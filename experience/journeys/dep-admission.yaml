@@ -1,0 +1,38 @@
+id: dep-admission
+actor: human-dev
+job: Add a new third-party dependency to a gated repo without asking anyone.
+prior_knowledge:
+  - Knows the crate name and version wanted; has never read ADMISSION docs.
+  - Does not know tiers, owners, or the register format.
+start:
+  installation: lgwks-deps binary runnable; repo has Cargo.lock, no register yet
+  state: clean temp consumer repo depending on one unregistered crate
+success:
+  visible_outcome: check names the exact refusal and the exact next command; tiers explains why; request prints a fillable block.
+states:
+  - name: refused
+    expectation: check exits non-zero and names crate, requirement, and source class.
+  - name: oriented
+    expectation: tiers shows the ladder; the wanted crate maps to exactly one rung.
+  - name: requested
+    expectation: request prints a block with owner/capability/reason blanks, not prose.
+invariants:
+  - No register, unparseable register, or unreadable lock is a refusal, never a pass.
+  - init never overwrites an existing register.
+  - check output on the same tree is byte-deterministic across runs.
+trust_boundaries:
+  - check/request/tiers/init perform no network calls and modify nothing except init's one file.
+recovery_contracts:
+  - Every refusal names the repair: which rung, which command, which file.
+agent_contracts:
+  - freshness --json emits a stable array of name/resolved/latest/stale/repository/error objects.
+  - Exit codes are stable: 0 admitted, 2 refused, 1 stale (freshness only).
+probes:
+  - id: no-register
+    action: Run check in a repo with a lock but no register; record exit code and text.
+  - id: unregistered-edge
+    action: Depend on one unregistered registry crate; run check; record the refusal.
+  - id: ladder-then-form
+    action: Run tiers, then request for that crate; verify the block matches the register schema.
+  - id: double-init
+    action: Run init twice; second run must refuse to overwrite.

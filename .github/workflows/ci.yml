@@ -1,0 +1,155 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    name: Build + gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.98.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+          components: clippy, rustfmt
+      - name: Verify lockfile is up-to-date
+        run: >
+          cargo metadata --locked >/dev/null ||
+          { echo 'Lockfile out of date: run cargo update --workspace and commit Cargo.lock' >&2; exit 1; }
+      - name: Enforce dependency edge ownership
+        run: cargo run --locked -p lgwks_deps --bin lgwks-deps -- check .
+      - name: Build all workspace targets
+        run: cargo test --workspace --all-targets --locked --no-run
+
+  fmt:
+    name: Format
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.98.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  tests:
+    name: Tests
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.98.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+          components: clippy
+      - name: Run all workspace tests
+        run: cargo test --workspace --all-targets --locked
+      - name: Doc tests
+        run: cargo test --workspace --doc --locked
+
+  clippy:
+    name: Clippy
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.98.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+          components: clippy
+      - name: Clippy all workspace targets
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  feature-matrix:
+    name: lgwks-std feature matrix
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.98.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+      - name: Check lgwks-std feature matrix
+        run: |
+          set -eu
+          cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --no-default-features
+          cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets
+          cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features hash --no-default-features
+          cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features pattern --no-default-features
+          cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features json --no-default-features
+          cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features wire --no-default-features
+          cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --all-features
+      - name: Check lgwks-deps
+        run: cargo check --manifest-path crates/lgwks-deps/Cargo.toml --all-targets
+
+  contract-drift:
+    name: lgwks-std contract drift checks
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate std+ contract alignment
+        run: |
+          python - <<'PY'
+          import re
+          import tomllib
+          from pathlib import Path
+
+          manifest = Path("crates/lgwks-std/Cargo.toml")
+          readme = Path("crates/lgwks-std/README.md")
+
+          parsed = tomllib.loads(manifest.read_text(encoding="utf-8"))
+          manifest_deps = set(parsed["dependencies"].keys())
+
+          text = readme.read_text(encoding="utf-8")
+          marker = "## Dependency philosophy"
+          start = text.find(marker)
+          if start == -1:
+              raise SystemExit("README dependency philosophy section missing")
+
+          section = text[start:start + 1800]
+          readme_deps = set(re.findall(r"- \*\*([a-zA-Z0-9_]+)\*\*", section))
+
+          missing_from_readme = sorted(manifest_deps - readme_deps)
+          missing_from_manifest = sorted(readme_deps - manifest_deps)
+          if missing_from_readme or missing_from_manifest:
+              raise SystemExit(
+                  f"Dependency contract drift detected. "
+                  f"missing_from_readme={missing_from_readme}, "
+                  f"missing_from_manifest={missing_from_manifest}"
+              )
+
+          package = parsed["package"]
+          if package["repository"] != "https://github.com/srinji-kaggss/logicalworks-crates":
+              raise SystemExit(
+                  f"Unexpected package repository URL: {package['repository']}"
+              )
+          PY
+
+  package-smoke:
+    name: lgwks-std package smoke-test
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.98.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+      - name: Run package smoke test
+        run: ./scripts/lgwks-std-package-smoke.sh

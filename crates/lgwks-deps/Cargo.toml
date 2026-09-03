@@ -1,0 +1,24 @@
+[package]
+name = "lgwks_deps"
+description = "Dependency admission, audit, and freshness for the std+ estate: every external edge names a human-approved owner."
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "Apache-2.0"
+repository = "https://github.com/srinji-kaggss/logicalworks-crates"
+readme = "README.md"
+homepage = "https://github.com/srinji-kaggss/logicalworks-crates/tree/main/crates/lgwks-deps"
+
+# The deps crate consumes JSON only through the estate facade it enforces.
+# Depending on serde_json directly here would make the checker its own first
+# bypass.
+[dependencies]
+lgwks_std = { workspace = true, features = ["json"] }
+
+[[bin]]
+name = "lgwks-deps"
+path = "src/main.rs"
+
+[lib]
+name = "lgwks_deps"
+path = "src/lib.rs"

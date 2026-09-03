@@ -1,0 +1,18 @@
+id: logicalworks-sdk-charter
+scope: Bringing the three estate crates into a consumer and trusting the result.
+actors:
+  - human-dev: Rust developer, knows cargo, has never seen lgwks crates.
+  - ai-agent: coding agent, emits JSON specs, runs CLI, reads exit codes.
+jobs:
+  - Bring up all three crates in a fresh consumer and exercise one path each.
+  - Admit a new third-party dependency through lgwks_deps without tribal knowledge.
+  - Author a bot declaratively as JSON and validate it without running side effects.
+entry_points:
+  - "crates.io version deps for lgwks_std / lgwks_bot; lgwks_deps binary via cargo run."
+  - "`lgwks-deps tiers` as the admission ladder; `lgwks-deps request` as the form."
+  - "BotSpec::from_json / to_json as the agent surface."
+global_invariants:
+  - Missing capability fails at build time, never at 2am at runtime.
+  - Unregistered dependency fails the gate with the owning fix named, never silently.
+  - Machine output for agents never mixes prose into payloads.
+  - Repeating a safe command never duplicates irreversible work.

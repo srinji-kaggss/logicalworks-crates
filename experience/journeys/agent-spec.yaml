@@ -1,0 +1,36 @@
+id: agent-spec
+actor: ai-agent
+job: Author a bot as JSON and validate it end to end without side effects.
+prior_knowledge:
+  - Knows the BotSpec JSON shape; has never seen the Rust builder.
+  - Cannot browse source; works from CLI output, exit codes, and JSON only.
+start:
+  installation: consumer crate with lgwks_bot dep; empty temp dir as target
+  state: no bot built yet
+success:
+  visible_outcome: Hand-written spec JSON parses via from_json, re-serializes stable, and its domains/caps are auditable before anything runs.
+states:
+  - name: authored
+    expectation: from_json accepts the hand-written spec or names the exact bad field.
+  - name: validated
+    expectation: Required caps for the spec's domains are enumerable without executing.
+  - name: materialized-or-blocked
+    expectation: Either the spec builds into a runnable bot, or the SDK says plainly that specs do not materialize here.
+invariants:
+  - Malformed spec JSON fails with the field named, never a panic or empty output.
+  - Validation performs zero side effects (no network, no spawn, no writes).
+  - Round-trip from_json/to_json is stable for the same input.
+trust_boundaries:
+  - Nothing in this journey posts, merges, spawns, or writes outside temp.
+recovery_contracts:
+  - A rejected spec names the field and the expected shape.
+agent_contracts:
+  - from_json errors are typed (crate::json::Error), not process aborts.
+  - Condition/action domain ids are stable strings auditable via source_domain/action_domain.
+probes:
+  - id: hand-spec-round-trip
+    action: Write BotSpec JSON by hand; from_json then to_json; diff for stability.
+  - id: bad-field
+    action: Break one field type; record the exact error text.
+  - id: spec-to-bot
+    action: Attempt to materialize a runnable Bot from the validated spec through the public SDK.

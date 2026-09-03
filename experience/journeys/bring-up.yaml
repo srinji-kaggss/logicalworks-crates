@@ -1,0 +1,35 @@
+id: bring-up
+actor: human-dev
+job: Depend on lgwks_std, lgwks_bot, lgwks_deps in a fresh crate and fire one path each.
+prior_knowledge:
+  - Knows cargo add / cargo build; has only the workspace README.
+  - Does not know module layout, cap names, or gate subcommands.
+start:
+  installation: empty crate, no lgwks deps yet
+  state: clean temp dir
+success:
+  visible_outcome: One binary prints std primitives, builds a capability-gated bot, ticks it offline, and round-trips a BotSpec through JSON.
+states:
+  - name: declared
+    expectation: Three dep lines in Cargo.toml; build succeeds first try.
+  - name: exercised
+    expectation: Each crate does one real thing with legible output.
+  - name: understood
+    expectation: The failure for a missing grant names the grant, not a trait bound.
+invariants:
+  - A bot built without the required grant is refused at build() with the cap named.
+  - tick() on an offline source performs no network or process side effects.
+  - BotSpec JSON round-trips byte-stable through to_json/from_json.
+trust_boundaries:
+  - Probe performs no network calls and spawns no processes.
+recovery_contracts:
+  - Build errors point at the missing Cargo.toml line or missing grant.
+agent_contracts:
+  - "BotSpec JSON has stable shape: name, chains[] with source, target, on[] condition/action pairs."
+probes:
+  - id: fresh-bring-up
+    action: Fresh crate with path deps; print hex/id/time/json; build fs-observe bot; tick; spec round-trip.
+  - id: missing-grant
+    action: Build the same bot against GrantSet::empty() with no grant; record the refusal text.
+  - id: repeat-tick
+    action: Tick twice; second tick fires identically with no accumulated state.
