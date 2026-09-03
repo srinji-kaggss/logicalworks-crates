@@ -566,9 +566,8 @@ mod tests {
 
         // The gate itself may depend only on the estate facade it enforces.
         {
-            let manifest =
-                std::fs::read_to_string(workspace.join("crates/lgwks-deps/Cargo.toml"))
-                    .expect("gate manifest missing");
+            let manifest = std::fs::read_to_string(workspace.join("crates/lgwks-deps/Cargo.toml"))
+                .expect("gate manifest missing");
             let after = manifest
                 .split("[dependencies]")
                 .nth(1)

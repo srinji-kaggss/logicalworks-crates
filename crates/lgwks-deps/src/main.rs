@@ -272,8 +272,7 @@ fn handle_freshness(args: &[String]) -> ExitCode {
         Err(e) => return refuse(&format!("Cargo.lock: {e}")),
     };
 
-    let registry: Vec<&lgwks_deps::lock::Resolved> =
-        resolved.iter().filter(|p| !p.local).collect();
+    let registry: Vec<&lgwks_deps::lock::Resolved> = resolved.iter().filter(|p| !p.local).collect();
 
     if registry.is_empty() {
         println!("no registry dependencies in Cargo.lock");
