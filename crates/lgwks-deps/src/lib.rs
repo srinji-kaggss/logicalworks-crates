@@ -591,11 +591,13 @@ mod tests {
             const APPROVED: &[&str] = &[
                 "blake3",
                 "getrandom",
+                "iri-string",
                 "regex",
                 "rkyv",
                 "ron",
                 "serde",
                 "serde_json",
+                "ureq",
             ];
 
             let manifest = std::fs::read_to_string(workspace.join("crates/lgwks-std/Cargo.toml"))

@@ -52,6 +52,8 @@ lgwks_std = { version = "0.5", features = ["full"] }           # everything
 | `json` | json | JSON serialization | serde, serde_json |
 | `ron` | ron | Rusty Object Notation | serde, ron |
 | `wire` | wire | Zero-copy binary serialization | rkyv |
+| `http` | http | Blocking HTTPS client (rustls-only TLS) | ureq, iri-string |
+| `online` | online | TCP reachability probing | none |
 | `full` | all of the above | — | all of the above |
 
 ## Module reference
@@ -72,6 +74,8 @@ lgwks_std = { version = "0.5", features = ["full"] }           # everything
 | `json` | JSON encoding and decoding via serde | `serde_json` |
 | `ron` | RON encoding and decoding via serde | `ron` |
 | `wire` | Zero-copy binary wire serialization via rkyv | `rkyv` |
+| `http` | Blocking HTTP GET/POST with strict URL validation | `ureq`, `iri-string` |
+| `online` | TCP reachability probing, zero-dep | — |
 
 ## Dependency philosophy
 
@@ -86,6 +90,8 @@ Cargo metadata; Cargo.lock preserves the exact transitive provenance.
 - **ron** — 1 leaf beyond serde (bitflags)
 - **rkyv** — 5 djkoloski crates, zero external deps
 - **getrandom** — zero deps in std-only mode
+- **ureq** — blocking HTTP client, rustls-only TLS stack plus small leaves
+- **iri-string** — zero-dep URI validation leaf at default features
 
 The `core` feature carries zero external dependencies. You choose what you pull
 in; every feature flag is one capability, one stack, no surprises.

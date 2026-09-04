@@ -72,6 +72,8 @@ jobs:
           components: clippy
       - name: Run all workspace tests
         run: cargo test --workspace --all-targets --locked
+      - name: Run lgwks-std full-feature tests
+        run: cargo test -p lgwks_std --all-targets --locked --features full
       - name: Doc tests
         run: cargo test --workspace --doc --locked
 
@@ -110,6 +112,8 @@ jobs:
           cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features pattern --no-default-features
           cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features json --no-default-features
           cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features wire --no-default-features
+          cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features http --no-default-features
+          cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features online --no-default-features
           cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --all-features
       - name: Check lgwks-deps
         run: cargo check --manifest-path crates/lgwks-deps/Cargo.toml --all-targets

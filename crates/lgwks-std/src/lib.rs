@@ -16,6 +16,8 @@
 //! - `json` — json. Adds `serde`, `serde_json`.
 //! - `ron` — ron. Adds `serde`, `ron`.
 //! - `wire` — wire. Adds `rkyv`.
+//! - `http` — http. Adds `ureq` (rustls-only TLS), `iri-string`.
+//! - `online` — online. Zero deps.
 //! - `full` — all of the above.
 
 #![forbid(unsafe_code)]
@@ -26,11 +28,15 @@ pub mod glob;
 #[cfg(feature = "hash")]
 pub mod hash;
 pub mod hex;
+#[cfg(feature = "http")]
+pub mod http;
 #[cfg(feature = "random")]
 pub mod id;
 #[cfg(feature = "json")]
 pub mod json;
 pub mod leb128;
+#[cfg(feature = "online")]
+pub mod online;
 #[cfg(feature = "pattern")]
 pub mod pattern;
 #[cfg(feature = "random")]
