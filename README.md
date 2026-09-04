@@ -5,13 +5,12 @@ Source of truth for the estate's shared Rust foundation crates, extracted from
 
 | Crate | Version | Role |
 |---|---|---|
-| `lgwks_std` | 0.5.1 | Core functions: hex, time, id, hash, glob, pattern, json, ron, wire, fs, task, leb128, encoding |
-| `lgwks_bot` | 0.1.1 | Async + actor roles: Observe, Evaluate, Execute, Query verbs over capability-gated domains |
+| `lgwks_std` | 0.5.2 | Core functions: hex, time, id, hash, glob, pattern, json, ron, wire, fs, task, leb128, encoding |
+| `lgwks_bot` | 0.1.2 | Async + actor roles: Observe, Evaluate, Execute, Query verbs over capability-gated domains |
 | `lgwks_deps` | 0.1.0 | All other deps: admission, audit, freshness (`lgwks-deps check`) — not published |
 
-Names and versions of the published crates are deliberately unchanged so
-existing crates.io consumers (`lgwks_std 0.5.1`, `lgwks_bot 0.1.1`) keep
-resolving with no edits. The next version bump publishes from this repo.
+All three crates are Apache-2.0, Logical Works Incorporated. Versions move
+together from this repo; the next bump publishes here.
 
 ## Consumption contract (three lanes)
 

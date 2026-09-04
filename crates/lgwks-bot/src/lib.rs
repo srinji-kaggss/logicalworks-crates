@@ -13,9 +13,9 @@
 //! let bot = Bot::builder("my-bot")
 //!     // .observe(source).on(condition, action)
 //!     .build(&GrantSet::all_shipped())
-//!     .unwrap();
+//!     .expect("shipped domains are covered by all_shipped");
 //!
-//! let fired = bot.tick().unwrap();
+//! let fired = bot.tick().expect("tick propagates domain errors");
 //! ```
 
 #![forbid(unsafe_code)]

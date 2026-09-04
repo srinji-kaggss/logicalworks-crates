@@ -15,8 +15,8 @@ resolver = "2"
 # unchanged so existing crates.io consumers resolve without edits.
 # ─────────────────────────────────────────────────────────────────────────────
 [workspace.dependencies]
-lgwks_std = { version = "0.5.1", path = "crates/lgwks-std" }
-lgwks_bot = { version = "0.1.1", path = "crates/lgwks-bot" }
+lgwks_std = { version = "0.5.2", path = "crates/lgwks-std" }
+lgwks_bot = { version = "0.1.2", path = "crates/lgwks-bot" }
 lgwks_deps = { version = "0.1.0", path = "crates/lgwks-deps" }
 
 [profile.release]

@@ -1,10 +1,10 @@
 [package]
 name = "lgwks_bot"
 description = "Capability-gated automation bots built on four verbs: Observe, Evaluate, Execute, Query."
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.98"
-license = "BSD-3-Clause"
+license = "Apache-2.0"
 repository = "https://github.com/srinji-kaggss/logicalworks-crates"
 homepage = "https://github.com/srinji-kaggss/logicalworks-crates/tree/main/crates/lgwks-bot"
 readme = "README.md"

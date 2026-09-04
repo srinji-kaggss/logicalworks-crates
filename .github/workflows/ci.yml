@@ -21,6 +21,25 @@ jobs:
           { echo 'Lockfile out of date: run cargo update --workspace and commit Cargo.lock' >&2; exit 1; }
       - name: Enforce dependency edge ownership
         run: cargo run --locked -p lgwks_deps --bin lgwks-deps -- check .
+      - name: Forbid unwrap outside tests
+        # Safety bar: library code fails loud with typed errors or named
+        # expects, never bare unwrap. Doc examples count as shipped surface.
+        run: |
+          set -eu
+          tmp="$(mktemp)"
+          trap 'rm -f "$tmp"' EXIT
+          grep -rn '\.unwrap()' crates/*/src --include='*.rs' > "$tmp" || true
+          fail=0
+          while IFS= read -r rec; do
+            loc="${rec%%:*}"; rest="${rec#*:}"; line="${rest%%:*}"
+            top="$(grep -n 'mod tests' "$loc" | head -1 | cut -d: -f1)"
+            if [ -z "$top" ] || [ "$line" -lt "$top" ]; then
+              echo "unwrap outside tests: $loc:$line" >&2
+              fail=1
+            fi
+          done < "$tmp"
+          [ "$fail" -eq 0 ] && echo "no unwrap outside tests"
+          exit "$fail"
       - name: Build all workspace targets
         run: cargo test --workspace --all-targets --locked --no-run
 
