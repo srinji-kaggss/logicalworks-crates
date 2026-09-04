@@ -145,7 +145,7 @@ jobs:
               raise SystemExit("README dependency philosophy section missing")
 
           section = text[start:start + 1800]
-          readme_deps = set(re.findall(r"- \*\*([a-zA-Z0-9_]+)\*\*", section))
+          readme_deps = set(re.findall(r"- \*\*([a-zA-Z0-9_-]+)\*\*", section))
 
           missing_from_readme = sorted(manifest_deps - readme_deps)
           missing_from_manifest = sorted(readme_deps - manifest_deps)
