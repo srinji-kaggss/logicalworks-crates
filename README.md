@@ -5,7 +5,7 @@ Source of truth for the estate's shared Rust foundation crates, extracted from
 
 | Crate | Version | Role |
 |---|---|---|
-| `lgwks_std` | 0.5.1 | Core functions: hex, time, id, hash, glob, pattern, json, ron, wire, fs, task |
+| `lgwks_std` | 0.5.1 | Core functions: hex, time, id, hash, glob, pattern, json, ron, wire, fs, task, leb128, encoding |
 | `lgwks_bot` | 0.1.1 | Async + actor roles: Observe, Evaluate, Execute, Query verbs over capability-gated domains |
 | `lgwks_deps` | 0.1.0 | All other deps: admission, audit, freshness (`lgwks-deps check`) — not published |
 
