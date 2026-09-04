@@ -196,9 +196,11 @@ dependencies = [
 
 [[package]]
 name = "lgwks_deps"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "lgwks_std",
+ "proc-macro2",
+ "syn 2.0.119",
 ]
 
 [[package]]

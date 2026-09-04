@@ -35,6 +35,9 @@ USAGE
               [--json]                  output as JSON instead of a table
    lgwks-deps vendor check [PATH]       prove every locked package resolves
                                         to the shared vendor tree
+   lgwks-deps scan [PATH]...            run the zero-gate source detectors
+                                        (error swallow, unlogged returns,
+                                        lint allowances, try chains, docs)
 
 EXIT
    0  every authored external edge has an admitted semantic owner
@@ -81,6 +84,7 @@ fn dispatch(command: &str, args: &[String]) -> ExitCode {
         "tiers" => handle_tiers(),
         "freshness" => handle_freshness(&args[1..]),
         "vendor" => handle_vendor(&args[1..]),
+        "scan" => handle_scan(&args[1..]),
         "-h" | "--help" | "help" => handle_help(),
         other => handle_unknown(other),
     }
@@ -498,6 +502,100 @@ fn run_vendor_check(start: &Path) -> ExitCode {
         }
         Err(e) => refuse(&e.to_string()),
     }
+}
+
+// ── scan ────────────────────────────────────────────────────────────────────
+
+/// Collects `.rs` files under a path, skipping build output, vendored
+/// sources, and virtualenv-style trees — the same external set the CI gate
+/// excludes, so local and remote verdicts agree.
+#[cfg(feature = "scan")]
+fn collect_rs_files(root: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut files: Vec<PathBuf> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            dirs.push(path);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            files.push(path);
+        }
+    }
+    dirs.sort();
+    files.sort();
+    for dir in dirs {
+        let name = dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if matches!(
+            name,
+            "target" | "vendor" | "node_modules" | "third_party" | ".venv" | ".git" | ".jj"
+        ) {
+            continue;
+        }
+        collect_rs_files(&dir, out);
+    }
+    out.extend(files);
+}
+
+#[cfg(feature = "scan")]
+fn handle_scan(args: &[String]) -> ExitCode {
+    let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+    let mut files: Vec<PathBuf> = Vec::new();
+    if positional.is_empty() {
+        collect_rs_files(&PathBuf::from("."), &mut files);
+    } else {
+        for target in positional {
+            let path = PathBuf::from(target.as_str());
+            if path.is_dir() {
+                collect_rs_files(&path, &mut files);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    let mut total = 0usize;
+    for file in &files {
+        match lgwks_deps::scan::scan_path(file) {
+            Ok(hits) => {
+                for hit in &hits {
+                    println!(
+                        "{}:{}: [{}] {}",
+                        file.display(),
+                        hit.line,
+                        hit.rule,
+                        hit.snippet
+                    );
+                }
+                total += hits.len();
+            }
+            Err(e) => {
+                eprintln!("scan error: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    if total == 0 {
+        println!("OK  scan clean — {} files, zero findings", files.len());
+        ExitCode::SUCCESS
+    } else {
+        eprintln!(
+            "REFUSED  scan: {total} findings across {} files",
+            files.len()
+        );
+        ExitCode::from(2)
+    }
+}
+
+#[cfg(not(feature = "scan"))]
+fn handle_scan(_args: &[String]) -> ExitCode {
+    eprintln!("lgwks-deps: scan needs the `scan` feature (default on)");
+    ExitCode::from(2)
 }
 
 // ── Ladder text ─────────────────────────────────────────────────────────────

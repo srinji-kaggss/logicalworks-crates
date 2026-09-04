@@ -1,4 +1,4 @@
-# lgwks_deps — dependency admission, audit, freshness, and vendor coverage
+# lgwks_deps — dependency admission, audit, freshness, vendor coverage, and source scan
 
 `lgwks_deps` owns INV-DEP-EDGE-OWNED: every external dependency authored by a
 workspace package names its semantic owner, capability, source, requirement,
@@ -13,6 +13,7 @@ lgwks-deps request <crate> <v>  # print an approval block to fill in
 lgwks-deps init [PATH]          # fail-closed starting register
 lgwks-deps freshness [PATH]     # resolved vs latest on crates.io
 lgwks-deps vendor check [PATH]  # prove the lockfile is covered by the shared vendor tree
+lgwks-deps scan [PATH]...       # keel zero-gate detectors (swallow/unlogged/allow/chain/doc), one verdict binary
 ```
 
 `vendor check` is the physical counterpart of the register: the register says

@@ -1,7 +1,7 @@
 [package]
 name = "lgwks_deps"
 description = "Dependency admission, audit, and freshness for the std+ estate: every external edge names a human-approved owner."
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"
@@ -12,8 +12,22 @@ homepage = "https://github.com/srinji-kaggss/logicalworks-crates/tree/main/crate
 # The deps crate consumes JSON only through the estate facade it enforces.
 # Depending on serde_json directly here would make the checker its own first
 # bypass.
+#
+# syn is the one exception to the zero-dependency gate-tool rule, and it is
+# not self-refuting: a Rust parser is the only honest way to police Rust
+# source (the `scan` subcommand ports keel's zero-gate detectors so every
+# estate repo runs the same verdicts from one binary). Pinned to the same
+# major the estate already vets for serde's derive stack. `scan` is a default
+# feature so `cargo install lgwks_deps` keeps working with no flags;
+# embedders who only call `check_dependencies` can disable default features.
+[features]
+default = ["scan"]
+scan = ["dep:syn", "dep:proc-macro2"]
+
 [dependencies]
 lgwks_std = { workspace = true, features = ["json"] }
+syn = { version = "2", features = ["full", "visit", "parsing"], optional = true }
+proc-macro2 = { version = "1", features = ["span-locations"], optional = true }
 
 [[bin]]
 name = "lgwks-deps"

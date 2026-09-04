@@ -31,6 +31,8 @@
 pub mod contract;
 pub mod lock;
 pub mod metadata;
+#[cfg(feature = "scan")]
+pub mod scan;
 pub mod vendor;
 
 use std::error::Error;
@@ -565,7 +567,13 @@ mod tests {
             .parent()
             .unwrap();
 
-        // The gate itself may depend only on the estate facade it enforces.
+        // The gate itself may depend only on the estate facade it enforces,
+        // plus the one reviewed exception below. syn (and its proc-macro2
+        // span shim) power the `scan` subcommand behind the default-off-able
+        // `scan` feature: a Rust grammar is the only honest oracle for Rust
+        // source, and a parser is not a data format the gate polices, so the
+        // self-refutation the JSON ban targets does not apply. Both are
+        // optional: `--no-default-features` keeps the gate zero-dependency.
         {
             let manifest = std::fs::read_to_string(workspace.join("crates/lgwks-deps/Cargo.toml"))
                 .expect("gate manifest missing");
@@ -579,11 +587,23 @@ mod tests {
                 .take_while(|l| !l.starts_with('['))
                 .filter(|l| !l.is_empty() && !l.starts_with('#'))
                 .collect();
+            let names: Vec<&str> = declared
+                .iter()
+                .map(|l| l.split('=').next().unwrap_or("").trim())
+                .collect();
             assert_eq!(
-                declared.len(),
-                1,
+                names,
+                ["lgwks_std", "syn", "proc-macro2"],
                 "unexpected gate dependencies: {declared:?}"
             );
+            for line in &declared {
+                if line.starts_with("syn") || line.starts_with("proc-macro2") {
+                    assert!(
+                        line.contains("optional = true"),
+                        "scan dependency must stay optional: {line}"
+                    );
+                }
+            }
             assert!(declared[0].starts_with("lgwks_std ="));
         }
 
