@@ -12,6 +12,6 @@ categories = ["development-tools", "config"]
 keywords = ["automation", "bot", "capabilities", "observe", "execute"]
 
 [dependencies]
-lgwks_std = { workspace = true, features = ["json"] }
+lgwks_std = { workspace = true, features = ["json", "http"] }
 
 [dev-dependencies]

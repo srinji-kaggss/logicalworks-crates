@@ -1,7 +1,7 @@
 //! `flow` owns composition domains — pipeline, branch, fan-out. These are
 //! Execute impls that chain other Execute actions. No new verb needed.
 
-use crate::cap::Cap;
+use crate::cap::{Auth, Cap};
 use crate::error::BotError;
 use crate::verb;
 
@@ -13,12 +13,15 @@ pub struct Pipeline {
 }
 
 /// A type-erased pipeline step. Implement `Execute` on your domain and use
-/// `Pipeline::step()` to add it.
+/// `Pipeline::step()` to add it. Steps receive the pipeline's `Auth` proof:
+/// a step whose caps exceed the presented proof is denied, so a pipeline
+/// can never smuggle broader authority into a narrower step.
 pub trait PipelineStep {
     /// Capabilities this step requires.
     fn required_caps(&self) -> &[Cap];
     /// Run with a type-erased input, producing a type-erased output.
-    fn run_any(&self, input: &dyn std::any::Any) -> Result<Box<dyn std::any::Any>, BotError>;
+    fn run_any(&self, call: (Auth, &dyn std::any::Any))
+    -> Result<Box<dyn std::any::Any>, BotError>;
 }
 
 impl<A> PipelineStep for A
@@ -31,10 +34,13 @@ where
         verb::Execute::required_caps(self)
     }
 
-    fn run_any(&self, input: &dyn std::any::Any) -> Result<Box<dyn std::any::Any>, BotError> {
-        match input.downcast_ref::<A::Input>() {
+    fn run_any(
+        &self,
+        call: (Auth, &dyn std::any::Any),
+    ) -> Result<Box<dyn std::any::Any>, BotError> {
+        match call.1.downcast_ref::<A::Input>() {
             Some(typed) => self
-                .run(typed)
+                .run((call.0, typed))
                 .map(|v| Box::new(v) as Box<dyn std::any::Any>),
             None => Err(BotError::DomainError {
                 domain: verb::Execute::domain_id(self).into(),
@@ -78,10 +84,11 @@ impl verb::Execute for Pipeline {
         &self.caps
     }
 
-    fn run(&self, _input: &()) -> Result<PipelineOutput, BotError> {
+    fn run(&self, call: (Auth, &())) -> Result<PipelineOutput, BotError> {
+        call.0.check(verb::Execute::required_caps(self))?;
         let mut current: Box<dyn std::any::Any> = Box::new(());
         for step in &self.steps {
-            current = step.run_any(current.as_ref())?;
+            current = step.run_any((call.0.clone(), current.as_ref()))?;
         }
         Ok(PipelineOutput(current))
     }

@@ -4,7 +4,7 @@
 
 use lgwks_std::json::{Deserialize, Serialize};
 
-use super::cap::Cap;
+use super::cap::{Auth, Cap};
 use super::error::BotError;
 use super::gate::GrantSet;
 
@@ -46,10 +46,13 @@ pub struct ActionSpec {
 // ── Live bot ───────────────────────────────────────────────────────────────
 
 /// A built bot — name, typed observation chains, validated capabilities.
-/// Constructed via `Bot::builder("name")`.
+/// Constructed via `Bot::builder("name")`. Holds the grant set so every
+/// `tick` mints fresh [`Auth`] proofs per domain instead of trusting
+/// build-time admission alone.
 pub struct Bot {
     name: String,
     chains: Vec<Chain>,
+    grants: GrantSet,
 }
 
 /// A typed observation chain: source → `[(condition, action)]`.
@@ -69,7 +72,7 @@ pub struct ChainEntry {
 trait ObserveAny {
     fn domain_id(&self) -> &str;
     fn required_caps(&self) -> &[Cap];
-    fn poll_any(&self) -> Result<Box<dyn std::any::Any>, BotError>;
+    fn poll_any(&self, grants: &GrantSet) -> Result<Box<dyn std::any::Any>, BotError>;
 }
 
 impl<T: super::verb::Observe + 'static> ObserveAny for T
@@ -84,8 +87,10 @@ where
         super::verb::Observe::required_caps(self)
     }
 
-    fn poll_any(&self) -> Result<Box<dyn std::any::Any>, BotError> {
-        self.poll().map(|v| Box::new(v) as Box<dyn std::any::Any>)
+    fn poll_any(&self, grants: &GrantSet) -> Result<Box<dyn std::any::Any>, BotError> {
+        let auth: Auth = grants.issue(super::verb::Observe::required_caps(self))?;
+        self.poll((auth, ()))
+            .map(|v| Box::new(v) as Box<dyn std::any::Any>)
     }
 }
 
@@ -97,7 +102,11 @@ trait EvaluateAny {
 trait ExecuteAny {
     fn domain_id(&self) -> &str;
     fn required_caps(&self) -> &[Cap];
-    fn run_any(&self, input: &dyn std::any::Any) -> Result<Box<dyn std::any::Any>, BotError>;
+    fn run_any(
+        &self,
+        grants: &GrantSet,
+        input: &dyn std::any::Any,
+    ) -> Result<Box<dyn std::any::Any>, BotError>;
 }
 
 // ── Builder ────────────────────────────────────────────────────────────────
@@ -131,14 +140,16 @@ impl Bot {
     }
 
     /// Tick all observation chains: poll each source, evaluate conditions,
-    /// fire matching actions. Returns the count of actions fired.
+    /// fire matching actions. Returns the count of actions fired. Every poll
+    /// and run carries a freshly issued `Auth` proof — a grant revoked
+    /// after build cannot fire.
     pub fn tick(&self) -> Result<usize, BotError> {
         let mut fired = 0;
         for chain in &self.chains {
-            let value = chain.source.poll_any()?;
+            let value = chain.source.poll_any(&self.grants)?;
             for entry in &chain.entries {
                 if entry.condition.check_any(value.as_ref())? {
-                    entry.action.run_any(value.as_ref())?;
+                    entry.action.run_any(&self.grants, value.as_ref())?;
                     fired += 1;
                 }
             }
@@ -208,6 +219,7 @@ impl BotBuilder {
         Ok(Bot {
             name: self.name,
             chains: self.chains,
+            grants: grants.clone(),
         })
     }
 }
@@ -257,13 +269,16 @@ impl ObserveBuilder {
 
             fn run_any(
                 &self,
+                grants: &GrantSet,
                 input: &dyn std::any::Any,
             ) -> Result<Box<dyn std::any::Any>, BotError> {
                 match input.downcast_ref::<A::Input>() {
-                    Some(typed) => self
-                        .0
-                        .run(typed)
-                        .map(|v| Box::new(v) as Box<dyn std::any::Any>),
+                    Some(typed) => {
+                        let auth: Auth = grants.issue(self.0.required_caps())?;
+                        self.0
+                            .run((auth, typed))
+                            .map(|v| Box::new(v) as Box<dyn std::any::Any>)
+                    }
                     None => Err(BotError::DomainError {
                         domain: self.0.domain_id().into(),
                         cause: "type mismatch in execute input".into(),
@@ -318,6 +333,7 @@ impl ObserveBuilder {
         Ok(Bot {
             name: self.name,
             chains: self.prior_chains,
+            grants: grants.clone(),
         })
     }
 }
@@ -386,7 +402,8 @@ mod tests {
             fn required_caps(&self) -> &[Cap] {
                 &self.0
             }
-            fn poll(&self) -> Result<u32, BotError> {
+            fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+                call.0.check(crate::verb::Observe::required_caps(self))?;
                 Ok(42)
             }
             fn domain_id(&self) -> &str {
@@ -401,7 +418,8 @@ mod tests {
             fn required_caps(&self) -> &[Cap] {
                 &[]
             }
-            fn run(&self, _: &u32) -> Result<(), BotError> {
+            fn run(&self, call: (Auth, &u32)) -> Result<(), BotError> {
+                call.0.check(crate::verb::Execute::required_caps(self))?;
                 Ok(())
             }
             fn domain_id(&self) -> &str {
@@ -429,7 +447,8 @@ mod tests {
             fn required_caps(&self) -> &[Cap] {
                 &self.0
             }
-            fn poll(&self) -> Result<u32, BotError> {
+            fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+                call.0.check(crate::verb::Observe::required_caps(self))?;
                 Ok(42)
             }
             fn domain_id(&self) -> &str {
@@ -444,7 +463,8 @@ mod tests {
             fn required_caps(&self) -> &[Cap] {
                 &[]
             }
-            fn run(&self, _: &u32) -> Result<(), BotError> {
+            fn run(&self, call: (Auth, &u32)) -> Result<(), BotError> {
+                call.0.check(crate::verb::Execute::required_caps(self))?;
                 Ok(())
             }
             fn domain_id(&self) -> &str {
@@ -473,7 +493,8 @@ mod tests {
             fn required_caps(&self) -> &[Cap] {
                 &[]
             }
-            fn poll(&self) -> Result<u32, BotError> {
+            fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+                call.0.check(crate::verb::Observe::required_caps(self))?;
                 Ok(10)
             }
             fn domain_id(&self) -> &str {
@@ -489,7 +510,8 @@ mod tests {
             fn required_caps(&self) -> &[Cap] {
                 &[]
             }
-            fn run(&self, _: &u32) -> Result<(), BotError> {
+            fn run(&self, call: (Auth, &u32)) -> Result<(), BotError> {
+                call.0.check(crate::verb::Execute::required_caps(self))?;
                 self.0.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             }
@@ -510,5 +532,101 @@ mod tests {
         let fired = bot.tick().unwrap();
         assert_eq!(fired, 1);
         assert_eq!(counter.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn issue_denies_what_was_never_granted() {
+        let grants = GrantSet::empty();
+        match grants.issue(&[Cap::net()]) {
+            Err(BotError::CapabilityDenied { required }) => {
+                assert_eq!(required, Cap::net());
+            }
+            other => panic!("expected denial, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn call_with_empty_proof_is_denied_at_the_callee() {
+        use crate::verb::Observe;
+
+        struct NetSource([Cap; 1]);
+        impl Observe for NetSource {
+            type Output = u32;
+            fn required_caps(&self) -> &[Cap] {
+                &self.0
+            }
+            fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+                call.0.check(crate::verb::Observe::required_caps(self))?;
+                Ok(1)
+            }
+            fn domain_id(&self) -> &str {
+                "test::net"
+            }
+        }
+
+        let vacuous = GrantSet::empty().issue(&[]).expect("empty coverage issues");
+        match NetSource([Cap::net()]).poll((vacuous, ())) {
+            Err(BotError::CapabilityDenied { required }) => {
+                assert_eq!(required, Cap::net());
+            }
+            other => panic!("expected denial, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wrong_scope_proof_is_denied_confused_deputy() {
+        use crate::verb::Observe;
+
+        struct NetSource([Cap; 1]);
+        impl Observe for NetSource {
+            type Output = u32;
+            fn required_caps(&self) -> &[Cap] {
+                &self.0
+            }
+            fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+                call.0.check(crate::verb::Observe::required_caps(self))?;
+                Ok(1)
+            }
+            fn domain_id(&self) -> &str {
+                "test::net"
+            }
+        }
+
+        let fs_only = GrantSet::empty()
+            .grant(Cap::fs())
+            .issue(&[Cap::fs()])
+            .expect("fs granted");
+        match NetSource([Cap::net()]).poll((fs_only, ())) {
+            Err(BotError::CapabilityDenied { required }) => {
+                assert_eq!(required, Cap::net());
+            }
+            other => panic!("expected denial, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn issued_proof_authorizes_the_call() {
+        use crate::verb::Observe;
+
+        struct NetSource([Cap; 1]);
+        impl Observe for NetSource {
+            type Output = u32;
+            fn required_caps(&self) -> &[Cap] {
+                &self.0
+            }
+            fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+                call.0.check(crate::verb::Observe::required_caps(self))?;
+                Ok(7)
+            }
+            fn domain_id(&self) -> &str {
+                "test::net"
+            }
+        }
+
+        let auth = GrantSet::empty()
+            .grant(Cap::net())
+            .issue(&[Cap::net()])
+            .expect("net granted");
+        assert_eq!(NetSource([Cap::net()]).poll((auth, ())).unwrap(), 7);
     }
 }

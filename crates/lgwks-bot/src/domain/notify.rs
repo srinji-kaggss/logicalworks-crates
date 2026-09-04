@@ -1,6 +1,6 @@
 //! `notify` owns the notification delivery domain. Requires `bot.notify`.
 
-use crate::cap::Cap;
+use crate::cap::{Auth, Cap};
 use crate::error::BotError;
 use crate::verb;
 
@@ -42,7 +42,8 @@ impl verb::Execute for Slack {
         &self.caps
     }
 
-    fn run(&self, _input: &Message) -> Result<(), BotError> {
+    fn run(&self, call: (Auth, &Message)) -> Result<(), BotError> {
+        call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
             cause: format!("notifying {} — binding required", self.channel),

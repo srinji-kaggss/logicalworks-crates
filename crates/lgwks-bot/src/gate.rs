@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use super::cap::Cap;
+use super::cap::{Auth, Cap};
 use super::error::BotError;
 
 /// A set of granted capabilities. The bot builder checks every domain's
@@ -47,5 +47,13 @@ impl GrantSet {
             }
         }
         Ok(())
+    }
+
+    /// Mint a sealed [`Auth`] proof covering `required`, or deny naming the
+    /// first missing capability. This is the only constructor path for
+    /// `Auth`: presenting the proof is what authorizes a verb call.
+    pub fn issue(&self, required: &[Cap]) -> Result<Auth, BotError> {
+        self.admit(required)?;
+        Ok(Auth::new(required.to_vec()))
     }
 }

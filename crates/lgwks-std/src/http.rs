@@ -180,6 +180,8 @@ mod tests {
     const ECHO: &str = "echo-body-123";
 
     /// Serve `replies` canned responses, then exit. Returns the bound port.
+    /// Reads full requests (headers plus any `Content-Length` body) before
+    /// replying, so POST bodies are never mistaken for missing.
     fn serve(replies: Vec<(&'static str, &'static str)>) -> (u16, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -195,8 +197,26 @@ mod tests {
                         break;
                     }
                 }
-                let text = String::from_utf8_lossy(&head);
-                let echoed = text.contains(ECHO);
+                let header_end = head
+                    .windows(4)
+                    .position(|w| w == b"\r\n\r\n")
+                    .map(|p| p + 4)
+                    .unwrap_or(head.len());
+                let text = String::from_utf8_lossy(&head[..header_end]);
+                let content_length = text
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                let mut received = head.len() - header_end;
+                while received < content_length {
+                    let n = stream.read(&mut request).unwrap();
+                    head.extend_from_slice(&request[..n]);
+                    received += n;
+                }
+                let full = String::from_utf8_lossy(&head);
+                let echoed = full.contains(ECHO);
                 let payload = if echoed { ECHO } else { body };
                 let reply = format!(
                     "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",

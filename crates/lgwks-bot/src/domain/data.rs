@@ -1,6 +1,6 @@
 //! `data` owns the data store domain. Requires `bot.fs`.
 
-use crate::cap::Cap;
+use crate::cap::{Auth, Cap};
 use crate::error::BotError;
 use crate::verb::{self, Observe};
 
@@ -36,7 +36,8 @@ impl verb::Observe for JsonStore {
         &self.caps
     }
 
-    fn poll(&self) -> Result<DataState, BotError> {
+    fn poll(&self, call: (Auth, ())) -> Result<DataState, BotError> {
+        call.0.check(self.required_caps())?;
         let raw = std::fs::read_to_string(&self.path).map_err(|e| BotError::DomainError {
             domain: self.domain_id().into(),
             cause: e.to_string(),
@@ -60,8 +61,9 @@ impl verb::Query for JsonStore {
         &self.caps
     }
 
-    fn query(&self, _: &()) -> Result<DataState, BotError> {
-        self.poll()
+    fn query(&self, call: (Auth, &())) -> Result<DataState, BotError> {
+        let (auth, _) = call;
+        self.poll((auth, ()))
     }
 
     fn domain_id(&self) -> &str {

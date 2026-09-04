@@ -1,7 +1,7 @@
 //! `gh` owns the GitHub domain and enforces INV-BOT-CAP-GATED: every
 //! GitHub operation requires `bot.net`.
 
-use crate::cap::Cap;
+use crate::cap::{Auth, Cap};
 use crate::error::BotError;
 use crate::verb;
 
@@ -43,7 +43,8 @@ impl verb::Observe for PrStatus {
         &self.caps
     }
 
-    fn poll(&self) -> Result<PrState, BotError> {
+    fn poll(&self, call: (Auth, ())) -> Result<PrState, BotError> {
+        call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
             cause: format!("polling {} — binding required", self.repo),
@@ -63,7 +64,8 @@ impl verb::Query for PrStatus {
         &self.caps
     }
 
-    fn query(&self, _: &()) -> Result<PrState, BotError> {
+    fn query(&self, call: (Auth, &())) -> Result<PrState, BotError> {
+        call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
             cause: format!("querying {} — binding required", self.repo),
@@ -118,7 +120,8 @@ impl verb::Observe for CiRun {
         &self.caps
     }
 
-    fn poll(&self) -> Result<CiState, BotError> {
+    fn poll(&self, call: (Auth, ())) -> Result<CiState, BotError> {
+        call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
             cause: format!("polling {} — binding required", self.repo),
@@ -138,7 +141,8 @@ impl verb::Query for CiRun {
         &self.caps
     }
 
-    fn query(&self, _: &()) -> Result<CiState, BotError> {
+    fn query(&self, call: (Auth, &())) -> Result<CiState, BotError> {
+        call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
             cause: format!("querying {} — binding required", self.repo),
@@ -181,7 +185,8 @@ impl verb::Execute for Merge {
         &self.caps
     }
 
-    fn run(&self, _input: &PrState) -> Result<String, BotError> {
+    fn run(&self, call: (Auth, &PrState)) -> Result<String, BotError> {
+        call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
             cause: format!("merging {} — binding required", self.repo),

@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crate::cap::Cap;
+use crate::cap::{Auth, Cap};
 use crate::error::BotError;
 use crate::verb::{self, Observe};
 
@@ -40,7 +40,8 @@ impl verb::Observe for Path {
         &self.caps
     }
 
-    fn poll(&self) -> Result<FsState, BotError> {
+    fn poll(&self, call: (Auth, ())) -> Result<FsState, BotError> {
+        call.0.check(self.required_caps())?;
         let exists = self.target.exists();
         let size = if exists {
             std::fs::metadata(&self.target).ok().map(|m| m.len())
@@ -67,8 +68,9 @@ impl verb::Query for Path {
         &self.caps
     }
 
-    fn query(&self, _: &()) -> Result<FsState, BotError> {
-        self.poll()
+    fn query(&self, call: (Auth, &())) -> Result<FsState, BotError> {
+        let (auth, _) = call;
+        self.poll((auth, ()))
     }
 
     fn domain_id(&self) -> &str {

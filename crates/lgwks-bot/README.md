@@ -9,7 +9,7 @@ time and dispatches at tick time.
 ## Quick start
 
 ```rust
-use lgwks_bot::{Bot, Cap, GrantSet};
+use lgwks_bot::{Auth, Bot, Cap, GrantSet};
 use lgwks_bot::verb::{Observe, Execute};
 
 // 1. Implement Observe on your source
@@ -17,7 +17,10 @@ struct PrWatcher { /* ... */ }
 impl Observe for PrWatcher {
     type Output = PrState;
     fn required_caps(&self) -> &[Cap] { &[Cap::net()] }
-    fn poll(&self) -> Result<PrState, lgwks_bot::BotError> { /* ... */ }
+    fn poll(&self, call: (Auth, ())) -> Result<PrState, lgwks_bot::BotError> {
+        call.0.check(self.required_caps())?;
+        /* ... */
+    }
     fn domain_id(&self) -> &str { "gh::pr_status" }
 }
 
@@ -27,7 +30,10 @@ impl Execute for SlackNotify {
     type Input = PrState;
     type Output = ();
     fn required_caps(&self) -> &[Cap] { &[Cap::notify()] }
-    fn run(&self, state: &PrState) -> Result<(), lgwks_bot::BotError> { /* ... */ }
+    fn run(&self, call: (Auth, &PrState)) -> Result<(), lgwks_bot::BotError> {
+        call.0.check(self.required_caps())?;
+        /* ... */
+    }
     fn domain_id(&self) -> &str { "notify::slack" }
 }
 
@@ -58,6 +64,14 @@ verbs.
 Every domain declares the capabilities it requires. The bot builder validates
 `required ⊆ granted` before construction — a bot that asks for `bot.net` without
 a grant fails at build time, not at runtime.
+
+Authority is proof-carrying past build: every `poll`, `run`, and `query` takes
+an `(Auth, input)` tuple, and only `GrantSet::issue` can mint the `Auth` half.
+The framework issues a fresh proof per domain on every `tick`; each callee
+checks coverage before acting, so a narrower proof presented to a broader
+domain is denied (no confused deputies). `Evaluate` takes no proof — it is
+pure boolean logic with no side effect to gate. This is explicit, auditable
+authority, not a sandbox: in-process code can always dial out directly.
 
 Shipped capabilities:
 
@@ -108,4 +122,4 @@ let json = spec.to_json()?;
 
 ## License
 
-BSD-3-Clause — Copyright 2026 Logical Works Incorporated
+Apache-2.0 — Copyright 2026 Logical Works Incorporated

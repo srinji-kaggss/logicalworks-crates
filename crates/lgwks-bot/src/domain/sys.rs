@@ -1,6 +1,6 @@
 //! `sys` owns the system process domain. Requires `bot.sys`.
 
-use crate::cap::Cap;
+use crate::cap::{Auth, Cap};
 use crate::error::BotError;
 use crate::verb;
 
@@ -38,7 +38,8 @@ impl verb::Observe for Process {
         &self.caps
     }
 
-    fn poll(&self) -> Result<ProcessState, BotError> {
+    fn poll(&self, call: (Auth, ())) -> Result<ProcessState, BotError> {
+        call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
             cause: format!("polling {} — binding required", self.command),
@@ -58,7 +59,8 @@ impl verb::Execute for Process {
         &self.caps
     }
 
-    fn run(&self, _: &()) -> Result<ProcessState, BotError> {
+    fn run(&self, call: (Auth, &())) -> Result<ProcessState, BotError> {
+        call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
             cause: format!("executing {} — binding required", self.command),
@@ -78,7 +80,8 @@ impl verb::Query for Process {
         &self.caps
     }
 
-    fn query(&self, _: &()) -> Result<ProcessState, BotError> {
+    fn query(&self, call: (Auth, &())) -> Result<ProcessState, BotError> {
+        call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
             cause: format!("querying {} — binding required", self.command),
