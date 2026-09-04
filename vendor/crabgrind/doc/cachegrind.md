@@ -1,0 +1,26 @@
+# Cachegrind Client Requests
+
+Interface to [Cachegrind Client Requests][vg-docs] defined in
+`valgrind/cachegrind.h`.
+
+These requests enable isolated profiling by combining the
+[--instr-atstart][instr-atstart] flag with
+[`start_instrumentation`](start_instrumentation) and
+[`stop_instrumentation`](stop_instrumentation) to delimit specific measurement
+regions.
+
+## Usage
+
+Nothing happens unless the binary runs under Cachegrind:
+
+> ```text
+> :~$ cargo build
+> :~$ valgrind --tool=cachegrind target/debug/app
+> ```
+
+## Version Requirements
+
+- **Minimum Valgrind:** `3.22`
+
+[instr-atstart]: https://courses.cs.vt.edu/~cs3214/fall2011/projects/valgrind/valgrind-3.4.0/docs/html/cl-manual.html#opt.instr-atstart
+[vg-docs]: https://valgrind.org/docs/manual/cg-manual.html#cg-manual.clientrequests

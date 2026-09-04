@@ -1,0 +1,18 @@
+Removal of a previously registered memory block description
+
+Deletes the mapping between a memory range and its custom description string.
+Subsequent errors in that region will revert to standard Memcheck reporting.
+
+# Arguments
+
+- `handle` - The [`BlockHandle`](BlockHandle) returned by
+  [`create_block`](create_block).
+
+# Errors
+
+- [`InvalidBlockHandle`](InvalidBlockHandle) - The provided handle was not
+  valid.
+
+## Note
+
+Requires Valgrind **3.2** or higher.

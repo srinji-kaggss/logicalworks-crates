@@ -1,0 +1,24 @@
+[package]
+name = "libcrux-sha2"
+description = "Formally verified SHA2 hash library"
+version = "0.0.8"
+readme = "Readme.md"
+
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[features]
+expose-hacl = []
+
+[dependencies]
+libcrux-hacl-rs.workspace = true
+libcrux-macros = { version = "=0.0.3", path = "../../utils/macros" }
+libcrux-traits.workspace = true
+
+[dev-dependencies]
+libcrux-traits = { workspace = true, features = ["generic-tests"] }
+libcrux-kats = { workspace = true, features = ["sha2"] }
+hex = "0.4.3"

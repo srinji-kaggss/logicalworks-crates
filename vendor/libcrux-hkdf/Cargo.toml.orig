@@ -1,0 +1,24 @@
+[package]
+name = "libcrux-hkdf"
+version = "0.0.8"
+description = "Libcrux HKDF implementation"
+readme = "Readme.md"
+
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/hkdf.rs"
+
+[features]
+check-secret-independence = ["libcrux-secrets/check-secret-independence"]
+
+[dependencies]
+libcrux-hmac = { workspace = true, features = [
+    "expose-hacl",
+] }
+libcrux-hacl-rs.workspace = true
+libcrux-secrets.workspace = true

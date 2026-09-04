@@ -1,0 +1,88 @@
+[package]
+name = "libcrux-ml-dsa"
+description = "Libcrux ML-DSA implementation"
+version = "0.0.10"
+readme = "README.md"
+
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+exclude = [
+    "boring.sh",
+    "/cg",
+    "*.sh",
+    "*.yaml",
+    "/proofs",
+    "tests/nistkats.rs",
+    "tests/kats",
+]
+
+[lib]
+bench = false # so libtest doesn't eat the arguments to criterion
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+libcrux-sha3.workspace = true
+libcrux-intrinsics.workspace = true
+libcrux-platform.workspace = true
+libcrux-macros.workspace = true
+libcrux-secrets.workspace = true
+hax-lib.workspace = true
+tls_codec = { workspace = true, optional = true }
+
+[dev-dependencies]
+rand = { version = "0.10" }
+hex = { version = "0.4.3", features = ["serde"] }
+serde_json = { version = "1.0" }
+serde = { version = "1.0", features = ["derive"] }
+criterion = "0.8"
+libcrux-kats = { workspace = true, features = ["mldsa"] }
+
+
+# This doesn't build on intel macos.
+[target.'cfg(not(all(target_os = "macos", target_arch = "x86_64")))'.dev-dependencies]
+pqcrypto-mldsa = { version = "0.1.0" } #, default-features = false
+
+[target.'cfg(hax)'.dependencies]
+core-models = { path = "../crates/utils/core-models", version = "0.0.7" }
+
+[features]
+default = ["std", "mldsa44", "mldsa65", "mldsa87"]
+simd128 = ["libcrux-sha3/simd128", "libcrux-intrinsics/simd128"]
+simd256 = ["libcrux-sha3/simd256", "libcrux-intrinsics/simd256"]
+acvp = []                                                        # expose internal API for ACVP testing
+test-utils = []                                                  # exposing internal functions for testing
+
+# Features for the different key sizes of ML-DSA
+mldsa44 = []
+mldsa65 = []
+mldsa87 = []
+
+# std support
+std = ["tls_codec?/std"]
+
+# Serialization & Deserialization using tls_codec
+codec = ["dep:tls_codec"]
+
+[[bench]]
+name = "manual44"
+harness = false
+
+[[bench]]
+name = "manual65"
+harness = false
+
+[[bench]]
+name = "manual87"
+harness = false
+
+[[bench]]
+name = "ml-dsa"
+harness = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(hax)', 'cfg(valgrind_ct_test)'] }

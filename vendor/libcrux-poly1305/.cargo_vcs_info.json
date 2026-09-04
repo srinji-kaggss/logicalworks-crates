@@ -1,0 +1,6 @@
+{
+  "git": {
+    "sha1": "451259bb704d4a9dab8cd31ac68a97e766fbd2bc"
+  },
+  "path_in_vcs": "crates/algorithms/poly1305"
+}

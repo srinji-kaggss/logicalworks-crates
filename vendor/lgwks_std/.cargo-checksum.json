@@ -1,0 +1,31 @@
+{
+  "$comment": "This file only protects against accidental modifications. It is not a security mechanism and does not protect against malicious changes.",
+  "files": {
+    ".cargo_vcs_info.json": "a63c41cfcbe78b817aa2a68f5cc58659585a1a0fbdbb6c6e9373072152fb5247",
+    "Cargo.lock": "1df9dd40cfaf744df34ac79c89e8aadc62e35d81c47c04ccb6cdedc5df6365d0",
+    "Cargo.toml": "44856341e19b6c50f1ea060961dbdb0b68d54cda56644e9793939db7f77aecb3",
+    "Cargo.toml.orig": "6387c18a8f902ecf27e836317ade36ef81210c4da1c6c6f3aa5bd39d331bf5b3",
+    "LICENSE": "389736aa0fc1d9d25c8db5311407803698cb0529a8f7173611c852671a60801e",
+    "README.md": "10053f059318885fd99e414b81f084c4d5aa3ce48ab002e616a95036895fcb40",
+    "src/encoding.rs": "cef7017fef2de388378ea7aba75d9258c1fdd5456a3b7a644e84ec6814a652de",
+    "src/fs.rs": "6813ce96c6bfe5d31ec42bafc7884d41d69d4885a325cab9e1ab569d0b2c44b4",
+    "src/glob.rs": "8153878a09d08f0c6cfbf8b0f87be87551828c0601b82657496359945b8fab6e",
+    "src/hash.rs": "0ace78392e1a15ced49b196901416b4d0b9d7f601c3e3c5fb8b399321b2c3c48",
+    "src/hex.rs": "94a8ef51c76510099fa183252b3d58157282204aaf2dd00bd8c8de5678512bb0",
+    "src/id.rs": "56a6cfcc737d9d4a9eb7a103420a33bbe6d5d939802c31501ee43a5d46afbc2d",
+    "src/json.rs": "e331d8392eb89ef02016b298e01fea69f92870919bbe6f858fd558bc5667535d",
+    "src/leb128.rs": "cd845af35ca2aaa2a6df109a9304a8bcbf9053089ecca9ad7b27ffce33b70d32",
+    "src/lib.rs": "881e594edcc11c66b56faf279c9e6848fce9a3d75034d747dabd549a9e39929f",
+    "src/pattern.rs": "ff9f11bb0b00917c8420bc499605515dce653ed3c9fd154aaac3a4ab17019d60",
+    "src/random.rs": "55a204b82838e0d074932b940e5725f8bd68d234d4a55830756ffc29b6429fa3",
+    "src/ron.rs": "c7bbe2a33ade13f0d8ad7c556c2af1a0304e831db20ef27875631d67bf495bfb",
+    "src/task.rs": "b5d07a769c34615a784c1efdf84dc0d97fcd1bd4cf72bbf6a0980a72b68d4221",
+    "src/time/calendar.rs": "5b859ae4e4c2c37cc77c6cd1c3b8e4195106fad216c581b8467db03040ed1162",
+    "src/time/error.rs": "3bc51af3b707d1e5b7b9f66b8258fcbf817ec8df772b7834c97f1f31a86a2fd1",
+    "src/time/format.rs": "74c8d576fd141b4779480133d0683b574f5d96d1cdc7f600a8c3dbfd9bf4c786",
+    "src/time/mod.rs": "6a40ca4ef69da6a30923a610f25b62424bf0ed705dd6c2d99b9f135f751693ea",
+    "src/time/parse.rs": "c0a445430a3e0df525e8b74fa4b3e09ba4fa5abd36d362a074efed37fa2f7cb1",
+    "src/wire.rs": "db87e81908963f9848479f0d8d034f4e652f40c3f30b3c135d7ae5ee2208cf70"
+  },
+  "package": "bd6a71f5140de8d2751ef3cd37b778b288fe5af3fc78204f8a89b2c07116dd5e"
+}

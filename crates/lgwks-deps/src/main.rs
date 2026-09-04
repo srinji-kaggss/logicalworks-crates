@@ -3,9 +3,13 @@
 //! admission process a path rather than a folk practice.
 //!
 //! This binary is a doctor, not an authority. `check` diagnoses, `request`
-//! prints a block for a human to fill in and commit, and `init` writes a
-//! fail-closed starting register. None of them can approve anything — approval
-//! is a diff with a name on it, which is the whole point of the contract.
+//! prints a block for a human to fill in, and `init` writes a fail-closed
+//! starting register. None of them can approve anything — approval is a diff
+//! with a name on it, which is the whole point of the contract.
+//!
+//! `vendor check` is the physical counterpart: the register says which edges
+//! are owned, the vendor tree says which bytes the offline build resolves,
+//! and the subcommand proves the lockfile is fully covered by the tree.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -26,13 +30,15 @@ USAGE
                                        committed beside the code it builds.
   lgwks-deps request <CRATE> <VERSION> print an approval block to fill in
   lgwks-deps init [PATH]               write a fail-closed starting register
-  lgwks-deps tiers                     print the admission ladder
-  lgwks-deps freshness [PATH]          check resolved deps against crates.io
-             [--json]                  output as JSON instead of a table
+   lgwks-deps tiers                     print the admission ladder
+   lgwks-deps freshness [PATH]          check resolved deps against crates.io
+              [--json]                  output as JSON instead of a table
+   lgwks-deps vendor check [PATH]       prove every locked package resolves
+                                        to the shared vendor tree
 
 EXIT
-  0  every authored external edge has an admitted semantic owner
-  2  a refusal, a missing register, or an unparseable one
+   0  every authored external edge has an admitted semantic owner
+   2  a refusal, a missing register, or an unparseable one
 ";
 
 fn parse_check_args(args: &[String]) -> (Option<PathBuf>, Option<PathBuf>) {
@@ -74,6 +80,7 @@ fn dispatch(command: &str, args: &[String]) -> ExitCode {
         "init" => run_init(args.get(1).map(PathBuf::from)),
         "tiers" => handle_tiers(),
         "freshness" => handle_freshness(&args[1..]),
+        "vendor" => handle_vendor(&args[1..]),
         "-h" | "--help" | "help" => handle_help(),
         other => handle_unknown(other),
     }
@@ -435,8 +442,65 @@ fn print_freshness_json(results: &[FreshnessResult]) {
     println!("]");
 }
 
-// ── Ladder text ─────────────────────────────────────────────────────────────
+// ── vendor ──────────────────────────────────────────────────────────────────
 
+fn handle_vendor(args: &[String]) -> ExitCode {
+    if args.first().map(String::as_str) != Some("check") {
+        eprint!("{USAGE}");
+        return ExitCode::from(2);
+    }
+    let positional: Vec<&String> = args[1..].iter().filter(|a| !a.starts_with("--")).collect();
+    let start = positional
+        .first()
+        .map(|p| PathBuf::from(p.as_str()))
+        .unwrap_or_else(|| PathBuf::from("."));
+    run_vendor_check(&start)
+}
+
+fn run_vendor_check(start: &Path) -> ExitCode {
+    let root = match lgwks_deps::repository_root(start) {
+        Ok(root) => root,
+        Err(e) => return refuse(&e.to_string()),
+    };
+    let tree = match lgwks_deps::vendor::tree_for(&root) {
+        Ok(tree) => tree,
+        Err(e) => return refuse(&e.to_string()),
+    };
+    let lock_path = root.join("Cargo.lock");
+    let lock_text = match std::fs::read_to_string(&lock_path) {
+        Ok(text) => text,
+        Err(e) => return refuse(&format!("cannot read {}: {e}", lock_path.display())),
+    };
+    match lgwks_deps::vendor::check_coverage(&lock_text, &tree) {
+        Ok(report) if report.missing.is_empty() => {
+            println!(
+                "OK  {} — {} locked packages covered by {}, {} local skipped",
+                root.display(),
+                report.covered,
+                tree.display(),
+                report.skipped_local
+            );
+            ExitCode::SUCCESS
+        }
+        Ok(report) => {
+            eprintln!(
+                "REFUSED  {} — {} of {} locked packages missing from {}\n",
+                root.display(),
+                report.missing.len(),
+                report.covered + report.missing.len(),
+                tree.display()
+            );
+            for missing in &report.missing {
+                eprintln!("  {} {}", missing.name, missing.version);
+            }
+            eprintln!("\nRe-run the vendor sync for this repo, then re-check.");
+            ExitCode::from(2)
+        }
+        Err(e) => refuse(&e.to_string()),
+    }
+}
+
+// ── Ladder text ─────────────────────────────────────────────────────────────
 const LADDER: &str = "\
 The std+ admission ladder (INV-DEP-EDGE-OWNED)
 

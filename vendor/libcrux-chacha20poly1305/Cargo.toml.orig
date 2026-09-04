@@ -1,0 +1,29 @@
+[package]
+name = "libcrux-chacha20poly1305"
+description = "Formally verified ChaCha20-Poly1305 AEAD library"
+version = "0.0.9"
+readme = "Readme.md"
+
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+libcrux-poly1305 = { version = "=0.0.6", path = "../poly1305/", features = [
+    "expose-hacl",
+] }
+libcrux-hacl-rs.workspace = true
+libcrux-macros = { version = "=0.0.3", path = "../../utils/macros" }
+libcrux-traits.workspace = true
+libcrux-secrets.workspace = true
+
+[dev-dependencies]
+rand_core = { version = "0.10" }
+rand = { version = "0.10", features = ["sys_rng"] }
+libcrux-kats = { workspace = true, features = ["chacha20poly1305"] }
+hex = "0.4.3"
+
+[features]
+check-secret-independence = ["libcrux-secrets/check-secret-independence"]

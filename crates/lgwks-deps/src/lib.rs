@@ -31,6 +31,7 @@
 pub mod contract;
 pub mod lock;
 pub mod metadata;
+pub mod vendor;
 
 use std::error::Error;
 use std::fmt;

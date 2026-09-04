@@ -1,0 +1,51 @@
+[package]
+name = "lgwks_std"
+description = "Zero-config primitives for hex, base64, timestamps, UUIDs, hashing, glob, regex, JSON, and async — zero external deps by default."
+version = "0.5.2"
+edition = "2024"
+rust-version = "1.98"
+license = "Apache-2.0"
+repository = "https://github.com/srinji-kaggss/logicalworks-crates"
+readme = "README.md"
+homepage = "https://github.com/srinji-kaggss/logicalworks-crates/tree/main/crates/lgwks-std"
+categories = ["development-tools", "encoding", "asynchronous"]
+keywords = ["stdlib", "utilities", "zero-config", "async", "serialization"]
+
+# INV-STDPLUS-APPROVED-ONLY: every dependency here is a vetted leaf or
+# single-purpose stack with zero further external deps. The gate test
+# `deps_are_approved_leaves` in ../lgwks-deps/src/lib.rs reads this
+# file and verifies each entry is on the approved list.
+#
+# APPROVED STACK (2026-08-24, Director-authorized):
+#   blake3        — 3 zero-dep leaves (arrayvec, cfg-if, constant_time_eq)
+#   regex         — 4 BurntSushi-internal crates, zero external deps
+#   rkyv          — 5 djkoloski crates (rend, ptr_meta, rancor, munge + derive)
+#                   proc-macro stack shared with serde
+#   serde         — 1 crate + derive (proc-macro2, quote, syn — same stack)
+#   serde_json    — 2 crates beyond serde (itoa, ryu — both zero-dep leaves)
+#                   reuses memchr from regex tree
+#   ron           — 1 crate beyond serde (bitflags — zero-dep leaf)
+#                   Rust-native config/data notation; serde-based
+#   getrandom     — 0-dep leaves in std-only mode for supported OSes
+[features]
+default = ["core"]
+core = []
+random = ["dep:getrandom"]
+hash = ["dep:blake3"]
+pattern = ["dep:regex"]
+json = ["dep:serde", "dep:serde_json"]
+ron = ["dep:serde", "dep:ron"]
+wire = ["dep:rkyv"]
+full = ["random", "hash", "pattern", "json", "ron", "wire"]
+
+[dependencies]
+blake3 = { version = "1.8", default-features = false, optional = true }
+regex = { version = "1.13", optional = true }
+rkyv = { version = "0.8", default-features = false, features = ["alloc", "bytecheck"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+ron = { version = "0.12", optional = true }
+getrandom = { version = "0.4", optional = true }
+
+[dev-dependencies]
+tempfile = "3.20"

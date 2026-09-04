@@ -26,6 +26,10 @@ pub struct Resolved {
     /// True when the package has no `source` key, meaning Cargo resolved it
     /// from the filesystem — a workspace member or a path dependency.
     pub local: bool,
+    /// The `checksum` key when present: sha256 of the `.crate` file for
+    /// registry packages. Absent for local packages and for git sources,
+    /// which Cargo tracks by revision instead.
+    pub checksum: Option<String>,
 }
 
 /// A `[[package]]` block that could not be read.
@@ -58,6 +62,7 @@ struct Pending {
     name: Option<String>,
     version: Option<String>,
     has_source: bool,
+    checksum: Option<String>,
     open: bool,
 }
 
@@ -81,6 +86,7 @@ fn apply_key_value(key: &str, value: &str, pending: &mut Pending) {
         "name" => pending.name = Some(value.to_string()),
         "version" => pending.version = Some(value.to_string()),
         "source" => pending.has_source = true,
+        "checksum" => pending.checksum = Some(value.to_string()),
         _ => {}
     }
 }
@@ -134,6 +140,7 @@ fn flush(pending: &mut Pending, out: &mut Vec<Resolved>) -> Result<(), LockError
         name,
         version,
         local: !pending.has_source,
+        checksum: pending.checksum.take(),
     });
     pending.open = false;
     Ok(())
@@ -203,6 +210,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
         let serde = pkgs.iter().find(|p| p.name == "serde").unwrap();
         assert!(!serde.local);
         assert_eq!(serde.version, "1.0.219");
+    }
+
+    #[test]
+    fn a_checksum_key_is_captured_for_registry_packages() {
+        let input = "[[package]]\nname = \"serde\"\nversion = \"1.0.219\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"abc123def456\"\n";
+        let pkgs = parse(input).unwrap();
+        assert_eq!(pkgs[0].checksum.as_deref(), Some("abc123def456"));
+    }
+
+    #[test]
+    fn a_package_without_a_checksum_reports_none() {
+        let pkgs = parse(SAMPLE).unwrap();
+        let local = pkgs.iter().find(|p| p.name == "lgwks_std").unwrap();
+        assert_eq!(local.checksum, None);
     }
 
     #[test]

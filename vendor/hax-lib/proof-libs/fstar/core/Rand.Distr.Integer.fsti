@@ -1,0 +1,1 @@
+module Rand.Distr.Integer

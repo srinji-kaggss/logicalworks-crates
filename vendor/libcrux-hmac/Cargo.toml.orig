@@ -1,0 +1,26 @@
+[package]
+name = "libcrux-hmac"
+version = "0.0.8"
+description = "Libcrux HMAC implementation"
+readme = "Readme.md"
+
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/hmac.rs"
+
+[features]
+expose-hacl = []
+
+[dependencies]
+libcrux-hacl-rs.workspace = true
+libcrux-sha2 = { workspace = true, features = ["expose-hacl"] }
+libcrux-traits.workspace = true
+libcrux-macros = { version = "=0.0.3", path = "../../utils/macros" }
+
+[dev-dependencies]
+libcrux-kats = { path = "../../testing/kats", features = ["hmac"] }

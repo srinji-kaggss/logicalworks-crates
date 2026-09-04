@@ -1,0 +1,47 @@
+[package]
+name = "crabgrind"
+version = "0.2.6"
+license = "MIT"
+edition = "2021"
+rust-version = "1.64"
+description = "Rust bindings to \"Valgrind Client Request\" interface"
+keywords = ["valgrind", "callgrind", "cachegrind", "memcheck", "client-requests"]
+categories = ["api-bindings", "development-tools::profiling", "development-tools::testing"]
+repository = "https://github.com/2dav/crabgrind"
+homepage = "https://github.com/2dav/crabgrind"
+documentation = "https://docs.rs/crabgrind"
+readme = "README.md"
+exclude = [".gitignore", "Justfile", "Cross.toml", "rustfmt.toml", "rust-toolchain.toml", "shell.nix",
+			"*.sh", "*.py", "*.defs", "*.head", "*.dict", "*.json", "tests/*"]
+
+[features]
+default = []
+# Turns every request into no-op.
+opt-out = []
+
+[build-dependencies]
+cc = "1"
+bindgen = "0.72"
+pkg-config = "0.3"
+
+[dev-dependencies]
+regex = "1"
+lazy_static = "1"
+libc = "0.2"
+
+[profile.release]
+debug = "full"
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+inline_always = "allow"
+cast_lossless = "allow"
+wildcard_imports = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "deny"
