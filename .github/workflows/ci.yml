@@ -117,6 +117,12 @@ jobs:
           cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --all-features
       - name: Check lgwks-deps
         run: cargo check --manifest-path crates/lgwks-deps/Cargo.toml --all-targets
+      - name: Check lgwks-ast feature matrix
+        run: |
+          set -eu
+          cargo check --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --no-default-features
+          cargo check --manifest-path crates/lgwks-ast/Cargo.toml --all-targets
+          cargo check --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --all-features
 
   contract-drift:
     name: lgwks-std contract drift checks

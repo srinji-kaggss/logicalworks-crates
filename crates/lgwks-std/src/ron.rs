@@ -25,10 +25,14 @@ pub fn to_writer<W: std::io::Write, T: Serialize>(
     mut writer: W,
     value: &T,
 ) -> Result<(), ron::Error> {
-    let s = ron::to_string(value)?;
-    writer
-        .write_all(s.as_bytes())
-        .map_err(|e| ron::Error::Message(e.to_string()))
+    let serialized = ron::to_string(value)?;
+    writer.write_all(serialized.as_bytes()).map_err(|error| {
+        eprintln!(
+            "lgwks_std::ron: to_writer failed writing {} bytes: {error}",
+            serialized.len()
+        );
+        ron::Error::Message(error.to_string())
+    })
 }
 
 // ── Decoding ────────────────────────────────────────────────────────────────
@@ -40,8 +44,8 @@ pub fn from_str<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, ron::error
 
 /// Deserialize a RON byte slice into the requested type.
 pub fn from_slice<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, FromSliceError> {
-    let s = std::str::from_utf8(bytes).map_err(FromSliceError::Utf8)?;
-    ron::from_str(s).map_err(FromSliceError::Ron)
+    let text = std::str::from_utf8(bytes).map_err(FromSliceError::Utf8)?;
+    ron::from_str(text).map_err(FromSliceError::Ron)
 }
 
 /// Why a byte-slice RON decode failed.

@@ -38,11 +38,11 @@ impl verb::Observe for Process {
         &self.caps
     }
 
-    fn poll(&self, call: (Auth, ())) -> Result<ProcessState, BotError> {
+    async fn poll(&self, call: (Auth, ())) -> Result<ProcessState, BotError> {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
-            cause: format!("polling {} — binding required", self.command),
+            cause: format!("polling {:?} — binding required", self.command),
         })
     }
 
@@ -59,11 +59,11 @@ impl verb::Execute for Process {
         &self.caps
     }
 
-    fn run(&self, call: (Auth, &())) -> Result<ProcessState, BotError> {
+    async fn execute_action(&self, call: (Auth, &())) -> Result<ProcessState, BotError> {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
-            cause: format!("executing {} — binding required", self.command),
+            cause: format!("executing {:?} — binding required", self.command),
         })
     }
 
@@ -80,25 +80,15 @@ impl verb::Query for Process {
         &self.caps
     }
 
-    fn query(&self, call: (Auth, &())) -> Result<ProcessState, BotError> {
+    async fn query(&self, call: (Auth, &())) -> Result<ProcessState, BotError> {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
-            cause: format!("querying {} — binding required", self.command),
+            cause: format!("querying {:?} — binding required", self.command),
         })
     }
 
     fn domain_id(&self) -> &str {
         "sys::process"
     }
-}
-
-/// Convenience: create a system process domain.
-pub fn process(command: impl Into<String>) -> Process {
-    Process::new(command)
-}
-
-/// Execute a shell command. Convenience for `Process` as Execute.
-pub fn run(command: impl Into<String>) -> Process {
-    Process::new(command)
 }

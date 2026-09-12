@@ -7,7 +7,7 @@ use crate::verb;
 
 // ── pr_status ──────────────────────────────────────────────────────────────
 
-/// Observe the status of a pull request. Supports Observe, Evaluate, Query.
+/// Observe the status of a pull request. Supports Observe and Query.
 pub struct PrStatus {
     repo: String,
     caps: Vec<Cap>,
@@ -43,11 +43,11 @@ impl verb::Observe for PrStatus {
         &self.caps
     }
 
-    fn poll(&self, call: (Auth, ())) -> Result<PrState, BotError> {
+    async fn poll(&self, call: (Auth, ())) -> Result<PrState, BotError> {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
-            cause: format!("polling {} — binding required", self.repo),
+            cause: format!("polling {:?} — binding required", self.repo),
         })
     }
 
@@ -64,11 +64,11 @@ impl verb::Query for PrStatus {
         &self.caps
     }
 
-    fn query(&self, call: (Auth, &())) -> Result<PrState, BotError> {
+    async fn query(&self, call: (Auth, &())) -> Result<PrState, BotError> {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
-            cause: format!("querying {} — binding required", self.repo),
+            cause: format!("querying {:?} — binding required", self.repo),
         })
     }
 
@@ -120,11 +120,11 @@ impl verb::Observe for CiRun {
         &self.caps
     }
 
-    fn poll(&self, call: (Auth, ())) -> Result<CiState, BotError> {
+    async fn poll(&self, call: (Auth, ())) -> Result<CiState, BotError> {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
-            cause: format!("polling {} — binding required", self.repo),
+            cause: format!("polling {:?} — binding required", self.repo),
         })
     }
 
@@ -141,11 +141,11 @@ impl verb::Query for CiRun {
         &self.caps
     }
 
-    fn query(&self, call: (Auth, &())) -> Result<CiState, BotError> {
+    async fn query(&self, call: (Auth, &())) -> Result<CiState, BotError> {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
-            cause: format!("querying {} — binding required", self.repo),
+            cause: format!("querying {:?} — binding required", self.repo),
         })
     }
 
@@ -185,11 +185,11 @@ impl verb::Execute for Merge {
         &self.caps
     }
 
-    fn run(&self, call: (Auth, &PrState)) -> Result<String, BotError> {
+    async fn execute_action(&self, call: (Auth, &PrState)) -> Result<String, BotError> {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
-            cause: format!("merging {} — binding required", self.repo),
+            cause: format!("merging {:?} — binding required", self.repo),
         })
     }
 

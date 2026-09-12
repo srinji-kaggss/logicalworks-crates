@@ -1,4 +1,4 @@
-//! `flow` owns composition domains — pipeline, branch, fan-out. These are
+//! `flow` owns composition domains — currently the pipeline. These are
 //! Execute impls that chain other Execute actions. No new verb needed.
 
 use crate::cap::{Auth, Cap};
@@ -20,8 +20,10 @@ pub trait PipelineStep {
     /// Capabilities this step requires.
     fn required_caps(&self) -> &[Cap];
     /// Run with a type-erased input, producing a type-erased output.
-    fn run_any(&self, call: (Auth, &dyn std::any::Any))
-    -> Result<Box<dyn std::any::Any>, BotError>;
+    fn run_any<'a>(
+        &'a self,
+        call: (Auth, &'a dyn std::any::Any),
+    ) -> crate::BoxFuture<'a, Result<Box<dyn std::any::Any>, BotError>>;
 }
 
 impl<A> PipelineStep for A
@@ -34,19 +36,23 @@ where
         verb::Execute::required_caps(self)
     }
 
-    fn run_any(
-        &self,
-        call: (Auth, &dyn std::any::Any),
-    ) -> Result<Box<dyn std::any::Any>, BotError> {
-        match call.1.downcast_ref::<A::Input>() {
-            Some(typed) => self
-                .run((call.0, typed))
-                .map(|v| Box::new(v) as Box<dyn std::any::Any>),
-            None => Err(BotError::DomainError {
-                domain: verb::Execute::domain_id(self).into(),
-                cause: "type mismatch in pipeline step input".into(),
-            }),
-        }
+    fn run_any<'a>(
+        &'a self,
+        call: (Auth, &'a dyn std::any::Any),
+    ) -> crate::BoxFuture<'a, Result<Box<dyn std::any::Any>, BotError>> {
+        Box::pin(async move {
+            let (auth, input) = call;
+            match input.downcast_ref::<A::Input>() {
+                Some(typed) => {
+                    let value = self.execute_action((auth, typed)).await?;
+                    Ok(Box::new(value) as Box<dyn std::any::Any>)
+                }
+                None => Err(BotError::DomainError {
+                    domain: verb::Execute::domain_id(self).into(),
+                    cause: "type mismatch in pipeline step input".into(),
+                }),
+            }
+        })
     }
 }
 
@@ -84,11 +90,13 @@ impl verb::Execute for Pipeline {
         &self.caps
     }
 
-    fn run(&self, call: (Auth, &())) -> Result<PipelineOutput, BotError> {
-        call.0.check(verb::Execute::required_caps(self))?;
+    async fn execute_action(&self, call: (Auth, &())) -> Result<PipelineOutput, BotError> {
+        let (auth, _) = call;
+        auth.check(verb::Execute::required_caps(self))?;
         let mut current: Box<dyn std::any::Any> = Box::new(());
         for step in &self.steps {
-            current = step.run_any((call.0.clone(), current.as_ref()))?;
+            let next = step.run_any((auth.clone(), current.as_ref())).await?;
+            current = next;
         }
         Ok(PipelineOutput(current))
     }

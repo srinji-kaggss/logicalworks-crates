@@ -420,7 +420,7 @@ pub fn check_dependencies(root: &Path) -> Result<(Contract, Vec<Refusal>), GateE
 
 /// Audits `root` against a register held elsewhere. This exists for the `check
 /// --contract` diagnosis path, where a repo is audited *before* it carries a
-/// register of its own. [`enforce`] never calls it: a build always reads the
+/// register of its own. `enforce` never calls it: a build always reads the
 /// register committed beside the code it is building, so no build can be
 /// pointed at a more permissive contract than the one in its own tree.
 pub fn check_dependencies_against(

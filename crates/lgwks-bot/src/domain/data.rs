@@ -2,9 +2,9 @@
 
 use crate::cap::{Auth, Cap};
 use crate::error::BotError;
-use crate::verb::{self, Observe};
+use crate::verb;
 
-/// A JSON store backed by a file path. Supports Observe, Execute, Query.
+/// A JSON store backed by a file path. Supports Observe and Query.
 pub struct JsonStore {
     path: std::path::PathBuf,
     caps: Vec<Cap>,
@@ -36,12 +36,15 @@ impl verb::Observe for JsonStore {
         &self.caps
     }
 
-    fn poll(&self, call: (Auth, ())) -> Result<DataState, BotError> {
+    async fn poll(&self, call: (Auth, ())) -> Result<DataState, BotError> {
         call.0.check(self.required_caps())?;
-        let raw = std::fs::read_to_string(&self.path).map_err(|e| BotError::DomainError {
-            domain: self.domain_id().into(),
-            cause: e.to_string(),
-        })?;
+        let path = self.path.clone();
+        let raw = lgwks_std::task::spawn_blocking(move || std::fs::read_to_string(&path))
+            .await
+            .map_err(|e| BotError::DomainError {
+                domain: self.domain_id().into(),
+                cause: e.to_string(),
+            })?;
         Ok(DataState {
             changed: false,
             raw,
@@ -61,9 +64,9 @@ impl verb::Query for JsonStore {
         &self.caps
     }
 
-    fn query(&self, call: (Auth, &())) -> Result<DataState, BotError> {
+    async fn query(&self, call: (Auth, &())) -> Result<DataState, BotError> {
         let (auth, _) = call;
-        self.poll((auth, ()))
+        verb::Observe::poll(self, (auth, ())).await
     }
 
     fn domain_id(&self) -> &str {

@@ -2,9 +2,16 @@
 
 A capability-gated bot framework built on four fixed verbs: **Observe**,
 **Evaluate**, **Execute**, **Query**. Bots are built from `(condition, action)`
-chains that bind observed sources to side effects — no scheduling, no
-orchestration engine, no runtime. The framework validates capabilities at build
-time and dispatches at tick time.
+chains that bind observed sources to side effects. The framework validates
+capabilities at build time and dispatches at tick time.
+
+Three of the four verbs are **async** (`Evaluate` stays synchronous and pure,
+because it has no side effect to gate). `Bot::tick` polls every source
+concurrently on the estate's zero-dependency `lgwks_std::task` executor — no
+tokio, no `futures`, no `async-trait` — and `Bot::block_on_tick` drives the
+same computation for synchronous callers. Blocking domain work (file reads,
+HTTP) runs on a `lgwks_std::task::spawn_blocking` thread so it overlaps its
+siblings instead of stalling them.
 
 ## Quick start
 
@@ -12,25 +19,31 @@ time and dispatches at tick time.
 use lgwks_bot::{Auth, Bot, Cap, GrantSet};
 use lgwks_bot::verb::{Observe, Execute};
 
-// 1. Implement Observe on your source
-struct PrWatcher { /* ... */ }
+// 1. Implement Observe on your source — the verb is async
+struct PrWatcher {
+    caps: Vec<Cap>,
+    /* ... */
+}
 impl Observe for PrWatcher {
     type Output = PrState;
-    fn required_caps(&self) -> &[Cap] { &[Cap::net()] }
-    fn poll(&self, call: (Auth, ())) -> Result<PrState, lgwks_bot::BotError> {
+    fn required_caps(&self) -> &[Cap] { &self.caps }
+    async fn poll(&self, call: (Auth, ())) -> Result<PrState, lgwks_bot::BotError> {
         call.0.check(self.required_caps())?;
         /* ... */
     }
     fn domain_id(&self) -> &str { "gh::pr_status" }
 }
 
-// 2. Implement Execute on your action
-struct SlackNotify { /* ... */ }
+// 2. Implement Execute on your action — also async
+struct SlackNotify {
+    caps: Vec<Cap>,
+    /* ... */
+}
 impl Execute for SlackNotify {
     type Input = PrState;
     type Output = ();
-    fn required_caps(&self) -> &[Cap] { &[Cap::notify()] }
-    fn run(&self, call: (Auth, &PrState)) -> Result<(), lgwks_bot::BotError> {
+    fn required_caps(&self) -> &[Cap] { &self.caps }
+    async fn execute_action(&self, call: (Auth, &PrState)) -> Result<(), lgwks_bot::BotError> {
         call.0.check(self.required_caps())?;
         /* ... */
     }
@@ -43,21 +56,35 @@ let bot = Bot::builder("ci-watcher")
     .on(|pr: &PrState| pr.checks_changed, SlackNotify::new("#deploys"))
     .build(&GrantSet::empty().grant(Cap::net()).grant(Cap::notify()))?;
 
-// 4. Tick — polls sources, evaluates conditions, fires matching actions
-let fired = bot.tick()?;
+// 4. Tick — polls sources concurrently, evaluates conditions, fires matching actions
+let fired = bot.block_on_tick()?;   // sync callers
+// let fired = bot.tick().await?;   // already-async callers
 ```
 
 ## The four verbs
 
 | Verb | Trait | Purpose |
 |------|-------|---------|
-| **Observe** | `verb::Observe` | Watch a source — poll, listen, stream. Produces a value each tick. |
-| **Evaluate** | `verb::Evaluate<T>` | Gate on a condition. Boolean over observed state. Closures implement this automatically. |
-| **Execute** | `verb::Execute` | Perform a side effect. Capability-gated. The action half of the chain. |
-| **Query** | `verb::Query` | Read without side effects. Direct call, no chain required. |
+| **Observe** | `verb::Observe` | Watch a source — poll, listen, stream. Async; produces a value each tick. |
+| **Evaluate** | `verb::Evaluate<T>` | Gate on a condition. Boolean over observed state. Synchronous and pure. Closures implement this automatically. |
+| **Execute** | `verb::Execute` | Perform a side effect. Async and capability-gated. The action half of the chain. |
+| **Query** | `verb::Query` | Read without side effects. Async, direct call, no chain required. |
 
 No fifth verb exists. New domains add implementations of these four, not new
 verbs.
+
+## Async execution model
+
+- `Bot::tick` is an `async fn`; it polls all sources in bounded concurrent waves
+  (`MAX_IN_FLIGHT_POLLS = 32`) with `lgwks_std::task::join_all`, then fires
+  matching actions sequentially in declaration order so side effects stay
+  deterministic.
+- Futures are **local** (not `Send`): `lgwks_std::task` drives a bot on the
+  calling thread, and domains may hold thread-local state. Embedders that need
+  multi-threaded execution run the bot on a dedicated thread.
+- A blocking domain offloads its syscall with `lgwks_std::task::spawn_blocking`
+  — one OS thread per in-flight call — so the executor is never stalled. The
+  wave cap bounds simultaneous blocking threads by `MAX_IN_FLIGHT_POLLS`.
 
 ## Capability system
 
@@ -65,8 +92,9 @@ Every domain declares the capabilities it requires. The bot builder validates
 `required ⊆ granted` before construction — a bot that asks for `bot.net` without
 a grant fails at build time, not at runtime.
 
-Authority is proof-carrying past build: every `poll`, `run`, and `query` takes
-an `(Auth, input)` tuple, and only `GrantSet::issue` can mint the `Auth` half.
+Authority is proof-carrying past build: every `poll`, `execute_action`, and
+`query` takes an `(Auth, input)` tuple, and only `GrantSet::issue` can mint the
+`Auth` half.
 The framework issues a fresh proof per domain on every `tick`; each callee
 checks coverage before acting, so a narrower proof presented to a broader
 domain is denied (no confused deputies). `Evaluate` takes no proof — it is
@@ -90,14 +118,14 @@ Nine domains ship with the crate, each implementing one or more verbs:
 
 | Domain | Module | Capabilities | Verbs |
 |--------|--------|-------------|-------|
-| GitHub | `domain::gh` | `bot.net` | Observe, Query |
-| Network | `domain::net` | `bot.net` | Observe, Execute, Query |
-| Chat | `domain::chat` | `bot.net` | Observe, Execute, Query |
-| Filesystem | `domain::fs` | `bot.fs` | Observe, Execute, Query |
-| Data store | `domain::data` | `bot.fs` | Observe, Execute, Query |
+| GitHub | `domain::gh` | `bot.net` | Observe, Execute, Query |
+| Network | `domain::net` | `bot.net` | Observe, Query |
+| Chat | `domain::chat` | `bot.net` | Observe, Query |
+| Filesystem | `domain::fs` | `bot.fs` | Observe, Query |
+| Data store | `domain::data` | `bot.fs` | Observe, Query |
 | System | `domain::sys` | `bot.sys` | Observe, Execute, Query |
-| Notifications | `domain::notify` | `bot.notify` | Execute |
-| Flow | `domain::flow` | inherited | Execute (pipeline, branch, fan-out) |
+| Notifications | `domain::notify` | `bot.notify`, `bot.net` | Execute |
+| Flow | `domain::flow` | inherited | Execute (pipeline) |
 | Evaluators | `domain::eval` | — | Evaluate (changed, threshold) |
 
 ## Serializable specs

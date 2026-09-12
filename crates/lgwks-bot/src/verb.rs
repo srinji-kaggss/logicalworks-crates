@@ -11,7 +11,7 @@ use super::error::BotError;
 /// Takes an `(Auth, ())` tuple: the proof must cover [`required_caps`](Observe::required_caps)
 /// or `poll` denies before touching the source. A domain that implements
 /// `Observe` can be bound to `(condition, action)` tuples in a bot spec.
-/// The framework calls `poll` on the interval or event the bot declares.
+/// The framework calls `poll` once per tick for each source bound to a chain.
 pub trait Observe {
     /// The value produced each observation tick.
     type Output;
@@ -21,7 +21,11 @@ pub trait Observe {
     fn required_caps(&self) -> &[Cap];
 
     /// Poll the source for the current state.
-    fn poll(&self, call: (Auth, ())) -> Result<Self::Output, BotError>;
+    ///
+    /// Async: the returned future is local to the driving thread (not `Send`),
+    /// because `lgwks_std::task` drives bots on one thread and a domain may hold
+    /// thread-local state. `Bot::tick` polls every source concurrently.
+    async fn poll(&self, call: (Auth, ())) -> Result<Self::Output, BotError>;
 
     /// The domain identifier (e.g. `"gh::pr_status"`).
     fn domain_id(&self) -> &str;
@@ -60,11 +64,12 @@ where
 // ── Execute ────────────────────────────────────────────────────────────────
 
 /// Perform a side effect. Capability-gated. The callable surface — the
-/// `action` half of the `(condition, action)` tuple, and directly invocable
-/// via `bot.execute()`.
+/// `action` half of the `(condition, action)` tuple, invoked as
+/// [`Execute::execute_action`].
 ///
 /// Takes an `(Auth, input)` tuple: the proof must cover
-/// [`required_caps`](Execute::required_caps) or `run` denies before acting.
+/// [`required_caps`](Execute::required_caps) or `execute_action` denies before
+/// acting.
 pub trait Execute {
     /// Input to the action.
     type Input;
@@ -75,8 +80,10 @@ pub trait Execute {
     /// proven per call by the `Auth` half of the tuple.
     fn required_caps(&self) -> &[Cap];
 
-    /// Run the action.
-    fn run(&self, call: (Auth, &Self::Input)) -> Result<Self::Output, BotError>;
+    /// Perform the effect this action models, after `call.0` proves the
+    /// required caps. Awaited by `Bot::tick` in chain order; blocking work
+    /// belongs on a `lgwks_std::task::spawn_blocking` thread inside the domain.
+    async fn execute_action(&self, call: (Auth, &Self::Input)) -> Result<Self::Output, BotError>;
 
     /// The domain identifier (e.g. `"notify::slack"`).
     fn domain_id(&self) -> &str;
@@ -99,8 +106,10 @@ pub trait Query {
     fn required_caps(&self) -> &[Cap];
 
     /// Run the query.
-    fn query(&self, call: (Auth, &Self::Input)) -> Result<Self::Output, BotError>;
+    ///
+    /// Async for the same reason as [`Observe::poll`].
+    async fn query(&self, call: (Auth, &Self::Input)) -> Result<Self::Output, BotError>;
 
-    /// The domain identifier.
+    /// The identifier the query reports in findings (e.g. `"gh::pr_status"`).
     fn domain_id(&self) -> &str;
 }

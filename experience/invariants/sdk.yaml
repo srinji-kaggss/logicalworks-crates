@@ -18,7 +18,7 @@ machine_contract:
   - "check: exit 0 admitted, 2 refused; human-readable lines, deterministic per tree."
   - "freshness: exit 0 fresh, 1 stale; --json is a stable object array."
   - "BotSpec JSON: stable shape, typed parse errors, zero side effects on validate."
-  - "tick(): returns fired-action count; offline sources perform no I/O beyond their documented poll."
+  - "tick()/block_on_tick(): returns fired-action count; offline sources perform no I/O beyond their documented poll."
 
 known_gaps:
   - "check has no --json mode; agents must parse human lines (freshness already has --json)."

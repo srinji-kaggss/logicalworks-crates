@@ -284,9 +284,9 @@ pub mod percent {
     pub fn decode(text: &str) -> Result<String, DecodeError> {
         let bytes = text.as_bytes();
         let mut out = Vec::with_capacity(bytes.len());
-        let mut i = 0;
-        while i < bytes.len() {
-            decode_step(bytes, &mut i, &mut out)?;
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            decode_step(bytes, &mut cursor, &mut out)?;
         }
         String::from_utf8(out).map_err(|utf8_err| DecodeError::NotUtf8 {
             at: utf8_err.utf8_error().valid_up_to(),

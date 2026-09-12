@@ -19,7 +19,7 @@ const BODY_PREVIEW: usize = 4096;
 /// Seconds a poll waits for the endpoint.
 const POLL_TIMEOUT_SECS: u64 = 10;
 
-/// Observe or query a network endpoint. Supports Observe, Execute, Query.
+/// Observe or query a network endpoint. Supports Observe and Query.
 pub struct Endpoint {
     url: String,
     caps: Vec<Cap>,
@@ -53,26 +53,32 @@ impl verb::Observe for Endpoint {
         &self.caps
     }
 
-    fn poll(&self, call: (Auth, ())) -> Result<NetState, BotError> {
+    async fn poll(&self, call: (Auth, ())) -> Result<NetState, BotError> {
         call.0.check(self.required_caps())?;
+        let url = self.url.clone();
         let options = Options {
             timeout: Duration::from_secs(POLL_TIMEOUT_SECS),
             ..Options::default()
         };
-        match http::get_with(&self.url, &options) {
+        let exchange =
+            lgwks_std::task::spawn_blocking(move || http::get_with(&url, &options)).await;
+        match exchange {
             Ok(response) => Ok(NetState {
                 status_code: response.status,
                 reachable: true,
                 body: response
                     .text()
-                    .unwrap_or_default()
+                    .unwrap_or_else(|error| {
+                        eprintln!("lgwks_bot::net: response body is not UTF-8: {error}");
+                        ""
+                    })
                     .chars()
                     .take(BODY_PREVIEW)
                     .collect(),
             }),
-            Err(http::Error::InvalidUrl(_)) => Err(BotError::DomainError {
+            Err(http::Error::InvalidUrl) => Err(BotError::DomainError {
                 domain: self.domain_id().into(),
-                cause: format!("invalid endpoint URL {}", self.url),
+                cause: "invalid endpoint URL (absolute http(s) URI required)".into(),
             }),
             Err(_) => Ok(NetState {
                 status_code: 0,
@@ -95,9 +101,9 @@ impl verb::Query for Endpoint {
         &self.caps
     }
 
-    fn query(&self, call: (Auth, &())) -> Result<NetState, BotError> {
+    async fn query(&self, call: (Auth, &())) -> Result<NetState, BotError> {
         let (auth, _) = call;
-        verb::Observe::poll(self, (auth, ()))
+        verb::Observe::poll(self, (auth, ())).await
     }
 
     fn domain_id(&self) -> &str {
@@ -154,9 +160,10 @@ mod tests {
     fn poll_reports_reachable_loopback() {
         use crate::verb::Observe;
         let (port, server) = serve_once("alive");
-        let state = Endpoint::new(format!("http://127.0.0.1:{port}/"))
-            .poll((net_auth(), ()))
-            .unwrap();
+        let state = lgwks_std::task::block_on(
+            Endpoint::new(format!("http://127.0.0.1:{port}/")).poll((net_auth(), ())),
+        )
+        .unwrap();
         assert!(state.reachable);
         assert_eq!(state.status_code, 200);
         assert_eq!(state.body, "alive");
@@ -169,9 +176,10 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
-        let state = Endpoint::new(format!("http://127.0.0.1:{port}/"))
-            .poll((net_auth(), ()))
-            .unwrap();
+        let state = lgwks_std::task::block_on(
+            Endpoint::new(format!("http://127.0.0.1:{port}/")).poll((net_auth(), ())),
+        )
+        .unwrap();
         assert!(!state.reachable);
         assert_eq!(state.status_code, 0);
     }
@@ -179,8 +187,7 @@ mod tests {
     #[test]
     fn poll_rejects_malformed_url_as_spec_bug() {
         use crate::verb::Observe;
-        let error = Endpoint::new("not a url")
-            .poll((net_auth(), ()))
+        let error = lgwks_std::task::block_on(Endpoint::new("not a url").poll((net_auth(), ())))
             .unwrap_err();
         assert!(matches!(error, BotError::DomainError { .. }));
     }
@@ -189,9 +196,9 @@ mod tests {
     fn poll_without_net_proof_is_denied() {
         use crate::verb::Observe;
         let vacuous = GrantSet::empty().issue(&[]).expect("empty coverage");
-        let error = Endpoint::new("http://127.0.0.1:9/")
-            .poll((vacuous, ()))
-            .unwrap_err();
+        let error =
+            lgwks_std::task::block_on(Endpoint::new("http://127.0.0.1:9/").poll((vacuous, ())))
+                .unwrap_err();
         assert!(matches!(error, BotError::CapabilityDenied { .. }));
     }
 }

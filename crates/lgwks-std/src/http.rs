@@ -48,8 +48,9 @@ pub struct Response {
 impl Response {
     /// The body as UTF-8, or [`Error::Transport`] when it is not valid UTF-8.
     pub fn text(&self) -> Result<&str, Error> {
-        std::str::from_utf8(&self.body)
-            .map_err(|_| Error::Transport("response body is not valid UTF-8".into()))
+        std::str::from_utf8(&self.body).map_err(|utf8_error| {
+            Error::Transport(format!("response body is not valid UTF-8: {utf8_error}"))
+        })
     }
 }
 
@@ -58,8 +59,10 @@ impl Response {
 /// What `http` refuses to hide: bad URLs, timeouts, transport failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    /// The URL is not an absolute http(s) URI.
-    InvalidUrl(String),
+    /// The URL is not an absolute http(s) URI. The offending URL is not
+    /// carried: it can contain credentials in its userinfo or a token in its
+    /// query string, and the caller already holds it.
+    InvalidUrl,
     /// The request hit [`Options::timeout`].
     Timeout,
     /// The exchange never completed: DNS, TCP, TLS, or protocol failure.
@@ -69,7 +72,9 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidUrl(url) => write!(f, "invalid http(s) URL: {url}"),
+            Self::InvalidUrl => {
+                write!(f, "invalid http(s) URL (absolute http(s) URI required)")
+            }
             Self::Timeout => write!(f, "request timed out"),
             Self::Transport(cause) => write!(f, "transport failure: {cause}"),
         }
@@ -80,15 +85,36 @@ impl std::error::Error for Error {}
 
 // ── Exchange ────────────────────────────────────────────────────────────────
 
-/// Reject anything that is not an absolute http(s) URI before dialing.
+/// Reject anything that is not an absolute http(s) URI before dialing. The
+/// diagnostics name the failure class, never the raw URL: a caller-supplied URL
+/// can carry credentials or tokens in its userinfo or query string.
 pub fn validate_url(url: &str) -> Result<(), Error> {
-    UriAbsoluteStr::new(url).map_err(|_| Error::InvalidUrl(url.into()))?;
-    let scheme = url.split(':').next().unwrap_or_default();
-    if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
-        Ok(())
-    } else {
-        Err(Error::InvalidUrl(url.into()))
+    UriAbsoluteStr::new(url).map_err(|cause| {
+        eprintln!("lgwks_std::http: rejecting malformed URL: {cause}");
+        Error::InvalidUrl
+    })?;
+    let Some(scheme) = url.split_once(':').map(|(scheme, _)| scheme) else {
+        eprintln!("lgwks_std::http: rejecting URL with no scheme");
+        return Err(Error::InvalidUrl);
+    };
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        eprintln!("lgwks_std::http: rejecting non-http(s) scheme {scheme:?}");
+        return Err(Error::InvalidUrl);
     }
+    // An absolute URI may be authority-less — `http:user:SECRET@host` parses —
+    // but it is not a valid request target. ureq refuses such a URL with a
+    // message that embeds the raw text, so reject it here, class-only, rather
+    // than let a lower layer echo it.
+    let Some(authority) = url[scheme.len() + 1..].strip_prefix("//") else {
+        eprintln!("lgwks_std::http: rejecting URL without authority");
+        return Err(Error::InvalidUrl);
+    };
+    let host_end = authority.find(['/', '?', '#']).unwrap_or(authority.len());
+    if authority[..host_end].is_empty() {
+        eprintln!("lgwks_std::http: rejecting URL with empty host");
+        return Err(Error::InvalidUrl);
+    }
+    Ok(())
 }
 
 fn agent(options: &Options) -> ureq::Agent {
@@ -108,7 +134,7 @@ fn response_of(mut response: ureq::http::Response<ureq::Body>) -> Result<Respons
         .map(|(name, value)| {
             (
                 name.to_string(),
-                value.to_str().unwrap_or_default().to_string(),
+                String::from_utf8_lossy(value.as_bytes()).into_owned(),
             )
         })
         .collect();
@@ -128,12 +154,17 @@ fn response_of(mut response: ureq::http::Response<ureq::Body>) -> Result<Respons
 fn map_error(error: ureq::Error) -> Error {
     match error {
         ureq::Error::Timeout(_) => Error::Timeout,
+        // ureq's `BadUri` message embeds the raw URI. `validate_url` rejects the
+        // shapes that reach it, but collapse it to the class-only variant
+        // anyway: a caller that logs the returned error must not receive the
+        // userinfo or query string back.
+        ureq::Error::BadUri(_) => Error::InvalidUrl,
         other => Error::Transport(other.to_string()),
     }
 }
 
 /// GET `url` with default options.
-pub fn get(url: &str) -> Result<Response, Error> {
+pub fn get_response(url: &str) -> Result<Response, Error> {
     get_with(url, &Options::default())
 }
 
@@ -160,12 +191,20 @@ pub fn post_with(
     options: &Options,
 ) -> Result<Response, Error> {
     validate_url(url)?;
-    agent(options)
+    // The URL is intentionally not logged: it can carry credentials in its
+    // userinfo or query string. Method, content type, and size are enough to
+    // correlate the request. `content_type` is caller-controlled, so it is
+    // debug-formatted: that escapes CR/LF and keeps a crafted value from
+    // forging a second log line.
+    eprintln!(
+        "lgwks_std::http: POST ({content_type:?}, {} bytes)",
+        body.len()
+    );
+    let request = agent(options)
         .post(url)
-        .header("Content-Type", content_type)
-        .send(body)
-        .map_err(map_error)
-        .and_then(response_of)
+        .header("Content-Type", content_type);
+    let response = request.send(body).map_err(map_error)?;
+    response_of(response)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -228,6 +267,19 @@ mod tests {
         (port, handle)
     }
 
+    #[test]
+    fn default_option_wrappers_reach_the_same_path() {
+        let (port, server) = serve(vec![("200 OK", "hello"), ("200 OK", "ok")]);
+        let url = format!("http://127.0.0.1:{port}/");
+        let got = get_response(&url).unwrap();
+        assert_eq!(got.status, 200);
+        assert_eq!(got.body, b"hello");
+        let posted = post(&url, "text/plain", ECHO.as_bytes()).unwrap();
+        assert_eq!(posted.status, 200);
+        assert_eq!(posted.text().unwrap(), ECHO);
+        server.join().unwrap();
+    }
+
     fn quiet() -> Options {
         Options {
             timeout: Duration::from_secs(5),
@@ -279,15 +331,26 @@ mod tests {
     fn rejects_non_http_urls_before_dialing() {
         assert!(matches!(
             get_with("not a url", &quiet()),
-            Err(Error::InvalidUrl(_))
+            Err(Error::InvalidUrl)
         ));
         assert!(matches!(
             get_with("/relative/path", &quiet()),
-            Err(Error::InvalidUrl(_))
+            Err(Error::InvalidUrl)
         ));
         assert!(matches!(
             get_with("ftp://127.0.0.1/file", &quiet()),
-            Err(Error::InvalidUrl(_))
+            Err(Error::InvalidUrl)
+        ));
+        // Authority-less absolute URIs pass the scheme check but are not valid
+        // request targets; ureq refuses them with a message that embeds the
+        // raw text, so they must be rejected here instead.
+        assert!(matches!(
+            get_with("http:user:SECRET@host", &quiet()),
+            Err(Error::InvalidUrl)
+        ));
+        assert!(matches!(
+            get_with("https://", &quiet()),
+            Err(Error::InvalidUrl)
         ));
     }
 

@@ -18,7 +18,7 @@ states:
     expectation: The failure for a missing grant names the grant, not a trait bound.
 invariants:
   - A bot built without the required grant is refused at build() with the cap named.
-  - tick() on an offline source performs no network or process side effects.
+  - block_on_tick() on an offline source performs no network or process side effects.
   - BotSpec JSON round-trips byte-stable through to_json/from_json.
 trust_boundaries:
   - Probe performs no network calls and spawns no processes.

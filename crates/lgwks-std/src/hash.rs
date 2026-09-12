@@ -17,8 +17,8 @@ impl std::hash::Hash for Digest {
 impl PartialEq for Digest {
     fn eq(&self, other: &Self) -> bool {
         let mut acc = 0u8;
-        for (a, b) in self.0.iter().zip(other.0.iter()) {
-            acc |= a ^ b;
+        for (left, right) in self.0.iter().zip(other.0.iter()) {
+            acc |= left ^ right;
         }
         acc == 0
     }

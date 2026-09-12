@@ -1,8 +1,7 @@
 //! `chat` owns the chat/messaging domain. Requires `bot.net`.
 //!
-//! Chat is an Observe source (incoming messages), an Execute surface (send
-//! replies), and a Query surface (read history). It is NOT a separate verb —
-//! it is where triggers come from.
+//! Chat is an Observe source (incoming messages) and a Query surface (read
+//! history). It is NOT a separate verb — it is where triggers come from.
 
 use crate::cap::{Auth, Cap};
 use crate::error::BotError;
@@ -51,11 +50,11 @@ impl verb::Observe for SlackChannel {
         &self.caps
     }
 
-    fn poll(&self, call: (Auth, ())) -> Result<ChatMessage, BotError> {
+    async fn poll(&self, call: (Auth, ())) -> Result<ChatMessage, BotError> {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
-            cause: format!("polling {} — binding required", self.channel),
+            cause: format!("polling {:?} — binding required", self.channel),
         })
     }
 
@@ -72,11 +71,11 @@ impl verb::Query for SlackChannel {
         &self.caps
     }
 
-    fn query(&self, call: (Auth, &())) -> Result<Vec<ChatMessage>, BotError> {
+    async fn query(&self, call: (Auth, &())) -> Result<Vec<ChatMessage>, BotError> {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
-            cause: format!("querying {} — binding required", self.channel),
+            cause: format!("querying {:?} — binding required", self.channel),
         })
     }
 
@@ -113,11 +112,11 @@ impl verb::Observe for HttpWebhook {
         &self.caps
     }
 
-    fn poll(&self, call: (Auth, ())) -> Result<ChatMessage, BotError> {
+    async fn poll(&self, call: (Auth, ())) -> Result<ChatMessage, BotError> {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
-            cause: format!("polling {} — binding required", self.path),
+            cause: format!("polling {:?} — binding required", self.path),
         })
     }
 
