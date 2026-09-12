@@ -1,6 +1,6 @@
 //! `error` owns the bot error vocabulary and enforces INV-BOT-ERROR-TYPED:
-//! every failure carries the operation, boundary, cause, and whether it is
-//! retryable.
+//! every failure is a distinct typed variant carrying the capability, field,
+//! domain, or condition that caused it — never a bare string.
 
 use std::fmt;
 
@@ -14,7 +14,8 @@ pub enum BotError {
         /// The capability that was required but missing.
         required: Cap,
     },
-    /// The bot spec is incomplete — missing name or zero chains.
+    /// The bot spec is incomplete — a required field is missing (currently the
+    /// name; an empty chain list is allowed).
     IncompleteSpec {
         /// What is missing.
         field: &'static str,

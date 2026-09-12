@@ -42,7 +42,7 @@ impl verb::Observe for Process {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
-            cause: format!("polling {} — binding required", self.command),
+            cause: format!("polling {:?} — binding required", self.command),
         })
     }
 
@@ -63,7 +63,7 @@ impl verb::Execute for Process {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
-            cause: format!("executing {} — binding required", self.command),
+            cause: format!("executing {:?} — binding required", self.command),
         })
     }
 
@@ -84,7 +84,7 @@ impl verb::Query for Process {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
-            cause: format!("querying {} — binding required", self.command),
+            cause: format!("querying {:?} — binding required", self.command),
         })
     }
 

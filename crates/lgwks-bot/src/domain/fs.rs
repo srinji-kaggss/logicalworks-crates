@@ -6,7 +6,7 @@ use crate::cap::{Auth, Cap};
 use crate::error::BotError;
 use crate::verb;
 
-/// Observe a filesystem path for changes. Supports Observe, Evaluate, Execute, Query.
+/// Observe a filesystem path for changes. Supports Observe and Query.
 pub struct Path {
     target: PathBuf,
     caps: Vec<Cap>,

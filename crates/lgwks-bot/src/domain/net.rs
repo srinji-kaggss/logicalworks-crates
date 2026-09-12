@@ -19,7 +19,7 @@ const BODY_PREVIEW: usize = 4096;
 /// Seconds a poll waits for the endpoint.
 const POLL_TIMEOUT_SECS: u64 = 10;
 
-/// Observe or query a network endpoint. Supports Observe, Execute, Query.
+/// Observe or query a network endpoint. Supports Observe and Query.
 pub struct Endpoint {
     url: String,
     caps: Vec<Cap>,

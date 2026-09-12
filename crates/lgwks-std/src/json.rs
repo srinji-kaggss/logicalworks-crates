@@ -1,6 +1,6 @@
 //! `json` owns JSON encoding and decoding for external interfaces.
 //! Built on serde_json for correctness and interoperability. For
-//! internal binary wire format, use [`crate::wire`].
+//! internal binary wire format, use the `wire` module (feature `wire`).
 //!
 //! INV-JSON-UTF8: all output is valid UTF-8. Input is validated as
 //! UTF-8 during deserialization.

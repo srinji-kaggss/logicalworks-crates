@@ -7,7 +7,7 @@ use crate::verb;
 
 // ── pr_status ──────────────────────────────────────────────────────────────
 
-/// Observe the status of a pull request. Supports Observe, Evaluate, Query.
+/// Observe the status of a pull request. Supports Observe and Query.
 pub struct PrStatus {
     repo: String,
     caps: Vec<Cap>,
@@ -47,7 +47,7 @@ impl verb::Observe for PrStatus {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
-            cause: format!("polling {} — binding required", self.repo),
+            cause: format!("polling {:?} — binding required", self.repo),
         })
     }
 
@@ -68,7 +68,7 @@ impl verb::Query for PrStatus {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
-            cause: format!("querying {} — binding required", self.repo),
+            cause: format!("querying {:?} — binding required", self.repo),
         })
     }
 
@@ -124,7 +124,7 @@ impl verb::Observe for CiRun {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
-            cause: format!("polling {} — binding required", self.repo),
+            cause: format!("polling {:?} — binding required", self.repo),
         })
     }
 
@@ -145,7 +145,7 @@ impl verb::Query for CiRun {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
-            cause: format!("querying {} — binding required", self.repo),
+            cause: format!("querying {:?} — binding required", self.repo),
         })
     }
 
@@ -189,7 +189,7 @@ impl verb::Execute for Merge {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
-            cause: format!("merging {} — binding required", self.repo),
+            cause: format!("merging {:?} — binding required", self.repo),
         })
     }
 

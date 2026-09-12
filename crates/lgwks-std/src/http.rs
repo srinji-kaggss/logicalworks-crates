@@ -97,12 +97,24 @@ pub fn validate_url(url: &str) -> Result<(), Error> {
         eprintln!("lgwks_std::http: rejecting URL with no scheme");
         return Err(Error::InvalidUrl);
     };
-    if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
-        Ok(())
-    } else {
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
         eprintln!("lgwks_std::http: rejecting non-http(s) scheme {scheme:?}");
-        Err(Error::InvalidUrl)
+        return Err(Error::InvalidUrl);
     }
+    // An absolute URI may be authority-less — `http:user:SECRET@host` parses —
+    // but it is not a valid request target. ureq refuses such a URL with a
+    // message that embeds the raw text, so reject it here, class-only, rather
+    // than let a lower layer echo it.
+    let Some(authority) = url[scheme.len() + 1..].strip_prefix("//") else {
+        eprintln!("lgwks_std::http: rejecting URL without authority");
+        return Err(Error::InvalidUrl);
+    };
+    let host_end = authority.find(['/', '?', '#']).unwrap_or(authority.len());
+    if authority[..host_end].is_empty() {
+        eprintln!("lgwks_std::http: rejecting URL with empty host");
+        return Err(Error::InvalidUrl);
+    }
+    Ok(())
 }
 
 fn agent(options: &Options) -> ureq::Agent {
@@ -142,6 +154,11 @@ fn response_of(mut response: ureq::http::Response<ureq::Body>) -> Result<Respons
 fn map_error(error: ureq::Error) -> Error {
     match error {
         ureq::Error::Timeout(_) => Error::Timeout,
+        // ureq's `BadUri` message embeds the raw URI. `validate_url` rejects the
+        // shapes that reach it, but collapse it to the class-only variant
+        // anyway: a caller that logs the returned error must not receive the
+        // userinfo or query string back.
+        ureq::Error::BadUri(_) => Error::InvalidUrl,
         other => Error::Transport(other.to_string()),
     }
 }
@@ -309,6 +326,17 @@ mod tests {
         ));
         assert!(matches!(
             get_with("ftp://127.0.0.1/file", &quiet()),
+            Err(Error::InvalidUrl)
+        ));
+        // Authority-less absolute URIs pass the scheme check but are not valid
+        // request targets; ureq refuses them with a message that embeds the
+        // raw text, so they must be rejected here instead.
+        assert!(matches!(
+            get_with("http:user:SECRET@host", &quiet()),
+            Err(Error::InvalidUrl)
+        ));
+        assert!(matches!(
+            get_with("https://", &quiet()),
             Err(Error::InvalidUrl)
         ));
     }

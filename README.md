@@ -8,7 +8,7 @@ Source of truth for the estate's shared Rust foundation crates, extracted from
 | `lgwks_std` | 0.5.2 | Core functions: hex, time, id, hash, glob, pattern, json, ron, wire, fs, task, leb128, encoding |
 | `lgwks_bot` | 0.1.2 | Async + actor roles: Observe, Evaluate, Execute, Query verbs over capability-gated domains |
 | `lgwks_ast` | 0.1.0 | The estate's one multi-language AST parser: language identification, ast-grep grammar selection, bounded traversal |
-| `lgwks_deps` | 0.1.0 | All other deps: admission, audit, freshness (`lgwks-deps check`) — not published |
+| `lgwks_deps` | 0.1.2 | All other deps: admission, audit, freshness (`lgwks-deps check`) — not published |
 
 All four crates are Apache-2.0, Logical Works Incorporated. Versions move
 together from this repo; the next bump publishes here.

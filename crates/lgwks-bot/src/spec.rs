@@ -10,8 +10,9 @@ use super::gate::GrantSet;
 
 // ── Serializable spec ──────────────────────────────────────────────────────
 
-/// The serializable bot contract — what an AI emits, what a manifest contains,
-/// what `Bot::build()` validates.
+/// The serializable bot contract — what an AI emits and what a manifest
+/// contains. `from_json` validates its shape; capability validation happens at
+/// build time from a [`GrantSet`], not from a spec.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(crate = "lgwks_std::json::serde", deny_unknown_fields)]
 pub struct BotSpec {
@@ -144,7 +145,7 @@ impl Bot {
     }
 
     /// The name the built [`Bot`] will report; it is set once by
-    /// [`BotBuilder::new`] and never derived from the chains.
+    /// [`Bot::builder`] and never derived from the chains.
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -160,7 +161,7 @@ impl Bot {
     /// count of actions fired.
     ///
     /// Async and concurrent: sources are polled in bounded waves of
-    /// [`MAX_IN_FLIGHT_POLLS`] via `lgwks_std::task::join_all`, so a set of
+    /// `MAX_IN_FLIGHT_POLLS` via `lgwks_std::task::join_all`, so a set of
     /// slow observers overlaps without unbounded blocking threads. Actions run
     /// sequentially in chain order so side effects stay deterministic. Every
     /// poll and `execute_action` carries a freshly issued `Auth` proof — a

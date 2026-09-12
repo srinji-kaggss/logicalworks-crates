@@ -20,10 +20,13 @@ use lgwks_bot::{Auth, Bot, Cap, GrantSet};
 use lgwks_bot::verb::{Observe, Execute};
 
 // 1. Implement Observe on your source — the verb is async
-struct PrWatcher { /* ... */ }
+struct PrWatcher {
+    caps: Vec<Cap>,
+    /* ... */
+}
 impl Observe for PrWatcher {
     type Output = PrState;
-    fn required_caps(&self) -> &[Cap] { &[Cap::net()] }
+    fn required_caps(&self) -> &[Cap] { &self.caps }
     async fn poll(&self, call: (Auth, ())) -> Result<PrState, lgwks_bot::BotError> {
         call.0.check(self.required_caps())?;
         /* ... */
@@ -32,11 +35,14 @@ impl Observe for PrWatcher {
 }
 
 // 2. Implement Execute on your action — also async
-struct SlackNotify { /* ... */ }
+struct SlackNotify {
+    caps: Vec<Cap>,
+    /* ... */
+}
 impl Execute for SlackNotify {
     type Input = PrState;
     type Output = ();
-    fn required_caps(&self) -> &[Cap] { &[Cap::notify()] }
+    fn required_caps(&self) -> &[Cap] { &self.caps }
     async fn execute_action(&self, call: (Auth, &PrState)) -> Result<(), lgwks_bot::BotError> {
         call.0.check(self.required_caps())?;
         /* ... */
@@ -112,14 +118,14 @@ Nine domains ship with the crate, each implementing one or more verbs:
 
 | Domain | Module | Capabilities | Verbs |
 |--------|--------|-------------|-------|
-| GitHub | `domain::gh` | `bot.net` | Observe, Query |
-| Network | `domain::net` | `bot.net` | Observe, Execute, Query |
-| Chat | `domain::chat` | `bot.net` | Observe, Execute, Query |
-| Filesystem | `domain::fs` | `bot.fs` | Observe, Execute, Query |
-| Data store | `domain::data` | `bot.fs` | Observe, Execute, Query |
+| GitHub | `domain::gh` | `bot.net` | Observe, Execute, Query |
+| Network | `domain::net` | `bot.net` | Observe, Query |
+| Chat | `domain::chat` | `bot.net` | Observe, Query |
+| Filesystem | `domain::fs` | `bot.fs` | Observe, Query |
+| Data store | `domain::data` | `bot.fs` | Observe, Query |
 | System | `domain::sys` | `bot.sys` | Observe, Execute, Query |
-| Notifications | `domain::notify` | `bot.notify` | Execute |
-| Flow | `domain::flow` | inherited | Execute (pipeline, branch, fan-out) |
+| Notifications | `domain::notify` | `bot.notify`, `bot.net` | Execute |
+| Flow | `domain::flow` | inherited | Execute (pipeline) |
 | Evaluators | `domain::eval` | — | Evaluate (changed, threshold) |
 
 ## Serializable specs

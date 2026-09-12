@@ -1,4 +1,4 @@
-//! `flow` owns composition domains — pipeline, branch, fan-out. These are
+//! `flow` owns composition domains — currently the pipeline. These are
 //! Execute impls that chain other Execute actions. No new verb needed.
 
 use crate::cap::{Auth, Cap};

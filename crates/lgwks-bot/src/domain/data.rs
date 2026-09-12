@@ -4,7 +4,7 @@ use crate::cap::{Auth, Cap};
 use crate::error::BotError;
 use crate::verb;
 
-/// A JSON store backed by a file path. Supports Observe, Execute, Query.
+/// A JSON store backed by a file path. Supports Observe and Query.
 pub struct JsonStore {
     path: std::path::PathBuf,
     caps: Vec<Cap>,

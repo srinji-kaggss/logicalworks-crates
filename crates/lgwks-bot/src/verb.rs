@@ -11,7 +11,7 @@ use super::error::BotError;
 /// Takes an `(Auth, ())` tuple: the proof must cover [`required_caps`](Observe::required_caps)
 /// or `poll` denies before touching the source. A domain that implements
 /// `Observe` can be bound to `(condition, action)` tuples in a bot spec.
-/// The framework calls `poll` on the interval or event the bot declares.
+/// The framework calls `poll` once per tick for each source bound to a chain.
 pub trait Observe {
     /// The value produced each observation tick.
     type Output;
@@ -110,6 +110,6 @@ pub trait Query {
     /// Async for the same reason as [`Observe::poll`].
     async fn query(&self, call: (Auth, &Self::Input)) -> Result<Self::Output, BotError>;
 
-    /// The identifier the query reports in findings (e.g. `"gh::pr_state"`).
+    /// The identifier the query reports in findings (e.g. `"gh::pr_status"`).
     fn domain_id(&self) -> &str;
 }

@@ -103,4 +103,4 @@ requirements demand it.
 
 ## License
 
-BSD-3-Clause — Copyright 2026 Logical Works Incorporated
+Apache-2.0 — Copyright 2026 Logical Works Incorporated
