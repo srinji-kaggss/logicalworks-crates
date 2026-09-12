@@ -267,6 +267,19 @@ mod tests {
         (port, handle)
     }
 
+    #[test]
+    fn default_option_wrappers_reach_the_same_path() {
+        let (port, server) = serve(vec![("200 OK", "hello"), ("200 OK", "ok")]);
+        let url = format!("http://127.0.0.1:{port}/");
+        let got = get_response(&url).unwrap();
+        assert_eq!(got.status, 200);
+        assert_eq!(got.body, b"hello");
+        let posted = post(&url, "text/plain", ECHO.as_bytes()).unwrap();
+        assert_eq!(posted.status, 200);
+        assert_eq!(posted.text().unwrap(), ECHO);
+        server.join().unwrap();
+    }
+
     fn quiet() -> Options {
         Options {
             timeout: Duration::from_secs(5),

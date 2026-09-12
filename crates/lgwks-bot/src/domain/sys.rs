@@ -92,8 +92,3 @@ impl verb::Query for Process {
         "sys::process"
     }
 }
-
-/// Convenience: create a system process domain.
-pub fn process_command(command: impl Into<String>) -> Process {
-    Process::new(command)
-}

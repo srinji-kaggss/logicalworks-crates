@@ -20,7 +20,15 @@ pub struct PatternError {
 
 impl core::fmt::Display for PatternError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "invalid pattern `{}`: {}", self.pattern, self.message)
+        // The pattern is caller-supplied and `message` quotes the offending
+        // part of it, so both are escaped: a pattern containing CR/LF must not
+        // forge a second line in whatever log interpolates this error.
+        write!(
+            f,
+            "invalid pattern `{}`: {}",
+            self.pattern.escape_debug(),
+            self.message.escape_debug()
+        )
     }
 }
 
@@ -121,6 +129,19 @@ mod tests {
     #[test]
     fn rejects_invalid_pattern() {
         assert!(Regex::new(r"[unclosed").is_err());
+    }
+
+    #[test]
+    fn error_display_escapes_control_characters() {
+        // An invalid pattern containing a newline must render as an escaped
+        // `\n`, not a raw byte that forges a second line in a caller's log.
+        let error = Regex::new("(\n").unwrap_err();
+        let rendered = error.to_string();
+        assert!(
+            !rendered.contains('\n'),
+            "raw newline survived: {rendered:?}"
+        );
+        assert!(rendered.contains("invalid pattern"));
     }
 
     #[test]

@@ -177,21 +177,28 @@ define_languages! {
     Yaml, "YAML.", "lang-yaml", "yaml", ["yaml", "yml"], Yaml;
 }
 
+/// The extension of `path` (the substring after its last `.`), or `None` when
+/// it has no dot.
+fn extension_of(path: &str) -> Option<&str> {
+    path.rsplit_once('.').map(|(_, extension)| extension)
+}
+
+/// Whether `extension` equals any entry of `known`, ASCII-case-insensitively.
+fn any_extension_matches(known: &[&str], extension: &str) -> bool {
+    known
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(extension))
+}
+
 impl Language {
     /// Language of a path by extension, or `None` without a compiled grammar.
     /// Case-insensitive without allocating a normalized copy.
     pub fn of_path(path: &str) -> Option<Self> {
-        let extension = path.rsplit_once('.')?.1;
+        let extension = extension_of(path)?;
         Self::ALL
             .iter()
             .copied()
-            .find(|language| language.supports_extension(extension))
-    }
-
-    fn supports_extension(self, extension: &str) -> bool {
-        self.extensions()
-            .iter()
-            .any(|known| known.eq_ignore_ascii_case(extension))
+            .find(|language| any_extension_matches(language.extensions(), extension))
     }
 }
 
@@ -255,15 +262,10 @@ impl CustomLang {
     /// Registered grammars are selected explicitly; they never join
     /// [`Language::ALL`] or content detection.
     pub fn of_path(path: &str, candidates: &[CustomLang]) -> Option<CustomLang> {
-        let extension = path.rsplit_once('.')?.1;
+        let extension = extension_of(path)?;
         candidates
             .iter()
-            .find(|language| {
-                language
-                    .extensions
-                    .iter()
-                    .any(|known| known.eq_ignore_ascii_case(extension))
-            })
+            .find(|language| any_extension_matches(language.extensions, extension))
             .cloned()
     }
 }
@@ -523,6 +525,11 @@ pub fn child_text_with_kind<L: LanguageExt>(
 
 /// The name a definition node declares, if a direct child kind in
 /// `name_kinds` names it.
+///
+/// Retained with [`callee_name`] and [`child_text_with_kind`] as the
+/// name-resolution surface keel's `lang.rs` calls today; keel issue #556
+/// migrates it onto this crate, so removing these would turn that migration
+/// into a rewrite.
 pub fn definition_name<L: LanguageExt>(
     node: &AstNode<'_, L>,
     name_kinds: &[&str],
@@ -531,7 +538,8 @@ pub fn definition_name<L: LanguageExt>(
 }
 
 /// The callee a call node names, or `None` when `node` is not a call kind or
-/// names none of `name_kinds`.
+/// names none of `name_kinds`. See [`definition_name`] for why this trio is
+/// retained.
 pub fn callee_name<L: LanguageExt>(
     node: &AstNode<'_, L>,
     call_kinds: &[&str],

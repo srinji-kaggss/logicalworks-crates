@@ -96,10 +96,21 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 /// closure to completion. A caller that must stop in-flight blocking work has
 /// to arrange that cooperatively inside the closure.
 pub async fn join_all<F: Future>(futures: impl IntoIterator<Item = F>) -> Vec<F::Output> {
-    let mut pending: Vec<Option<Pin<Box<F>>>> = futures
-        .into_iter()
-        .map(|future| Some(Box::pin(future)))
-        .collect();
+    join_all_boxed(futures.into_iter().map(Box::pin).collect::<Vec<_>>()).await
+}
+
+/// [`join_all`] over futures the caller has already boxed.
+///
+/// Same polling, ordering and cancellation semantics as [`join_all`]; the only
+/// difference is the allocation model. `join_all` boxes each input once
+/// (`n` boxes for `n` futures); this takes those boxes as given and adds none,
+/// so a caller that already holds `Pin<Box<_>>` — the bot tick path boxes at
+/// its type-erasure boundary — avoids a second box per future. The cost model
+/// is `n` heap allocations either way, not a measured throughput claim.
+pub async fn join_all_boxed<F: Future + ?Sized>(
+    futures: impl IntoIterator<Item = Pin<Box<F>>>,
+) -> Vec<F::Output> {
+    let mut pending: Vec<Option<Pin<Box<F>>>> = futures.into_iter().map(Some).collect();
     let count = pending.len();
     let mut done: Vec<Option<F::Output>> = (0..count).map(|_| None).collect();
 
@@ -411,6 +422,20 @@ mod tests {
         // child's count must stay at one.
         assert_eq!(fast_polls.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(slow_polls.load(AtomicOrdering::SeqCst), 2);
+    }
+
+    #[test]
+    fn join_all_boxed_matches_join_all_and_accepts_boxes() {
+        let plain = block_on(join_all(vec![std::future::ready(1), std::future::ready(2)]));
+        let boxed: Vec<Pin<Box<dyn Future<Output = i32>>>> = vec![
+            Box::pin(std::future::ready(1)),
+            Box::pin(std::future::ready(2)),
+        ];
+        assert_eq!(plain, vec![1, 2]);
+        assert_eq!(block_on(join_all_boxed(boxed)), vec![1, 2]);
+
+        let empty: Vec<Pin<Box<dyn Future<Output = i32>>>> = Vec::new();
+        assert_eq!(block_on(join_all_boxed(empty)), Vec::<i32>::new());
     }
 
     #[test]

@@ -20,6 +20,21 @@ pub enum BotError {
         /// What is missing.
         field: &'static str,
     },
+    /// The serialized spec exceeds [`crate::spec::MAX_SPEC_BYTES`]. The bound is
+    /// defensive: it stops a hostile or runaway manifest from allocating
+    /// without limit before any validation runs.
+    SpecTooLarge {
+        /// Observed length in bytes.
+        bytes: usize,
+        /// The applied bound.
+        limit: usize,
+    },
+    /// The serialized spec is not valid JSON for the schema.
+    MalformedSpec {
+        /// The parser's positional diagnostic, with control characters escaped
+        /// so an untrusted field name cannot forge a log line.
+        cause: String,
+    },
     /// A domain action failed at runtime.
     DomainError {
         /// The domain that failed (e.g. `"gh::pr_status"`).
@@ -44,6 +59,10 @@ impl fmt::Display for BotError {
             Self::IncompleteSpec { field } => {
                 write!(f, "incomplete bot spec: missing {field}")
             }
+            Self::SpecTooLarge { bytes, limit } => {
+                write!(f, "bot spec is {bytes} bytes, over the {limit}-byte limit")
+            }
+            Self::MalformedSpec { cause } => write!(f, "malformed bot spec: {cause}"),
             Self::DomainError { domain, cause } => {
                 write!(f, "{domain}: {cause}")
             }

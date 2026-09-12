@@ -174,7 +174,9 @@ impl Bot {
         let mut values: Vec<Result<Box<dyn std::any::Any>, BotError>> =
             Vec::with_capacity(self.chains.len());
         for wave in self.chains.chunks(MAX_IN_FLIGHT_POLLS) {
-            let batch = lgwks_std::task::join_all(
+            // `poll_any` already boxes at the type-erasure boundary, so this is
+            // the no-rebox entry point: one allocation per source, not two.
+            let batch = lgwks_std::task::join_all_boxed(
                 wave.iter().map(|chain| chain.source.poll_any(&self.grants)),
             )
             .await;
@@ -227,6 +229,25 @@ impl ChainEntry {
     }
 }
 
+/// Validate the name and every chain's capabilities, then assemble the `Bot`.
+/// Shared by both builder entry points so the admission rules cannot drift.
+fn assemble(name: String, chains: Vec<Chain>, grants: &GrantSet) -> Result<Bot, BotError> {
+    if name.is_empty() {
+        return Err(BotError::IncompleteSpec { field: "name" });
+    }
+    for chain in &chains {
+        grants.admit(chain.source.required_caps())?;
+        for entry in &chain.entries {
+            grants.admit(entry.action.required_caps())?;
+        }
+    }
+    Ok(Bot {
+        name,
+        chains,
+        grants: grants.clone(),
+    })
+}
+
 /// Builder for `Bot`. Collects observation chains before validation.
 pub struct BotBuilder {
     name: String,
@@ -252,20 +273,7 @@ impl BotBuilder {
     /// Build with no observation chains — a bot that only supports direct
     /// `query()` and `execute()` calls.
     pub fn build(self, grants: &GrantSet) -> Result<Bot, BotError> {
-        if self.name.is_empty() {
-            return Err(BotError::IncompleteSpec { field: "name" });
-        }
-        for chain in &self.chains {
-            grants.admit(chain.source.required_caps())?;
-            for entry in &chain.entries {
-                grants.admit(entry.action.required_caps())?;
-            }
-        }
-        Ok(Bot {
-            name: self.name,
-            chains: self.chains,
-            grants: grants.clone(),
-        })
+        assemble(self.name, self.chains, grants)
     }
 }
 
@@ -367,24 +375,18 @@ impl ObserveBuilder {
             source: self.source,
             entries: self.entries,
         });
-        if self.name.is_empty() {
-            return Err(BotError::IncompleteSpec { field: "name" });
-        }
-        for chain in &self.prior_chains {
-            grants.admit(chain.source.required_caps())?;
-            for entry in &chain.entries {
-                grants.admit(entry.action.required_caps())?;
-            }
-        }
-        Ok(Bot {
-            name: self.name,
-            chains: self.prior_chains,
-            grants: grants.clone(),
-        })
+        assemble(self.name, self.prior_chains, grants)
     }
 }
 
 // ── Serialization ──────────────────────────────────────────────────────────
+
+/// Upper bound on a serialized spec accepted by [`BotSpec::from_json`]. A bot
+/// manifest is small, so this is a defensive limit rather than a capability: it
+/// keeps a hostile or runaway input from allocating without bound before schema
+/// validation runs. Input exactly at the bound is still parsed; one byte over
+/// is refused with [`BotError::SpecTooLarge`].
+pub const MAX_SPEC_BYTES: usize = 1024 * 1024;
 
 impl BotSpec {
     /// The spec as pretty-printed JSON; field order follows the struct
@@ -394,9 +396,25 @@ impl BotSpec {
     }
 
     /// Parse a spec previously produced by [`BotSpec::to_json`]; a missing or
-    /// unknown field is rejected rather than defaulted.
-    pub fn from_json(s: &str) -> Result<Self, crate::json::Error> {
-        crate::json::from_str(s)
+    /// unknown field is rejected rather than defaulted, and input over
+    /// [`MAX_SPEC_BYTES`] is refused before parsing.
+    ///
+    /// # Errors
+    ///
+    /// [`BotError::SpecTooLarge`] if `s` is longer than [`MAX_SPEC_BYTES`];
+    /// [`BotError::MalformedSpec`] if `s` is not schema-valid JSON. The
+    /// malformed diagnostic is the parser's positional message with control
+    /// characters escaped, because an unknown field name is attacker-chosen.
+    pub fn from_json(s: &str) -> Result<Self, BotError> {
+        if s.len() > MAX_SPEC_BYTES {
+            return Err(BotError::SpecTooLarge {
+                bytes: s.len(),
+                limit: MAX_SPEC_BYTES,
+            });
+        }
+        crate::json::from_str(s).map_err(|error| BotError::MalformedSpec {
+            cause: error.to_string().escape_debug().to_string(),
+        })
     }
 }
 
@@ -531,6 +549,93 @@ mod tests {
     #[test]
     fn missing_required_fields_are_rejected() {
         assert!(BotSpec::from_json(r#"{"chains":[]}"#).is_err());
+    }
+
+    #[test]
+    fn spec_size_bound_is_checked_just_above_the_limit() {
+        // Limit-adjacent partition for the defensive bound: exactly at the
+        // bound the input is not refused for size (it is merely malformed);
+        // one byte over is refused as SpecTooLarge and never parsed.
+        let at = "x".repeat(MAX_SPEC_BYTES);
+        assert!(matches!(
+            BotSpec::from_json(&at),
+            Err(BotError::MalformedSpec { .. })
+        ));
+        let over = "x".repeat(MAX_SPEC_BYTES + 1);
+        assert!(matches!(
+            BotSpec::from_json(&over),
+            Err(BotError::SpecTooLarge { bytes, limit })
+                if bytes == MAX_SPEC_BYTES + 1 && limit == MAX_SPEC_BYTES
+        ));
+    }
+
+    #[test]
+    fn malformed_spec_diagnostic_escapes_control_characters() {
+        // An unknown field name is attacker-chosen; a newline in it must not
+        // survive into the diagnostic as a log-forging byte.
+        match BotSpec::from_json("{\"name\":\"x\",\"chains\":[],\"a\\nb\":1}") {
+            Err(BotError::MalformedSpec { cause }) => {
+                assert!(
+                    !cause.contains('\n') && !cause.contains('\r'),
+                    "cause must not carry raw control bytes: {cause:?}"
+                );
+            }
+            other => panic!("expected MalformedSpec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn both_builder_entry_points_apply_the_same_admission() {
+        // `assemble` is shared, so the no-chains path and the with-chains path
+        // must agree on both the empty-name rejection and the capability check.
+        struct NeedsNet(Vec<Cap>);
+        impl crate::verb::Observe for NeedsNet {
+            type Output = u32;
+            fn required_caps(&self) -> &[Cap] {
+                &self.0
+            }
+            async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+                call.0.check(crate::verb::Observe::required_caps(self))?;
+                Ok(0)
+            }
+            fn domain_id(&self) -> &str {
+                "test::needs_net"
+            }
+        }
+        struct Noop;
+        impl crate::verb::Execute for Noop {
+            type Input = u32;
+            type Output = ();
+            fn required_caps(&self) -> &[Cap] {
+                &[]
+            }
+            async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
+                call.0.check(crate::verb::Execute::required_caps(self))?;
+                Ok(())
+            }
+            fn domain_id(&self) -> &str {
+                "test::noop"
+            }
+        }
+
+        // No-chains entry point (`BotBuilder::build`).
+        assert!(matches!(
+            Bot::builder("").build(&GrantSet::empty()),
+            Err(BotError::IncompleteSpec { field: "name" })
+        ));
+        // With-chains entry point (`ObserveBuilder::build`) rejects the same.
+        assert!(matches!(
+            Bot::builder("")
+                .observe(NeedsNet(vec![]))
+                .build(&GrantSet::empty()),
+            Err(BotError::IncompleteSpec { field: "name" })
+        ));
+        // And both admit capabilities the same way.
+        let denied = Bot::builder("x")
+            .observe(NeedsNet(vec![Cap::net()]))
+            .on(|_: &u32| true, Noop)
+            .build(&GrantSet::empty());
+        assert!(matches!(denied, Err(BotError::CapabilityDenied { .. })));
     }
 
     #[test]
