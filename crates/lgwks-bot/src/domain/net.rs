@@ -76,9 +76,9 @@ impl verb::Observe for Endpoint {
                     .take(BODY_PREVIEW)
                     .collect(),
             }),
-            Err(http::Error::InvalidUrl(_)) => Err(BotError::DomainError {
+            Err(http::Error::InvalidUrl) => Err(BotError::DomainError {
                 domain: self.domain_id().into(),
-                cause: format!("invalid endpoint URL {}", self.url),
+                cause: "invalid endpoint URL (absolute http(s) URI required)".into(),
             }),
             Err(_) => Ok(NetState {
                 status_code: 0,

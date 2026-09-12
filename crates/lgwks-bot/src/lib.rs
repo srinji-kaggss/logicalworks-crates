@@ -2,11 +2,12 @@
 //! Execute, Query.
 //!
 //! Bots are assembled from `(condition, action)` chains that bind observed
-//! sources to side effects. Authority is proof-carrying: every poll, run,
-//! and query takes an `(Auth, input)` tuple, and only `GrantSet::issue`
-//! can mint the `Auth` half. Capabilities are validated at build time — a
-//! bot that requires `bot.net` without a grant fails before it runs — and
-//! proven again on every call, so a grant revoked after build cannot fire.
+//! sources to side effects. Authority is proof-carrying: every `poll`,
+//! `execute_action`, and `query` takes an `(Auth, input)` tuple, and only
+//! `GrantSet::issue` can mint the `Auth` half. Capabilities are validated at
+//! build time — a bot that requires `bot.net` without a grant fails before it
+//! runs — and proven again on every call, so a grant revoked after build cannot
+//! fire.
 //!
 //! `Evaluate` takes no proof: it is pure (boolean in, boolean out) with no
 //! side effect to gate.

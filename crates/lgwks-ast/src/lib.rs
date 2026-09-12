@@ -636,6 +636,36 @@ mod tests {
     #[test]
     fn content_detection_needs_exactly_one_clean_reading() {
         assert_eq!(try_detect_content("fn f() {}", &[]), Ok(None));
+        // Two clean readings are ambiguous, so the answer is None rather than a
+        // pick. Repeating one candidate is a deterministic way to produce that
+        // without depending on a source two grammars happen to agree on.
+        assert_eq!(
+            try_detect_content("fn f() {}", &[Language::Rust, Language::Rust]),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn over_budget_tree_refuses_as_ast_too_large() {
+        // parse_bounded is the one place the node bound is enforced, so drive it
+        // directly with a bound small enough to exceed without a megabyte of
+        // source. The walk stops at limit + 1, which is what proves refusal.
+        match parse_bounded(
+            "fn f() { let x = 1; }",
+            &SupportLang::Rust,
+            "rust",
+            MAX_SOURCE_BYTES,
+            2,
+        ) {
+            Err(ParseError::AstTooLarge {
+                observed, limit, ..
+            }) => {
+                assert_eq!(limit, 2);
+                assert!(observed > limit, "observed {observed} must exceed {limit}");
+            }
+            Err(other) => panic!("expected AstTooLarge, got {other:?}"),
+            Ok(_) => panic!("a tree past the bound must refuse"),
+        }
     }
 
     #[test]

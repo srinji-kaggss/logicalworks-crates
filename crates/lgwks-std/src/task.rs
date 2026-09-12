@@ -90,7 +90,11 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 /// resolves immediately with an empty vector.
 ///
 /// Cancellation: dropping the returned future drops every child that has not
-/// resolved, matching normal future-drop semantics.
+/// resolved, which cancels a child only if that child is cancel-safe on drop.
+/// It does not stop work already handed to [`spawn_blocking`]: a dropped
+/// `JoinHandle` drops the handle, not the dedicated OS thread, which runs its
+/// closure to completion. A caller that must stop in-flight blocking work has
+/// to arrange that cooperatively inside the closure.
 pub async fn join_all<F: Future>(futures: impl IntoIterator<Item = F>) -> Vec<F::Output> {
     let mut pending: Vec<Option<Pin<Box<F>>>> = futures
         .into_iter()
@@ -364,22 +368,49 @@ mod tests {
         }
     }
 
+    /// Pends on first poll, wakes the group from another thread, then resolves.
+    struct PendingThenReady {
+        polls: Arc<AtomicUsize>,
+        waker_slot: Arc<Mutex<Option<Waker>>>,
+    }
+
+    impl Future for PendingThenReady {
+        type Output = usize;
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<usize> {
+            let n = self.polls.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+            if n > 1 {
+                return Poll::Ready(n);
+            }
+            *lock(&self.waker_slot) = Some(cx.waker().clone());
+            let slot = Arc::clone(&self.waker_slot);
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(5));
+                if let Some(waker) = lock(&slot).take() {
+                    waker.wake();
+                }
+            });
+            Poll::Pending
+        }
+    }
+
     #[test]
     fn join_all_never_repolls_a_completed_future() {
-        let polls = Arc::new(AtomicUsize::new(0));
-        let output = block_on(join_all(vec![
-            CountPolls {
-                polls: polls.clone(),
-            },
-            CountPolls {
-                polls: polls.clone(),
-            },
-            CountPolls {
-                polls: polls.clone(),
-            },
-        ]));
-        assert_eq!(output, vec![1, 2, 3]);
-        assert_eq!(polls.load(AtomicOrdering::SeqCst), 3);
+        let fast_polls = Arc::new(AtomicUsize::new(0));
+        let slow_polls = Arc::new(AtomicUsize::new(0));
+        let fast: Pin<Box<dyn Future<Output = usize>>> = Box::pin(CountPolls {
+            polls: Arc::clone(&fast_polls),
+        });
+        let slow: Pin<Box<dyn Future<Output = usize>>> = Box::pin(PendingThenReady {
+            polls: Arc::clone(&slow_polls),
+            waker_slot: Arc::new(Mutex::new(None)),
+        });
+        let output = block_on(join_all(vec![fast, slow]));
+        assert_eq!(output, vec![1, 2]);
+        // The fast child resolved on its first poll. When the slow child wakes
+        // the group, only the incomplete set may be polled again, so the fast
+        // child's count must stay at one.
+        assert_eq!(fast_polls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(slow_polls.load(AtomicOrdering::SeqCst), 2);
     }
 
     #[test]

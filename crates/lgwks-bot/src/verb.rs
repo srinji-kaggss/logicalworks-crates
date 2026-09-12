@@ -64,8 +64,8 @@ where
 // ── Execute ────────────────────────────────────────────────────────────────
 
 /// Perform a side effect. Capability-gated. The callable surface — the
-/// `action` half of the `(condition, action)` tuple, and directly invocable
-/// via `bot.execute()`.
+/// `action` half of the `(condition, action)` tuple, invoked as
+/// [`Execute::execute_action`].
 ///
 /// Takes an `(Auth, input)` tuple: the proof must cover
 /// [`required_caps`](Execute::required_caps) or `execute_action` denies before

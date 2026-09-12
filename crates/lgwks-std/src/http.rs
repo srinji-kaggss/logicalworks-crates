@@ -59,8 +59,10 @@ impl Response {
 /// What `http` refuses to hide: bad URLs, timeouts, transport failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    /// The URL is not an absolute http(s) URI.
-    InvalidUrl(String),
+    /// The URL is not an absolute http(s) URI. The offending URL is not
+    /// carried: it can contain credentials in its userinfo or a token in its
+    /// query string, and the caller already holds it.
+    InvalidUrl,
     /// The request hit [`Options::timeout`].
     Timeout,
     /// The exchange never completed: DNS, TCP, TLS, or protocol failure.
@@ -70,7 +72,9 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidUrl(url) => write!(f, "invalid http(s) URL: {url}"),
+            Self::InvalidUrl => {
+                write!(f, "invalid http(s) URL (absolute http(s) URI required)")
+            }
             Self::Timeout => write!(f, "request timed out"),
             Self::Transport(cause) => write!(f, "transport failure: {cause}"),
         }
@@ -87,17 +91,17 @@ impl std::error::Error for Error {}
 pub fn validate_url(url: &str) -> Result<(), Error> {
     UriAbsoluteStr::new(url).map_err(|cause| {
         eprintln!("lgwks_std::http: rejecting malformed URL: {cause}");
-        Error::InvalidUrl(url.into())
+        Error::InvalidUrl
     })?;
     let Some(scheme) = url.split_once(':').map(|(scheme, _)| scheme) else {
         eprintln!("lgwks_std::http: rejecting URL with no scheme");
-        return Err(Error::InvalidUrl(url.into()));
+        return Err(Error::InvalidUrl);
     };
     if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
         Ok(())
     } else {
         eprintln!("lgwks_std::http: rejecting non-http(s) scheme {scheme:?}");
-        Err(Error::InvalidUrl(url.into()))
+        Err(Error::InvalidUrl)
     }
 }
 
@@ -172,9 +176,11 @@ pub fn post_with(
     validate_url(url)?;
     // The URL is intentionally not logged: it can carry credentials in its
     // userinfo or query string. Method, content type, and size are enough to
-    // correlate the request.
+    // correlate the request. `content_type` is caller-controlled, so it is
+    // debug-formatted: that escapes CR/LF and keeps a crafted value from
+    // forging a second log line.
     eprintln!(
-        "lgwks_std::http: POST ({content_type}, {} bytes)",
+        "lgwks_std::http: POST ({content_type:?}, {} bytes)",
         body.len()
     );
     let request = agent(options)
@@ -295,15 +301,15 @@ mod tests {
     fn rejects_non_http_urls_before_dialing() {
         assert!(matches!(
             get_with("not a url", &quiet()),
-            Err(Error::InvalidUrl(_))
+            Err(Error::InvalidUrl)
         ));
         assert!(matches!(
             get_with("/relative/path", &quiet()),
-            Err(Error::InvalidUrl(_))
+            Err(Error::InvalidUrl)
         ));
         assert!(matches!(
             get_with("ftp://127.0.0.1/file", &quiet()),
-            Err(Error::InvalidUrl(_))
+            Err(Error::InvalidUrl)
         ));
     }
 
