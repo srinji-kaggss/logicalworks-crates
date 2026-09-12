@@ -35,6 +35,19 @@ pub mod metadata;
 pub mod scan;
 pub mod vendor;
 
+/// The estate's one authored `tokio` edge, re-exported for the storefront.
+///
+/// `lgwks_deps` owns this edge so no other crate declares `tokio` directly
+/// (`INV-DEP-EDGE-OWNED`). `lgwks_bot` enables the `tokio` storefront feature
+/// and reaches the engine through this re-export; a consumer that wants the
+/// engine without the bot enables the feature here.
+#[cfg(feature = "tokio")]
+pub use tokio;
+
+/// The optional GPUI desktop UI framework selected through the storefront.
+#[cfg(feature = "gpui")]
+pub use gpui;
+
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -567,13 +580,11 @@ mod tests {
             .parent()
             .unwrap();
 
-        // The gate itself may depend only on the estate facade it enforces,
-        // plus the one reviewed exception below. syn (and its proc-macro2
-        // span shim) power the `scan` subcommand behind the default-off-able
-        // `scan` feature: a Rust grammar is the only honest oracle for Rust
-        // source, and a parser is not a data format the gate polices, so the
-        // self-refutation the JSON ban targets does not apply. Both are
-        // optional: `--no-default-features` keeps the gate zero-dependency.
+        // The deps storefront may depend only on the estate facade it enforces,
+        // plus the reviewed scan exception, plus optional storefront features
+        // that the end user selects. The default build stays zero-dependency:
+        // every third-party edge other than lgwks_std must be `optional = true`,
+        // so `cargo build`/`cargo install` with no features pulls nothing.
         {
             let manifest = std::fs::read_to_string(workspace.join("crates/lgwks-deps/Cargo.toml"))
                 .expect("gate manifest missing");
@@ -593,14 +604,15 @@ mod tests {
                 .collect();
             assert_eq!(
                 names,
-                ["lgwks_std", "syn", "proc-macro2"],
+                ["lgwks_std", "syn", "proc-macro2", "gpui", "tokio"],
                 "unexpected gate dependencies: {declared:?}"
             );
             for line in &declared {
-                if line.starts_with("syn") || line.starts_with("proc-macro2") {
+                if !line.starts_with("lgwks_std") {
                     assert!(
                         line.contains("optional = true"),
-                        "scan dependency must stay optional: {line}"
+                        "storefront dependency must stay optional so the default build is \
+                         zero-dependency: {line}"
                     );
                 }
             }

@@ -72,8 +72,12 @@ jobs:
           components: clippy
       - name: Run all workspace tests
         run: cargo test --workspace --all-targets --locked
+      - name: Run lgwks-bot no-default-feature tests
+        run: cargo test -p lgwks_bot --all-targets --locked --no-default-features
       - name: Run lgwks-std full-feature tests
         run: cargo test -p lgwks_std --all-targets --locked --features full
+      - name: Run lgwks-bot async runner tests
+        run: cargo test -p lgwks_bot --all-targets --locked --features full
       - name: Doc tests
         run: cargo test --workspace --doc --locked
 
@@ -106,24 +110,54 @@ jobs:
       - name: Check lgwks-std feature matrix
         run: |
           set -eu
-          cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --no-default-features
-          cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets
-          cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features hash --no-default-features
-          cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features pattern --no-default-features
-          cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features json --no-default-features
-          cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features wire --no-default-features
-          cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features http --no-default-features
-          cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features online --no-default-features
-          cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features fs-raw --no-default-features
-          cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --all-features
+           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --no-default-features
+           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets
+           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features hash --no-default-features
+           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features pattern --no-default-features
+           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features json --no-default-features
+           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features wire --no-default-features
+           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features http --no-default-features
+           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features online --no-default-features
+           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features fs-raw --no-default-features
+            cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --all-features
       - name: Check lgwks-deps
-        run: cargo check --manifest-path crates/lgwks-deps/Cargo.toml --all-targets
+        run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets
+      - name: Check lgwks-deps storefront engine feature
+        run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features tokio
+      - name: Check lgwks-deps GPUI storefront feature
+        run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features gpui
+      - name: Check lgwks-bot async feature matrix
+        run: |
+          set -eu
+           cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --no-default-features
+           cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets
+           cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --features net,process,fs,signal
+           cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --all-features
+      - name: Check lgwks-bot WASI runtime boundary
+        run: |
+          set -eu
+          rustup target add wasm32-wasip1
+           cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --target wasm32-wasip1 --features rt
       - name: Check lgwks-ast feature matrix
         run: |
           set -eu
-          cargo check --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --no-default-features
-          cargo check --manifest-path crates/lgwks-ast/Cargo.toml --all-targets
-          cargo check --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --all-features
+           cargo check --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --no-default-features
+           cargo check --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets
+           cargo check --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --all-features
+
+  gpui-macos:
+    name: GPUI macOS renderer
+    needs: [build]
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.98.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+      - name: Check normal GPUI renderer feature
+        run: cargo check --locked -p lgwks_deps --all-targets --features gpui
 
   contract-drift:
     name: lgwks-std contract drift checks

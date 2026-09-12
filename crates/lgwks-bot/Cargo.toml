@@ -1,7 +1,7 @@
 [package]
 name = "lgwks_bot"
-description = "Capability-gated automation bots built on four verbs: Observe, Evaluate, Execute, Query."
-version = "0.2.1"
+description = "Capability-gated automation bots (Observe, Evaluate, Execute, Query) and the estate's async runner surface."
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"
@@ -11,7 +11,29 @@ readme = "README.md"
 categories = ["development-tools", "config"]
 keywords = ["automation", "bot", "capabilities", "observe", "execute"]
 
+# The async engine is the bot's, per the deps law; its `tokio` edge is owned by
+# the `lgwks_deps` storefront. `--no-default-features` withdraws the async
+# surface entirely (no `lgwks_deps`, no tokio), leaving the actor verbs on the
+# synchronous `lgwks_std::task` executor.
+[features]
+default = ["rt", "time", "sync", "macros"]
+rt = ["dep:lgwks_deps", "lgwks_deps/tokio"]
+time = ["rt", "lgwks_deps/tokio-time"]
+sync = ["rt", "lgwks_deps/tokio-sync"]
+macros = ["rt", "lgwks_deps/tokio-macros"]
+net = ["rt", "lgwks_deps/tokio-net"]
+process = ["rt", "lgwks_deps/tokio-process"]
+fs = ["rt", "lgwks_deps/tokio-fs"]
+signal = ["rt", "lgwks_deps/tokio-signal"]
+full = ["rt", "time", "sync", "macros", "net", "process", "fs", "signal"]
+
 [dependencies]
 lgwks_std = { workspace = true, features = ["json", "http"] }
+lgwks_deps = { workspace = true, default-features = false, optional = true }
 
 [dev-dependencies]
+
+[[example]]
+name = "bounded_fanout"
+path = "examples/bounded_fanout.rs"
+required-features = ["rt", "time", "sync"]

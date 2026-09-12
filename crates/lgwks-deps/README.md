@@ -22,5 +22,19 @@ build resolves, and the subcommand binds them by hash. The tree lives at the
 workspace root so every estate repo resolves one physical copy; it is outside
 all package directories, so `cargo package` never ships it.
 
+## Storefront features
+
+Third-party capabilities are optional features selected by the consumer:
+
+```toml
+[dependencies]
+lgwks_deps = { version = "0.1", features = ["gpui"] }
+```
+
+The `gpui` feature re-exports `lgwks_deps::gpui` and retains GPUI's normal
+platform renderer. macOS builds require a usable Xcode Metal Toolchain
+(`metal` and `metallib`); Linux builds require the platform development stack
+selected by GPUI. The feature is not compiled by the default `scan` build.
+
 The binary diagnoses; it never approves. Approval is a committed diff with a
 human's name on it. See `contract/APPROVED.toml` for the register format.

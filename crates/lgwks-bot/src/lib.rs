@@ -12,6 +12,15 @@
 //! `Evaluate` takes no proof: it is pure (boolean in, boolean out) with no
 //! side effect to gate.
 //!
+//! # Async surface
+//!
+//! With the default `rt` feature, `lgwks_bot` is also the estate's async and
+//! runner surface: `Runtime`, `rt::task::join_all_bounded`, timers, channels,
+//! and the opt-in `net`/`process`/`fs`/`signal` drivers. The engine is sourced
+//! from the `lgwks_deps` storefront (`feature = "tokio"`), so no other crate
+//! authors a `tokio` edge. `--no-default-features` withdraws the async surface
+//! and leaves the synchronous `lgwks_std::task` executor as the only runtime.
+//!
 //! # Quick start
 //!
 //! ```rust,no_run
@@ -60,14 +69,36 @@ pub mod domain {
 pub mod error;
 pub mod gate;
 pub mod json;
+#[cfg(feature = "rt")]
+pub mod rt;
 pub mod spec;
 pub mod verb;
 
 pub use cap::{Auth, Cap};
 pub use error::BotError;
 pub use gate::GrantSet;
+#[cfg(feature = "rt")]
+pub use rt::{Builder, Handle, Runtime, block_on};
 pub use spec::{Bot, BotSpec, Chain, ChainEntry};
 pub use verb::{Evaluate, Execute, Observe, Query};
+
+/// Wait for all of a set of futures, returning their outputs in input order.
+///
+/// Re-exported from the storefront engine so callers never name `tokio`. For a
+/// fan-out that must be bounded, prefer `rt::task::join_all_bounded`.
+#[cfg(all(feature = "rt", feature = "macros"))]
+pub use lgwks_deps::tokio::join;
+
+/// Race a set of futures, running the first branch that becomes ready.
+///
+/// Re-exported from the storefront engine so callers never name `tokio`.
+#[cfg(all(feature = "rt", feature = "macros"))]
+pub use lgwks_deps::tokio::select;
+
+/// Wait for all of a set of fallible futures, short-circuiting on the first
+/// error. Re-exported from the storefront engine so callers never name `tokio`.
+#[cfg(all(feature = "rt", feature = "macros"))]
+pub use lgwks_deps::tokio::try_join;
 
 pub use domain::chat;
 pub use domain::data;
