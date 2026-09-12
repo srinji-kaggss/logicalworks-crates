@@ -1,7 +1,7 @@
 [package]
 name = "lgwks_std"
 description = "Zero-config primitives for hex, base64, timestamps, UUIDs, hashing, glob, regex, JSON, HTTP, connectivity, and async — zero external deps by default."
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"

@@ -17,10 +17,10 @@ resolver = "2"
 # versions bump here and the tagged commit publishes to crates.io.
 # ─────────────────────────────────────────────────────────────────────────────
 [workspace.dependencies]
-lgwks_std = { version = "0.6.0", path = "crates/lgwks-std" }
-lgwks_bot = { version = "0.2.0", path = "crates/lgwks-bot" }
-lgwks_ast = { version = "0.1.0", path = "crates/lgwks-ast" }
-lgwks_deps = { version = "0.1.3", path = "crates/lgwks-deps" }
+lgwks_std = { version = "0.6.1", path = "crates/lgwks-std" }
+lgwks_bot = { version = "0.2.1", path = "crates/lgwks-bot" }
+lgwks_ast = { version = "0.1.1", path = "crates/lgwks-ast" }
+lgwks_deps = { version = "0.1.4", path = "crates/lgwks-deps" }
 
 [profile.release]
 opt-level = 3
