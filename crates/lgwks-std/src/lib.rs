@@ -18,6 +18,7 @@
 //! - `wire` — wire. Adds `rkyv`.
 //! - `http` — http. Adds `ureq` (rustls-only TLS), `iri-string`.
 //! - `online` — online. Zero deps.
+//! - `fs-raw` — fs::available_space. Adds `rustix` (Unix-only).
 //! - `full` — all of the above.
 
 #![forbid(unsafe_code)]

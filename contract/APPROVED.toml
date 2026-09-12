@@ -212,3 +212,17 @@ reason = "Per-language tree-sitter grammars behind carbon-copy cargo features, s
 approved_by = "Director"
 approved_on = "2026-09-11"
 review = "https://github.com/srinji-kaggss/logicalworks-crates"
+
+[[approved]]
+crate = "rustix"
+tier = "boundary"
+version = "^1"
+owner = "lgwks_std"
+capability = "fs.available_space"
+source = "registry"
+allowed_consumers = "lgwks_std"
+allowed_kinds = "normal"
+reason = "Filesystem capacity available to an unprivileged process is absent from the stable standard library."
+approved_by = "Director"
+approved_on = "2026-09-12"
+review = "https://github.com/srinji-kaggss/logicalworks-crates"
