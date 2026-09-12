@@ -13,14 +13,14 @@ resolver = "2"
 # Source of truth for `lgwks_std` (estate std+ surface), `lgwks_bot`
 # (capability-gated automation verbs — the actor roles), `lgwks_ast` (the
 # estate's one multi-language AST parser), and `lgwks_deps` (dependency
-# admission, audit, and freshness). Extracted from Braid; crate names and
-# versions are unchanged so existing crates.io consumers resolve without edits.
+# admission, audit, and freshness). This repo is now the source of truth:
+# versions bump here and the tagged commit publishes to crates.io.
 # ─────────────────────────────────────────────────────────────────────────────
 [workspace.dependencies]
-lgwks_std = { version = "0.5.2", path = "crates/lgwks-std" }
-lgwks_bot = { version = "0.1.2", path = "crates/lgwks-bot" }
+lgwks_std = { version = "0.6.0", path = "crates/lgwks-std" }
+lgwks_bot = { version = "0.2.0", path = "crates/lgwks-bot" }
 lgwks_ast = { version = "0.1.0", path = "crates/lgwks-ast" }
-lgwks_deps = { version = "0.1.2", path = "crates/lgwks-deps" }
+lgwks_deps = { version = "0.1.3", path = "crates/lgwks-deps" }
 
 [profile.release]
 opt-level = 3
