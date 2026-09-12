@@ -51,7 +51,7 @@ impl verb::Observe for SlackChannel {
         &self.caps
     }
 
-    fn poll(&self, call: (Auth, ())) -> Result<ChatMessage, BotError> {
+    async fn poll(&self, call: (Auth, ())) -> Result<ChatMessage, BotError> {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
@@ -72,7 +72,7 @@ impl verb::Query for SlackChannel {
         &self.caps
     }
 
-    fn query(&self, call: (Auth, &())) -> Result<Vec<ChatMessage>, BotError> {
+    async fn query(&self, call: (Auth, &())) -> Result<Vec<ChatMessage>, BotError> {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
@@ -113,7 +113,7 @@ impl verb::Observe for HttpWebhook {
         &self.caps
     }
 
-    fn poll(&self, call: (Auth, ())) -> Result<ChatMessage, BotError> {
+    async fn poll(&self, call: (Auth, ())) -> Result<ChatMessage, BotError> {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),

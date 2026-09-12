@@ -2,6 +2,7 @@
 members = [
     "crates/lgwks-std",
     "crates/lgwks-bot",
+    "crates/lgwks-ast",
     "crates/lgwks-deps",
 ]
 resolver = "2"
@@ -17,6 +18,7 @@ resolver = "2"
 [workspace.dependencies]
 lgwks_std = { version = "0.5.2", path = "crates/lgwks-std" }
 lgwks_bot = { version = "0.1.2", path = "crates/lgwks-bot" }
+lgwks_ast = { version = "0.1.0", path = "crates/lgwks-ast" }
 lgwks_deps = { version = "0.1.0", path = "crates/lgwks-deps" }
 
 [profile.release]

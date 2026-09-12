@@ -42,7 +42,7 @@ impl verb::Execute for Slack {
         &self.caps
     }
 
-    fn run(&self, call: (Auth, &Message)) -> Result<(), BotError> {
+    async fn execute_action(&self, call: (Auth, &Message)) -> Result<(), BotError> {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),

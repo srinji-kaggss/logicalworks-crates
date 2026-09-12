@@ -21,7 +21,11 @@ pub trait Observe {
     fn required_caps(&self) -> &[Cap];
 
     /// Poll the source for the current state.
-    fn poll(&self, call: (Auth, ())) -> Result<Self::Output, BotError>;
+    ///
+    /// Async: the returned future is local to the driving thread (not `Send`),
+    /// because `lgwks_std::task` drives bots on one thread and a domain may hold
+    /// thread-local state. `Bot::tick` polls every source concurrently.
+    async fn poll(&self, call: (Auth, ())) -> Result<Self::Output, BotError>;
 
     /// The domain identifier (e.g. `"gh::pr_status"`).
     fn domain_id(&self) -> &str;
@@ -75,8 +79,10 @@ pub trait Execute {
     /// proven per call by the `Auth` half of the tuple.
     fn required_caps(&self) -> &[Cap];
 
-    /// Run the action.
-    fn run(&self, call: (Auth, &Self::Input)) -> Result<Self::Output, BotError>;
+    /// Perform the effect this action models, after `call.0` proves the
+    /// required caps. Awaited by `Bot::tick` in chain order; blocking work
+    /// belongs on a `lgwks_std::task::spawn_blocking` thread inside the domain.
+    async fn execute_action(&self, call: (Auth, &Self::Input)) -> Result<Self::Output, BotError>;
 
     /// The domain identifier (e.g. `"notify::slack"`).
     fn domain_id(&self) -> &str;
@@ -99,8 +105,10 @@ pub trait Query {
     fn required_caps(&self) -> &[Cap];
 
     /// Run the query.
-    fn query(&self, call: (Auth, &Self::Input)) -> Result<Self::Output, BotError>;
+    ///
+    /// Async for the same reason as [`Observe::poll`].
+    async fn query(&self, call: (Auth, &Self::Input)) -> Result<Self::Output, BotError>;
 
-    /// The domain identifier.
+    /// The identifier the query reports in findings (e.g. `"gh::pr_state"`).
     fn domain_id(&self) -> &str;
 }

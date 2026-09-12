@@ -65,7 +65,7 @@ lgwks_std = { version = "0.5", features = ["full"] }           # everything
 | `glob` | Shell-style glob matching (DP algorithm, O(M*N)) | `glob` |
 | `hex` | Hex encode and decode | `hex` |
 | `leb128` | LEB128 variable-length integer encoding | — |
-| `task` | Minimal single-threaded async executor | — |
+| `task` | Single-threaded executor: `block_on`, concurrent `join_all`, off-thread `spawn_blocking` | — |
 | `time` | RFC 3339 timestamps, calendar math | `chrono`, `time` |
 | `random` | OS entropy via `getrandom` | `getrandom` |
 | `id` | UUID v4 generation and parsing | `uuid` |

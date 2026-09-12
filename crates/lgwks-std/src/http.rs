@@ -48,8 +48,9 @@ pub struct Response {
 impl Response {
     /// The body as UTF-8, or [`Error::Transport`] when it is not valid UTF-8.
     pub fn text(&self) -> Result<&str, Error> {
-        std::str::from_utf8(&self.body)
-            .map_err(|_| Error::Transport("response body is not valid UTF-8".into()))
+        std::str::from_utf8(&self.body).map_err(|utf8_error| {
+            Error::Transport(format!("response body is not valid UTF-8: {utf8_error}"))
+        })
     }
 }
 
@@ -82,11 +83,18 @@ impl std::error::Error for Error {}
 
 /// Reject anything that is not an absolute http(s) URI before dialing.
 pub fn validate_url(url: &str) -> Result<(), Error> {
-    UriAbsoluteStr::new(url).map_err(|_| Error::InvalidUrl(url.into()))?;
-    let scheme = url.split(':').next().unwrap_or_default();
+    UriAbsoluteStr::new(url).map_err(|cause| {
+        eprintln!("lgwks_std::http: rejecting malformed URL {url:?}: {cause}");
+        Error::InvalidUrl(url.into())
+    })?;
+    let Some(scheme) = url.split_once(':').map(|(scheme, _)| scheme) else {
+        eprintln!("lgwks_std::http: rejecting URL with no scheme: {url:?}");
+        return Err(Error::InvalidUrl(url.into()));
+    };
     if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
         Ok(())
     } else {
+        eprintln!("lgwks_std::http: rejecting non-http(s) scheme {scheme:?} in {url:?}");
         Err(Error::InvalidUrl(url.into()))
     }
 }
@@ -108,7 +116,7 @@ fn response_of(mut response: ureq::http::Response<ureq::Body>) -> Result<Respons
         .map(|(name, value)| {
             (
                 name.to_string(),
-                value.to_str().unwrap_or_default().to_string(),
+                String::from_utf8_lossy(value.as_bytes()).into_owned(),
             )
         })
         .collect();
@@ -133,7 +141,7 @@ fn map_error(error: ureq::Error) -> Error {
 }
 
 /// GET `url` with default options.
-pub fn get(url: &str) -> Result<Response, Error> {
+pub fn get_response(url: &str) -> Result<Response, Error> {
     get_with(url, &Options::default())
 }
 
@@ -160,12 +168,15 @@ pub fn post_with(
     options: &Options,
 ) -> Result<Response, Error> {
     validate_url(url)?;
-    agent(options)
+    eprintln!(
+        "lgwks_std::http: POST {url} ({content_type}, {} bytes)",
+        body.len()
+    );
+    let request = agent(options)
         .post(url)
-        .header("Content-Type", content_type)
-        .send(body)
-        .map_err(map_error)
-        .and_then(response_of)
+        .header("Content-Type", content_type);
+    let response = request.send(body).map_err(map_error)?;
+    response_of(response)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

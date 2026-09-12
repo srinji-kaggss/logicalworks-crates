@@ -77,7 +77,9 @@ impl Regex {
         self.0.replace(text, replacement).into_owned()
     }
 
-    /// Replace all matches with `replacement`.
+    /// The text with every non-overlapping match replaced by `replacement`;
+    /// `$name` and `${name}` in the replacement expand to capture groups, and
+    /// an empty match at the cursor advances rather than looping.
     pub fn replace_all(&self, text: &str, replacement: &str) -> String {
         self.0.replace_all(text, replacement).into_owned()
     }

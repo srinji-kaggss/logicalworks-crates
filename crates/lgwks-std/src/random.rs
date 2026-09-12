@@ -39,11 +39,7 @@ impl fmt::Display for EntropyError {
     }
 }
 
-impl Error for EntropyError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        None
-    }
-}
+impl Error for EntropyError {}
 
 /// Fills `buf` with cryptographically secure random bytes from the OS.
 pub fn fill_bytes(buf: &mut [u8]) -> Result<(), EntropyError> {

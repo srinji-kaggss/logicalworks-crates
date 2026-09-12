@@ -72,7 +72,10 @@ pub struct ChainEntry {
 trait ObserveAny {
     fn domain_id(&self) -> &str;
     fn required_caps(&self) -> &[Cap];
-    fn poll_any(&self, grants: &GrantSet) -> Result<Box<dyn std::any::Any>, BotError>;
+    fn poll_any<'a>(
+        &'a self,
+        grants: &'a GrantSet,
+    ) -> crate::BoxFuture<'a, Result<Box<dyn std::any::Any>, BotError>>;
 }
 
 impl<T: super::verb::Observe + 'static> ObserveAny for T
@@ -87,10 +90,15 @@ where
         super::verb::Observe::required_caps(self)
     }
 
-    fn poll_any(&self, grants: &GrantSet) -> Result<Box<dyn std::any::Any>, BotError> {
-        let auth: Auth = grants.issue(super::verb::Observe::required_caps(self))?;
-        self.poll((auth, ()))
-            .map(|v| Box::new(v) as Box<dyn std::any::Any>)
+    fn poll_any<'a>(
+        &'a self,
+        grants: &'a GrantSet,
+    ) -> crate::BoxFuture<'a, Result<Box<dyn std::any::Any>, BotError>> {
+        Box::pin(async move {
+            let auth: Auth = grants.issue(super::verb::Observe::required_caps(self))?;
+            let value = self.poll((auth, ())).await?;
+            Ok(Box::new(value) as Box<dyn std::any::Any>)
+        })
     }
 }
 
@@ -102,14 +110,20 @@ trait EvaluateAny {
 trait ExecuteAny {
     fn domain_id(&self) -> &str;
     fn required_caps(&self) -> &[Cap];
-    fn run_any(
-        &self,
-        grants: &GrantSet,
-        input: &dyn std::any::Any,
-    ) -> Result<Box<dyn std::any::Any>, BotError>;
+    fn run_any<'a>(
+        &'a self,
+        grants: &'a GrantSet,
+        input: &'a dyn std::any::Any,
+    ) -> crate::BoxFuture<'a, Result<Box<dyn std::any::Any>, BotError>>;
 }
 
 // ── Builder ────────────────────────────────────────────────────────────────
+
+/// Upper bound on sources polled simultaneously by one `tick`. A source poll
+/// may occupy one `spawn_blocking` thread, so this caps tick's blocking-thread
+/// fan-out regardless of how many chains a spec declares. Chains beyond the
+/// cap are polled in additional waves.
+const MAX_IN_FLIGHT_POLLS: usize = 32;
 
 /// Intermediate builder for attaching `(condition, action)` tuples to an
 /// observed source.
@@ -129,37 +143,67 @@ impl Bot {
         }
     }
 
-    /// The bot's name.
+    /// The name the built [`Bot`] will report; it is set once by
+    /// [`BotBuilder::new`] and never derived from the chains.
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// The observation chains.
+    /// The chains in declaration order. [`Bot::tick`] polls and fires in this
+    /// order, so reordering changes which side effects run before an error.
     pub fn chains(&self) -> &[Chain] {
         &self.chains
     }
 
-    /// Tick all observation chains: poll each source, evaluate conditions,
-    /// fire matching actions. Returns the count of actions fired. Every poll
-    /// and run carries a freshly issued `Auth` proof — a grant revoked
+    /// Tick all observation chains: poll every source concurrently, evaluate
+    /// conditions, and fire matching actions in declaration order. Returns the
+    /// count of actions fired.
+    ///
+    /// Async and concurrent: sources are polled in bounded waves of
+    /// [`MAX_IN_FLIGHT_POLLS`] via `lgwks_std::task::join_all`, so a set of
+    /// slow observers overlaps without unbounded blocking threads. Actions run
+    /// sequentially in chain order so side effects stay deterministic. Every
+    /// poll and run carries a freshly issued `Auth` proof — a grant revoked
     /// after build cannot fire.
-    pub fn tick(&self) -> Result<usize, BotError> {
+    ///
+    /// Error ordering: sources are all polled before any action runs; the first
+    /// error in declaration order is returned, and chains declared before it
+    /// have already fired.
+    pub async fn tick(&self) -> Result<usize, BotError> {
+        let mut values: Vec<Result<Box<dyn std::any::Any>, BotError>> =
+            Vec::with_capacity(self.chains.len());
+        for wave in self.chains.chunks(MAX_IN_FLIGHT_POLLS) {
+            let batch = lgwks_std::task::join_all(
+                wave.iter().map(|chain| chain.source.poll_any(&self.grants)),
+            )
+            .await;
+            values.extend(batch);
+        }
+
         let mut fired = 0;
-        for chain in &self.chains {
-            let value = chain.source.poll_any(&self.grants)?;
+        for (chain, value) in self.chains.iter().zip(values) {
+            let value = value?;
             for entry in &chain.entries {
                 if entry.condition.check_any(value.as_ref())? {
-                    entry.action.run_any(&self.grants, value.as_ref())?;
+                    entry.action.run_any(&self.grants, value.as_ref()).await?;
                     fired += 1;
                 }
             }
         }
         Ok(fired)
     }
+
+    /// Blocking convenience for [`Bot::tick`]: drive it to completion on the
+    /// current thread with `lgwks_std::task::block_on`. Callers already in an
+    /// async context should `tick().await` the same computation.
+    pub fn block_on_tick(&self) -> Result<usize, BotError> {
+        lgwks_std::task::block_on(self.tick())
+    }
 }
 
 impl Chain {
-    /// The source domain identifier.
+    /// The `domain_id()` reported by this chain's source observer, for
+    /// diagnostics.
     pub fn source_domain(&self) -> &str {
         self.source.domain_id()
     }
@@ -267,23 +311,24 @@ impl ObserveBuilder {
                 self.0.required_caps()
             }
 
-            fn run_any(
-                &self,
-                grants: &GrantSet,
-                input: &dyn std::any::Any,
-            ) -> Result<Box<dyn std::any::Any>, BotError> {
-                match input.downcast_ref::<A::Input>() {
-                    Some(typed) => {
-                        let auth: Auth = grants.issue(self.0.required_caps())?;
-                        self.0
-                            .run((auth, typed))
-                            .map(|v| Box::new(v) as Box<dyn std::any::Any>)
+            fn run_any<'a>(
+                &'a self,
+                grants: &'a GrantSet,
+                input: &'a dyn std::any::Any,
+            ) -> crate::BoxFuture<'a, Result<Box<dyn std::any::Any>, BotError>> {
+                Box::pin(async move {
+                    match input.downcast_ref::<A::Input>() {
+                        Some(typed) => {
+                            let auth: Auth = grants.issue(self.0.required_caps())?;
+                            let value = self.0.execute_action((auth, typed)).await?;
+                            Ok(Box::new(value) as Box<dyn std::any::Any>)
+                        }
+                        None => Err(BotError::DomainError {
+                            domain: self.0.domain_id().into(),
+                            cause: "type mismatch in execute input".into(),
+                        }),
                     }
-                    None => Err(BotError::DomainError {
-                        domain: self.0.domain_id().into(),
-                        cause: "type mismatch in execute input".into(),
-                    }),
-                }
+                })
             }
         }
 
@@ -341,12 +386,14 @@ impl ObserveBuilder {
 // ── Serialization ──────────────────────────────────────────────────────────
 
 impl BotSpec {
-    /// Serialize to JSON.
+    /// The spec as pretty-printed JSON; field order follows the struct
+    /// declaration and enum variants serialize by name.
     pub fn to_json(&self) -> Result<String, crate::json::Error> {
         crate::json::to_string_pretty(self)
     }
 
-    /// Deserialize from JSON.
+    /// Parse a spec previously produced by [`BotSpec::to_json`]; a missing or
+    /// unknown field is rejected rather than defaulted.
     pub fn from_json(s: &str) -> Result<Self, crate::json::Error> {
         crate::json::from_str(s)
     }
@@ -357,6 +404,91 @@ impl BotSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// An observer that resolves immediately with `1`.
+    struct Immediate;
+    impl crate::verb::Observe for Immediate {
+        type Output = u32;
+        fn required_caps(&self) -> &[Cap] {
+            &[]
+        }
+        async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+            call.0.check(crate::verb::Observe::required_caps(self))?;
+            Ok(1)
+        }
+        fn domain_id(&self) -> &str {
+            "test::immediate"
+        }
+    }
+
+    /// An observer whose poll always fails at the domain boundary.
+    struct Failing;
+    impl crate::verb::Observe for Failing {
+        type Output = u32;
+        fn required_caps(&self) -> &[Cap] {
+            &[]
+        }
+        async fn poll(&self, _call: (Auth, ())) -> Result<u32, BotError> {
+            Err(BotError::DomainError {
+                domain: "test::failing".into(),
+                cause: "boom".into(),
+            })
+        }
+        fn domain_id(&self) -> &str {
+            "test::failing"
+        }
+    }
+
+    /// An observer that records how many polls overlap. Its body crosses a
+    /// `spawn_blocking` thread, which is the only way two polls can run at the
+    /// same wall-clock time on a one-thread executor.
+    struct PeakSource {
+        in_flight: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+    }
+    impl crate::verb::Observe for PeakSource {
+        type Output = u32;
+        fn required_caps(&self) -> &[Cap] {
+            &[]
+        }
+        async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+            call.0.check(crate::verb::Observe::required_caps(self))?;
+            let in_flight = Arc::clone(&self.in_flight);
+            let peak = Arc::clone(&self.peak);
+            lgwks_std::task::spawn_blocking(move || {
+                let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+            })
+            .await;
+            Ok(1)
+        }
+        fn domain_id(&self) -> &str {
+            "test::peak"
+        }
+    }
+
+    /// A counting action.
+    #[derive(Clone)]
+    struct Counting(Arc<AtomicUsize>);
+    impl crate::verb::Execute for Counting {
+        type Input = u32;
+        type Output = ();
+        fn required_caps(&self) -> &[Cap] {
+            &[]
+        }
+        async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
+            call.0.check(crate::verb::Execute::required_caps(self))?;
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn domain_id(&self) -> &str {
+            "test::counting"
+        }
+    }
 
     #[test]
     fn spec_round_trips_json() {
@@ -402,7 +534,7 @@ mod tests {
             fn required_caps(&self) -> &[Cap] {
                 &self.0
             }
-            fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+            async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
                 call.0.check(crate::verb::Observe::required_caps(self))?;
                 Ok(42)
             }
@@ -418,7 +550,7 @@ mod tests {
             fn required_caps(&self) -> &[Cap] {
                 &[]
             }
-            fn run(&self, call: (Auth, &u32)) -> Result<(), BotError> {
+            async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
                 call.0.check(crate::verb::Execute::required_caps(self))?;
                 Ok(())
             }
@@ -447,7 +579,7 @@ mod tests {
             fn required_caps(&self) -> &[Cap] {
                 &self.0
             }
-            fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+            async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
                 call.0.check(crate::verb::Observe::required_caps(self))?;
                 Ok(42)
             }
@@ -463,7 +595,7 @@ mod tests {
             fn required_caps(&self) -> &[Cap] {
                 &[]
             }
-            fn run(&self, call: (Auth, &u32)) -> Result<(), BotError> {
+            async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
                 call.0.check(crate::verb::Execute::required_caps(self))?;
                 Ok(())
             }
@@ -493,7 +625,7 @@ mod tests {
             fn required_caps(&self) -> &[Cap] {
                 &[]
             }
-            fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+            async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
                 call.0.check(crate::verb::Observe::required_caps(self))?;
                 Ok(10)
             }
@@ -510,7 +642,7 @@ mod tests {
             fn required_caps(&self) -> &[Cap] {
                 &[]
             }
-            fn run(&self, call: (Auth, &u32)) -> Result<(), BotError> {
+            async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
                 call.0.check(crate::verb::Execute::required_caps(self))?;
                 self.0.fetch_add(1, Ordering::Relaxed);
                 Ok(())
@@ -529,7 +661,7 @@ mod tests {
             .build(&GrantSet::empty())
             .unwrap();
 
-        let fired = bot.tick().unwrap();
+        let fired = bot.block_on_tick().unwrap();
         assert_eq!(fired, 1);
         assert_eq!(counter.load(Ordering::Relaxed), 1);
     }
@@ -555,7 +687,7 @@ mod tests {
             fn required_caps(&self) -> &[Cap] {
                 &self.0
             }
-            fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+            async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
                 call.0.check(crate::verb::Observe::required_caps(self))?;
                 Ok(1)
             }
@@ -565,7 +697,7 @@ mod tests {
         }
 
         let vacuous = GrantSet::empty().issue(&[]).expect("empty coverage issues");
-        match NetSource([Cap::net()]).poll((vacuous, ())) {
+        match lgwks_std::task::block_on(NetSource([Cap::net()]).poll((vacuous, ()))) {
             Err(BotError::CapabilityDenied { required }) => {
                 assert_eq!(required, Cap::net());
             }
@@ -583,7 +715,7 @@ mod tests {
             fn required_caps(&self) -> &[Cap] {
                 &self.0
             }
-            fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+            async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
                 call.0.check(crate::verb::Observe::required_caps(self))?;
                 Ok(1)
             }
@@ -596,7 +728,7 @@ mod tests {
             .grant(Cap::fs())
             .issue(&[Cap::fs()])
             .expect("fs granted");
-        match NetSource([Cap::net()]).poll((fs_only, ())) {
+        match lgwks_std::task::block_on(NetSource([Cap::net()]).poll((fs_only, ()))) {
             Err(BotError::CapabilityDenied { required }) => {
                 assert_eq!(required, Cap::net());
             }
@@ -614,7 +746,7 @@ mod tests {
             fn required_caps(&self) -> &[Cap] {
                 &self.0
             }
-            fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+            async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
                 call.0.check(crate::verb::Observe::required_caps(self))?;
                 Ok(7)
             }
@@ -627,6 +759,83 @@ mod tests {
             .grant(Cap::net())
             .issue(&[Cap::net()])
             .expect("net granted");
-        assert_eq!(NetSource([Cap::net()]).poll((auth, ())).unwrap(), 7);
+        assert_eq!(
+            lgwks_std::task::block_on(NetSource([Cap::net()]).poll((auth, ()))).unwrap(),
+            7
+        );
+    }
+
+    #[test]
+    fn tick_is_directly_awaitable() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let bot = Bot::builder("direct")
+            .observe(Immediate)
+            .on(|_: &u32| true, Counting(Arc::clone(&counter)))
+            .build(&GrantSet::empty())
+            .expect("builds");
+        let fired = lgwks_std::task::block_on(bot.tick()).expect("tick");
+        assert_eq!(fired, 1);
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn tick_polls_sources_concurrently() {
+        // Both polls block on a dedicated thread, so the peak in-flight count
+        // can only reach 2 if tick drives the two sources at the same time.
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let source = || PeakSource {
+            in_flight: Arc::clone(&in_flight),
+            peak: Arc::clone(&peak),
+        };
+        let bot = Bot::builder("concurrent")
+            .observe(source())
+            .on(|_: &u32| true, Counting(Arc::new(AtomicUsize::new(0))))
+            .observe(source())
+            .on(|_: &u32| true, Counting(Arc::new(AtomicUsize::new(0))))
+            .build(&GrantSet::empty())
+            .expect("builds");
+        assert_eq!(bot.block_on_tick().expect("tick"), 2);
+        let observed = peak.load(Ordering::SeqCst);
+        assert!(
+            observed >= 2,
+            "sources overlapped only {observed} at a time"
+        );
+    }
+
+    #[test]
+    fn tick_waves_more_chains_than_the_in_flight_cap() {
+        // 40 chains exceed MAX_IN_FLIGHT_POLLS (32), so this only passes if
+        // the wave loop polls every chain, not just the first wave.
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut builder = Bot::builder("waves")
+            .observe(Immediate)
+            .on(|_: &u32| true, Counting(Arc::clone(&counter)));
+        for _ in 0..39 {
+            builder = builder
+                .observe(Immediate)
+                .on(|_: &u32| true, Counting(Arc::clone(&counter)));
+        }
+        let bot = builder.build(&GrantSet::empty()).expect("builds");
+        assert_eq!(bot.chains().len(), 40);
+        assert_eq!(bot.block_on_tick().expect("tick"), 40);
+        assert_eq!(counter.load(Ordering::SeqCst), 40);
+    }
+
+    #[test]
+    fn tick_fires_earlier_chains_then_returns_first_error() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let bot = Bot::builder("ordered")
+            .observe(Immediate)
+            .on(|_: &u32| true, Counting(Arc::clone(&counter)))
+            .observe(Failing)
+            .on(|_: &u32| true, Counting(Arc::clone(&counter)))
+            .build(&GrantSet::empty())
+            .expect("builds");
+        match bot.block_on_tick() {
+            Err(BotError::DomainError { domain, .. }) => assert_eq!(domain, "test::failing"),
+            other => panic!("expected the failing chain's error, got {other:?}"),
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 }

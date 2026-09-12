@@ -21,11 +21,24 @@
 //!     .build(&GrantSet::all_shipped())
 //!     .expect("shipped domains are covered by all_shipped");
 //!
-//! let fired = bot.tick().expect("tick propagates domain errors");
+//! let fired = bot.block_on_tick().expect("tick propagates domain errors");
 //! ```
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+// The verb traits are async by design. `lgwks_std::task` drives every bot on
+// one local thread, so a verb's returned future is deliberately not `Send`;
+// the `async_fn_in_trait` auto-trait warning does not apply to this crate.
+#![allow(async_fn_in_trait)]
+
+use std::future::Future;
+use std::pin::Pin;
+
+/// A boxed, non-`Send` future used to type-erase the async verbs behind the
+/// `Bot`'s dynamic chains. The public traits stay native `async fn`; only this
+/// internal erasure boundary boxes, which is what avoids an `async-trait`
+/// dependency.
+pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 pub mod cap;
 pub mod domain {

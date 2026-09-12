@@ -43,7 +43,7 @@ impl verb::Observe for PrStatus {
         &self.caps
     }
 
-    fn poll(&self, call: (Auth, ())) -> Result<PrState, BotError> {
+    async fn poll(&self, call: (Auth, ())) -> Result<PrState, BotError> {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
@@ -64,7 +64,7 @@ impl verb::Query for PrStatus {
         &self.caps
     }
 
-    fn query(&self, call: (Auth, &())) -> Result<PrState, BotError> {
+    async fn query(&self, call: (Auth, &())) -> Result<PrState, BotError> {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
@@ -120,7 +120,7 @@ impl verb::Observe for CiRun {
         &self.caps
     }
 
-    fn poll(&self, call: (Auth, ())) -> Result<CiState, BotError> {
+    async fn poll(&self, call: (Auth, ())) -> Result<CiState, BotError> {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
@@ -141,7 +141,7 @@ impl verb::Query for CiRun {
         &self.caps
     }
 
-    fn query(&self, call: (Auth, &())) -> Result<CiState, BotError> {
+    async fn query(&self, call: (Auth, &())) -> Result<CiState, BotError> {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
@@ -185,7 +185,7 @@ impl verb::Execute for Merge {
         &self.caps
     }
 
-    fn run(&self, call: (Auth, &PrState)) -> Result<String, BotError> {
+    async fn execute_action(&self, call: (Auth, &PrState)) -> Result<String, BotError> {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),

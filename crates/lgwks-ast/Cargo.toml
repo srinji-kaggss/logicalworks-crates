@@ -1,0 +1,94 @@
+[package]
+name = "lgwks_ast"
+description = "The estate's one multi-language AST parser: extension/content language identification, ast-grep grammar selection, and bounded tree traversal."
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "Apache-2.0"
+repository = "https://github.com/srinji-kaggss/logicalworks-crates"
+readme = "README.md"
+homepage = "https://github.com/srinji-kaggss/logicalworks-crates/tree/main/crates/lgwks-ast"
+categories = ["development-tools", "parser-implementations"]
+
+# INV-AST-ONE-PARSER: this crate is the estate's only multi-language AST
+# parser. Code tools identify a language, select a grammar, and parse through
+# it; they do not each depend on ast-grep and rebuild the language/extension
+# tables. The only external edges are ast-grep-core and ast-grep-language.
+#
+# Grammar selection is per-language and opt-in. The default enables the seven
+# languages the safety engine parses; every remaining grammar ast-grep-language
+# ships is available as its own `lang-*` feature, and `full` enables all 28.
+# An extension with no compiled grammar is not recognised, so a consumer never
+# pays to compile a grammar it cannot select.
+[features]
+default = [
+    "lang-rust",
+    "lang-python",
+    "lang-typescript",
+    "lang-javascript",
+    "lang-go",
+    "lang-java",
+    "lang-swift",
+]
+lang-rust = ["ast-grep-language/tree-sitter-rust"]
+lang-python = ["ast-grep-language/tree-sitter-python"]
+lang-typescript = ["ast-grep-language/tree-sitter-typescript"]
+lang-tsx = ["ast-grep-language/tree-sitter-typescript"]
+lang-javascript = ["ast-grep-language/tree-sitter-javascript"]
+lang-go = ["ast-grep-language/tree-sitter-go"]
+lang-java = ["ast-grep-language/tree-sitter-java"]
+lang-swift = ["ast-grep-language/tree-sitter-swift"]
+lang-c = ["ast-grep-language/tree-sitter-c"]
+lang-cpp = ["ast-grep-language/tree-sitter-cpp"]
+lang-csharp = ["ast-grep-language/tree-sitter-c-sharp"]
+lang-scala = ["ast-grep-language/tree-sitter-scala"]
+lang-kotlin = ["ast-grep-language/tree-sitter-kotlin"]
+lang-bash = ["ast-grep-language/tree-sitter-bash"]
+lang-css = ["ast-grep-language/tree-sitter-css"]
+lang-dart = ["ast-grep-language/tree-sitter-dart"]
+lang-elixir = ["ast-grep-language/tree-sitter-elixir"]
+lang-haskell = ["ast-grep-language/tree-sitter-haskell"]
+lang-hcl = ["ast-grep-language/tree-sitter-hcl"]
+lang-html = ["ast-grep-language/tree-sitter-html"]
+lang-json = ["ast-grep-language/tree-sitter-json"]
+lang-lua = ["ast-grep-language/tree-sitter-lua"]
+lang-md = ["ast-grep-language/tree-sitter-md"]
+lang-nix = ["ast-grep-language/tree-sitter-nix"]
+lang-php = ["ast-grep-language/tree-sitter-php"]
+lang-ruby = ["ast-grep-language/tree-sitter-ruby"]
+lang-solidity = ["ast-grep-language/tree-sitter-solidity"]
+lang-yaml = ["ast-grep-language/tree-sitter-yaml"]
+full = [
+    "lang-rust",
+    "lang-python",
+    "lang-typescript",
+    "lang-tsx",
+    "lang-javascript",
+    "lang-go",
+    "lang-java",
+    "lang-swift",
+    "lang-c",
+    "lang-cpp",
+    "lang-csharp",
+    "lang-scala",
+    "lang-kotlin",
+    "lang-bash",
+    "lang-css",
+    "lang-dart",
+    "lang-elixir",
+    "lang-haskell",
+    "lang-hcl",
+    "lang-html",
+    "lang-json",
+    "lang-lua",
+    "lang-md",
+    "lang-nix",
+    "lang-php",
+    "lang-ruby",
+    "lang-solidity",
+    "lang-yaml",
+]
+
+[dependencies]
+ast-grep-core = "0.45"
+ast-grep-language = { version = "0.45", default-features = false }

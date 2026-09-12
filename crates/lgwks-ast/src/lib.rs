@@ -1,0 +1,642 @@
+//! `lgwks_ast` owns the estate's one multi-language AST parser.
+//!
+//! Code tools in the estate — the safety detectors in `keel-core` and the
+//! graph extractor in `code-world-model` — need the same three things: decide
+//! a source file's language, select that language's tree-sitter grammar, and
+//! walk the resulting syntax tree safely. Before this crate each rebuilt its
+//! own language enum, extension table, grammar mapping, and parse loop; that
+//! is one concept implemented twice, so it lives here instead.
+//!
+//! Enforced invariant **INV-AST-ONE-PARSER**: a consumer identifies, selects,
+//! and parses through this crate and does not depend on `ast-grep` directly.
+//!
+//! ## Grammar selection
+//!
+//! One cargo feature per grammar forwards to `ast-grep-language`. The default
+//! enables the seven languages the safety detectors parse; every remaining
+//! grammar ast-grep-language ships — C#, CSS, Dart, Elixir, Haskell, HCL,
+//! HTML, JSON, Lua, Markdown, Nix, PHP, Ruby, Solidity, YAML, and the rest —
+//! is its own opt-in `lang-*` feature, and `full` enables all 28. A language
+//! whose feature is off is not in [`Language::ALL`] and is never returned by
+//! [`Language::of_path`], so no consumer pays to compile a grammar it cannot
+//! select.
+//!
+//! ## Custom languages
+//!
+//! ast-grep keeps its built-in set small on purpose; its documented extension
+//! point for anything else is a caller-registered parser. [`CustomLang`] is
+//! that registration: name the language, hand it a `tree-sitter` grammar, and
+//! parse it through [`try_parse_with`] under the same bounds and recovery
+//! refusal as a built-in. A grammar the estate needs should be contributed to
+//! `ast-grep-language` upstream and the local registration deleted once it
+//! ships — this crate never forks upstream's language tables.
+//!
+//! ## Bounded parsing
+//!
+//! A recoverable tree-sitter tree is not proof of valid syntax: recovery emits
+//! `ERROR` and `MISSING` nodes. [`try_parse`] therefore refuses before any
+//! detector sees the tree — oversized bytes, a parser that cannot produce a
+//! tree, a tree past [`MAX_AST_NODES`], or one carrying recovery nodes. The
+//! unchecked [`parse`] exists for diagnostics and tests that inspect
+//! malformed trees on purpose.
+
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+
+use std::fmt;
+
+use ast_grep_core::Language as CoreLanguage;
+use ast_grep_core::matcher::{Pattern, PatternBuilder, PatternError};
+use ast_grep_core::tree_sitter::LanguageExt;
+pub use ast_grep_core::tree_sitter::{StrDoc, TSLanguage};
+pub use ast_grep_core::{AstGrep, Node};
+pub use ast_grep_language::SupportLang;
+
+/// One parsed source file, owning its tree. Defaults to a built-in [`Language`];
+/// a caller-registered grammar parses to `Parsed<CustomLang>`.
+pub type Parsed<L = SupportLang> = AstGrep<StrDoc<L>>;
+
+/// One node of a [`Parsed`] tree.
+pub type AstNode<'t, L = SupportLang> = Node<'t, StrDoc<L>>;
+
+/// Largest source admitted to the checked parser (2 MiB).
+pub const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
+
+/// Largest concrete syntax tree admitted; bounds downstream walks, which a
+/// byte bound alone does not price.
+pub const MAX_AST_NODES: usize = 2_000_000;
+
+macro_rules! define_languages {
+    ($(
+        $variant:ident, $doc:literal, $feature:literal, $name:literal,
+        [$($ext:literal),+], $support:ident
+    );+ $(;)?) => {
+        /// Every language this build can select a grammar for.
+        ///
+        /// A variant exists only when its `lang-*` feature is enabled; the
+        /// compiler enforces that a consumer cannot name a language whose
+        /// grammar it did not compile.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum Language {
+            $(
+                #[doc = $doc]
+                #[cfg(feature = $feature)]
+                $variant,
+            )+
+        }
+
+        impl Language {
+            /// Every language with a compiled grammar, in table order.
+            pub const ALL: &'static [Language] = &[
+                $(
+                    #[cfg(feature = $feature)]
+                    Language::$variant,
+                )+
+            ];
+
+            /// The lowercase, stable name used in findings and diagnostics.
+            pub fn name(self) -> &'static str {
+                match self {
+                    $(
+                        #[cfg(feature = $feature)]
+                        Language::$variant => $name,
+                    )+
+                }
+            }
+
+            /// Extensions answered for, without the leading dot.
+            pub fn extensions(self) -> &'static [&'static str] {
+                match self {
+                    $(
+                        #[cfg(feature = $feature)]
+                        Language::$variant => &[$($ext),+],
+                    )+
+                }
+            }
+
+            /// The ast-grep grammar for this language.
+            pub fn support_lang(self) -> SupportLang {
+                match self {
+                    $(
+                        #[cfg(feature = $feature)]
+                        Language::$variant => SupportLang::$support,
+                    )+
+                }
+            }
+        }
+    };
+}
+
+define_languages! {
+    Bash, "Bash / POSIX shell.", "lang-bash", "bash", ["sh", "bash"], Bash;
+    C, "C.", "lang-c", "c", ["c", "h"], C;
+    Cpp, "C++.", "lang-cpp", "cpp", ["cpp", "hpp", "cc", "cxx", "hh", "hxx"], Cpp;
+    CSharp, "C#.", "lang-csharp", "csharp", ["cs"], CSharp;
+    Css, "CSS.", "lang-css", "css", ["css"], Css;
+    Dart, "Dart.", "lang-dart", "dart", ["dart"], Dart;
+    Elixir, "Elixir.", "lang-elixir", "elixir", ["ex", "exs"], Elixir;
+    Go, "Go.", "lang-go", "go", ["go"], Go;
+    Haskell, "Haskell.", "lang-haskell", "haskell", ["hs"], Haskell;
+    Hcl, "HCL / Terraform.", "lang-hcl", "hcl", ["hcl", "tf"], Hcl;
+    Html, "HTML.", "lang-html", "html", ["html", "htm"], Html;
+    Java, "Java.", "lang-java", "java", ["java"], Java;
+    JavaScript, "JavaScript.", "lang-javascript", "javascript", ["js", "jsx", "mjs", "cjs", "vue", "svelte"], JavaScript;
+    Json, "JSON.", "lang-json", "json", ["json"], Json;
+    Kotlin, "Kotlin.", "lang-kotlin", "kotlin", ["kt", "kts"], Kotlin;
+    Lua, "Lua.", "lang-lua", "lua", ["lua"], Lua;
+    Markdown, "Markdown.", "lang-md", "markdown", ["md", "markdown"], Markdown;
+    Nix, "Nix.", "lang-nix", "nix", ["nix"], Nix;
+    Php, "PHP.", "lang-php", "php", ["php"], Php;
+    Python, "Python.", "lang-python", "python", ["py", "pyi"], Python;
+    Ruby, "Ruby.", "lang-ruby", "ruby", ["rb"], Ruby;
+    Rust, "Rust.", "lang-rust", "rust", ["rs"], Rust;
+    Scala, "Scala.", "lang-scala", "scala", ["scala", "sc"], Scala;
+    Solidity, "Solidity.", "lang-solidity", "solidity", ["sol"], Solidity;
+    Swift, "Swift.", "lang-swift", "swift", ["swift"], Swift;
+    Tsx, "TSX (TypeScript + JSX).", "lang-tsx", "tsx", ["tsx"], Tsx;
+    TypeScript, "TypeScript.", "lang-typescript", "typescript", ["ts", "mts", "cts"], TypeScript;
+    Yaml, "YAML.", "lang-yaml", "yaml", ["yaml", "yml"], Yaml;
+}
+
+impl Language {
+    /// Language of a path by extension, or `None` without a compiled grammar.
+    /// Case-insensitive without allocating a normalized copy.
+    pub fn of_path(path: &str) -> Option<Self> {
+        let extension = path.rsplit_once('.')?.1;
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|language| language.supports_extension(extension))
+    }
+
+    fn supports_extension(self, extension: &str) -> bool {
+        self.extensions()
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(extension))
+    }
+}
+
+// ── Custom languages ────────────────────────────────────────────────────────
+
+/// A tree-sitter grammar registered from outside `ast-grep-language`.
+///
+/// ast-grep keeps its built-in language set small on purpose; for anything it
+/// does not ship, upstream's documented extension point is a caller-registered
+/// parser. [`CustomLang`] is that registration for the Rust API: name the
+/// language, hand it a `tree-sitter` grammar, and it is usable through
+/// [`try_parse_with`] and every bounded walker.
+///
+/// A grammar the estate needs should be contributed upstream and the local
+/// registration deleted once `ast-grep-language` ships it; keeping it behind
+/// this type makes that a localized change, not a fork of upstream's tables.
+#[derive(Clone)]
+pub struct CustomLang {
+    name: &'static str,
+    grammar: TSLanguage,
+    expando: char,
+    extensions: &'static [&'static str],
+}
+
+impl CustomLang {
+    /// Register `grammar` under `name`. `$` is assumed valid in the language's
+    /// patterns; use [`CustomLang::with_expando`] when it is not.
+    pub fn new(name: &'static str, grammar: TSLanguage) -> Self {
+        Self {
+            name,
+            grammar,
+            expando: '$',
+            extensions: &[],
+        }
+    }
+
+    /// Replace the character standing in for `$` while parsing patterns, for a
+    /// language where `$` is an identifier character.
+    pub fn with_expando(mut self, expando: char) -> Self {
+        self.expando = expando;
+        self
+    }
+
+    /// Declare the file extensions this language answers for.
+    pub fn with_extensions(mut self, extensions: &'static [&'static str]) -> Self {
+        self.extensions = extensions;
+        self
+    }
+
+    /// The lowercase, stable name used in findings and diagnostics.
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// Extensions answered for, without the leading dot.
+    pub fn extensions(&self) -> &'static [&'static str] {
+        self.extensions
+    }
+
+    /// The first candidate claiming `path`'s extension, case-insensitively.
+    /// Registered grammars are selected explicitly; they never join
+    /// [`Language::ALL`] or content detection.
+    pub fn of_path(path: &str, candidates: &[CustomLang]) -> Option<CustomLang> {
+        let extension = path.rsplit_once('.')?.1;
+        candidates
+            .iter()
+            .find(|language| {
+                language
+                    .extensions
+                    .iter()
+                    .any(|known| known.eq_ignore_ascii_case(extension))
+            })
+            .cloned()
+    }
+}
+
+impl CoreLanguage for CustomLang {
+    fn expando_char(&self) -> char {
+        self.expando
+    }
+
+    fn kind_to_id(&self, kind: &str) -> u16 {
+        self.grammar.id_for_node_kind(kind, true)
+    }
+
+    fn field_to_id(&self, field: &str) -> Option<u16> {
+        self.grammar.field_id_for_name(field).map(|id| id.get())
+    }
+
+    fn build_pattern(&self, builder: &PatternBuilder) -> Result<Pattern, PatternError> {
+        builder.build(|src| StrDoc::try_new(src, self.clone()))
+    }
+}
+
+impl LanguageExt for CustomLang {
+    fn get_ts_language(&self) -> TSLanguage {
+        self.grammar.clone()
+    }
+}
+
+/// A checked-parse refusal. None of these may be reported as clean.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseError {
+    /// The source exceeds the byte bound.
+    SourceTooLarge {
+        /// Observed length in bytes.
+        actual: usize,
+        /// The applied bound.
+        limit: usize,
+    },
+    /// The selected grammar could not produce a syntax tree.
+    ParserUnavailable {
+        /// The language name.
+        language: &'static str,
+        /// The parser's own detail string.
+        detail: String,
+    },
+    /// The tree carries an `ERROR` or `MISSING` recovery node.
+    InvalidSyntax {
+        /// The language name.
+        language: &'static str,
+    },
+    /// The tree exceeds the node bound.
+    AstTooLarge {
+        /// The language name.
+        language: &'static str,
+        /// Nodes observed up to the bound.
+        observed: usize,
+        /// The applied bound.
+        limit: usize,
+    },
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SourceTooLarge { actual, limit } => {
+                write!(f, "source is {actual} bytes; parser limit is {limit} bytes")
+            }
+            Self::ParserUnavailable { language, detail } => write!(
+                f,
+                "{language} parser could not produce a syntax tree: {detail}"
+            ),
+            Self::InvalidSyntax { language } => {
+                write!(f, "{language} parser produced an ERROR or MISSING node")
+            }
+            Self::AstTooLarge {
+                language,
+                observed,
+                limit,
+            } => write!(
+                f,
+                "{language} AST exceeds {limit} nodes (observed at least {observed})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+/// Node count, deepest depth, and recovery state from one traversal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AstMetrics {
+    /// Nodes visited.
+    pub nodes: usize,
+    /// Deepest branch depth, root counting as 1.
+    pub max_depth: usize,
+    /// Whether an `ERROR` or `MISSING` node was seen.
+    pub has_syntax_issues: bool,
+}
+
+impl AstMetrics {
+    fn including<L: LanguageExt>(mut self, node: &AstNode<'_, L>, depth: usize) -> Self {
+        self.nodes = self.nodes.saturating_add(1);
+        self.max_depth = self.max_depth.max(depth);
+        self.has_syntax_issues = self.has_syntax_issues || node.is_error() || node.is_missing();
+        self
+    }
+}
+
+/// What language is this file? A known extension answers; otherwise the
+/// compiled grammars answer by trial parse when exactly one parses cleanly.
+/// `None` means unclaimable — report unscanned, never clean.
+pub fn detect(path: &str, source: &str) -> Option<Language> {
+    try_detect(path, source).ok().flatten()
+}
+
+/// Identify without erasing resource refusal: the byte bound still applies to
+/// an extension-identified language, because it will be parsed next.
+pub fn try_detect(path: &str, source: &str) -> Result<Option<Language>, ParseError> {
+    validate_source_size(source, MAX_SOURCE_BYTES)?;
+    Ok(Language::of_path(path).or_else(|| detect_by_parsing(source)))
+}
+
+/// The only clean reading wins. Ranking two bad readings picks a guess, and
+/// two clean readings (a comment valid in both languages) genuinely do not
+/// say — answering would attach a rule set on no evidence.
+fn detect_by_parsing(source: &str) -> Option<Language> {
+    let mut readable = Language::ALL
+        .iter()
+        .copied()
+        .filter(|&language| try_parse(source, language).is_ok());
+    let only = readable.next()?;
+    readable.next().is_none().then_some(only)
+}
+
+/// Production boundary: refuse oversized bytes, then reject recovery nodes and
+/// over-budget trees in one traversal.
+pub fn try_parse(code: &str, language: Language) -> Result<Parsed, ParseError> {
+    parse_bounded(
+        code,
+        &language.support_lang(),
+        language.name(),
+        MAX_SOURCE_BYTES,
+        MAX_AST_NODES,
+    )
+}
+
+/// Checked parse of a caller-registered grammar, held to the same byte bound,
+/// node bound, and recovery refusal as [`try_parse`].
+pub fn try_parse_with<L: LanguageExt>(
+    code: &str,
+    language: &L,
+    name: &'static str,
+) -> Result<AstGrep<StrDoc<L>>, ParseError> {
+    parse_bounded(code, language, name, MAX_SOURCE_BYTES, MAX_AST_NODES)
+}
+
+fn parse_bounded<L: LanguageExt>(
+    code: &str,
+    language: &L,
+    name: &'static str,
+    max_source_bytes: usize,
+    max_ast_nodes: usize,
+) -> Result<AstGrep<StrDoc<L>>, ParseError> {
+    validate_source_size(code, max_source_bytes)?;
+    let parsed = AstGrep::try_new(code, language.clone()).map_err(|detail| {
+        ParseError::ParserUnavailable {
+            language: name,
+            detail,
+        }
+    })?;
+    let metrics = inspect_ast(&parsed.root(), Some(max_ast_nodes));
+    if metrics.nodes > max_ast_nodes {
+        return Err(ParseError::AstTooLarge {
+            language: name,
+            observed: metrics.nodes,
+            limit: max_ast_nodes,
+        });
+    }
+    if metrics.has_syntax_issues {
+        return Err(ParseError::InvalidSyntax { language: name });
+    }
+    Ok(parsed)
+}
+
+/// Unchecked parse for diagnostics and tests that intentionally inspect
+/// malformed trees. Production call sites use [`try_parse`].
+pub fn parse(code: &str, language: Language) -> Parsed {
+    parse_with(code, &language.support_lang())
+}
+
+/// Unchecked parse of a caller-registered grammar. Production call sites use
+/// [`try_parse_with`].
+pub fn parse_with<L: LanguageExt>(code: &str, language: &L) -> AstGrep<StrDoc<L>> {
+    language.ast_grep(code)
+}
+
+fn validate_source_size(source: &str, limit: usize) -> Result<(), ParseError> {
+    let actual = source.len();
+    (actual <= limit)
+        .then_some(())
+        .ok_or(ParseError::SourceTooLarge { actual, limit })
+}
+
+/// Whether the tree holds an `ERROR` or `MISSING` node. Ask before reporting:
+/// on unreadable source, no finding means nothing parsed, not nothing wrong.
+pub fn has_syntax_issues<L: LanguageExt>(root: &AstNode<'_, L>) -> bool {
+    inspect_ast(root, None).has_syntax_issues
+}
+
+/// Deepest branch depth, root counting as 1.
+pub fn max_depth<L: LanguageExt>(root: &AstNode<'_, L>) -> usize {
+    inspect_ast(root, None).max_depth
+}
+
+/// Node count, depth, and recovery state in one heap-backed walk.
+///
+/// With a node cap, traversal stops at `limit + 1`: enough to prove refusal
+/// without letting validation itself go unbounded on a hostile tree.
+pub fn inspect_ast<'t, L: LanguageExt>(
+    root: &AstNode<'t, L>,
+    stop_after_nodes: Option<usize>,
+) -> AstMetrics {
+    let mut metrics = AstMetrics::default();
+    let mut frontier: Vec<(AstNode<'t, L>, usize)> = vec![(root.clone(), 1)];
+    while let Some((node, depth)) = frontier.pop() {
+        metrics = metrics.including(&node, depth);
+        if metrics.nodes > stop_after_nodes.unwrap_or(usize::MAX) {
+            break;
+        }
+        let child_depth = depth.saturating_add(1);
+        frontier.extend(node.children().map(|child| (child, child_depth)));
+    }
+    metrics
+}
+
+/// The text of the first direct child whose `kind` equals one of `kinds`, or
+/// `None` when no direct child matches. Descendants are not searched, so a
+/// caller hunting a nested identifier must walk to that level first.
+pub fn child_text_with_kind<L: LanguageExt>(
+    node: &AstNode<'_, L>,
+    kinds: &[&str],
+) -> Option<String> {
+    node.children()
+        .find(|child| kinds.contains(&child.kind().as_ref()))
+        .map(|child| child.text().to_string())
+}
+
+/// The name a definition node declares, if a direct child kind in
+/// `name_kinds` names it.
+pub fn definition_name<L: LanguageExt>(
+    node: &AstNode<'_, L>,
+    name_kinds: &[&str],
+) -> Option<String> {
+    child_text_with_kind(node, name_kinds)
+}
+
+/// The callee a call node names, or `None` when `node` is not a call kind or
+/// names none of `name_kinds`.
+pub fn callee_name<L: LanguageExt>(
+    node: &AstNode<'_, L>,
+    call_kinds: &[&str],
+    name_kinds: &[&str],
+) -> Option<String> {
+    call_kinds
+        .contains(&node.kind().as_ref())
+        .then(|| child_text_with_kind(node, name_kinds))
+        .flatten()
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(all(test, feature = "lang-rust"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_extension_selects_a_language() {
+        assert_eq!(Language::of_path("a/b.rs"), Some(Language::Rust));
+        assert_eq!(Language::of_path("a/B.RS"), Some(Language::Rust));
+        assert_eq!(Language::of_path("noextension"), None);
+        assert_eq!(Language::of_path("a/b.cobol"), None);
+    }
+
+    #[test]
+    fn every_declared_extension_resolves_to_its_own_language() {
+        for &language in Language::ALL {
+            for extension in language.extensions() {
+                assert_eq!(
+                    Language::of_path(&format!("dir/file.{extension}")),
+                    Some(language),
+                    "{}: .{extension} must resolve to itself",
+                    language.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_two_enabled_languages_claim_one_extension() {
+        let mut claimed: Vec<(&str, &str)> = Vec::new();
+        for &language in Language::ALL {
+            for extension in language.extensions() {
+                if let Some((other, _)) = claimed.iter().find(|(ext, _)| ext == extension) {
+                    panic!(
+                        ".{other} is claimed by both {} and an earlier language",
+                        language.name()
+                    );
+                }
+                claimed.push((extension, language.name()));
+            }
+        }
+    }
+
+    #[test]
+    fn checked_parse_accepts_valid_rust() {
+        let parsed = try_parse("fn f() {}", Language::Rust).expect("valid rust parses");
+        assert!(max_depth(&parsed.root()) > 1);
+        assert!(!has_syntax_issues(&parsed.root()));
+    }
+
+    #[test]
+    fn recovery_nodes_refuse_before_consumers() {
+        assert!(matches!(
+            try_parse("fn f( {", Language::Rust),
+            Err(ParseError::InvalidSyntax { .. })
+        ));
+    }
+
+    #[test]
+    fn oversized_source_refuses_before_parsing() {
+        let big = "x".repeat(MAX_SOURCE_BYTES + 1);
+        assert!(matches!(
+            try_parse(&big, Language::Rust),
+            Err(ParseError::SourceTooLarge { .. })
+        ));
+        assert!(try_detect("probe.rs", &big).is_err());
+    }
+
+    #[test]
+    fn extensions_win_and_content_detection_is_used_only_without_one() {
+        assert_eq!(detect("probe.rs", "not rust at all"), Some(Language::Rust));
+    }
+
+    #[test]
+    fn name_and_grammar_agree_for_every_enabled_language() {
+        for &language in Language::ALL {
+            assert!(!language.name().is_empty());
+            assert!(!language.extensions().is_empty());
+            // Constructing the grammar must not panic for any enabled row.
+            let _ = language.support_lang();
+        }
+    }
+
+    #[test]
+    fn a_registered_grammar_parses_through_the_bounded_api() {
+        let custom = CustomLang::new("rust-as-custom", SupportLang::Rust.get_ts_language());
+        let parsed = try_parse_with("fn f() {}", &custom, custom.name()).expect("custom parses");
+        assert!(max_depth(&parsed.root()) > 1);
+        assert!(!has_syntax_issues(&parsed.root()));
+    }
+
+    #[test]
+    fn a_registered_grammar_keeps_the_recovery_refusal() {
+        let custom = CustomLang::new("rust-as-custom", SupportLang::Rust.get_ts_language());
+        assert!(matches!(
+            try_parse_with("fn f( {", &custom, custom.name()),
+            Err(ParseError::InvalidSyntax { .. })
+        ));
+    }
+
+    #[test]
+    fn a_registered_grammar_refuses_oversized_source() {
+        let custom = CustomLang::new("rust-as-custom", SupportLang::Rust.get_ts_language());
+        let big = "x".repeat(MAX_SOURCE_BYTES + 1);
+        assert!(matches!(
+            try_parse_with(&big, &custom, custom.name()),
+            Err(ParseError::SourceTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn registered_grammars_resolve_paths_by_extensions() {
+        let custom = CustomLang::new("rust-as-custom", SupportLang::Rust.get_ts_language())
+            .with_extensions(&["custom", "CU"]);
+        assert_eq!(
+            CustomLang::of_path("a/file.custom", std::slice::from_ref(&custom)).map(|l| l.name()),
+            Some("rust-as-custom")
+        );
+        assert_eq!(
+            CustomLang::of_path("a/file.cu", std::slice::from_ref(&custom)).map(|l| l.name()),
+            Some("rust-as-custom")
+        );
+        assert!(CustomLang::of_path("a/file.rs", &[custom]).is_none());
+    }
+}

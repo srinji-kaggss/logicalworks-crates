@@ -152,8 +152,8 @@ impl<T: 'static> All<T> {
 
 impl<T: 'static> Evaluate<T> for All<T> {
     fn check(&self, value: &T) -> Result<bool, BotError> {
-        for c in &self.conditions {
-            if !c.check(value)? {
+        for condition in &self.conditions {
+            if !condition.check(value)? {
                 return Ok(false);
             }
         }
@@ -179,8 +179,8 @@ impl<T: 'static> Any<T> {
 
 impl<T: 'static> Evaluate<T> for Any<T> {
     fn check(&self, value: &T) -> Result<bool, BotError> {
-        for c in &self.conditions {
-            if c.check(value)? {
+        for condition in &self.conditions {
+            if condition.check(value)? {
                 return Ok(true);
             }
         }
