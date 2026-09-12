@@ -616,6 +616,7 @@ mod tests {
                 "regex",
                 "rkyv",
                 "ron",
+                "rustix",
                 "serde",
                 "serde_json",
                 "ureq",

@@ -114,6 +114,7 @@ jobs:
           cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features wire --no-default-features
           cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features http --no-default-features
           cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features online --no-default-features
+          cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features fs-raw --no-default-features
           cargo check --manifest-path crates/lgwks-std/Cargo.toml --all-targets --all-features
       - name: Check lgwks-deps
         run: cargo check --manifest-path crates/lgwks-deps/Cargo.toml --all-targets

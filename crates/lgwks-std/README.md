@@ -54,6 +54,7 @@ lgwks_std = { version = "0.5", features = ["full"] }           # everything
 | `wire` | wire | Zero-copy binary serialization | rkyv |
 | `http` | http | Blocking HTTPS client (rustls-only TLS) | ureq, iri-string |
 | `online` | online | TCP reachability probing | none |
+| `fs-raw` | fs | Bytes available on a filesystem, unprivileged | rustix |
 | `full` | all of the above | — | all of the above |
 
 ## Module reference
@@ -92,6 +93,7 @@ Cargo metadata; Cargo.lock preserves the exact transitive provenance.
 - **getrandom** — zero deps in std-only mode
 - **ureq** — blocking HTTP client, rustls-only TLS stack plus small leaves
 - **iri-string** — zero-dep URI validation leaf at default features
+- **rustix** — safe POSIX syscall surface for the `fs-raw` primitive; Unix-only, optional
 
 The `core` feature carries zero external dependencies. You choose what you pull
 in; every feature flag is one capability, one stack, no surprises.
