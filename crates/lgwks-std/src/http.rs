@@ -21,6 +21,11 @@ pub struct Options {
     pub timeout: Duration,
     /// `User-Agent` header sent with every request.
     pub user_agent: String,
+    /// Extra headers sent with every request as `(name, value)` pairs, e.g.
+    /// `("Authorization", "Bearer ...")`. Names and values must be valid
+    /// header bytes; an invalid pair is a caller bug and the request errors
+    /// rather than silently dropping the header.
+    pub headers: Vec<(String, String)>,
 }
 
 impl Default for Options {
@@ -28,6 +33,7 @@ impl Default for Options {
         Self {
             timeout: Duration::from_secs(30),
             user_agent: format!("lgwks-std/{}", env!("CARGO_PKG_VERSION")),
+            headers: Vec::new(),
         }
     }
 }
@@ -171,11 +177,11 @@ pub fn get_response(url: &str) -> Result<Response, Error> {
 /// GET `url` with `options`.
 pub fn get_with(url: &str, options: &Options) -> Result<Response, Error> {
     validate_url(url)?;
-    agent(options)
-        .get(url)
-        .call()
-        .map_err(map_error)
-        .and_then(response_of)
+    let mut call = agent(options).get(url);
+    for (name, value) in &options.headers {
+        call = call.header(name.as_str(), value.as_str());
+    }
+    call.call().map_err(map_error).and_then(response_of)
 }
 
 /// POST `body` to `url` with `content_type`, using default options.
@@ -200,9 +206,12 @@ pub fn post_with(
         "lgwks_std::http: POST ({content_type:?}, {} bytes)",
         body.len()
     );
-    let request = agent(options)
+    let mut request = agent(options)
         .post(url)
         .header("Content-Type", content_type);
+    for (name, value) in &options.headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
     let response = request.send(body).map_err(map_error)?;
     response_of(response)
 }
@@ -284,6 +293,7 @@ mod tests {
         Options {
             timeout: Duration::from_secs(5),
             user_agent: "lgwks-std-test".into(),
+            headers: Vec::new(),
         }
     }
 
@@ -364,6 +374,47 @@ mod tests {
     }
 
     #[test]
+    fn custom_headers_reach_the_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = vec![0u8; 4096];
+            let mut head = Vec::new();
+            loop {
+                let n = stream.read(&mut request).unwrap();
+                head.extend_from_slice(&request[..n]);
+                if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let text = String::from_utf8_lossy(&head).into_owned();
+            let reply = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+            stream.write_all(reply.as_bytes()).unwrap();
+            text
+        });
+        let options = Options {
+            timeout: Duration::from_secs(5),
+            user_agent: "lgwks-std-test".into(),
+            headers: vec![("Authorization".into(), "Bearer test-token".into())],
+        };
+        let response = post_with(
+            &format!("http://127.0.0.1:{port}/"),
+            "text/plain",
+            b"hi",
+            &options,
+        )
+        .unwrap();
+        assert_eq!(response.status, 200);
+        let seen = handle.join().unwrap();
+        assert!(
+            seen.to_ascii_lowercase()
+                .contains("authorization: bearer test-token"),
+            "server never saw the Authorization header:\n{seen}"
+        );
+    }
+
+    #[test]
     fn silent_server_hits_timeout() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -374,6 +425,7 @@ mod tests {
         let options = Options {
             timeout: Duration::from_millis(200),
             user_agent: "lgwks-std-test".into(),
+            headers: Vec::new(),
         };
         let error = get_with(&format!("http://127.0.0.1:{port}/"), &options).unwrap_err();
         assert_eq!(error, Error::Timeout);
