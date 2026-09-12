@@ -68,7 +68,8 @@ where
 /// via `bot.execute()`.
 ///
 /// Takes an `(Auth, input)` tuple: the proof must cover
-/// [`required_caps`](Execute::required_caps) or `run` denies before acting.
+/// [`required_caps`](Execute::required_caps) or `execute_action` denies before
+/// acting.
 pub trait Execute {
     /// Input to the action.
     type Input;

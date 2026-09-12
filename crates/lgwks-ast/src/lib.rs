@@ -39,6 +39,17 @@
 //! tree, a tree past [`MAX_AST_NODES`], or one carrying recovery nodes. The
 //! unchecked [`parse`] exists for diagnostics and tests that inspect
 //! malformed trees on purpose.
+//!
+//! The two bounds are not interchangeable. [`MAX_SOURCE_BYTES`] bounds the
+//! bytes handed to the parser and is what keeps parse work linear in input;
+//! [`MAX_AST_NODES`] is measured on the tree *after* tree-sitter has built it,
+//! so it bounds the validation walk and every downstream walk, not the
+//! parser's own allocation. Neither is a hard memory ceiling.
+//!
+//! Content sniffing is opt-in for the same reason: [`try_detect_content`]
+//! trial-parses each candidate grammar in full, so the caller names a small
+//! candidate set and the probe source is held to [`MAX_DETECT_BYTES`]. The
+//! extension-only [`detect`] never parses.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -59,12 +70,20 @@ pub type Parsed<L = SupportLang> = AstGrep<StrDoc<L>>;
 /// One node of a [`Parsed`] tree.
 pub type AstNode<'t, L = SupportLang> = Node<'t, StrDoc<L>>;
 
-/// Largest source admitted to the checked parser (2 MiB).
+/// Largest source admitted to the checked parser (2 MiB). This is the input
+/// bound that keeps parse work linear in bytes.
 pub const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Largest concrete syntax tree admitted; bounds downstream walks, which a
-/// byte bound alone does not price.
+/// byte bound alone does not price. Measured on the tree after tree-sitter has
+/// built it, so it does not cap the parser's own allocation.
 pub const MAX_AST_NODES: usize = 2_000_000;
+
+/// Largest probe source admitted to [`try_detect_content`] (64 KiB). Content
+/// detection costs one full parse per candidate grammar, so it is bounded far
+/// below [`MAX_SOURCE_BYTES`]; a language probe only needs enough bytes to
+/// show one clean reading.
+pub const MAX_DETECT_BYTES: usize = 64 * 1024;
 
 macro_rules! define_languages {
     ($(
@@ -353,25 +372,35 @@ impl AstMetrics {
     }
 }
 
-/// What language is this file? A known extension answers; otherwise the
-/// compiled grammars answer by trial parse when exactly one parses cleanly.
-/// `None` means unclaimable — report unscanned, never clean.
-pub fn detect(path: &str, source: &str) -> Option<Language> {
-    try_detect(path, source).ok().flatten()
+/// Identify a language by file extension. `None` means the name does not claim
+/// the file — report unscanned, never clean.
+///
+/// Content sniffing is deliberately not part of this call: it costs one full
+/// parse per grammar. A caller that needs it opts in with
+/// [`try_detect_content`] and names the few grammars it expects, rather than
+/// trial-parsing every language this build carries.
+pub fn detect(path: &str) -> Option<Language> {
+    Language::of_path(path)
 }
 
-/// Identify without erasing resource refusal: the byte bound still applies to
-/// an extension-identified language, because it will be parsed next.
-pub fn try_detect(path: &str, source: &str) -> Result<Option<Language>, ParseError> {
-    validate_source_size(source, MAX_SOURCE_BYTES)?;
-    Ok(Language::of_path(path).or_else(|| detect_by_parsing(source)))
+/// Identify `source` by trial-parsing `candidates` — the opt-in content path.
+///
+/// Cost is `candidates.len()` full parses, so `source` is held to
+/// [`MAX_DETECT_BYTES`] rather than [`MAX_SOURCE_BYTES`], and the caller — not
+/// this crate — decides which grammars are plausible. Exactly one candidate
+/// must parse cleanly; zero or several yield `None`, because reporting a guess
+/// or picking among equally valid readings would attach a rule set on no
+/// evidence.
+pub fn try_detect_content(
+    source: &str,
+    candidates: &[Language],
+) -> Result<Option<Language>, ParseError> {
+    validate_source_size(source, MAX_DETECT_BYTES)?;
+    Ok(detect_by_parsing(source, candidates))
 }
 
-/// The only clean reading wins. Ranking two bad readings picks a guess, and
-/// two clean readings (a comment valid in both languages) genuinely do not
-/// say — answering would attach a rule set on no evidence.
-fn detect_by_parsing(source: &str) -> Option<Language> {
-    let mut readable = Language::ALL
+fn detect_by_parsing(source: &str, candidates: &[Language]) -> Option<Language> {
+    let mut readable = candidates
         .iter()
         .copied()
         .filter(|&language| try_parse(source, language).is_ok());
@@ -580,12 +609,33 @@ mod tests {
             try_parse(&big, Language::Rust),
             Err(ParseError::SourceTooLarge { .. })
         ));
-        assert!(try_detect("probe.rs", &big).is_err());
     }
 
     #[test]
-    fn extensions_win_and_content_detection_is_used_only_without_one() {
-        assert_eq!(detect("probe.rs", "not rust at all"), Some(Language::Rust));
+    fn detect_is_extension_only_and_never_trial_parses() {
+        assert_eq!(detect("probe.rs"), Some(Language::Rust));
+        assert_eq!(detect("noextension"), None);
+    }
+
+    #[test]
+    fn content_detection_is_opt_in_and_capped_below_the_parse_bound() {
+        assert_eq!(
+            try_detect_content("fn f() {}", &[Language::Rust]),
+            Ok(Some(Language::Rust))
+        );
+        // A probe past MAX_DETECT_BYTES is refused before any grammar runs, so
+        // content detection costs at most candidates x MAX_DETECT_BYTES even
+        // though the checked parse bound is MAX_SOURCE_BYTES.
+        let oversized_probe = "x".repeat(MAX_DETECT_BYTES + 1);
+        assert!(matches!(
+            try_detect_content(&oversized_probe, &[Language::Rust]),
+            Err(ParseError::SourceTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn content_detection_needs_exactly_one_clean_reading() {
+        assert_eq!(try_detect_content("fn f() {}", &[]), Ok(None));
     }
 
     #[test]

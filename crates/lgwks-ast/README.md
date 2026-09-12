@@ -12,8 +12,11 @@ implemented twice; this crate owns it once.
 ```rust
 use lgwks_ast::{Language, try_parse, inspect_ast};
 
-// Identify by extension, or by trial parse when there is none.
+// Identify by extension — the cheap, always-on path.
 let language = Language::of_path("src/lib.rs").expect("rust grammar is compiled in");
+
+// Content sniffing is opt-in, because it costs one full parse per candidate:
+// let language = try_detect_content(source, &[Language::Rust, Language::Python])?;
 
 // Checked parse: oversized bytes, recovery nodes, and over-budget trees are
 // refused before any consumer sees the tree.
@@ -103,10 +106,15 @@ liftable into a pull request.
 
 ## Bounds
 
-- `MAX_SOURCE_BYTES` — 2 MiB per checked parse.
+- `MAX_SOURCE_BYTES` — 2 MiB per checked parse. This bounds the bytes handed
+  to tree-sitter and keeps parse work linear in input.
 - `MAX_AST_NODES` — 2,000,000 nodes; the boundary walk is capped and stops
   within one node of the limit, so refusal does not itself walk an unbounded
-  tree.
+  tree. It is measured on the tree *after* tree-sitter builds it, so it bounds
+  the validation walk, not the parser's own allocation.
+- `MAX_DETECT_BYTES` — 64 KiB per content-detection probe. `try_detect_content`
+  tries each caller-named candidate in full, so the probe is bounded well below
+  `MAX_SOURCE_BYTES`; `detect` never parses at all.
 - `try_parse` refuses an `ERROR`/`MISSING` recovery node: a recoverable tree
   is not proof of valid syntax. `parse` is the unchecked escape hatch for
   diagnostics and tests that inspect malformed trees on purpose.

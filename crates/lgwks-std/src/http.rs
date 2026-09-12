@@ -81,20 +81,22 @@ impl std::error::Error for Error {}
 
 // ── Exchange ────────────────────────────────────────────────────────────────
 
-/// Reject anything that is not an absolute http(s) URI before dialing.
+/// Reject anything that is not an absolute http(s) URI before dialing. The
+/// diagnostics name the failure class, never the raw URL: a caller-supplied URL
+/// can carry credentials or tokens in its userinfo or query string.
 pub fn validate_url(url: &str) -> Result<(), Error> {
     UriAbsoluteStr::new(url).map_err(|cause| {
-        eprintln!("lgwks_std::http: rejecting malformed URL {url:?}: {cause}");
+        eprintln!("lgwks_std::http: rejecting malformed URL: {cause}");
         Error::InvalidUrl(url.into())
     })?;
     let Some(scheme) = url.split_once(':').map(|(scheme, _)| scheme) else {
-        eprintln!("lgwks_std::http: rejecting URL with no scheme: {url:?}");
+        eprintln!("lgwks_std::http: rejecting URL with no scheme");
         return Err(Error::InvalidUrl(url.into()));
     };
     if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
         Ok(())
     } else {
-        eprintln!("lgwks_std::http: rejecting non-http(s) scheme {scheme:?} in {url:?}");
+        eprintln!("lgwks_std::http: rejecting non-http(s) scheme {scheme:?}");
         Err(Error::InvalidUrl(url.into()))
     }
 }
@@ -168,8 +170,11 @@ pub fn post_with(
     options: &Options,
 ) -> Result<Response, Error> {
     validate_url(url)?;
+    // The URL is intentionally not logged: it can carry credentials in its
+    // userinfo or query string. Method, content type, and size are enough to
+    // correlate the request.
     eprintln!(
-        "lgwks_std::http: POST {url} ({content_type}, {} bytes)",
+        "lgwks_std::http: POST ({content_type}, {} bytes)",
         body.len()
     );
     let request = agent(options)

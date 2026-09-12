@@ -26,10 +26,13 @@ pub fn to_writer<W: std::io::Write, T: Serialize>(
     value: &T,
 ) -> Result<(), ron::Error> {
     let serialized = ron::to_string(value)?;
-    eprintln!("lgwks_std::ron: writing {} bytes", serialized.len());
-    writer
-        .write_all(serialized.as_bytes())
-        .map_err(|e| ron::Error::Message(e.to_string()))
+    writer.write_all(serialized.as_bytes()).map_err(|error| {
+        eprintln!(
+            "lgwks_std::ron: to_writer failed writing {} bytes: {error}",
+            serialized.len()
+        );
+        ron::Error::Message(error.to_string())
+    })
 }
 
 // ── Decoding ────────────────────────────────────────────────────────────────

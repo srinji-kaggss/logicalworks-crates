@@ -35,10 +35,13 @@ use std::future::Future;
 use std::pin::Pin;
 
 /// A boxed, non-`Send` future used to type-erase the async verbs behind the
-/// `Bot`'s dynamic chains. The public traits stay native `async fn`; only this
-/// internal erasure boundary boxes, which is what avoids an `async-trait`
-/// dependency.
-pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+/// `Bot`'s dynamic chains and behind [`domain::flow::PipelineStep`]. The public
+/// traits stay native `async fn`; only the erasure boundary boxes, which is
+/// what avoids an `async-trait` dependency.
+///
+/// Public because it appears in the public `PipelineStep` signature: an
+/// implementer must be able to name the return type.
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 pub mod cap;
 pub mod domain {

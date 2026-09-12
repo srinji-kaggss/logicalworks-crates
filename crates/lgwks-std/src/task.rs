@@ -209,7 +209,13 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    eprintln!("lgwks_std::task: spawn_blocking is starting a blocking job");
+    // Opt-in trace: spawning a thread is an effect worth being able to
+    // reconstruct after an incident, but one stderr line per job would flood
+    // callers that treat stderr as a machine-readable channel. Set
+    // LGWKS_TASK_TRACE to turn it on.
+    if std::env::var_os("LGWKS_TASK_TRACE").is_some() {
+        eprintln!("lgwks_std::task: spawn_blocking job started");
+    }
     let shared = Arc::new(Mutex::new(Shared {
         job: Job::Running,
         waker: None,

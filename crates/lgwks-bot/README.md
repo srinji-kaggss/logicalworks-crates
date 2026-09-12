@@ -5,12 +5,13 @@ A capability-gated bot framework built on four fixed verbs: **Observe**,
 chains that bind observed sources to side effects. The framework validates
 capabilities at build time and dispatches at tick time.
 
-The four verbs are **async**. `Bot::tick` polls every source concurrently on the
-estate's zero-dependency `lgwks_std::task` executor — no tokio, no `futures`, no
-`async-trait` — and `Bot::block_on_tick` drives the same computation for
-synchronous callers. Blocking domain work (file reads, HTTP) runs on a
-`lgwks_std::task::spawn_blocking` thread so it overlaps its siblings instead of
-stalling them.
+Three of the four verbs are **async** (`Evaluate` stays synchronous and pure,
+because it has no side effect to gate). `Bot::tick` polls every source
+concurrently on the estate's zero-dependency `lgwks_std::task` executor — no
+tokio, no `futures`, no `async-trait` — and `Bot::block_on_tick` drives the
+same computation for synchronous callers. Blocking domain work (file reads,
+HTTP) runs on a `lgwks_std::task::spawn_blocking` thread so it overlaps its
+siblings instead of stalling them.
 
 ## Quick start
 
@@ -36,7 +37,7 @@ impl Execute for SlackNotify {
     type Input = PrState;
     type Output = ();
     fn required_caps(&self) -> &[Cap] { &[Cap::notify()] }
-    async fn run(&self, call: (Auth, &PrState)) -> Result<(), lgwks_bot::BotError> {
+    async fn execute_action(&self, call: (Auth, &PrState)) -> Result<(), lgwks_bot::BotError> {
         call.0.check(self.required_caps())?;
         /* ... */
     }
@@ -85,8 +86,9 @@ Every domain declares the capabilities it requires. The bot builder validates
 `required ⊆ granted` before construction — a bot that asks for `bot.net` without
 a grant fails at build time, not at runtime.
 
-Authority is proof-carrying past build: every `poll`, `run`, and `query` takes
-an `(Auth, input)` tuple, and only `GrantSet::issue` can mint the `Auth` half.
+Authority is proof-carrying past build: every `poll`, `execute_action`, and
+`query` takes an `(Auth, input)` tuple, and only `GrantSet::issue` can mint the
+`Auth` half.
 The framework issues a fresh proof per domain on every `tick`; each callee
 checks coverage before acting, so a narrower proof presented to a broader
 domain is denied (no confused deputies). `Evaluate` takes no proof — it is

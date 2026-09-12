@@ -13,7 +13,7 @@ use super::gate::GrantSet;
 /// The serializable bot contract — what an AI emits, what a manifest contains,
 /// what `Bot::build()` validates.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(crate = "lgwks_std::json::serde")]
+#[serde(crate = "lgwks_std::json::serde", deny_unknown_fields)]
 pub struct BotSpec {
     /// The bot's unique name.
     pub name: String,
@@ -23,7 +23,7 @@ pub struct BotSpec {
 
 /// One observation binding in a serializable spec.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(crate = "lgwks_std::json::serde")]
+#[serde(crate = "lgwks_std::json::serde", deny_unknown_fields)]
 pub struct ChainSpec {
     /// The domain identifier of the observed source (e.g. `"gh::pr_status"`).
     pub source: String,
@@ -35,7 +35,7 @@ pub struct ChainSpec {
 
 /// A serializable action reference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(crate = "lgwks_std::json::serde")]
+#[serde(crate = "lgwks_std::json::serde", deny_unknown_fields)]
 pub struct ActionSpec {
     /// The domain identifier (e.g. `"notify::slack"`).
     pub domain: String,
@@ -163,8 +163,8 @@ impl Bot {
     /// [`MAX_IN_FLIGHT_POLLS`] via `lgwks_std::task::join_all`, so a set of
     /// slow observers overlaps without unbounded blocking threads. Actions run
     /// sequentially in chain order so side effects stay deterministic. Every
-    /// poll and run carries a freshly issued `Auth` proof — a grant revoked
-    /// after build cannot fire.
+    /// poll and `execute_action` carries a freshly issued `Auth` proof — a
+    /// grant revoked after build cannot fire.
     ///
     /// Error ordering: sources are all polled before any action runs; the first
     /// error in declaration order is returned, and chains declared before it
@@ -513,6 +513,23 @@ mod tests {
         assert_eq!(back.chains[0].source, "gh::pr_status");
         assert_eq!(back.chains[0].on.len(), 1);
         assert_eq!(back.chains[0].on[0].0, "checks_changed");
+    }
+
+    #[test]
+    fn unknown_fields_are_rejected_at_every_level() {
+        // deny_unknown_fields is what makes the from_json doc's "unknown field
+        // is rejected" true; without it serde would silently ignore all three.
+        let top = r#"{"name":"x","chains":[],"extra":1}"#;
+        let chain = r#"{"name":"x","chains":[{"source":"a","target":"b","on":[],"extra":1}]}"#;
+        let action = r#"{"name":"x","chains":[{"source":"a","target":"b","on":[["c",{"domain":"d","target":"e","extra":1}]]}]}"#;
+        assert!(BotSpec::from_json(top).is_err());
+        assert!(BotSpec::from_json(chain).is_err());
+        assert!(BotSpec::from_json(action).is_err());
+    }
+
+    #[test]
+    fn missing_required_fields_are_rejected() {
+        assert!(BotSpec::from_json(r#"{"chains":[]}"#).is_err());
     }
 
     #[test]
