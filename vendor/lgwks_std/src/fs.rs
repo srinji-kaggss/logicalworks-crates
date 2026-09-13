@@ -205,6 +205,44 @@ fn walk_recursive(
     Ok(())
 }
 
+// ── Raw filesystem capacity ─────────────────────────────────────────────────
+
+/// Bytes available to an unprivileged process on the filesystem holding `path`.
+///
+/// Stable `std` has no portable equivalent (`std::fs::available_space` is
+/// unstable), so this is the `fs-raw` feature's one primitive. It reports the
+/// bytes the calling user may actually write (`f_bavail * f_frsize`), not the
+/// filesystem's total size.
+///
+/// # Errors
+///
+/// Returns the underlying OS error when `path` cannot be stat'ed. On non-Unix
+/// targets the capability is absent and this returns [`io::ErrorKind::Unsupported`]
+/// rather than a fabricated value.
+#[cfg(all(unix, feature = "fs-raw"))]
+pub fn available_space(path: impl AsRef<Path>) -> io::Result<u64> {
+    let stat = rustix::fs::statvfs(path.as_ref())?;
+    let block = if stat.f_frsize == 0 {
+        stat.f_bsize
+    } else {
+        stat.f_frsize
+    };
+    Ok(stat.f_bavail.saturating_mul(block))
+}
+
+/// Bytes available to an unprivileged process on the filesystem holding `path`.
+///
+/// The `fs-raw` capability is Unix-only; other targets report
+/// [`io::ErrorKind::Unsupported`] rather than a fabricated value.
+#[cfg(all(not(unix), feature = "fs-raw"))]
+pub fn available_space(path: impl AsRef<Path>) -> io::Result<u64> {
+    let _ = path;
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "fs-raw available_space is Unix-only",
+    ))
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -323,6 +361,21 @@ mod tests {
             "/nonexistent-path-that-does-not-exist",
             &WalkOptions::default(),
         );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[cfg(all(unix, feature = "fs-raw"))]
+    fn available_space_reports_positive_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let free = available_space(tmp.path()).expect("statvfs on a real directory");
+        assert!(free > 0, "available space must be positive, got {free}");
+    }
+
+    #[test]
+    #[cfg(feature = "fs-raw")]
+    fn available_space_on_missing_path_is_an_error() {
+        let result = available_space("/nonexistent-path-that-does-not-exist");
         assert!(result.is_err());
     }
 }

@@ -13,14 +13,14 @@
 edition = "2024"
 rust-version = "1.98"
 name = "lgwks_std"
-version = "0.5.2"
+version = "0.6.1"
 build = false
 autolib = false
 autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = "Zero-config primitives for hex, base64, timestamps, UUIDs, hashing, glob, regex, JSON, and async — zero external deps by default."
+description = "Zero-config primitives for hex, base64, timestamps, UUIDs, hashing, glob, regex, JSON, HTTP, connectivity, and async — zero external deps by default."
 homepage = "https://github.com/srinji-kaggss/logicalworks-crates/tree/main/crates/lgwks-std"
 readme = "README.md"
 keywords = [
@@ -42,6 +42,7 @@ resolver = "2"
 [features]
 core = []
 default = ["core"]
+fs-raw = ["dep:rustix"]
 full = [
     "random",
     "hash",
@@ -49,12 +50,20 @@ full = [
     "json",
     "ron",
     "wire",
+    "http",
+    "online",
+    "fs-raw",
 ]
 hash = ["dep:blake3"]
+http = [
+    "dep:ureq",
+    "dep:iri-string",
+]
 json = [
     "dep:serde",
     "dep:serde_json",
 ]
+online = []
 pattern = ["dep:regex"]
 random = ["dep:getrandom"]
 ron = [
@@ -76,6 +85,10 @@ default-features = false
 version = "0.4"
 optional = true
 
+[dependencies.iri-string]
+version = "0.7"
+optional = true
+
 [dependencies.regex]
 version = "1.13"
 optional = true
@@ -93,6 +106,15 @@ default-features = false
 version = "0.12"
 optional = true
 
+[dependencies.rustix]
+version = "1"
+features = [
+    "std",
+    "fs",
+]
+optional = true
+default-features = false
+
 [dependencies.serde]
 version = "1"
 features = ["derive"]
@@ -101,6 +123,12 @@ optional = true
 [dependencies.serde_json]
 version = "1"
 optional = true
+
+[dependencies.ureq]
+version = "3"
+features = ["rustls"]
+optional = true
+default-features = false
 
 [dev-dependencies.tempfile]
 version = "3.20"

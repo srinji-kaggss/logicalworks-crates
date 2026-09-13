@@ -52,6 +52,9 @@ lgwks_std = { version = "0.5", features = ["full"] }           # everything
 | `json` | json | JSON serialization | serde, serde_json |
 | `ron` | ron | Rusty Object Notation | serde, ron |
 | `wire` | wire | Zero-copy binary serialization | rkyv |
+| `http` | http | Blocking HTTPS client (rustls-only TLS) | ureq, iri-string |
+| `online` | online | TCP reachability probing | none |
+| `fs-raw` | fs | Bytes available on a filesystem, unprivileged | rustix |
 | `full` | all of the above | — | all of the above |
 
 ## Module reference
@@ -63,7 +66,7 @@ lgwks_std = { version = "0.5", features = ["full"] }           # everything
 | `glob` | Shell-style glob matching (DP algorithm, O(M*N)) | `glob` |
 | `hex` | Hex encode and decode | `hex` |
 | `leb128` | LEB128 variable-length integer encoding | — |
-| `task` | Minimal single-threaded async executor | — |
+| `task` | Single-threaded executor: `block_on`, concurrent `join_all`, off-thread `spawn_blocking` | — |
 | `time` | RFC 3339 timestamps, calendar math | `chrono`, `time` |
 | `random` | OS entropy via `getrandom` | `getrandom` |
 | `id` | UUID v4 generation and parsing | `uuid` |
@@ -72,6 +75,8 @@ lgwks_std = { version = "0.5", features = ["full"] }           # everything
 | `json` | JSON encoding and decoding via serde | `serde_json` |
 | `ron` | RON encoding and decoding via serde | `ron` |
 | `wire` | Zero-copy binary wire serialization via rkyv | `rkyv` |
+| `http` | Blocking HTTP GET/POST with strict URL validation | `ureq`, `iri-string` |
+| `online` | TCP reachability probing, zero-dep | — |
 
 ## Dependency philosophy
 
@@ -86,6 +91,9 @@ Cargo metadata; Cargo.lock preserves the exact transitive provenance.
 - **ron** — 1 leaf beyond serde (bitflags)
 - **rkyv** — 5 djkoloski crates, zero external deps
 - **getrandom** — zero deps in std-only mode
+- **ureq** — blocking HTTP client, rustls-only TLS stack plus small leaves
+- **iri-string** — zero-dep URI validation leaf at default features
+- **rustix** — safe POSIX syscall surface for the `fs-raw` primitive; Unix-only, optional
 
 The `core` feature carries zero external dependencies. You choose what you pull
 in; every feature flag is one capability, one stack, no surprises.
@@ -97,4 +105,4 @@ requirements demand it.
 
 ## License
 
-BSD-3-Clause — Copyright 2026 Logical Works Incorporated
+Apache-2.0 — Copyright 2026 Logical Works Incorporated
