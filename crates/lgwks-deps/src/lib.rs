@@ -631,7 +631,6 @@ mod tests {
                 "rustix",
                 "serde",
                 "serde_json",
-                "thiserror",
                 "ureq",
             ];
 

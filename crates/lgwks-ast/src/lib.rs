@@ -10,6 +10,17 @@
 //! Enforced invariant **INV-AST-ONE-PARSER**: a consumer identifies, selects,
 //! and parses through this crate and does not depend on `ast-grep` directly.
 //!
+//! ## Code observability
+//!
+//! This is the estate's code-observability lane: structural parsing here, and
+//! the shared typed-diagnostic derive in [`error`]. [`ParseError`] is built with
+//! it, and downstream analysers derive `Display`/`source`/`#[from]` from the
+//! same stack instead of each declaring `thiserror`. The crate root re-exports
+//! the derive because `#[derive(Error)]` expands to absolute
+//! `::thiserror::__private<N>::…` paths resolved in the *consuming* crate: a
+//! consumer names this crate `thiserror` (`extern crate lgwks_ast as thiserror;`)
+//! and derives normally, with no `thiserror` edge of its own.
+//!
 //! ## Grammar selection
 //!
 //! One cargo feature per grammar forwards to `ast-grep-language`. The default
@@ -54,7 +65,16 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use std::fmt;
+pub mod error;
+
+/// Root re-export required by the `thiserror` derive's absolute expansion path.
+///
+/// `#[derive(Error)]` expands to `::thiserror::__private<N>::…`, resolved in
+/// the *consuming* crate. A consumer with no `thiserror` Cargo edge makes that
+/// path resolve here by naming this crate `thiserror`; the glob is what carries
+/// the version-suffixed private module.
+#[doc(hidden)]
+pub use thiserror::*;
 
 use ast_grep_core::Language as CoreLanguage;
 use ast_grep_core::matcher::{Pattern, PatternBuilder, PatternError};
@@ -295,9 +315,10 @@ impl LanguageExt for CustomLang {
 }
 
 /// A checked-parse refusal. None of these may be reported as clean.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ParseError {
     /// The source exceeds the byte bound.
+    #[error("source is {actual} bytes; parser limit is {limit} bytes")]
     SourceTooLarge {
         /// Observed length in bytes.
         actual: usize,
@@ -305,6 +326,7 @@ pub enum ParseError {
         limit: usize,
     },
     /// The selected grammar could not produce a syntax tree.
+    #[error("{language} parser could not produce a syntax tree: {detail}")]
     ParserUnavailable {
         /// The language name.
         language: &'static str,
@@ -312,11 +334,13 @@ pub enum ParseError {
         detail: String,
     },
     /// The tree carries an `ERROR` or `MISSING` recovery node.
+    #[error("{language} parser produced an ERROR or MISSING node")]
     InvalidSyntax {
         /// The language name.
         language: &'static str,
     },
     /// The tree exceeds the node bound.
+    #[error("{language} AST exceeds {limit} nodes (observed at least {observed})")]
     AstTooLarge {
         /// The language name.
         language: &'static str,
@@ -326,33 +350,6 @@ pub enum ParseError {
         limit: usize,
     },
 }
-
-impl fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::SourceTooLarge { actual, limit } => {
-                write!(f, "source is {actual} bytes; parser limit is {limit} bytes")
-            }
-            Self::ParserUnavailable { language, detail } => write!(
-                f,
-                "{language} parser could not produce a syntax tree: {detail}"
-            ),
-            Self::InvalidSyntax { language } => {
-                write!(f, "{language} parser produced an ERROR or MISSING node")
-            }
-            Self::AstTooLarge {
-                language,
-                observed,
-                limit,
-            } => write!(
-                f,
-                "{language} AST exceeds {limit} nodes (observed at least {observed})"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for ParseError {}
 
 /// Node count, deepest depth, and recovery state from one traversal.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
