@@ -8,7 +8,7 @@
 // ── Re-exports ──────────────────────────────────────────────────────────────
 
 pub use serde::{self, Deserialize, Serialize};
-pub use serde_json::{Error, Map, Number, Value, json};
+pub use serde_json::{Deserializer, Error, Map, Number, Value, json};
 
 // ── Encoding ────────────────────────────────────────────────────────────────
 

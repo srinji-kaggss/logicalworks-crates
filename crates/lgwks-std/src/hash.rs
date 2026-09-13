@@ -90,6 +90,17 @@ pub fn blake3(data: &[u8]) -> Digest {
     Digest(*blake3::hash(data).as_bytes())
 }
 
+/// Hash `data` with keyed BLAKE3 under `key` and return the 32-byte digest.
+///
+/// This is the estate's message-authentication primitive: whoever holds `key`
+/// can recompute the tag, whoever does not cannot forge one. Use it where a
+/// checksum is not enough because the writer is adversarial (audit chains,
+/// sealed receipts). The key must come from outside the sealed artifact
+/// (environment, keyring); a key stored beside the tags proves nothing.
+pub fn keyed(key: &[u8; 32], data: &[u8]) -> Digest {
+    Digest(*blake3::keyed_hash(key, data).as_bytes())
+}
+
 /// Incremental hasher for streaming data.
 pub struct Hasher(blake3::Hasher);
 
@@ -170,5 +181,29 @@ mod tests {
     #[test]
     fn from_hex_rejects_wrong_length() {
         assert!(Digest::from_hex("abcd").is_err());
+    }
+
+    #[test]
+    fn keyed_differs_from_unkeyed() {
+        let key = [0x42u8; 32];
+        assert_ne!(keyed(&key, b"hello world"), blake3(b"hello world"));
+    }
+
+    #[test]
+    fn keyed_is_key_sensitive() {
+        assert_ne!(keyed(&[0x01u8; 32], b"data"), keyed(&[0x02u8; 32], b"data"));
+    }
+
+    #[test]
+    fn keyed_deterministic_across_calls() {
+        let key = [0x07u8; 32];
+        assert_eq!(keyed(&key, b"receipt"), keyed(&key, b"receipt"));
+    }
+
+    #[test]
+    fn keyed_matches_blake3_keyed_hash() {
+        let key = [0xABu8; 32];
+        let expected = *blake3::keyed_hash(&key, b"vector").as_bytes();
+        assert_eq!(keyed(&key, b"vector").as_bytes(), &expected);
     }
 }

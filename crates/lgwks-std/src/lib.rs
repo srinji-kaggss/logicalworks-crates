@@ -19,6 +19,7 @@
 //! - `http` — http. Adds `ureq` (rustls-only TLS), `iri-string`.
 //! - `online` — online. Zero deps.
 //! - `fs-raw` — fs::available_space. Adds `rustix` (Unix-only).
+//! - `process` — process::kill_process_group. Adds `rustix/process` (Unix-only).
 //! - `full` — all of the above.
 
 #![forbid(unsafe_code)]
@@ -40,6 +41,8 @@ pub mod leb128;
 pub mod online;
 #[cfg(feature = "pattern")]
 pub mod pattern;
+#[cfg(feature = "process")]
+pub mod process;
 #[cfg(feature = "random")]
 pub mod random;
 #[cfg(feature = "ron")]

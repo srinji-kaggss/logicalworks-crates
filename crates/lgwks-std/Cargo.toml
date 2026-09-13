@@ -30,8 +30,8 @@ keywords = ["stdlib", "utilities", "zero-config", "async", "serialization"]
 #   ureq          — blocking HTTP client, rustls-only (no gzip/cookies/json
 #                   extras); closure is the rustls TLS stack plus small leaves
 #   iri-string    — zero-dep URI validation leaf at default features
-#   rustix        — safe POSIX syscall surface for the fs-raw primitives
-#                   stable std does not expose; Unix-only, optional
+#   rustix        — safe POSIX syscall surface for the fs-raw and process
+#                   primitives stable std does not expose; Unix-only, optional
 [features]
 default = ["core"]
 core = []
@@ -44,7 +44,8 @@ wire = ["dep:rkyv"]
 http = ["dep:ureq", "dep:iri-string"]
 online = []
 fs-raw = ["dep:rustix"]
-full = ["random", "hash", "pattern", "json", "ron", "wire", "http", "online", "fs-raw"]
+process = ["dep:rustix", "rustix?/process"]
+full = ["random", "hash", "pattern", "json", "ron", "wire", "http", "online", "fs-raw", "process"]
 
 [dependencies]
 blake3 = { version = "1.8", default-features = false, optional = true }
