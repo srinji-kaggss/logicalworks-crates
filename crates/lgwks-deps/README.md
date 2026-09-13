@@ -7,9 +7,9 @@ Every other third-party capability is an optional feature you select:
 ```toml
 [dependencies]
 # Engine without the bot facade:
-lgwks_deps = { version = "0.1.6", default-features = false, features = ["tokio"] }
+lgwks_deps = { version = "0.1.7", default-features = false, features = ["tokio"] }
 # GPU desktop UI:
-lgwks_deps = { version = "0.1.6", default-features = false, features = ["gpui"] }
+lgwks_deps = { version = "0.1.7", default-features = false, features = ["gpui"] }
 ```
 
 ```rust

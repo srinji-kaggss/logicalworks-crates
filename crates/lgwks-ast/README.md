@@ -63,7 +63,7 @@ ast-grep-language ships is its own opt-in feature, and `full` enables all 28:
 
 ```toml
 [dependencies]
-lgwks_ast = { version = "0.1.2", features = ["lang-c", "lang-cpp", "lang-scala", "lang-kotlin", "lang-tsx"] }
+lgwks_ast = { version = "0.1.3", features = ["lang-c", "lang-cpp", "lang-scala", "lang-kotlin", "lang-tsx"] }
 # or everything: features = ["full"]
 ```
 

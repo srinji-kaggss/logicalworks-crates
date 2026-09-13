@@ -6,42 +6,79 @@ independently; each release lists per-crate deltas. The format follows
 `0.x`, so any minor may carry breaking changes, which are then listed
 explicitly under that crate.
 
-## [Unreleased]
+## [lgwks_std 0.6.3] — 2026-09-13
 
 ### Added
 
-- `lgwks_std::retry` (core, zero-dep): `RetryPolicy` value type — attempts,
-  exponential backoff with caller-supplied jitter, total deadline.
-  Pure data: no I/O, no threads, no clock reads. O(1) saturating `delay`.
-- `lgwks_std::http::Options::idempotency_key`: attach an `Idempotency-Key`
-  header; the client never invents the key.
-- `lgwks_std::ron::FromSliceError::source`: forwards the wrapped UTF-8 / RON
-  error instead of dropping the chain.
-- Examples that compile in CI: `lgwks_std` quickstart (core-only),
-  `lgwks_ast` parse tour, `lgwks_deps` checkout audit.
-- `lgwks_ast` feature-matrix acceptance: `--no-default-features` asserts an
-  empty grammar table selects nothing (no more vacuous green).
-- Repo bar: root `CHANGELOG.md`, `SECURITY.md`, `CONTRIBUTING.md`,
-  `docs/distributed-boundaries.md`, per-crate docs.rs `all-features`
-  metadata, `lgwks_ast` LICENSE, discoverability metadata for `lgwks_deps`
-  / `lgwks_ast`, shared `[workspace.lints]`, crate docs on every `pub mod`
-  listing, README quickstarts with current versions.
+- `retry` (core, zero-dep): `RetryPolicy` value type — attempts, exponential
+  backoff with caller-supplied jitter, total deadline. Pure data: no I/O, no
+  threads, no clock reads. O(1) saturating `delay`.
+- `http::Options::idempotency_key`: attach an `Idempotency-Key` header; the
+  client never invents the key.
+- `ron::FromSliceError::source`: forwards the wrapped UTF-8 / RON error
+  instead of dropping the chain.
+- Quickstart example (`examples/quickstart.rs`), compiled and run in CI.
 
 ### Changed
 
-- `lgwks_std::time::ParseError` `Display` now carries the `at` offset on every
-  variant (previously dropped on four of six). Messages changed; match on
-  variants, not strings.
-- `lgwks_bot::error` documents that `String` causes at the domain boundary are
-  intentional (typed envelope, escaped payload), narrowing INV-BOT-ERROR-TYPED
-  wording without weakening enforcement.
-- `lgwks_bot::cap` documents that `Cap::new` accepts any name by convention
-  and enforcement is by grant equality; prefer the shipped constants.
-- `lgwks_bot` documents both domain paths (`lgwks_bot::net` and
-  `lgwks_bot::domain::net`) as stable, and `BotSpec` as validate-only (no
-  `from_spec` materializer, no `bot!` macro — by decision, see below).
-- `lgwks_std::http` documents the pooling boundary: one attempt per call, no
-  connection reuse, retries are caller policy via `retry`.
+- `time::ParseError` `Display` now carries the `at` offset on every variant
+  (previously dropped on four of six). Messages changed; match on variants,
+  not strings.
+- `http` documents the pooling boundary: one attempt per call, no connection
+  reuse, retries are caller policy via `retry`.
+
+## [lgwks_bot 0.3.2] — 2026-09-13
+
+### Changed
+
+- `error` documents that `String` causes at the domain boundary are
+  intentional (typed envelope, escaped payload), narrowing
+  INV-BOT-ERROR-TYPED wording without weakening enforcement.
+- `cap` documents that `Cap::new` accepts any name by convention and
+  enforcement is by grant equality; prefer the shipped constants.
+- Both domain paths (`lgwks_bot::net` and `lgwks_bot::domain::net`) documented
+  as stable; `BotSpec` documented as validate-only (no `from_spec`
+  materializer, no `bot!` macro — by decision, see below).
+- `rt` intra-doc links repaired (absolute `crate::` paths) under the new
+  `broken_intra_doc_links` deny lane.
+
+## [lgwks_ast 0.1.3] — 2026-09-13
+
+### Added
+
+- Shipped LICENSE (was declared but missing from the package).
+- Parse-tour example (`examples/parse.rs`, `lang-rust`-gated).
+- Feature-matrix acceptance: `--no-default-features` asserts an empty grammar
+  table selects nothing (no more vacuous green).
+- Discoverability metadata (keywords) and docs.rs `all-features` config.
+
+## [lgwks_deps 0.1.7] — 2026-09-13
+
+### Added
+
+- Checkout-audit example (`examples/check.rs`) exercising
+  `check_dependencies_against` the way CI does.
+- Discoverability metadata (categories, keywords) and docs.rs
+  `all-features` config.
+
+### Changed
+
+- README leads with the storefront (was gate-first): install-and-select
+  snippets with `default-features = false`, tokio-via-facade guidance,
+  CLI-vs-library split.
+
+## Shared repo bar (all four crates, 2026-09-13)
+
+- Root `CHANGELOG.md`, `SECURITY.md`, `CONTRIBUTING.md`,
+  `docs/distributed-boundaries.md` (mesh transport/identity/time/
+  replication/backpressure/observability/schema boundaries, each with an
+  owner).
+- Shared `[workspace.lints]` (`missing_docs` deny, `unsafe_code` forbid,
+  `broken_intra_doc_links` deny) with per-crate opt-in; new CI lanes: docs
+  builds (all-features + no-default), per-crate clippy matrix,
+  README-version drift guard.
+- Crate docs on every `pub mod` listing; README quickstarts pinned at current
+  versions.
 
 ### Decisions (no code)
 
