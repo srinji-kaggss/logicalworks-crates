@@ -3069,7 +3069,7 @@ checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
 
 [[package]]
 name = "lgwks_ast"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ast-grep-core",
  "ast-grep-language",
@@ -3078,7 +3078,7 @@ dependencies = [
 
 [[package]]
 name = "lgwks_bot"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "lgwks_deps",
  "lgwks_std",
@@ -3086,7 +3086,7 @@ dependencies = [
 
 [[package]]
 name = "lgwks_deps"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "gpui",
  "lgwks_std",
@@ -3097,7 +3097,7 @@ dependencies = [
 
 [[package]]
 name = "lgwks_std"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "blake3",
  "getrandom 0.4.3",

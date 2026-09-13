@@ -1,7 +1,7 @@
 [package]
 name = "lgwks_ast"
 description = "The estate's code-observability lane: one multi-language AST parser (language identification, ast-grep grammar selection, bounded traversal) plus the shared typed-diagnostic derive."
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"

@@ -5,10 +5,10 @@ Source of truth for the estate's shared Rust foundation crates, extracted from
 
 | Crate | Version | Role |
 |---|---|---|
-| `lgwks_std` | 0.6.1 | Core functions: hex, time, id, hash, glob, pattern, json, ron, wire, fs, task, leb128, encoding |
-| `lgwks_bot` | 0.3.0 | Async, runner, and actor surface: Observe, Evaluate, Execute, Query verbs plus the curated runtime |
-| `lgwks_ast` | 0.1.1 | The estate's one multi-language AST parser: language identification, ast-grep grammar selection, bounded traversal |
-| `lgwks_deps` | 0.1.5 | The third-party storefront: opt-in dependency features, admission, audit, freshness (`lgwks-deps check`) |
+| `lgwks_std` | 0.6.2 | Core functions: hex, time, id, hash, glob, pattern, json, ron, wire, fs, http, online, process, task, leb128, encoding |
+| `lgwks_bot` | 0.3.1 | Async, runner, and actor surface: Observe, Evaluate, Execute, Query verbs plus the curated runtime |
+| `lgwks_ast` | 0.1.2 | The estate's code-observability lane: multi-language AST parsing plus the shared typed-diagnostic derive |
+| `lgwks_deps` | 0.1.6 | The third-party storefront: opt-in dependency features, admission, audit, freshness (`lgwks-deps check`) |
 
 All four crates are Apache-2.0, Logical Works Incorporated. Versions move
 together from this repo; the next bump publishes here.
