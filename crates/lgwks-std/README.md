@@ -46,6 +46,7 @@ lgwks_std = { version = "0.5", features = ["full"] }           # everything
 | Feature | Modules | What it adds | External deps |
 |---------|---------|-------------|---------------|
 | `core` (default) | encoding, fs, glob, hex, leb128, task, time | — | **0** |
+| `error` | error | `std::error::Error` derive (`Display`, `source`, `#[from]`) | thiserror |
 | `random` | random, id | UUID v4, OS entropy | getrandom |
 | `hash` | hash | BLAKE3 content-addressable hashing | blake3 |
 | `pattern` | pattern | Linear-time compiled regex | regex |
@@ -65,6 +66,7 @@ lgwks_std = { version = "0.5", features = ["full"] }           # everything
 | `fs` | Recursive directory walking with sandbox enforcement | `walkdir` |
 | `glob` | Shell-style glob matching (DP algorithm, O(M*N)) | `glob` |
 | `hex` | Hex encode and decode | `hex` |
+| `error` | Typed-error derive: `Display`, `source`, `#[from]` | `thiserror` |
 | `leb128` | LEB128 variable-length integer encoding | — |
 | `task` | Single-threaded executor: `block_on`, concurrent `join_all`, off-thread `spawn_blocking` | — |
 | `time` | RFC 3339 timestamps, calendar math | `chrono`, `time` |
@@ -88,6 +90,7 @@ Cargo metadata; Cargo.lock preserves the exact transitive provenance.
 - **regex** — 4 BurntSushi-internal crates, zero external deps
 - **serde** — derive stack (proc-macro2, quote, syn)
 - **serde_json** — 2 leaves beyond serde (itoa, ryu)
+- **thiserror** — `thiserror-impl` derive on the shared serde proc-macro stack
 - **ron** — 1 leaf beyond serde (bitflags)
 - **rkyv** — 5 djkoloski crates, zero external deps
 - **getrandom** — zero deps in std-only mode

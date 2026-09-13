@@ -10,6 +10,7 @@
 //! ## Feature map
 //!
 //! - `core` (default) — encoding, fs, glob, hex, leb128, task, time. Zero deps.
+//! - `error` — error. Adds `thiserror`.
 //! - `random` — random, id. Adds `getrandom`.
 //! - `hash` — hash. Adds `blake3`.
 //! - `pattern` — pattern. Adds `regex`.
@@ -25,6 +26,8 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 pub mod encoding;
+#[cfg(feature = "error")]
+pub mod error;
 pub mod fs;
 pub mod glob;
 #[cfg(feature = "hash")]
@@ -51,3 +54,26 @@ pub mod task;
 pub mod time;
 #[cfg(feature = "wire")]
 pub mod wire;
+
+/// Root re-export required by the `thiserror` derive's absolute expansion path.
+///
+/// `#[derive(Error)]` expands to `::thiserror::__private<N>::…`, an absolute
+/// path resolved in the *consuming* crate. A consumer that has no `thiserror`
+/// Cargo edge of its own makes that path resolve here by naming this crate
+/// `thiserror`:
+///
+/// ```
+/// extern crate lgwks_std as thiserror;
+///
+/// #[derive(thiserror::Error, Debug)]
+/// pub enum StoreError {
+///     #[error("value length {actual} exceeds maximum {maximum}")]
+///     Length { actual: usize, maximum: usize },
+/// }
+/// ```
+///
+/// The glob is what carries the version-suffixed `__private<N>` module, so it
+/// is deliberately a glob rather than a named re-export.
+#[cfg(feature = "error")]
+#[doc(hidden)]
+pub use thiserror::*;

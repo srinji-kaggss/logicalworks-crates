@@ -46,6 +46,20 @@ approved_on = "2026-08-30"
 review = "https://github.com/srinji-kaggss/Braid/issues/91"
 
 [[approved]]
+crate = "thiserror"
+tier = "boundary"
+version = "^2"
+owner = "lgwks_std"
+capability = "error.derive"
+source = "registry"
+allowed_consumers = "lgwks_std"
+allowed_kinds = "normal"
+reason = "Display and source implementations need compiler introspection the standard library does not expose."
+approved_by = "Director"
+approved_on = "2026-09-13"
+review = "https://github.com/srinji-kaggss/logicalworks-crates/pull/4"
+
+[[approved]]
 crate = "blake3"
 tier = "boundary"
 version = "^1.8"

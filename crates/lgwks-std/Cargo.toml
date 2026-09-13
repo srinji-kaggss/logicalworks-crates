@@ -32,9 +32,14 @@ keywords = ["stdlib", "utilities", "zero-config", "async", "serialization"]
 #   iri-string    — zero-dep URI validation leaf at default features
 #   rustix        — safe POSIX syscall surface for the fs-raw and process
 #                   primitives stable std does not expose; Unix-only, optional
+#   thiserror      — 1 crate + thiserror-impl derive, reusing the serde
+#                   proc-macro stack (proc-macro2, quote, syn); the derive is
+#                   the one honest oracle for `Display`/`source`, which stable
+#                   std does not generate
 [features]
 default = ["core"]
 core = []
+error = ["dep:thiserror"]
 random = ["dep:getrandom"]
 hash = ["dep:blake3"]
 pattern = ["dep:regex"]
@@ -45,7 +50,7 @@ http = ["dep:ureq", "dep:iri-string"]
 online = []
 fs-raw = ["dep:rustix"]
 process = ["dep:rustix", "rustix?/process"]
-full = ["random", "hash", "pattern", "json", "ron", "wire", "http", "online", "fs-raw", "process"]
+full = ["error", "random", "hash", "pattern", "json", "ron", "wire", "http", "online", "fs-raw", "process"]
 
 [dependencies]
 blake3 = { version = "1.8", default-features = false, optional = true }
@@ -53,6 +58,7 @@ regex = { version = "1.13", optional = true }
 rkyv = { version = "0.8", default-features = false, features = ["alloc", "bytecheck"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
+thiserror = { version = "2", default-features = false, optional = true }
 ron = { version = "0.12", optional = true }
 getrandom = { version = "0.4", optional = true }
 ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }

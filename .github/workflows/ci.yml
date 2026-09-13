@@ -115,6 +115,7 @@ jobs:
            cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features hash --no-default-features
            cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features pattern --no-default-features
            cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features json --no-default-features
+           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features error --no-default-features
            cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features wire --no-default-features
            cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features http --no-default-features
            cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features online --no-default-features
