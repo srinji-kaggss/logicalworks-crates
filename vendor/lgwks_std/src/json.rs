@@ -1,6 +1,6 @@
 //! `json` owns JSON encoding and decoding for external interfaces.
 //! Built on serde_json for correctness and interoperability. For
-//! internal binary wire format, use [`crate::wire`].
+//! internal binary wire format, use the `wire` module (feature `wire`).
 //!
 //! INV-JSON-UTF8: all output is valid UTF-8. Input is validated as
 //! UTF-8 during deserialization.
@@ -44,7 +44,8 @@ pub fn from_slice<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Err
     serde_json::from_slice(bytes)
 }
 
-/// Deserialize from a reader.
+/// Deserialize the entire `reader` as JSON into `T`. The reader is consumed to
+/// EOF; an I/O failure and a syntax failure both surface as [`Error`].
 pub fn from_reader<R: std::io::Read, T: serde::de::DeserializeOwned>(
     reader: R,
 ) -> Result<T, Error> {
@@ -56,7 +57,8 @@ pub fn from_value<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, Err
     serde_json::from_value(value)
 }
 
-/// Serialize a value into a [`Value`].
+/// Build a [`Value`] tree from `value`. Fails when `value` contains a map whose
+/// keys are not strings, or when its `Serialize` impl reports an error.
 pub fn to_value<T: Serialize>(value: &T) -> Result<Value, Error> {
     serde_json::to_value(value)
 }
