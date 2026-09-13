@@ -24,15 +24,35 @@
 //! way to stand enforcement down is `enforce = false` under `[policy]` in the
 //! register itself — a reviewable diff carrying a human's name, never an
 //! environment variable a build can set for itself.
+//!
+//! ## Storefront
+//!
+//! `lgwks_deps` is also the estate's install-and-select surface for
+//! third-party engines: enable `tokio` for the async runtime behind
+//! `lgwks_bot::rt` (`use lgwks_deps::tokio::...` only when bypassing the bot
+//! facade) or `gpui` for the GPU desktop UI. Capability features are
+//! default-off; the `scan` gate-tool feature is the default-on exception for
+//! `cargo install` CLI use. Library consumers take
+//! `default-features = false` plus exactly the engine they need so the Rust
+//! parser never rides along with a runtime edge.
+//!
+//! Do NOT `cargo add tokio` / `cargo add gpui` directly: the gate refuses any
+//! second edge, and the facade (`lgwks_bot::rt`, `lgwks_deps::tokio`) is the
+//! single entry the estate audits.
 
-#![forbid(unsafe_code)]
-#![deny(missing_docs)]
+// Lint contract (missing_docs deny, unsafe_code forbid, broken intra-doc
+// links deny) comes from the workspace root.
 
+/// The approval register: parsing and lookup for `contract/APPROVED.toml`.
 pub mod contract;
+/// The register: parsing and approval lookup for `contract/APPROVED.toml`.
 pub mod lock;
+/// Cargo metadata edges: who authored which external dependency.
 pub mod metadata;
+/// Rust source scan: the keel zero-gate detectors behind `lgwks-deps scan` (feature `scan`).
 #[cfg(feature = "scan")]
 pub mod scan;
+/// Vendor-tree coverage: binding the lockfile to the shared `vendor/` tree.
 pub mod vendor;
 
 /// The estate's one authored `tokio` edge, re-exported for the storefront.

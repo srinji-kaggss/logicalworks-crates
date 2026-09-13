@@ -95,6 +95,56 @@ jobs:
           components: clippy
       - name: Clippy all workspace targets
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Clippy feature matrix
+        # Per-crate all-features (gpui excluded: it needs the Xcode Metal
+        # toolchain and is covered by the gpui-macos job, not ubuntu lanes).
+        run: >
+          cargo clippy --locked --manifest-path crates/lgwks-std/Cargo.toml
+          --all-targets --all-features -- -D warnings &&
+          cargo clippy --locked --manifest-path crates/lgwks-bot/Cargo.toml
+          --all-targets --all-features -- -D warnings &&
+          cargo clippy --locked --manifest-path crates/lgwks-ast/Cargo.toml
+          --all-targets --all-features -- -D warnings &&
+          cargo clippy --locked --manifest-path crates/lgwks-deps/Cargo.toml
+          --all-targets --features tokio-full -- -D warnings
+      - name: Clippy no default features
+        run: >
+          cargo clippy --locked --manifest-path crates/lgwks-std/Cargo.toml
+          --all-targets --no-default-features -- -D warnings &&
+          cargo clippy --locked --manifest-path crates/lgwks-bot/Cargo.toml
+          --all-targets --no-default-features -- -D warnings &&
+          cargo clippy --locked --manifest-path crates/lgwks-ast/Cargo.toml
+          --all-targets --no-default-features -- -D warnings
+
+  docs:
+    name: Docs
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.98.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+      - name: Doc build with broken-link denial
+        # Per-crate (gpui excluded: it needs the Xcode Metal toolchain and is
+        # covered by the gpui-macos job, not ubuntu lanes).
+        run: >
+          RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
+          -p lgwks_std --all-features &&
+          RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
+          -p lgwks_bot --all-features &&
+          RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
+          -p lgwks_ast --all-features &&
+          RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
+          -p lgwks_deps --features tokio-full
+      - name: Doc build without default features
+        run: >
+          RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
+          --manifest-path crates/lgwks-bot/Cargo.toml --no-default-features &&
+          RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
+          --manifest-path crates/lgwks-ast/Cargo.toml --no-default-features
 
   feature-matrix:
     name: lgwks-std feature matrix
@@ -202,6 +252,40 @@ jobs:
               raise SystemExit(
                   f"Unexpected package repository URL: {package['repository']}"
               )
+
+          # README version pins must track the manifests (stale copy-paste
+          # downgrades consumers on 0.x, where minors may break).
+          import re as _re
+
+          pins = {
+              "lgwks_std": tomllib.loads(
+                  Path("crates/lgwks-std/Cargo.toml").read_text(encoding="utf-8")
+              )["package"]["version"],
+              "lgwks_bot": tomllib.loads(
+                  Path("crates/lgwks-bot/Cargo.toml").read_text(encoding="utf-8")
+              )["package"]["version"],
+              "lgwks_ast": tomllib.loads(
+                  Path("crates/lgwks-ast/Cargo.toml").read_text(encoding="utf-8")
+              )["package"]["version"],
+              "lgwks_deps": tomllib.loads(
+                  Path("crates/lgwks-deps/Cargo.toml").read_text(encoding="utf-8")
+              )["package"]["version"],
+          }
+          md_files = [Path("README.md")] + sorted(Path("crates").glob("*/README.md"))
+          bad = []
+          for md in md_files:
+              text = md.read_text(encoding="utf-8")
+              for crate, version in pins.items():
+                  major, minor, *_ = version.split(".")
+                  for m in _re.finditer(
+                      rf"{crate}\s*=\s*(?:\{{\s*version\s*=\s*)?\"(\d+)\.(\d+)(?:\.(\d+))?\"",
+                      text,
+                  ):
+                      if (m.group(1), m.group(2)) != (major, minor):
+                          bad.append(f"{md}: {m.group(0)} (manifest is {version})")
+          if bad:
+              raise SystemExit("Stale README version pins:\n" + "\n".join(bad))
+          print("README version pins track the manifests")
           PY
 
   package-smoke:

@@ -63,7 +63,7 @@ ast-grep-language ships is its own opt-in feature, and `full` enables all 28:
 
 ```toml
 [dependencies]
-lgwks_ast = { version = "0.1", features = ["lang-c", "lang-cpp", "lang-scala", "lang-kotlin", "lang-tsx"] }
+lgwks_ast = { version = "0.1.2", features = ["lang-c", "lang-cpp", "lang-scala", "lang-kotlin", "lang-tsx"] }
 # or everything: features = ["full"]
 ```
 
@@ -119,7 +119,9 @@ let parsed = try_parse_with("SELECT 1", &sql, sql.name()).expect("valid SQL");
 ```
 
 `TSLanguage` is re-exported, so a consumer adds only the grammar crate, never
-`ast-grep-core` directly.
+`ast-grep-core` directly. A grammar crate is a third-party edge like any
+other: register it in `contract/APPROVED.toml` (owner, capability, reason)
+before depending on it — `lgwks-deps check` refuses it otherwise.
 
 A grammar the estate needs belongs in `ast-grep-language` upstream, following
 its [add-a-language guide](https://ast-grep.github.io/contributing/add-lang.html):

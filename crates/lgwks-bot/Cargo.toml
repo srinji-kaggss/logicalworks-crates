@@ -6,6 +6,7 @@ edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"
 repository = "https://github.com/srinji-kaggss/logicalworks-crates"
+documentation = "https://docs.rs/lgwks_bot"
 homepage = "https://github.com/srinji-kaggss/logicalworks-crates/tree/main/crates/lgwks-bot"
 readme = "README.md"
 categories = ["development-tools", "config"]
@@ -31,7 +32,12 @@ full = ["rt", "time", "sync", "macros", "net", "process", "fs", "signal"]
 lgwks_std = { workspace = true, features = ["json", "http"] }
 lgwks_deps = { workspace = true, default-features = false, optional = true }
 
-[dev-dependencies]
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [[example]]
 name = "bounded_fanout"

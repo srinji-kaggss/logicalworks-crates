@@ -1,9 +1,16 @@
 //! `cap` owns the capability token for bot domains and enforces
-//! INV-BOT-CAP-DOTTED: capabilities are dotted string names drawn from the
-//! bot vocabulary, consistent with the global IR's `Capability` model.
+//! INV-BOT-CAP-DOTTED: the shipped capabilities are dotted string names drawn
+//! from the bot vocabulary, consistent with the global IR's `Capability` model.
+//! [`Cap::new`] accepts any name by convention — custom capabilities are
+//! data-driven (`Cap::new("your.domain.cap")`), so the constructor cannot
+//! reject unknown names without breaking that path. Enforcement is by equality
+//! at the gate (`required ⊆ granted`): an unknown or misspelled name simply
+//! never matches a grant. Prefer the [`Cap::NET`]/[`Cap::FS`]/[`Cap::SYS`]/
+//! [`Cap::NOTIFY`] constants and their shorthand constructors for shipped
+//! capabilities.
 //!
 //! Names ([`Cap`]) are forgeable labels — authority is the sealed [`Auth`]
-//! proof, minted only by [`GrantSet`](super::gate::GrantSet). Every
+//! proof, minted only by [`GrantSet`](crate::gate::GrantSet). Every
 //! side-effecting verb takes `(Auth, input)` tuples and checks coverage
 //! before acting. This stops confused-deputy calls and accidental ungated
 //! use; it is not a sandbox — in-process code can always dial out directly,

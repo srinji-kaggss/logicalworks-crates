@@ -1,3 +1,7 @@
+//! Sync-surface acceptance without the async engine.
+//!
+//! Compiled only under `--no-default-features`: proves the serializable spec
+//! surface (`BotSpec` JSON round-trip) survives with no `tokio` in the tree.
 #![cfg(not(feature = "rt"))]
 
 use lgwks_bot::BotSpec;

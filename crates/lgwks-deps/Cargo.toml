@@ -6,8 +6,11 @@ edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"
 repository = "https://github.com/srinji-kaggss/logicalworks-crates"
+documentation = "https://docs.rs/lgwks_deps"
 readme = "README.md"
 homepage = "https://github.com/srinji-kaggss/logicalworks-crates/tree/main/crates/lgwks-deps"
+categories = ["development-tools"]
+keywords = ["dependencies", "audit", "supply-chain", "lgwks"]
 
 # The deps crate consumes JSON only through the estate facade it enforces.
 # Depending on serde_json directly here would make the checker its own first
@@ -67,3 +70,10 @@ path = "src/main.rs"
 [lib]
 name = "lgwks_deps"
 path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

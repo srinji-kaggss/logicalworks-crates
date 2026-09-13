@@ -3,8 +3,16 @@
 //! http(s) URIs before any socket opens.
 //!
 //! The API is blocking. From async code, run it on a blocking thread.
-//! HTTP error statuses (4xx/5xx) are returned as [`Response`], never as
-//! [`Error`] — only transport failure, timeout, and invalid URLs error.
+//! HTTP error statuses (4xx/5xx) are returned as [`Response`](crate::http::Response),
+//! never as [`Error`](crate::http::Error) — only transport failure, timeout,
+//! and invalid URLs error.
+//!
+//! Each call builds and drops its own connection agent: there is no
+//! connection pooling. Callers that issue bursts should reuse a
+//! [`crate::retry::RetryPolicy`] budget and keep concurrency bounded
+//! (`lgwks_bot::rt::task::join_all_bounded`), not open unbounded parallel
+//! requests. Retries, backoff, and circuit-breaking are caller policy, not
+//! client behavior — the client makes exactly one attempt per call.
 
 use std::fmt;
 use std::io::Read;
@@ -14,7 +22,7 @@ use iri_string::types::UriAbsoluteStr;
 
 // ── Options ─────────────────────────────────────────────────────────────────
 
-/// Request options. Start from [`Options::default`] (30s timeout).
+/// Request options. Start from [`Options::default`](crate::http::Options::default) (30s timeout).
 #[derive(Debug, Clone)]
 pub struct Options {
     /// Total request timeout, covering connect, TLS, send, and receive.
@@ -38,6 +46,20 @@ impl Default for Options {
     }
 }
 
+impl Options {
+    /// Attach an idempotency key (`Idempotency-Key` header) so a retried
+    /// request is deduplicated by the receiver. Pair with
+    /// [`crate::retry::RetryPolicy`] and a caller-generated key
+    /// (`crate::id::Uuid::new_v4` under feature `random`); the client never
+    /// invents the key, because a regenerated key on retry would defeat the
+    /// deduplication the header exists for.
+    pub fn idempotency_key(mut self, key: &str) -> Self {
+        self.headers
+            .push(("Idempotency-Key".to_string(), key.to_string()));
+        self
+    }
+}
+
 // ── Response ────────────────────────────────────────────────────────────────
 
 /// A completed HTTP exchange: status, headers, and full body.
@@ -52,7 +74,8 @@ pub struct Response {
 }
 
 impl Response {
-    /// The body as UTF-8, or [`Error::Transport`] when it is not valid UTF-8.
+    /// The body as UTF-8, or [`crate::http::Error::Transport`]
+    /// when it is not valid UTF-8.
     pub fn text(&self) -> Result<&str, Error> {
         std::str::from_utf8(&self.body).map_err(|utf8_error| {
             Error::Transport(format!("response body is not valid UTF-8: {utf8_error}"))
@@ -69,7 +92,7 @@ pub enum Error {
     /// carried: it can contain credentials in its userinfo or a token in its
     /// query string, and the caller already holds it.
     InvalidUrl,
-    /// The request hit [`Options::timeout`].
+    /// The request hit [`Options::timeout`](crate::http::Options::timeout).
     Timeout,
     /// The exchange never completed: DNS, TCP, TLS, or protocol failure.
     Transport(String),

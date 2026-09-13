@@ -1,11 +1,13 @@
 //! `online` owns reachability probing with zero dependencies.
 //!
-//! [`probe`] tests one socket address; [`is_online`] tests the public
+//! [`probe`](crate::online::probe) tests one socket address;
+//! [`is_online`](crate::online::is_online) tests the public
 //! internet via anycast endpoints. Both return plain booleans — a failed
 //! probe is a signal, not an error.
 //!
-//! [`is_online`] exercises the live internet and is not covered by the
-//! hermetic test suite; pin your own endpoint with [`probe`] instead.
+//! [`is_online`](crate::online::is_online) exercises the live internet and is
+//! not covered by the hermetic test suite; pin your own endpoint with
+//! [`probe`](crate::online::probe) instead.
 
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
@@ -26,7 +28,7 @@ pub fn probe(addr: impl ToSocketAddrs, timeout: Duration) -> bool {
 ///
 /// Dials anycast endpoints over TCP (1.1.1.1:443, 8.8.8.8:53); true when
 /// either answers. This is a heuristic for UI gating and diagnostics, not
-/// a guarantee a given host is reachable — use [`probe`] for that.
+/// a guarantee a given host is reachable — use [`crate::online::probe`] for that.
 pub fn is_online(timeout: Duration) -> bool {
     probe("1.1.1.1:443", timeout) || probe("8.8.8.8:53", timeout)
 }

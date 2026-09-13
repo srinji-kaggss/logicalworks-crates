@@ -34,12 +34,10 @@
 //! let fired = bot.block_on_tick().expect("tick propagates domain errors");
 //! ```
 
-#![forbid(unsafe_code)]
-#![deny(missing_docs)]
-// The verb traits are async by design. `lgwks_std::task` drives every bot on
-// one local thread, so a verb's returned future is deliberately not `Send`;
-// the `async_fn_in_trait` auto-trait warning does not apply to this crate.
 #![allow(async_fn_in_trait)]
+// Verbs are async by design (single-threaded `lgwks_std::task` driver, futures
+// deliberately not `Send`). Remaining lint contract (missing_docs deny,
+// unsafe_code forbid, broken intra-doc links deny) comes from the workspace.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -53,9 +51,13 @@ use std::pin::Pin;
 /// implementer must be able to name the return type.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
+/// Capability tokens and sealed authority proofs.
 pub mod cap;
 pub mod domain {
     //! Shipped automation domains.
+    //!
+    //! Both paths are stable: `lgwks_bot::net` and `lgwks_bot::domain::net`
+    //! name the same module. Prefer the short path in new code.
     pub mod chat;
     pub mod data;
     pub mod eval;
@@ -66,12 +68,25 @@ pub mod domain {
     pub mod notify;
     pub mod sys;
 }
+/// Typed bot errors.
 pub mod error;
+/// Grant sets: build-time admission and per-tick proof minting.
 pub mod gate;
+/// JSON through the estate facade (`lgwks_std::json`).
 pub mod json;
+/// Async runtime surface (feature `rt`): owned `Runtime`, bounded fan-out,
+/// timers, channels, and opt-in drivers.
 #[cfg(feature = "rt")]
 pub mod rt;
+/// The serializable spec contract and the builder that assembles bots.
+///
+/// `BotSpec` is validate-only: there is no `from_spec` materializer. A spec
+/// that validates still builds through `Bot::builder`, so capability grants
+/// stay explicit at the call site. The builder DSL is the DSL — there is
+/// deliberately no `bot!` proc-macro (it would drag `syn` into every consumer
+/// and hide the per-call `Auth::check` that auditors read).
 pub mod spec;
+/// The four verbs: Observe, Evaluate, Execute, Query. No fifth verb exists.
 pub mod verb;
 
 pub use cap::{Auth, Cap};

@@ -8,13 +8,20 @@
 //!
 //! [`lgwks_bot`]: crate
 //! [`lgwks_deps`]: lgwks_deps
+//! [`runtime`]: crate::rt::runtime
+//! [`task`]: crate::rt::task
+//! [`time`]: crate::rt::time
+//! [`sync`]: crate::rt::sync
+//! [`Runtime`]: crate::rt::runtime::Runtime
+//! [`Handle`]: crate::rt::runtime::Handle
+//! [`block_on`]: crate::rt::runtime::block_on
 //!
 //! # What this is
 //!
 //! - [`runtime`] — an explicitly owned runtime ([`Runtime`]),
 //!   its builder, a cloneable [`Handle`], and a free [`block_on`].
-//! - [`task`] — [`spawn`](task::spawn), `JoinHandle`, `JoinSet`, abort, and
-//!   [`join_all_bounded`](task::join_all_bounded): bounded-concurrency fan-out
+//! - [`task`] — [`spawn`](crate::rt::task::spawn), `JoinHandle`, `JoinSet`, abort, and
+//!   [`join_all_bounded`](crate::rt::task::join_all_bounded): bounded-concurrency fan-out
 //!   that preserves input order and never exceeds the limit.
 //! - [`time`] — `sleep`, `timeout`, `interval`, `Instant` (feature `time`).
 //! - [`sync`] — `mpsc`, `oneshot`, `broadcast`, `watch`, `Mutex`, `RwLock`,
@@ -41,7 +48,7 @@
 //!
 //! This is not a scheduler with realtime guarantees. Future completion order
 //! across worker threads is not deterministic; only the *result* order of
-//! [`join_all_bounded`](task::join_all_bounded) is.
+//! [`join_all_bounded`](crate::rt::task::join_all_bounded) is.
 
 pub mod runtime;
 pub mod task;
