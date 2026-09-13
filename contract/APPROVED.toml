@@ -46,6 +46,20 @@ approved_on = "2026-08-30"
 review = "https://github.com/srinji-kaggss/Braid/issues/91"
 
 [[approved]]
+crate = "thiserror"
+tier = "boundary"
+version = "^2"
+owner = "lgwks_ast"
+capability = "observability.error_derive"
+source = "registry"
+allowed_consumers = "lgwks_ast"
+allowed_kinds = "normal"
+reason = "Typed diagnostics and ParseError surfaces need Display and source derives the standard library does not generate."
+approved_by = "Director"
+approved_on = "2026-09-13"
+review = "https://github.com/srinji-kaggss/logicalworks-crates/pull/4"
+
+[[approved]]
 crate = "blake3"
 tier = "boundary"
 version = "^1.8"

@@ -1,6 +1,6 @@
 [package]
 name = "lgwks_ast"
-description = "The estate's one multi-language AST parser: extension/content language identification, ast-grep grammar selection, and bounded tree traversal."
+description = "The estate's code-observability lane: one multi-language AST parser (language identification, ast-grep grammar selection, bounded traversal) plus the shared typed-diagnostic derive."
 version = "0.1.1"
 edition = "2024"
 rust-version = "1.98"
@@ -14,6 +14,11 @@ categories = ["development-tools", "parser-implementations"]
 # parser. Code tools identify a language, select a grammar, and parse through
 # it; they do not each depend on ast-grep and rebuild the language/extension
 # tables. The only external edges are ast-grep-core and ast-grep-language.
+#
+# Observability lane: the crate also owns the estate's one typed-diagnostic
+# derive (`thiserror`), used by `ParseError` and re-exported so downstream
+# analysers derive `Display`/`source` here instead of each declaring the crate.
+# It lives in this lane, not `lgwks_std`, to keep the std+ stack minimal.
 #
 # Grammar selection is per-language and opt-in. The default enables the seven
 # languages the safety engine parses; every remaining grammar ast-grep-language
@@ -92,3 +97,4 @@ full = [
 [dependencies]
 ast-grep-core = "0.45"
 ast-grep-language = { version = "0.45", default-features = false }
+thiserror = { version = "2", default-features = false }

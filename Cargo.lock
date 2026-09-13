@@ -3073,6 +3073,7 @@ version = "0.1.1"
 dependencies = [
  "ast-grep-core",
  "ast-grep-language",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

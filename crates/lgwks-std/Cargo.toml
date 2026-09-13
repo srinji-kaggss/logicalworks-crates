@@ -32,6 +32,8 @@ keywords = ["stdlib", "utilities", "zero-config", "async", "serialization"]
 #   iri-string    — zero-dep URI validation leaf at default features
 #   rustix        — safe POSIX syscall surface for the fs-raw and process
 #                   primitives stable std does not expose; Unix-only, optional
+#   thiserror     — not here; the typed-error derive is owned by `lgwks_ast`
+#                   (the code-observability lane) so the std+ stack stays lean
 [features]
 default = ["core"]
 core = []

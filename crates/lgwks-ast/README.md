@@ -1,4 +1,4 @@
-# lgwks_ast — the estate's one multi-language AST parser
+# lgwks_ast — the estate's code-observability lane
 
 Code tools across the estate need the same three things: decide a source
 file's language, select that language's tree-sitter grammar, and walk the
@@ -6,6 +6,10 @@ resulting syntax tree safely. `keel-core`'s safety detectors and
 `code-world-model`'s graph extractor each built their own language enum,
 extension table, grammar mapping, and parse loop. That is one concept
 implemented twice; this crate owns it once.
+
+The lane also owns the estate's shared typed-diagnostic derive, so a parser and
+its consumers report refusals through one `Display`/`source` implementation
+instead of each declaring `thiserror`.
 
 ## Usage
 
@@ -28,6 +32,28 @@ assert!(metrics.nodes > 1);
 Consumers do not depend on `ast-grep` directly; the grammar types
 (`AstGrep`, `Node`, `StrDoc`, `SupportLang`) are re-exported here as
 `Parsed`, `AstNode`, and friends.
+
+## Typed diagnostics
+
+`ParseError` is built with the estate's one `std::error::Error` derive, and an
+analyser derives its own diagnostics from the same stack:
+
+```rust
+extern crate lgwks_ast as thiserror;
+
+#[derive(thiserror::Error, Debug)]
+enum Diagnostic {
+    #[error("parse refused: {0}")]
+    Refused(String),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+```
+
+`#[derive(Error)]` expands to absolute `::thiserror::__private<N>::…` paths
+resolved in the consuming crate, so the `extern crate … as thiserror;` line is
+what makes the expansion resolve; the crate root re-exports the module it
+needs.
 
 ## Grammar selection
 
