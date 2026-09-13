@@ -62,9 +62,10 @@
 //! candidate set and the probe source is held to [`MAX_DETECT_BYTES`]. The
 //! extension-only [`detect`] never parses.
 
-#![forbid(unsafe_code)]
-#![deny(missing_docs)]
+// Lint contract (missing_docs deny, unsafe_code forbid, broken intra-doc
+// links deny) comes from the workspace root.
 
+/// Typed diagnostics: [`ParseError`] and the shared error derive lane.
 pub mod error;
 
 /// Root re-export required by the `thiserror` derive's absolute expansion path.
@@ -723,5 +724,25 @@ mod tests {
             Some("rust-as-custom")
         );
         assert!(CustomLang::of_path("a/file.rs", &[custom]).is_none());
+    }
+}
+
+// ── Feature-matrix acceptance ───────────────────────────────────────────────
+// Compiled unconditionally so `cargo test --no-default-features` asserts
+// something instead of passing vacuously: a build with no grammar selects
+// nothing, and a build with grammars resolves the cheapest path (`of_path`).
+
+#[cfg(test)]
+mod feature_matrix_tests {
+    use super::*;
+
+    #[test]
+    fn empty_build_selects_nothing() {
+        if Language::ALL.is_empty() {
+            assert!(Language::of_path("src/lib.rs").is_none());
+            assert!(detect("probe.rs").is_none());
+        } else {
+            assert!(Language::of_path("src/lib.rs").is_some());
+        }
     }
 }

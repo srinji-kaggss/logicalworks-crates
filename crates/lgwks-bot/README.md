@@ -21,6 +21,14 @@ current-thread on WASM), bounded fan-out, timers, channels, and opt-in
 `tokio` edge. `--no-default-features` withdraws it entirely and leaves the
 actor surface on the synchronous executor.
 
+```sh
+cargo add lgwks_bot                                        # async by default
+cargo add lgwks_bot --no-default-features                  # sync actors only
+```
+
+Only need offline `Bot::tick` with no timers, channels, or sockets? Disable
+defaults: the sync surface runs on zero-dependency `lgwks_std::task`.
+
 ## Quick start
 
 ```rust
@@ -155,6 +163,13 @@ let spec = BotSpec::from_json(r#"{
 
 let json = spec.to_json()?;
 ```
+
+`BotSpec` is validate-only: there is no `from_spec` materializer. A spec that
+validates still builds through `Bot::builder`, so capability grants stay
+explicit at the call site. The builder chain is the DSL — there is
+deliberately no `bot!` proc-macro: it would drag `syn` into every consumer
+(the estate bans `syn` outside the `lgwks_deps` gate tool) and hide the
+per-call `Auth::check` that auditors read.
 
 ## Async runtime surface
 

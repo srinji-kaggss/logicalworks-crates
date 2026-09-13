@@ -18,6 +18,10 @@
 //! Together these replace `tokio`, `futures`, `pollster`, and `async-trait`
 //! for applications that only need to await futures, await a bounded set of
 //! them together, and keep blocking work off the driving thread.
+//!
+//! [`block_on`]: crate::task::block_on
+//! [`join_all`]: crate::task::join_all
+//! [`spawn_blocking`]: crate::task::spawn_blocking
 
 use std::any::Any;
 use std::future::Future;

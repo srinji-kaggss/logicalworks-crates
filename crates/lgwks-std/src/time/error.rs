@@ -96,8 +96,11 @@ pub enum ParseError {
     },
 }
 
-fn fmt_too_short(f: &mut fmt::Formatter<'_>, len: usize) -> fmt::Result {
-    write!(f, "RFC 3339 input too short: {len} bytes")
+fn fmt_too_short(f: &mut fmt::Formatter<'_>, len: usize, at: usize) -> fmt::Result {
+    write!(
+        f,
+        "RFC 3339 input too short: {len} bytes (ended at offset {at})"
+    )
 }
 
 fn fmt_malformed(f: &mut fmt::Formatter<'_>, at: usize, byte: u8) -> fmt::Result {
@@ -114,22 +117,32 @@ fn fmt_out_of_range(
     value: u32,
     min: u32,
     max: u32,
+    at: usize,
 ) -> fmt::Result {
-    write!(f, "{field} {value} out of range {min}..={max}")
+    write!(
+        f,
+        "{field} {value} out of range {min}..={max} at offset {at}"
+    )
 }
 
-fn fmt_fraction_width(f: &mut fmt::Formatter<'_>, digits: usize) -> fmt::Result {
-    write!(f, "fractional seconds width {digits} out of range 1..=9")
+fn fmt_fraction_width(f: &mut fmt::Formatter<'_>, digits: usize, at: usize) -> fmt::Result {
+    write!(
+        f,
+        "fractional seconds width {digits} out of range 1..=9 at offset {at}"
+    )
 }
 
-fn fmt_missing_offset(f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    write!(f, "missing timezone offset ('Z' or '+-HH:MM')")
+fn fmt_missing_offset(f: &mut fmt::Formatter<'_>, at: usize) -> fmt::Result {
+    write!(
+        f,
+        "missing timezone offset ('Z' or '+-HH:MM') at offset {at}"
+    )
 }
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::TooShort { len, at: _ } => fmt_too_short(f, *len),
+            Self::TooShort { len, at } => fmt_too_short(f, *len, *at),
             Self::Malformed { at, byte } => fmt_malformed(f, *at, *byte),
             Self::NonDigit { field, at, byte } => fmt_non_digit(f, *field, *at, *byte),
             Self::OutOfRange {
@@ -137,10 +150,10 @@ impl fmt::Display for ParseError {
                 value,
                 min,
                 max,
-                at: _,
-            } => fmt_out_of_range(f, *field, *value, *min, *max),
-            Self::FractionWidth { digits, at: _ } => fmt_fraction_width(f, *digits),
-            Self::MissingOffset { at: _ } => fmt_missing_offset(f),
+                at,
+            } => fmt_out_of_range(f, *field, *value, *min, *max, *at),
+            Self::FractionWidth { digits, at } => fmt_fraction_width(f, *digits, *at),
+            Self::MissingOffset { at } => fmt_missing_offset(f, *at),
         }
     }
 }

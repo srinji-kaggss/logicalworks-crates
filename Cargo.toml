@@ -29,3 +29,13 @@ lgwks_deps = { version = "0.1.6", path = "crates/lgwks-deps", default-features =
 [profile.release]
 opt-level = 3
 lto = true
+
+# Shared lint contract: every member opts in with `[lints] workspace = true`.
+# Mirrors the crate-level attributes the crates already carried, plus
+# `broken_intra_doc_links`, which CI enforces on the docs lanes.
+[workspace.lints.rust]
+missing_docs = "deny"
+unsafe_code = "forbid"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"

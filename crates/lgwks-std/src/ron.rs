@@ -66,7 +66,14 @@ impl core::fmt::Display for FromSliceError {
     }
 }
 
-impl std::error::Error for FromSliceError {}
+impl std::error::Error for FromSliceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Utf8(e) => Some(e),
+            Self::Ron(e) => Some(e),
+        }
+    }
+}
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 

@@ -1,6 +1,11 @@
 //! `error` owns the bot error vocabulary and enforces INV-BOT-ERROR-TYPED:
 //! every failure is a distinct typed variant carrying the capability, field,
-//! domain, or condition that caused it — never a bare string.
+//! domain, or condition that caused it. Variants that surface untrusted
+//! runtime text (`MalformedSpec`, `DomainError`, `EvaluateError`) carry it as
+//! a `String` cause by design: the boundary is typed (which domain failed is
+//! always known), while the foreign payload is escaped at the `Display`
+//! boundary so it cannot forge a log line. There is no bare-string failure
+//! with no typed envelope.
 
 use std::fmt;
 
@@ -73,4 +78,12 @@ impl fmt::Display for BotError {
     }
 }
 
-impl std::error::Error for BotError {}
+impl std::error::Error for BotError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        // All causes are data (`Cap`, `&'static str`, escaped `String`), never
+        // a wrapped error: there is no deeper source to forward. String
+        // causes are intentional here — see the module header — not a missing
+        // `#[from]` impl.
+        None
+    }
+}

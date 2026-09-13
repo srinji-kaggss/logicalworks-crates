@@ -9,6 +9,17 @@ Pick exactly what you need. The default feature compiles with **zero external
 dependencies**. Each optional feature unlocks one capability with one vetted
 stack beneath it — no transitive surprises, no feature flag archaeology.
 
+Package `lgwks_std` (underscore) lives in directory `crates/lgwks-std`
+(hyphen): `cargo add lgwks_std` then `use lgwks_std::...`.
+
+## Install
+
+```sh
+cargo add lgwks_std                                    # core only, zero deps
+cargo add lgwks_std --features json,http               # pick what you need
+cargo run -p lgwks_std --example quickstart            # 10-line tour (this repo)
+```
+
 ## Usage
 
 ```rust
@@ -28,24 +39,36 @@ use lgwks_std::hash;            // feature = "hash"
 use lgwks_std::pattern::Regex;  // feature = "pattern"
 use lgwks_std::json;            // feature = "json"
 
-let id = Uuid::new_v4().unwrap();
+let id = Uuid::new_v4().expect("OS entropy");
 let blake3 = hash::blake3(b"content-addressable");
-let re = Regex::new(r"\d+").unwrap();
-let value: MyStruct = json::from_str(&data)?;
+let re = Regex::new(r"\d+").expect("valid regex");
+
+#[derive(json::Serialize, json::Deserialize)]
+#[serde(crate = "lgwks_std::json::serde")]
+struct Point { x: i32, y: i32 }
+
+let point: Point = json::from_str(r#"{"x":1,"y":2}"#).expect("valid JSON");
 ```
+
+> **The `#[serde(crate = ...)]` line is required, not optional.** `serde`'s
+> derive macro resolves a crate named `serde`; the gate forbids consumers from
+> declaring `serde` directly (it is owned by `lgwks_std`), so the attribute
+> points the expansion at the re-export instead. If the compiler says
+> `cannot find - serde in this scope`, add the attribute — do NOT
+> `cargo add serde`; `lgwks-deps check` will refuse that edge.
 
 ## Feature map
 
 ```toml
 [dependencies]
-lgwks_std = "0.5"                       # core only, zero deps
-lgwks_std = { version = "0.5", features = ["hash", "json"] }  # pick what you need
-lgwks_std = { version = "0.5", features = ["full"] }           # everything
+lgwks_std = "0.6"                       # core only, zero deps
+lgwks_std = { version = "0.6", features = ["hash", "json"] }  # pick what you need
+lgwks_std = { version = "0.6", features = ["full"] }           # everything
 ```
 
 | Feature | Modules | What it adds | External deps |
 |---------|---------|-------------|---------------|
-| `core` (default) | encoding, fs, glob, hex, leb128, task, time | — | **0** |
+| `core` (default) | encoding, fs, glob, hex, leb128, retry, task, time | — | **0** |
 | `random` | random, id | UUID v4, OS entropy | getrandom |
 | `hash` | hash | BLAKE3 content-addressable hashing | blake3 |
 | `pattern` | pattern | Linear-time compiled regex | regex |
@@ -66,6 +89,7 @@ lgwks_std = { version = "0.5", features = ["full"] }           # everything
 | `glob` | Shell-style glob matching (DP algorithm, O(M*N)) | `glob` |
 | `hex` | Hex encode and decode | `hex` |
 | `leb128` | LEB128 variable-length integer encoding | — |
+| `retry` | Retry budgets: attempts, exponential backoff with caller jitter, deadlines | — |
 | `task` | Single-threaded executor: `block_on`, concurrent `join_all`, off-thread `spawn_blocking` | — |
 | `time` | RFC 3339 timestamps, calendar math | `chrono`, `time` |
 | `random` | OS entropy via `getrandom` | `getrandom` |

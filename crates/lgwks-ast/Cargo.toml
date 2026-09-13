@@ -6,9 +6,11 @@ edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"
 repository = "https://github.com/srinji-kaggss/logicalworks-crates"
+documentation = "https://docs.rs/lgwks_ast"
 readme = "README.md"
 homepage = "https://github.com/srinji-kaggss/logicalworks-crates/tree/main/crates/lgwks-ast"
 categories = ["development-tools", "parser-implementations"]
+keywords = ["parser", "ast", "tree-sitter", "static-analysis"]
 
 # INV-AST-ONE-PARSER: this crate is the estate's only multi-language AST
 # parser. Code tools identify a language, select a grammar, and parse through
@@ -98,3 +100,14 @@ full = [
 ast-grep-core = "0.45"
 ast-grep-language = { version = "0.45", default-features = false }
 thiserror = { version = "2", default-features = false }
+
+[[example]]
+name = "parse"
+required-features = ["lang-rust"]
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
