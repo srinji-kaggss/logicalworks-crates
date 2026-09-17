@@ -4,7 +4,17 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+dispose_work() {
+  if command -v trash >/dev/null 2>&1; then
+    trash "$WORK"
+  elif command -v gio >/dev/null 2>&1; then
+    gio trash "$WORK"
+  else
+    printf 'No OS Trash tool; retained package-smoke artifacts at %s\n' "$WORK" >&2
+    return 1
+  fi
+}
+trap dispose_work EXIT
 
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 if [[ "$TARGET_DIR" != /* ]]; then

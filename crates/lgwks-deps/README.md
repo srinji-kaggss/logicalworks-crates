@@ -7,9 +7,11 @@ Every other third-party capability is an optional feature you select:
 ```toml
 [dependencies]
 # Engine without the bot facade:
-lgwks_deps = { version = "0.1.7", default-features = false, features = ["tokio"] }
+lgwks_deps = { version = "0.1.8", default-features = false, features = ["tokio"] }
 # GPU desktop UI:
-lgwks_deps = { version = "0.1.7", default-features = false, features = ["gpui"] }
+lgwks_deps = { version = "0.1.8", default-features = false, features = ["gpui"] }
+# Native terminal UI:
+lgwks_deps = { version = "0.1.8", default-features = false, features = ["appcui"] }
 ```
 
 ```rust
@@ -32,6 +34,13 @@ platform renderer. macOS builds require a usable Xcode Metal Toolchain
 selected by GPUI. The feature is not compiled by the default `scan` build.
 
 ## Gate: admission, audit, freshness, vendor coverage, source scan
+
+Version 0.1.8 adds the default-off `appcui` feature, re-exporting
+`lgwks_deps::appcui`. It is not present in published 0.1.7. Downstream code
+uses `use lgwks_deps::appcui; use appcui::prelude::*;` so upstream macros can
+resolve their crate alias without a direct dependency. Native terminal support
+does not imply a full editor, backend execution, or measured platform parity.
+See `docs/appcui-admission.md` in the repository for authority and verification.
 
 CLI first (`cargo install lgwks_deps` keeps working with no flags — the
 default `scan` build is the gate tool); library second (see the storefront
