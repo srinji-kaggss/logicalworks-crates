@@ -6,7 +6,7 @@ resource: /docs/appcui-admission.md
 tags: [dependencies, appcui, terminal, rocco]
 generated: {by: agent:rust-coder, at: 2026-09-17}
 verified: {by: agent:rust-coder, method: explicit Director direction and policy source inspection}
-status: locally-verified-release-pending
+status: published-parent-review-pending
 stale_after: 2026-10-17
 sources: [Director conversation 2026-09-17, /AGENTS.md, /docs/dependency-doctrine.md, /contract/APPROVED.toml, https://github.com/gdt050579/AppCUI-rs, https://crates.io/crates/appcui/0.5.1]
 ---
@@ -101,3 +101,16 @@ was retried against the exact source. These are retained failures, not passes.
 The package-smoke change is a necessary safety repair for a mandatory command,
 not permission to clean unrelated artifacts. Actual native UI journey, other
 platforms, advisories and all broader assurance measurements remain unverified.
+
+## Publication correction and observed release
+
+The Director answered "Authorize release continuation" when explicitly asked
+whether to continue beyond the open-PR boundary. `cargo publish --locked -p
+lgwks_deps` then uploaded and published 0.1.8 successfully from clean commit
+822307da2c7adefccd09b449af2998c75deea42b. A fresh `cargo info lgwks_deps@0.1.8`
+download confirmed the AppCUI feature. Tag `lgwks_deps-v0.1.8` peels to that
+commit on origin. This supersedes the earlier dry-run-only status; no secret
+was disclosed or signing configuration changed. CI run 35281748262 completed
+successfully at that exact commit, including all three native feature targets.
+Parent independent review is still pending; CI is not that review. Rocco now
+consumes the actual published capability, never the checkout path.

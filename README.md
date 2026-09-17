@@ -8,7 +8,7 @@ Source of truth for the estate's shared Rust foundation crates, extracted from
 | `lgwks_std` | 0.6.3 | [docs.rs](https://docs.rs/lgwks_std) | Core functions: hex, time, id, hash, glob, pattern, json, ron, wire, fs, http, online, process, task, retry, leb128, encoding |
 | `lgwks_bot` | 0.3.2 | [docs.rs](https://docs.rs/lgwks_bot) | Async, runner, and actor surface: Observe, Evaluate, Execute, Query verbs plus the curated runtime |
 | `lgwks_ast` | 0.1.3 | [docs.rs](https://docs.rs/lgwks_ast) | The estate's code-observability lane: multi-language AST parsing plus the shared typed-diagnostic derive |
-| `lgwks_deps` | 0.1.7 | [docs.rs](https://docs.rs/lgwks_deps) | The third-party storefront: opt-in dependency features, admission, audit, freshness (`lgwks-deps check`) |
+| `lgwks_deps` | 0.1.8 | [docs.rs](https://docs.rs/lgwks_deps) | The third-party storefront: opt-in dependency features, admission, audit, freshness (`lgwks-deps check`) |
 
 All four crates are Apache-2.0, Logical Works Incorporated. Versions move
 independently from one repo and one tag; the table lists the current published
@@ -64,7 +64,7 @@ fn main() {
 | Rust source lint scan (zero-gate detectors) | `lgwks_deps` | `scan` (default for CLI) |
 | Raw `tokio` engine without the bot facade | `lgwks_deps` | `tokio*` with `default-features = false` |
 | GPU desktop UI (Zed's GPUI) | `lgwks_deps` | `gpui` with `default-features = false` |
-| Native terminal UI (next release; not in 0.1.7) | `lgwks_deps` | `appcui` with `default-features = false` |
+| Native terminal UI (AppCUI) | `lgwks_deps` | `appcui` with `default-features = false`, version 0.1.8 or newer |
 
 Surprises, documented once so no one re-discovers them: `online` is
 feature-gated (not in `core`); `tempfile` is dev-only (no production tempdir
