@@ -6,7 +6,7 @@ independently; each release lists per-crate deltas. The format follows
 `0.x`, so any minor may carry breaking changes, which are then listed
 explicitly under that crate.
 
-## [Unreleased]
+## [lgwks_deps 0.1.8] — release candidate
 
 ### lgwks_deps Added
 
