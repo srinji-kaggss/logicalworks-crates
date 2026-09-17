@@ -64,6 +64,7 @@ fn main() {
 | Rust source lint scan (zero-gate detectors) | `lgwks_deps` | `scan` (default for CLI) |
 | Raw `tokio` engine without the bot facade | `lgwks_deps` | `tokio*` with `default-features = false` |
 | GPU desktop UI (Zed's GPUI) | `lgwks_deps` | `gpui` with `default-features = false` |
+| Native terminal UI (next release; not in 0.1.7) | `lgwks_deps` | `appcui` with `default-features = false` |
 
 Surprises, documented once so no one re-discovers them: `online` is
 feature-gated (not in `core`); `tempfile` is dev-only (no production tempdir

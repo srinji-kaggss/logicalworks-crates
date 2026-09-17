@@ -31,6 +31,7 @@ scan = ["dep:syn", "dep:proc-macro2"]
 # default build pulls none of them. gpui is Zed's GPU desktop UI framework;
 # `tokio` is the async engine behind `lgwks_bot`'s runner surface.
 gpui = ["dep:gpui", "gpui/default"]
+appcui = ["dep:appcui"]
 tokio = ["dep:tokio"]
 tokio-time = ["tokio", "tokio/time"]
 tokio-sync = ["tokio", "tokio/sync"]
@@ -54,6 +55,7 @@ lgwks_std = { workspace = true, features = ["json"] }
 syn = { version = "2", features = ["full", "visit", "parsing"], optional = true }
 proc-macro2 = { version = "1", features = ["span-locations"], optional = true }
 gpui = { version = "0.2", optional = true }
+appcui = { version = "=0.5.1", default-features = false, optional = true }
 # The engine is compiled `default-features = false` with the portable `rt`
 # feature always on. Native targets add `rt-multi-thread`; WASM targets use the
 # current-thread runtime because Tokio does not provide its multi-thread driver

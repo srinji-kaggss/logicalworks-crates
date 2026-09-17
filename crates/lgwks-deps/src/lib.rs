@@ -68,6 +68,16 @@ pub use tokio;
 #[cfg(feature = "gpui")]
 pub use gpui;
 
+/// Native terminal widgets and input-driven drawing, selected explicitly.
+///
+/// ```
+/// use lgwks_deps::appcui;
+/// use appcui::prelude::*;
+/// let _layout = layout!("x:0,y:0,w:20,h:5");
+/// ```
+#[cfg(feature = "appcui")]
+pub use appcui;
+
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -624,7 +634,7 @@ mod tests {
                 .collect();
             assert_eq!(
                 names,
-                ["lgwks_std", "syn", "proc-macro2", "gpui", "tokio"],
+                ["lgwks_std", "syn", "proc-macro2", "gpui", "appcui", "tokio"],
                 "unexpected gate dependencies: {declared:?}"
             );
             for line in &declared {

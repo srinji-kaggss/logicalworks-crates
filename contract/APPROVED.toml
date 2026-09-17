@@ -18,6 +18,20 @@ enforce = true
 repository = "https://github.com/srinji-kaggss/logicalworks-crates"
 
 [[approved]]
+crate = "appcui"
+tier = "boundary"
+version = "=0.5.1"
+owner = "lgwks_deps"
+capability = "terminal.widgets"
+source = "registry"
+allowed_consumers = "lgwks_deps"
+allowed_kinds = "normal"
+reason = "Native terminal widgets and event dispatch are absent from the standard library and existing estate surfaces."
+approved_by = "Director"
+approved_on = "2026-09-17"
+review = "docs/appcui-admission.md"
+
+[[approved]]
 crate = "serde"
 tier = "boundary"
 version = "^1"
