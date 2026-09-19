@@ -78,6 +78,28 @@ pub use gpui;
 #[cfg(feature = "appcui")]
 pub use appcui;
 
+/// Minimalist tensor compute and safetensors loading, selected explicitly.
+///
+/// The storefront owns this edge so no consumer declares `candle-core`
+/// directly. Weights are loaded from local files; the feature is default-off.
+#[cfg(feature = "ml-candle")]
+pub use candle_core;
+
+/// Neural network layers and parameter containers built on `candle-core`.
+#[cfg(feature = "ml-candle")]
+pub use candle_nn;
+
+/// Reference transformer model implementations built on `candle-core`.
+///
+/// Selecting this feature also compiles `hf-hub`, which is network-capable;
+/// the estate runtime reads a local checkpoint and does not call the hub.
+#[cfg(feature = "ml-candle")]
+pub use candle_transformers;
+
+/// Vocabulary-driven subword tokenisation matching published checkpoints.
+#[cfg(feature = "ml-tokenizers")]
+pub use tokenizers;
+
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -634,7 +656,18 @@ mod tests {
                 .collect();
             assert_eq!(
                 names,
-                ["lgwks_std", "syn", "proc-macro2", "gpui", "appcui", "tokio"],
+                [
+                    "lgwks_std",
+                    "syn",
+                    "proc-macro2",
+                    "gpui",
+                    "appcui",
+                    "tokio",
+                    "candle-core",
+                    "candle-nn",
+                    "candle-transformers",
+                    "tokenizers",
+                ],
                 "unexpected gate dependencies: {declared:?}"
             );
             for line in &declared {

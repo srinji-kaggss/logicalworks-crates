@@ -176,6 +176,8 @@ jobs:
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features tokio
       - name: Check lgwks-deps GPUI storefront feature
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features gpui
+      - name: Check lgwks-deps ML storefront features
+        run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features ml-candle,ml-tokenizers
       - name: Check lgwks-bot async feature matrix
         run: |
           set -eu
@@ -225,6 +227,20 @@ jobs:
           toolchain: "1.98.0"
       - name: Check normal GPUI renderer feature
         run: cargo check --locked -p lgwks_deps --all-targets --features gpui
+
+  candle-macos:
+    name: Candle ML storefront (Metal)
+    needs: [build]
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.98.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+      - name: Check Candle Metal storefront features
+        run: cargo check --locked -p lgwks_deps --all-targets --features ml-candle-metal,ml-tokenizers
 
   contract-drift:
     name: lgwks-std contract drift checks
