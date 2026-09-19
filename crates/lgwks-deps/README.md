@@ -12,6 +12,8 @@ lgwks_deps = { version = "0.1.8", default-features = false, features = ["tokio"]
 lgwks_deps = { version = "0.1.8", default-features = false, features = ["gpui"] }
 # Native terminal UI:
 lgwks_deps = { version = "0.1.8", default-features = false, features = ["appcui"] }
+# ML inference: tensor compute, transformer models, and the matching tokenizer:
+lgwks_deps = { version = "0.1.8", default-features = false, features = ["ml-candle", "ml-tokenizers"] }
 ```
 
 ```rust
@@ -32,6 +34,16 @@ The `gpui` feature re-exports `lgwks_deps::gpui` and retains GPUI's normal
 platform renderer. macOS builds require a usable Xcode Metal Toolchain
 (`metal` and `metallib`); Linux builds require the platform development stack
 selected by GPUI. The feature is not compiled by the default `scan` build.
+
+The `ml-candle` feature re-exports `lgwks_deps::{candle_core, candle_nn,
+candle_transformers}` and `ml-candle-metal` additionally selects Candle's macOS
+Metal backend; `ml-tokenizers` re-exports `lgwks_deps::tokenizers`. They are
+default-off, so the default `scan` build compiles none of Candle's closure.
+Selecting `ml-candle` does pull `hf-hub` transitively through
+`candle-transformers` — the compiled tree is network-capable even though the
+estate runtime loads a local checkpoint and does not call the hub. See
+`docs/candle-admission.md` for authority, transitive-surface limits, and
+verification.
 
 ## Gate: admission, audit, freshness, vendor coverage, source scan
 

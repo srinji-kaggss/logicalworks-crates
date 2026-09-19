@@ -32,6 +32,16 @@ scan = ["dep:syn", "dep:proc-macro2"]
 # `tokio` is the async engine behind `lgwks_bot`'s runner surface.
 gpui = ["dep:gpui", "gpui/default"]
 appcui = ["dep:appcui"]
+# ML inference storefront. Candle is HuggingFace's minimalist Rust ML framework:
+# `ml-candle` brings tensor compute, NN layers, and the transformer model
+# registry; `ml-candle-metal` adds the macOS Metal backend to that set.
+# `ml-tokenizers` is the HuggingFace subword tokenizer used for tokenizer
+# parity with the reference runtime. All three stay default-off, so the default
+# `scan` build and every consumer that does not select them pull none of
+# Candle's closure.
+ml-candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers"]
+ml-candle-metal = ["ml-candle", "candle-transformers/metal"]
+ml-tokenizers = ["dep:tokenizers"]
 tokio = ["dep:tokio"]
 tokio-time = ["tokio", "tokio/time"]
 tokio-sync = ["tokio", "tokio/sync"]
@@ -61,6 +71,15 @@ appcui = { version = "=0.5.1", default-features = false, optional = true }
 # current-thread runtime because Tokio does not provide its multi-thread driver
 # there. Every other driver is a storefront feature the consumer selects.
 tokio = { version = "1", default-features = false, features = ["rt"], optional = true }
+# Candle and the HuggingFace tokenizer are storefront edges: optional and
+# default-off, so `cargo build`/`cargo install` pulls none of them. Model
+# weights load from local files; `candle-transformers` itself pulls `hf-hub`,
+# so selecting `ml-candle` does compile a network-capable closure even though
+# the runtime reads a local checkpoint.
+candle-core = { version = "0.11", optional = true }
+candle-nn = { version = "0.11", optional = true }
+candle-transformers = { version = "0.11", default-features = false, optional = true }
+tokenizers = { version = "0.23", optional = true }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread"], optional = true }
