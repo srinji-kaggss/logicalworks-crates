@@ -5,4 +5,4 @@ Cargo.lock.orig
 .codegraph/
 
 # graphify AST cache: derived build artifact, never source
-graphify-out/cache/
+graphify-out/
