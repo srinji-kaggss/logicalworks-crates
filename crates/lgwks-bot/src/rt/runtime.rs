@@ -28,6 +28,7 @@ pub const MAX_WORKER_THREADS: usize = 1024;
 pub struct Builder {
     worker_threads: Option<NonZeroUsize>,
     thread_name: Option<String>,
+    max_blocking_threads: Option<NonZeroUsize>,
 }
 
 impl Builder {
@@ -53,6 +54,19 @@ impl Builder {
     #[must_use]
     pub fn thread_name(mut self, name: impl Into<String>) -> Self {
         self.thread_name = Some(name.into());
+        self
+    }
+
+    /// Cap the blocking pool used by `spawn_blocking` and the `fs` driver.
+    /// Pass `None` for Tokio's default (512). The value is a
+    /// [`NonZeroUsize`] because Tokio refuses zero (`assert!(val > 0)`), so
+    /// an unbounded or zero pool cannot be expressed by accident; callers
+    /// that fan out blocking work pair this with
+    /// [`crate::rt::task::join_all_bounded`] to keep both async and blocking
+    /// concurrency explicit.
+    #[must_use]
+    pub fn max_blocking_threads(mut self, threads: Option<NonZeroUsize>) -> Self {
+        self.max_blocking_threads = threads;
         self
     }
 
@@ -88,6 +102,9 @@ impl Builder {
         }
         #[cfg(not(target_family = "wasm"))]
         builder.thread_name(self.thread_name.as_deref().unwrap_or("lgwks-bot"));
+        if let Some(max_blocking) = self.max_blocking_threads {
+            builder.max_blocking_threads(max_blocking.get());
+        }
         builder.enable_all();
         builder.build().map(|inner| Runtime { inner })
     }

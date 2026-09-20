@@ -173,6 +173,58 @@ fn bounded_fanout_with_empty_input_resolves_immediately() {
 }
 
 #[test]
+fn bounded_fanout_streams_a_large_input_without_exceeding_the_limit() {
+    let runtime = Runtime::new().expect("runtime");
+    let current = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+
+    // 64 inputs over limit 4: order must hold and peak concurrency must stay
+    // bounded even though the input count far exceeds the limit. Under the old
+    // spawn-everything-up-front shape this held the limit only via a semaphore
+    // while retaining all 64 tasks; the replenishing implementation never holds
+    // more than `limit` tasks.
+    let outputs = runtime.block_on(async {
+        let futures = (0..64u32).map(|index| {
+            let current = Arc::clone(&current);
+            let peak = Arc::clone(&peak);
+            async move {
+                let now = current.fetch_add(1, SeqCst) + 1;
+                peak.fetch_max(now, SeqCst);
+                sleep(Duration::from_millis(5)).await;
+                current.fetch_sub(1, SeqCst);
+                index * 3
+            }
+        });
+        join_all_bounded(4, futures).await
+    });
+
+    assert_eq!(
+        outputs,
+        (0..64u32).map(|index| index * 3).collect::<Vec<_>>()
+    );
+    let observed = peak.load(SeqCst);
+    assert!(
+        observed <= 4,
+        "peak concurrency {observed} exceeded limit 4"
+    );
+    assert!(observed >= 1, "no task ever ran");
+}
+
+#[test]
+fn builder_applies_an_explicit_blocking_pool_bound() {
+    let max_blocking = NonZeroUsize::new(4).expect("nonzero");
+    let runtime = Builder::new()
+        .max_blocking_threads(Some(max_blocking))
+        .build()
+        .expect("bounded blocking pool builds");
+    let value = runtime.block_on(async {
+        let handle = spawn(async { 6u32 });
+        handle.await.expect("task did not panic") * 7
+    });
+    assert_eq!(value, 42);
+}
+
+#[test]
 fn bounded_fanout_treats_limit_zero_as_one() {
     let runtime = Runtime::new().expect("runtime");
     let outputs = runtime.block_on(join_all_bounded(0, (0..4u32).map(std::future::ready)));
