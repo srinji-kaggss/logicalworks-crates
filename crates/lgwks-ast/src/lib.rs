@@ -214,6 +214,7 @@ fn any_extension_matches(known: &[&str], extension: &str) -> bool {
 impl Language {
     /// Language of a path by extension, or `None` without a compiled grammar.
     /// Case-insensitive without allocating a normalized copy.
+    #[must_use]
     pub fn of_path(path: &str) -> Option<Self> {
         let extension = extension_of(path)?;
         Self::ALL
@@ -247,6 +248,7 @@ pub struct CustomLang {
 impl CustomLang {
     /// Register `grammar` under `name`. `$` is assumed valid in the language's
     /// patterns; use [`CustomLang::with_expando`] when it is not.
+    #[must_use]
     pub fn new(name: &'static str, grammar: TSLanguage) -> Self {
         Self {
             name,
@@ -258,23 +260,27 @@ impl CustomLang {
 
     /// Replace the character standing in for `$` while parsing patterns, for a
     /// language where `$` is an identifier character.
+    #[must_use]
     pub fn with_expando(mut self, expando: char) -> Self {
         self.expando = expando;
         self
     }
 
     /// Declare the file extensions this language answers for.
+    #[must_use]
     pub fn with_extensions(mut self, extensions: &'static [&'static str]) -> Self {
         self.extensions = extensions;
         self
     }
 
     /// The lowercase, stable name used in findings and diagnostics.
+    #[must_use]
     pub fn name(&self) -> &'static str {
         self.name
     }
 
     /// Extensions answered for, without the leading dot.
+    #[must_use]
     pub fn extensions(&self) -> &'static [&'static str] {
         self.extensions
     }
@@ -282,6 +288,7 @@ impl CustomLang {
     /// The first candidate claiming `path`'s extension, case-insensitively.
     /// Registered grammars are selected explicitly; they never join
     /// [`Language::ALL`] or content detection.
+    #[must_use]
     pub fn of_path(path: &str, candidates: &[CustomLang]) -> Option<CustomLang> {
         let extension = extension_of(path)?;
         candidates
@@ -379,6 +386,7 @@ impl AstMetrics {
 /// parse per grammar. A caller that needs it opts in with
 /// [`try_detect_content`] and names the few grammars it expects, rather than
 /// trial-parsing every language this build carries.
+#[must_use]
 pub fn detect(path: &str) -> Option<Language> {
     Language::of_path(path)
 }
@@ -460,6 +468,7 @@ fn parse_bounded<L: LanguageExt>(
 
 /// Unchecked parse for diagnostics and tests that intentionally inspect
 /// malformed trees. Production call sites use [`try_parse`].
+#[must_use]
 pub fn parse(code: &str, language: Language) -> Parsed {
     parse_with(code, &language.support_lang())
 }
@@ -479,11 +488,13 @@ fn validate_source_size(source: &str, limit: usize) -> Result<(), ParseError> {
 
 /// Whether the tree holds an `ERROR` or `MISSING` node. Ask before reporting:
 /// on unreadable source, no finding means nothing parsed, not nothing wrong.
+#[must_use]
 pub fn has_syntax_issues<L: LanguageExt>(root: &AstNode<'_, L>) -> bool {
     inspect_ast(root, None).has_syntax_issues
 }
 
 /// Deepest branch depth, root counting as 1.
+#[must_use]
 pub fn max_depth<L: LanguageExt>(root: &AstNode<'_, L>) -> usize {
     inspect_ast(root, None).max_depth
 }
@@ -492,6 +503,7 @@ pub fn max_depth<L: LanguageExt>(root: &AstNode<'_, L>) -> usize {
 ///
 /// With a node cap, traversal stops at `limit + 1`: enough to prove refusal
 /// without letting validation itself go unbounded on a hostile tree.
+#[must_use]
 pub fn inspect_ast<'t, L: LanguageExt>(
     root: &AstNode<'t, L>,
     stop_after_nodes: Option<usize>,
@@ -512,6 +524,7 @@ pub fn inspect_ast<'t, L: LanguageExt>(
 /// The text of the first direct child whose `kind` equals one of `kinds`, or
 /// `None` when no direct child matches. Descendants are not searched, so a
 /// caller hunting a nested identifier must walk to that level first.
+#[must_use]
 pub fn child_text_with_kind<L: LanguageExt>(
     node: &AstNode<'_, L>,
     kinds: &[&str],
@@ -528,6 +541,7 @@ pub fn child_text_with_kind<L: LanguageExt>(
 /// name-resolution surface keel's `lang.rs` calls today; keel issue #556
 /// migrates it onto this crate, so removing these would turn that migration
 /// into a rewrite.
+#[must_use]
 pub fn definition_name<L: LanguageExt>(
     node: &AstNode<'_, L>,
     name_kinds: &[&str],
@@ -538,6 +552,7 @@ pub fn definition_name<L: LanguageExt>(
 /// The callee a call node names, or `None` when `node` is not a call kind or
 /// names none of `name_kinds`. See [`definition_name`] for why this trio is
 /// retained.
+#[must_use]
 pub fn callee_name<L: LanguageExt>(
     node: &AstNode<'_, L>,
     call_kinds: &[&str],

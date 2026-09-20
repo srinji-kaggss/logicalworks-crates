@@ -189,6 +189,7 @@ pub mod percent {
     /// Encodes every byte that is not an RFC 3986 unreserved character, which
     /// is the component-safe set: reserved delimiters such as `/` and `?` are
     /// escaped, so the result is safe to place in a single URL component.
+    #[must_use]
     pub fn encode_component(text: &str) -> String {
         let mut out = String::with_capacity(text.len());
         for &byte in text.as_bytes() {

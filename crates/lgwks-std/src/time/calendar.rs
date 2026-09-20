@@ -4,6 +4,7 @@
 //! elapsed since the Unix epoch (`1970-01-01`), accounting for 400-year leap cycles.
 
 /// Determines whether the given astronomical year index is a leap year (366 days).
+#[must_use]
 pub fn is_leap(year: i64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
@@ -13,6 +14,7 @@ pub fn is_leap(year: i64) -> bool {
 /// # Panics
 ///
 /// Panics if `month` is not in `1..=12`.
+#[must_use]
 pub fn days_in_month(year: i64, month: u32) -> u32 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
@@ -35,6 +37,7 @@ fn civil_to_era(year: i64, month: u32) -> (i64, i64) {
 }
 
 /// Days since 1970-01-01 for a proleptic Gregorian date.
+#[must_use]
 pub fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let (era, year_of_era) = civil_to_era(year, month);
     let month_prime = i64::from(if month > 2 { month - 3 } else { month + 9 });
@@ -78,6 +81,7 @@ fn day_of_year_to_month_day(day_of_year: i64, computed_year: i64) -> (i64, u32, 
 }
 
 /// The proleptic Gregorian date for a count of days since 1970-01-01.
+#[must_use]
 pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let shifted_days = days + 719_468;
     let (era, day_of_era) = shifted_to_era(shifted_days);

@@ -16,6 +16,7 @@ pub use parse::parse_rfc3339;
 use std::time::SystemTime;
 
 /// Formats the current instant as an RFC 3339 UTC string.
+#[must_use]
 pub fn now_rfc3339() -> String {
     to_rfc3339(SystemTime::now())
 }

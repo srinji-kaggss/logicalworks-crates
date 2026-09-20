@@ -53,9 +53,10 @@ impl Options {
     /// (`crate::id::Uuid::new_v4` under feature `random`); the client never
     /// invents the key, because a regenerated key on retry would defeat the
     /// deduplication the header exists for.
+    #[must_use]
     pub fn idempotency_key(mut self, key: &str) -> Self {
         self.headers
-            .push(("Idempotency-Key".to_string(), key.to_string()));
+            .push(("Idempotency-Key".to_owned(), key.to_owned()));
         self
     }
 }

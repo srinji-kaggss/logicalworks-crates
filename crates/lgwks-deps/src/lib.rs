@@ -257,6 +257,7 @@ impl fmt::Display for Refusal {
 
 impl Refusal {
     /// The crate this refusal is about.
+    #[must_use]
     pub fn krate(&self) -> &str {
         match self {
             Self::ForeignWorkspaceMember { krate, .. }
@@ -409,7 +410,7 @@ pub fn audit_direct(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
                 consumer: edge.consumer.clone(),
                 krate: edge.package.clone(),
                 approved: entry.source.clone(),
-                declared: edge.source.class().to_string(),
+                declared: edge.source.class().to_owned(),
             });
         } else if let Some(entry) = consumer_approvals
             .iter()

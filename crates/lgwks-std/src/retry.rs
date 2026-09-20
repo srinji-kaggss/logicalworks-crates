@@ -53,6 +53,7 @@ impl RetryPolicy {
     /// A policy of `max_attempts` tries starting at `base_delay` backoff with
     /// a `deadline` total budget. The per-backoff cap defaults to 30 seconds;
     /// use [`with_max_delay`](crate::retry::RetryPolicy::with_max_delay) to narrow it.
+    #[must_use]
     pub fn new(max_attempts: u32, base_delay: Duration, deadline: Duration) -> Self {
         Self {
             max_attempts: max_attempts.max(1),
@@ -63,6 +64,7 @@ impl RetryPolicy {
     }
 
     /// Cap any single backoff at `max_delay` (applied before jitter).
+    #[must_use]
     pub fn with_max_delay(mut self, max_delay: Duration) -> Self {
         self.max_delay = max_delay;
         self
@@ -73,6 +75,7 @@ impl RetryPolicy {
     /// `backoff - (entropy % (backoff + 1))`, so jitter only ever shrinks the
     /// wait. Saturating shift arithmetic keeps hostile attempt counts O(1)
     /// and panic-free.
+    #[must_use]
     pub fn delay(&self, attempt: u32, jitter_entropy: u64) -> Duration {
         let shift = attempt.min(31);
         let backoff = self
@@ -89,11 +92,13 @@ impl RetryPolicy {
     }
 
     /// Whether `elapsed` has consumed the total `deadline` budget.
+    #[must_use]
     pub fn deadline_exceeded(&self, elapsed: Duration) -> bool {
         elapsed >= self.deadline
     }
 
     /// Whether another attempt is allowed after `failures` failures.
+    #[must_use]
     pub fn should_retry(&self, failures: u32, elapsed: Duration) -> bool {
         failures < self.max_attempts && !self.deadline_exceeded(elapsed)
     }

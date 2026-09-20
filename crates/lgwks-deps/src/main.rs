@@ -398,7 +398,7 @@ fn extract_json_string(body: &str, key: &str) -> String {
 }
 
 // Each label is a column value; the format string owns the alignment.
-#[allow(clippy::print_literal)]
+#[expect(clippy::print_literal)]
 fn print_freshness_table(results: &[FreshnessResult]) {
     println!(
         "{:<30} {:<12} {:<12} {:<5} {}",

@@ -162,21 +162,21 @@ fn package_hash(checksum_file: &Path) -> Result<String, String> {
     let key = "\"package\"";
     let found = text
         .find(key)
-        .ok_or_else(|| "no \"package\" hash".to_string())?;
+        .ok_or_else(|| "no \"package\" hash".to_owned())?;
     let rest = text[found + key.len()..].trim_start();
     let rest = rest
         .strip_prefix(':')
-        .ok_or_else(|| "no \"package\" hash".to_string())?;
+        .ok_or_else(|| "no \"package\" hash".to_owned())?;
     let rest = rest.trim_start();
     let rest = rest
         .strip_prefix('"')
-        .ok_or_else(|| "no \"package\" hash".to_string())?;
+        .ok_or_else(|| "no \"package\" hash".to_owned())?;
     let end = rest
         .find('"')
-        .ok_or_else(|| "no \"package\" hash".to_string())?;
+        .ok_or_else(|| "no \"package\" hash".to_owned())?;
     let hash = rest[..end].to_string();
     if hash.is_empty() {
-        return Err("no \"package\" hash".to_string());
+        return Err("no \"package\" hash".to_owned());
     }
     Ok(hash)
 }
@@ -193,7 +193,7 @@ fn manifest_identity(manifest: &Path) -> Option<(String, String)> {
         if line.starts_with('[') {
             in_package = line == "[package]";
         } else if in_package && let Some((key, value)) = line.split_once('=') {
-            let value = value.trim().trim_matches('"').to_string();
+            let value = value.trim().trim_matches('"').to_owned();
             match key.trim() {
                 "name" if name.is_none() => name = Some(value),
                 "version" if version.is_none() => version = Some(value),
@@ -380,8 +380,8 @@ source = "git+https://example.com/org/git-crate#abc123"
         assert_eq!(
             report.missing,
             vec![Missing {
-                name: "missing-crate".to_string(),
-                version: "4.5.6".to_string(),
+                name: "missing-crate".to_owned(),
+                version: "4.5.6".to_owned(),
             }]
         );
     }
