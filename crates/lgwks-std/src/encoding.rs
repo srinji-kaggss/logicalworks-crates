@@ -54,6 +54,7 @@ pub mod base64 {
 
     /// Why a base64 string could not be decoded.
     #[derive(Debug, Clone, PartialEq, Eq)]
+    #[non_exhaustive]
     pub enum DecodeError {
         /// Padded base64 arrives in four-character quanta.
         BadLength {
@@ -214,6 +215,7 @@ pub mod percent {
 
     /// Why a percent-encoded string could not be decoded.
     #[derive(Debug, Clone, PartialEq, Eq)]
+    #[non_exhaustive]
     pub enum DecodeError {
         /// A `%` was not followed by two hex digits.
         TruncatedEscape {

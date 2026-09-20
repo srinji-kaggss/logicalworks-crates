@@ -117,6 +117,7 @@ macro_rules! define_languages {
         /// compiler enforces that a consumer cannot name a language whose
         /// grammar it did not compile.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #[non_exhaustive]
         pub enum Language {
             $(
                 #[doc = $doc]
@@ -324,6 +325,7 @@ impl LanguageExt for CustomLang {
 
 /// A checked-parse refusal. None of these may be reported as clean.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ParseError {
     /// The source exceeds the byte bound.
     #[error("source is {actual} bytes; parser limit is {limit} bytes")]
@@ -361,6 +363,7 @@ pub enum ParseError {
 
 /// Node count, deepest depth, and recovery state from one traversal.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AstMetrics {
     /// Nodes visited.
     pub nodes: usize,

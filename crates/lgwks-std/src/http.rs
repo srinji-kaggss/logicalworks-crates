@@ -24,6 +24,7 @@ use iri_string::types::UriAbsoluteStr;
 
 /// Request options. Start from [`Options::default`](crate::http::Options::default) (30s timeout).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Options {
     /// Total request timeout, covering connect, TLS, send, and receive.
     pub timeout: Duration,
@@ -65,6 +66,7 @@ impl Options {
 
 /// A completed HTTP exchange: status, headers, and full body.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Response {
     /// HTTP status code, including 4xx/5xx.
     pub status: u16,
@@ -88,6 +90,7 @@ impl Response {
 
 /// What `http` refuses to hide: bad URLs, timeouts, transport failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     /// The URL is not an absolute http(s) URI. The offending URL is not
     /// carried: it can contain credentials in its userinfo or a token in its

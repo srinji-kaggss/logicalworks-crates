@@ -37,6 +37,7 @@ use std::time::Duration;
 /// All fields are plain data so policies can cross crate boundaries (JSON,
 /// manifests, config files) without dragging an executor along.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RetryPolicy {
     /// Maximum attempts including the first try. `0` is normalised to `1`:
     /// a policy always permits the initial attempt, never zero work.
