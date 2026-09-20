@@ -41,12 +41,13 @@ where
 /// the property a plain [`JoinSet`] does not give: `JoinSet::join_next` yields
 /// completion order.
 ///
-/// # Concurrency bound
+/// # Concurrency and memory bound
 ///
-/// The bound is enforced by a shared semaphore acquired inside each task, so a
-/// task holds its permit for the whole of its future. All futures are placed on
-/// the runtime up front; the semaphore is what serializes them. A caller that
-/// also needs to bound *retained memory* must chunk its input.
+/// The bound is enforced by replenishment: at most `limit` tasks are spawned
+/// and awaited at once, and each completion spawns the next pending input. The
+/// retained [`JoinSet`] therefore never exceeds `limit` entries, and only the
+/// output vector grows with input length — a caller fanning out over thousands
+/// of inputs needs no manual chunking to keep task memory bounded.
 ///
 /// # Cancellation and failure
 ///
@@ -62,30 +63,47 @@ where
     T: Send + 'static,
 {
     use lgwks_deps::tokio::sync::Semaphore;
-    use std::sync::Arc;
 
-    let items: Vec<F> = futures.into_iter().collect();
-    let total = items.len();
+    let limit = limit.clamp(1, Semaphore::MAX_PERMITS);
+    let mut inputs = futures.into_iter();
+    let (lower, _) = inputs.size_hint();
+    // Index slots are appended as inputs are spawned, so the result vector is
+    // the only state that grows with input length; the JoinSet stays ≤ limit.
+    let mut slots: Vec<Option<T>> = Vec::new();
+    if lower > 0 {
+        slots.reserve(lower);
+    }
+    let mut set = JoinSet::new();
+    let mut next_index: usize = 0;
+    let mut total: usize = 0;
+
+    let spawn_next = |set: &mut JoinSet<(usize, T)>,
+                      slots: &mut Vec<Option<T>>,
+                      next_index: &mut usize,
+                      total: &mut usize,
+                      future: F| {
+        let index = *next_index;
+        *next_index += 1;
+        *total += 1;
+        slots.push(None);
+        set.spawn(async move {
+            let output = future.await;
+            (index, output)
+        });
+    };
+
+    // Prime the pipeline: at most `limit` tasks exist before the first
+    // completion, so a 64-input fan-out over limit 4 holds 4 tasks, not 64.
+    for _ in 0..limit {
+        match inputs.next() {
+            Some(future) => spawn_next(&mut set, &mut slots, &mut next_index, &mut total, future),
+            None => break,
+        }
+    }
     if total == 0 {
         return Vec::new();
     }
 
-    let permits = Arc::new(Semaphore::new(limit.clamp(1, Semaphore::MAX_PERMITS)));
-    let mut set = JoinSet::new();
-    for (index, future) in items.into_iter().enumerate() {
-        let permits = Arc::clone(&permits);
-        set.spawn(async move {
-            let permit = permits
-                .acquire()
-                .await
-                .expect("join_all_bounded: the semaphore is never closed");
-            let output = future.await;
-            drop(permit);
-            (index, output)
-        });
-    }
-
-    let mut slots: Vec<Option<T>> = (0..total).map(|_| None).collect();
     while let Some(joined) = set.join_next().await {
         match joined {
             Ok((index, output)) => slots[index] = Some(output),
@@ -95,6 +113,14 @@ where
                 // awaited. A shrink would break the INV-RT-BOUNDED-FANOUT
                 // guarantee, so fail loudly rather than fabricate a slot.
                 panic!("join_all_bounded: a task was cancelled before it produced a value");
+            }
+        }
+        match inputs.next() {
+            Some(future) => spawn_next(&mut set, &mut slots, &mut next_index, &mut total, future),
+            None => {
+                if set.is_empty() {
+                    break;
+                }
             }
         }
     }

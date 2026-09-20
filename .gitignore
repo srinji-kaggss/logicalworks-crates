@@ -3,3 +3,6 @@
 Cargo.lock.orig
 .DS_Store
 .codegraph/
+
+# graphify AST cache: derived build artifact, never source
+graphify-out/

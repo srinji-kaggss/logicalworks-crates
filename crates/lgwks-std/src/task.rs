@@ -100,7 +100,7 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 /// closure to completion. A caller that must stop in-flight blocking work has
 /// to arrange that cooperatively inside the closure.
 pub async fn join_all<F: Future>(futures: impl IntoIterator<Item = F>) -> Vec<F::Output> {
-    join_all_boxed(futures.into_iter().map(Box::pin).collect::<Vec<_>>()).await
+    join_all_boxed(futures.into_iter().map(Box::pin)).await
 }
 
 /// [`join_all`] over futures the caller has already boxed.

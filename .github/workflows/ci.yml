@@ -176,6 +176,8 @@ jobs:
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features tokio
       - name: Check lgwks-deps GPUI storefront feature
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features gpui
+      - name: Check lgwks-deps ML storefront features
+        run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features ml-candle,ml-tokenizers
       - name: Check lgwks-bot async feature matrix
         run: |
           set -eu
@@ -195,6 +197,23 @@ jobs:
            cargo check --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets
            cargo check --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --all-features
 
+  appcui-native:
+    name: AppCUI native storefront
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+          components: clippy
+      - run: cargo test --locked -p lgwks_deps --no-default-features --features appcui --lib
+      - run: cargo test --locked -p lgwks_deps --no-default-features --features appcui --doc
+      - run: cargo clippy --locked -p lgwks_deps --no-default-features --features appcui --all-targets -- -D warnings
+
   gpui-macos:
     name: GPUI macOS renderer
     needs: [build]
@@ -208,6 +227,20 @@ jobs:
           toolchain: "1.98.0"
       - name: Check normal GPUI renderer feature
         run: cargo check --locked -p lgwks_deps --all-targets --features gpui
+
+  candle-macos:
+    name: Candle ML storefront (Metal)
+    needs: [build]
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.98.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+      - name: Check Candle Metal storefront features
+        run: cargo check --locked -p lgwks_deps --all-targets --features ml-candle-metal,ml-tokenizers
 
   contract-drift:
     name: lgwks-std contract drift checks

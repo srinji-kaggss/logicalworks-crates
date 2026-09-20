@@ -1,0 +1,40 @@
+# Thin adapter: the factory is .keel/lanes.toml + the keel binary. Swap this
+# file to port to another CI platform; do not encode pipeline logic here.
+name: keel
+on: [push, pull_request]
+
+jobs:
+  keel:
+    runs-on: ubuntu-latest
+    # The generated pipeline is budgeted: a run that exceeds seven
+    # minutes is a failure, not a slow success.
+    timeout-minutes: 7
+    env:
+      # One authority for the executor fleet: the committed declaration.
+      # Without KEEL_EXECUTORS the loader disables local execution and
+      # refuses before scheduling, so the pipeline could never run.
+      KEEL_EXECUTORS: ${{ github.workspace }}/.keel/free-tier-executors.toml
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install
+      - name: Install keel
+        run: |
+          if [ -z "${KEEL_INSTALL_COMMAND}" ]; then
+            echo "keel is not published; set the repository variable KEEL_INSTALL_COMMAND to a shell command that places a keel binary on PATH." >&2
+            exit 1
+          fi
+          eval "${KEEL_INSTALL_COMMAND}"
+        env:
+          KEEL_INSTALL_COMMAND: ${{ vars.KEEL_INSTALL_COMMAND }}
+      - name: Run the keel pipeline
+        run: keel
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: keel-evidence
+          path: ${{ runner.temp }}/keel-runs
+          if-no-files-found: warn

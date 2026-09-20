@@ -25,6 +25,7 @@ pub fn encode(bytes: impl AsRef<[u8]>) -> String {
 /// Why a hex string could not be decoded. Variant names are stable and
 /// machine-readable; callers match on them rather than on message text.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DecodeError {
     /// The input had an odd number of characters, so some byte is half-written.
     OddLength {

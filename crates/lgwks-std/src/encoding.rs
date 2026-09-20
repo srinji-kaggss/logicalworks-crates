@@ -54,6 +54,7 @@ pub mod base64 {
 
     /// Why a base64 string could not be decoded.
     #[derive(Debug, Clone, PartialEq, Eq)]
+    #[non_exhaustive]
     pub enum DecodeError {
         /// Padded base64 arrives in four-character quanta.
         BadLength {
@@ -189,6 +190,7 @@ pub mod percent {
     /// Encodes every byte that is not an RFC 3986 unreserved character, which
     /// is the component-safe set: reserved delimiters such as `/` and `?` are
     /// escaped, so the result is safe to place in a single URL component.
+    #[must_use]
     pub fn encode_component(text: &str) -> String {
         let mut out = String::with_capacity(text.len());
         for &byte in text.as_bytes() {
@@ -213,6 +215,7 @@ pub mod percent {
 
     /// Why a percent-encoded string could not be decoded.
     #[derive(Debug, Clone, PartialEq, Eq)]
+    #[non_exhaustive]
     pub enum DecodeError {
         /// A `%` was not followed by two hex digits.
         TruncatedEscape {

@@ -7,6 +7,7 @@ use std::fmt;
 
 /// Why an LEB128 sequence could not be decoded.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DecodeError {
     /// Input ended unexpectedly before the terminating byte.
     UnexpectedEnd {

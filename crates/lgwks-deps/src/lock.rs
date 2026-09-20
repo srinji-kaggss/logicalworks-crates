@@ -83,10 +83,10 @@ fn handle_header(
 
 fn apply_key_value(key: &str, value: &str, pending: &mut Pending) {
     match key {
-        "name" => pending.name = Some(value.to_string()),
-        "version" => pending.version = Some(value.to_string()),
+        "name" => pending.name = Some(value.to_owned()),
+        "version" => pending.version = Some(value.to_owned()),
         "source" => pending.has_source = true,
-        "checksum" => pending.checksum = Some(value.to_string()),
+        "checksum" => pending.checksum = Some(value.to_owned()),
         _ => {}
     }
 }

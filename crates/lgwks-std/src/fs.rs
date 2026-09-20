@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 /// Options for configuring a recursive filesystem walk.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct WalkOptions {
     /// Maximum directory depth to traverse (0 = only the root directory entries).
     pub max_depth: usize,

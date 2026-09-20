@@ -68,6 +68,38 @@ pub use tokio;
 #[cfg(feature = "gpui")]
 pub use gpui;
 
+/// Native terminal widgets and input-driven drawing, selected explicitly.
+///
+/// ```
+/// use lgwks_deps::appcui;
+/// use appcui::prelude::*;
+/// let _layout = layout!("x:0,y:0,w:20,h:5");
+/// ```
+#[cfg(feature = "appcui")]
+pub use appcui;
+
+/// Minimalist tensor compute and safetensors loading, selected explicitly.
+///
+/// The storefront owns this edge so no consumer declares `candle-core`
+/// directly. Weights are loaded from local files; the feature is default-off.
+#[cfg(feature = "ml-candle")]
+pub use candle_core;
+
+/// Neural network layers and parameter containers built on `candle-core`.
+#[cfg(feature = "ml-candle")]
+pub use candle_nn;
+
+/// Reference transformer model implementations built on `candle-core`.
+///
+/// Selecting this feature also compiles `hf-hub`, which is network-capable;
+/// the estate runtime reads a local checkpoint and does not call the hub.
+#[cfg(feature = "ml-candle")]
+pub use candle_transformers;
+
+/// Vocabulary-driven subword tokenisation matching published checkpoints.
+#[cfg(feature = "ml-tokenizers")]
+pub use tokenizers;
+
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -225,6 +257,7 @@ impl fmt::Display for Refusal {
 
 impl Refusal {
     /// The crate this refusal is about.
+    #[must_use]
     pub fn krate(&self) -> &str {
         match self {
             Self::ForeignWorkspaceMember { krate, .. }
@@ -377,7 +410,7 @@ pub fn audit_direct(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
                 consumer: edge.consumer.clone(),
                 krate: edge.package.clone(),
                 approved: entry.source.clone(),
-                declared: edge.source.class().to_string(),
+                declared: edge.source.class().to_owned(),
             });
         } else if let Some(entry) = consumer_approvals
             .iter()
@@ -624,7 +657,18 @@ mod tests {
                 .collect();
             assert_eq!(
                 names,
-                ["lgwks_std", "syn", "proc-macro2", "gpui", "tokio"],
+                [
+                    "lgwks_std",
+                    "syn",
+                    "proc-macro2",
+                    "gpui",
+                    "appcui",
+                    "tokio",
+                    "candle-core",
+                    "candle-nn",
+                    "candle-transformers",
+                    "tokenizers",
+                ],
                 "unexpected gate dependencies: {declared:?}"
             );
             for line in &declared {

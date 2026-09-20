@@ -212,6 +212,7 @@ fn step_token(token: &Token<'_>, path: &[u8], dp: &[bool], next: &mut [bool]) {
 /// `[abc]` / `[a-z]` / `[!a-z]` character classes.
 ///
 /// Guaranteed $O(M \times N)$ time and $O(N)$ memory via deterministic DP.
+#[must_use]
 pub fn matches(pattern: &str, path: &str) -> bool {
     let tokens = tokenize(pattern.as_bytes());
     let path_bytes = path.as_bytes();

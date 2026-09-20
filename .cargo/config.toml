@@ -1,0 +1,12 @@
+# Make a plain `cargo build` the enforcement, not a separate CI step.
+#
+# This is not a trick: `cargo clippy` is literally
+# `cmd.env("RUSTC_WORKSPACE_WRAPPER", clippy_path)` — see clippy's own main.rs.
+# Setting it here means the lints in Cargo.toml `[workspace.lints]` fire on
+# every ordinary build, for workspace members only (`--cap-lints` still
+# protects the vendored tree), with no flag to remember and no CI step to skip.
+#
+# The wrapper composes with RUSTC_WRAPPER (sccache) in the order
+# `$RUSTC_WRAPPER $RUSTC_WORKSPACE_WRAPPER $RUSTC`.
+[build]
+rustc-workspace-wrapper = "clippy-driver"

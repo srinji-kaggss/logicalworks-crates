@@ -67,7 +67,7 @@ impl Error for ScanError {}
 /// Scans one Rust source text with all five detectors, ordered by line.
 pub fn scan_source(source: &str, path: &str) -> Result<Vec<Hit>, ScanError> {
     let file = syn::parse_file(source).map_err(|cause| ScanError::Unparseable {
-        path: path.to_string(),
+        path: path.to_owned(),
         cause: cause.to_string(),
     })?;
     let mut hits = Vec::new();
@@ -213,15 +213,15 @@ impl TokenString for syn::Expr {
         match self {
             syn::Expr::Lit(lit) => match &lit.lit {
                 syn::Lit::Str(s) => format!("{:?}", s.value()),
-                syn::Lit::ByteStr(_) | syn::Lit::CStr(_) => "b\"..\"".to_string(),
-                syn::Lit::Byte(_) => "b'..'".to_string(),
+                syn::Lit::ByteStr(_) | syn::Lit::CStr(_) => "b\"..\"".to_owned(),
+                syn::Lit::Byte(_) => "b'..'".to_owned(),
                 syn::Lit::Char(c) => format!("{:?}", c.value()),
-                syn::Lit::Int(i) => i.base10_digits().to_string(),
-                syn::Lit::Float(f) => f.base10_digits().to_string(),
+                syn::Lit::Int(i) => i.base10_digits().to_owned(),
+                syn::Lit::Float(f) => f.base10_digits().to_owned(),
                 syn::Lit::Bool(b) => b.value.to_string(),
-                _ => "..".to_string(),
+                _ => "..".to_owned(),
             },
-            _ => "..".to_string(),
+            _ => "..".to_owned(),
         }
     }
 }
@@ -367,7 +367,7 @@ impl ErrorSwallowVisitor<'_> {
             self.hits.push(Hit {
                 rule: "ERROR-SWALLOW",
                 line: call.method.span().start().line.max(1),
-                snippet: ".ok(); discards Result value".to_string(),
+                snippet: ".ok(); discards Result value".to_owned(),
             });
         }
     }
@@ -385,7 +385,7 @@ impl ErrorSwallowVisitor<'_> {
         self.hits.push(Hit {
             rule: "ERROR-SWALLOW",
             line: local.let_token.span().start().line.max(1),
-            snippet: "let _ = ...; binds a value to `_` without inspecting it".to_string(),
+            snippet: "let _ = ...; binds a value to `_` without inspecting it".to_owned(),
         });
         visit::visit_expr(self, init.expr.as_ref());
         true
@@ -417,7 +417,7 @@ impl<'ast> Visit<'ast> for ErrorSwallowVisitor<'_> {
             self.hits.push(Hit {
                 rule: "ERROR-SWALLOW",
                 line,
-                snippet: ".unwrap_or_default() silently drops error".to_string(),
+                snippet: ".unwrap_or_default() silently drops error".to_owned(),
             });
         }
         if let Some(method) = discarded_error_closure(node) {
@@ -496,7 +496,7 @@ fn unlogged_err_hit(line_number: usize) -> Hit {
     Hit {
         rule: "unlogged-err-return",
         line: line_number,
-        snippet: "return Err(...) with no log emission before it in the same block — the caller sees only a value, not a signal. Log the error with enough context to diagnose it. Line wrapping does not matter: the check is on statements, not physical lines.".to_string(),
+        snippet: "return Err(...) with no log emission before it in the same block — the caller sees only a value, not a signal. Log the error with enough context to diagnose it. Line wrapping does not matter: the check is on statements, not physical lines.".to_owned(),
     }
 }
 

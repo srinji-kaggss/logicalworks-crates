@@ -281,7 +281,7 @@ fn handle_section_header(
     } else if line.starts_with('[') {
         Err(ContractError::Malformed {
             line: line_no,
-            text: line.to_string(),
+            text: line.to_owned(),
         })
     } else {
         Ok(false)
@@ -299,12 +299,12 @@ fn apply_policy_pair(
         *enforce = value == "true";
         Ok(())
     } else if key == "repository" {
-        *repository = Some(unquote(value).to_string());
+        *repository = Some(unquote(value).to_owned());
         Ok(())
     } else {
         Err(ContractError::UnknownKey {
             line: line_no,
-            key: key.to_string(),
+            key: key.to_owned(),
         })
     }
 }
@@ -320,10 +320,10 @@ fn apply_approved_pair(
         .find(|k| **k == key)
         .ok_or_else(|| ContractError::UnknownKey {
             line: line_no,
-            key: key.to_string(),
+            key: key.to_owned(),
         })?;
     let draft = drafts.last_mut().expect("approved section implies a draft");
-    draft.fields.push((known, unquote(value).to_string()));
+    draft.fields.push((known, unquote(value).to_owned()));
     Ok(())
 }
 
@@ -339,7 +339,7 @@ fn process_pair(
     match section {
         Section::None => Err(ContractError::OrphanKey {
             line: line_no,
-            key: key.to_string(),
+            key: key.to_owned(),
         }),
         Section::Policy => apply_policy_pair(key, value, line_no, enforce, repository),
         Section::Approved => apply_approved_pair(key, value, line_no, drafts),
@@ -364,7 +364,7 @@ fn process_contract_line(
     }
     let (key, value) = split_pair(line).ok_or_else(|| ContractError::Malformed {
         line: line_no,
-        text: line.to_string(),
+        text: line.to_owned(),
     })?;
     process_pair(section, key, value, line_no, enforce, repository, drafts)
 }
@@ -424,6 +424,7 @@ impl Contract {
 
     /// Finds the approval for a resolved package, tolerating `-`/`_` spelling
     /// drift between a manifest and a lock file.
+    #[must_use]
     pub fn approval_for(&self, krate: &str) -> Option<&Entry> {
         let wanted = normalise(krate);
         self.entries.iter().find(|e| normalise(&e.krate) == wanted)
@@ -448,7 +449,7 @@ fn check_field_present(
         Ok(())
     } else {
         Err(ContractError::MissingField {
-            krate: krate.to_string(),
+            krate: krate.to_owned(),
             field,
         })
     }
@@ -465,15 +466,15 @@ fn validate_tier(draft: &Draft) -> Result<Tier, ContractError> {
     let tier_text = draft.get("tier").expect("checked above");
     Tier::parse(tier_text).ok_or_else(|| ContractError::BadTier {
         line: draft.line,
-        value: tier_text.to_string(),
+        value: tier_text.to_owned(),
     })
 }
 
 fn validate_date(approved_on: &str, krate: &str) -> Result<(), ContractError> {
     if !is_iso_date(approved_on) {
         Err(ContractError::BadDate {
-            krate: krate.to_string(),
-            value: approved_on.to_string(),
+            krate: krate.to_owned(),
+            value: approved_on.to_owned(),
         })
     } else {
         Ok(())
@@ -483,7 +484,7 @@ fn validate_date(approved_on: &str, krate: &str) -> Result<(), ContractError> {
 fn validate_reason(reason: &str, krate: &str) -> Result<(), ContractError> {
     if !is_a_sentence(reason, krate) {
         Err(ContractError::ThinReason {
-            krate: krate.to_string(),
+            krate: krate.to_owned(),
         })
     } else {
         Ok(())
@@ -491,27 +492,27 @@ fn validate_reason(reason: &str, krate: &str) -> Result<(), ContractError> {
 }
 
 fn build(draft: &Draft) -> Result<Entry, ContractError> {
-    let krate = draft.get("crate").unwrap_or("<unnamed>").to_string();
+    let krate = draft.get("crate").unwrap_or("<unnamed>").to_owned();
     validate_required_fields(draft, &krate)?;
     let tier = validate_tier(draft)?;
-    let approved_on = draft.get("approved_on").expect("checked above").to_string();
+    let approved_on = draft.get("approved_on").expect("checked above").to_owned();
     validate_date(&approved_on, &krate)?;
-    let reason = draft.get("reason").expect("checked above").to_string();
+    let reason = draft.get("reason").expect("checked above").to_owned();
     validate_reason(&reason, &krate)?;
 
     Ok(Entry {
         krate,
         tier,
-        version: draft.get("version").expect("checked above").to_string(),
-        owner: draft.get("owner").expect("checked above").to_string(),
-        capability: draft.get("capability").expect("checked above").to_string(),
-        source: draft.get("source").expect("checked above").to_string(),
+        version: draft.get("version").expect("checked above").to_owned(),
+        owner: draft.get("owner").expect("checked above").to_owned(),
+        capability: draft.get("capability").expect("checked above").to_owned(),
+        source: draft.get("source").expect("checked above").to_owned(),
         allowed_consumers: split_csv(draft.get("allowed_consumers").expect("checked above")),
         allowed_kinds: split_csv(draft.get("allowed_kinds").expect("checked above")),
         reason,
-        approved_by: draft.get("approved_by").expect("checked above").to_string(),
+        approved_by: draft.get("approved_by").expect("checked above").to_owned(),
         approved_on,
-        review: draft.get("review").expect("checked above").to_string(),
+        review: draft.get("review").expect("checked above").to_owned(),
         line: draft.line,
     })
 }
@@ -521,7 +522,7 @@ fn split_csv(value: &str) -> Vec<String> {
         .split(',')
         .map(str::trim)
         .filter(|item| !item.is_empty())
-        .map(ToString::to_string)
+        .map(str::to_owned)
         .collect()
 }
 

@@ -7,9 +7,13 @@ Every other third-party capability is an optional feature you select:
 ```toml
 [dependencies]
 # Engine without the bot facade:
-lgwks_deps = { version = "0.1.7", default-features = false, features = ["tokio"] }
+lgwks_deps = { version = "0.1.8", default-features = false, features = ["tokio"] }
 # GPU desktop UI:
-lgwks_deps = { version = "0.1.7", default-features = false, features = ["gpui"] }
+lgwks_deps = { version = "0.1.8", default-features = false, features = ["gpui"] }
+# Native terminal UI:
+lgwks_deps = { version = "0.1.8", default-features = false, features = ["appcui"] }
+# ML inference: tensor compute, transformer models, and the matching tokenizer:
+lgwks_deps = { version = "0.1.8", default-features = false, features = ["ml-candle", "ml-tokenizers"] }
 ```
 
 ```rust
@@ -31,7 +35,24 @@ platform renderer. macOS builds require a usable Xcode Metal Toolchain
 (`metal` and `metallib`); Linux builds require the platform development stack
 selected by GPUI. The feature is not compiled by the default `scan` build.
 
+The `ml-candle` feature re-exports `lgwks_deps::{candle_core, candle_nn,
+candle_transformers}` and `ml-candle-metal` additionally selects Candle's macOS
+Metal backend; `ml-tokenizers` re-exports `lgwks_deps::tokenizers`. They are
+default-off, so the default `scan` build compiles none of Candle's closure.
+Selecting `ml-candle` does pull `hf-hub` transitively through
+`candle-transformers` — the compiled tree is network-capable even though the
+estate runtime loads a local checkpoint and does not call the hub. See
+`docs/candle-admission.md` for authority, transitive-surface limits, and
+verification.
+
 ## Gate: admission, audit, freshness, vendor coverage, source scan
+
+Version 0.1.8 adds the default-off `appcui` feature, re-exporting
+`lgwks_deps::appcui`. It is not present in published 0.1.7. Downstream code
+uses `use lgwks_deps::appcui; use appcui::prelude::*;` so upstream macros can
+resolve their crate alias without a direct dependency. Native terminal support
+does not imply a full editor, backend execution, or measured platform parity.
+See `docs/appcui-admission.md` in the repository for authority and verification.
 
 CLI first (`cargo install lgwks_deps` keeps working with no flags — the
 default `scan` build is the gate tool); library second (see the storefront

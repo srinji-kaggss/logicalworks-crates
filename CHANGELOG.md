@@ -6,6 +6,21 @@ independently; each release lists per-crate deltas. The format follows
 `0.x`, so any minor may carry breaking changes, which are then listed
 explicitly under that crate.
 
+## [lgwks_deps 0.1.8] — 2026-09-17
+
+### lgwks_deps Added
+
+- Default-off `appcui` storefront feature, pinned to 0.5.1, exposing native
+  terminal widgets and input-driven drawing through the estate owner.
+- Admission records the Director's AppCUI selection and estate-use directive;
+  the authorized commit is the policy record, not a cryptographic signature.
+- Native feature CI and re-export macro doctest. Publication remains separate.
+
+### Shared verification Changed
+
+- Package-smoke disposal uses the operating-system Trash instead of irreversible
+  removal; missing Trash tooling fails loudly and retains the owned artifact.
+
 ## [lgwks_std 0.6.3] — 2026-09-13
 
 ### Added

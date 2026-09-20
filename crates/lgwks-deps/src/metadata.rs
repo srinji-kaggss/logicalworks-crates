@@ -35,6 +35,7 @@ impl DependencyKind {
     }
 
     /// Stable contract spelling.
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Normal => "normal",
@@ -65,6 +66,7 @@ pub enum DependencySource {
 
 impl DependencySource {
     /// Stable policy class used by the contract.
+    #[must_use]
     pub const fn class(&self) -> &'static str {
         match self {
             Self::Registry(_) => "registry",
@@ -75,6 +77,7 @@ impl DependencySource {
     }
 
     /// Exact Cargo source or path, retained for diagnostics.
+    #[must_use]
     pub fn detail(&self) -> &str {
         match self {
             Self::Registry(value) | Self::Git(value) | Self::Path(value) | Self::Other(value) => {
@@ -220,7 +223,7 @@ pub fn parse(text: &str) -> Result<Vec<DirectEdge>, MetadataError> {
                 target_repository: member_repositories
                     .get(dependency.name.as_str())
                     .and_then(|repository| *repository)
-                    .map(ToString::to_string),
+                    .map(str::to_owned),
             });
         }
     }
@@ -251,7 +254,7 @@ pub fn read(root: &Path) -> Result<Vec<DirectEdge>, MetadataError> {
         .map_err(MetadataError::Spawn)?;
     if !output.status.success() {
         return Err(MetadataError::Cargo(
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         ));
     }
     parse(&String::from_utf8_lossy(&output.stdout))

@@ -5,6 +5,7 @@ use std::fmt;
 
 /// Which calendar or clock field failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Field {
     /// Calendar year.
     Year,
@@ -45,6 +46,7 @@ impl fmt::Display for Field {
 
 /// Why an RFC 3339 string failed to parse.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ParseError {
     /// Input has fewer bytes than the minimum valid RFC 3339 stamp.
     TooShort {

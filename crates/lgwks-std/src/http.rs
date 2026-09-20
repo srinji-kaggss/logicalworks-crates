@@ -24,6 +24,7 @@ use iri_string::types::UriAbsoluteStr;
 
 /// Request options. Start from [`Options::default`](crate::http::Options::default) (30s timeout).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Options {
     /// Total request timeout, covering connect, TLS, send, and receive.
     pub timeout: Duration,
@@ -53,9 +54,10 @@ impl Options {
     /// (`crate::id::Uuid::new_v4` under feature `random`); the client never
     /// invents the key, because a regenerated key on retry would defeat the
     /// deduplication the header exists for.
+    #[must_use]
     pub fn idempotency_key(mut self, key: &str) -> Self {
         self.headers
-            .push(("Idempotency-Key".to_string(), key.to_string()));
+            .push(("Idempotency-Key".to_owned(), key.to_owned()));
         self
     }
 }
@@ -64,6 +66,7 @@ impl Options {
 
 /// A completed HTTP exchange: status, headers, and full body.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Response {
     /// HTTP status code, including 4xx/5xx.
     pub status: u16,
@@ -87,6 +90,7 @@ impl Response {
 
 /// What `http` refuses to hide: bad URLs, timeouts, transport failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     /// The URL is not an absolute http(s) URI. The offending URL is not
     /// carried: it can contain credentials in its userinfo or a token in its

@@ -4,6 +4,7 @@ use super::calendar::civil_from_days;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Splits an instant into whole seconds since the epoch and nanoseconds.
+#[must_use]
 pub fn unix_parts(at: SystemTime) -> (i64, u32) {
     match at.duration_since(UNIX_EPOCH) {
         Ok(duration_since_epoch) => (
@@ -26,6 +27,7 @@ fn split_pre_epoch(duration: Duration) -> (i64, u32) {
 }
 
 /// Converts seconds and nanoseconds into a `SystemTime`.
+#[must_use]
 pub fn from_unix_parts(secs: i64, nanos: u32) -> SystemTime {
     if secs >= 0 {
         UNIX_EPOCH + Duration::new(secs as u64, nanos)
@@ -99,6 +101,7 @@ fn write_optional_fraction(out: &mut String, nanos: u32) {
 }
 
 /// Formats a `SystemTime` as an RFC 3339 UTC string with fractional seconds.
+#[must_use]
 pub fn to_rfc3339(at: SystemTime) -> String {
     let (secs, nanos) = unix_parts(at);
     let (year, month, day) = civil_from_days(secs.div_euclid(86_400));
