@@ -34,6 +34,39 @@ explicitly under that crate.
   contributor to send a patch that would wait on a decision no one has made; the
   block is stated as a refusal on arrival instead. It lifts when an instrument is
   chosen and recorded in `LICENSING.md`. The other three crates are unaffected.
+- **A capability refusal states the whole shortfall, in real time, and derives
+  its own repair** (owner direction, 2026-09-21). The check returned at the first
+  ungranted capability, so repairing a bot was a loop: grant what you were told,
+  rebuild, be told the next word. Each individual refusal was true and the
+  sequence was still the wrong instrument, because the gate had already computed
+  the whole difference — the required set minus the granted set — and reported
+  only its head. `Deficit` is that difference reported in full, `Shortage` names
+  the domain that declared each requirement, and `Deficit::to_grant_set` turns
+  the diagnostic back into the grant set that closes it, so the repair is derived
+  rather than transcribed. This is the shape the owner asked for explicitly:
+  isolate what is missing at the point of the attempt, hand back the missing
+  pieces, and continue — not a build loop that refuses one word at a time.
+- **A run-time capability hold was designed, built, and then removed as
+  unreachable.** The step after a total refusal is the natural one: deny an
+  action at run time, hold the entry, let the caller supply the capability, and
+  continue from that point rather than restarting the chain. It cannot be
+  reached, and the reason is structural rather than incidental. `assemble` admits
+  every declared requirement before the world exists, and every per-call proof is
+  minted from **the same list** — `run_any` issues
+  `grants.issue(self.0.required_caps())` and the action checks
+  `call.0.check(self.required_caps())` — so the declaration and the check cannot
+  disagree, and nothing narrows `Grants` after `assemble`. `Auth::check` cannot
+  fail inside a running bot. The hold was removed rather than shipped behind a
+  contrived test, and the finding is recorded in
+  `docs/guides/lgwks-bot/authority.md` with its line citations.
+- **The gap the hold was reaching for is the opposite one, and it is real: an
+  action that declares `&[]` and performs a side effect passes the gate
+  silently.** The gate checks the declared set and `&[]` is trivially covered, so
+  "this action needs nothing" and "this action's author never said" are the same
+  value and the crate cannot distinguish them. Every guarantee about authority is
+  a guarantee about capabilities a domain *declares*. Closing that, or making a
+  run-time hold meaningful, is a design change rather than a repair, and neither
+  is made here.
 - **Four `lgwks_bot` questions were put to the project owner on 2026-09-21 and
   decided.** They are recorded here because each was previously stated in a
   first-party document as *open*, and those documents now say what was decided.
@@ -354,8 +387,46 @@ explicitly under that crate.
   refused write aborts the answer with `BotError::ReceiptNotRecorded` and leaves
   cursor, scope, transcript and receipt list untouched.
 
+### lgwks_bot Added
+
+- **`Deficit`, `Shortage` and `Demand`: the whole capability shortfall, and the
+  repair it derives.** `Auth::check` and `GrantSet::admit` return
+  `BotError::CapabilityDenied` naming **every** ungranted requirement rather than
+  the first, each `Shortage` carrying the `Demand` — the domain that declared it
+  — where the check site knows it. `Bot::build` walks every source and every
+  action and reports the whole bot's unmet requirements from one pass. New
+  methods: `Auth::uncovered`, `Auth::covers_cap`, `GrantSet::uncovered`,
+  `GrantSet::grants`, `Deficit::shortages/len/is_empty/first/to_grant_set`.
+- **`Deficit::to_grant_set` derives the repair.** The shortfall already names
+  every capability that would close it, so a caller hands back the set the
+  deficit derived instead of writing a repair from the message — the step where a
+  hand-written repair covers the first line and misses the rest. The repair is
+  the *shortfall*, not the requirement: an already-granted capability is not in
+  it, and closing the requirement is that set folded into the held one.
+- **`Cap` names are `Cow<'static, str>`.** The shipped four were `String`-backed,
+  so `Cap::net()` allocated and — because `GrantSet::issue` mints a proof by
+  copying the requirement list — every effect execution re-allocated the same
+  constants. `Cow::Borrowed` makes a shipped capability a pointer copy and
+  authority for it allocation-free. Equality, ordering and hashing compare
+  contents, so a `Cap` deserialized from a spec and one built from a constant are
+  one capability; a test asserts that in both directions, because if they
+  compared unequal the gate would deny a bot it had granted.
+- **`Auth::check` is logarithmic in the granted set.** The covered set is sorted
+  and de-duplicated at mint and queried by binary search, replacing a linear scan
+  inside a loop over the requirement list. The measured defect and its numbers
+  are in `bench/README.md`: 12.9 microseconds for 128 capabilities against 3.4
+  nanoseconds for one, growing with the *product* of the two counts.
+
 ### lgwks_bot Changed
 
+- **Breaking, effective at the next `lgwks_bot` version published from this
+  tree.** `BotError::CapabilityDenied`'s payload changes from
+  `required: Cap` — one capability — to `deficit: Deficit`, which carries all of
+  them. A consumer matching `CapabilityDenied { required }` must read
+  `deficit.first().required()`, or iterate `deficit.shortages()` to see the
+  whole shortfall. The variant name, and every `CapabilityDenied { .. }` match,
+  are unchanged. `lgwks_bot` 0.4.2 on crates.io keeps the old shape; nothing in
+  this tree is published by this change.
 - `MemoryJournal` keeps `PartialEq` and loses `Eq`: it now holds
   `DecisionReceipt`s, which carry the `f64` scores a verdict was reached on, and
   `f64` is not `Eq`. The `session` module is not in the published

@@ -62,7 +62,7 @@ means "this run did not finish", not "nothing happened".
 
 One consequence is easy to miss, and it is the reason the ledger exists.
 `observe_fold` commits the new values and bumps the revisions *before*
-`fire_plan` decides (`crates/lgwks-bot/src/ecs.rs:1041`), so selecting work by
+`fire_plan` decides (`crates/lgwks-bot/src/ecs.rs:1042`), so selecting work by
 `Changed<Revision>` alone means the next tick polls an unchanged source, finds
 nothing eligible, and never attempts the actions after the failure again. The
 work is lost, not queued.

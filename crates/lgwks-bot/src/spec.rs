@@ -149,6 +149,10 @@ where
             self.0.required_caps()
         }
 
+        fn domain_id(&self) -> &str {
+            self.0.domain_id()
+        }
+
         fn run_any<'a>(
             &'a self,
             grants: &'a GrantSet,
@@ -277,6 +281,14 @@ pub(crate) trait EvaluateAny {
 pub(crate) trait ExecuteAny {
     /// Forwards to [`Execute::required_caps`](crate::verb::Execute::required_caps).
     fn required_caps(&self) -> &[Cap];
+    /// Forwards to [`Execute::domain_id`](crate::verb::Execute::domain_id).
+    ///
+    /// Erased alongside the input and output, and needed here for the same
+    /// reason admission needs it: a capability denial names the domain that
+    /// declared the requirement, and by the time the action is a
+    /// `Box<dyn ExecuteAny>` this is the only way left to ask it which domain
+    /// it is.
+    fn domain_id(&self) -> &str;
     /// Issue an [`Auth`] for the action's caps, downcast `input` to the
     /// action's `Input`, run it, and box the output as `Any`. Denies with
     /// [`BotError::CapabilityDenied`] before acting; reports a type mismatch as
@@ -775,8 +787,8 @@ mod tests {
     fn issue_denies_what_was_never_granted() -> Result<(), BotError> {
         let grants = GrantSet::empty();
         match grants.issue(&[Cap::net()]) {
-            Err(BotError::CapabilityDenied { required }) => {
-                assert_eq!(required, Cap::net());
+            Err(BotError::CapabilityDenied { deficit }) => {
+                assert_eq!(deficit.first().required(), &Cap::net());
                 Ok(())
             }
             other => Err(failed(format!("expected denial, got {other:?}"))),
@@ -804,8 +816,8 @@ mod tests {
 
         let vacuous = GrantSet::empty().issue(&[])?;
         match lgwks_std::task::block_on(NetSource([Cap::net()]).poll((vacuous, ()))) {
-            Err(BotError::CapabilityDenied { required }) => {
-                assert_eq!(required, Cap::net());
+            Err(BotError::CapabilityDenied { deficit }) => {
+                assert_eq!(deficit.first().required(), &Cap::net());
                 Ok(())
             }
             other => Err(failed(format!(
@@ -835,8 +847,8 @@ mod tests {
 
         let fs_only = GrantSet::empty().grant(Cap::fs()).issue(&[Cap::fs()])?;
         match lgwks_std::task::block_on(NetSource([Cap::net()]).poll((fs_only, ()))) {
-            Err(BotError::CapabilityDenied { required }) => {
-                assert_eq!(required, Cap::net());
+            Err(BotError::CapabilityDenied { deficit }) => {
+                assert_eq!(deficit.first().required(), &Cap::net());
                 Ok(())
             }
             other => Err(failed(format!(
