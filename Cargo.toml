@@ -20,7 +20,7 @@ resolver = "2"
 [workspace.dependencies]
 lgwks_std = { version = "0.6.4", path = "crates/lgwks-std" }
 lgwks_bot = { version = "0.4.0", path = "crates/lgwks-bot" }
-lgwks_ast = { version = "0.1.4", path = "crates/lgwks-ast" }
+lgwks_ast = { version = "0.2.0", path = "crates/lgwks-ast" }
 # Dependents reach the storefront without its `scan` default (the gate tool's
 # Rust parser is not a runtime dependency); they opt into storefront features
 # such as `tokio` explicitly.

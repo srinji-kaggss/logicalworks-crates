@@ -14,7 +14,12 @@ use crate::error::BotError;
 use crate::verb;
 
 /// Characters of body kept for observation.
-const BODY_PREVIEW: usize = 4096;
+///
+/// Public because it bounds a public field: a consumer deciding whether
+/// [`NetState::body`] is enough to work with needs the number, and stating it
+/// in prose beside the field is how a documented cap drifts from the real one.
+/// The field's doc links here instead, so the two cannot disagree.
+pub const BODY_PREVIEW: usize = 4096;
 
 /// Seconds a poll waits for the endpoint.
 const POLL_TIMEOUT_SECS: u64 = 10;

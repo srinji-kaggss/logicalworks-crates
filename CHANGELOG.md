@@ -47,6 +47,9 @@ because a default-off implementation is a candidate rather than an architecture.
 - `rt::task::LocalSet` and `rt::task::spawn_local`. Every verb is deliberately
   non-`Send`, and `spawn` requires `Send`, so the crate's own futures could not
   be spawned at all.
+- `domain::net::NetState::BODY_PREVIEW` is now public. Its cap was documented in
+  prose beside a public field, which is how a documented limit drifts from the
+  real one; the field's doc links the constant instead, so they cannot disagree.
 - `rt::io` (feature `io`): `AsyncRead`/`AsyncWrite`/`AsyncBufRead` and their
   extensions, `BufReader`, `BufWriter`, `duplex`, `copy`. The storefront gained
   `tokio-io` for it, because `io-util` was previously reachable only through the
@@ -81,7 +84,17 @@ because a default-off implementation is a candidate rather than an architecture.
   arm first, and `admitted` is `error.is_none() && refusals.is_empty()` so a
   payload cannot report admission beside a failed read.
 
-### lgwks_ast 0.1.4 Changed
+### lgwks_ast 0.2.0 — Breaking
+
+- `Language::C` is renamed **`Language::CLang`**. The workspace forbids
+  `clippy::min_ident_chars`, and `forbid` cannot be lowered from source, so the
+  variant name itself had to change — an `#[allow]` there is a hard E0453, not a
+  suppression. The lint fires on the macro's input token, so an alias elsewhere
+  would not have helped. `Language::name()` still reports `"c"`, which is the
+  stable identity findings and callers match on, so only Rust code naming the
+  variant is affected. Nothing in the estate referenced it.
+
+### lgwks_ast Changed
 
 - `Language` and its four lookup tables are now generated from a single row per
   grammar, so a language cannot be added by halves: the variant, its slot in
@@ -91,7 +104,7 @@ because a default-off implementation is a candidate rather than an architecture.
 - `CustomLang` gained explicit extension handling (`with_extensions`,
   `of_path`) and traversal metrics that keep `nodes` saturating, `max_depth`
   monotone, and `has_syntax_issues` sticky.
-- `examples/parse.rs` extended. No public item was removed.
+- `examples/parse.rs` extended.
 
 ### Shared Changed
 

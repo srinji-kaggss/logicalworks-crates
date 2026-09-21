@@ -7,7 +7,7 @@ Source of truth for the estate's shared Rust foundation crates, extracted from
 |---|---|---|---|
 | `lgwks_std` | 0.6.4 | [docs.rs](https://docs.rs/lgwks_std) | Core functions: hex, time, id, hash, glob, pattern, json, ron, wire, fs, http, online, process, task, retry, leb128, encoding |
 | `lgwks_bot` | 0.4.0 | [docs.rs](https://docs.rs/lgwks_bot) | Async, runner, and actor surface: Observe, Evaluate, Execute, Query verbs plus the curated runtime |
-| `lgwks_ast` | 0.1.4 | [docs.rs](https://docs.rs/lgwks_ast) | The estate's code-observability lane: multi-language AST parsing plus the shared typed-diagnostic derive |
+| `lgwks_ast` | 0.2.0 | [docs.rs](https://docs.rs/lgwks_ast) | The estate's code-observability lane: multi-language AST parsing plus the shared typed-diagnostic derive |
 | `lgwks_deps` | 0.1.9 | [docs.rs](https://docs.rs/lgwks_deps) | The third-party storefront: opt-in dependency features, admission, audit, freshness (`lgwks-deps check`) |
 
 All four crates are Apache-2.0, Logical Works Incorporated. Versions move

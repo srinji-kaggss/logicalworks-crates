@@ -184,7 +184,18 @@ macro_rules! define_languages {
 
 define_languages! {
     Bash, "Bash / POSIX shell.", "lang-bash", "bash", ["sh", "bash"], Bash;
-    C, "C.", "lang-c", "c", ["c", "h"], C;
+    // `CLang`, not `C`. The workspace forbids `clippy::min_ident_chars`, and a
+    // `forbid` cannot be lowered from source — an `#[allow]` here is a hard
+    // E0453 rather than a suppression, so the variant name itself has to change.
+    // The lint fires on this macro's *input* token, which is why a
+    // `#[doc(hidden)]` alias elsewhere would not have helped.
+    //
+    // The trailing `C` is fine: that is `SupportLang::C`, an external enum's
+    // variant reached through a path, and the lint does not visit path segments.
+    // Only the leading token had to move. `Language::name()` still reports "c",
+    // which is the stable identity callers match on, so nothing that reads a
+    // finding is affected — only Rust code naming the variant.
+    CLang, "C.", "lang-c", "c", ["c", "h"], C;
     Cpp, "C++.", "lang-cpp", "cpp", ["cpp", "hpp", "cc", "cxx", "hh", "hxx"], Cpp;
     CSharp, "C#.", "lang-csharp", "csharp", ["cs"], CSharp;
     Css, "CSS.", "lang-css", "css", ["css"], Css;

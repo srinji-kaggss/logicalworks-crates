@@ -4178,7 +4178,7 @@ checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
 
 [[package]]
 name = "lgwks_ast"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "ast-grep-core",
  "ast-grep-language",

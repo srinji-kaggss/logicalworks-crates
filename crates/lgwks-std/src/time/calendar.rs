@@ -241,9 +241,13 @@ fn day_of_year_to_month_day(day_of_year: i64, computed_year: i64) -> (i64, i64, 
 /// The proleptic Gregorian date for a count of days since 1970-01-01.
 ///
 /// The inverse of [`days_from_civil`]. Exact for every `i64` day count: the
-/// re-basing in [`shifted_to_era`] avoids the one addition that could overflow,
+/// re-basing in `shifted_to_era` avoids the one addition that could overflow,
 /// and `146_097` is what bounds every remaining intermediate, so the reported
 /// year stays inside `i64` even when the day count is at its extreme.
+///
+/// `shifted_to_era` is named rather than linked because it is private: a public
+/// item's docs cannot reach a private one without `--document-private-items`,
+/// and `rustdoc::private_intra_doc_links` is denied here.
 #[must_use]
 pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let (era, day_of_era) = shifted_to_era(days);

@@ -132,9 +132,14 @@ Cargo metadata; Cargo.lock preserves the exact transitive provenance.
 - **ureq** — blocking HTTP client, rustls-only TLS stack plus small leaves
 - **iri-string** — zero-dep URI validation leaf at default features
 - **rustix** — safe POSIX syscall surface for the `fs-raw` primitive; Unix-only, optional
+- **tracing** — 4 crates (`tracing`, `tracing-core`, `pin-project-lite`,
+  `once_cell`), no proc macro because `attributes` is off. Default-on: the
+  PRINTS rule forbids `println!` in library code and names `tracing` as the
+  replacement, so the facility has to be reachable.
 
-The `core` feature carries zero external dependencies. You choose what you pull
-in; every feature flag is one capability, one stack, no surprises.
+`core` alone carries zero external dependencies; the default build is `core`
+plus `trace`. You choose what you pull in; every other feature flag is one
+capability, one stack, no surprises.
 
 ## Minimum supported Rust version
 
