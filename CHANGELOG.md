@@ -34,8 +34,33 @@ explicitly under that crate.
   that wanted to log one wrote a wrapper that then had to change whenever the
   type did.
 
+### lgwks_bot Breaking
+
+- **Effect dispatch is authorized and durable, and the scope is required.** Every
+  `Bot` is built around an `EffectScope`: the run's `EffectIdentity` (which run
+  this is, the `EnvironmentId` it acts on, and the `FlowRevision` it came from),
+  the `Broker` that owns the environment's generation, and the `EffectJournal`
+  the dispatch is written to. Both builder entry points refuse to build without
+  one, as `BotError::IncompleteSpec { field: "effects" }`. An identity the caller
+  did not choose is one it cannot recover against, so there is no default and no
+  implicit in-memory scope.
+- `Bot::resolve_effect` takes an `EffectKey` instead of a work id and a
+  caller-supplied revision. `EffectKey` is now the settlement identity: `Bot::pending`
+  hands one back, and evidence is compared by `ActionDigest` and `AttemptId`.
+
 ### lgwks_bot Added
 
+- **Write-ahead dispatch.** `IntentAdmitted` and `DispatchPrepared` are committed
+  to the journal before the effect leaves the process, and `Broker::revalidate`
+  re-checks the environment generation at the handoff, with no await between mint
+  and check.
+- **A restart continues the record rather than the process.** A bot
+  reconstructed against a journal holds an attempt whose outcome was never
+  established instead of resending it, and retires an attempt whose effect
+  landed. Two defects the new tests found are fixed: a restart re-minted
+  `AttemptId::FIRST` and so reproduced a key the journal had already walked past,
+  which refused every `NotApplied` retry as `OutOfOrder`; and a crash after a
+  landed effect left the run unable to continue past that entry at all.
 - `Debug` for the public surface. Every public type in the crate now implements
   it except three macro-invoked families in `effect.rs` (`Id128`-generated ids,
   `counter_role!`, `digest_role!`). Derived where a derive is the right
