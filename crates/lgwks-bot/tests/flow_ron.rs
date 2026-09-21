@@ -11,13 +11,15 @@ use lgwks_bot::{BotError, FlowSpec};
 const RON: &str = r#"FlowSpec(
     vars: {},
     entry: "end",
-    nodes: { "end": (kind: "end") },
+    nodes: { "end": end },
 )"#;
 
+/// The same document in JSON, where external tagging costs a unit variant its
+/// name: the variant becomes the bare string it is named by.
 const JSON: &str = r#"{
     "vars": {},
     "entry": "end",
-    "nodes": { "end": { "kind": "end" } }
+    "nodes": { "end": "end" }
 }"#;
 
 /// The refusal each notation produced for its own spelling, so a test can
@@ -33,24 +35,24 @@ fn refusals(ron: &str, json: &str) -> [Option<BotError>; 2] {
 }
 
 /// The `(node, kind)` an unknown-node-kind refusal named, if that is what it was.
-fn unknown_kind(source: &str) -> Option<(String, String)> {
-    match FlowSpec::from_ron(source).err() {
+fn unknown_kind(decoded: Result<FlowSpec, BotError>) -> Option<(String, String)> {
+    match decoded.err() {
         Some(BotError::UnknownNodeKind { node, kind }) => Some((node, kind)),
         _ => None,
     }
 }
 
 /// The `(bytes, limit)` an oversize refusal named, if that is what it was.
-fn too_large(source: &str) -> Option<(usize, usize)> {
-    match FlowSpec::from_ron(source).err() {
+fn too_large(decoded: Result<FlowSpec, BotError>) -> Option<(usize, usize)> {
+    match decoded.err() {
         Some(BotError::FlowTooLarge { bytes, limit }) => Some((bytes, limit)),
         _ => None,
     }
 }
 
 /// The diagnostic a malformed refusal carried, if that is what it was.
-fn malformed(source: &str) -> Option<String> {
-    match FlowSpec::from_ron(source).err() {
+fn malformed(decoded: Result<FlowSpec, BotError>) -> Option<String> {
+    match decoded.err() {
         Some(BotError::MalformedFlow { cause }) => Some(cause),
         _ => None,
     }
@@ -95,7 +97,7 @@ FlowSpec(
     vars: {},
     entry: "end",
     nodes: {
-        "end": (kind: "end"),   // the only node
+        "end": end,   // the only node
     },
 )
 "#;
@@ -103,24 +105,35 @@ FlowSpec(
     Ok(())
 }
 
-/// An unknown node kind is refused by name, in either notation.
+/// An unknown node kind is refused on either notation, and each names what it
+/// can.
 ///
-/// The diagnostic is why `reject_unknown_node_kinds` runs before serde: serde
-/// reports an unknown variant without saying which node carried it, and an
-/// operator reading a log for a bot that has been up for days needs the node.
+/// The two refusals differ, and the cause is the notation rather than the flow.
+/// JSON checks a variant name against nothing, so serde's own error names
+/// neither the variant nor the node, and the guard supplies both. RON checks
+/// the name against the list it is handed and refuses before any visitor sees
+/// it, so its error names the variant and the enum and cannot name the node.
+/// Both refuse; only what each can say differs.
 #[test]
 fn an_unknown_node_kind_is_refused_by_name() {
-    let ron = r#"FlowSpec(vars: {}, entry: "x", nodes: { "x": (kind: "nope") })"#;
-    let json = r#"{"vars": {}, "entry": "x", "nodes": { "x": { "kind": "nope" } }}"#;
+    let ron = r#"FlowSpec(vars: {}, entry: "x", nodes: { "x": nope })"#;
+    let json = r#"{"vars": {}, "entry": "x", "nodes": { "x": "nope" }}"#;
 
-    assert_eq!(unknown_kind(ron), Some(("x".to_owned(), "nope".to_owned())));
+    assert_eq!(
+        unknown_kind(FlowSpec::from_json(json)),
+        Some(("x".to_owned(), "nope".to_owned())),
+        "the JSON path should name the node and the kind it carried"
+    );
 
-    // The same refusal, reached through either notation.
+    let cause = malformed(FlowSpec::from_ron(ron));
+    assert!(
+        cause.as_deref().is_some_and(|cause| cause.contains("nope")),
+        "the RON path should name the variant it refused: {cause:?}"
+    );
+
+    // Neither notation accepts it, which is the property that matters.
     for (notation, error) in ["ron", "json"].into_iter().zip(refusals(ron, json)) {
-        assert!(
-            matches!(error, Some(BotError::UnknownNodeKind { .. })),
-            "{notation}: expected UnknownNodeKind, got {error:?}"
-        );
+        assert!(error.is_some(), "{notation}: an unknown kind was accepted");
     }
 }
 
@@ -134,7 +147,7 @@ fn an_oversized_document_is_refused() {
     let limit = lgwks_bot::MAX_FLOW_BYTES;
 
     assert_eq!(
-        too_large(&oversized_ron),
+        too_large(FlowSpec::from_ron(&oversized_ron)),
         Some((oversized_ron.len(), limit)),
         "the refusal did not name the size and the limit"
     );
@@ -153,7 +166,10 @@ fn an_oversized_document_is_refused() {
 #[test]
 fn an_unknown_field_is_refused() {
     let typo = r#"FlowSpec(vars: {}, entry: "end", nodes: { "end": (kind: "end") }, entyr: "x")"#;
-    assert!(malformed(typo).is_some(), "an unknown field was accepted");
+    assert!(
+        malformed(FlowSpec::from_ron(typo)).is_some(),
+        "an unknown field was accepted"
+    );
 }
 
 /// A refusal never carries a raw control character into a log line.
@@ -182,22 +198,47 @@ fn a_refusal_escapes_control_characters() {
     }
 }
 
-/// The node kinds require a map, and this pins why.
+/// A variant is written with its own name, and the tag spelling is gone.
 ///
-/// `NodeKind` is serde internally tagged (`tag = "kind"`), and an internally
-/// tagged enum needs its tag to be a real field, so RON's native
-/// `End` / `Say(text: "hello")` spelling cannot decode. This test fails the day
-/// that tagging changes, and that is the point: moving to external tagging
-/// would make a flow read `Say(text: "hello")`, which is a deliberate change to
-/// the wire contract rather than a silent one.
+/// This is the property external tagging exists for, so it is pinned in both
+/// directions: the native form decodes, and the `(kind: "end")` map that the
+/// internally tagged enums required no longer does. A change back to internal
+/// tagging fails here rather than silently changing how every flow reads.
 #[test]
-fn the_node_kind_spelling_is_forced_by_internal_tagging() {
-    let native = r#"FlowSpec(vars: {}, entry: "end", nodes: { "end": End })"#;
-    let cause = malformed(native);
+fn a_variant_is_spelled_with_its_own_name() {
+    // A unit variant is its own name; a variant with fields takes them in
+    // parentheses, which is the shape RON is built for.
+    let native = r#"FlowSpec(
+        vars: {},
+        entry: "greet",
+        nodes: {
+            "greet": say(text: "Hello"),
+            "end": end,
+        },
+        edges: [ next(from: "greet", to: "end") ],
+    )"#;
     assert!(
-        cause
-            .as_deref()
-            .is_some_and(|cause| cause.contains("internally tagged")),
-        "RON's native enum spelling should be refused for its tagging; got {cause:?}"
+        FlowSpec::from_ron(native).is_ok(),
+        "RON's native enum spelling should decode: {:?}",
+        FlowSpec::from_ron(native)
     );
+
+    let tagged = r#"FlowSpec(vars: {}, entry: "end", nodes: { "end": (kind: "end") })"#;
+    assert!(
+        malformed(FlowSpec::from_ron(tagged)).is_some(),
+        "the internally tagged spelling should no longer decode"
+    );
+}
+
+/// A unit variant becomes a bare string in JSON, and this is the visible cost
+/// of the tagging choice on that side.
+#[test]
+fn json_pays_for_external_tagging_on_unit_variants() -> Result<(), Box<dyn std::error::Error>> {
+    let spec = FlowSpec::from_json(JSON)?;
+    let rendered = spec.to_json()?;
+    assert!(
+        rendered.contains("\"end\": \"end\""),
+        "a unit variant should render as its own name; got:\n{rendered}"
+    );
+    Ok(())
 }

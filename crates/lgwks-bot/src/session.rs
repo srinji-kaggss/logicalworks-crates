@@ -43,7 +43,7 @@ use std::fmt;
 use std::num::IntErrorKind;
 
 use lgwks_std::hash::Hasher;
-use lgwks_std::json::Value as JsonValue;
+use lgwks_std::json::serde;
 use lgwks_std::json::{Deserialize, Serialize};
 
 use crate::error::BotError;
@@ -277,12 +277,7 @@ pub type NodeId = String;
 
 /// The closed set of scalar values carried by a [`VarScope`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    crate = "lgwks_std::json::serde",
-    tag = "kind",
-    content = "value",
-    rename_all = "snake_case"
-)]
+#[serde(crate = "lgwks_std::json::serde", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Value {
     /// A free-form string.
@@ -355,12 +350,7 @@ fn integer_bytes(value: i64) -> usize {
 
 /// Declared type of one variable in a flow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    crate = "lgwks_std::json::serde",
-    tag = "kind",
-    content = "options",
-    rename_all = "snake_case"
-)]
+#[serde(crate = "lgwks_std::json::serde", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum VarType {
     /// A free-form string assigned by an ask.
@@ -551,12 +541,7 @@ impl fmt::Display for AnswerRejection {
 
 /// A variable reference or literal used by a branch predicate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    crate = "lgwks_std::json::serde",
-    tag = "kind",
-    content = "value",
-    rename_all = "snake_case"
-)]
+#[serde(crate = "lgwks_std::json::serde", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ValueExpr {
     /// A literal scalar.
@@ -575,12 +560,7 @@ impl ValueExpr {
 
 /// Closed, side-effect-free branch predicate language.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    crate = "lgwks_std::json::serde",
-    tag = "op",
-    content = "args",
-    rename_all = "snake_case"
-)]
+#[serde(crate = "lgwks_std::json::serde", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Predicate {
     /// A constant predicate.
@@ -651,11 +631,7 @@ impl Predicate {
 
 /// A declared flow node and its closed operation kind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    crate = "lgwks_std::json::serde",
-    tag = "kind",
-    rename_all = "snake_case"
-)]
+#[serde(crate = "lgwks_std::json::serde", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum NodeKind {
     /// Emit interpolated text and follow its [`FlowEdge`] continuation.
@@ -713,11 +689,7 @@ pub type FlowNodeKind = NodeKind;
 
 /// One explicit continuation in a flow graph.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    crate = "lgwks_std::json::serde",
-    tag = "kind",
-    rename_all = "snake_case"
-)]
+#[serde(crate = "lgwks_std::json::serde", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum FlowEdge {
     /// Continue from one node to another.
@@ -910,11 +882,7 @@ impl ChoiceArm {
 
 /// A terminal outcome returned by a completed session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    crate = "lgwks_std::json::serde",
-    tag = "kind",
-    rename_all = "snake_case"
-)]
+#[serde(crate = "lgwks_std::json::serde", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Terminal {
     /// The flow completed normally.
@@ -1090,8 +1058,13 @@ impl FlowSpec {
     /// Parse and validate a flow using the shared JSON facade.
     pub fn from_json(source: &str) -> Result<Self, BotError> {
         check_flow_size(source)?;
-        let value: JsonValue = crate::json::from_str(source).map_err(malformed_flow)?;
-        Self::from_document(value)
+        reject_unknown_node_kinds(&merge_read_kinds(
+            parse_json::<DeclaredNodes<false>>(source),
+            parse_json::<DeclaredNodes<true>>(source),
+        ))?;
+        let spec = parse_json::<Self>(source).map_err(malformed_flow)?;
+        spec.validate()?;
+        Ok(spec)
     }
 
     /// Parse and validate a flow written in RON.
@@ -1102,28 +1075,31 @@ impl FlowSpec {
     /// is what keeps one document from being acceptable in one notation and
     /// refused in the other.
     ///
-    /// Note the spelling the node kinds require. `NodeKind` carries
-    /// `tag = "kind"` and `Predicate` carries `tag = "op"`, and a serde
-    /// internally-tagged enum needs its tag to be a real field, so RON's native
-    /// `Say(text: "hello")` form does not decode. A map is what does:
+    /// Every enum in the document is externally tagged, so a variant is written
+    /// with its own name, which is what makes a flow read as a script rather
+    /// than as a tagged record:
     ///
     /// ```ron
     /// FlowSpec(
     ///     vars: {},
     ///     entry: "end",
-    ///     nodes: { "end": (kind: "end") },
+    ///     nodes: { "end": End },
     /// )
     /// ```
+    ///
+    /// The cost is on the JSON side, where the same variant becomes
+    /// `{"end": {}}`, and a unit variant becomes the bare string `"end"`.
     pub fn from_ron(source: &str) -> Result<Self, BotError> {
         check_flow_size(source)?;
-        let value: JsonValue = lgwks_std::ron::from_str(source).map_err(malformed_flow)?;
-        Self::from_document(value)
-    }
-
-    /// Turn a parsed document into a validated flow.
-    fn from_document(value: JsonValue) -> Result<Self, BotError> {
-        reject_unknown_node_kinds(&value)?;
-        let spec: Self = crate::json::from_value(value).map_err(malformed_flow)?;
+        // No node-kind guard here, and the reason is RON's rather than a
+        // choice: RON checks a variant name against the list it is handed, so
+        // an unknown name is refused before any visitor of ours sees it, and
+        // the name reaches the surface only through RON's own error. That error
+        // names both the variant and the enum it was not a member of, which is
+        // more than serde says on the JSON path. There, a name is not checked
+        // against anything, so the guard is what supplies the name at all, and
+        // with it the node that carried it.
+        let spec = parse_ron::<Self>(source).map_err(malformed_flow)?;
         spec.validate()?;
         Ok(spec)
     }
@@ -1918,6 +1894,22 @@ fn valid_identifier(value: &str) -> bool {
         && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
+/// Decode `text` as JSON, with the decoder's diagnostic as a string.
+fn parse_json<T>(text: &str) -> Result<T, String>
+where
+    T: serde::de::DeserializeOwned,
+{
+    crate::json::from_str(text).map_err(|error| error.to_string())
+}
+
+/// Decode `text` as RON, with the decoder's diagnostic as a string.
+fn parse_ron<T>(text: &str) -> Result<T, String>
+where
+    T: serde::de::DeserializeOwned,
+{
+    lgwks_std::ron::from_str(text).map_err(|error| error.to_string())
+}
+
 /// Refuse an oversized document before a decoder walks it.
 ///
 /// Every notation is measured the same way, so a document cannot be too large
@@ -1945,25 +1937,117 @@ fn malformed_flow(error: impl std::fmt::Display) -> BotError {
 
 /// Reject unknown tagged node kinds before serde turns them into a generic
 /// malformed-document diagnostic.
-fn reject_unknown_node_kinds(value: &JsonValue) -> Result<(), BotError> {
-    let Some(nodes) = value.get("nodes").and_then(JsonValue::as_object) else {
-        return Ok(());
-    };
-    for (node_id, node) in nodes {
-        let Some(kind) = node.get("kind").and_then(JsonValue::as_str) else {
-            continue;
-        };
+fn reject_unknown_node_kinds(declared: &BTreeMap<String, String>) -> Result<(), BotError> {
+    for (node_id, kind) in declared {
         if !matches!(
-            kind,
+            kind.as_str(),
             "say" | "ask" | "branch" | "handoff" | "refer" | "route" | "end"
         ) {
             return Err(BotError::UnknownNodeKind {
                 node: node_id.clone(),
-                kind: kind.to_owned(),
+                kind: kind.clone(),
             });
         }
     }
     Ok(())
+}
+
+/// The node kinds a document declares, keyed by node id.
+///
+/// Both notations decode into this, so the guard is written once rather than
+/// once per notation. It exists because the guard has to read a variant's name
+/// before the flow's own types have accepted it: by the time `FlowSpec` refuses
+/// an unknown kind, serde has already discarded which node carried it.
+///
+/// The name is `FlowSpec` because RON enforces a struct's name: a document
+/// written `FlowSpec(..)` is refused by a type that calls itself anything else,
+/// so a guard named after itself would read no document at all and would report
+/// silence, which is indistinguishable from finding nothing wrong. Every other
+/// field of the document is ignored here, which is serde's default.
+#[derive(Deserialize)]
+#[serde(crate = "lgwks_std::json::serde", rename = "FlowSpec")]
+struct DeclaredNodes<const FIELDED: bool> {
+    /// Every node's declared kind. Absent or empty is not this guard's
+    /// business; the flow's own validation refuses an empty node map.
+    #[serde(default)]
+    nodes: BTreeMap<String, VariantName<FIELDED>>,
+}
+
+/// A variant's name, read through serde's enum path.
+///
+/// The enum path is the only one that carries the name: RON writes a unit
+/// variant as a bare identifier, and asking the decoder for `Any` hands back a
+/// nameless unit, so the name reaches a reader only as a variant name.
+///
+/// `FIELDED` is which of serde's two variant accessors to read the content
+/// with. A unit variant must be consumed as a unit and a variant carrying
+/// anything must not, serde offers no way to ask which a given variant is, and
+/// guessing wrong fails the decode rather than reading the name. So both are
+/// attempted: this is the only place the flow's types are not the authority on
+/// their own shape, and the cost is one extra decode of a document already
+/// capped at [`MAX_FLOW_BYTES`].
+struct VariantName<const FIELDED: bool>(String);
+
+impl<'de, const FIELDED: bool> Deserialize<'de> for VariantName<FIELDED> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        /// Reads a variant's name and discards whatever it carries.
+        struct NameVisitor<const FIELDED: bool>;
+
+        impl<'de, const FIELDED: bool> serde::de::Visitor<'de> for NameVisitor<FIELDED> {
+            type Value = VariantName<FIELDED>;
+
+            fn expecting(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                formatter.write_str("a node kind")
+            }
+
+            fn visit_enum<A>(self, data: A) -> Result<VariantName<FIELDED>, A::Error>
+            where
+                A: serde::de::EnumAccess<'de>,
+            {
+                use serde::de::VariantAccess;
+
+                let (name, variant) = data.variant::<String>()?;
+                if FIELDED {
+                    variant.newtype_variant::<serde::de::IgnoredAny>()?;
+                } else {
+                    variant.unit_variant()?;
+                }
+                Ok(VariantName(name))
+            }
+        }
+
+        deserializer.deserialize_enum("NodeKind", &[], NameVisitor::<FIELDED>)
+    }
+}
+
+/// Merge what two shape-specific decodes of one document read.
+///
+/// A document holds unit variants and fielded ones at once, and serde reads a
+/// variant's content through one accessor and not the other, so the guard
+/// decodes the document once per shape and combines the results. A shape that
+/// does not decode contributes nothing rather than failing the guard: a
+/// document of only unit variants is exactly the case the fielded attempt
+/// cannot read, and it is not an error. When neither shape reads, the guard has
+/// no names to check and stays quiet, leaving the flow's own refusal to speak.
+fn merge_read_kinds<const FIRST: bool, const SECOND: bool>(
+    first: Result<DeclaredNodes<FIRST>, String>,
+    second: Result<DeclaredNodes<SECOND>, String>,
+) -> BTreeMap<String, String> {
+    let mut merged = BTreeMap::new();
+    if let Ok(declared) = first {
+        for (node_id, name) in declared.nodes {
+            merged.insert(node_id, name.0);
+        }
+    }
+    if let Ok(declared) = second {
+        for (node_id, name) in declared.nodes {
+            merged.insert(node_id, name.0);
+        }
+    }
+    merged
 }
 
 /// Named, typed variable declarations and their assigned values.

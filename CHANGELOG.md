@@ -249,14 +249,23 @@ modules above it, and it ships in the same release.
     `BotError::UnknownNodeKind` diagnostic and the structural checks are
     identical on either path. A document cannot be acceptable in one notation and
     refused in the other.
-  - **The node kinds need a map spelling.** `NodeKind` is a serde internally
-    tagged enum (`tag = "kind"`), and an internally tagged enum needs its tag to
-    be a real field, so `(kind: "end")` decodes and RON's native `End` does not.
-    `Predicate` is tagged the same way on `op`. Moving `NodeKind` to external
-    tagging would make a flow read `Say(text: "hello")`, which is a change to the
-    wire contract rather than a spelling detail, so it is not made here.
+  - **A variant is spelled with its own name.** Every enum in a flow document is
+    externally tagged, so a unit variant is its own name (`end`) and a variant
+    carrying fields takes them in parentheses (`say(text: "hello")`); in JSON the
+    same two are the bare string `"end"` and `{"say": {"text": "hello"}}`. This
+    is a change to the wire spelling rather than to the notation: the seven enums
+    a document carries (`NodeKind`, `FlowEdge`, `Terminal`, `Predicate`,
+    `ValueExpr`, `Value`, `VarType`) previously took a `kind` field, and a
+    document written in the older spelling is now refused rather than
+    reinterpreted.
+  - **The unknown-kind diagnostic reads differently on each path.** JSON checks a
+    variant name against nothing, so `BotError::UnknownNodeKind` names the node
+    and the kind it carried; RON checks the name against the variant list it is
+    handed and refuses before our own visitor runs, so its refusal names the
+    variant and the enum but cannot name the node. Both refuse; only what each
+    can say differs.
   - `crates/lgwks-bot/tests/flow_ron.rs` pins all of the above, including that
-    the tagging constraint is what it is and not something else.
+    the internally tagged spelling no longer decodes.
 
 - **`Observe::fingerprint`, and with it the lazy seam: a source that holds still
   is no longer polled.** Change detection is an *equality* question — the
