@@ -63,9 +63,16 @@ ast-grep-language ships is its own opt-in feature, and `full` enables all 28:
 
 ```toml
 [dependencies]
-lgwks_ast = { version = "0.1.3", features = ["lang-c", "lang-cpp", "lang-scala", "lang-kotlin", "lang-tsx"] }
+lgwks_ast = { version = "0.2.0", features = ["lang-c", "lang-cpp", "lang-scala", "lang-kotlin", "lang-tsx"] }
 # or everything: features = ["full"]
 ```
+
+**0.2.0 breaks one name.** `Language::C` is renamed `Language::CLang`. The
+workspace forbids `clippy::min_ident_chars` and `forbid` cannot be lowered from
+source, so an `#[allow]` on that variant is a hard E0453 rather than a
+suppression — the variant itself had to change. `Language::name()` still reports
+`"c"`, which is the stable identity findings match on, and the `lang-c` *feature*
+is unchanged, so only Rust code that names the variant is affected.
 
 | Feature | Language | Extensions | Default |
 |---------|----------|------------|---------|
