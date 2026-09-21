@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 
 use lgwks_bot::{
-    BotError, FlowBounds, FlowEdge, FlowSpec, NodeKind, Predicate, Session, Terminal, Value,
+    BotError, DegradedReason, Embedder, EmbedderIdentity, FlowBounds, FlowEdge, FlowSpec, NodeKind,
+    Predicate, Resolution, Resolver, SemanticResolver, Session, Terminal, TranscriptEntry, Value,
     ValueExpr, VarType,
 };
 
@@ -519,5 +520,218 @@ fn validation_rejects_an_unknown_node_kind() -> TestResult {
     }"#;
     let result = FlowSpec::from_json(source);
     assert!(matches!(result, Err(BotError::UnknownNodeKind { .. })));
+    Ok(())
+}
+
+/// A resolver that always reports the same verdict, so a session's behaviour
+/// can be observed against each [`Resolution`] variant in isolation.
+struct FixedResolver(Resolution);
+
+impl Resolver for FixedResolver {
+    fn resolve(&self, _utterance: &str, _options: &[String]) -> Resolution {
+        self.0.clone()
+    }
+}
+
+/// One `Ask` node whose options route to an `End`, so a resolved answer is
+/// observable as the session leaving the node.
+fn one_question_flow() -> Result<FlowSpec, BotError> {
+    let mut vars = BTreeMap::new();
+    vars.insert(
+        String::from("choice"),
+        VarType::Choice(vec![String::from("yes"), String::from("no")]),
+    );
+    FlowSpec::new(
+        vars,
+        "ask",
+        BTreeMap::from([
+            (
+                String::from("ask"),
+                NodeKind::Ask {
+                    var: String::from("choice"),
+                    options: vec![String::from("yes"), String::from("no")],
+                    routes: BTreeMap::from([
+                        (String::from("yes"), String::from("done")),
+                        (String::from("no"), String::from("done")),
+                    ]),
+                },
+            ),
+            (String::from("done"), NodeKind::End),
+        ]),
+        Vec::new(),
+        BTreeMap::new(),
+        FlowBounds::new(8),
+    )
+}
+
+/// One `Ask` node whose options are ordinary English, so a phrase that shares no
+/// letter with either of them is the only way to reach the semantic tier.
+fn order_flow() -> Result<FlowSpec, BotError> {
+    let options = vec![String::from("Repeat last order"), String::from("Cancel")];
+    // Cloned once because the declaration and the node both name the options;
+    // the node then takes ownership rather than cloning a second time.
+    let declared = VarType::Choice(options.clone());
+    FlowSpec::new(
+        BTreeMap::from([(String::from("order"), declared)]),
+        "ask",
+        BTreeMap::from([
+            (
+                String::from("ask"),
+                NodeKind::Ask {
+                    var: String::from("order"),
+                    options,
+                    routes: BTreeMap::from([
+                        (String::from("Repeat last order"), String::from("end")),
+                        (String::from("Cancel"), String::from("end")),
+                    ]),
+                },
+            ),
+            (String::from("end"), NodeKind::End),
+        ]),
+        Vec::new(),
+        BTreeMap::new(),
+        FlowBounds::new(8),
+    )
+}
+
+/// An embedder that places `"the usual"` next to `"Repeat last order"` and
+/// everything else orthogonally, so the test's geometry is its assertion.
+struct OrderEmbedder {
+    identity: EmbedderIdentity,
+}
+
+impl Embedder for OrderEmbedder {
+    type Error = std::convert::Infallible;
+
+    fn identity(&self) -> &EmbedderIdentity {
+        &self.identity
+    }
+
+    fn embed(&self, text: &str) -> Result<Vec<f32>, Self::Error> {
+        Ok(match text {
+            "the usual" | "Repeat last order" => vec![1.0, 0.0],
+            _ => vec![0.0, 1.0],
+        })
+    }
+}
+
+#[test]
+fn a_session_resolves_a_phrase_only_a_model_can_relate() -> TestResult {
+    // The claim this test exists to check is the integration one: a semantic
+    // resolver is a `Resolver`, so it drops into `Session` with no change to the
+    // session, the flow document, or the four verbs. The unit tests in
+    // `semantic.rs` prove the tier's arithmetic; only this proves it plugs in.
+    let embedder = OrderEmbedder {
+        identity: EmbedderIdentity::new("test-model", "digest-test", 2)?,
+    };
+    let mut session =
+        Session::with_resolver("semantic", order_flow()?, SemanticResolver::new(embedder))?;
+
+    // The premise, asserted rather than assumed: the default resolver cannot
+    // reach this phrase. Without it the test could pass on a lexicon match and
+    // prove nothing about the model.
+    let mut default = Session::new("default", order_flow()?)?;
+    default.answer("the usual")?;
+    assert_eq!(
+        default.current(),
+        Some("ask"),
+        "the lexicon alone must re-ask, or this test proves nothing about the model"
+    );
+
+    session.answer("the usual")?;
+
+    assert_eq!(
+        session.terminal(),
+        Some(&Terminal::Completed),
+        "the model's resolution advanced the session"
+    );
+    assert_eq!(
+        session.scope().get("order"),
+        Some(&Value::Choice(String::from("Repeat last order")))
+    );
+    Ok(())
+}
+
+#[test]
+fn a_degraded_resolver_reasks_without_claiming_absence() -> TestResult {
+    let session = Session::with_resolver(
+        "degraded",
+        one_question_flow()?,
+        FixedResolver(Resolution::Degraded {
+            reason: DegradedReason::EmbedderUnavailable,
+        }),
+    )?;
+    let mut session = session;
+    session.answer("yes")?;
+
+    assert_eq!(
+        session.current(),
+        Some("ask"),
+        "a degraded resolver re-asks the same node rather than advancing"
+    );
+    assert_eq!(session.terminal(), None);
+
+    let roles: Vec<&str> = session
+        .transcript()
+        .iter()
+        .map(TranscriptEntry::role)
+        .collect();
+    assert!(
+        roles.contains(&"resolver-degraded"),
+        "the cause is recorded under its own role, got {roles:?}"
+    );
+    let recorded = session
+        .transcript()
+        .iter()
+        .find(|entry| entry.role() == "resolver-degraded")
+        .map(TranscriptEntry::text)
+        .unwrap_or_default();
+    assert_eq!(
+        recorded, "Resolver unavailable: the embedder is unavailable",
+        "the record names the cause rather than reporting an empty score"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_degraded_verdict_is_distinguishable_from_an_absent_one() -> TestResult {
+    let mut absent = Session::with_resolver(
+        "absent",
+        one_question_flow()?,
+        FixedResolver(Resolution::Absent { best_score: 0.0 }),
+    )?;
+    absent.answer("yes")?;
+    let mut degraded = Session::with_resolver(
+        "degraded",
+        one_question_flow()?,
+        FixedResolver(Resolution::Degraded {
+            reason: DegradedReason::EmbedderUnavailable,
+        }),
+    )?;
+    degraded.answer("yes")?;
+
+    // Both re-ask, and that is the point: the *session* behaviour is the same,
+    // while what is recorded is not. A two-valued verdict would leave these two
+    // transcripts identical, and an operator reading a session that repeats the
+    // same question would have no way to tell an unclear person from a resolver
+    // that never ran.
+    assert_eq!(
+        degraded.transcript().len(),
+        absent.transcript().len() + 1,
+        "the degraded re-ask carries one record the absent one does not"
+    );
+    let absent_roles: Vec<&str> = absent
+        .transcript()
+        .iter()
+        .map(TranscriptEntry::role)
+        .collect();
+    let degraded_roles: Vec<&str> = degraded
+        .transcript()
+        .iter()
+        .map(TranscriptEntry::role)
+        .collect();
+    assert!(!absent_roles.contains(&"resolver-degraded"));
+    assert!(degraded_roles.contains(&"resolver-degraded"));
+    assert_ne!(absent_roles, degraded_roles);
     Ok(())
 }

@@ -235,6 +235,52 @@ subset (the same token tier, and nothing else), so keeping both would be two
 implementations of one job. That is a breaking public-API change for the next
 release, which the standing constraint reserves for a separate step.
 
+### 3.6 The semantic tier — **landed in this change**
+
+§3.5 states a limit rather than hiding it: `"the usual"` cannot be derived from
+`"Repeat last order"` by any amount of string distance. That is true, and it is
+what a lexicon is for. This section is the layer that answers it, and it is the
+one place a model belongs in this design.
+
+`semantic.rs` adds `Embedder` — a seam, not a dependency. The crate still
+carries no model, no tensor library and no tokenizer; the weights are not
+source, and compiling them in would make every consumer pay for them. A consumer
+with a model supplies it. `lgwks_std::similarity` gains `Cosine` alongside the
+other metrics, so the comparison itself is not reinvented here.
+
+Three properties make this safe to add to a running system rather than a second
+opinion that can disagree with the first.
+
+**It cannot change a verdict the lexicon reached.** The tier is consulted only
+when the lexicon returns `Absent`, and every other lexicon verdict — including
+`Ambiguous` — is returned verbatim. A model is a tie-breaker of last resort, not
+an override: if it could outvote an exact match it eventually would, and an
+exact match is the one verdict that cannot be wrong. So for any utterance that
+already resolved, enabling this tier is not a behaviour change.
+
+**Its contribution is named.** `MatchTier` gains `Semantic`, so a resolution
+says whether a model produced it, and `EmbedderIdentity` carries the model's
+name, a content digest of its weights, and its vector width. The digest is what
+makes two runs comparable — same name, different weights is a different model —
+and it is supplied by the embedder rather than computed here, because only the
+code that loaded the weights can know them. A verdict a model produced is only
+declarable if the model is named.
+
+**It reports rather than guesses.** A failed embedder, or one that contradicts
+its own declared width, produces `Resolution::Degraded` (§6 item 5) and not
+`Absent`. Re-asking is the right response to both, but the record distinguishes
+them, so an operator can tell an unclear person from a dependency that is down.
+
+Three things are deliberate rather than missing. The policy constants
+(`0.72`, `0.05`) are **declared, not fitted**, and are constructor arguments
+because the right values depend on the model; the margin is small on purpose,
+since two phrasings of one option legitimately score within hundredths of each
+other. There is **no cache**: an option list is authored and short, and a cache
+is a second piece of state needing a bound, an eviction policy and a test for
+both — the seam it would sit behind is `Embedder`. And there is **no logging**:
+the cause travels in the verdict and is written into the transcript, which is
+the run's record, rather than into a second unmanaged copy of the same fact.
+
 ## 4. What maps onto something that already exists
 
 | Described subsystem | This workspace | Note |
@@ -426,28 +472,37 @@ Each step lands green and independently. Steps 1–2 are unblocked now.
 2. **Language understanding.** ✅ Landed in this change: `language.rs`, the
    tiered lexicon; `Resolver` reshaped to the three-way `Resolution`, and
    `KeywordResolver` deleted rather than kept beside its superset (§3.5).
-3. **The locator ladder.** `Anchor`, `Ladder`, and `recognize_with_ladder`, per
+3. **The semantic tier.** ✅ Landed in this change: `semantic.rs`, the
+   embedding-backed tier over an injected `Embedder`, with `Cosine` added to
+   `lgwks_std::similarity`. Consulted only where the lexicon returns `Absent`,
+   so it cannot change a verdict the deterministic tiers already reached, and
+   the model's identity is recorded with every decision it informs (§3.6).
+4. **The locator ladder.** `Anchor`, `Ladder`, and `recognize_with_ladder`, per
    §3.2. Requires `ElementFacts` to carry the anchors a candidate offers.
-4. **The two missing typed outcomes.** `BotError` gains an indeterminate
-   variant so a timed-out `Execute` is not retyped `Failed` and retried into a
-   duplicate (the open defect named in §3.1); `TerminalOutcome` gains `Partial`
-   so a run that produced some but not all of its output is distinguishable from
-   one that produced none. This is also the described platform's
+5. **The missing typed outcomes.** Three of the same invariant. ✅ Landed:
+   `Resolution::Degraded` (§3.6), the verdict a resolver returns when a
+   dependency it needs is unavailable — without it, *nothing matched* and *we
+   could not look* render identically and asking the person again is the wrong
+   repair for the second. Still open: `BotError` gains an indeterminate variant
+   so a timed-out `Execute` is not retyped `Failed` and retried into a duplicate
+   (the open defect named in §3.1), and `TerminalOutcome` gains `Partial` so a
+   run that produced some but not all of its output is distinguishable from one
+   that produced none. That last is also the described platform's
    `completed | partial | failed` triage, and it is the same invariant again.
-5. **The politeness frontier.** Adaptive per-host delay, bounded per-host
+6. **The politeness frontier.** Adaptive per-host delay, bounded per-host
    concurrency, and the three-way admission verdict, all under `Time<Virtual>`
    (§5.3). This is the piece that makes a crawl complete, and it is the highest
-   value item on this list after the two already landed. `docs/bot-on-ecs.md`
-   §8 already specifies it; what is missing is the implementation.
-6. **Declared identity**, wired as a flow property and recorded per run (§5.2).
-7. **The `bot.evade` capability**, with the seeded, recorded draw and the grant
-   log (§5.4, §5.5). Deliberately after 5 and 6, so the cheap remedies are the
+   value item on this list that has not landed. `docs/bot-on-ecs.md` §8 already
+   specifies it; what is missing is the implementation.
+7. **Declared identity**, wired as a flow property and recorded per run (§5.2).
+8. **The `bot.evade` capability**, with the seeded, recorded draw and the grant
+   log (§5.4, §5.5). Deliberately after 6 and 7, so the cheap remedies are the
    ones in place before the expensive one is reachable.
-8. **The settlement policy.** `Time<Virtual>`-driven, declared per step, with
+9. **The settlement policy.** `Time<Virtual>`-driven, declared per step, with
    non-settlement as a typed terminal outcome (§3.4).
-9. **The recorder and its visible-delta compiler** (§3.3), on the ECS substrate.
-10. **The agent domain**, closed-enum actions and `FlowBounds` budget (§5.7).
-11. **The MCP adapter**, over the four verbs.
+10. **The recorder and its visible-delta compiler** (§3.3), on the ECS substrate.
+11. **The agent domain**, closed-enum actions and `FlowBounds` budget (§5.7).
+12. **The MCP adapter**, over the four verbs.
 
 ## 7. What this document does not decide
 

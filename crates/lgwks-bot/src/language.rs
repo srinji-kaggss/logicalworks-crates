@@ -291,7 +291,13 @@ fn score_all(
 }
 
 /// Decides a [`Resolution`] from scored candidates, best-first.
-fn decide(scored: &[(usize, MatchTier, f64)]) -> Resolution {
+///
+/// Shared with the semantic tier rather than reimplemented there. The rule it
+/// encodes — the best candidate must lead the runner-up by a stated margin, and
+/// everything inside that margin is still in play — is the *policy* of a
+/// three-way verdict, and two copies of it would be two policies that drift.
+/// Only the margin differs between callers, so the margin is a parameter.
+pub(crate) fn decide(scored: &[(usize, MatchTier, f64)], margin: f64) -> Resolution {
     let Some(&(index, tier, score)) = scored.first() else {
         return Resolution::Absent { best_score: 0.0 };
     };
@@ -299,7 +305,7 @@ fn decide(scored: &[(usize, MatchTier, f64)]) -> Resolution {
         Some(&(_, _, next)) => score - next,
         None => score,
     };
-    if lead >= MATCH_MARGIN {
+    if lead >= margin {
         return Resolution::Resolved {
             index,
             tier,
@@ -311,7 +317,7 @@ fn decide(scored: &[(usize, MatchTier, f64)]) -> Resolution {
     // narrows the re-ask to exactly that set.
     let tied: Vec<usize> = scored
         .iter()
-        .take_while(|candidate| score - candidate.2 < MATCH_MARGIN)
+        .take_while(|candidate| score - candidate.2 < margin)
         .map(|candidate| candidate.0)
         .collect();
     Resolution::Ambiguous { tied, score }
@@ -378,12 +384,10 @@ impl LanguageResolver {
     /// Resolves `utterance` against `options` as a three-way verdict.
     #[must_use]
     pub fn decide_for(&self, utterance: &str, options: &[String]) -> Resolution {
-        decide(&score_all(
-            utterance,
-            options,
-            &self.aliases,
-            &self.distance,
-        ))
+        decide(
+            &score_all(utterance, options, &self.aliases, &self.distance),
+            MATCH_MARGIN,
+        )
     }
 }
 
