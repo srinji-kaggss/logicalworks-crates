@@ -40,9 +40,14 @@ There is one execution path. `crates/lgwks-bot/Cargo.toml` states that
 "would mean nothing exercises it, the workspace gate never compiles it, and it
 rots into a second opinion nobody chose."
 
-`Bot::tick` is synchronous (`crates/lgwks-bot/src/ecs.rs:452`). The systems drive
-the non-`Send` verb futures on the calling thread, so there is nothing to await.
-Do not write `bot.tick().await`.
+`Bot::tick` is the synchronous adapter (`crates/lgwks-bot/src/ecs.rs:630`): it
+drives the non-`Send` verb futures on a thread-parking executor, so there is
+nothing to await. `Bot::tick_async` is the same tick awaited on the caller's
+executor (`crates/lgwks-bot/src/ecs.rs:561`), and it is the one to call from
+inside a runtime — `tick` refuses there with `BotError::TickInsideRuntime`
+rather than park the thread that owns the reactor. Do not write
+`bot.tick().await`; that is `tick` returning `usize`, then a `usize` that is not
+a future. See [failures](failures.md) for why the refusal is not a failed tick.
 
 ## Supported versions
 

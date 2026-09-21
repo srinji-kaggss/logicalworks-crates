@@ -148,6 +148,32 @@ pub enum ContractError {
         /// The offending value.
         value: String,
     },
+    /// A `[policy]` value was outside its closed grammar.
+    ///
+    /// `enforce` admits exactly `true` and exactly `false`. Every other token,
+    /// including `True`, `"true"` and `1`, is this refusal: the earlier reader
+    /// read any unrecognised spelling as `false`, which let a typo stand the
+    /// whole gate down without a diagnostic.
+    BadPolicyValue {
+        /// One-based line number.
+        line: usize,
+        /// The offending key.
+        key: String,
+        /// The offending value, verbatim, quotes included.
+        value: String,
+    },
+    /// The same `[policy]` key was written more than once.
+    DuplicatePolicyKey {
+        /// One-based line number.
+        line: usize,
+        /// The repeated key.
+        key: String,
+    },
+    /// `[policy]` was declared more than once.
+    DuplicatePolicySection {
+        /// One-based line number of the second declaration.
+        line: usize,
+    },
     /// `approved_on` was not an ISO `YYYY-MM-DD` date.
     BadDate {
         /// The entry's crate name.
@@ -210,6 +236,44 @@ fn fmt_bad_tier(formatter: &mut fmt::Formatter<'_>, line: usize, value: &str) ->
     )
 }
 
+/// Renders `ContractError::BadPolicyValue`. A quoted `"true"` is shown with its
+/// quotes so the reader can see that the register carried a string where the
+/// grammar requires a Boolean.
+fn fmt_bad_policy_value(
+    formatter: &mut fmt::Formatter<'_>,
+    line: usize,
+    key: &str,
+    value: &str,
+) -> fmt::Result {
+    write!(
+        formatter,
+        "line {line}: [policy] {key} = {value:?} is not a Boolean; write exactly true or false"
+    )
+}
+
+/// Renders `ContractError::DuplicatePolicyKey`, naming the repeated key so the
+/// second assignment can be deleted without re-reading this module.
+fn fmt_duplicate_policy_key(
+    formatter: &mut fmt::Formatter<'_>,
+    line: usize,
+    key: &str,
+) -> fmt::Result {
+    write!(
+        formatter,
+        "line {line}: [policy] {key} is written more than once; keep one assignment"
+    )
+}
+
+/// Renders `ContractError::DuplicatePolicySection` at the second `[policy]`, so
+/// the two declarations can be merged rather than guessed between.
+fn fmt_duplicate_policy_section(formatter: &mut fmt::Formatter<'_>, line: usize) -> fmt::Result {
+    write!(
+        formatter,
+        "line {line}: [policy] is declared more than once; a second declaration would \
+         silently override the first"
+    )
+}
+
 /// Renders `ContractError::BadDate`, printing the required layout explicitly.
 fn fmt_bad_date(formatter: &mut fmt::Formatter<'_>, krate: &str, value: &str) -> fmt::Result {
     write!(
@@ -245,6 +309,15 @@ impl fmt::Display for ContractError {
             Self::OrphanKey { line, ref key } => fmt_orphan_key(formatter, line, key),
             Self::MissingField { ref krate, field } => fmt_missing_field(formatter, krate, field),
             Self::BadTier { line, ref value } => fmt_bad_tier(formatter, line, value),
+            Self::BadPolicyValue {
+                line,
+                ref key,
+                ref value,
+            } => fmt_bad_policy_value(formatter, line, key, value),
+            Self::DuplicatePolicyKey { line, ref key } => {
+                fmt_duplicate_policy_key(formatter, line, key)
+            }
+            Self::DuplicatePolicySection { line } => fmt_duplicate_policy_section(formatter, line),
             Self::BadDate {
                 ref krate,
                 ref value,
@@ -345,6 +418,10 @@ struct Reader<'a> {
     allowed_keys: &'a [&'static str],
     /// Current section.
     section: Section,
+    /// Whether a `[policy]` header has already been read.
+    policy_declared: bool,
+    /// Policy keys already assigned, so a repeat is a refusal.
+    policy_keys: Vec<String>,
     /// Policy enforcement flag, defaulting to true.
     enforce: bool,
     /// Optional repository authority.
@@ -364,9 +441,18 @@ fn handle_section_header(
     line_no: usize,
     entry_header: &str,
     section: &mut Section,
+    policy_declared: &mut bool,
     drafts: &mut Vec<RawEntry>,
 ) -> Result<bool, ContractError> {
     if line == "[policy]" {
+        // A second `[policy]` is refused rather than merged. The two blocks are
+        // read by the same reader, so a later one silently overwrites whatever
+        // the earlier one set; refusing is what keeps the register's effective
+        // enforcement flag the one a reviewer read.
+        if *policy_declared {
+            return Err(ContractError::DuplicatePolicySection { line: line_no });
+        }
+        *policy_declared = true;
         *section = Section::Policy;
         Ok(true)
     } else if line == entry_header {
@@ -386,31 +472,70 @@ fn handle_section_header(
     }
 }
 
+/// Every key the `[policy]` block defines.
+const POLICY_KEYS: [&str; 2] = ["enforce", "repository"];
+
+/// Decodes `[policy] enforce` under a closed grammar: exactly `true` or exactly
+/// `false`, and nothing else.
+///
+/// The token is the raw pair value after comment stripping and trimming, so a
+/// quoted `"true"` still arrives with its quotes and is refused as a string
+/// where the grammar requires a Boolean. This is the difference the previous
+/// reader could not make: it read *any* unrecognised spelling as `false`, so
+/// `enforce = True`, `enforce = "true"` and `enforce = 1` each stood the whole
+/// gate down without a diagnostic. A gate a typo can disable is a gate a typo
+/// does disable.
+fn decode_enforce(value: &str, line_no: usize) -> Result<bool, ContractError> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(ContractError::BadPolicyValue {
+            line: line_no,
+            key: "enforce".to_owned(),
+            value: value.to_owned(),
+        }),
+    }
+}
+
 /// Applies one key/value pair written inside `[policy]`.
 ///
-/// `enforce` is compared against the exact literal `true`; any other spelling,
-/// including `True` and `1`, leaves enforcement on, so a malformed attempt to
-/// stand the gate down fails closed rather than disabling it. The quote wrapper
-/// is stripped from `repository` because the reader does not implement TOML
-/// escapes, so an escaped quote inside the value is not accepted.
+/// A repeated key is refused rather than overwritten: "last write wins" would
+/// make the effective enforcement flag depend on line order, which is exactly
+/// the ambiguity this block exists to remove. The quote wrapper is stripped
+/// from `repository` because the reader does not implement TOML escapes, so an
+/// escaped quote inside the value is not accepted.
 fn apply_policy_pair(
     key: &str,
     value: &str,
     line_no: usize,
+    seen_keys: &mut Vec<String>,
     enforce: &mut bool,
     repository: &mut Option<String>,
 ) -> Result<(), ContractError> {
-    if key == "enforce" {
-        *enforce = value == "true";
-        Ok(())
-    } else if key == "repository" {
-        *repository = Some(unquote(value).to_owned());
-        Ok(())
-    } else {
-        Err(ContractError::UnknownKey {
+    if !POLICY_KEYS.contains(&key) {
+        return Err(ContractError::UnknownKey {
             line: line_no,
             key: key.to_owned(),
-        })
+        });
+    }
+    if seen_keys.iter().any(|seen| seen == key) {
+        return Err(ContractError::DuplicatePolicyKey {
+            line: line_no,
+            key: key.to_owned(),
+        });
+    }
+    match key {
+        "enforce" => {
+            let decoded = decode_enforce(value, line_no)?;
+            seen_keys.push(key.to_owned());
+            *enforce = decoded;
+            Ok(())
+        }
+        _ => {
+            seen_keys.push(key.to_owned());
+            *repository = Some(unquote(value).to_owned());
+            Ok(())
+        }
     }
 }
 
@@ -459,6 +584,7 @@ fn process_pair(
             key,
             value,
             line_no,
+            &mut reader.policy_keys,
             &mut reader.enforce,
             &mut reader.repository,
         ),
@@ -506,6 +632,7 @@ fn process_contract_line(
         line_no,
         reader.entry_header,
         &mut reader.section,
+        &mut reader.policy_declared,
         &mut reader.entries,
     )? {
         return Ok(());
@@ -545,6 +672,8 @@ pub(crate) fn parse_register(
         entry_header,
         allowed_keys,
         section: Section::None,
+        policy_declared: false,
+        policy_keys: Vec::new(),
         enforce: true,
         repository: None,
         entries: Vec::new(),
@@ -1121,6 +1250,88 @@ mod tests {
     #[test]
     fn policy_can_stand_enforcement_down_for_adoption() -> TestResult {
         let input = format!("[policy]\nenforce = false\n\n{}", entry(""));
+        let contract = Contract::parse(&input)?;
+        assert!(!contract.enforce);
+        Ok(())
+    }
+
+    /// The exact spellings the closed grammar admits. `true` and `false` are
+    /// the only two tokens; everything else is refused below.
+    #[test]
+    fn the_boolean_grammar_admits_exactly_true_and_false() -> TestResult {
+        let on = Contract::parse("[policy]\nenforce = true\n")?;
+        assert!(on.enforce, "`enforce = true` must leave enforcement on");
+        let off = Contract::parse("[policy]\nenforce = false\n")?;
+        assert!(!off.enforce, "`enforce = false` is adoption mode");
+        Ok(())
+    }
+
+    /// Issue 45's three literal inputs plus the neighbouring spellings a human
+    /// actually writes. Each one used to be read as `false`, standing the gate
+    /// down without a diagnostic; each must now be a typed refusal that names
+    /// the line.
+    #[test]
+    fn a_malformed_enforce_value_is_refused_rather_than_read_as_false() {
+        // Surrounding whitespace is the reader's, not the value's: `split_pair`
+        // trims it, so `enforce =   true` is the legal spelling with padding and
+        // is covered by the positive test above.
+        for token in [
+            "True",
+            "FALSE",
+            "\"true\"",
+            "\"false\"",
+            "1",
+            "0",
+            "yes",
+            "on",
+            "",
+            "true.",
+            "true;",
+        ] {
+            let input = format!("[policy]\nenforce = {token}\n");
+            assert_eq!(
+                Contract::parse(&input),
+                Err(ContractError::BadPolicyValue {
+                    line: 2,
+                    key: "enforce".into(),
+                    value: token.into(),
+                }),
+                "`enforce = {token}` must be refused, not silently read as false"
+            );
+        }
+    }
+
+    /// A trailing comment is stripped before the token is read, so the two
+    /// legal spellings keep working with one written beside them.
+    #[test]
+    fn a_trailing_comment_does_not_change_the_policy_token() -> TestResult {
+        let contract = Contract::parse("[policy]\nenforce = false # adoption\n")?;
+        assert!(!contract.enforce);
+        Ok(())
+    }
+
+    #[test]
+    fn a_repeated_policy_key_is_refused() {
+        assert_eq!(
+            Contract::parse("[policy]\nenforce = true\nenforce = false\n"),
+            Err(ContractError::DuplicatePolicyKey {
+                line: 3,
+                key: "enforce".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_repeated_policy_section_is_refused() {
+        assert_eq!(
+            Contract::parse("[policy]\nenforce = true\n[policy]\nenforce = false\n"),
+            Err(ContractError::DuplicatePolicySection { line: 3 })
+        );
+    }
+
+    #[test]
+    fn a_policy_block_after_the_entries_is_still_read() -> TestResult {
+        let input = format!("{}\n[policy]\nenforce = false\n", entry(""));
         let contract = Contract::parse(&input)?;
         assert!(!contract.enforce);
         Ok(())

@@ -19,6 +19,7 @@
 //! trailing commas). Both sides of every comparison use the same function, so
 //! verdicts agree.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
@@ -354,17 +355,375 @@ fn is_test_module(module: &syn::ItemMod) -> bool {
 // ── Detector 1: ERROR-SWALLOW ───────────────────────────────────────────────
 // Ported from the reference `detect_error_swallow` detector.
 
-/// Result-typed expressions whose error is silently discarded: `.ok()` on a
-/// `Result`, `let _ = <fallible>`, `.unwrap_or_default()` on a `Result`, or
-/// a one-argument closure to `unwrap_or_else` / `map_err` / `or_else` that
-/// never reads the error it was handed.
+/// Result-typed expressions whose error is silently discarded: `.ok();` in
+/// statement position, `let _ = <fallible>;`, `.unwrap_or_default()` on a
+/// `Result`, or a one-argument closure to `unwrap_or_else` / `map_err` /
+/// `or_else` that never observes the error it was handed.
 ///
-/// Closure arity alone proves the receiver is a `Result`: `Option`'s
-/// `unwrap_or_else` takes zero arguments, so a one-argument closure cannot be
-/// an `Option` fallback, and `map_err` / `or_else` exist only on `Result`.
+/// The rule's name is a claim — an error existed and was dropped — so the
+/// scanner resolves *why it believes a fallible value is in hand* before it
+/// reports one, from evidence stated in the file being scanned
+/// ([`FallibilityIndex`]). A receiver that resolves to something which is not
+/// a `Result` is never reported. A receiver that does not resolve at all is
+/// reported only where the call's shape cannot be an `Option` operation, and
+/// the evidence line then says the shape is all there is. Nothing about the
+/// verdict depends on a method's arity alone, which is not a type and cannot
+/// be one.
 fn detect_error_swallow(_source: &str, file: &syn::File, hits: &mut Vec<Hit>) {
-    let mut visitor = ErrorSwallowVisitor { hits };
+    let index = FallibilityIndex::of(file);
+    let mut visitor = ErrorSwallowVisitor {
+        hits,
+        index: &index,
+    };
     visitor.visit_file(file);
+}
+
+/// The evidence line used when a call's shape is the only thing proving it
+/// cannot be an `Option` operation.
+const SHAPE_ONLY: &str = "the call shape alone, which `Option` cannot have";
+
+/// What this file proves about the value a receiver expression yields.
+///
+/// Every witness is built from syntax in the scanned file, so a positive
+/// answer is a fact about the file rather than a guess from a spelling. The
+/// three answers are distinct for a reason: [`Self::NotFallible`] is evidence
+/// *against* an error, [`Self::Unresolved`] is the absence of evidence, and
+/// only the first licenses silence while the second licenses the shape-only
+/// report.
+#[derive(Debug)]
+enum Fallibility {
+    /// The receiver carries an error; the witness says why the scanner says so.
+    Result(Witness),
+    /// The receiver resolved to a value that does not carry an error.
+    NotFallible,
+    /// The receiver could not be resolved from this file.
+    Unresolved,
+}
+
+/// Why a value is known to carry an error.
+#[derive(Debug)]
+enum Witness {
+    /// A function defined in this file declares a `Result` return, directly
+    /// or through a type alias declared here.
+    Function(String),
+    /// A binding's written type annotation resolves to `Result`.
+    Binding(String),
+    /// A standard-library routine from [`STD_FALLIBLE_ROUTINES`].
+    Routine(String),
+}
+
+impl Witness {
+    /// Render the witness as the finding's evidence.
+    fn describe(&self) -> String {
+        match *self {
+            Self::Function(ref name) => format!("the `Result` returned by fn `{name}`"),
+            Self::Binding(ref name) => format!("the `Result` bound by `let {name}: ..`"),
+            Self::Routine(ref path) => format!("the `Result` returned by `{path}`"),
+        }
+    }
+}
+
+/// Standard-library routines that return `Result`, by rendered path.
+///
+/// This table is the scanner's substitute for the type information a single
+/// file does not carry: `syn` reads syntax, and these are the call forms whose
+/// fallibility is a fact about the standard library rather than an inference
+/// from a name. It is deliberately finite and hand-checked, and it holds only
+/// routines reached by calling them outright — an entry like
+/// `Command::output` would be dead, because in `Command::new(..).output()` the
+/// receiver expression is the `Command::new(..)` call, not `output`.
+///
+/// A routine that is not listed resolves to [`Fallibility::Unresolved`], which
+/// is silent except for the shapes `Option` cannot have.
+const STD_FALLIBLE_ROUTINES: &[&str] = &[
+    "File::create",
+    "File::open",
+    "String::from_utf8",
+    "std::env::current_dir",
+    "std::env::current_exe",
+    "std::env::remove_var",
+    "std::env::set_current_dir",
+    "std::env::set_var",
+    "std::env::var",
+    "std::env::var_os",
+    "std::fs::File::create",
+    "std::fs::File::open",
+    "std::fs::canonicalize",
+    "std::fs::copy",
+    "std::fs::create_dir",
+    "std::fs::create_dir_all",
+    "std::fs::metadata",
+    "std::fs::read",
+    "std::fs::read_dir",
+    "std::fs::read_link",
+    "std::fs::read_to_string",
+    "std::fs::remove_dir",
+    "std::fs::remove_dir_all",
+    "std::fs::remove_file",
+    "std::fs::rename",
+    "std::fs::symlink_metadata",
+    "std::fs::write",
+    "std::net::TcpListener::bind",
+    "std::net::TcpStream::connect",
+    "std::net::UdpSocket::bind",
+    "std::str::from_utf8",
+];
+
+/// How many alias hops a written type may take before resolution gives up.
+///
+/// `type A = B; type B = A;` is not a `Result` and is not resolvable; this
+/// bound is what makes the recursion total without carrying a visited set.
+const MAX_ALIAS_DEPTH: u8 = 8;
+
+/// The fallibility witnesses one file states about itself.
+///
+/// The scan is single-file by construction — [`scan_source`] receives one
+/// source text — so this index is the whole semantic source available, and the
+/// boundary is stated rather than papered over: a receiver whose type is
+/// declared in another module is [`Fallibility::Unresolved`], not a guess.
+#[derive(Default)]
+struct FallibilityIndex {
+    /// Every free function defined here, by name, with the return type its
+    /// signature writes.
+    ///
+    /// Methods are not recorded. A receiver reached as `x.f()` is resolved by
+    /// the expression, never by the method's name, so recording `fn open` from
+    /// an impl block would only make a *free* `fn open` ambiguous and cost a
+    /// witness it had.
+    functions: HashMap<String, KnownReturn>,
+    /// Every `type X = ..;` alias defined here.
+    aliases: HashMap<String, syn::Type>,
+    /// Every annotated `let name: Type = ..;` written here.
+    bindings: HashMap<String, syn::Type>,
+}
+
+/// A return type as the signature wrote it.
+///
+/// The written type is boxed because `syn::Type` is an order of magnitude
+/// larger than the enum's other variants, and every entry of
+/// [`WitnessCollector`]'s map would otherwise pay for it.
+enum KnownReturn {
+    /// The signature writes a return type.
+    Written(Box<syn::Type>),
+    /// The signature writes none, so the return is `()`.
+    Unit,
+    /// Two definitions here share this bare name, so a call through it does
+    /// not resolve to one signature.
+    Ambiguous,
+}
+
+impl FallibilityIndex {
+    /// Collect every witness the file states.
+    fn of(file: &syn::File) -> Self {
+        let mut index = Self::default();
+        {
+            let mut collector = WitnessCollector {
+                index: &mut index,
+                seen_bindings: HashSet::new(),
+                ambiguous_bindings: HashSet::new(),
+            };
+            collector.visit_file(file);
+        }
+        index
+    }
+
+    /// Resolve a receiver expression.
+    fn classify(&self, receiver: &syn::Expr) -> Fallibility {
+        match *receiver {
+            syn::Expr::Call(ref call) => self.classify_call(&call.func),
+            syn::Expr::Path(ref path) if path.qself.is_none() => self.classify_binding(&path.path),
+            _ => Fallibility::Unresolved,
+        }
+    }
+
+    /// Classify the value of an expression that is bound directly, as in
+    /// `let _ = <expr>;`.
+    ///
+    /// Only a call or a named binding states anything here. A method call's
+    /// *result* is not the fallible value this detector is about — the method
+    /// already returned `T` — and the method call itself is reported by the
+    /// method-call walk, so classifying one here would double-count it.
+    fn classify_value(&self, expression: &syn::Expr) -> Fallibility {
+        match *expression {
+            syn::Expr::Call(ref call) => self.classify_call(&call.func),
+            syn::Expr::Path(ref path) if path.qself.is_none() => self.classify_binding(&path.path),
+            _ => Fallibility::Unresolved,
+        }
+    }
+
+    /// Classify a call target.
+    ///
+    /// Supported forms are a single-segment path (`read_config(..)`) and a
+    /// `Self::`- or `self::`-qualified one. A path through a module
+    /// (`crate::io::read_config(..)`) does not resolve: the scanner cannot see
+    /// what that module re-exports, and resolving by the last segment would
+    /// credit a different function that happens to share its name.
+    fn classify_call(&self, func: &syn::Expr) -> Fallibility {
+        let syn::Expr::Path(ref path) = *func else {
+            return Fallibility::Unresolved;
+        };
+        if path.qself.is_some() {
+            return Fallibility::Unresolved;
+        }
+        let rendered = render_path(&path.path);
+        if STD_FALLIBLE_ROUTINES.contains(&rendered.as_str()) {
+            return Fallibility::Result(Witness::Routine(rendered));
+        }
+        let Some(name) = callable_name(&path.path) else {
+            return Fallibility::Unresolved;
+        };
+        let Some(known) = self.functions.get(&name) else {
+            return Fallibility::Unresolved;
+        };
+        match *known {
+            KnownReturn::Written(ref ty) if self.type_is_result(ty, 0) => {
+                Fallibility::Result(Witness::Function(name))
+            }
+            KnownReturn::Written(_) | KnownReturn::Unit => Fallibility::NotFallible,
+            KnownReturn::Ambiguous => Fallibility::Unresolved,
+        }
+    }
+
+    /// Classify a plain path used as a value, against the annotated `let`
+    /// bindings this file writes.
+    fn classify_binding(&self, path: &syn::Path) -> Fallibility {
+        if path.leading_colon.is_some() {
+            return Fallibility::Unresolved;
+        }
+        let mut segments = path.segments.iter();
+        let (Some(segment), None) = (segments.next(), segments.next()) else {
+            return Fallibility::Unresolved;
+        };
+        let name = segment.ident.to_string();
+        match self.bindings.get(&name) {
+            Some(ty) if self.type_is_result(ty, 0) => Fallibility::Result(Witness::Binding(name)),
+            Some(_) => Fallibility::NotFallible,
+            None => Fallibility::Unresolved,
+        }
+    }
+
+    /// True when a written type is a `Result`, following this file's aliases.
+    fn type_is_result(&self, ty: &syn::Type, depth: u8) -> bool {
+        if depth >= MAX_ALIAS_DEPTH {
+            return false;
+        }
+        let next = depth.saturating_add(1);
+        match *ty {
+            syn::Type::Path(ref path) => {
+                if path.qself.is_some() {
+                    return false;
+                }
+                let Some(segment) = path.path.segments.last() else {
+                    return false;
+                };
+                if segment.ident == "Result" {
+                    return true;
+                }
+                match self.aliases.get(&segment.ident.to_string()) {
+                    Some(aliased) => self.type_is_result(aliased, next),
+                    None => false,
+                }
+            }
+            syn::Type::Reference(ref reference) => self.type_is_result(&reference.elem, next),
+            syn::Type::Paren(ref paren) => self.type_is_result(&paren.elem, next),
+            syn::Type::Group(ref group) => self.type_is_result(&group.elem, next),
+            _ => false,
+        }
+    }
+}
+
+/// Render a path's segments, which is how [`STD_FALLIBLE_ROUTINES`] is keyed
+/// and how a witness names the routine it found.
+fn render_path(path: &syn::Path) -> String {
+    path.segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<String>>()
+        .join("::")
+}
+
+/// The bare name a call's path resolves to in this file, when its own shape
+/// allows one.
+///
+/// A qualified `Self::name` is the same free function as `name`; anything
+/// longer is a path through a module, which does not resolve here.
+fn callable_name(path: &syn::Path) -> Option<String> {
+    if path.leading_colon.is_some() {
+        return None;
+    }
+    let mut segments = path.segments.iter();
+    match (segments.next(), segments.next(), segments.next()) {
+        (Some(only), None, _) => Some(only.ident.to_string()),
+        (Some(first), Some(second), None) if first.ident == "Self" || first.ident == "self" => {
+            Some(second.ident.to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Collects the witnesses a file states about its own types.
+struct WitnessCollector<'a> {
+    /// Index being built.
+    index: &'a mut FallibilityIndex,
+    /// Annotated binding names already recorded.
+    seen_bindings: HashSet<String>,
+    /// Annotated binding names written more than once, which no longer say
+    /// which binding a later read of the name means.
+    ambiguous_bindings: HashSet<String>,
+}
+
+impl WitnessCollector<'_> {
+    /// Record a free function's return type under its name.
+    fn record_signature(&mut self, name: &syn::Ident, output: &syn::ReturnType) {
+        let known = match *output {
+            syn::ReturnType::Default => KnownReturn::Unit,
+            syn::ReturnType::Type(_, ref ty) => KnownReturn::Written(Box::new(ty.as_ref().clone())),
+        };
+        match self.index.functions.entry(name.to_string()) {
+            Entry::Vacant(slot) => {
+                slot.insert(known);
+            }
+            // A second definition under one bare name does not resolve to one
+            // signature, so a call through it stops being a witness instead of
+            // silently keeping whichever was seen first.
+            Entry::Occupied(mut slot) => {
+                slot.insert(KnownReturn::Ambiguous);
+            }
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for WitnessCollector<'_> {
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        self.record_signature(&node.sig.ident, &node.sig.output);
+        visit::visit_item_fn(self, node);
+    }
+
+    fn visit_item_type(&mut self, node: &'ast syn::ItemType) {
+        self.index
+            .aliases
+            .insert(node.ident.to_string(), node.ty.as_ref().clone());
+        visit::visit_item_type(self, node);
+    }
+
+    /// Only an annotated `let` states a type; an inferred one states nothing,
+    /// which is why `let value = ..;` never becomes a witness.
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        if let syn::Pat::Type(ref typed) = node.pat
+            && let syn::Pat::Ident(ref bound) = *typed.pat
+        {
+            let name = bound.ident.to_string();
+            if !self.ambiguous_bindings.contains(&name) {
+                if self.seen_bindings.insert(name.clone()) {
+                    self.index.bindings.insert(name, typed.ty.as_ref().clone());
+                } else {
+                    self.index.bindings.remove(&name);
+                    self.ambiguous_bindings.insert(name);
+                }
+            }
+        }
+        visit::visit_local(self, node);
+    }
 }
 
 /// Walks a file looking for discarded `Result` errors, accumulating findings
@@ -375,16 +734,46 @@ fn detect_error_swallow(_source: &str, file: &syn::File, hits: &mut Vec<Hit>) {
 struct ErrorSwallowVisitor<'a> {
     /// Findings accumulated during the walk, in visit order.
     hits: &'a mut Vec<Hit>,
+    /// Witnesses collected from the file being walked.
+    index: &'a FallibilityIndex,
+}
+
+impl ErrorSwallowVisitor<'_> {
+    /// Build the evidence for a finding, or refuse to report one.
+    ///
+    /// `shape_is_option_impossible` is true only for a call whose spelling and
+    /// argument shape a standard `Option` cannot have (see
+    /// [`discarded_error_closure`] and [`Self::record_discarded_ok`]). A
+    /// resolved witness always reports; a receiver resolved to something that
+    /// is not a `Result` never does; an unresolved receiver reports only under
+    /// that shape, and the evidence then says the shape is the whole of it
+    /// rather than dressing an inference up as a proved defect.
+    fn evidence_for(
+        &self,
+        receiver: &syn::Expr,
+        shape_is_option_impossible: bool,
+    ) -> Option<String> {
+        match self.index.classify(receiver) {
+            Fallibility::Result(ref witness) => Some(witness.describe()),
+            Fallibility::NotFallible => None,
+            Fallibility::Unresolved if shape_is_option_impossible => Some(SHAPE_ONLY.to_owned()),
+            Fallibility::Unresolved => None,
+        }
+    }
 }
 
 /// Names the method when a call passes a closure that drops the error it is
 /// handed, and `None` otherwise.
 ///
-/// Only one-argument closures count: `Option::unwrap_or_else` takes a
-/// zero-argument closure and `map_err` / `or_else` do not exist on `Option`,
-/// so an arity of exactly one is itself the proof that the receiver is a
-/// `Result`. A closure taking a second argument (a `FnOnce(.., ..)`) is not
-/// the shape being detected and is left alone.
+/// Only one-argument closures count. That arity is evidence about `Option`,
+/// not about the receiver: `Option::unwrap_or_else` and `Option::or_else` take
+/// a zero-argument closure, and `Option` has no `map_err` at all, so a call
+/// passing exactly one closure argument cannot be any of those methods on an
+/// `Option`. A user-defined type may still define the same names, which is why
+/// this answer is only the *shape*: when the receiver does not resolve, the
+/// finding says so, and when it resolves to a non-`Result` the call is not
+/// reported at all. A closure taking a second argument (a `FnOnce(.., ..)`) is
+/// not the shape being detected and is left alone.
 fn discarded_error_closure(node: &syn::ExprMethodCall) -> Option<&'static str> {
     let method = match node.method.to_string().as_str() {
         "unwrap_or_else" => "unwrap_or_else",
@@ -405,6 +794,12 @@ fn discarded_error_closure(node: &syn::ExprMethodCall) -> Option<&'static str> {
 /// A `|_|` parameter drops the cause outright. A named parameter the body
 /// never reads drops it just as completely.
 ///
+/// A parameter is *read* only where the body reaches the binding the pattern
+/// introduced. A name that merely appears — a second binding that shadows it,
+/// a field or method of the same spelling, a macro's token text — is not a
+/// read of the error, and treating one as a read is what let an unrelated
+/// local binding change the verdict.
+///
 /// Any pattern that is neither a wildcard nor a single identifier (a tuple, a
 /// struct pattern, a slice) binds through a shape rather than a name; the
 /// detector cannot tell a dropped binding from a used one there, so it refuses
@@ -412,47 +807,359 @@ fn discarded_error_closure(node: &syn::ExprMethodCall) -> Option<&'static str> {
 fn error_binding_is_dropped(parameter: &syn::Pat, body: &syn::Expr) -> bool {
     match *parameter {
         syn::Pat::Wild(_) => true,
-        syn::Pat::Ident(ref bound) => !body_reads_ident(body, &bound.ident),
+        syn::Pat::Ident(ref bound) => !BodyReadsBinding::observes(body, &bound.ident),
         _ => false,
     }
 }
 
-/// True when `name` occurs anywhere in `body`, syntactically or inside a macro
-/// body's token text.
-fn body_reads_ident(body: &syn::Expr, name: &syn::Ident) -> bool {
-    let mut reader = IdentReader { name, found: false };
-    reader.visit_expr(body);
-    reader.found
-}
-
-/// Visit state for [`body_reads_ident`]: the identifier being looked for and
-/// whether it has been seen so far.
-struct IdentReader<'a> {
-    /// The parameter name whose use would count as reading the error.
+/// Whether a closure body observes the error binding its parameter introduced.
+///
+/// The evidence for "the error was used" is a **value read of that binding**,
+/// resolved lexically: a path expression naming it while no enclosing scope
+/// has rebound the name. Three things are deliberately not evidence:
+///
+/// - A *declaration*. `let _error = Vec::new();` introduces a second binding,
+///   and reading that one observes a different value entirely.
+/// - A *spelling*. A field name, a method name, a path segment, or text inside
+///   a macro never touches the parameter's value.
+/// - A *discard*. `drop(error)` and a bare `error;` read the binding and
+///   preserve nothing, which is the loss this detector exists to name.
+///
+/// Constructs the walk cannot resolve fail toward silence rather than toward a
+/// false accusation, which is the bias the previous textual check declared: a
+/// macro whose tokens name the binding is credited, and a pattern whose shape
+/// is not modelled is not treated as a shadow.
+struct BodyReadsBinding<'a> {
+    /// Identifier the closure parameter introduced.
     name: &'a syn::Ident,
-    /// Set once a matching identifier is visited; never cleared, because one
-    /// read anywhere in the body is enough to clear the closure.
-    found: bool,
+    /// True once an enclosing scope has rebound `name`, so a path with that
+    /// spelling reads the other binding rather than this one.
+    shadowed: bool,
+    /// Set once a preserving read of the binding is seen.
+    observed: bool,
 }
 
-impl<'ast> Visit<'ast> for IdentReader<'_> {
-    fn visit_ident(&mut self, node: &'ast syn::Ident) {
-        if node == self.name {
-            self.found = true;
+impl<'a> BodyReadsBinding<'a> {
+    /// Report whether `body` reads the binding `name` introduced.
+    fn observes(body: &syn::Expr, name: &'a syn::Ident) -> bool {
+        let mut visitor = Self {
+            name,
+            shadowed: false,
+            observed: false,
+        };
+        visitor.visit_expr(body);
+        visitor.observed
+    }
+
+    /// Visit a nested scope, hiding the binding while `rebinds` is set.
+    fn visit_scoped<F>(&mut self, rebinds: bool, body: F)
+    where
+        F: FnOnce(&mut Self),
+    {
+        let outer = self.shadowed;
+        if rebinds {
+            self.shadowed = true;
+        }
+        body(self);
+        self.shadowed = outer;
+    }
+
+    /// True when a path names this binding and nothing else.
+    fn path_is_binding(&self, path: &syn::Path, has_qself: bool) -> bool {
+        if has_qself || path.leading_colon.is_some() {
+            return false;
+        }
+        let mut segments = path.segments.iter();
+        let (Some(segment), None) = (segments.next(), segments.next()) else {
+            return false;
+        };
+        segment.ident == *self.name && matches!(segment.arguments, syn::PathArguments::None)
+    }
+
+    /// True for a statement whose whole effect is to drop the value: a bare
+    /// `error;` or a `let _ = error;`.
+    fn is_discard_statement(&self, statement: &syn::Stmt) -> bool {
+        if self.shadowed {
+            return false;
+        }
+        match *statement {
+            syn::Stmt::Expr(syn::Expr::Path(ref path), Some(_)) => {
+                self.path_is_binding(&path.path, path.qself.is_some())
+            }
+            syn::Stmt::Local(ref local) => {
+                if !matches!(local.pat, syn::Pat::Wild(_)) {
+                    return false;
+                }
+                let Some(ref init) = local.init else {
+                    return false;
+                };
+                matches!(
+                    *init.expr,
+                    syn::Expr::Path(ref path)
+                        if self.path_is_binding(&path.path, path.qself.is_some())
+                )
+            }
+            _ => false,
         }
     }
 
-    /// Macro bodies are matched as TEXT, not walked as syntax: an inline
-    /// format capture spells the read inside a string literal, so
-    /// `|err| panic!("...: {err}")` has no `err` ident in the AST. Text can
-    /// only ever say "read" where syntax says nothing, failing toward
-    /// silence, never toward a false accusation.
-    fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        if node.tokens.to_string().contains(&self.name.to_string()) {
-            self.found = true;
+    /// True for `drop(<binding>)`, including a qualified `std::mem::drop`.
+    ///
+    /// The read is real, but the cause is not made observable by it, so it
+    /// does not clear the finding.
+    fn is_drop_of_binding(&self, call: &syn::ExprCall) -> bool {
+        if self.shadowed {
+            return false;
         }
-        visit::visit_macro(self, node);
+        let syn::Expr::Path(ref func) = *call.func else {
+            return false;
+        };
+        if !matches!(func.path.segments.last(), Some(segment) if segment.ident == "drop") {
+            return false;
+        }
+        let mut args = call.args.iter();
+        let (Some(only), None) = (args.next(), args.next()) else {
+            return false;
+        };
+        matches!(
+            *only,
+            syn::Expr::Path(ref path)
+                if self.path_is_binding(&path.path, path.qself.is_some())
+        )
     }
+
+    /// Credit a macro's arguments if they read the binding.
+    fn observe_macro(&mut self, mac: &syn::Macro) {
+        if !self.shadowed && macro_reads_binding(&mac.tokens, self.name) {
+            self.observed = true;
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for BodyReadsBinding<'_> {
+    /// Mark the read, and do not recurse: the walk has one subject, and a
+    /// later segment of a longer path is not it.
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if self.shadowed {
+            return;
+        }
+        if self.path_is_binding(&node.path, node.qself.is_some()) {
+            self.observed = true;
+        }
+    }
+
+    /// A `let` binds from the statement after it onward, so its initializer is
+    /// visited under the state in force before the binding exists, and every
+    /// later statement under the shadowed state.
+    fn visit_block(&mut self, node: &'ast syn::Block) {
+        let outer = self.shadowed;
+        for statement in &node.stmts {
+            let rebinding = match *statement {
+                syn::Stmt::Local(ref local) => pattern_binds(&local.pat, self.name),
+                _ => false,
+            };
+            if !rebinding {
+                self.visit_stmt(statement);
+                continue;
+            }
+            if let syn::Stmt::Local(ref local) = *statement
+                && let Some(ref init) = local.init
+            {
+                self.visit_expr(init.expr.as_ref());
+                if let Some((_, ref diverge)) = init.diverge {
+                    self.visit_expr(diverge.as_ref());
+                }
+            }
+            self.shadowed = true;
+        }
+        self.shadowed = outer;
+    }
+
+    /// A statement that drops the value is a read without an observation.
+    fn visit_stmt(&mut self, node: &'ast syn::Stmt) {
+        if self.is_discard_statement(node) {
+            return;
+        }
+        visit::visit_stmt(self, node);
+    }
+
+    /// `drop(error)` reads the binding and preserves nothing.
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if self.is_drop_of_binding(node) {
+            return;
+        }
+        visit::visit_expr_call(self, node);
+    }
+
+    /// A closure parameter shadows the binding inside the closure, so a nested
+    /// closure that rebinds the name is not observing the outer error.
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        let rebinds = node
+            .inputs
+            .iter()
+            .any(|pattern| pattern_binds(pattern, self.name));
+        self.visit_scoped(rebinds, |visitor| visitor.visit_expr(node.body.as_ref()));
+    }
+
+    fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+        self.visit_expr(node.expr.as_ref());
+        let rebinds = pattern_binds(&node.pat, self.name);
+        self.visit_scoped(rebinds, |visitor| visitor.visit_block(&node.body));
+    }
+
+    /// An `if let PAT = ..` binds in the branch it guards, not in the
+    /// condition, so the condition is visited unshadowed and the branch is
+    /// not.
+    fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+        self.visit_expr(node.cond.as_ref());
+        let rebinds = let_condition_binds(node.cond.as_ref(), self.name);
+        self.visit_scoped(rebinds, |visitor| {
+            visitor.visit_block(&node.then_branch);
+            if let Some(ref alternative) = node.else_branch {
+                visitor.visit_expr(alternative.1.as_ref());
+            }
+        });
+    }
+
+    fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+        self.visit_expr(node.cond.as_ref());
+        let rebinds = let_condition_binds(node.cond.as_ref(), self.name);
+        self.visit_scoped(rebinds, |visitor| visitor.visit_block(&node.body));
+    }
+
+    /// A match arm's pattern binds in its guard and its body.
+    fn visit_arm(&mut self, node: &'ast syn::Arm) {
+        let rebinds = pattern_binds(&node.pat, self.name);
+        self.visit_scoped(rebinds, |visitor| {
+            if let Some((_, ref guard)) = node.guard {
+                visitor.visit_expr(guard.as_ref());
+            }
+            visitor.visit_expr(node.body.as_ref());
+        });
+    }
+
+    /// A nested function's parameter binds in its own body.
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        let rebinds = node.sig.inputs.iter().any(|input| match *input {
+            syn::FnArg::Receiver(_) => false,
+            syn::FnArg::Typed(ref typed) => pattern_binds(&typed.pat, self.name),
+        });
+        self.visit_scoped(rebinds, |visitor| visitor.visit_block(&node.block));
+    }
+
+    fn visit_expr_macro(&mut self, node: &'ast syn::ExprMacro) {
+        self.observe_macro(&node.mac);
+    }
+
+    fn visit_stmt_macro(&mut self, node: &'ast syn::StmtMacro) {
+        self.observe_macro(&node.mac);
+    }
+}
+
+/// True when a pattern introduces a binding named `name`.
+///
+/// Covers the shapes a closure body reaches for — an identifier, possibly
+/// through a tuple, struct, slice, reference, or-pattern, or type ascription.
+/// A pattern this walk does not model answers `false` and is therefore not
+/// treated as a shadow, the same refusal to accuse that
+/// [`error_binding_is_dropped`] makes for an unrecognised parameter.
+fn pattern_binds(pattern: &syn::Pat, name: &syn::Ident) -> bool {
+    match *pattern {
+        syn::Pat::Ident(ref bound) => bound.ident == *name,
+        syn::Pat::Tuple(ref tuple) => tuple
+            .elems
+            .iter()
+            .any(|element| pattern_binds(element, name)),
+        syn::Pat::TupleStruct(ref tuple) => tuple
+            .elems
+            .iter()
+            .any(|element| pattern_binds(element, name)),
+        syn::Pat::Struct(ref structure) => structure
+            .fields
+            .iter()
+            .any(|field| pattern_binds(&field.pat, name)),
+        syn::Pat::Slice(ref slice) => slice
+            .elems
+            .iter()
+            .any(|element| pattern_binds(element, name)),
+        syn::Pat::Reference(ref reference) => pattern_binds(&reference.pat, name),
+        syn::Pat::Or(ref alternatives) => alternatives
+            .cases
+            .iter()
+            .any(|case| pattern_binds(case, name)),
+        syn::Pat::Paren(ref paren) => pattern_binds(&paren.pat, name),
+        syn::Pat::Type(ref typed) => pattern_binds(&typed.pat, name),
+        _ => false,
+    }
+}
+
+/// True when an `if let` / `while let` condition rebinds the name in the body
+/// it guards.
+fn let_condition_binds(condition: &syn::Expr, name: &syn::Ident) -> bool {
+    matches!(*condition, syn::Expr::Let(ref binding) if pattern_binds(&binding.pat, name))
+}
+
+/// True when a macro's token stream reads `name` as a value.
+///
+/// Macro arguments are token trees rather than syntax, so only two spellings
+/// count: an identifier token in value position, and an inline format capture
+/// inside a string literal. Two things are excluded on purpose. The name
+/// reached through `.` or `::` is a field, method, or path segment rather than
+/// the binding. And ordinary text inside a string literal is not a read at
+/// all — `concat!("_error")` names the binding while touching nothing, and
+/// that textual match used to clear the finding on its own.
+///
+/// The scan reads a group's tokens as flat text, so a `let` that rebinds the
+/// name *inside* a macro's block argument is not tracked. That over-credits a
+/// read, which is the direction this detector has always failed in: silence
+/// rather than a false accusation.
+fn macro_reads_binding(tokens: &proc_macro2::TokenStream, name: &syn::Ident) -> bool {
+    let expected = name.to_string();
+    let trees: Vec<proc_macro2::TokenTree> = tokens.clone().into_iter().collect();
+    let mut previous: Option<&proc_macro2::TokenTree> = None;
+    let mut found = false;
+    for tree in &trees {
+        match *tree {
+            proc_macro2::TokenTree::Ident(ref ident) => {
+                if ident == name && !is_access_prefix(previous) {
+                    found = true;
+                }
+            }
+            proc_macro2::TokenTree::Literal(ref literal) => {
+                if literal_names_binding(literal, &expected) {
+                    found = true;
+                }
+            }
+            proc_macro2::TokenTree::Group(ref group) => {
+                if macro_reads_binding(&group.stream(), name) {
+                    found = true;
+                }
+            }
+            proc_macro2::TokenTree::Punct(_) => {}
+        }
+        previous = Some(tree);
+    }
+    found
+}
+
+/// True when the token before an identifier binds it into a field, method, or
+/// path rather than naming the value.
+fn is_access_prefix(previous: Option<&proc_macro2::TokenTree>) -> bool {
+    matches!(
+        previous,
+        Some(proc_macro2::TokenTree::Punct(punct))
+            if punct.as_char() == '.' || punct.as_char() == ':'
+    )
+}
+
+/// True when a string literal contains an inline format capture of `name`.
+///
+/// Only a brace-delimited capture counts. `concat!("_error")` mentions the
+/// spelling as text, which is not a read, and the same is true of a plain
+/// message string that happens to contain the name.
+fn literal_names_binding(literal: &proc_macro2::Literal, name: &str) -> bool {
+    let text = literal.to_string();
+    text.contains(&format!("{{{name}}}")) || text.contains(&format!("{{{name}:"))
 }
 
 impl ErrorSwallowVisitor<'_> {
@@ -460,22 +1167,25 @@ impl ErrorSwallowVisitor<'_> {
     /// converted to an `Option` and then dropped, so the error is gone with no
     /// caller ever reading it.
     ///
-    /// Only a statement whose semicolon is present counts. A trailing
-    /// `.ok()` expression (a tail value) is not discarded, and an `Option`
-    /// receiver is indistinguishable here, but `.ok()` on a `Result` is the
-    /// shape this detector exists for, and the statement form is the one that
-    /// provably throws the value away.
+    /// Only a statement whose semicolon is present counts: a trailing `.ok()`
+    /// expression (a tail value) is not discarded. `Option` has no `ok`, so
+    /// the spelling is the shape evidence; a receiver that resolves to a
+    /// non-`Result` still refuses the finding.
     fn record_discarded_ok(&mut self, statement: &syn::Stmt) {
         let syn::Stmt::Expr(syn::Expr::MethodCall(ref call), Some(_)) = *statement else {
             return;
         };
-        if call.method == "ok" {
-            self.hits.push(Hit {
-                rule: "ERROR-SWALLOW",
-                line: call.method.span().start().line.max(1),
-                snippet: ".ok(); discards Result value".to_owned(),
-            });
+        if call.method != "ok" {
+            return;
         }
+        let Some(evidence) = self.evidence_for(call.receiver.as_ref(), true) else {
+            return;
+        };
+        self.hits.push(Hit {
+            rule: "ERROR-SWALLOW",
+            line: call.method.span().start().line.max(1),
+            snippet: format!(".ok(); discards {evidence} without reading it"),
+        });
     }
 
     /// Records a `let _ = <expr>;` binding and reports whether it matched.
@@ -485,6 +1195,11 @@ impl ErrorSwallowVisitor<'_> {
     /// statement. When it does match, the initializer is visited here rather
     /// than by the caller, which is why the caller must not re-walk it: doing
     /// so would report the same initializer twice.
+    ///
+    /// The initializer is visited either way — a value that is not fallible
+    /// can still hold a `.ok()` or another swallow — but only a call or an
+    /// annotated binding *witnesses* fallibility, so `let _ = 7usize;` and
+    /// `let _ = option;` produce no finding.
     fn record_wildcard_binding(&mut self, statement: &syn::Stmt) -> bool {
         let syn::Stmt::Local(ref local) = *statement else {
             return false;
@@ -495,11 +1210,16 @@ impl ErrorSwallowVisitor<'_> {
         let Some(ref init) = local.init else {
             return false;
         };
-        self.hits.push(Hit {
-            rule: "ERROR-SWALLOW",
-            line: local.let_token.span().start().line.max(1),
-            snippet: "let _ = ...; binds a value to `_` without inspecting it".to_owned(),
-        });
+        if let Fallibility::Result(ref witness) = self.index.classify_value(init.expr.as_ref()) {
+            self.hits.push(Hit {
+                rule: "ERROR-SWALLOW",
+                line: local.let_token.span().start().line.max(1),
+                snippet: format!(
+                    "let _ = ...; binds {} to `_` without inspecting it",
+                    witness.describe()
+                ),
+            });
+        }
         visit::visit_expr(self, init.expr.as_ref());
         true
     }
@@ -527,17 +1247,26 @@ impl<'ast> Visit<'ast> for ErrorSwallowVisitor<'_> {
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         let line = node.method.span().start().line.max(1);
         if node.method == "unwrap_or_default" {
-            self.hits.push(Hit {
-                rule: "ERROR-SWALLOW",
-                line,
-                snippet: ".unwrap_or_default() silently drops error".to_owned(),
-            });
+            // `Option::unwrap_or_default` carries this exact spelling and means
+            // "absent, use the default", so the receiver has to resolve before
+            // this can be reported as a lost error.
+            if let Some(evidence) = self.evidence_for(node.receiver.as_ref(), false) {
+                self.hits.push(Hit {
+                    rule: "ERROR-SWALLOW",
+                    line,
+                    snippet: format!(".unwrap_or_default() silently drops error from {evidence}"),
+                });
+            }
         }
-        if let Some(method) = discarded_error_closure(node) {
+        if let Some(method) = discarded_error_closure(node)
+            && let Some(evidence) = self.evidence_for(node.receiver.as_ref(), true)
+        {
             self.hits.push(Hit {
                 rule: "ERROR-SWALLOW",
                 line,
-                snippet: format!(".{method}(|..| ..) never reads the error it was handed"),
+                snippet: format!(
+                    ".{method}(|..| ..) never reads the error it was handed; evidence: {evidence}"
+                ),
             });
         }
         visit::visit_expr_method_call(self, node);
@@ -1312,56 +2041,378 @@ mod tests {
         hits.iter().map(|hit| hit.rule).collect()
     }
 
-    // ERROR-SWALLOW: RED then GREEN per spelling.
+    // ERROR-SWALLOW: the report is a claim about a lost *error*, so every
+    // fixture below asserts the finding's evidence as well as its rule, and
+    // the controls assert the absence of a finding — the direction issue #48
+    // was filed from. The two are one contract: `swallow` and `no_swallow`
+    // are the same predicate read at both ends.
+
+    /// The one `ERROR-SWALLOW` finding, with the evidence it carries.
+    fn swallow(hits: &[Hit]) -> Result<&Hit, Box<dyn std::error::Error>> {
+        let mut found = hits.iter().filter(|hit| hit.rule == "ERROR-SWALLOW");
+        let hit = found
+            .next()
+            .ok_or_else(|| format!("expected an ERROR-SWALLOW finding, got {hits:?}"))?;
+        assert!(found.next().is_none(), "expected one finding, got {hits:?}");
+        Ok(hit)
+    }
+
+    /// Asserts a fixture produces no lost-error finding.
+    fn no_swallow(hits: &[Hit]) {
+        let found: Vec<&Hit> = hits
+            .iter()
+            .filter(|hit| hit.rule == "ERROR-SWALLOW")
+            .collect();
+        assert!(found.is_empty(), "unexpected ERROR-SWALLOW: {found:?}");
+    }
+
+    /// Issue #48, literal false-positive source 1. `Option` has an
+    /// `unwrap_or_default` of its own, where `None` means "use zero" and no
+    /// error was ever produced.
+    const OPTION_DEFAULT: &str = r#"pub fn default_count(value: Option<usize>) -> usize {
+    value.unwrap_or_default()
+}
+"#;
+
+    /// Issue #48, literal false-positive source 2. An integer literal cannot
+    /// carry an error, so binding it to `_` discards nothing.
+    const INFALLIBLE_WILDCARD: &str = r#"pub fn discard_number() {
+    let _ = 7usize;
+}
+"#;
+
+    /// A `Result` swallowed through the same spelling as source 1.
+    const RESULT_DEFAULT: &str = r#"pub fn read_count() -> Result<usize, E> { Ok(1) }
+
+pub fn count() -> usize {
+    read_count().unwrap_or_default()
+}
+"#;
+
+    /// The same `Result` reached through an alias this file declares.
+    const ALIASED_RESULT_DEFAULT: &str = r#"pub type Outcome<T> = Result<T, E>;
+pub fn read_count() -> Outcome<usize> { Ok(1) }
+
+pub fn count() -> usize {
+    read_count().unwrap_or_default()
+}
+"#;
+
+    /// A `Result` bound to `_` and never inspected.
+    const DISCARDED_RESULT_VALUE: &str = r#"pub fn read_count() -> Result<usize, E> { Ok(1) }
+
+pub fn warm() {
+    let _ = read_count();
+}
+"#;
+
+    /// A user-defined method with the same spelling as the standard one. Its
+    /// receiver resolves here to a type that is not a `Result`, which is
+    /// evidence *against* a lost error, not merely missing evidence.
+    const SAME_NAME_USER_METHOD: &str = r#"pub struct Counter { hits: usize }
+
+impl Counter {
+    pub fn unwrap_or_default(&self) -> usize { self.hits }
+}
+
+pub fn count() -> usize {
+    let counter: Counter = Counter { hits: 0 };
+    counter.unwrap_or_default()
+}
+"#;
+
+    #[test]
+    fn option_default_is_not_a_lost_error() -> TestResult {
+        no_swallow(&scan(OPTION_DEFAULT)?);
+        Ok(())
+    }
+
+    #[test]
+    fn infallible_wildcard_binding_is_not_a_lost_error() -> TestResult {
+        no_swallow(&scan(INFALLIBLE_WILDCARD)?);
+        Ok(())
+    }
+
+    #[test]
+    fn option_binding_is_not_a_lost_error() -> TestResult {
+        no_swallow(&scan(
+            "pub fn f() -> Option<u8> {\n    let value: Option<u8> = None;\n    let _ = value;\n    value\n}\n",
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn user_defined_same_name_method_is_not_a_lost_error() -> TestResult {
+        no_swallow(&scan(SAME_NAME_USER_METHOD)?);
+        Ok(())
+    }
+
+    #[test]
+    fn result_default_is_a_lost_error() -> TestResult {
+        let hits = scan(RESULT_DEFAULT)?;
+        let hit = swallow(&hits)?;
+        assert_eq!(hit.line, 4, "the finding lands on the call");
+        assert!(
+            hit.snippet
+                .contains("the `Result` returned by fn `read_count`"),
+            "{hit:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn aliased_result_default_is_a_lost_error() -> TestResult {
+        let hits = scan(ALIASED_RESULT_DEFAULT)?;
+        let hit = swallow(&hits)?;
+        assert!(
+            hit.snippet
+                .contains("the `Result` returned by fn `read_count`"),
+            "an alias declared in this file resolves: {hit:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn discarded_result_value_is_a_lost_error() -> TestResult {
+        let hits = scan(DISCARDED_RESULT_VALUE)?;
+        let hit = swallow(&hits)?;
+        assert_eq!(hit.line, 4);
+        assert!(
+            hit.snippet
+                .contains("binds the `Result` returned by fn `read_count`"),
+            "{hit:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resolved_result_binding_is_a_lost_error() -> TestResult {
+        let hits = scan(
+            "pub fn read() -> Result<u8, E> { Ok(1) }\n\npub fn f() {\n    let outcome: Result<u8, E> = read();\n    let _ = outcome;\n}\n",
+        )?;
+        let hit = swallow(&hits)?;
+        assert!(hit.snippet.contains("`let outcome: ..`"), "{hit:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn unresolved_receiver_is_reported_as_shape_evidence_only() -> TestResult {
+        // The receiver's type is not stated in this file, so the only thing
+        // the scanner can honestly say is that the shape is not one `Option`
+        // has. That is not a proved defect, and the evidence says so rather
+        // than claiming an error was found.
+        let hits = scan("pub fn f(buffer: &Buffer) -> u8 { buffer.map_err(|_| 0) }\n")?;
+        let hit = swallow(&hits)?;
+        assert!(hit.snippet.contains("the call shape alone"), "{hit:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn resolved_non_result_receiver_is_never_reported() -> TestResult {
+        // The same call with a receiver whose type *is* stated here: the
+        // evidence now resolves, and it resolves against a lost error.
+        let hits = scan(
+            "pub struct Buffer { len: u8 }\n\nimpl Buffer {\n    pub fn map_err<F: Fn(u8) -> u8>(&self, f: F) -> u8 { f(self.len) }\n}\n\npub fn f() -> u8 {\n    let buffer: Buffer = Buffer { len: 0 };\n    buffer.map_err(|_| 0)\n}\n",
+        )?;
+        no_swallow(&hits);
+        Ok(())
+    }
 
     #[test]
     fn wildcard_map_err_is_swallow() -> TestResult {
-        let hits = scan("fn f() -> Result<(), E> { g().map_err(|_| E::Flat)?; Ok(()) }\n")?;
-        assert!(rules(&hits).contains(&"ERROR-SWALLOW"), "{hits:?}");
+        let hits = scan(
+            "pub fn read() -> Result<u8, E> { Ok(1) }\n\npub fn f() -> Result<(), E> {\n    read().map_err(|_| E::Flat)?;\n    Ok(())\n}\n",
+        )?;
+        let hit = swallow(&hits)?;
+        assert!(
+            hit.snippet.contains("the `Result` returned by fn `read`"),
+            "{hit:?}"
+        );
         Ok(())
     }
 
     #[test]
     fn named_but_unread_map_err_is_swallow() -> TestResult {
-        let hits = scan("fn f() -> Result<(), E> { g().map_err(|cause| E::Flat)?; Ok(()) }\n")?;
-        assert!(rules(&hits).contains(&"ERROR-SWALLOW"), "{hits:?}");
+        let hits = scan(
+            "pub fn read() -> Result<u8, E> { Ok(1) }\n\npub fn f() -> Result<(), E> {\n    read().map_err(|cause| E::Flat)?;\n    Ok(())\n}\n",
+        )?;
+        assert!(swallow(&hits)?.snippet.contains("map_err("), "{hits:?}");
         Ok(())
     }
 
     #[test]
     fn named_and_formatted_map_err_is_clean() -> TestResult {
-        let hits = scan(
-            "fn f() -> Result<(), E> { g().map_err(|cause| E::Msg(format!(\"{cause}\")))?; Ok(()) }\n",
-        )?;
-        assert!(!rules(&hits).contains(&"ERROR-SWALLOW"), "{hits:?}");
-        Ok(())
-    }
-
-    #[test]
-    fn unwrap_or_default_on_result_is_swallow() -> TestResult {
-        let hits = scan("fn f() -> u32 { g().unwrap_or_default() }\n")?;
-        assert!(rules(&hits).contains(&"ERROR-SWALLOW"), "{hits:?}");
+        no_swallow(&scan(
+            "pub fn read() -> Result<u8, E> { Ok(1) }\n\npub fn f() -> Result<(), E> {\n    read().map_err(|cause| E::Msg(format!(\"{cause}\")))?;\n    Ok(())\n}\n",
+        )?);
         Ok(())
     }
 
     #[test]
     fn discarded_ok_is_swallow() -> TestResult {
-        let hits = scan("fn f() { g().ok(); }\n")?;
-        assert!(rules(&hits).contains(&"ERROR-SWALLOW"), "{hits:?}");
+        let hits = scan(
+            "pub fn read() -> Result<u8, E> { Ok(1) }\n\npub fn f() {\n    read().ok();\n}\n",
+        )?;
+        assert!(
+            swallow(&hits)?
+                .snippet
+                .contains("the `Result` returned by fn `read`"),
+            "{hits:?}"
+        );
         Ok(())
     }
 
     #[test]
-    fn let_underscore_binding_is_swallow() -> TestResult {
-        let hits = scan("fn f() { let _ = g(); }\n")?;
-        assert!(rules(&hits).contains(&"ERROR-SWALLOW"), "{hits:?}");
+    fn option_or_else_with_no_argument_is_clean() -> TestResult {
+        no_swallow(&scan(
+            "pub fn f(value: Option<u8>) -> u8 {\n    value.unwrap_or_else(|| 0)\n}\n",
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn tested_ok_is_clean() -> TestResult {
+        no_swallow(&scan(
+            "pub fn read() -> Result<u8, E> { Ok(1) }\n\npub fn f() -> bool {\n    read().is_ok()\n}\n",
+        )?);
         Ok(())
     }
 
     #[test]
     fn swallow_inside_test_fn_is_exempt() -> TestResult {
-        let hits = scan("#[test]\nfn f() { g().map_err(|_| E::Flat).unwrap(); }\n")?;
-        assert!(!rules(&hits).contains(&"ERROR-SWALLOW"), "{hits:?}");
+        let hits = scan("#[test]\nfn f() {\n    read().map_err(|_| E::Flat).unwrap();\n}\n")?;
+        no_swallow(&hits);
+        Ok(())
+    }
+
+    // Issue #49: a fallback closure's parameter counts as used only where the
+    // body reads that binding. Shadowing it, naming a same-spelled field, or
+    // mentioning it in a macro's text are not reads of the error.
+
+    /// Issue #49, literal missed-error source: the returned `Vec` is a *new*
+    /// binding, and the filesystem error is discarded unread.
+    const SHADOWED_FALLBACK: &str = r#"pub fn load(path: &str) -> Vec<u8> {
+    std::fs::read(path).unwrap_or_else(|_error| {
+        let _error = Vec::new();
+        _error
+    })
+}
+"#;
+
+    /// The control: identical handling, no shadowing.
+    const UNSHADOWED_FALLBACK: &str = r#"pub fn load(path: &str) -> Vec<u8> {
+    std::fs::read(path).unwrap_or_else(|_error| Vec::new())
+}
+"#;
+
+    #[test]
+    fn shadowed_error_binding_does_not_satisfy_the_use_check() -> TestResult {
+        let hits = scan(SHADOWED_FALLBACK)?;
+        let hit = swallow(&hits)?;
+        assert_eq!(hit.line, 2, "the finding lands on the fallback call");
+        assert!(hit.snippet.contains("unwrap_or_else("), "{hit:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn unshadowed_named_fallback_is_reported_too() -> TestResult {
+        let hits = scan(UNSHADOWED_FALLBACK)?;
+        assert_eq!(swallow(&hits)?.line, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn renamed_unrelated_local_does_not_clear_the_finding() -> TestResult {
+        let hits = scan(
+            "pub fn load(path: &str) -> Vec<u8> {\n    std::fs::read(path).unwrap_or_else(|_error| {\n        let scratch = Vec::new();\n        scratch\n    })\n}\n",
+        )?;
+        assert_eq!(swallow(&hits)?.line, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn genuine_propagation_is_clean() -> TestResult {
+        no_swallow(&scan(
+            "pub fn load(path: &str) -> std::io::Result<Vec<u8>> {\n    let bytes = std::fs::read(path)?;\n    Ok(bytes)\n}\n",
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn structured_diagnostic_use_is_clean() -> TestResult {
+        no_swallow(&scan(
+            "pub fn load(path: &str) -> Result<Vec<u8>, E> {\n    std::fs::read(path).map_err(|error| E::Read { source: error })\n}\n",
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn nested_closure_capture_is_clean() -> TestResult {
+        no_swallow(&scan(
+            "pub fn load(path: &str) -> Result<Vec<u8>, E> {\n    std::fs::read(path).map_err(|error| {\n        let render = || format!(\"{error}\");\n        E::Msg(render())\n    })\n}\n",
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn nested_closure_that_rebinds_the_name_is_a_swallow() -> TestResult {
+        let hits = scan(
+            "pub fn load(path: &str) -> E {\n    std::fs::read(path).map_err(|error| {\n        let render = |error: u8| error.to_string();\n        E::Flat(render(0))\n    })\n}\n",
+        )?;
+        assert_eq!(swallow(&hits)?.line, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn same_spelled_field_is_not_a_read() -> TestResult {
+        let hits = scan(
+            "pub struct Failure { pub error: u8 }\n\npub fn load(path: &str, other: &Failure) -> E {\n    std::fs::read(path).map_err(|error| E::Flat(other.error))\n}\n",
+        )?;
+        assert_eq!(swallow(&hits)?.line, 4);
+        Ok(())
+    }
+
+    #[test]
+    fn unrelated_macro_string_is_not_a_read() -> TestResult {
+        let hits = scan(
+            "pub fn load(path: &str) -> E {\n    std::fs::read(path).map_err(|_error| E::flat(concat!(\"_error\")))\n}\n",
+        )?;
+        assert_eq!(swallow(&hits)?.line, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn inline_format_capture_is_a_read() -> TestResult {
+        no_swallow(&scan(
+            "pub fn load(path: &str) -> E {\n    std::fs::read(path).map_err(|error| E::flat(format!(\"{error}\")))\n}\n",
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn comment_mentioning_the_binding_is_not_a_read() -> TestResult {
+        let hits = scan(
+            "pub fn load(path: &str) -> E {\n    std::fs::read(path).map_err(|error| {\n        // the error binding is mentioned here and nowhere else\n        E::flat(\"error\")\n    })\n}\n",
+        )?;
+        assert_eq!(swallow(&hits)?.line, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_drop_is_a_swallow() -> TestResult {
+        let hits = scan(
+            "pub fn load(path: &str) -> E {\n    std::fs::read(path).map_err(|error| {\n        drop(error);\n        E::Flat\n    })\n}\n",
+        )?;
+        assert_eq!(swallow(&hits)?.line, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn stored_then_dropped_binding_is_a_swallow() -> TestResult {
+        let hits = scan(
+            "pub fn load(path: &str) -> E {\n    std::fs::read(path).map_err(|error| {\n        let _ = error;\n        E::Flat\n    })\n}\n",
+        )?;
+        assert_eq!(swallow(&hits)?.line, 2);
         Ok(())
     }
 

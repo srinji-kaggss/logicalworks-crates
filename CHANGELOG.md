@@ -28,6 +28,166 @@ explicitly under that crate.
   in every contribution, so `CONTRIBUTING.md` now states that a contributor
   licence agreement must be in place before a non-trivial `lgwks_bot`
   contribution is merged.
+### lgwks_bot Fixed
+
+- **A tick can no longer be run from inside an async runtime through the
+  synchronous adapter.** `Bot::tick` drives the tick with a thread-parking
+  executor. Called from a thread that an async runtime is driving — a
+  current-thread runtime above all — parking that thread stops the reactor dead,
+  so a tick with a timer, a socket, or a sibling task never returned: it was a
+  deadlock, not a slow tick. `tick` now returns `BotError::TickInsideRuntime`
+  when a runtime already owns the calling thread. It refuses on a multi-worker
+  runtime too, where parking the caller may happen to work, because which thread
+  the caller was handed is not knowable from inside the tick.
+- `Bot::tick_async` is the async adapter: the same four phases, awaited on the
+  caller's executor, returning the same `Result`. It is the entry point inside a
+  runtime, and the one to reach for when a verb needs this crate's timer or a
+  driver.
+- The tick is now decidable before it is doable. The decision system
+  (`fire_plan`) records the effect program as an ordered list of steps before any
+  effect runs, and the driver then awaits those steps (`EcsBot::run_steps`).
+  That is what makes a condition failure's position well defined: the steps the
+  walk cleared before the failing condition still run, and the tick reports the
+  failure.
+- `rt::task::repeat` no longer starves cancellation. It raced each iteration
+  against the token but never handed the executor back, so a body whose future
+  was ready on its first poll made the whole loop one uninterruptible poll: a
+  cancel was delivered only after the budget was spent, and on a current-thread
+  runtime the cancelling task could not be scheduled at all. `repeat` now
+  completes a bounded number of iterations per poll and then yields.
+- Cancellation trees no longer poll or drop recursively. `Inner::cancelled`
+  built a `race_two` nesting with one stack frame per ancestor link, and the
+  derived `Drop` for `parent: Option<Arc<Inner>>` recursed once per link, so a
+  deep chain exhausted the stack without polling or a runtime. Both walk the
+  chain once and iteratively now, and `Inner` detaches each parent link as it is
+  dropped.
+
+### lgwks_bot Documentation
+
+- The README, the crate docs, and the `lgwks-bot` guides described the tick as
+  one synchronous pass. They now document both adapters, the four phases, the
+  refusal, and what a cancelled tick leaves behind.
+
+### Fixed
+
+- **A resolver measured its margin against a field the threshold had already
+  emptied** (`lgwks_bot`). Below-threshold candidates were discarded before the
+  lead was computed, so a winner holding a `0.02` lead against a required `0.08`
+  reported its whole score as the lead and resolved where it should have stayed
+  ambiguous. The threshold and the margin are two questions asked in that order:
+  the threshold asks whether an option *may* win, the margin asks whether it
+  separated itself from the next best thing actually observed, and that second
+  question cannot be answered against a field the first has emptied. Both tiers
+  now hand every measured score to `decide`, which applies the threshold and
+  then measures the lead against the real runner-up, including one below it.
+- **A comparison that was never made no longer reads as one that was**
+  (`lgwks_bot`, `lgwks_std`). A zero or non-finite embedding was scored
+  `ZeroMagnitude` and then skipped, so a degenerate candidate vanished from the
+  field and a degenerate utterance was reported as `Absent { best_score: 0.0 }`
+  — the value a healthy model returns for a field it rejected. A comparison set
+  missing even one member cannot produce the verdict a complete set produces, so
+  an unusable vector now refuses the set and the session records
+  `resolver-degraded` rather than advancing.
+- **Missing element facts no longer score as matching facts** (`lgwks_bot`).
+  Every recognition component delegated to a metric that scores two empty inputs
+  `1.0`, so "no identifying attribute was observed" became maximum identity
+  confidence, and an element's tag was never checked at all. Identity, path and
+  text now decide presence before consulting their metric — absent on either
+  side contributes nothing — and the tag is a gate rather than a weight. The
+  component weights are deliberately *not* renormalized: a missing component
+  keeps its weight missing, which is what lets the acceptance threshold state
+  which facts a match actually requires.
+
+### Added
+
+- `DegradedReason::UnmeasurableEmbedding` (`lgwks_bot`) and
+  `CosineError::NonFinite` (`lgwks_std`). A vector no angle can be computed from
+  is reported apart from an unavailable embedder, because the causes and the
+  repairs differ — nothing is down, one of the vectors is degenerate. Both enums
+  are `#[non_exhaustive]`, so these variants are additive.
+
+### Fixed
+
+- **The invariant audit reported "enforced" for states it never examined**
+  (`lgwks_deps`). A register entry naming a lint no manifest declares, a file
+  that exists but declares no test, or a lint declared at `allow` all produced a
+  clean verdict, so the gate could not fail. The register now answers four
+  questions separately — registration validity, reference resolution, execution,
+  and verified outcome — and `check` prints `resolve`/`resolved`/`attested`,
+  never `enforced`. Every verdict carries a `SCOPE` line stating that no enforcer
+  was executed, so a resolved reference is not read as proof the invariant holds.
+  A reference that walks out of the repository (`..`) is refused at load, before
+  the filesystem is consulted.
+- **A malformed `policy.enforce` silently disabled both gates** (`lgwks_deps`).
+  The token was read as `value == "true"`, so `True`, `"true"`, `1`, `yes`, and
+  the empty string all became `false` with no diagnostic, standing the gate down.
+  A closed Boolean grammar now accepts exactly `true` and `false` and otherwise
+  refuses with a typed error naming the line and the value; the key set is
+  closed, and a repeated key or `[policy]` section is refused rather than
+  last-write-wins.
+- **The self-exemption trusted a package name** (`lgwks_deps`). Any edge whose
+  *name* was `lgwks_std` or `lgwks_deps` was exempt, including an external path
+  or Git package wearing that name, so an unapproved source could be admitted by
+  being called the right thing. The name list is gone; the only exemption is
+  Cargo's own `workspace_members` list.
+
+### Fixed
+
+- **Flow validation accepted a read before initialization** (`lgwks_bot`).
+  Validation tested variable names for *global* writer membership, so a document
+  was accepted whenever a writer existed anywhere — including one that runs only
+  after the read. Validation now runs a forward definite-assignment analysis: a
+  node may read a variable only if every entry-reaching path assigns it. Reads
+  of undeclared names still report `UndeclaredVariable` first, and a branch's
+  own condition variable is not counted as a read because the executor never
+  resolves it. New typed variant `BotError::VariableReadBeforeInit`.
+- **The scanner reported discarded errors that were never errors**
+  (`lgwks_deps`). ERROR-SWALLOW was a claim with no evidence behind it: every
+  `.unwrap_or_default()` and every initialized `let _` was reported, including
+  `Option` fallbacks and infallible bindings. Fallibility is now resolved from
+  the file being scanned — a free function whose written or aliased return type
+  is `Result`, a curated table of std routines, or an annotated binding — and a
+  receiver resolved to a non-`Result` is never reported. Where the type is not
+  visible the finding says so, and its evidence states that the shape is all
+  there is rather than implying proof.
+- **A shadowing binding satisfied the use check while the error was discarded**
+  (`lgwks_deps`). Any ident spelling counted as a read, so a local that rebound
+  the error's name cleared the finding and the error was dropped. A read now
+  requires a value-position path naming the binding with no enclosing scope
+  having rebound it; field and method segments, macro strings, and comments are
+  not evidence, and `drop(binding)` is a discard rather than a use.
+
+- **A validated flow could expand to gigabytes from a sub-megabyte document**
+  (`lgwks_bot`). `FlowBounds` bounded *steps*, validation bounded the document's
+  *shape*, and nothing bounded *bytes*: a template repeating `${answer}` 20,000
+  times is a 200 KB document that interpolates to 163,840,000 bytes in one step,
+  and four such steps reach 10 GB. Four ceilings now bound it — utterance,
+  stored value, computed record expansion, and aggregate session retention — and
+  a template's expansion is *sized* with checked arithmetic before it is
+  rendered, so the amplification costs a bounded number of additions instead of
+  an unbounded allocation. A template whose literal bytes alone exceed the
+  ceiling is refused at load, because it could never render at any value.
+  `ResourceLimits` lets an operator tighten the shipped ceilings; a document may
+  tighten its own and may not raise them.
+- **A declared terminal outcome was accepted and then ignored**
+  (`lgwks_bot`). `Handoff` and `Refer` computed their outcome from the node
+  alone, so a document that said a handoff was not authorized ran as a handoff.
+  One calculation now backs both validation and execution, and a declaration
+  that contradicts its node is refused at load rather than accepted and dropped.
+- **An ask could offer an option the declared variable cannot store**
+  (`lgwks_bot`). Validation did not decode ask candidates, so a flow offering an
+  unanswerable option loaded cleanly and failed for the person answering it. The
+  same decoding that runs at store time now runs at load over every candidate.
+
+### Added
+
+- Nine `BotError` variants (`lgwks_bot`): `AskOptionNotAssignable`,
+  `AskOptionTooLarge`, `ConflictingTerminalDeclaration`, `RecordTooLarge`,
+  `ResourceLimitAboveCeiling`, `SessionRetentionExceeded`,
+  `TemplateExpansionTooLarge`, `UtteranceTooLarge`, and `ValueTooLarge`. All are
+  additive.
+- `ResourceLimits`, `ResourceAxis`, `CompiledTemplate`, `TemplatePart`, and the
+  four `MAX_*` byte ceilings, exported from the crate root (`lgwks_bot`).
 
 ### Fixed
 

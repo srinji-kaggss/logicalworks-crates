@@ -6,7 +6,7 @@
 //! truth for INV-DEP-EDGE-OWNED.
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use lgwks_std::json::Deserialize;
@@ -155,8 +155,16 @@ pub struct DirectEdge {
 pub enum MetadataError {
     /// Cargo could not be started.
     Spawn(std::io::Error),
-    /// The manifest path could not be resolved against the working directory.
-    Resolve(std::io::Error),
+    /// The repository root could not be turned into an absolute path.
+    ///
+    /// Distinct from [`Self::Spawn`]: Cargo was never reached, because the
+    /// manifest it would have been pointed at could not be named.
+    Root {
+        /// The manifest path as it was spelled before absolutization.
+        path: PathBuf,
+        /// Why the path could not be resolved.
+        cause: std::io::Error,
+    },
     /// Cargo returned a non-zero status.
     Cargo(String),
     /// Cargo returned JSON outside the supported format-1 subset.
@@ -172,9 +180,13 @@ impl fmt::Display for MetadataError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::Spawn(ref error) => write!(f, "cannot run cargo metadata: {error}"),
-            Self::Resolve(ref error) => write!(
+            Self::Root {
+                ref path,
+                ref cause,
+            } => write!(
                 f,
-                "cannot resolve the manifest path against the working directory: {error}"
+                "cannot resolve the manifest path {}: {cause}",
+                path.display()
             ),
             Self::Cargo(ref error) => write!(f, "cargo metadata refused: {error}"),
             Self::Json(ref error) => write!(f, "cargo metadata JSON: {error}"),
@@ -188,7 +200,8 @@ impl std::error::Error for MetadataError {
     /// Cargo's own prose as a `String` and have nothing further to chain.
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match *self {
-            Self::Spawn(ref error) | Self::Resolve(ref error) => Some(error),
+            Self::Spawn(ref error) => Some(error),
+            Self::Root { ref cause, .. } => Some(cause),
             Self::Json(ref error) => Some(error),
             Self::Cargo(_) | Self::Schema(_) => None,
         }
@@ -223,6 +236,10 @@ struct CargoPackage {
     /// Declared repository URL, when the manifest has one. Read only for
     /// workspace members, where it proves the member is ours.
     repository: Option<String>,
+    /// Absolute path to the package's `Cargo.toml`. Read for workspace members
+    /// so a scope can be resolved to a real module file rather than to a
+    /// directory guessed from the package name.
+    manifest_path: Option<String>,
     /// The dependency declarations this package authored, including optional
     /// edges that are inactive in the current feature selection, which is the
     /// reason metadata rather than the lockfile is the source of truth here.
@@ -337,6 +354,13 @@ fn direct_edges(metadata: CargoMetadata) -> Result<Vec<DirectEdge>, MetadataErro
 }
 
 /// Runs locked Cargo metadata and decodes the supported response shape.
+///
+/// The manifest path is made absolute before Cargo is started. `--manifest-path`
+/// is resolved by Cargo against *its* working directory, which this call sets to
+/// `root`, so a relative `root` would otherwise be joined to itself — a gate
+/// invoked as `check crates/thing` would report a manifest that plainly exists
+/// as missing, and every fixture test built on a relative path would pass on
+/// that refusal rather than on the rule it meant to exercise.
 fn read_metadata(root: &Path) -> Result<CargoMetadata, MetadataError> {
     let manifest = manifest_path(root)?;
     let output = Command::new("cargo")
@@ -371,7 +395,11 @@ fn read_metadata(root: &Path) -> Result<CargoMetadata, MetadataError> {
 /// directory leaves the child nothing to reinterpret, and keeps the refusal
 /// message naming the manifest Cargo was actually given.
 fn manifest_path(root: &Path) -> Result<std::path::PathBuf, MetadataError> {
-    std::path::absolute(root.join("Cargo.toml")).map_err(MetadataError::Resolve)
+    let manifest = root.join("Cargo.toml");
+    std::path::absolute(&manifest).map_err(|cause| MetadataError::Root {
+        path: manifest,
+        cause,
+    })
 }
 
 /// Runs locked Cargo metadata and returns every direct workspace edge.
@@ -379,26 +407,64 @@ pub fn read(root: &Path) -> Result<Vec<DirectEdge>, MetadataError> {
     direct_edges(read_metadata(root)?)
 }
 
-/// Runs locked Cargo metadata and returns the names of its workspace members.
+/// One workspace member, with the directory holding its manifest.
+///
+/// Scope resolution needs the directory: a scope of `lgwks_bot::verb` is only
+/// real if `verb` is a module of *that* package, and the package name alone
+/// does not say where its sources are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Member {
+    /// Package name as the manifest declares it.
+    pub name: String,
+    /// Directory holding the member's `Cargo.toml`, as Cargo reported it.
+    pub manifest_dir: PathBuf,
+}
+
+/// Runs locked Cargo metadata and returns its workspace members.
 ///
 /// Scope validation uses this list rather than path prefixes, so an invariant
 /// cannot claim authority over a directory merely because it lives under the
-/// repository. The names are sorted for deterministic diagnostics.
-pub fn workspace_package_names(root: &Path) -> Result<Vec<String>, MetadataError> {
+/// repository. Members are sorted by name for deterministic diagnostics.
+///
+/// A member whose `manifest_path` Cargo omitted is `Schema`: the directory is
+/// the whole point of this call, and a member the audit cannot locate must be
+/// a refusal rather than a member it quietly cannot resolve scopes against.
+pub fn workspace_members(root: &Path) -> Result<Vec<Member>, MetadataError> {
     let metadata = read_metadata(root)?;
     let members: std::collections::BTreeSet<&str> = metadata
         .workspace_members
         .iter()
         .map(String::as_str)
         .collect();
-    let mut names: Vec<String> = metadata
+    let mut located = Vec::new();
+    for package in metadata
         .packages
         .iter()
         .filter(|package| members.contains(package.id.as_str()))
-        .map(|package| package.name.clone())
-        .collect();
-    names.sort();
-    Ok(names)
+    {
+        let manifest_path = package.manifest_path.as_deref().ok_or_else(|| {
+            MetadataError::Schema(format!(
+                "workspace member {:?} has no manifest_path",
+                package.name
+            ))
+        })?;
+        let manifest_dir = Path::new(manifest_path)
+            .parent()
+            .ok_or_else(|| {
+                MetadataError::Schema(format!(
+                    "workspace member {:?} manifest_path {manifest_path:?} has no directory",
+                    package.name
+                ))
+            })?
+            .to_path_buf();
+        located.push(Member {
+            name: package.name.clone(),
+            manifest_dir,
+        });
+    }
+    located.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(located)
 }
 
 #[cfg(test)]
