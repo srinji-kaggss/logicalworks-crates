@@ -6,8 +6,8 @@
 //! condition on downtime); a malformed URL is a spec bug and errors.
 //!
 //! The preview is bounded where the bytes are read, not after: a poll asks the
-//! transport for at most [`BODY_PREVIEW_BYTES`] and keeps the prefix it gets,
-//! so a server cannot make a probe allocate by sending a large body. The
+//! transport for at most the byte ceiling it declares and keeps the prefix it
+//! gets, so a server cannot make a probe allocate by sending a large body. The
 //! ceiling and the preview are two numbers for one purpose, so the preview is
 //! derived from [`BODY_PREVIEW`] rather than written down twice.
 
@@ -64,10 +64,10 @@ pub struct NetState {
     pub reachable: bool,
     /// Response body, truncated to [`BODY_PREVIEW`] characters for observation.
     ///
-    /// Read under the [`BODY_PREVIEW_BYTES`] ceiling and decoded lossily, so a
-    /// large or non-UTF-8 response still yields a bounded preview rather than
-    /// failing the probe: a body worth watching is exactly the one too big to
-    /// hold.
+    /// Read under the transport's byte ceiling, derived from [`BODY_PREVIEW`],
+    /// and decoded lossily, so a large or non-UTF-8 response still yields a
+    /// bounded preview rather than failing the probe: a body worth watching is
+    /// exactly the one too big to hold.
     pub body: String,
 }
 
