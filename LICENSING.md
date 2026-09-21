@@ -14,6 +14,16 @@ public licence does not cover.
 
 Copyright 2026 Logical Works Incorporated.
 
+### The repository itself
+
+The root [`LICENSE`](LICENSE) is **MPL-2.0**, and it covers this repository: the
+documentation, the scripts, the CI configuration, and everything else in the
+tree that a crate's own `LICENSE` does not already cover. Each crate is governed
+by the file in its own directory, so the three Apache-2.0 crates stay
+Apache-2.0 as consumed artefacts while the repository they are built in is
+MPL-2.0. Where the two could be read as disagreeing, the crate's own file
+governs that crate.
+
 ## Why the bot differs
 
 `lgwks_bot` is the artefact every other repository in this estate embeds. Under a
@@ -70,8 +80,9 @@ relicensing ambition and need no agreement.
 ## The published versions did not change
 
 Licences are not retroactive. **Every version already on crates.io is
-Apache-2.0 and stays Apache-2.0**, including `lgwks_bot` 0.4.2. This change takes
-effect at the next version published from this tree.
+Apache-2.0 and stays Apache-2.0**, including `lgwks_bot` 0.4.2. The change takes
+effect at `lgwks_bot` 0.5.0, which is the first version this tree cuts under
+MPL-2.0.
 
 That matters for the four repositories depending on the bot, because they pin
 exact published versions:

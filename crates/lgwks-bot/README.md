@@ -21,13 +21,17 @@ distinguish it from a task runner:
 cargo add lgwks_bot
 ```
 
-**Version boundary.** `crates/lgwks-bot/Cargo.toml` reads `0.4.2`, but the
-`session`, `language`, `semantic`, `interface`, and `frontier` modules are on
-`main` and are **not** in the published `lgwks_bot-v0.4.2` tag — that tag's
-`lib.rs` exports `cap`, `domain`, `error`, `gate`, `json`, `rt`, `spec`, and
-`verb`, and nothing else. This README, like the rustdoc beside it, describes
-`main`. Check `CHANGELOG.md` for the release that carries a symbol before
-depending on it, and do not assume an installed `0.4.2` has these.
+**Version boundary.** `crates/lgwks-bot/Cargo.toml` reads `0.5.0`, and the
+newest tag is `lgwks_bot-v0.4.2`. That tag's `lib.rs` exports `cap`, `domain`,
+`error`, `gate`, `json`, `rt`, `spec`, and `verb`, and nothing else. `main`
+exports those plus `broker`, `effect`, `frontier`, `interface`, `journal`,
+`language`, `retry`, `semantic`, and `session`, none of which is in any tag yet.
+This README, like the rustdoc beside it, describes `main`.
+
+The manifest reading `0.5.0` is not an installable version: it is the release cut
+for the 2026-09-21 train, and no `lgwks_bot-v0.5.0` tag exists. Check
+`CHANGELOG.md` for the release that carries a symbol before depending on it, and
+do not assume an installed `0.4.2` has any of the nine modules above.
 
 ## Quick start
 

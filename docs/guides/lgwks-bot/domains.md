@@ -1,5 +1,12 @@
 # The registry: what a spec's identifiers resolve to
 
+> **Unreleased.** This page describes `crates/lgwks-bot/src/lib.rs` on the
+> development commit this branch was cut from. The `lgwks_bot-v0.4.2` tag does
+> not export `DomainRegistry`, `Source`, `Action`, or `domains!`, so an installed
+> `lgwks_bot = "0.4.2"` does not have anything on this page. `0.5.0` is the
+> version cut for it, and no `lgwks_bot-v0.5.0` tag exists yet either. Check
+> `CHANGELOG.md` for the release that carries a symbol before depending on it.
+
 A `BotSpec` carries identifiers, not code. `ChainSpec::source` is a string such
 as `"github::pr_status"`, `ActionSpec::domain` is a string such as
 `"notify::slack"`, and the `target` beside each is a parameter whose meaning the

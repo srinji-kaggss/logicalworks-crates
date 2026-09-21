@@ -74,11 +74,10 @@ Field rules the parser enforces:
 
 Add the dependency to the owning crate's `Cargo.toml` under that owner's lane:
 
-- Core primitive → `crates/lgwks-std` (its existing feature stack is
-  grandfathered).
+- Core primitive → `crates/lgwks-std` (its existing feature stack is settled).
 - Async, runners, actor roles → `crates/lgwks-bot`; its runtime engine is
   selected through the `lgwks_deps` storefront's `tokio` feature.
-- Parsing → `crates/lgwks-ast` (standalone, grandfathered; do not add a second
+- Parsing → `crates/lgwks-ast` (standalone, and finished; do not add a second
   parser).
 - **Everything else → an optional, default-off feature of `crates/lgwks-deps`**
   — the storefront. This is the default for a new dependency: register with

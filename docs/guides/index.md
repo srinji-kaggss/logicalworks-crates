@@ -29,10 +29,10 @@ what is implied.
 
 | Crate | `Cargo.toml` version | Newest tag | Checked |
 |---|---|---|---|
-| `lgwks_std` | 0.6.6 | `lgwks_std-v0.6.6` | Tag exists in this repository |
-| `lgwks_bot` | 0.4.2 | `lgwks_bot-v0.4.2` | Tag exists; its public surface differs from `main` (below) |
+| `lgwks_std` | 0.6.7 | `lgwks_std-v0.6.6` | Manifest raised in the 2026-09-21 cut; no tag for it yet |
+| `lgwks_bot` | 0.5.0 | `lgwks_bot-v0.4.2` | Manifest raised in the 2026-09-21 cut; no tag for it yet, and the 0.4.2 tag's surface differs from `main` (below) |
 | `lgwks_ast` | 0.2.2 | `lgwks_ast-v0.2.2` | Tag exists in this repository |
-| `lgwks_deps` | 0.1.12 | `lgwks_deps-v0.1.12` | Tag exists in this repository |
+| `lgwks_deps` | 0.1.13 | `lgwks_deps-v0.1.12` | Manifest raised in the 2026-09-21 cut; no tag for it yet |
 
 Those are source tags, and a source tag is not a registry upload.
 `docs/releasing.md` keeps the two apart and warns that a release created before
@@ -40,19 +40,24 @@ the upload is a claim the registry does not support. Confirm the version you are
 installing against docs.rs or `cargo tree` in your own project before relying on
 a symbol.
 
-### `lgwks_bot` is the one crate with unreleased modules
+### `lgwks_bot` is the one crate whose `main` runs ahead of its newest tag
 
-`crates/lgwks-bot/src/lib.rs` on `main` exports `session`, `language`,
-`semantic`, `interface`, and `frontier`. The `lgwks_bot-v0.4.2` tag's `lib.rs`
-exports `cap`, `domain`, `error`, `gate`, `json`, `rt`, `spec`, and `verb`, and
-nothing else. If you install `lgwks_bot = "0.4.2"`, those five modules are not
-there.
+The newest `lgwks_bot` tag is `lgwks_bot-v0.4.2`, and its `lib.rs` exports
+`cap`, `domain`, `error`, `gate`, `json`, `rt`, `spec`, and `verb`. `main`
+exports those plus `broker`, `effect`, `frontier`, `interface`, `journal`,
+`language`, `retry`, `semantic`, and `session`. If you install
+`lgwks_bot = "0.4.2"`, none of those nine is there.
 
-Two pages in this tree document that unreleased surface, and both are marked at
-the top:
+The manifest reads `0.5.0` because the release commit for the 2026-09-21 cut has
+landed, but no `lgwks_bot-v0.5.0` tag exists and nothing has been uploaded, so
+`0.5.0` is not installable either. Until the tag exists, `main` is the only place
+those nine modules can be read.
+
+The pages in this tree that document the newer surface are marked at the top:
 
 - [Guidance sessions](lgwks-bot/sessions.md)
 - [Resolution and degraded verdicts](lgwks-bot/resolution.md)
+- [The registry](lgwks-bot/domains.md)
 
 Everything else under `lgwks-bot/` describes symbols present in the 0.4.2 tag.
 

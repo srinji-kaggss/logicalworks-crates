@@ -126,3 +126,4 @@ you to discover.
 | [Background work](background-work.md) | Bounded fan-out, supervision, and the cancellation limits |
 | [Sessions](sessions.md) | Unreleased. Validated guidance flows |
 | [Resolution](resolution.md) | Unreleased. Lexical and semantic resolution, and what `Degraded` means |
+| [Domains](domains.md) | Unreleased. The `domain_id -> constructor` registry a spec's identifiers resolve through |

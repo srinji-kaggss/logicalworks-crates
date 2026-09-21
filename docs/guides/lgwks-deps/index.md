@@ -8,7 +8,7 @@ cargo add lgwks_deps --no-default-features      # the storefront library
 ```
 
 The binary is the gate. The library is the storefront. Current version:
-`0.1.12`, MSRV Rust 1.98.0, edition 2024.
+`0.1.13`, MSRV Rust 1.98.0, edition 2024.
 
 Do not run `cargo install lgwks_deps --no-default-features` expecting the `scan`
 subcommand. The CLI's source detectors live behind the `scan` feature, which is
@@ -49,7 +49,7 @@ Each feature re-exports the upstream crate, so you never declare it directly.
 
 ```toml
 [dependencies]
-lgwks_deps = { version = "0.1.12", default-features = false, features = ["tokio"] }
+lgwks_deps = { version = "0.1.13", default-features = false, features = ["tokio"] }
 ```
 
 The ML features are default-off, so the default `scan` build compiles none of

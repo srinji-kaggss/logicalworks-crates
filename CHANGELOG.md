@@ -8,6 +8,8 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+## [lgwks_std 0.6.7 / lgwks_bot 0.5.0 / lgwks_deps 0.1.13] - 2026-09-21
+
 ### Proofs
 
 - **`proofs/bot-spec.sml` states and proves seven theorems about the
@@ -67,11 +69,19 @@ explicitly under that crate.
   including in proprietary products (MPL-2.0 §3.3), and only modification of the
   MPL-covered files carries the §3.2 source obligation. `lgwks_std`, `lgwks_ast`
   and `lgwks_deps` remain Apache-2.0.
-- **No published version changed.** Licences are not retroactive; every version
-  on crates.io including `lgwks_bot` 0.4.2 stays Apache-2.0. The new terms take
-  effect at the next version published from this tree, which is why no crate
-  version is bumped here. The four dependent repositories pin exact published
-  versions and none is affected until it moves.
+- **No published version changed, and the new terms land at `lgwks_bot` 0.5.0.**
+  Licences are not retroactive; every version on crates.io including `lgwks_bot`
+  0.4.2 stays Apache-2.0. The release this section is part of is the first cut
+  from this tree under MPL-2.0, so 0.5.0 is the version the terms take effect at.
+  The four dependent repositories pin exact published versions and none is
+  affected until it moves.
+- **The repository root now carries the MPL-2.0 text.** There was no root
+  `LICENSE`, so the repository's own licence was unstated while the bot's was
+  not, and a reader arriving at the tree rather than at a crate had nothing to
+  read. The root file covers the documentation, the scripts and the CI
+  configuration; each crate is still governed by the `LICENSE` in its own
+  directory, so `lgwks_std`, `lgwks_ast` and `lgwks_deps` remain Apache-2.0 as
+  consumed artefacts. `LICENSING.md` states which file governs what.
 - **`LICENSING.md` records the model**, including the commercial licence that
   grants relief from §3.2 for organisations that need to modify the bot without
   publishing those modifications. Offering two licences requires holding rights
@@ -162,6 +172,13 @@ explicitly under that crate.
   no indirection, so it archives in place and any record that contains one
   reaches it without a pointer — which is the property that makes the journal's
   chain head a value a reader can compare against without decoding the record.
+
+
+- **`ron::Error` and `ron::error::SpannedError` are re-exported.** The `ron`
+  module's own functions returned them and no caller could name them, because
+  the `ron` crate is an optional dependency and nothing re-exported the types.
+  A facade that returns a type has to let a caller write it down, which is the
+  same reason `wire` re-exports `rkyv`. Additive.
 
 ### lgwks_bot Breaking
 
@@ -262,14 +279,6 @@ Changed:
 
 **No crate version is bumped.** The change is unpublished like the five public
 modules above it, and it ships in the same release.
-
-### lgwks_std Added
-
-- **`ron::Error` and `ron::error::SpannedError` are re-exported.** The `ron`
-  module's own functions returned them and no caller could name them, because
-  the `ron` crate is an optional dependency and nothing re-exported the types.
-  A facade that returns a type has to let a caller write it down, which is the
-  same reason `wire` re-exports `rkyv`. Additive.
 
 ### lgwks_bot Added
 
@@ -645,6 +654,51 @@ modules above it, and it ships in the same release.
   One limitation is documented and not solved here: the witness distinguishes
   *types*, not *chains*, so two chains that both produce a `u16` are
   indistinguishable and a mis-pairing between them still passes.
+
+
+- **A decision carries its provenance, and its receipt is written before the
+  transition.** `Resolver::resolve` returns `Verdict`: the `Resolution` and its
+  `Provenance` in one value, because "this score came from that model under that
+  rule" is one fact and a second call can only re-derive it. `Provenance` names a
+  `PolicyVersion` always — content-addressed over the tier's own parameters, so
+  retuning changes the revision — and an `EmbedderIdentity` only when a model was
+  consulted. `Session` writes a versioned, serializable `DecisionReceipt` per
+  decision through a required
+  `Journal::record_decision -> Result<ReceiptAcceptance, JournalError>`, binding
+  session and flow revision, node, the digest of the *ordered* option list, the
+  verdict verbatim, provenance, the selected option's **text** rather than an
+  index that moves, and the route. Because the receipt is written first, a
+  refused write aborts the answer with `BotError::ReceiptNotRecorded` and leaves
+  cursor, scope, transcript and receipt list untouched.
+
+
+- **`Deficit`, `Shortage` and `Demand`: the whole capability shortfall, and the
+  repair it derives.** `Auth::check` and `GrantSet::admit` return
+  `BotError::CapabilityDenied` naming **every** ungranted requirement rather than
+  the first, each `Shortage` carrying the `Demand` — the domain that declared it
+  — where the check site knows it. `Bot::build` walks every source and every
+  action and reports the whole bot's unmet requirements from one pass. New
+  methods: `Auth::uncovered`, `Auth::covers_cap`, `GrantSet::uncovered`,
+  `GrantSet::grants`, `Deficit::shortages/len/is_empty/first/to_grant_set`.
+- **`Deficit::to_grant_set` derives the repair.** The shortfall already names
+  every capability that would close it, so a caller hands back the set the
+  deficit derived instead of writing a repair from the message — the step where a
+  hand-written repair covers the first line and misses the rest. The repair is
+  the *shortfall*, not the requirement: an already-granted capability is not in
+  it, and closing the requirement is that set folded into the held one.
+- **`Cap` names are `Cow<'static, str>`.** The shipped four were `String`-backed,
+  so `Cap::net()` allocated and — because `GrantSet::issue` mints a proof by
+  copying the requirement list — every effect execution re-allocated the same
+  constants. `Cow::Borrowed` makes a shipped capability a pointer copy and
+  authority for it allocation-free. Equality, ordering and hashing compare
+  contents, so a `Cap` deserialized from a spec and one built from a constant are
+  one capability; a test asserts that in both directions, because if they
+  compared unequal the gate would deny a bot it had granted.
+- **`Auth::check` is logarithmic in the granted set.** The covered set is sorted
+  and de-duplicated at mint and queried by binary search, replacing a linear scan
+  inside a loop over the requirement list. The measured defect and its numbers
+  are in `bench/README.md`: 12.9 microseconds for 128 capabilities against 3.4
+  nanoseconds for one, growing with the *product* of the two counts.
 
 ### lgwks_bot Fixed
 
@@ -1022,53 +1076,6 @@ modules above it, and it ships in the same release.
   (`lgwks_bot`). All additive.
 - `crates/lgwks-bot/examples/failed_tick.rs`, so the guide's program is compiled
   and run by the gate rather than being prose that nothing checks.
-
-### lgwks_bot Added
-
-- **A decision carries its provenance, and its receipt is written before the
-  transition.** `Resolver::resolve` returns `Verdict`: the `Resolution` and its
-  `Provenance` in one value, because "this score came from that model under that
-  rule" is one fact and a second call can only re-derive it. `Provenance` names a
-  `PolicyVersion` always — content-addressed over the tier's own parameters, so
-  retuning changes the revision — and an `EmbedderIdentity` only when a model was
-  consulted. `Session` writes a versioned, serializable `DecisionReceipt` per
-  decision through a required
-  `Journal::record_decision -> Result<ReceiptAcceptance, JournalError>`, binding
-  session and flow revision, node, the digest of the *ordered* option list, the
-  verdict verbatim, provenance, the selected option's **text** rather than an
-  index that moves, and the route. Because the receipt is written first, a
-  refused write aborts the answer with `BotError::ReceiptNotRecorded` and leaves
-  cursor, scope, transcript and receipt list untouched.
-
-### lgwks_bot Added
-
-- **`Deficit`, `Shortage` and `Demand`: the whole capability shortfall, and the
-  repair it derives.** `Auth::check` and `GrantSet::admit` return
-  `BotError::CapabilityDenied` naming **every** ungranted requirement rather than
-  the first, each `Shortage` carrying the `Demand` — the domain that declared it
-  — where the check site knows it. `Bot::build` walks every source and every
-  action and reports the whole bot's unmet requirements from one pass. New
-  methods: `Auth::uncovered`, `Auth::covers_cap`, `GrantSet::uncovered`,
-  `GrantSet::grants`, `Deficit::shortages/len/is_empty/first/to_grant_set`.
-- **`Deficit::to_grant_set` derives the repair.** The shortfall already names
-  every capability that would close it, so a caller hands back the set the
-  deficit derived instead of writing a repair from the message — the step where a
-  hand-written repair covers the first line and misses the rest. The repair is
-  the *shortfall*, not the requirement: an already-granted capability is not in
-  it, and closing the requirement is that set folded into the held one.
-- **`Cap` names are `Cow<'static, str>`.** The shipped four were `String`-backed,
-  so `Cap::net()` allocated and — because `GrantSet::issue` mints a proof by
-  copying the requirement list — every effect execution re-allocated the same
-  constants. `Cow::Borrowed` makes a shipped capability a pointer copy and
-  authority for it allocation-free. Equality, ordering and hashing compare
-  contents, so a `Cap` deserialized from a spec and one built from a constant are
-  one capability; a test asserts that in both directions, because if they
-  compared unequal the gate would deny a bot it had granted.
-- **`Auth::check` is logarithmic in the granted set.** The covered set is sorted
-  and de-duplicated at mint and queried by binary search, replacing a linear scan
-  inside a loop over the requirement list. The measured defect and its numbers
-  are in `bench/README.md`: 12.9 microseconds for 128 capabilities against 3.4
-  nanoseconds for one, growing with the *product* of the two counts.
 
 ### lgwks_bot Changed
 
