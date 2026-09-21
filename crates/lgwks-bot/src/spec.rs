@@ -43,12 +43,38 @@
 //! fn assert_chain<S: Observe, C: Evaluate<S::Output>, A: Execute<Input = S::Output>>() {}
 //! assert_chain::<Clock, Above<u16>, Ring>();
 //!
+//! # use lgwks_bot::broker::Broker;
+//! # use lgwks_bot::effect::{EnvironmentId, FlowRevision, RunId};
+//! # use lgwks_bot::journal::MemoryJournal;
+//! # use lgwks_bot::spec::{EffectIdentity, EffectScope};
+//! # fn scope() -> Result<EffectScope, Box<dyn std::error::Error>> {
+//! #     let environment = EnvironmentId::from_hex("2122232425262728292a2b2c2d2e2f30")?;
+//! #     let mut broker = Broker::new();
+//! #     broker.register(environment)?;
+//! #     Ok(EffectScope::new(
+//! #         EffectIdentity::new(
+//! #             RunId::from_hex("0102030405060708090a0b0c0d0e0f10")?,
+//! #             environment,
+//! #             FlowRevision::from_tagged(
+//! #                 "blake3_256",
+//! #                 "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+//! #             )?,
+//! #         ),
+//! #         broker,
+//! #         Box::new(MemoryJournal::new()),
+//! #     ))
+//! # }
+//! // Every bot is built against an effect scope: the run it is, the environment
+//! // it acts on, and the journal a dispatch is written to before it leaves the
+//! // process. There is no default, because a default identity is one the caller
+//! // cannot recover against.
 //! let bot = Bot::builder("doc")
 //!     .observe(Clock)
 //!     .on(|ticks: &u16| *ticks >= 3, Ring)
+//!     .with_effects(scope()?)
 //!     .build(&GrantSet::empty())?;
 //! # let _ = bot;
-//! # Ok::<(), BotError>(())
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
 //! An action that takes something else is a compile error — `E0271`, `type
@@ -289,8 +315,9 @@ where
 /// implementation rather than a second way to run a bot.
 pub use crate::ecs::{
     AbandonReason, EcsBot as Bot, EcsBuilder as BotBuilder, EcsObserveBuilder as ObserveBuilder,
-    EffectEvidence, PendingWork, RetryPolicy, TransitionHold, WorkId,
+    EffectEvidence, EffectScope, PendingWork, RetryPolicy, TransitionHold, WorkId,
 };
+pub use crate::effect::{EffectIdentity, EffectKey};
 
 /// One `(condition, action)` tuple in a chain.
 pub(crate) struct ChainEntry {
@@ -656,9 +683,45 @@ impl BotSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::broker::Broker;
+    use crate::effect::{EnvironmentId, FlowRevision, RunId};
     use crate::error::DispatchCertainty;
+    use crate::journal::MemoryJournal;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// What a test returns when it can fail in more than one error domain.
+    ///
+    /// Building the scope a bot needs crosses `IdError` and `BrokerError` as
+    /// well as `BotError`, and none of the three converts into another, so a
+    /// test that hands over a scope reports through `Box<dyn Error>` and names
+    /// the failure with `?` rather than flattening it into a variant it is not.
+    type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+    /// The effect scope a test's bot runs under.
+    ///
+    /// A bot has no dispatch path without one, so every builder in this module
+    /// hands over a scope; the ones whose subject is spec validation still do,
+    /// because a refusal produced by "no scope" would be a refusal about the
+    /// wrong thing and the assertion around it would read as the validation it
+    /// claims to test.
+    fn test_effects() -> TestResult<EffectScope> {
+        let environment = EnvironmentId::from_hex("2122232425262728292a2b2c2d2e2f30")?;
+        let mut broker = Broker::new();
+        broker.register(environment)?;
+        Ok(EffectScope::new(
+            EffectIdentity::new(
+                RunId::from_hex("0102030405060708090a0b0c0d0e0f10")?,
+                environment,
+                FlowRevision::from_tagged(
+                    "blake3_256",
+                    "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+                )?,
+            ),
+            broker,
+            Box::new(MemoryJournal::new()),
+        ))
+    }
 
     /// The failure a test reports when its precondition did not hold. Tests
     /// return `Result` and propagate with `?`, so a mismatch is reported as a
@@ -876,7 +939,7 @@ mod tests {
     }
 
     #[test]
-    fn both_builder_entry_points_apply_the_same_admission() {
+    fn both_builder_entry_points_apply_the_same_admission() -> TestResult<()> {
         // `assemble` is shared, so the no-chains path and the with-chains path
         // must agree on both the empty-name rejection and the capability check.
         struct NeedsNet(Vec<Cap>);
@@ -912,7 +975,9 @@ mod tests {
         // No-chains entry point (`BotBuilder::build`).
         assert!(
             matches!(
-                Bot::builder("").build(&GrantSet::empty()),
+                Bot::builder("")
+                    .with_effects(test_effects()?)
+                    .build(&GrantSet::empty()),
                 Err(BotError::IncompleteSpec { field: "name" })
             ),
             "the no-chains entry point must reject an empty name"
@@ -922,6 +987,7 @@ mod tests {
             matches!(
                 Bot::builder("")
                     .observe(NeedsNet(vec![]))
+                    .with_effects(test_effects()?)
                     .build(&GrantSet::empty()),
                 Err(BotError::IncompleteSpec { field: "name" })
             ),
@@ -931,24 +997,29 @@ mod tests {
         let denied = Bot::builder("x")
             .observe(NeedsNet(vec![Cap::net()]))
             .on(|_: &u32| true, Noop)
+            .with_effects(test_effects()?)
             .build(&GrantSet::empty());
         assert!(
             matches!(denied, Err(BotError::CapabilityDenied { .. })),
             "a source whose cap is not in the grant set must be denied at build"
         );
+        Ok(())
     }
 
     #[test]
-    fn empty_name_is_rejected() {
-        let result = Bot::builder("").build(&GrantSet::all_shipped());
+    fn empty_name_is_rejected() -> TestResult<()> {
+        let result = Bot::builder("")
+            .with_effects(test_effects()?)
+            .build(&GrantSet::all_shipped());
         assert!(
             result.is_err(),
             "an empty name must be rejected even when every cap is granted"
         );
+        Ok(())
     }
 
     #[test]
-    fn capability_denied_without_grant() {
+    fn capability_denied_without_grant() -> TestResult<()> {
         struct FakeSource(Vec<Cap>);
         impl FakeSource {
             fn net() -> Self {
@@ -988,15 +1059,17 @@ mod tests {
         let result = Bot::builder("test")
             .observe(FakeSource::net())
             .on(|_: &u32| true, FakeAction)
+            .with_effects(test_effects()?)
             .build(&GrantSet::empty());
         assert!(
             result.is_err(),
             "`bot.net` must be denied when the grant set is empty"
         );
+        Ok(())
     }
 
     #[test]
-    fn capability_granted_builds_ok() -> Result<(), BotError> {
+    fn capability_granted_builds_ok() -> TestResult<()> {
         struct FakeSource(Vec<Cap>);
         impl FakeSource {
             fn net() -> Self {
@@ -1037,6 +1110,7 @@ mod tests {
         let bot = Bot::builder("test")
             .observe(FakeSource::net())
             .on(|_: &u32| true, FakeAction)
+            .with_effects(test_effects()?)
             .build(&grants)?;
         assert_eq!(bot.name(), "test");
         assert_eq!(bot.source_domains().len(), 1);
@@ -1044,7 +1118,7 @@ mod tests {
     }
 
     #[test]
-    fn tick_fires_matching_actions() -> Result<(), BotError> {
+    fn tick_fires_matching_actions() -> TestResult<()> {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1087,6 +1161,7 @@ mod tests {
             .observe(CountSource)
             .on(|seen: &u32| *seen > 5, CountAction(Arc::clone(&counter)))
             .on(|seen: &u32| *seen > 100, CountAction(Arc::clone(&counter)))
+            .with_effects(test_effects()?)
             .build(&GrantSet::empty())?;
 
         let fired = bot.tick()?;
@@ -1197,11 +1272,12 @@ mod tests {
     }
 
     #[test]
-    fn tick_drives_sources_in_one_step() -> Result<(), BotError> {
+    fn tick_drives_sources_in_one_step() -> TestResult<()> {
         let counter = Arc::new(AtomicUsize::new(0));
         let mut bot = Bot::builder("direct")
             .observe(Immediate)
             .on(|_: &u32| true, Counting(Arc::clone(&counter)))
+            .with_effects(test_effects()?)
             .build(&GrantSet::empty())?;
         let fired = bot.tick()?;
         assert_eq!(fired, 1);
@@ -1210,7 +1286,7 @@ mod tests {
     }
 
     #[test]
-    fn tick_polls_sources_concurrently() -> Result<(), BotError> {
+    fn tick_polls_sources_concurrently() -> TestResult<()> {
         // Both polls block on a dedicated thread, so the peak in-flight count
         // can only reach 2 if tick drives the two sources at the same time.
         let in_flight = Arc::new(AtomicUsize::new(0));
@@ -1224,6 +1300,7 @@ mod tests {
             .on(|_: &u32| true, Counting(Arc::new(AtomicUsize::new(0))))
             .observe(source())
             .on(|_: &u32| true, Counting(Arc::new(AtomicUsize::new(0))))
+            .with_effects(test_effects()?)
             .build(&GrantSet::empty())?;
         assert_eq!(bot.tick()?, 2);
         let observed = peak.load(Ordering::SeqCst);
@@ -1235,7 +1312,7 @@ mod tests {
     }
 
     #[test]
-    fn tick_waves_more_chains_than_the_in_flight_cap() -> Result<(), BotError> {
+    fn tick_waves_more_chains_than_the_in_flight_cap() -> TestResult<()> {
         // 40 chains exceed MAX_IN_FLIGHT_POLLS (32), so this only passes if
         // the wave loop polls every chain, not just the first wave.
         let counter = Arc::new(AtomicUsize::new(0));
@@ -1247,7 +1324,9 @@ mod tests {
                 .observe(Immediate)
                 .on(|_: &u32| true, Counting(Arc::clone(&counter)));
         }
-        let mut bot = builder.build(&GrantSet::empty())?;
+        let mut bot = builder
+            .with_effects(test_effects()?)
+            .build(&GrantSet::empty())?;
         assert_eq!(bot.source_domains().len(), 40);
         assert_eq!(bot.tick()?, 40);
         assert_eq!(counter.load(Ordering::SeqCst), 40);
@@ -1255,20 +1334,21 @@ mod tests {
     }
 
     #[test]
-    fn a_failing_poll_fires_nothing_and_returns_the_first_error() -> Result<(), BotError> {
+    fn a_failing_poll_fires_nothing_and_returns_the_first_error() -> TestResult<()> {
         let counter = Arc::new(AtomicUsize::new(0));
         let mut bot = Bot::builder("ordered")
             .observe(Immediate)
             .on(|_: &u32| true, Counting(Arc::clone(&counter)))
             .observe(Failing)
             .on(|_: &u32| true, Counting(Arc::clone(&counter)))
+            .with_effects(test_effects()?)
             .build(&GrantSet::empty())?;
         match bot.tick() {
             Err(BotError::DomainError { domain, .. }) => assert_eq!(domain, "test::failing"),
             other => {
-                return Err(failed(format!(
-                    "expected the failing chain's error, got {other:?}"
-                )));
+                return Err(
+                    failed(format!("expected the failing chain's error, got {other:?}")).into(),
+                );
             }
         }
         // All-or-nothing per tick: the observe system polls every source before

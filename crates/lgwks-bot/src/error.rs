@@ -35,8 +35,10 @@
 
 use std::fmt;
 
+use super::broker::DispatchError;
 use super::cap::Deficit;
 use super::ecs::{EffectEvidence, PendingWork, WorkId};
+use super::effect::{ActionDigest, ActionId, AttemptId};
 use super::session::{ResourceAxis, Terminal};
 
 /// Error from bot construction, admission, or execution.
@@ -489,8 +491,21 @@ pub enum BotError {
     /// lets a caller tell a wrong address from stale or contradictory evidence,
     /// which are three different repairs.
     NoSuchWork {
-        /// The identity that matched no held entry.
+        /// The address that matched no held entry.
         work: WorkId,
+    },
+    /// `resolve_effect` was given a key for an action this bot does not declare.
+    ///
+    /// Distinct from [`NoSuchWork`](Self::NoSuchWork), which is an action the
+    /// bot *does* declare at an entry with nothing to settle. This one has no
+    /// address to report at all, because the key's action does not appear in the
+    /// declaration: the key came from somewhere other than
+    /// [`Bot::pending`](crate::spec::Bot::pending) — another bot's journal, or a
+    /// journal this run does not own — and no evidence about it can be applied
+    /// here.
+    ActionNotDeclared {
+        /// The action the key named.
+        action: ActionId,
     },
     /// `resolve_effect` named a generation that is not the one in the slot.
     ///
@@ -501,13 +516,20 @@ pub enum BotError {
     /// an attempt nobody can account for eligible to run again. Nothing was
     /// changed, and re-reading the pending work gives the generation to report
     /// against.
+    ///
+    /// The two digests are the two bindings, not two counters: an
+    /// [`ActionDigest`] is derived from the generation's revision together with
+    /// the entry it belongs to, so comparing them is comparing which observed
+    /// input the attempt was made against. That is the fact that decides
+    /// whether evidence is about the same work, and it is why settlement does
+    /// not have to be told the revision separately.
     EvidenceSuperseded {
-        /// The identity the evidence was submitted for.
+        /// The address the evidence was submitted for.
         work: WorkId,
-        /// The generation the caller named.
-        named: u64,
-        /// The generation the chain holds now.
-        current: u64,
+        /// The binding the caller's key names.
+        named: ActionDigest,
+        /// The binding the chain holds now.
+        current: ActionDigest,
     },
     /// `resolve_effect` was given evidence about an attempt that is no longer
     /// the outstanding one on that entry.
@@ -526,12 +548,12 @@ pub enum BotError {
     /// moved, and applying it would make an attempt whose effect may be live
     /// eligible to run a third time.
     EvidenceStaleAttempt {
-        /// The identity the evidence was submitted for.
+        /// The address the evidence was submitted for.
         work: WorkId,
         /// The attempt the evidence was about.
-        reported: u32,
+        reported: AttemptId,
         /// The attempt the entry is on now.
-        outstanding: u32,
+        outstanding: AttemptId,
     },
     /// `resolve_effect` was given evidence opposite to what already settled the
     /// entry for this generation.
@@ -547,6 +569,37 @@ pub enum BotError {
         settled: EffectEvidence,
         /// The evidence that was refused.
         submitted: EffectEvidence,
+    },
+    /// A fresh attempt on an action was refused because the journal records an
+    /// earlier attempt on it as dispatched with no outcome.
+    ///
+    /// This is the one refusal in this enum that is a *recovery* answer rather
+    /// than a caller mistake: the bot was reconstructed against a journal, the
+    /// journal says an attempt on this action was prepared and nothing recorded
+    /// what became of it, and the substrate will not begin another one. Nothing
+    /// established that the bytes did not arrive, and a blind resend of a
+    /// non-idempotent effect is exactly the duplicate the durable path exists
+    /// to prevent.
+    ///
+    /// The repair is [`Bot::resolve_effect`](crate::spec::Bot::resolve_effect)
+    /// with the key from [`Bot::pending`](crate::spec::Bot::pending):
+    /// [`NotApplied`](EffectEvidence::NotApplied) makes the entry eligible
+    /// again, [`Applied`](EffectEvidence::Applied) records that the effect
+    /// landed and the entry the key names is done for the generation the
+    /// acknowledgement covers.
+    EffectUnsettled {
+        /// The action whose earlier attempt never settled.
+        action: ActionId,
+    },
+    /// The broker or the journal refused a dispatch on its way out.
+    ///
+    /// Both halves arrive as one variant because they are refused at one
+    /// instant — the handoff — and a caller's next move is the same for either:
+    /// nothing left the process, and the tick reports it rather than retrying
+    /// blind. [`DispatchError`] is where the two causes are told apart.
+    EffectRefused {
+        /// Which half refused, and why.
+        cause: DispatchError,
     },
 }
 
@@ -1038,6 +1091,11 @@ impl fmt::Display for BotError {
                 work.chain(),
                 work.entry()
             ),
+            Self::ActionNotDeclared { action } => write!(
+                f,
+                "action {action} is not declared by this bot: nothing was changed, and \
+                 the key did not come from this bot's pending()"
+            ),
             // The generation the caller named is rendered first and the one in
             // the slot second, in the order the mistake happened: a reader
             // checking this against their own ledger wants to see their number
@@ -1048,9 +1106,9 @@ impl fmt::Display for BotError {
                 current,
             } => write!(
                 f,
-                "evidence names generation {named} of chain {} entry {}, which has \
-                 been superseded by generation {current}: nothing was changed, re-read \
-                 pending() and report against the generation that is there now",
+                "evidence names binding {named} of chain {} entry {}, which has \
+                 been superseded by binding {current}: nothing was changed, re-read \
+                 pending() and report the key it hands back now",
                 work.chain(),
                 work.entry()
             ),
@@ -1060,11 +1118,13 @@ impl fmt::Display for BotError {
                 outstanding,
             } => write!(
                 f,
-                "evidence was about attempt {reported} of chain {} entry {}, but that \
-                 entry is on attempt {outstanding} now: nothing was changed, and the \
+                "evidence was about attempt {} of chain {} entry {}, but that \
+                 entry is on attempt {} now: nothing was changed, and the \
                  report is about an attempt that is over rather than one outstanding",
+                reported.get(),
                 work.chain(),
-                work.entry()
+                work.entry(),
+                outstanding.get()
             ),
             Self::EvidenceContradicted {
                 work,
@@ -1079,6 +1139,20 @@ impl fmt::Display for BotError {
                 work.chain(),
                 work.entry()
             ),
+            Self::EffectUnsettled { action } => write!(
+                f,
+                "no attempt on action {action} was begun: the journal records an \
+                 earlier attempt on it as dispatched with no outcome, so it may \
+                 already be live. Settle it with the key pending() hands back \
+                 before anything is sent again"
+            ),
+            // Matched by reference so the cause renders through its own
+            // `Display`: the refusal is read once, here, and the variant keeps
+            // the whole of it for a caller that wants to tell the broker's
+            // refusal from the journal's.
+            Self::EffectRefused { ref cause } => {
+                write!(f, "nothing left the process: {cause}")
+            }
         }
     }
 }

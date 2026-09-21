@@ -558,6 +558,25 @@ pub trait EffectJournal {
     /// The last committed position, or the genesis when nothing is committed.
     fn tail(&self) -> JournalPosition;
 
+    /// Every committed event, in commit order.
+    ///
+    /// Required rather than optional, and read rather than streamed, because
+    /// this is what [`recover`] consumes: a controller that comes back after a
+    /// crash learns what was in flight by replaying its own journal, and a
+    /// journal that cannot be read back cannot be the record behind an external
+    /// handoff. An adapter over a store that can only be appended to is a
+    /// *sink*, not a journal, and this trait is not a sink.
+    ///
+    /// The whole sequence rather than a page, because [`recover`] folds over it
+    /// and a partial replay answers "what is uncertain" with a subset — which
+    /// reads as "nothing is uncertain" for every attempt in the part that was
+    /// not read.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::Storage`] when the backing store refused to be read.
+    fn committed(&self) -> Result<Vec<EffectEvent>, JournalError>;
+
     /// Append `event` if and only if `expected_tail` is still the committed
     /// tail.
     ///
@@ -970,6 +989,15 @@ impl EffectJournal for MemoryJournal {
             Some(entry) => entry.position(),
             None => JournalPosition::genesis(),
         }
+    }
+
+    /// Copied out rather than borrowed, because the trait hands the caller a
+    /// value it owns: `recover` folds over the sequence and a journal that
+    /// handed back a borrow would tie the fold to the journal's own lifetime,
+    /// which is exactly the coupling a caller reading a journal it is about to
+    /// give back does not want.
+    fn committed(&self) -> Result<Vec<EffectEvent>, JournalError> {
+        Ok(self.events().copied().collect())
     }
 
     fn compare_and_append(

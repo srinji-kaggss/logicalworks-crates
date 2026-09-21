@@ -18,12 +18,21 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll};
 
-use lgwks_bot::spec::{ActionSpec, ChainSpec};
+use lgwks_bot::broker::Broker;
+use lgwks_bot::effect::{EnvironmentId, FlowRevision, RunId};
+use lgwks_bot::journal::MemoryJournal;
+use lgwks_bot::spec::{ActionSpec, ChainSpec, EffectIdentity, EffectScope};
 use lgwks_bot::{Auth, Bot, BotError, BotSpec, Cap, Execute, GrantSet, Observe};
 
 /// The tests here cross `json::Error` and `BotError`, so they report
-/// `Box<dyn Error>` and propagate each with `?`.
+/// `Box<dyn Error>` and propagate each with `?`. A scope that cannot be built
+/// reports through the same box for the same reason: the error domains it
+/// crosses do not convert into one another, and flattening them would name the
+/// wrong failure.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+/// The same box, for the one helper that is not a test body.
+type ScopeResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 /// The value the source and the action both carry.
 const VALUE: u32 = 1;
@@ -108,6 +117,35 @@ impl Execute for YieldAction {
     }
 }
 
+/// The effect scope a test's bot runs under.
+///
+/// A bot has no dispatch path without one: the scope names the run, the
+/// environment the run acts on, and the journal a dispatch is written to before
+/// it leaves the process. A fresh identity per call, so no test inherits
+/// another's held attempts, and an in-memory journal, because these tests are
+/// about a different boundary than durability is.
+///
+/// Returns `ScopeResult` because building a scope crosses `IdError` and
+/// `BrokerError` as well as `BotError`, and none of the three converts into
+/// another; the tests below report through `Box<dyn Error>` for the same reason.
+fn test_effects() -> ScopeResult<EffectScope> {
+    let environment = EnvironmentId::from_hex("2122232425262728292a2b2c2d2e2f30")?;
+    let mut broker = Broker::new();
+    broker.register(environment)?;
+    Ok(EffectScope::new(
+        EffectIdentity::new(
+            RunId::from_hex("0102030405060708090a0b0c0d0e0f10")?,
+            environment,
+            FlowRevision::from_tagged(
+                "blake3_256",
+                "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            )?,
+        ),
+        broker,
+        Box::new(MemoryJournal::new()),
+    ))
+}
+
 #[test]
 fn no_default_features_preserve_the_sync_spec_surface() -> TestResult {
     // The specs are `#[non_exhaustive]`, so this consumer builds them through
@@ -140,6 +178,7 @@ fn no_default_features_run_a_synchronous_tick() -> TestResult {
                 log: Rc::clone(&log),
             },
         )
+        .with_effects(test_effects()?)
         .build(&GrantSet::empty())?;
 
     let fired = bot.tick()?;

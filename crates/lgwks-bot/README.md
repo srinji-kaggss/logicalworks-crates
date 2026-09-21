@@ -36,6 +36,10 @@ do not assume an installed `0.4.2` has any of the nine modules above.
 ## Quick start
 
 ```rust
+use lgwks_bot::broker::Broker;
+use lgwks_bot::effect::{EnvironmentId, FlowRevision, RunId};
+use lgwks_bot::journal::MemoryJournal;
+use lgwks_bot::spec::{EffectIdentity, EffectScope};
 use lgwks_bot::{Auth, Bot, BotError, Cap, GrantSet};
 use lgwks_bot::verb::{Execute, Observe};
 
@@ -86,9 +90,31 @@ impl Execute for PageOnCall {
 
 let grants = GrantSet::empty().grant(Cap::net());
 
+// The run's identity: which run this is, which environment it acts on, and the
+// flow revision it came from. It is required rather than defaulted, because a
+// bot that cannot name its own run cannot recover against one after a restart.
+// `MemoryJournal` keeps the write-ahead record in this process; a real
+// deployment hands in a journal that outlives it.
+let environment = EnvironmentId::from_hex("2122232425262728292a2b2c2d2e2f30")?;
+let mut broker = Broker::new();
+broker.register(environment)?;
+let effects = EffectScope::new(
+    EffectIdentity::new(
+        RunId::from_hex("0102030405060708090a0b0c0d0e0f10")?,
+        environment,
+        FlowRevision::from_tagged(
+            "blake3_256",
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        )?,
+    ),
+    broker,
+    Box::new(MemoryJournal::new()),
+);
+
 let mut bot = Bot::builder("queue-watch")
     .observe(QueueDepth { caps: vec![Cap::net()] })
     .on(|depth: &u32| *depth > 10, PageOnCall)
+    .with_effects(effects)
     .build(&grants)?;
 
 // One tick: poll every source, fire every chain whose condition now holds.
@@ -97,7 +123,7 @@ let mut bot = Bot::builder("queue-watch")
 // inside an async runtime, `await bot.tick_async()` instead.
 let fired = bot.tick()?;
 assert_eq!(fired, 1);
-# Ok::<(), BotError>(())
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 `bot.tick()` returns the number of actions fired. A built bot is `mut`
