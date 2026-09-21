@@ -25,9 +25,16 @@ explicitly under that crate.
 - **`LICENSING.md` records the model**, including the commercial licence that
   grants relief from §3.2 for organisations that need to modify the bot without
   publishing those modifications. Offering two licences requires holding rights
-  in every contribution, so `CONTRIBUTING.md` now states that a contributor
-  licence agreement must be in place before a non-trivial `lgwks_bot`
-  contribution is merged.
+  in every contribution, so a contributor licence agreement has to be in place
+  before a non-trivial `lgwks_bot` contribution can be merged.
+- **`lgwks_bot` is closed to outside contributions, and the contributor licence
+  agreement that would reopen it is deferred.** A patch sent today has no path
+  to merge, so `CONTRIBUTING.md` and `LICENSING.md` now say *closed* rather than
+  *not merged until an agreement exists*. The earlier phrasing left a
+  contributor to send a patch that would wait on a decision no one has made; the
+  block is stated as a refusal on arrival instead. It lifts when an instrument is
+  chosen and recorded in `LICENSING.md`. The other three crates are unaffected.
+
 ### lgwks_bot Fixed
 
 - **A tick can no longer be run from inside an async runtime through the
@@ -217,6 +224,29 @@ explicitly under that crate.
   stores the option's own text verbatim, resolved into the current candidate set
   at use time. `Resolution::StaleAlias` reports a binding whose option is gone;
   the session records it and re-asks rather than resolving to a position.
+- **An HTTP body was read into memory before any ceiling applied**
+  (`lgwks_std`, `lgwks_bot`). A remote server chose the process's memory
+  footprint, and the bot's preview limit was a post-hoc trim of an arbitrary
+  allocation. The read is now bounded *while* reading: each window is clamped to
+  what remains of a declared ceiling, so no buffer exceeds it. The overflow
+  policy is a typed choice — `BodyPolicy::Whole` refuses past the limit with
+  `Error::BodyTooLarge`, `BodyPolicy::Preview` keeps the prefix and reports
+  `Truncation::{Complete, Cut}`. The bot selects `Preview` because a body larger
+  than a preview is the normal case for a live endpoint, and its ceiling is
+  derived from the preview size so the two numbers cannot drift.
+- **A comment naming a log macro suppressed an unlogged-error finding**
+  (`lgwks_deps`). The scan matched evidence over a window of physical lines, so
+  a marker inside a comment satisfied the check for a return that discards its
+  error. Evidence is now a statement rather than prose: the physical-line window
+  is gone.
+- **`--contract FILE` also became the audit target** (`lgwks_deps`). An
+  invocation naming a register could audit the wrong tree and return a success
+  verdict for it. `check` now parses its own arguments in one consuming pass,
+  refusing a missing value, an option used as a value, a repeated override, a
+  surplus positional and an unknown flag — with nothing audited. A *relative*
+  target was additionally resolved against two different working directories
+  because `--manifest-path` is resolved by cargo against cargo's own cwd; it is
+  now made absolute before the child sees it.
 
 ### Changed
 

@@ -52,13 +52,16 @@ rights in **every** contribution to it. A contribution accepted under the
 inbound MPL alone cannot be relicensed commercially, which would make the offer
 above impossible to honour for any release containing it.
 
-A signed contributor licence agreement is therefore required before a
-non-trivial contribution is merged. **Until that agreement exists, outside
-contributions to `lgwks_bot` must not be merged** — not deferred with a note,
-not merged and fixed later. Choosing the instrument is a decision for the
-repository owner; the Apache Individual CLA and the Harmony Contributor
-Assignment Agreement are the two standard ones and either satisfies the
-requirement. [`CONTRIBUTING.md`](CONTRIBUTING.md) states the same rule where a
+A signed contributor licence agreement would therefore be required before a
+non-trivial contribution could be merged. **`lgwks_bot` is closed to outside
+contributions until one exists**, and that is a door rather than a queue: a patch
+sent today has no path to merge and is refused on arrival rather than parked
+pending a decision.
+
+Selecting the instrument is deferred. The two standard candidates are the Apache
+Individual CLA and the Harmony Contributor Assignment Agreement, and the choice
+will be recorded here when it is made. Until then, do not send patches to
+`lgwks_bot`. [`CONTRIBUTING.md`](CONTRIBUTING.md) states the same rule where a
 contributor will see it.
 
 This constrains nothing for the other three crates, which are Apache-2.0 with no
