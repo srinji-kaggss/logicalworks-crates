@@ -256,6 +256,50 @@ explicitly under that crate.
   so that part is additive. These are development APIs and are not in any
   published version.
 
+### Fixed
+
+- **A clean tick could mean work had been silently abandoned** (`lgwks_bot`).
+  The `fire` system selected on `Changed<Revision>` and the revision was
+  committed before anything ran, so a mid-chain failure marked the source
+  handled: untried entries were never reached while the source held still, a
+  failure in the first chain stopped every later chain, and `tick` returned
+  `Ok`. Eligible work now lives in a ledger keyed by chain and entry, and the
+  revision only *opens* a transition. The walk resumes at the first unresolved
+  entry and never replays an acknowledged effect to reach a successor.
+  `tick` returns `Err(PendingTransition { work, outstanding })` when work is
+  held and nothing failed, so a clean tick now means nothing is held.
+  `RetryPolicy` bounds attempts with a spent budget abandoning the entry rather
+  than retrying forever, and an effect that may have happened is never
+  re-attempted without `resolve_effect` supplying evidence.
+- **A selector could starve every permitted host** (`lgwks_bot`).
+  `next_admissible` reimplemented the admission predicate by hand and omitted
+  the rules check, so a permanently disallowed lexicographically-first host was
+  selected on every turn of the loop. One side-effect-free decision now backs
+  both `admit` and `next_admissible`, and expiry has a single definition.
+- **A frontier permit could be released against the wrong key**
+  (`lgwks_bot`). Completion recomputed a request's constraints from current
+  topology, so a host whose name re-resolved leaked a slot and released one it
+  never held. The reservation now *is* the permit: `Admission::Admit` carries an
+  opaque non-clonable `InFlightPermit` that completion consumes, and the
+  release/record methods that took a key are gone.
+
+### Changed
+
+- `Bot::tick` reports held work as `Err(PendingTransition)`. A caller that
+  treated `Ok` as "nothing outstanding" now sees the distinction. Where a
+  failure and held work coincide the tick keeps the action's **typed error** in
+  preference to the pending report, so a retry classifier still sees
+  `EffectIndeterminate` as a variant.
+
+### Added
+
+- `BotError::PendingTransition` and `BotError::NoSuchWork` (`lgwks_bot`), and the
+  work-tracking vocabulary re-exported from `spec`: `AbandonReason`,
+  `EffectEvidence`, `PendingWork`, `RetryPolicy`, `TransitionHold`, `WorkId`
+  (`lgwks_bot`). All additive.
+- `crates/lgwks-bot/examples/failed_tick.rs`, so the guide's program is compiled
+  and run by the gate rather than being prose that nothing checks.
+
 ### lgwks_bot Fixed
 
 - **A supervised task's outcome is reported, not discarded.** `Supervisor::reap`

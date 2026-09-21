@@ -25,6 +25,7 @@
 use std::fmt;
 
 use super::cap::Cap;
+use super::ecs::{PendingWork, WorkId};
 use super::session::{ResourceAxis, Terminal};
 
 /// Error from bot construction, admission, or execution.
@@ -378,6 +379,34 @@ pub enum BotError {
         /// The flow's declared maximum.
         budget: usize,
     },
+    /// A tick finished with a transition still holding work.
+    ///
+    /// This is the outcome the ECS substrate used to express by *silence*: a
+    /// tick that failed partway committed its revision, so an unchanged source
+    /// never reached the entries the failure skipped, and a later clean tick was
+    /// indistinguishable from a handled transition. The work is now retained
+    /// and this variant is how its retention is reported — held for an attempt
+    /// or for evidence, or given up on.
+    PendingTransition {
+        /// The entry that needs the caller: the first one still open, in
+        /// `(chain, entry)` order.
+        ///
+        /// A tick that gave up on an entry reports the error that caused the
+        /// abandonment instead, since that keeps the typed variant intact;
+        /// [`crate::spec::Bot::pending`] is where abandoned entries are named.
+        work: PendingWork,
+        /// Entries across every chain that are still open.
+        outstanding: usize,
+    },
+    /// `resolve_effect` was given an entry whose outcome is already decided.
+    ///
+    /// Not a no-op: a caller that believes it acknowledged an effect that
+    /// nothing was holding has a wrong model of the world, and the error is
+    /// where they find that out.
+    NoSuchWork {
+        /// The identity that matched no held entry.
+        work: WorkId,
+    },
 }
 
 /// Render untrusted text so it cannot forge a log record.
@@ -400,7 +429,11 @@ pub enum BotError {
 ///
 /// Applied at the rendering site rather than in the enum, so the structured
 /// payload a consumer matches on keeps the original bytes.
-struct Escaped<'a>(&'a str);
+///
+/// `pub(crate)` because it is one implementation, not one per module: `ecs`
+/// renders the cause of a held or abandoned entry through the same adapter
+/// rather than with an escaping pass of its own.
+pub(crate) struct Escaped<'a>(pub(crate) &'a str);
 
 impl fmt::Display for Escaped<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -691,6 +724,24 @@ impl fmt::Display for BotError {
                     "session attempted {steps} steps over its {budget}-step budget"
                 )
             }
+            // The payload's own `Display` renders the cause through `Escaped`,
+            // at the point the untrusted bytes are reachable, so this arm wraps
+            // the whole report only to keep the boundary uniform.
+            Self::PendingTransition {
+                ref work,
+                outstanding,
+            } => write!(
+                f,
+                "tick left work unfinished: {} ({outstanding} open)",
+                Escaped(&work.to_string())
+            ),
+            Self::NoSuchWork { work } => write!(
+                f,
+                "no held effect at chain {} entry {}: only an entry whose outcome is \
+                 indeterminate, or one that was given up on, can be settled with evidence",
+                work.chain(),
+                work.entry()
+            ),
         }
     }
 }

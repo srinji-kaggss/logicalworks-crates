@@ -1,21 +1,22 @@
 # What a failed tick means
 
 Both entry points return `Result<usize, BotError>`: `Bot::tick` is the
-synchronous adapter (`crates/lgwks-bot/src/ecs.rs:630`) and `Bot::tick_async` is
-the one to `await` from inside a runtime (`crates/lgwks-bot/src/ecs.rs:561`).
+synchronous adapter (`crates/lgwks-bot/src/ecs.rs:1490`) and `Bot::tick_async` is
+the one to `await` from inside a runtime (`crates/lgwks-bot/src/ecs.rs:1408`).
 Four different things can produce an `Err`. Three are failures that mean
 different things for your data — the distinction is the difference between a
 retry and a duplicate — and the fourth is the adapter refusing to run a tick at
 all.
 
-The three cases below are exercised in
-`crates/lgwks-bot/src/ecs.rs` tests and in
-`crates/lgwks-bot/src/spec.rs` (`a_failing_poll_fires_nothing_and_returns_the_first_error`).
+Cases one and two are the two the `observe_fold` and `fire_plan` systems produce,
+and the program under case two is compiled and run as
+`crates/lgwks-bot/examples/failed_tick.rs`. Case three is what the error variant
+behind an indeterminate effect means.
 
 ## Case one: a poll failed
 
 Nothing ran. The `observe_fold` system returns before committing anything
-(`crates/lgwks-bot/src/ecs.rs:292`):
+(`crates/lgwks-bot/src/ecs.rs:1017`):
 
 ```rust,ignore
 let values = match polled.into_iter().collect::<Result<Vec<_>, _>>() {
@@ -38,11 +39,13 @@ previous revision. No condition is evaluated, so no action runs.
 ## Case two: an action failed
 
 Actions run in declaration order, but deciding and doing are two systems. The
-`fire_plan` system walks the chains whose revisions moved and records one
-ordered `Step` per condition that held (`crates/lgwks-bot/src/ecs.rs:349`); the
-`run_steps` pass then awaits those steps on the caller's executor in exactly
-that order (`crates/lgwks-bot/src/ecs.rs:679`). It breaks on the first failure
-and records it, and there is no rollback:
+`fire_plan` system walks the eligible work — a chain whose `Revision` moved opens
+a transition, and a chain with a transition outstanding is walked whether or not
+it moved — and records one ordered `Step` per condition that held
+(`crates/lgwks-bot/src/ecs.rs:1080`); the `run_steps` pass then awaits those steps
+on the caller's executor in exactly that order
+(`crates/lgwks-bot/src/ecs.rs:1550`). It breaks on the first failure and records
+it, and there is no rollback:
 
 ```rust,ignore
 match entry.action.run_any(&grants.0, value.as_ref()).await {
@@ -57,19 +60,36 @@ match entry.action.run_any(&grants.0, value.as_ref()).await {
 Every action before the failure already ran, and its effect is live. `Err` here
 means "this run did not finish", not "nothing happened".
 
-One consequence is easy to miss. `observe_fold` committed the new values and
-bumped the revisions *before* `fire_plan` decided
-(`crates/lgwks-bot/src/ecs.rs:316`), so the
-next tick polls the source, finds it unchanged, and does not re-fire the chain.
-The actions after the failure are not attempted again until the source moves.
-The work is lost, not queued.
+One consequence is easy to miss, and it is the reason the ledger exists.
+`observe_fold` commits the new values and bumps the revisions *before*
+`fire_plan` decides (`crates/lgwks-bot/src/ecs.rs:1041`), so selecting work by
+`Changed<Revision>` alone means the next tick polls an unchanged source, finds
+nothing eligible, and never attempts the actions after the failure again. The
+work is lost, not queued.
 
-The program below asserts that, along with the poll case.
+Eligible work is now recorded in its own structure, keyed by `(chain, entry)`,
+and `fire_plan` walks *that* rather than the change set: `Changed<Revision>` only
+opens a transition. Three consequences follow, and the example below asserts all
+three.
 
-```rust
+- **The failed entry is retried while it has budget, even if the source never
+  moves again.** `RetryPolicy` sets the budget (three attempts by default;
+  `RetryPolicy::ONE_ATTEMPT` for a domain whose failures are always terminal).
+- **The entries after it wait.** The walk stops at the first entry it cannot
+  settle, so an acknowledged effect is never replayed to reach a successor.
+- **Giving up is reported, not silent.** When the budget is spent the entry is
+  abandoned, the tick still returns the action's own typed error, and
+  `Bot::pending()` names the entry, the reason (`AbandonReason`), and the source
+  revision. A `pending()` that lists anything is work that is still owed, and a
+  clean `Ok` tick — with `Err(BotError::PendingTransition)` in place of silence
+  whenever work is held and nothing failed — cannot be read as "the transition
+  was handled".
+
+```rust,ignore
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use lgwks_bot::spec::{AbandonReason, TransitionHold};
 use lgwks_bot::{Auth, Bot, BotError, Cap, Execute, GrantSet, Observe};
 
 struct Reading(Arc<AtomicU32>);
@@ -125,22 +145,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .on(|_: &u32| true, Fail)
         .build(&GrantSet::empty())?;
 
-    let error = bot.tick().expect_err("the second action fails");
+    let error = match bot.tick() {
+        Ok(fired) => return Err(format!("the second action was reported as {fired} fired").into()),
+        Err(error) => error,
+    };
     assert!(matches!(error, BotError::DomainError { .. }), "got {error:?}");
-    assert_eq!(
-        counted.load(Ordering::SeqCst),
-        1,
-        "the action before the failure already ran"
-    );
+    assert_eq!(counted.load(Ordering::SeqCst), 1, "the action before the failure already ran");
 
-    // The failed chain is not retried while the source holds still.
-    let second = bot.tick()?;
-    assert_eq!(second, 0, "the chain does not re-fire on an unchanged value");
-    assert_eq!(counted.load(Ordering::SeqCst), 1);
+    // The source holds still, and the refused entry is attempted again anyway.
+    // The action ahead of it has already succeeded and is not replayed.
+    assert!(matches!(bot.tick(), Err(BotError::DomainError { .. })));
+    assert_eq!(counted.load(Ordering::SeqCst), 1, "the acknowledged effect is not replayed");
 
-    // It runs again once the source moves.
+    // Third attempt: the budget is spent. The tick reports the refusal, and
+    // `pending` names the entry it gave up on rather than dropping it.
+    assert!(matches!(bot.tick(), Err(BotError::DomainError { .. })));
+    let pending = bot.pending();
+    assert_eq!(pending.len(), 1, "one entry is left owing an answer: {pending:?}");
+    assert!(matches!(
+        pending[0].hold(),
+        TransitionHold::Abandoned { reason: AbandonReason::AttemptsExhausted { .. }, .. }
+    ));
+    assert_eq!(bot.tick()?, 0, "the rest of the chain is resolved, so nothing fires");
+
+    // A new source value is new work for the entries that were not given up on.
     value.store(1, Ordering::SeqCst);
-    assert!(bot.tick().is_err());
+    assert_eq!(bot.tick()?, 1, "the new revision's work runs");
     assert_eq!(counted.load(Ordering::SeqCst), 2);
     Ok(())
 }
@@ -149,17 +179,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Case three: the effect may already have happened
 
 `BotError` separates "the effect did not happen" from "the effect may have
-happened" as two variants, not one variant with a flag
-(`crates/lgwks-bot/src/error.rs:12`).
+happened" as two variants, not one variant with a flag.
 
 | Variant | Means | A retry is |
 |---|---|---|
-| `BotError::DomainError` | the action did not take effect | a retry |
-| `BotError::EffectIndeterminate` | the effect may be live | a possible duplicate |
+| `BotError::DomainError` | The action did not take effect | a retry |
+| `BotError::EffectIndeterminate` | The effect may be live | a possible duplicate |
 
 `EffectIndeterminate` is documented as the case you reach "when a request timed
 out, or a connection dropped, *after* the request was sent"
-(`crates/lgwks-bot/src/error.rs:102`). Its `Display` renders the domain, the
+(`crates/lgwks-bot/src/error.rs:104`). Its `Display` renders the domain, the
 cause, and the words "may have taken effect", so an operator reading a log line
 sees the indeterminacy rather than having to infer it.
 
@@ -175,9 +204,24 @@ fn may_have_taken_effect(error: &lgwks_bot::BotError) -> bool {
 is deliberate: a new variant becomes a compile-time prompt at your `match` rather
 than a silent fallthrough.
 
-Delivering exactly-once across an external effect needs durable intent and an
-outcome-unknown record. Neither exists in the inspected source. Until they do,
-treat a failed tick as a partial run to be reconciled.
+An indeterminate effect is the one case the substrate refuses to decide on its
+own. The entry is held — reported through `Bot::pending()` as
+`TransitionHold::OutcomeUnknown`, and never attempted again by the tick loop,
+whatever the budget says — until the caller says what happened:
+
+```rust,ignore
+bot.resolve_effect(work, EffectEvidence::Applied)?;   // it happened: recorded, not replayed
+bot.resolve_effect(work, EffectEvidence::NotApplied)?; // it did not: eligible again
+```
+
+`resolve_effect` refuses with `BotError::NoSuchWork` when the entry is not held,
+because accepting evidence for an entry that has an answer would let a caller
+believe an effect was acknowledged when nothing was.
+
+The ledger is in memory, so this is a report to the caller that owns the run, not
+durability: an effect left in doubt is owed an answer by whoever holds the bot,
+including across a restart. Delivering exactly-once across an external effect
+needs that intent stored outside the process.
 
 ## Not a failure: the adapter refused
 
@@ -197,25 +241,34 @@ Two failures come from the wiring rather than from a domain, and both are typed
 so they cannot be mistaken for a condition that simply did not fire.
 
 - A condition whose `Evaluate<T>` implementation returns `Err` stops the chain
-  with that error (`crates/lgwks-bot/src/ecs.rs:388`). A structural failure in a
-  condition is `BotError::EvaluateError`, not `false`. The stop is ordered
-  rather than absolute: the steps `fire_plan` recorded before the failing
-  condition are still run, so an effect the walk had already cleared does take
-  effect. `a_condition_failure_stops_the_walk_after_the_effects_it_cleared`
-  pins both halves of that.
+  with that error (`crates/lgwks-bot/src/ecs.rs:1207`). A structural failure in a
+  condition is `BotError::EvaluateError`, not `false`. The stop is ordered rather
+  than absolute: the steps `fire_plan` recorded before the failing condition are
+  still run, so an effect the walk had already cleared does take effect, while
+  the entry behind the failing condition is left exactly as it was — nothing was
+  attempted, so nothing about its effect is claimed.
+  `a_condition_failure_stops_the_walk_after_the_effects_it_cleared` pins the
+  ordered half and
+  `a_condition_that_cannot_be_evaluated_holds_the_chain_without_claiming_anything`
+  pins the other.
 - The erased chain wrappers downcast the observed value back to the type the
   condition was registered with. A mismatch in the condition is
-  `EvaluateError`; a mismatch in the action's input is
-  `BotError::DomainError` naming the action's domain
-  (`crates/lgwks-bot/src/spec.rs:134`, `crates/lgwks-bot/src/spec.rs:165`). The
-  `Auth` is issued before the downcast in the action path, so a type mismatch
-  fails without a side effect.
+  `EvaluateError`; a mismatch in the action's input is `BotError::DomainError`
+  naming the action's domain (`crates/lgwks-bot/src/spec.rs`). The `Auth` is
+  issued before the downcast in the action path, so a type mismatch fails
+  without a side effect.
 
 ## The order errors are reported in
 
-Systems stop at the first error and the driver reports that one. `TickError` is
-a resource because an exclusive system returns `()` and cannot propagate
-(`crates/lgwks-bot/src/ecs.rs:163`), and `tick` takes it after the schedule runs.
-For polls, "first" means first in declaration order: all sources are polled
-before any `Revision` is written, so a failing poll cannot leave one source
-updated and another not.
+A poll failure stops the tick before any effect: all sources are polled before
+any `Revision` is written, so a failing poll cannot leave one source updated and
+another not, and `tick` returns the first error in declaration order.
+
+An action failure does not stop the later chains. `fire_plan` walks every chain
+in declaration order and `run_steps` runs them in that same order, parking the
+first failure it saw and reporting that one, while the chains behind the failing
+one still run and still record their work. `TickError` is a resource rather than
+a return value because an exclusive system returns `()` and cannot propagate
+(`crates/lgwks-bot/src/ecs.rs:212`); `tick` takes it after the schedule runs, and
+it takes precedence over the `PendingTransition` report because it carries the
+typed variant a retry classifier matches on.

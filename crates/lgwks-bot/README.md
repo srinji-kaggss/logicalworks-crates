@@ -149,13 +149,21 @@ four phases, of which only the two middle ones are those systems:
    bump that source's `Revision(u64)` marker component *only when the value
    moved*. A poll that failed is reported here, before any `Revision` is
    written.
-3. **Decide** (`fire_plan`) — walk the sources matching `Changed<Revision>` in
-   declaration order, evaluate each chain's condition, and record the effects
-   whose conditions hold, in declaration order. Conditions are pure over the
-   observed value, so this records exactly the program the old interleaved loop
-   would have walked.
-4. **Act** — run the recorded effects in that order, awaited one at a time, so
-   side effects stay deterministic.
+3. **Decide** (`fire_plan`) — walk the bot's *eligible work*, recorded in a
+   ledger keyed by `(chain, entry)`, in declaration order: a chain whose
+   `Revision` moved opens or resumes a transition, and a chain with work
+   outstanding is walked whether or not it moved. Evaluate each entry's
+   condition and record the effects whose conditions hold, in declaration order.
+   Conditions are pure over the observed value, so this records exactly the
+   program the old interleaved loop would have walked.
+4. **Act** — apply the recorded decisions in that order, awaited one at a time,
+   so side effects stay deterministic, writing each entry's outcome back into
+   the ledger as it goes. A chain's walk stops at the first entry it cannot
+   settle, so an acknowledged effect is never replayed to reach a successor.
+
+The ledger in phase 3 is what makes `Changed<Revision>` a *trigger* rather than
+the whole answer: the change filter decides which chain opens a transition, and
+the ledger decides what that chain still owes from then on.
 
 Two consequences of that order are worth knowing before you rely on a tick:
 
@@ -188,8 +196,15 @@ socket never reports ready, and the sibling task the verb awaits never runs. So:
   returns `BotError::TickInsideRuntime` (`docs/guides/lgwks-bot/failures.md`).
 
 Dropping a `tick_async` future — a cancellation, a `select!`, a timeout — is
-safe. The unattempted work is lost rather than queued, the same as a partial
-run, and the next tick starts from the same state as the first.
+safe, but it is not the same as a tick that never started. Work the tick had not
+reached is untouched, and the entries after it keep their declared order. An
+entry whose attempt had *already begun* is held as `TransitionHold::Unrecorded`:
+the effect may be live, so it is never attempted again on its own. A later tick
+does not replay it — it returns `BotError::PendingTransition` and `Bot::pending()`
+names the entry, and `Bot::resolve_effect` is how the caller says what actually
+happened. This is the same hold a failed attempt under `EffectIndeterminate`
+produces, and it is deliberate: a tick that ends without a record is exactly the
+case the write-ahead record exists for.
 
 Futures are **local** (not `Send`): a bot is driven on the calling thread and
 domains may hold thread-local state. `rt::task::LocalSet` is available when you
@@ -227,10 +242,15 @@ the tick, it is a failure of the call site. See
 
 Two consequences follow, and neither is fixed by retrying blindly:
 
-- **The unattempted work is lost, not queued.** Revisions are committed in the
-  observe phase, before any action runs, so the next tick sees an unchanged
-  source and does not re-fire the chain. The actions after the failure are
-  simply not attempted again.
+- **The unattempted work is queued, not lost.** Work that is eligible stays
+  recorded: an entry that has not been attempted, or one whose attempt failed
+  under a budget that is not yet spent, is attempted on a later tick even if the
+  source never moves again, and the entries after it are not skipped to reach
+  anything. `tick` returns `Err(BotError::PendingTransition)` while work is held,
+  so a clean tick is never "the transition was handled" when it was not, and
+  `Bot::pending()` lists every entry that is not finished — including any entry
+  the attempt budget gave up on, with its reason. `RetryPolicy` sets the budget
+  (three attempts by default, `RetryPolicy::ONE_ATTEMPT` for none).
 - **A retry may duplicate.** An action that failed after its request was sent
   fails as `BotError::EffectIndeterminate`, which says the effect may be live.
   That variant exists precisely so this is readable from the type rather than
@@ -239,10 +259,16 @@ Two consequences follow, and neither is fixed by retrying blindly:
   possible duplicate — a second merge, message, or process launch. Consumers
   that retry should match on the variant and treat these two differently.
 
-Delivering exactly-once across an external effect needs durable intent and an
-outcome-unknown record, which this crate does not yet provide. Until it does,
-treat a failed tick as a partial run to be reconciled rather than a no-op to be
-retried.
+An effect that may already have happened is never re-attempted on its own: the
+entry is held and reported, and `Bot::resolve_effect(work, evidence)` is how a
+caller says what happened — `EffectEvidence::Applied` records it without
+replaying it, `NotApplied` makes the entry eligible for an attempt again.
+
+Delivering exactly-once across an external effect still needs durable intent
+outside this process: the ledger is in memory, so it reports an unsettled effect
+to the caller that owns it rather than surviving a crash. A panic that unwinds
+out of an action takes the chain's live transition with it; see the limits
+section in `src/ecs.rs`.
 
 ## Capability system
 
