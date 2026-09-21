@@ -57,6 +57,7 @@
 //! attribute cannot reach a threshold of three quarters however well the rest
 //! of it lines up.
 //!
+//! [`Jaccard`]: lgwks_std::similarity::Jaccard
 //! [`Recognition`]: crate::interface::Recognition
 
 use std::fmt;
