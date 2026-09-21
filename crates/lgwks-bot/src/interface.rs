@@ -20,7 +20,10 @@
 //! This is the same distinction `docs/bot-on-ecs.md` §8.1 derives for a crawl
 //! frontier — *a record that cannot distinguish "done" from "never started"* —
 //! and the same one [`crate::error::BotError`] lacks for a timed-out `Execute`.
-//! One invariant, three arrivals.
+//! One invariant, four arrivals, and the fourth closed first: a resolver that
+//! could not run at all reported a score of `0.0`, which is the same value as a
+//! resolver that ran and found nothing, so `Resolution::Degraded` now carries
+//! the cause instead.
 //!
 //! # The document boundary is a gate, not a score
 //!

@@ -1102,6 +1102,29 @@ pub enum MatchTier {
     Phonetic,
     /// The utterance and the option are lexically close.
     Fuzzy,
+    /// The utterance and the option are close in a model's embedding space.
+    Semantic,
+}
+
+/// Why a resolver could not reach a verdict.
+///
+/// A closed set rather than a string, so a caller can branch on the cause
+/// without parsing prose, and so the set of ways a resolver can fail is stated
+/// where a reviewer reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DegradedReason {
+    /// The semantic tier's embedder returned an error, or a vector of the
+    /// wrong length.
+    EmbedderUnavailable,
+}
+
+impl fmt::Display for DegradedReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::EmbedderUnavailable => formatter.write_str("the embedder is unavailable"),
+        }
+    }
 }
 
 /// The outcome of resolving an utterance against the candidate options.
@@ -1134,6 +1157,24 @@ pub enum Resolution {
     Absent {
         /// The highest score observed.
         best_score: f64,
+    },
+    /// The resolver could not reach a verdict at all.
+    ///
+    /// This is [`Self::Absent`]'s neighbour and not a spelling of it. `Absent`
+    /// means the options were all considered and none fit: the person was not
+    /// understood, and asking again in different words can help. `Degraded`
+    /// means the resolver never got to consider them: a dependency it needs is
+    /// unavailable, and asking the person again cannot help — the same
+    /// utterance will degrade identically.
+    ///
+    /// Carries no `best_score`, deliberately. There is no score; a failed
+    /// resolver observed no similarity, and reporting `0.0` would be a
+    /// measurement that was never taken. That is the same two-valued record
+    /// [`Self::Ambiguous`] exists to remove — *nothing matched* versus *may have
+    /// matched, and we could not look* — arriving a fourth time.
+    Degraded {
+        /// The cause, for the caller to record and route on.
+        reason: DegradedReason,
     },
 }
 
@@ -1425,6 +1466,16 @@ impl Session {
                 self.record_prompt(&node_id, &options);
                 return Ok(());
             }
+            Resolution::Degraded { reason } => {
+                // Re-ask, as for `Absent`, but record the cause under its own
+                // role: a transcript that renders a degraded re-ask exactly as
+                // an unclear one is how an operator concludes the person was
+                // being difficult while the embedder was down.
+                self.record(&node_id, "user", utterance);
+                self.record_degraded(&node_id, reason);
+                self.record_prompt(&node_id, &options);
+                return Ok(());
+            }
         };
         let Some(option) = options.get(index) else {
             return Err(BotError::ResolverReturnedInvalidOption { node: node_id });
@@ -1545,6 +1596,17 @@ impl Session {
     fn record_prompt(&mut self, node_id: &str, options: &[String]) {
         let prompt = format!("Choose one: {}", options.join(", "));
         self.record(node_id, "assistant", &prompt);
+    }
+
+    /// Records that the resolver could not reach a verdict.
+    ///
+    /// A distinct role rather than a second assistant prompt, because the two
+    /// failures need different repairs and a transcript is where that is
+    /// decided: an absent resolution says the person's words did not fit the
+    /// options, and a degraded one says the resolver never got to compare them.
+    fn record_degraded(&mut self, node_id: &str, reason: DegradedReason) {
+        let text = format!("Resolver unavailable: {reason}");
+        self.record(node_id, "resolver-degraded", &text);
     }
 }
 

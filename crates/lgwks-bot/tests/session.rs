@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use lgwks_bot::{
-    BotError, FlowBounds, FlowEdge, FlowSpec, NodeKind, Predicate, Session, Terminal, Value,
-    ValueExpr, VarType,
+    BotError, DegradedReason, FlowBounds, FlowEdge, FlowSpec, NodeKind, Predicate, Resolution,
+    Resolver, Session, Terminal, TranscriptEntry, Value, ValueExpr, VarType,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -519,5 +519,130 @@ fn validation_rejects_an_unknown_node_kind() -> TestResult {
     }"#;
     let result = FlowSpec::from_json(source);
     assert!(matches!(result, Err(BotError::UnknownNodeKind { .. })));
+    Ok(())
+}
+
+/// A resolver that always reports the same verdict, so a session's behaviour
+/// can be observed against each [`Resolution`] variant in isolation.
+struct FixedResolver(Resolution);
+
+impl Resolver for FixedResolver {
+    fn resolve(&self, _utterance: &str, _options: &[String]) -> Resolution {
+        self.0.clone()
+    }
+}
+
+/// One `Ask` node whose options route to an `End`, so a resolved answer is
+/// observable as the session leaving the node.
+fn one_question_flow() -> Result<FlowSpec, BotError> {
+    let mut vars = BTreeMap::new();
+    vars.insert(
+        String::from("choice"),
+        VarType::Choice(vec![String::from("yes"), String::from("no")]),
+    );
+    FlowSpec::new(
+        vars,
+        "ask",
+        BTreeMap::from([
+            (
+                String::from("ask"),
+                NodeKind::Ask {
+                    var: String::from("choice"),
+                    options: vec![String::from("yes"), String::from("no")],
+                    routes: BTreeMap::from([
+                        (String::from("yes"), String::from("done")),
+                        (String::from("no"), String::from("done")),
+                    ]),
+                },
+            ),
+            (String::from("done"), NodeKind::End),
+        ]),
+        Vec::new(),
+        BTreeMap::new(),
+        FlowBounds::new(8),
+    )
+}
+
+#[test]
+fn a_degraded_resolver_reasks_without_claiming_absence() -> TestResult {
+    let session = Session::with_resolver(
+        "degraded",
+        one_question_flow()?,
+        FixedResolver(Resolution::Degraded {
+            reason: DegradedReason::EmbedderUnavailable,
+        }),
+    )?;
+    let mut session = session;
+    session.answer("yes")?;
+
+    assert_eq!(
+        session.current(),
+        Some("ask"),
+        "a degraded resolver re-asks the same node rather than advancing"
+    );
+    assert_eq!(session.terminal(), None);
+
+    let roles: Vec<&str> = session
+        .transcript()
+        .iter()
+        .map(TranscriptEntry::role)
+        .collect();
+    assert!(
+        roles.contains(&"resolver-degraded"),
+        "the cause is recorded under its own role, got {roles:?}"
+    );
+    let recorded = session
+        .transcript()
+        .iter()
+        .find(|entry| entry.role() == "resolver-degraded")
+        .map(TranscriptEntry::text)
+        .unwrap_or_default();
+    assert_eq!(
+        recorded, "Resolver unavailable: the embedder is unavailable",
+        "the record names the cause rather than reporting an empty score"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_degraded_verdict_is_distinguishable_from_an_absent_one() -> TestResult {
+    let mut absent = Session::with_resolver(
+        "absent",
+        one_question_flow()?,
+        FixedResolver(Resolution::Absent { best_score: 0.0 }),
+    )?;
+    absent.answer("yes")?;
+    let mut degraded = Session::with_resolver(
+        "degraded",
+        one_question_flow()?,
+        FixedResolver(Resolution::Degraded {
+            reason: DegradedReason::EmbedderUnavailable,
+        }),
+    )?;
+    degraded.answer("yes")?;
+
+    // Both re-ask, and that is the point: the *session* behaviour is the same,
+    // while what is recorded is not. A two-valued verdict would leave these two
+    // transcripts identical, and an operator reading a session that repeats the
+    // same question would have no way to tell an unclear person from a resolver
+    // that never ran.
+    assert_eq!(
+        degraded.transcript().len(),
+        absent.transcript().len() + 1,
+        "the degraded re-ask carries one record the absent one does not"
+    );
+    let absent_roles: Vec<&str> = absent
+        .transcript()
+        .iter()
+        .map(TranscriptEntry::role)
+        .collect();
+    let degraded_roles: Vec<&str> = degraded
+        .transcript()
+        .iter()
+        .map(TranscriptEntry::role)
+        .collect();
+    assert!(!absent_roles.contains(&"resolver-degraded"));
+    assert!(degraded_roles.contains(&"resolver-degraded"));
+    assert_ne!(absent_roles, degraded_roles);
     Ok(())
 }

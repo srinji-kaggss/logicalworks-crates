@@ -428,11 +428,15 @@ Each step lands green and independently. Steps 1–2 are unblocked now.
    `KeywordResolver` deleted rather than kept beside its superset (§3.5).
 3. **The locator ladder.** `Anchor`, `Ladder`, and `recognize_with_ladder`, per
    §3.2. Requires `ElementFacts` to carry the anchors a candidate offers.
-4. **The two missing typed outcomes.** `BotError` gains an indeterminate
-   variant so a timed-out `Execute` is not retyped `Failed` and retried into a
-   duplicate (the open defect named in §3.1); `TerminalOutcome` gains `Partial`
-   so a run that produced some but not all of its output is distinguishable from
-   one that produced none. This is also the described platform's
+4. **The missing typed outcomes.** Three of the same invariant. ✅ Landed:
+   `Resolution::Degraded` (§3.6), the verdict a resolver returns when a
+   dependency it needs is unavailable — without it, *nothing matched* and *we
+   could not look* render identically and asking the person again is the wrong
+   repair for the second. Still open: `BotError` gains an indeterminate variant
+   so a timed-out `Execute` is not retyped `Failed` and retried into a duplicate
+   (the open defect named in §3.1), and `TerminalOutcome` gains `Partial` so a
+   run that produced some but not all of its output is distinguishable from one
+   that produced none. That last is also the described platform's
    `completed | partial | failed` triage, and it is the same invariant again.
 5. **The politeness frontier.** Adaptive per-host delay, bounded per-host
    concurrency, and the three-way admission verdict, all under `Time<Virtual>`

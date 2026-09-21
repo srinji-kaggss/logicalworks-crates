@@ -133,10 +133,10 @@ pub use language::LanguageResolver;
 #[cfg(feature = "rt")]
 pub use rt::{Builder, Handle, Runtime, block_on};
 pub use session::{
-    ChoiceArm, FlowBounds, FlowEdge, FlowNodeKind, FlowSpec, Interpolate, Journal, MatchTier,
-    MemoryJournal, NodeId, NodeKind, Predicate, Resolution, Resolver, Session, SessionId,
-    TemplateInterpolator, Terminal, TerminalOutcome, TranscriptEntry, Value, ValueExpr, VarScope,
-    VarType,
+    ChoiceArm, DegradedReason, FlowBounds, FlowEdge, FlowNodeKind, FlowSpec, Interpolate, Journal,
+    MatchTier, MemoryJournal, NodeId, NodeKind, Predicate, Resolution, Resolver, Session,
+    SessionId, TemplateInterpolator, Terminal, TerminalOutcome, TranscriptEntry, Value, ValueExpr,
+    VarScope, VarType,
 };
 pub use spec::{Bot, BotSpec};
 pub use verb::{Evaluate, Execute, Observe, Query};
