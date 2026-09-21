@@ -132,7 +132,7 @@ can cross a trust boundary too; `call.0.check(self.required_caps())?` is what
 makes the proof load-bearing rather than decorative.
 
 `Observe::Output` must be `PartialEq`. `EcsBuilder::observe` requires it
-(`crates/lgwks-bot/src/ecs.rs:474`), because the condition on this executor *is*
+(`crates/lgwks-bot/src/ecs.rs:479`), because the condition on this executor *is*
 bevy's change detection, and a value that cannot be compared cannot be detected
 as changed. `Observe::poll` is `async fn` returning a future that is
 deliberately not `Send` (`crates/lgwks-bot/src/verb.rs`), so a domain may hold
@@ -148,9 +148,9 @@ declaration order, so the effects fire in the order you wrote the `.on` calls.
 
 `build(&grants)` returns `Result<Bot, BotError>`. Two things make it fail:
 `GrantSet::admit` rejects a source or action whose `required_caps` the set does
-not cover (`crates/lgwks-bot/src/ecs.rs:587`), and `Schedule::initialize` with
+not cover (`crates/lgwks-bot/src/ecs.rs:592`), and `Schedule::initialize` with
 `ambiguity_detection: LogLevel::Error` rejects a schedule whose systems cannot be
-totally ordered (`crates/lgwks-bot/src/ecs.rs:621`).
+totally ordered (`crates/lgwks-bot/src/ecs.rs:626`).
 
 `Bot::tick` returns `Result<usize, BotError>`, where the `usize` is the number of
 actions that fired. The bot is `mut` because a tick advances its world.
@@ -158,7 +158,7 @@ actions that fired. The bot is `mut` because a tick advances its world.
 ## Inspecting a bot
 
 Four accessors exist for tests and instrumentation, all read-only
-(`crates/lgwks-bot/src/ecs.rs:388`):
+(`crates/lgwks-bot/src/ecs.rs:393`):
 
 | Method | Returns |
 |---|---|

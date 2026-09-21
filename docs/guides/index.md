@@ -59,6 +59,6 @@ Everything else under `lgwks-bot/` describes symbols present in the 0.4.2 tag.
 ## How these pages cite
 
 Each factual claim names the file it came from, as in
-`crates/lgwks-bot/src/ecs.rs:447`. Line numbers are from the commit this branch
+`crates/lgwks-bot/src/ecs.rs:452`. Line numbers are from the commit this branch
 was cut from. Where a claim could not be established from the inspected source,
 the page says so rather than describing the intent.

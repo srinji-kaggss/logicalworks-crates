@@ -1,6 +1,6 @@
 # What a failed tick means
 
-`Bot::tick` returns `Result<usize, BotError>` (`crates/lgwks-bot/src/ecs.rs:447`).
+`Bot::tick` returns `Result<usize, BotError>` (`crates/lgwks-bot/src/ecs.rs:452`).
 Three different things can produce the `Err`, and they mean different things for
 your data. The distinction is the difference between a retry and a duplicate.
 
@@ -34,7 +34,7 @@ previous revision. No condition is evaluated, so no action runs.
 ## Case two: an action failed
 
 Actions run in declaration order inside the `fire` system
-(`crates/lgwks-bot/src/ecs.rs:284`). The loop breaks on the first failure and
+(`crates/lgwks-bot/src/ecs.rs:289`). The loop breaks on the first failure and
 parks it, and there is no rollback:
 
 ```rust,ignore
@@ -177,7 +177,7 @@ Two failures come from the wiring rather than from a domain, and both are typed
 so they cannot be mistaken for a condition that simply did not fire.
 
 - A condition whose `Evaluate<T>` implementation returns `Err` stops the chain
-  with that error (`crates/lgwks-bot/src/ecs.rs:318`). A structural failure in a
+  with that error (`crates/lgwks-bot/src/ecs.rs:323`). A structural failure in a
   condition is `BotError::EvaluateError`, not `false`.
 - The erased chain wrappers downcast the observed value back to the type the
   condition was registered with. A mismatch in the condition is

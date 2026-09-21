@@ -40,7 +40,7 @@ There is one execution path. `crates/lgwks-bot/Cargo.toml` states that
 "would mean nothing exercises it, the workspace gate never compiles it, and it
 rots into a second opinion nobody chose."
 
-`Bot::tick` is synchronous (`crates/lgwks-bot/src/ecs.rs:447`). The systems drive
+`Bot::tick` is synchronous (`crates/lgwks-bot/src/ecs.rs:452`). The systems drive
 the non-`Send` verb futures on the calling thread, so there is nothing to await.
 Do not write `bot.tick().await`.
 
