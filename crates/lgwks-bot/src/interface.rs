@@ -33,6 +33,30 @@
 //! excluded before it is scored. Similarity is for choosing within a document;
 //! identity of document is not a similarity question.
 //!
+//! The tag is the other gate. A `button` and an `img` are not the same control
+//! however alike their boxes are, and "both of these are buttons" is not a
+//! degree of similarity that a weight should be able to outvote.
+//!
+//! # Missing evidence is not matching evidence
+//!
+//! A fingerprint compares two snapshots of the same element taken at different
+//! moments. A fact that neither snapshot reports is not a fact the two
+//! *agree* on: it is a comparison that was never made. The underlying metrics
+//! cannot draw that distinction — [`Jaccard`] scores two empty sets as `1.0` by
+//! the set convention every other consumer relies on, and an edit distance
+//! scores two empty strings as `1.0` for the same reason — so it is drawn
+//! here, at the component, where the meaning of the field is known. A fact
+//! absent on either side contributes `0.0` and never more.
+//!
+//! Unobserved facts are not renormalized away either. Redistributing a missing
+//! component's weight across the ones that remain would make a snapshot
+//! carrying *less* evidence easier to match rather than harder, and geometry
+//! alone could score a perfect `1.0`. The weights are fixed and the missing
+//! weight stays missing, which is what lets the acceptance threshold say what
+//! it means: `identity` is half the vector, so an element with no identifying
+//! attribute cannot reach a threshold of three quarters however well the rest
+//! of it lines up.
+//!
 //! [`Recognition`]: crate::interface::Recognition
 
 use std::fmt;
@@ -227,6 +251,16 @@ impl Similarity for IdentityComponent {
     type Value = ElementFacts;
 
     fn score(&self, left: &Self::Value, right: &Self::Value) -> f64 {
+        // No identifying attribute on either side is not agreement about an
+        // empty set of attributes. `Jaccard` reads it as `1.0`, correctly for
+        // every consumer that means set equality, and here it would hand an
+        // element with nothing to identify it by the *maximum* identity
+        // confidence — half the fingerprint's weight, for a fact neither
+        // snapshot observed. So the presence of the evidence is decided before
+        // the metric is consulted: absent on either side is no confidence.
+        if left.identity.is_empty() || right.identity.is_empty() {
+            return 0.0;
+        }
         self.metric.score(&left.identity, &right.identity)
     }
 }
@@ -259,6 +293,12 @@ impl Similarity for PathComponent {
     type Value = ElementFacts;
 
     fn score(&self, left: &Self::Value, right: &Self::Value) -> f64 {
+        // The same rule as identity, for the same reason: two empty paths are
+        // not a structural agreement, they are a snapshot that reported no
+        // structure. `PathSimilarity` scores the pair `1.0`.
+        if left.path.is_empty() || right.path.is_empty() {
+            return 0.0;
+        }
         self.metric.score(&left.path, &right.path)
     }
 }
@@ -285,6 +325,14 @@ impl Similarity for TextComponent {
     type Value = ElementFacts;
 
     fn score(&self, left: &Self::Value, right: &Self::Value) -> f64 {
+        // An element with no visible text is ordinary — an icon-only control,
+        // a spacer, an image — and two of them do not agree about their text,
+        // they both have none. `EditDistance` scores the empty pair `1.0`; the
+        // presence rule refuses it. An icon-only control is recognized by its
+        // identity and its structure, which is what those facts are for.
+        if left.text.is_empty() || right.text.is_empty() {
+            return 0.0;
+        }
         self.metric.score(&left.text, &right.text)
     }
 }
@@ -311,6 +359,13 @@ impl Similarity for GeometryComponent {
     type Value = ElementFacts;
 
     fn score(&self, left: &Self::Value, right: &Self::Value) -> f64 {
+        // Geometry is the one component with no absence rule, and the reason is
+        // that a bounding box has no unobserved state to confuse with an
+        // observed one: every snapshot reports a box for every element it
+        // reports at all, and `[0.0, 0.0, 0.0, 0.0]` is the position of an
+        // element at the origin rather than a fact nobody looked at. If that
+        // ever stops being true the field has to become an `Option`, because a
+        // sentinel value is not a presence rule.
         self.metric.score(&left.bounds, &right.bounds)
     }
 }
@@ -359,6 +414,16 @@ impl RecognitionVector {
     /// The ordering states an opinion rather than balancing a grid: attributes
     /// authored to be stable outrank a class path, and layout is the weakest
     /// signal because it is the one that moves when a banner loads.
+    ///
+    /// The weights also settle which facts a match *requires*, and that is not
+    /// an accident of the numbers: a component contributes nothing when the
+    /// fact is absent on either side, so a score is at most the weight of the
+    /// facts both elements actually reported. Identity and path together are
+    /// `3/4`, exactly the threshold, so a candidate has to carry a genuinely
+    /// observed matching identifier *and* a matching structure to be accepted
+    /// at all — text and layout can never make up the difference. A vector
+    /// built with different weights has a different set of required facts, and
+    /// `RecognitionVector::new` is where that is declared.
     pub fn fingerprint() -> Result<Self, RecognitionError> {
         let components: Vec<(f64, Box<dyn Similarity<Value = ElementFacts>>)> = vec![
             (0.5, Box::new(IdentityComponent::new())),
@@ -385,9 +450,11 @@ impl RecognitionVector {
     ///
     /// Candidates are compared in the order given and the lowest index wins a
     /// tie, so the result does not depend on iteration order — the comparator
-    /// rule `docs/bot-on-ecs.md` §8 takes from Heritrix. A candidate whose
-    /// piercing path differs from the target's is excluded before scoring; see
-    /// the module documentation for why that is a gate and not a weight.
+    /// rule `docs/bot-on-ecs.md` §8 takes from Heritrix. Two candidates are
+    /// excluded before they are scored rather than down-weighted: one whose
+    /// piercing path differs from the target's, and one whose tag is an
+    /// incompatible kind of thing. See the module documentation for why those
+    /// are gates and not weights.
     #[must_use]
     pub fn recognize(&self, target: &ElementFacts, candidates: &[ElementFacts]) -> Recognition {
         let mut best: Option<(usize, f64)> = None;
@@ -395,6 +462,9 @@ impl RecognitionVector {
 
         for (index, candidate) in candidates.iter().enumerate() {
             if candidate.frames != target.frames {
+                continue;
+            }
+            if !tags_compatible(target, candidate) {
                 continue;
             }
             let score = self.scorer.score(target, candidate);
@@ -435,6 +505,26 @@ impl RecognitionVector {
         }
         Recognition::Resolved { index, score, lead }
     }
+}
+
+/// Whether two elements are the same kind of thing.
+///
+/// The tag is the coarsest structural fact a snapshot reports and the cheapest
+/// way for two elements to be obviously different. It is a gate rather than a
+/// weighted component for the same reason the frame path is: "both of these are
+/// buttons" is not a degree of similarity, and a weight would let a strong
+/// enough identifier score outvote a candidate that is a different HTML
+/// element entirely.
+///
+/// An empty tag is an unreported fact rather than a claim of incompatibility,
+/// so it excludes nothing. It also cannot help: the tag is not one of the
+/// components, so an unknown tag leaves the candidate with exactly the evidence
+/// the remaining facts supply. A *role* is not consulted here because a snapshot
+/// carries it inside `identity` (`role=button`, an ARIA role attribute) and it
+/// is scored there as an identifying attribute, with half the vector's weight
+/// behind it.
+fn tags_compatible(target: &ElementFacts, candidate: &ElementFacts) -> bool {
+    target.tag.is_empty() || candidate.tag.is_empty() || target.tag == candidate.tag
 }
 
 /// The outcome of resolving a target element against a set of candidates.
@@ -542,6 +632,231 @@ mod tests {
                 lead: 0.0,
             },
             "the lowest index must win a tie, and the pair must not resolve"
+        );
+        Ok(())
+    }
+
+    /// Builds facts for an element that carries a tag and a path and nothing
+    /// else: no identity attributes, no text.
+    fn bare(tag: &str, path: &str) -> ElementFacts {
+        ElementFacts::new(tag, path, "", [0.5, 0.5, 0.1, 0.05])
+    }
+
+    /// Builds facts for an icon-only control: an identifier, a path and a box,
+    /// and no visible text.
+    fn icon(identifier: &str) -> ElementFacts {
+        bare("button", "html > body > nav > button").with_identity(vec![String::from(identifier)])
+    }
+
+    #[test]
+    fn absent_identity_is_not_evidence_that_an_unrelated_element_matches()
+    -> Result<(), RecognitionError> {
+        // GitHub issue #39's counterexample, verbatim. Neither fact carries an
+        // identifying attribute and neither carries text; the two boxes and the
+        // two paths are identical; the tags differ. This used to score
+        // `Resolved { index: 0, score: 0.75, lead: 0.75 }` — identity `1.0` from
+        // `Jaccard`'s empty-set convention, text `1.0` from the edit distance's,
+        // geometry `1.0`, path `0.0` — a confident locator decision for an
+        // element that is not even the same kind of thing.
+        let target = ElementFacts::new("button", "button", "", [0.5, 0.5, 0.1, 0.05]);
+        let unrelated = ElementFacts::new("img", "img", "", [0.5, 0.5, 0.1, 0.05]);
+        let result = vector()?.recognize(&target, &[unrelated]);
+        assert!(matches!(result, Recognition::Absent { .. }), "{result:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn the_metric_convention_is_intact_where_it_belongs() {
+        // The rule being corrected lives one layer down, and it is still
+        // correct there: two empty sets are the same set and two empty strings
+        // are the same string. What element recognition changes is the reading
+        // of "empty" — *nothing to compare* rather than *identical* — and this
+        // asserts both halves, so a future repair cannot quietly change the
+        // shared metric to fix a consumer.
+        let no_attributes: [String; 0] = [];
+        assert_close(
+            Jaccard::<String>::new().score(&no_attributes, &no_attributes),
+            1.0,
+        );
+        assert_close(EditDistance::new(8).score("", ""), 1.0);
+        assert_close(PathSimilarity::new().score("", ""), 1.0);
+
+        let blank = bare("button", "");
+        assert_close(IdentityComponent::new().score(&blank, &blank), 0.0);
+        assert_close(TextComponent::new(8).score(&blank, &blank), 0.0);
+        assert_close(PathComponent::new().score(&blank, &blank), 0.0);
+    }
+
+    #[test]
+    fn an_element_with_nothing_to_identify_it_by_cannot_resolve() -> Result<(), RecognitionError> {
+        // Same tag, same path, same box, no text, and no identity attributes on
+        // either side. Every fact that is present agrees perfectly, and the two
+        // snapshots still say nothing about which element this is: the absent
+        // facts are comparisons that were not made, not comparisons that
+        // succeeded. Identity is half the vector and the threshold is three
+        // quarters, so it cannot resolve however well the rest lines up.
+        let recognition = vector()?.recognize(
+            &bare("button", "html > body > form > button"),
+            &[bare("button", "html > body > form > button")],
+        );
+        assert!(
+            matches!(
+                recognition,
+                Recognition::Absent { best_score } if best_score < FINGERPRINT_THRESHOLD
+            ),
+            "two elements with no identifying evidence must not match, got {recognition:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_icon_only_control_resolves_on_its_identifier() -> Result<(), RecognitionError> {
+        // The positive case the presence rule must not break: no visible text
+        // at all, and a genuinely observed matching stable identifier. Text is
+        // absent on both sides and contributes nothing; identity and structure
+        // carry the decision, which is what those facts are for.
+        let target = icon("data-testid=menu");
+        let recognition = vector()?.recognize(&target, std::slice::from_ref(&target));
+        assert!(
+            matches!(
+                recognition,
+                Recognition::Resolved { index: 0, score, lead }
+                    if (score - 0.875).abs() < 1e-9 && lead >= FINGERPRINT_MARGIN
+            ),
+            "a matching identifier must still resolve an icon-only control, got {recognition:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_icon_only_control_does_not_match_on_layout() -> Result<(), RecognitionError> {
+        // The same icon-only pair with different identifiers. Identity is
+        // unobserved-in-effect (both sides report one, and they disagree) and
+        // text is absent, so the only facts left are the path and the box, worth
+        // a quarter of the vector between them — nowhere near three quarters.
+        // Layout alone cannot locate a control.
+        let target = icon("data-testid=menu");
+        let other = icon("data-testid=close");
+        let recognition = vector()?.recognize(&target, &[other]);
+        assert!(
+            matches!(
+                recognition,
+                Recognition::Absent { best_score } if best_score < FINGERPRINT_THRESHOLD
+            ),
+            "a quarter of the vector must not resolve, got {recognition:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_unrelated_tag_is_excluded_however_well_the_rest_agrees() -> Result<(), RecognitionError> {
+        // Every component in the vector agrees perfectly, including a genuinely
+        // observed matching identifier and matching text. The tag disagrees, and
+        // the tag is a gate, so the candidate is never scored. The mirror case
+        // below is what shows the gate is the cause rather than the scoring.
+        let facts = |tag: &str| {
+            ElementFacts::new(
+                tag,
+                "html > body > form > button",
+                "Submit",
+                [0.5, 0.5, 0.1, 0.05],
+            )
+            .with_identity(vec![String::from("data-testid=submit")])
+        };
+        let target = facts("button");
+        let impostor = facts("img");
+        assert_eq!(
+            vector()?.recognize(&target, &[impostor]),
+            Recognition::Absent { best_score: 0.0 },
+            "a different element kind is not a candidate"
+        );
+        let twin = facts("button");
+        assert!(
+            matches!(
+                vector()?.recognize(&target, &[twin]),
+                Recognition::Resolved { score, .. } if (score - 1.0).abs() < 1e-9
+            ),
+            "the identical element on the same facts still resolves"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_unreported_tag_excludes_nothing() -> Result<(), RecognitionError> {
+        // An empty tag is a fact nobody reported, not a competing one, so it
+        // cannot be an incompatibility. It cannot help either: the tag is not a
+        // component, so the candidate has exactly the evidence its other facts
+        // supply, and it still has to clear the threshold on those.
+        let target = ElementFacts::new(
+            "button",
+            "html > body > form > button",
+            "Submit",
+            [0.5, 0.5, 0.1, 0.05],
+        )
+        .with_identity(vec![String::from("data-testid=submit")]);
+        let unlabelled = ElementFacts::new(
+            "",
+            "html > body > form > button",
+            "Submit",
+            [0.5, 0.5, 0.1, 0.05],
+        )
+        .with_identity(vec![String::from("data-testid=submit")]);
+        let recognition = vector()?.recognize(&target, &[unlabelled]);
+        assert!(
+            matches!(recognition, Recognition::Resolved { index: 0, .. }),
+            "an unreported tag must not exclude an otherwise matching element, got {recognition:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn structurally_distinct_candidates_are_measured_and_rejected() -> Result<(), RecognitionError>
+    {
+        // Same tag, so the candidate is scored rather than gated, and every
+        // fact it reports differs. The score is a real measurement below the
+        // threshold, which is the difference between "looked at and rejected"
+        // and "never looked at".
+        let target = ElementFacts::new(
+            "button",
+            "html > body > form > button",
+            "Submit order",
+            [0.5, 0.5, 0.1, 0.05],
+        )
+        .with_identity(vec![String::from("data-testid=submit")]);
+        let elsewhere = ElementFacts::new(
+            "button",
+            "html > body > article > aside > button",
+            "Terms and conditions",
+            [900.0, 900.0, 0.1, 0.05],
+        )
+        .with_identity(vec![String::from("data-testid=legal")]);
+        let recognition = vector()?.recognize(&target, &[elsewhere]);
+        assert!(
+            matches!(
+                recognition,
+                Recognition::Absent { best_score }
+                    if best_score < FINGERPRINT_THRESHOLD && best_score > 0.0
+            ),
+            "a scored near-miss is Absent at its measured score, got {recognition:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn two_indistinguishable_icon_only_candidates_are_ambiguous() -> Result<(), RecognitionError> {
+        // The same absence rules, with a field instead of a lone candidate: two
+        // identical icon-only controls carry the same observed identifier, so
+        // neither can be separated from the other, and the verdict is the one
+        // that forces a re-ask rather than a guess.
+        let target = icon("data-testid=menu");
+        let recognition = vector()?.recognize(&target, &[target.clone(), target.clone()]);
+        assert!(
+            matches!(
+                &recognition,
+                Recognition::Ambiguous { best: 0, runner_up: Some(1), score, lead }
+                    if (score - 0.875).abs() < 1e-9 && lead.abs() < 1e-9
+            ),
+            "two indistinguishable icon-only controls are a tie, got {recognition:?}"
         );
         Ok(())
     }
