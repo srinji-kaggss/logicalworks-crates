@@ -888,13 +888,25 @@ mod feature_matrix_tests {
 
     /// A path is claimed exactly when a compiled grammar declares its extension.
     ///
-    /// This is the assertion the reported failure got wrong. Its predecessor
-    /// asserted `Language::of_path("src/lib.rs").is_some()` whenever
-    /// [`Language::ALL`] was non-empty; that implication does not hold, because
+    /// Its predecessor asserted `Language::of_path("src/lib.rs").is_some()`
+    /// whenever [`Language::ALL`] was non-empty. That implication does not hold:
     /// `lang-rust` is independent of every other grammar feature, so a
     /// standalone Python build is non-empty and correctly does not claim `.rs`.
-    /// Membership is read off the compiled table instead: with no grammar
-    /// compiled nothing is claimed, and with grammars the table decides.
+    ///
+    /// Read what this loop can and cannot tell you. It compares [`Language::of_path`]
+    /// against the same compiled table `of_path` is built from — `extension_of`
+    /// and `any_extension_matches` over [`Language::ALL`] — so it is a
+    /// consistency check between the aggregate lookup and the per-language
+    /// extension lists, not independent evidence that either is right. It
+    /// cannot fail while those two agree, and it asserts only `is_some()`, so it
+    /// says nothing about *which* language a path resolves to.
+    ///
+    /// The regression the report described is pinned by concrete assertions
+    /// instead: the two `rust_paths_resolve_*` tests below, which name
+    /// `Some(Language::Rust)` and `None` outright, the [`Language::ALL`]
+    /// emptiness block at the end of this test, and
+    /// `every_compiled_language_resolves_its_own_extensions`, which pairs each
+    /// compiled language with its own declared extension.
     #[test]
     fn empty_build_selects_nothing() {
         for &probe in PROBES {
