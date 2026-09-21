@@ -25,9 +25,15 @@ explicitly under that crate.
 - **`LICENSING.md` records the model**, including the commercial licence that
   grants relief from §3.2 for organisations that need to modify the bot without
   publishing those modifications. Offering two licences requires holding rights
-  in every contribution, so `CONTRIBUTING.md` now states that a contributor
-  licence agreement must be in place before a non-trivial `lgwks_bot`
-  contribution is merged.
+  in every contribution, so a contributor licence agreement has to be in place
+  before a non-trivial `lgwks_bot` contribution can be merged.
+- **`lgwks_bot` is closed to outside contributions, and the contributor licence
+  agreement that would reopen it is deferred.** A patch sent today has no path
+  to merge, so `CONTRIBUTING.md` and `LICENSING.md` now say *closed* rather than
+  *not merged until an agreement exists*. The earlier phrasing left a
+  contributor to send a patch that would wait on a decision no one has made; the
+  block is stated as a refusal on arrival instead. It lifts when an instrument is
+  chosen and recorded in `LICENSING.md`. The other three crates are unaffected.
 
 ## [lgwks_deps 0.1.12] - 2026-09-20
 
