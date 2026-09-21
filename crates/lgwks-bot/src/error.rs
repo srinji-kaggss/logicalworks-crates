@@ -145,6 +145,20 @@ pub enum BotError {
         /// The declared variable name.
         name: String,
     },
+    /// A node reads a variable that no path reaching it has assigned yet.
+    ///
+    /// Distinct from [`BotError::VariableNeverWritten`], which is a writer
+    /// that does not exist anywhere, and from [`BotError::VariableUnset`],
+    /// which is the same condition found at run time. This one is the
+    /// load-time defect where a writer exists but executes only *after* the
+    /// read, or only on another branch: the document is accepted, and the
+    /// session then fails on its first step with no provider involved.
+    VariableReadBeforeInit {
+        /// The node performing the read.
+        node: String,
+        /// The variable read before any reaching assignment.
+        name: String,
+    },
     /// A flow reads a variable that was not declared.
     UndeclaredVariable {
         /// The variable name that was read.
@@ -335,6 +349,12 @@ impl fmt::Display for BotError {
             Self::VariableNeverWritten { ref name } => {
                 write!(f, "declared variable {} is never written", Escaped(name))
             }
+            Self::VariableReadBeforeInit { ref node, ref name } => write!(
+                f,
+                "flow node {} reads variable {} before any reaching assignment",
+                Escaped(node),
+                Escaped(name)
+            ),
             Self::UndeclaredVariable { ref name } => {
                 write!(f, "flow reads undeclared variable {}", Escaped(name))
             }
@@ -516,6 +536,10 @@ mod tests {
                 option: payload.clone(),
             },
             BotError::VariableNeverWritten {
+                name: payload.clone(),
+            },
+            BotError::VariableReadBeforeInit {
+                node: payload.clone(),
                 name: payload.clone(),
             },
             BotError::UndeclaredVariable {
