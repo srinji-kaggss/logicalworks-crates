@@ -564,13 +564,20 @@ pub fn check_dependencies_against(
     Ok((register, refusals))
 }
 
-/// Audits the optional invariant register beside `root`.
+/// Resolves the optional invariant register beside `root` against the
+/// repository.
 ///
 /// `Ok(None)` is the compatibility path for a repository that has not authored
 /// `contract/INVARIANTS.toml`; its dependency-register verdict is unchanged.
+///
+/// The second half of the result is an [`invariants::Audit`], not a refusal
+/// list: an audit carries a per-entry status, so a caller can tell an entry
+/// whose references resolved (`Resolved`) from one a recorded run attests
+/// (`Attested`). Neither is proof that the invariant holds — this crate
+/// executes nothing — and [`invariants::SCOPE`] is the sentence that says so.
 pub fn check_invariants(
     root: &Path,
-) -> Result<Option<(invariants::Register, Vec<invariants::Refusal>)>, GateError> {
+) -> Result<Option<(invariants::Register, invariants::Audit)>, GateError> {
     invariants::check(root).map_err(GateError::Invariant)
 }
 
