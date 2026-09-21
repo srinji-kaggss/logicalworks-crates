@@ -20,9 +20,15 @@
 //!
 //! - [`runtime`] — an explicitly owned runtime ([`Runtime`]),
 //!   its builder, a cloneable [`Handle`], and a free [`block_on`].
-//! - [`task`] — [`spawn`](crate::rt::task::spawn), `JoinHandle`, `JoinSet`, abort, and
+//! - [`task`] — [`JoinSet`](crate::rt::task::JoinSet) and
 //!   [`join_all_bounded`](crate::rt::task::join_all_bounded): bounded-concurrency fan-out
 //!   that preserves input order and never exceeds the limit.
+//! - [`supervise`](crate::rt::supervise) — `Supervisor`: the way concurrent
+//!   work, and a subprocess, is started. `Supervisor::default` is the ceiling
+//!   when the caller has no opinion, `Supervisor::spawn` and
+//!   `Supervisor::spawn_process` are the two starters, and nothing here returns
+//!   a handle to a running task or process, so nothing can be started and then
+//!   forgotten.
 //! - [`time`] — `sleep`, `timeout`, `interval`, `Instant` (feature `time`).
 //! - [`sync`] — `mpsc`, `oneshot`, `broadcast`, `watch`, `Mutex`, `RwLock`,
 //!   `Semaphore`, `Notify`, `Barrier` (feature `sync`).
@@ -42,6 +48,26 @@
 //! let runtime = Runtime::new().expect("runtime");
 //! let answer = runtime.block_on(async { 2 + 2 });
 //! assert_eq!(answer, 4);
+//! ```
+//!
+//! # Starting work
+//!
+//! A future can be awaited, and the runtime can drive one to completion, but no
+//! verb here hands a caller a droppable handle to a *running* task or process.
+//! Work that outlives the call is placed on a
+//! [`Supervisor`](crate::rt::supervise::Supervisor), which owns it, applies the
+//! in-flight ceiling, and reports how each task or process ended:
+//!
+//! ```
+//! use lgwks_bot::Runtime;
+//! use lgwks_bot::rt::supervise::Supervisor;
+//!
+//! let runtime = Runtime::new().expect("runtime");
+//! runtime.block_on(async {
+//!     let mut supervisor = Supervisor::default();
+//!     supervisor.spawn(|_token| async { /* one unit of work */ }).await;
+//!     // Dropping it stops what it started; `shutdown().await` waits instead.
+//! });
 //! ```
 //!
 //! # Limits

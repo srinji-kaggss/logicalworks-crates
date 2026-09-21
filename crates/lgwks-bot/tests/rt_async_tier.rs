@@ -4,7 +4,25 @@
 //! `tokio`, and assert the invariants that justify the facade: bounded fan-out
 //! never exceeds its limit and preserves input order, a panicking input is
 //! resumed on the awaiter (not converted to a `JoinError`), abort is
-//! cancellation, and dropping a handle detaches rather than cancels.
+//! cancellation, and nothing this crate hands out can be started and then
+//! forgotten.
+//!
+//! # What this file can no longer test, and why
+//!
+//! Two tests were removed with the API they exercised, rather than rewritten
+//! around it. Both measured a *droppable* detached task, which is the shape the
+//! crate no longer has:
+//!
+//! - "a handle spawning after its runtime is dropped reports cancellation"
+//!   tested `Handle::spawn`. `Handle` can now only *drive* work
+//!   ([`lgwks_bot::rt::runtime::Handle::block_on`]), so the case cannot arise.
+//! - "shutdown_timeout does not claim to abort started blocking work" needed a
+//!   public `spawn_blocking`, whose handle was droppable. Nothing on the public
+//!   surface starts work on the runtime's blocking pool any more, so the
+//!   contract `Runtime::shutdown_timeout` documents is no longer observable
+//!   from outside the crate. It is still the engine's behaviour and still
+//!   documented; it is simply no longer reachable by a caller, which is a
+//!   coverage loss recorded here rather than a test quietly weakened.
 #![cfg(all(
     feature = "rt",
     feature = "time",
@@ -14,7 +32,9 @@
 ))]
 
 use std::cell::Cell;
+use std::future::Future;
 use std::num::NonZeroUsize;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
@@ -22,10 +42,9 @@ use std::time::Duration;
 
 use lgwks_bot::rt::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter, duplex};
 use lgwks_bot::rt::runtime::MAX_WORKER_THREADS;
+use lgwks_bot::rt::supervise::{Supervisor, TaskOutcome};
 use lgwks_bot::rt::sync::{CancellationToken, mpsc};
-use lgwks_bot::rt::task::{
-    JoinError, JoinSet, LocalSet, join_all_bounded, spawn, spawn_blocking, spawn_local, yield_now,
-};
+use lgwks_bot::rt::task::{JoinError, JoinSet, join_all_bounded};
 use lgwks_bot::rt::time::{sleep, timeout};
 use lgwks_bot::{Builder, Runtime};
 
@@ -36,24 +55,6 @@ use lgwks_bot::{Builder, Runtime};
 /// each with `?`. A mismatch is then a named failure carrying the reason,
 /// rather than an unwind that reports only that something unwound.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
-
-/// Block the calling blocking-pool thread for `duration`.
-///
-/// Two of these tests have blocking work as their subject rather than their
-/// setup: one measures that a *started* blocking task cannot be aborted by
-/// `shutdown_timeout`, the other that the pool bound is applied to it. That
-/// requires a real OS thread and a real wait, because `rt::time::sleep` cannot be
-/// awaited from inside a `spawn_blocking` closure, and the runtime this test
-/// shuts down has no timer driver left to await. `lgwks_std::task`'s own test
-/// module carries the same reasoned exception for the same reason.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "a blocking-pool thread has no async timer to await, and the blocking work that must \
-              outlive shutdown is this test's subject rather than its scaffolding"
-)]
-fn block_pool_thread(duration: Duration) {
-    std::thread::sleep(duration);
-}
 
 /// Panic on the calling task, carrying `message` as the payload.
 ///
@@ -88,8 +89,12 @@ fn an_explicit_worker_count_above_the_resource_bound_is_rejected() -> TestResult
 fn runtime_spawns_and_joins_a_task() -> TestResult {
     let runtime = Runtime::new()?;
     let value = runtime.block_on(async {
-        let handle = spawn(async { 21u32 });
-        Ok::<u32, JoinError>(handle.await? * 2)
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async { 21u32 });
+        let Some(joined) = tasks.join_next().await else {
+            return Err("the set must yield the one task it holds".into());
+        };
+        Ok::<u32, Box<dyn std::error::Error>>(joined? * 2)
     })?;
     assert_eq!(value, 42);
     Ok(())
@@ -145,27 +150,27 @@ fn channel_carries_values_between_tasks() -> TestResult {
     let runtime = Runtime::new()?;
     let sum = runtime.block_on(async {
         let (tx, mut rx) = mpsc::channel::<u32>(8);
-        let mut senders = Vec::new();
+        let mut senders = JoinSet::new();
         for value in 1..=4u32 {
             let tx = tx.clone();
-            senders.push(spawn(async move { tx.send(value).await }));
+            senders.spawn(async move { tx.send(value).await });
         }
         drop(tx);
         let mut sum = 0;
         while let Some(value) = rx.recv().await {
             sum += value;
         }
-        // Every send is awaited rather than discarded: a send that failed inside
-        // a detached task would otherwise be invisible, and the received total
-        // would still be correct for the values that did get through.
-        for sender in senders {
-            let sent = sender.await?;
+        // Every send is joined rather than discarded: a send that failed inside
+        // a task nobody joined would otherwise be invisible, and the received
+        // total would still be correct for the values that did get through.
+        while let Some(sent) = senders.join_next().await {
+            let sent = sent?;
             assert!(
                 sent.is_ok(),
                 "the receiver outlives every sender, so no send may fail"
             );
         }
-        Ok::<u32, JoinError>(sum)
+        Ok::<u32, Box<dyn std::error::Error>>(sum)
     })?;
     assert_eq!(sum, 10);
     Ok(())
@@ -288,8 +293,17 @@ fn bounded_fanout_streams_a_large_input_without_exceeding_the_limit() -> TestRes
     Ok(())
 }
 
+/// The blocking-pool knob is accepted, and a runtime built with it drives work.
+///
+/// What this no longer measures is the bound itself. It used to observe the
+/// ceiling by starting `spawn_blocking` calls on the runtime's pool, and that
+/// entry point is gone with the rest of the droppable-handle surface, so the
+/// pool is no longer reachable from outside the crate — the only remaining user
+/// is the `fs` driver. The knob still bounds exactly that pool, which is what
+/// its documentation now says; this test covers the part a caller can still
+/// see, which is that a runtime built with the knob set is a working runtime.
 #[test]
-fn builder_applies_an_explicit_blocking_pool_bound() -> TestResult {
+fn builder_accepts_a_blocking_pool_bound_and_still_drives_tasks() -> TestResult {
     let Some(max_blocking) = NonZeroUsize::new(4) else {
         return Err("4 is non-zero".into());
     };
@@ -297,8 +311,12 @@ fn builder_applies_an_explicit_blocking_pool_bound() -> TestResult {
         .max_blocking_threads(Some(max_blocking))
         .build()?;
     let value = runtime.block_on(async {
-        let handle = spawn(async { 6u32 });
-        Ok::<u32, JoinError>(handle.await? * 7)
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async { 6u32 });
+        let Some(joined) = tasks.join_next().await else {
+            return Err("the set must yield the one task it holds".into());
+        };
+        Ok::<u32, Box<dyn std::error::Error>>(joined? * 7)
     })?;
     assert_eq!(value, 42);
     Ok(())
@@ -347,67 +365,33 @@ fn bounded_fanout_resumes_a_panicking_input_on_the_awaiter() -> TestResult {
     Ok(())
 }
 
+/// A tracked set is a cancellation, not a detach: dropping it stops its tasks.
+///
+/// This is the replacement for the test that pinned the old behaviour
+/// (`dropping a JoinHandle detaches rather than cancels`) — the handle that
+/// behaved that way no longer exists. The property still worth pinning is the
+/// opposite one, because it is what makes the set a safe container: a caller who
+/// lets the set go does not leave work running behind them. The task below would
+/// set `ran` at 20 ms if it were detached, and never reaches it.
 #[test]
-fn a_handle_spawning_after_its_runtime_is_dropped_reports_cancellation() -> TestResult {
-    let runtime = Runtime::new()?;
-    let handle = runtime.handle();
-    drop(runtime);
-
-    // The doc contract: this does not panic. The task is never scheduled, and
-    // the loss is observable as a cancelled join rather than a silent success.
-    let joined = handle.spawn(async { 1u8 });
-    let next = Runtime::new()?;
-    let Err(error) = next.block_on(joined) else {
-        return Err("a task with no runtime cannot produce a value".into());
-    };
-    assert!(error.is_cancelled());
-    Ok(())
-}
-
-#[test]
-fn shutdown_timeout_does_not_claim_to_abort_started_blocking_work() -> TestResult {
-    let runtime = Runtime::new()?;
-    let started = Arc::new(AtomicBool::new(false));
-    let finished = Arc::new(AtomicBool::new(false));
-    let worker_started = Arc::clone(&started);
-    let worker_finished = Arc::clone(&finished);
-
-    runtime.block_on(async move {
-        spawn_blocking(move || {
-            worker_started.store(true, SeqCst);
-            block_pool_thread(Duration::from_millis(40));
-            worker_finished.store(true, SeqCst);
-        });
-        while !started.load(SeqCst) {
-            yield_now().await;
-        }
-    });
-
-    runtime.shutdown_timeout(Duration::ZERO);
-    block_pool_thread(Duration::from_millis(80));
-    assert!(
-        finished.load(SeqCst),
-        "a started blocking task cannot be aborted by shutdown_timeout"
-    );
-    Ok(())
-}
-
-#[test]
-fn dropping_a_join_handle_detaches_rather_than_cancels() -> TestResult {
+fn dropping_a_tracked_set_cancels_its_tasks() -> TestResult {
     let runtime = Runtime::new()?;
     let ran = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&ran);
     runtime.block_on(async move {
-        let handle = spawn(async move {
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async move {
             sleep(Duration::from_millis(20)).await;
             flag.store(true, SeqCst);
         });
-        drop(handle);
+        drop(tasks);
+        // Well past the deadline the task would have needed, so a detach would
+        // be observable rather than a race.
         sleep(Duration::from_millis(80)).await;
     });
     assert!(
-        ran.load(SeqCst),
-        "a dropped JoinHandle must not cancel its task"
+        !ran.load(SeqCst),
+        "dropping a JoinSet must cancel its tasks, not detach them"
     );
     Ok(())
 }
@@ -416,13 +400,14 @@ fn dropping_a_join_handle_detaches_rather_than_cancels() -> TestResult {
 fn abort_is_cancellation() -> TestResult {
     let runtime = Runtime::new()?;
     let joined = runtime.block_on(async {
-        let handle = spawn(async {
+        let mut tasks = JoinSet::new();
+        let handle = tasks.spawn(async {
             sleep(Duration::from_secs(30)).await;
         });
         handle.abort();
-        handle.await
+        tasks.join_next().await
     });
-    let Err(error) = joined else {
+    let Some(Err(error)) = joined else {
         return Err("an aborted task yields a JoinError".into());
     };
     assert!(error.is_cancelled());
@@ -433,12 +418,13 @@ fn abort_is_cancellation() -> TestResult {
 fn a_panicking_task_surfaces_as_a_join_error() -> TestResult {
     let runtime = Runtime::new()?;
     let joined = runtime.block_on(async {
-        let handle = spawn(async {
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async {
             explode("task exploded");
         });
-        handle.await
+        tasks.join_next().await
     });
-    let Err(error) = joined else {
+    let Some(Err(error)) = joined else {
         return Err("a panicking task yields a JoinError".into());
     };
     assert!(error.is_panic());
@@ -446,14 +432,14 @@ fn a_panicking_task_surfaces_as_a_join_error() -> TestResult {
 }
 
 #[test]
-fn a_handle_spawns_from_a_non_runtime_thread() -> TestResult {
+fn a_handle_drives_work_from_a_non_runtime_thread() -> TestResult {
     let runtime = Runtime::new()?;
     let handle = runtime.handle();
-    // `std::thread::spawn` and not the runtime's `spawn`: the claim is that a
-    // handle works from a thread the runtime does not own, so the thread must be
-    // one the runtime did not make. What `clippy.toml` bans is an *unjoined* OS
-    // thread — one whose panic is invisible and whose handle is leaked — and
-    // this thread is joined on the next line.
+    // `std::thread::spawn` and not a task: the claim is that a handle works from
+    // a thread the runtime does not own, so the thread must be one the runtime
+    // did not make. What `clippy.toml` bans is an *unjoined* OS thread — one
+    // whose panic is invisible and whose handle is leaked — and this thread is
+    // joined on the next line.
     #[expect(
         clippy::disallowed_methods,
         reason = "the claim under test is that a Handle drives work from a thread the runtime did \
@@ -628,29 +614,45 @@ fn a_token_cancelled_before_the_await_still_releases_the_task() -> TestResult {
 }
 
 /// The crate's own thesis: its verbs are deliberately not `Send`, so a domain
-/// may hold thread-local state. Until `LocalSet` was exposed there was no way to
-/// spawn a future with that property, because `spawn` requires `Send`, which every verb
-/// in this crate violates on purpose.
+/// may hold thread-local state.
+///
+/// There is no spawn for a future like this. Every spawn-based path in this
+/// crate requires `Send`, which is precisely the property the crate's verbs
+/// violate on purpose, so the way to run one is to **drive** it: await it, or
+/// hand a set of them to [`lgwks_std::task::join_all_boxed`], which polls them
+/// on the calling thread and returns their outputs in input order. This replaces
+/// the test that used `LocalSet` for the same purpose; `LocalSet` was itself a
+/// spawn surface, so it went with the others.
 #[test]
-fn a_local_set_runs_a_task_that_is_not_send() -> TestResult {
+fn a_non_send_future_is_driven_rather_than_spawned() -> TestResult {
     let runtime = Runtime::new()?;
     let observed = runtime.block_on(async {
-        let local = LocalSet::new();
-        local
-            .run_until(async {
-                // `Rc` and `Cell` are the point: this future cannot be `Send`,
-                // and `spawn` would refuse it at compile time.
-                let shared = Rc::new(Cell::new(0u8));
-                let held = Rc::clone(&shared);
-                let handle = spawn_local(async move {
-                    held.set(7);
-                    held.get()
-                });
-                handle.await
-            })
-            .await
-    })?;
-    assert_eq!(observed, 7, "the local task must run and return its value");
+        // `Rc` and `Cell` are the point: these futures cannot be `Send`, so no
+        // spawn in this crate would accept them.
+        let shared = Rc::new(Cell::new(0u8));
+        let first = {
+            let held = Rc::clone(&shared);
+            async move {
+                held.set(7);
+                held.get()
+            }
+        };
+        let second = {
+            let held = Rc::clone(&shared);
+            async move { held.get() + 1 }
+        };
+        // Boxed so both inputs share one type: `join_all` is generic over a
+        // single `F`, and two `async` blocks are two distinct types. This is
+        // exactly the type-erasure boundary `join_all_boxed` exists for.
+        let futures: Vec<Pin<Box<dyn Future<Output = u8>>>> =
+            vec![Box::pin(first), Box::pin(second)];
+        lgwks_std::task::join_all_boxed(futures).await
+    });
+    assert_eq!(
+        observed,
+        vec![7, 8],
+        "a non-`Send` future must run to completion without a spawn"
+    );
     Ok(())
 }
 
@@ -672,6 +674,55 @@ fn io_traits_compose_over_a_duplex_stream() -> TestResult {
     assert_eq!(
         echoed, "ping\n",
         "a buffered reader must recover the written line"
+    );
+    Ok(())
+}
+
+/// `Supervisor::shutdown` must report a body that returned on its own as
+/// `Cancelled`, on the runtime flavour a consumer actually builds.
+///
+/// This is a regression, and the defect it pins was invisible until the process
+/// tests needed it: the grace before the abort was counted in `yield_now`
+/// calls, and `yield_now` reschedules *the yielding task*. On the current-thread
+/// executor the crate's unit tests use, that hands the other task the CPU
+/// immediately, so eight yields were always enough and the shape looked correct.
+/// On a multi-threaded runtime the parked body is on another worker and needs a
+/// thread wakeup — an OS event no number of local reschedules waits for — so the
+/// abort won the race and a *cancelled* task was reported as `Aborted`. A
+/// supervisor whose outcomes cannot be told apart is the one thing its report
+/// exists to prevent, so the grace is now a wall-clock bound and this test is
+/// what holds it there.
+#[test]
+fn a_cancelled_body_is_reported_cancelled_on_a_multi_threaded_runtime() -> TestResult {
+    let runtime = Runtime::new()?;
+    let outcomes = runtime.block_on(async {
+        let mut supervisor = Supervisor::default();
+        supervisor
+            .spawn(|token| async move {
+                // Parked, and cooperative: it returns the instant the token is
+                // cancelled, but it never completes on its own. Cancelling it and
+                // waiting for the runtime to notice is the whole test.
+                token
+                    .run_until_cancelled(std::future::pending::<()>())
+                    .await;
+            })
+            .await;
+        // Let the body reach its wait: a task that has not been polled yet would
+        // be cancelled before it ever parked, which tests nothing. The supervisor
+        // offers no "has it started" signal, and inventing one for a test would be
+        // a production change made for the test's convenience — the body is ready
+        // from the moment it is spawned, so a scheduler round-trip is enough.
+        for _ in 0..64 {
+            lgwks_bot::rt::task::yield_now().await;
+        }
+        let report = supervisor.shutdown().await;
+        report.into_outcomes()
+    });
+    assert!(
+        outcomes
+            .iter()
+            .all(|outcome| matches!(outcome, TaskOutcome::Cancelled { .. })),
+        "a body that returned on its cancellation is cancelled, not aborted: {outcomes:?}"
     );
     Ok(())
 }

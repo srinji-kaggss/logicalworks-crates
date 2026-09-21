@@ -333,10 +333,12 @@ impl CancellationToken {
 
     /// A `'static` future that resolves when this token is cancelled.
     ///
-    /// Takes a clone, so it can be moved into
-    /// [`spawn`](crate::rt::task::spawn) without borrowing the original token,
-    /// which is required, since a spawned task must own everything it captures.
-    /// Resolves immediately if already cancelled.
+    /// Takes a clone, so it can be moved into a body that must own everything
+    /// it captures — the closure [`Supervisor::spawn`] takes, or a task placed
+    /// on a [`JoinSet`](crate::rt::task::JoinSet) — without borrowing the
+    /// original token. Resolves immediately if already cancelled.
+    ///
+    /// [`Supervisor::spawn`]: crate::rt::supervise::Supervisor::spawn
     //
     // No `#[must_use]`: the return type is `impl Future`, which is already
     // `#[must_use]`, so an attribute here would be redundant and would earn

@@ -98,14 +98,25 @@ use std::any::Any;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::future::Future;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
+use std::process::ExitStatus;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+// Only the supervised process reports an `io::Error`; a build without the
+// `process` feature has no such fallible call, so the import is gated with it.
+#[cfg(feature = "process")]
+use std::io;
 
 use lgwks_deps::tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use lgwks_deps::tokio::task::Id;
 
+#[cfg(feature = "process")]
+use lgwks_deps::tokio::process::Child;
+
 use super::cancel::CancellationToken;
+#[cfg(feature = "process")]
+use super::process::Command;
 use super::task::{JoinSet, yield_now};
 
 /// Iterations one poll of [`repeat`] may complete before it hands the executor
@@ -237,10 +248,11 @@ impl fmt::Display for TaskId {
 /// that died before producing its result was indistinguishable — through every
 /// public surface — from one that returned normally.
 ///
-/// The four states are a product, not a single flag: a caller's response to a
+/// The states are a product, not a single flag: a caller's response to a
 /// panic (surface the payload, page someone) is not its response to a
-/// cancellation (expected, nothing to do) nor to an abort (a task ignored its
-/// token, which is a bug in the body).
+/// cancellation (expected, nothing to do), nor to an abort (a task ignored its
+/// token, which is a bug in the body), nor to a supervised process that exited
+/// non-zero (work that ran and did not do what it was asked).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TaskOutcome {
@@ -286,6 +298,33 @@ pub enum TaskOutcome {
         /// The panic payload, rendered.
         message: String,
     },
+    /// A supervised process ended without exiting successfully — and the
+    /// supervisor did not stop it.
+    ///
+    /// This is [`Supervisor::spawn_process`]'s outcome, and it is the one a
+    /// task body cannot produce: a body that returns *is* a success, so before
+    /// this variant existed a command that exited non-zero and a command that
+    /// exited zero were the same report. A process the supervisor killed
+    /// because its token was cancelled is [`Self::Cancelled`], not this, so the
+    /// two are distinguishable from outside — which is the question an owner of
+    /// a subprocess actually asks.
+    Failed {
+        /// The task that ended.
+        task: TaskId,
+        /// The status the engine reported, or `None` when it could not report
+        /// one (the wait itself failed).
+        ///
+        /// `None` is not a success and is not silence: it means the process
+        /// ended and this supervisor cannot say how, which is reported rather
+        /// than folded into [`Self::Cancelled`] — a supervisor that could not
+        /// read the status does not know whether the process stopped on its
+        /// own.
+        ///
+        /// On Unix a process killed by a signal reports
+        /// [`ExitStatus::code`]`() == None` with a signal number, so a status
+        /// that is present is not automatically a code.
+        status: Option<ExitStatus>,
+    },
 }
 
 impl TaskOutcome {
@@ -296,6 +335,7 @@ impl TaskOutcome {
             Self::Completed { task }
             | Self::Cancelled { task }
             | Self::Aborted { task }
+            | Self::Failed { task, .. }
             | Self::Panicked { task, .. } => task,
         }
     }
@@ -316,6 +356,37 @@ impl TaskOutcome {
         matches!(self, Self::Panicked { .. })
     }
 
+    /// Whether a supervised process ended without exiting successfully.
+    ///
+    /// `false` for every other state, so a caller can ask this of any outcome
+    /// without matching on the variant first.
+    #[must_use]
+    pub const fn is_process_failure(&self) -> bool {
+        matches!(self, Self::Failed { .. })
+    }
+
+    /// The status of a supervised process that did not exit successfully.
+    ///
+    /// `None` for every other state, and for a process whose status the engine
+    /// could not read, so a caller can carry the cause of a process failure out
+    /// of a report without matching on the variant — the same shape as
+    /// [`Self::panic_message`], and for the same reason: a match arm that
+    /// forgot a variant must not silently read one failure as another.
+    #[must_use]
+    pub fn exit_status(&self) -> Option<ExitStatus> {
+        // `*self` rather than `self`, and every state named rather than
+        // covered by a wildcard, for the reasons `panic_message` gives: this
+        // crate forbids `clippy::pattern_type_mismatch`, and a new variant must
+        // force this question to be asked again.
+        match *self {
+            Self::Failed { status, .. } => status,
+            Self::Completed { .. }
+            | Self::Cancelled { .. }
+            | Self::Aborted { .. }
+            | Self::Panicked { .. } => None,
+        }
+    }
+
     /// The panic payload, if this outcome is a panic.
     ///
     /// `None` for every other state, so a caller can carry the cause of a
@@ -331,7 +402,10 @@ impl TaskOutcome {
         // added without this question being asked again.
         match *self {
             Self::Panicked { ref message, .. } => Some(message.as_str()),
-            Self::Completed { .. } | Self::Cancelled { .. } | Self::Aborted { .. } => None,
+            Self::Completed { .. }
+            | Self::Cancelled { .. }
+            | Self::Aborted { .. }
+            | Self::Failed { .. } => None,
         }
     }
 }
@@ -379,10 +453,25 @@ impl ShutdownReport {
     ///
     /// Cancellation counts as *not* clean, because a caller asking this
     /// question is asking whether the work finished, and a cancelled task did
-    /// not.
+    /// not. So does a supervised process that exited non-zero: it ended, and
+    /// the caller's question is whether the work succeeded, not whether the
+    /// task stopped.
     #[must_use]
     pub fn is_clean(&self) -> bool {
         self.outcomes.iter().all(TaskOutcome::is_success)
+    }
+
+    /// Every supervised process that did not exit successfully, in completion
+    /// order.
+    ///
+    /// The counterpart of [`ShutdownReport::panicked`] for
+    /// [`Supervisor::spawn_process`]: a report whose only readable failure is a
+    /// panic would leave a command that exited non-zero to be found by
+    /// hand-filtering [`ShutdownReport::outcomes`].
+    pub fn failed(&self) -> impl Iterator<Item = &TaskOutcome> {
+        self.outcomes
+            .iter()
+            .filter(|outcome| outcome.is_process_failure())
     }
 }
 
@@ -390,7 +479,7 @@ impl ShutdownReport {
 ///
 /// Counters saturate rather than wrap, so they stay monotonic over any lifetime
 /// a process can actually reach. `completed` counts tasks that *ended*, however
-/// they ended, and is split into the four ways that can happen: a caller that
+/// they ended, and is split into the five ways that can happen: a caller that
 /// only needs resource accounting reads it or [`Stats::in_flight`], and a
 /// caller that needs to know whether the work succeeded reads
 /// [`Stats::succeeded`] and cannot get the answer wrong by reading `completed`
@@ -402,11 +491,18 @@ pub struct Stats {
     pub spawned: u64,
     /// Tasks that have finished, however they ended.
     ///
-    /// Equal to `succeeded + cancelled + aborted + panicked`. It is the
-    /// accounting total, not a success count.
+    /// Equal to `succeeded + failed + cancelled + aborted + panicked`. It is
+    /// the accounting total, not a success count.
     pub completed: u64,
     /// Tasks whose body ran to completion and returned.
     pub succeeded: u64,
+    /// Supervised processes that ended without exiting successfully.
+    ///
+    /// Zero for a supervisor that never ran one. A process the supervisor
+    /// killed because its token was cancelled counts as `cancelled` instead:
+    /// this counter answers "did the command succeed", not "did the child
+    /// stop".
+    pub failed: u64,
     /// Tasks that observed their token and returned because of it.
     pub cancelled: u64,
     /// Tasks the runtime dropped before they finished.
@@ -468,6 +564,8 @@ pub struct Supervisor {
     completed: u64,
     /// Tasks that ran to completion. Saturating.
     succeeded: u64,
+    /// Supervised processes that did not exit successfully. Saturating.
+    failed: u64,
     /// Tasks that observed their token and returned. Saturating.
     cancelled: u64,
     /// Tasks dropped by the runtime before finishing. Saturating.
@@ -492,6 +590,23 @@ enum TaskEnd {
     Completed,
     /// The body stopped because its token was cancelled.
     Cancelled,
+    /// A supervised process ended without exiting successfully.
+    ///
+    /// Distinct from [`TaskEnd::Completed`] because the body cannot express it:
+    /// a process body returns after its child exits, whether that exit was
+    /// clean or not, so the exit status is the only thing that tells the two
+    /// apart. `status` is `None` when the engine could not report one.
+    ///
+    /// Gated with the feature that can produce it: [`Supervisor::spawn_process`]
+    /// is the only constructor, so a build without `process` has no value of
+    /// this shape to describe. The public [`TaskOutcome::Failed`] it is absorbed
+    /// into is unconditional, because a `#[non_exhaustive]` public enum may
+    /// carry a variant a given build cannot produce.
+    #[cfg(feature = "process")]
+    Failed {
+        /// The status the engine reported, if it reported one.
+        status: Option<ExitStatus>,
+    },
 }
 
 /// Whether a terminal outcome is subject to the retention cap.
@@ -517,14 +632,56 @@ enum Retention {
 /// is where a panic payload puts its point, and keeps the bound a sum.
 const MAX_PANIC_MESSAGE_CHARS: usize = 512;
 
-/// Bounded number of yields [`Supervisor::shutdown`] gives cooperative bodies.
+/// Wall-clock grace [`Supervisor::shutdown`] gives cooperative bodies.
 ///
 /// A supervisor cannot wait for a body that never observes its token, so the
-/// wait has to be finite. This is finite by construction: a fixed count of
-/// yields, after which everything still running is aborted. It exists so that a
-/// body which *is* cooperative is reported as cancelled rather than aborted —
-/// the abort is the fallback for the other case, not the first response.
-const COOPERATIVE_DRAIN_YIELDS: u8 = 8;
+/// wait has to be finite. The unit is time, not yields, and that is the whole
+/// point of the constant: `yield_now` reschedules *the yielding task*, so on a
+/// current-thread runtime it lets another task run immediately, while on a
+/// multi-threaded one it does nothing at all for a body parked on a different
+/// worker — that body's return needs a thread wakeup, which is an OS-level
+/// event no number of local reschedules waits for. A counted grace is therefore
+/// long enough on one worker and far too short on several, and the failure is
+/// silent: a cancelled body is reported as an *aborted* one, which is the exact
+/// distinction [`Supervisor::shutdown`]'s return value exists to make.
+///
+/// This bounds the wait; it is not a cost. A body that returns is absorbed the
+/// moment it does, so a cooperative body pays its own wakeup latency and
+/// nothing more. Only a body that ignores its token spends the whole grace, and
+/// it spends it on the shutdown path — the terminal one, where a delay is
+/// cheaper than a misreported outcome.
+const COOPERATIVE_DRAIN_GRACE: Duration = Duration::from_millis(50);
+
+/// The in-flight ceiling [`Supervisor::default`] falls back to when the OS will
+/// not report a usable processor count.
+///
+/// Four, not one: a single-slot supervisor is a serial executor wearing a
+/// supervisor's name, and a bot whose background work is a heartbeat plus a
+/// watcher would deadlock itself against its own bound. Not a large constant:
+/// the bound is a resource ceiling, and a discovered count is always preferred
+/// to this. It is reached only when
+/// [`std::thread::available_parallelism`] itself fails.
+const FALLBACK_MAX_IN_FLIGHT: usize = 4;
+
+impl Default for Supervisor {
+    /// A supervisor bounded by the machine it is on.
+    ///
+    /// The ceiling is discovered rather than required, because the caller who
+    /// has no opinion is the common case and the one this constructor exists
+    /// for: a bot that wants supervision — bounded, cancellable, reported —
+    /// should not have to invent a number to get it. The number is
+    /// [`std::thread::available_parallelism`], the same discovery
+    /// [`Builder`](crate::rt::runtime::Builder) uses for its worker count, and
+    /// `FALLBACK_MAX_IN_FLIGHT` only if the OS refuses to report one. It is
+    /// still a real ceiling: there is no default that is unbounded.
+    ///
+    /// A caller who wants to choose uses [`Supervisor::new`].
+    fn default() -> Self {
+        let bound =
+            std::thread::available_parallelism().map_or(FALLBACK_MAX_IN_FLIGHT, NonZeroUsize::get);
+        Self::new(bound)
+    }
+}
 
 impl Supervisor {
     /// Create a supervisor that runs at most `max_in_flight` tasks at once.
@@ -546,6 +703,7 @@ impl Supervisor {
             spawned: 0,
             completed: 0,
             succeeded: 0,
+            failed: 0,
             cancelled: 0,
             aborted: 0,
             panicked: 0,
@@ -585,6 +743,7 @@ impl Supervisor {
             spawned: self.spawned,
             completed: self.completed,
             succeeded: self.succeeded,
+            failed: self.failed,
             cancelled: self.cancelled,
             aborted: self.aborted,
             panicked: self.panicked,
@@ -656,7 +815,6 @@ impl Supervisor {
             }
         });
     }
-
     /// Place `body` on this supervisor, refusing if the bound is reached.
     ///
     /// The non-blocking counterpart to [`Supervisor::spawn`]. A refusal is a
@@ -713,6 +871,136 @@ impl Supervisor {
         });
     }
 
+    /// Start `command` as a supervised child process.
+    ///
+    /// This is the only way this crate starts a process, and it behaves exactly
+    /// like [`Supervisor::spawn`] where it matters — it awaits a free slot
+    /// before starting anything, it returns no handle, and the process it
+    /// starts is reported like any other task:
+    ///
+    /// - **Bounded.** The permit is acquired before the spawn, so a supervisor
+    ///   already at its ceiling does not start the process until a slot frees.
+    ///   Nothing is queued on this module's behalf.
+    /// - **Killed on drop, as a whole group.** The supervisor's token reaches
+    ///   the task, and the task kills the child's **process group** rather than
+    ///   the child alone: a shell started here can spawn a pipeline, and
+    ///   `Child::kill` would leave the grandchildren running with nobody
+    ///   holding their handles. The same kill lands if the task is aborted,
+    ///   because the guard that performs it lives in the task's own frame.
+    /// - **Reported.** A process that exited zero is [`TaskOutcome::Completed`];
+    ///   one that exited non-zero, was killed by a signal, or whose status
+    ///   could not be read is [`TaskOutcome::Failed`], and carries its
+    ///   [`ExitStatus`] when there is one; one this supervisor stopped because
+    ///   it was cancelled is [`TaskOutcome::Cancelled`]. [`Stats::failed`]
+    ///   counts the middle case, so a bot running a failing command is not
+    ///   reported as a healthy one.
+    ///
+    /// # The handle this does not return
+    ///
+    /// The [`TaskId`] is not a handle. It cannot be joined, aborted, or waited
+    /// on; it exists so a caller can match a terminal report to the command it
+    /// started, which is the only thing a caller needs a running process to
+    /// give back. A caller that wants the child's output redirects that stream
+    /// into a sink it already owns — the supervisor owns the process, not the
+    /// data.
+    ///
+    /// # Why the command is borrowed
+    ///
+    /// The engine's builder methods (`arg`, `env`, `stdout`) all return
+    /// `&mut Command`, so a by-value parameter would refuse the ordinary call:
+    ///
+    /// ```no_run
+    /// # use lgwks_bot::rt::process::Command;
+    /// # use lgwks_bot::rt::supervise::Supervisor;
+    /// # async fn run() -> std::io::Result<()> {
+    /// # let mut supervisor = Supervisor::default();
+    /// let mut command = Command::new("sh");
+    /// supervisor.spawn_process(command.arg("-c").arg("exit 0")).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// A `&mut Command` accepts that chain directly, keeps the command owned by
+    /// the caller, and gives up nothing: the supervisor only starts what it is
+    /// handed, and a caller that wants to run the same command twice may.
+    ///
+    /// # Errors
+    ///
+    /// An [`io::Error`] from the engine when the process could not be started
+    /// at all: the program does not exist, is not executable, or the OS refused
+    /// the fork. A failure to *start* is returned rather than turned into an
+    /// outcome, because nothing was started and the caller is the one who knows
+    /// what that means. The unreachable case — this module never closes its own
+    /// semaphore — is returned too rather than asserted, since a
+    /// `forbid`-level lint rules out the panic and a silent `return` would
+    /// swallow the condition. A refused start does not consume a slot: the
+    /// permit is released when this function returns.
+    #[cfg(feature = "process")]
+    pub async fn spawn_process(&mut self, command: &mut Command) -> io::Result<TaskId> {
+        let Some(permit) = self.claim().await else {
+            return Err(io::Error::other(
+                "lgwks_bot: the supervisor's in-flight semaphore was closed",
+            ));
+        };
+        let token = self.child_token();
+        // Two guarantees rather than one, because the group kill is a syscall
+        // the platform may not have: `kill_on_drop` reaches the direct child
+        // everywhere, and the group kill below reaches what that child spawned.
+        command.kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
+        let child = start(command)?;
+        Ok(self.place(permit, async move {
+            let mut child = child;
+            let mut group = ProcessGroup::of(&child);
+            match token.run_until_cancelled(child.wait()).await {
+                // The child was reaped, so its group is empty or already gone.
+                // The guard is disarmed before this frame can unwind: the OS
+                // may reissue a reaped id, and a stale group id signalled later
+                // would kill whatever inherited it.
+                Some(Ok(status)) => {
+                    group.disarm();
+                    if status.success() {
+                        TaskEnd::Completed
+                    } else {
+                        TaskEnd::Failed {
+                            status: Some(status),
+                        }
+                    }
+                }
+                // The wait itself failed, so this supervisor cannot say whether
+                // the process is still running. The guard is left armed and the
+                // group is killed as the frame unwinds, rather than reporting a
+                // status nobody has.
+                Some(Err(_)) => TaskEnd::Failed { status: None },
+                // Cancelled. The group is killed **synchronously**, and the
+                // child is then dropped rather than reaped.
+                //
+                // The signal has been delivered by the time `kill` returns,
+                // which is the whole guarantee, and it is the reason the order
+                // is kill-then-reap rather than the other way round: reaping
+                // first would wait for a process that has no reason to exit on
+                // its own.
+                //
+                // The child is not awaited afterwards, and that is deliberate.
+                // The engine's `wait` needs a SIGCHLD round trip through its
+                // driver, and the supervisor's cooperative drain window is
+                // shorter than that by design, so the task would be aborted
+                // before it could report — a cancelled process would surface as
+                // `Aborted`, collapsing the distinction this path exists to
+                // preserve. Awaiting the reap buys nothing the signal did not
+                // already guarantee, and leaks nothing: dropping the child
+                // re-sends the kill through `kill_on_drop`, and the engine's
+                // orphan reaper waits on it from the signal handler.
+                None => {
+                    group.kill();
+                    group.disarm();
+                    TaskEnd::Cancelled
+                }
+            }
+        }))
+    }
+
     /// Cancel every task, wait for the set to drain, and return what it
     /// drained.
     ///
@@ -739,9 +1027,26 @@ impl Supervisor {
     pub async fn shutdown(mut self) -> ShutdownReport {
         self.token.cancel();
         // Give a cooperative body room to return on its own before the abort
-        // lands, so `Cancelled` and `Aborted` mean what they say. Bounded by a
-        // constant: this never waits on a body that ignores its token.
-        for _ in 0..COOPERATIVE_DRAIN_YIELDS {
+        // lands, so `Cancelled` and `Aborted` mean what they say. Bounded by
+        // `COOPERATIVE_DRAIN_GRACE`: this never waits on a body that ignores its
+        // token.
+        //
+        // The loop absorbs what has finished and then yields, rather than
+        // yielding a fixed number of times and only then joining: a body that
+        // returns early is settled immediately, so the grace is a ceiling on
+        // the wait and not a charge for it.
+        let deadline = Instant::now().checked_add(COOPERATIVE_DRAIN_GRACE);
+        loop {
+            while let Some(joined) = self.set.try_join_next_with_id() {
+                self.absorb(joined, Retention::Draining);
+            }
+            // `None` means the clock could not express the deadline, which is
+            // reachable only past the representable range. There is nothing to
+            // wait for in that case, so the abort below is the whole response.
+            let Some(deadline) = deadline else { break };
+            if self.set.is_empty() || Instant::now() >= deadline {
+                break;
+            }
             yield_now().await;
         }
         // Everything still running is dropped here, which is what makes the
@@ -791,7 +1096,12 @@ impl Supervisor {
     /// The identity is registered before the task can run to completion,
     /// because the spawn and the insert happen on this thread with no await
     /// between them, so a terminal report always finds its entry.
-    fn place<Fut>(&mut self, permit: OwnedSemaphorePermit, future: Fut)
+    ///
+    /// The id is returned rather than dropped because a caller sometimes has to
+    /// name the task it just started — [`Supervisor::spawn_process`] reports it
+    /// so the process's terminal outcome can be matched to the spawn — and the
+    /// id is not a handle: it cannot join, abort or observe the task.
+    fn place<Fut>(&mut self, permit: OwnedSemaphorePermit, future: Fut) -> TaskId
     where
         Fut: Future<Output = TaskEnd> + Send + 'static,
     {
@@ -803,6 +1113,7 @@ impl Supervisor {
             future.await
         });
         self.identities.insert(handle.id(), task);
+        task
     }
 
     /// Turn one join result into a counted, retained terminal outcome.
@@ -836,6 +1147,20 @@ impl Supervisor {
                 self.identities
                     .remove(&raw)
                     .map(|task| TaskOutcome::Cancelled { task })
+            }
+            // Gated with the variant and with the feature that produces it:
+            // nothing else in this crate can report a non-zero process exit.
+            #[cfg(feature = "process")]
+            Ok((_, TaskEnd::Failed { status })) => {
+                // Counted as its own kind rather than folded into `succeeded`:
+                // a process that exited 1 is work that did not do what it was
+                // asked, and a counter that cannot see the difference reports a
+                // failing bot as a healthy one. `completed` still counts it, so
+                // the totals keep adding up.
+                self.failed = self.failed.saturating_add(1);
+                self.identities
+                    .remove(&raw)
+                    .map(|task| TaskOutcome::Failed { task, status })
             }
             Err(error) if error.is_panic() => {
                 self.panicked = self.panicked.saturating_add(1);
@@ -880,6 +1205,105 @@ impl Drop for Supervisor {
     fn drop(&mut self) {
         self.token.cancel();
         self.set.abort_all();
+    }
+}
+
+/// Start `command`, and name the one lint exception this module carries.
+///
+/// [`Command::spawn`] is banned workspace-wide by `clippy.toml`, with
+/// [`Supervisor::spawn_process`] as its named replacement. The ban exists so no
+/// *caller* starts a process nobody owns; here the child is owned by the task
+/// that `spawn_process` places, and there is no other constructor for a running
+/// child. The expectation is the crate's form for a reasoned, checked
+/// exception — if the entry is ever retargeted or lifted, this `expect` becomes
+/// unfulfilled and this line is revisited rather than silently continuing to be
+/// exempt.
+#[cfg(feature = "process")]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the engine's Command has no other way to start a child; this is the single call Supervisor::spawn_process wraps, and it is not reachable from outside this module"
+)]
+fn start(command: &mut Command) -> io::Result<Child> {
+    command.spawn()
+}
+
+/// A child's process group, killed as a unit unless it is disarmed.
+///
+/// A `Child` is one process. A command a bot starts is usually a shell or a
+/// wrapper that spawns its own children — a pipeline, a package manager, a
+/// build — and `Child::kill` reaches only the first of them, leaving the rest
+/// running with nobody holding their handles. Signalling the *group* is what
+/// makes "stop the process" mean the whole tree.
+///
+/// The guard is armed when the group is created and disarmed the instant the
+/// child is reaped, because a reaped process id can be reissued by the OS and a
+/// stale group id signalled later would kill whatever inherited it. Because the
+/// guard lives in the task's own frame, it fires on every way that task can
+/// stop — cancellation, abort, or the supervisor being dropped — which is why
+/// the kill does not depend on [`Drop`] for [`Supervisor`] knowing anything
+/// about processes.
+#[cfg(feature = "process")]
+struct ProcessGroup {
+    /// The group id, or `0` when the engine could not report the child's id.
+    ///
+    /// Zero is *refused* by `kill_process_group` rather than read as "this
+    /// process's own group", so an unreadable id can never signal the
+    /// supervisor's own process group.
+    group: i32,
+    /// Whether a kill is still owed to the group.
+    armed: bool,
+}
+
+#[cfg(feature = "process")]
+impl ProcessGroup {
+    /// The process group of `child`, armed.
+    ///
+    /// The id is read before the child is awaited: an unreaped child still has
+    /// its id, and a group leader's group id is its own pid, which is what
+    /// `process_group(0)` arranged when the command was built.
+    fn of(child: &Child) -> Self {
+        let group = match child.id() {
+            // `try_from` rather than `as`: the workspace forbids a truncating
+            // cast, and an id that does not fit an `i32` is not a group this
+            // module can signal, so it becomes the refused `0` instead.
+            Some(id) => i32::try_from(id).unwrap_or(0),
+            None => 0,
+        };
+        Self { group, armed: true }
+    }
+
+    /// Signal the whole group.
+    ///
+    /// The result is deliberately not used: this is called from [`Drop`] and
+    /// from the cancellation path, neither of which has anywhere to report it,
+    /// and a failure means the group has already gone or the OS refused the
+    /// signal. Neither case leaves a process running that this crate could have
+    /// stopped — `kill_on_drop(true)` independently covers the direct child,
+    /// and the group is what covers its children.
+    fn kill(&self) {
+        if self.group <= 0 {
+            return;
+        }
+        let _outcome: io::Result<()> = lgwks_std::process::kill_process_group(self.group);
+    }
+
+    /// Mark the group as already gone, so [`Drop`] does not signal it.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(feature = "process")]
+impl Drop for ProcessGroup {
+    /// Kill the group if a kill is still owed to it.
+    ///
+    /// This is the last line of the guarantee, and it is deliberately
+    /// synchronous: a task aborted before it reached its own kill still takes
+    /// its process group with it as its frame unwinds.
+    fn drop(&mut self) {
+        if self.armed {
+            self.kill();
+        }
     }
 }
 

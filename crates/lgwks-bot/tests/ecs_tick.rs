@@ -39,7 +39,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use lgwks_bot::rt::sync::{Mutex, mpsc};
-use lgwks_bot::rt::task::spawn;
+use lgwks_bot::rt::task::JoinSet;
 use lgwks_bot::rt::time::{sleep, timeout};
 use lgwks_bot::{Auth, Bot, BotError, Builder, Cap, Execute, GrantSet, Observe, block_on};
 
@@ -635,7 +635,10 @@ fn sibling_channel_completion() -> TestResult {
         .build(&GrantSet::empty())?;
 
     let ticked: usize = block_on(async move {
-        let sibling = spawn(async move {
+        // A tracked set, not a handle this scope could drop: the sibling is
+        // joined below, and the set aborts it if this scope unwinds first.
+        let mut siblings = JoinSet::new();
+        siblings.spawn(async move {
             for _ in 0..HEARTBEATS {
                 sleep(HEARTBEAT_INTERVAL).await;
                 sibling_beats.fetch_add(1, SeqCst);
@@ -647,10 +650,11 @@ fn sibling_channel_completion() -> TestResult {
         });
 
         let ticked = timeout(TICK_BUDGET, bot.tick_async()).await;
-        match sibling.await {
-            Ok(Ok(())) => {}
-            Ok(Err(message)) => return Err(message),
-            Err(error) => return Err(format!("the sibling task did not finish: {error}")),
+        match siblings.join_next().await {
+            Some(Ok(Ok(()))) => {}
+            Some(Ok(Err(message))) => return Err(message),
+            Some(Err(error)) => return Err(format!("the sibling task did not finish: {error}")),
+            None => return Err(String::from("the sibling task was never joined")),
         }
         match ticked {
             Ok(Ok(fired)) => Ok(fired),
@@ -704,7 +708,8 @@ fn a_cancelled_tick_leaves_the_bot_usable() -> TestResult {
         .build(&GrantSet::empty())?;
 
     let outcome: (bool, usize) = block_on(async move {
-        let sibling = spawn(async move {
+        let mut siblings = JoinSet::new();
+        siblings.spawn(async move {
             sleep(HEARTBEAT_INTERVAL).await;
             if let Err(error) = sender.send(SENTINEL).await {
                 return Err(format!("the sibling's send failed: {error}"));
@@ -715,10 +720,11 @@ fn a_cancelled_tick_leaves_the_bot_usable() -> TestResult {
         let cancelled = timeout(CANCEL_AFTER, bot.tick_async()).await;
         let dropped = cancelled.is_err();
         let resumed = timeout(TICK_BUDGET, bot.tick_async()).await;
-        match sibling.await {
-            Ok(Ok(())) => {}
-            Ok(Err(message)) => return Err(message),
-            Err(error) => return Err(format!("the sibling task did not finish: {error}")),
+        match siblings.join_next().await {
+            Some(Ok(Ok(()))) => {}
+            Some(Ok(Err(message))) => return Err(message),
+            Some(Err(error)) => return Err(format!("the sibling task did not finish: {error}")),
+            None => return Err(String::from("the sibling task was never joined")),
         }
         match resumed {
             Ok(Ok(fired)) => Ok((dropped, fired)),

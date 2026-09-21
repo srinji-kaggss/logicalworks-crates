@@ -35,7 +35,15 @@ macros = ["rt", "lgwks_deps/tokio-macros"]
 # makes `net`, `process`, and `fs` composable with each other.
 io = ["rt", "lgwks_deps/tokio-io"]
 net = ["io", "lgwks_deps/tokio-net"]
-process = ["io", "lgwks_deps/tokio-process"]
+# `sync` is implied because the only way this crate runs a command is
+# `Supervisor::spawn_process`: `Command` describes, and the supervisor is what
+# starts it. A `process` build without `sync` would expose the description and
+# not the sanctioned runner, which is a configuration whose only remaining
+# runner is the banned `Command::spawn`. `lgwks_std/process` is the audited
+# group-kill syscall (`contract/APPROVED.toml` records rustix under `lgwks_std`
+# with exactly this reason: killing a shell must reach its grandchildren, which
+# `Child::kill` cannot do); this enables it, and adds no dependency.
+process = ["io", "sync", "lgwks_std/process", "lgwks_deps/tokio-process"]
 fs = ["io", "lgwks_deps/tokio-fs"]
 signal = ["rt", "lgwks_deps/tokio-signal"]
 full = ["rt", "time", "sync", "macros", "io", "net", "process", "fs", "signal"]
