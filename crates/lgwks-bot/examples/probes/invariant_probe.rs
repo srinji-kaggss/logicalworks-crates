@@ -21,9 +21,18 @@
 //!    engine's whole module, so the ban lives in `clippy.toml`, not in the type.
 //!    Calling it is now a hard error, so the probe can no longer demonstrate the
 //!    call; the ban refuses it, which is the point.
-//! 2. Fire-and-forget **is** representable: a `JoinHandle` is droppable and
-//!    nothing records the task (now `rt::task::spawn`, the sanctioned path).
-//!    "Zero un-tracked background tasks" is a convention the caller keeps.
+//! 2. Fire-and-forget is **no longer** representable: there is no call in
+//!    `rt::task` that starts a task and hands back a handle to it, and none in
+//!    `rt::process` that starts a process and hands back a `Child`. The
+//!    `rt::task::spawn` this claim used to cite — a droppable `JoinHandle` to a
+//!    running task, with nothing recording it — has been removed, along with
+//!    `spawn_local`, `spawn_blocking`, `Handle::spawn` and the `Child`
+//!    re-export. The block that used to demonstrate otherwise cannot be written
+//!    at all: the only way to start concurrent work is `Supervisor`, and the
+//!    only way to start a process is a supervised one. Closed by the type
+//!    system, not by a lint — a stricter outcome than the probe was built to
+//!    detect, and strictly stronger, because no consumer outside this workspace
+//!    can reach the deleted symbols either.
 //! 3. A std `Mutex` held across `.await` is **no longer** representable:
 //!    `await_holding_lock = "forbid"` refuses it, so the block that used to
 //!    demonstrate otherwise cannot be written at all, a stricter outcome than
@@ -40,12 +49,17 @@ fn main() {
     let (_tx, _rx) = lgwks_bot::rt::sync::mpsc::unbounded_channel::<u8>();
 
     // INVARIANT CLAIM: "Zero Un-Tracked Background Tasks."
-    // If this compiles, fire-and-forget is representable: the JoinHandle is
-    // droppable and nothing records the task.
+    // The form recorded here when the probe was written was
+    //     let _dropped_on_the_floor = lgwks_bot::rt::task::spawn(async {});
+    // — a droppable handle to a running task, with nothing recording it. That
+    // symbol no longer resolves, and neither does any other call that starts
+    // work and hands the caller something it can drop. There is nothing left to
+    // demonstrate: what replaces it is the only shape the API has, and it is
+    // owned from the first line to the last.
     let rt = lgwks_bot::Runtime::new().unwrap();
     rt.block_on(async {
-        let _dropped_on_the_floor = lgwks_bot::rt::task::spawn(async {});
-        drop(_dropped_on_the_floor);
+        let mut supervisor = lgwks_bot::rt::supervise::Supervisor::default();
+        supervisor.spawn(|_token| async {}).await;
     });
 
     // INVARIANT CLAIM: "No Mutex across .await" / std Mutex banned in async.

@@ -1,15 +1,19 @@
 # Bounded background work
 
-Three APIs in this workspace bound background work. Pick by what you need
-bounded: simultaneous tasks, iterations of a loop, or threads for a blocking
-call. The units differ, and so do the guarantees.
+Four APIs in this workspace bound background work. Pick by what you need
+bounded: simultaneous tasks, iterations of a loop, child processes, or threads
+for a blocking call. The units differ, and so do the guarantees.
 
 ## `Supervisor`: a ceiling on tasks
 
 `rt::supervise::Supervisor` (feature `sync`) owns a set of background tasks and
 stops them when it goes away. `Supervisor::new(max_in_flight)` takes the ceiling,
 clamps it into `1..=Semaphore::MAX_PERMITS`, and offers no argument that produces
-an unbounded supervisor (`crates/lgwks-bot/src/rt/supervise.rs:536`).
+an unbounded supervisor (`crates/lgwks-bot/src/rt/supervise.rs:693`).
+`Supervisor::default()` is the constructor for the caller who has no opinion: it
+discovers the ceiling from `std::thread::available_parallelism`, so the safe
+default is the *first* thing that resolves rather than something to remember to
+ask for, and it is still a real ceiling.
 
 Four properties, all in the module documentation
 (`crates/lgwks-bot/src/rt/supervise.rs:9`):
@@ -28,12 +32,15 @@ would grow with total spawns rather than with live tasks.
 
 Every task ends in exactly one `TaskOutcome`, read through `next_report` (or
 returned by `shutdown`), and each outcome carries the `TaskId` the supervisor
-assigned in spawn order. `Stats` counts them in four separate ways —
-`succeeded`, `cancelled`, `aborted`, `panicked` — so a caller can tell work that
-finished from work that died. `Stats::completed` is the sum, a resource count
-rather than a success count. The report buffer is capped at the in-flight
-ceiling; a caller that spawns without ever reading its reports loses detail,
-never memory, and `Stats::reports_dropped` says how much.
+assigned in spawn order. `Stats` counts them separately — `succeeded`,
+`cancelled`, `aborted`, `panicked`, and (with the `process` feature) `failed` —
+so a caller can tell work that finished from work that died from a command that
+exited non-zero. A process that exited 3 is a `Failed` outcome carrying its
+`ExitStatus`, which is not the same report as one this supervisor killed.
+`Stats::completed` is the resource count, a sum rather than a success count. The
+report buffer is capped at the in-flight ceiling; a caller that spawns without
+ever reading its reports loses detail, never memory, and
+`Stats::reports_dropped` says how much.
 
 ```rust
 use lgwks_bot::Runtime;
@@ -43,6 +50,8 @@ use lgwks_bot::rt::time::Duration;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Runtime::new()?;
     runtime.block_on(async {
+        // `new(4)` when you have an opinion about the ceiling, `default()` when
+        // you do not; both are bounded.
         let mut supervisor = Supervisor::new(4);
 
         // A bounded loop. `Budget` is a required argument, so there is no call
@@ -67,24 +76,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## `Supervisor::spawn_process`: a child process nobody can abandon
+
+`Supervisor::spawn_process(command)` starts a child under the same in-flight
+ceiling as `spawn`, and returns a `TaskId` — not a `Child`
+(`crates/lgwks-bot/src/rt/supervise.rs:939`). `rt::process` re-exports `Command`
+so you can say what to run; it does not hand out a handle to what is running.
+The task this places is the only owner the process has:
+
+```rust
+use lgwks_bot::rt::process::Command;
+use lgwks_bot::rt::supervise::Supervisor;
+
+async fn deploy(supervisor: &mut Supervisor) -> std::io::Result<()> {
+    // `Command` describes; the supervisor starts, bounds, and owns.
+    let mut command = Command::new("sh");
+    supervisor.spawn_process(command.arg("-c").arg("make -j4")).await?;
+    Ok(())
+}
+```
+
+Three differences from a raw `Child`:
+
+- **The whole process group is killed, not the child.** A shell started this way
+  can spawn a pipeline, and `Child::kill` reaches only the shell — its
+  grandchildren keep running with nobody holding their handles. The kill is
+  `killpg` on the child's own group (`lgwks_std::process::kill_process_group`),
+  and it lands both when the task is cancelled and when the supervisor is dropped
+  or aborted.
+- **Starting can fail, and the caller is told.** An `io::Error` comes back when
+  the program does not exist or is not executable; a failed start does not
+  consume a slot.
+- **The exit is reported.** Exit zero is `TaskOutcome::Completed`; a non-zero
+  exit or a signal death is `TaskOutcome::Failed` carrying the `ExitStatus`; a
+  kill this supervisor ordered is `TaskOutcome::Cancelled`. `Stats::failed`
+  counts the middle one separately, so a bot whose command fails is not reported
+  as a healthy one.
+
 ## `repeat`: a bound on iterations
 
 `repeat(&token, budget, body)` is the only loop the module asks you to write, and
-it cannot be written without a `Budget` (`crates/lgwks-bot/src/rt/supervise.rs:945`).
+it cannot be written without a `Budget` (`crates/lgwks-bot/src/rt/supervise.rs:1369`).
 The variants are `Iterations(NonZeroU64)`, `For(Duration)`, and `Ongoing`.
 
 Two details that decide how tight your bound really is:
 
 - `Budget::For` checks its deadline between iterations, so a body that blocks for
   longer than the budget overruns it by one iteration
-  (`crates/lgwks-bot/src/rt/supervise.rs:145`). Cancellation is not subject to
+  (`crates/lgwks-bot/src/rt/supervise.rs:1383`). Cancellation is not subject to
   that slack, because it interrupts the body itself.
 - Every iteration races the token rather than checking it between iterations.
   A cancel drops a body that is still awaiting, and the loop reports
   `Outcome::Cancelled` rather than `Outcome::Exhausted`, so a completed run is
   distinguishable from an interrupted one.
 - The loop also yields the executor every `YIELD_INTERVAL` iterations
-  (`crates/lgwks-bot/src/rt/supervise.rs:131`), which is what keeps a body whose
+  (`crates/lgwks-bot/src/rt/supervise.rs:142`), which is what keeps a body whose
   future is ready on its first poll from turning the whole loop into one
   uninterruptible poll. Without it a cancel ordered by another task could not be
   delivered until the budget ran out, and on a current-thread runtime the
@@ -98,7 +144,7 @@ owns the token ends.
 
 `rt::task::join_all_bounded(limit, futures)` (feature `sync`) spawns and awaits
 at most `limit` tasks at once, spawning the next pending input as each completes
-(`crates/lgwks-bot/src/rt/task.rs:107`). Result `i` is the output of input `i`,
+(`crates/lgwks-bot/src/rt/task.rs:93`). Result `i` is the output of input `i`,
 whichever completes first, which is the property `JoinSet::join_next` does not
 give you.
 
@@ -126,14 +172,16 @@ how many chains a spec declares.
 
 These are the places the bounds stop applying.
 
-**A bound on tasks is not a bound on time.** `crates/lgwks-bot/src/rt/mod.rs:47`
+**A bound on tasks is not a bound on time.** `crates/lgwks-bot/src/rt/mod.rs:72`
 states it: this is not a scheduler with realtime guarantees, and future
 completion order across worker threads is not deterministic. Only the result
-order of `join_all_bounded` is.
+order of `join_all_bounded` is. The same applies to a child process: the
+supervisor bounds how many run at once and guarantees the kill reaches the group,
+not how quickly the OS tears the group down.
 
 **Cancellation drops a future. That is not the same as stopping a thread.** The
 implementation races each iteration with `token.run_until_cancelled(body(...))`
-(`crates/lgwks-bot/src/rt/supervise.rs:981`), which drops the body's future. A
+(`crates/lgwks-bot/src/rt/supervise.rs:1405`), which drops the body's future. A
 body that is awaiting returns promptly. What happens to work a body handed to
 another thread is not established by the inspected source: `spawn_blocking`
 spawns an OS thread and offers no abort, and its documented bound is a thread per
@@ -150,8 +198,15 @@ the refusal means.
 **`Drop` aborts rather than joins.** A supervisor that goes out of scope cancels
 and aborts, and does not wait. Use `shutdown().await` when you need to know the
 tasks have finished before continuing — it gives a cooperative body a bounded
-number of yields to return on its own before the abort lands, so a task that
+wall-clock grace to return on its own before the abort lands, so a task that
 observed its token is reported `Cancelled` and one that ignored it as `Aborted`.
+The grace is time and not a count of yields, which matters on a multi-threaded
+runtime: `yield_now` only reschedules the yielding task, so it cannot give a body
+parked on another worker the thread wakeup its return actually needs, and a
+counted grace reported cancelled work as aborted
+(`crates/lgwks-bot/src/rt/supervise.rs:653`). A body that returns is settled the
+moment it does, so the grace is a ceiling on the wait and not a cost charged to
+every shutdown.
 
 **`lgwks_std::task` has no cancellation primitive.** Its `block_on`, `join_all`,
 and `spawn_blocking` are for a build with no async runtime. There is a
@@ -159,7 +214,7 @@ and `spawn_blocking` are for a build with no async runtime. There is a
 
 ## What the tests exercise
 
-`crates/lgwks-bot/src/rt/supervise.rs:1002` runs the module's own tests under the
+`crates/lgwks-bot/src/rt/supervise.rs:1426` runs the module's own tests under the
 ordinary workspace test run. They cover an iteration budget stopping at its
 limit, an `Ongoing` budget stopping at a cancel, cancellation interrupting a body
 that is still awaiting, `try_spawn` refusing at the bound rather than growing,
@@ -170,3 +225,13 @@ a success and its payload is preserved, a task that panicked after an effect is
 not reported as one that finished, cooperative cancellation and abort are told
 apart, and a shutdown that outlives the report cap still hands every outcome
 over.
+
+`crates/lgwks-bot/tests/rt_process.rs` is the black-box acceptance for
+`spawn_process`, run with `--features full`: a zero exit reports `Completed`, a
+non-zero exit reports `Failed` with its status and counts in `Stats::failed`, a
+cancelled command is killed **with its grandchild** — a shell records both its own
+and its backgrounded `sleep`'s pid, and the test asserts both are gone — and a
+command that cannot start returns `NotFound` without consuming a slot.
+`crates/lgwks-bot/tests/rt_async_tier.rs` holds the drain regression: on a real
+multi-threaded runtime, a body that returns on its cancellation is reported
+`Cancelled` and not `Aborted`.

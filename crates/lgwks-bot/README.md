@@ -207,8 +207,12 @@ produces, and it is deliberate: a tick that ends without a record is exactly the
 case the write-ahead record exists for.
 
 Futures are **local** (not `Send`): a bot is driven on the calling thread and
-domains may hold thread-local state. `rt::task::LocalSet` is available when you
-need to spawn such a future.
+domains may hold thread-local state. A non-`Send` future is driven by awaiting
+it, or by `lgwks_std::task::join_all` / `join_all_bounded`, which poll many
+futures on the calling thread. There is no public API here that *spawns* one: a
+single-threaded spawn was the same un-owned handle as the multi-threaded one,
+with the added trap that the handle's type could not be named at the call site,
+so it is gone for the same reason.
 
 ### Failure
 
@@ -383,12 +387,12 @@ On `wasm32-wasip1`, the `rt` feature uses a current-thread runtime;
 | Module | Feature | Contents |
 |---|---|---|
 | `rt::runtime` | `rt` | `Runtime`, `Builder`, `Handle`, free `block_on` |
-| `rt::task` | `rt` / `sync` | `spawn`, `spawn_local`, `LocalSet`, `JoinHandle`, `JoinError`, `JoinSet`, `spawn_blocking`, `yield_now`; `join_all_bounded` requires `sync` |
+| `rt::task` | `rt` / `sync` | `JoinSet`, `JoinError`, `AbortHandle`, `yield_now`; `join_all_bounded` requires `sync`. No verb here starts a task and hands back a handle to it |
 | `rt::time` | `time` | `sleep`, `sleep_until`, `timeout`, `timeout_at`, `interval`, `Instant`, `Elapsed` |
 | `rt::sync` | `sync` | `CancellationToken`, `mpsc`, `oneshot`, `broadcast`, `watch`, `Mutex`, `RwLock`, `Semaphore`, `Notify`, `Barrier`, `OnceCell` |
 | `rt::io` | `io` | `AsyncRead`/`AsyncWrite`/`AsyncBufRead` and their extensions, `BufReader`, `BufWriter`, `duplex`, `copy` |
 | `rt::net` | `net` | `TcpListener`, `TcpStream`, `UdpSocket`, `lookup_host` |
-| `rt::process` | `process` | `Command`, `Child` and its pipes |
+| `rt::process` | `process` | `Command` — describing what to run. Running it is `Supervisor::spawn_process`; `Child` and its pipes are not exported |
 | `rt::fs` | `fs` | async filesystem (blocking-threadpool wrapper) |
 | `rt::signal` | `signal` | OS signal streams (Unix/Windows) |
 
@@ -457,12 +461,21 @@ that a caller never has to reason about a leak or a runaway loop.
 
 A task cannot leak. `spawn` returns no handle, so there is nothing for a caller
 to drop. There is no unbounded
-constructor and no internal queue: the ceiling is taken at `new`, and the permit
-is acquired *before* the spawn, so waiting is real backpressure rather than
-buffering. `try_spawn` refuses instead of growing, and counts the refusal.
+constructor and no internal queue: the ceiling comes from `new(max_in_flight)`,
+or from `default()` when the caller has no opinion — which is the constructor
+that resolves first, since a safe default should not have to be remembered — and
+the permit is acquired *before* the spawn, so waiting is real backpressure rather
+than buffering. `try_spawn` refuses instead of growing, and counts the refusal.
 Finished tasks are reaped at every entry point, which matters because a
 `JoinSet` retains a completed task's slot until it is joined. `Drop` cancels and
 aborts, so there is no `close()` to forget.
+
+A process cannot leak either. `spawn_process(command)` starts a child under the
+same ceiling and returns a `TaskId` rather than a `Child`, so there is no handle
+to drop. The child is placed in its own process group and the **group** is
+killed — when the task is cancelled, and when the supervisor drops or aborts —
+because a shell's grandchildren are the case that matters and `Child::kill`
+cannot reach them.
 
 A loop cannot run away. `repeat` cannot be written without a `Budget`, and every
 iteration *races* the token rather than checking it between iterations, so a
@@ -472,11 +485,14 @@ than free-running.
 
 A caller can tell how a task ended. Every task produces exactly one
 `TaskOutcome`, carrying the `TaskId` the supervisor assigned in spawn order, and
-`Stats` counts the four outcomes separately: `succeeded`, `cancelled`, `aborted`,
-`panicked`. `Stats::completed` is their sum — a resource count, not a success
-count — so a task that panicked before producing its result can never be read as
-one that finished. The report buffer is capped at the in-flight ceiling, and
-`Stats::reports_dropped` counts what a caller that never drains it missed.
+`Stats` counts the outcomes separately: `succeeded`, `cancelled`, `aborted`,
+`panicked`, and `failed` (the `process` feature). `Stats::completed` is the
+resource count — a sum, not a success count — so a task that panicked before
+producing its result can never be read as one that finished. A command that
+exited non-zero is `Failed`, carrying its `ExitStatus`; one this supervisor
+killed is `Cancelled`; and the two are never the same increment. The report
+buffer is capped at the in-flight ceiling, and `Stats::reports_dropped` counts
+what a caller that never drains it missed.
 
 ```rust
 use lgwks_bot::rt::supervise::{Budget, Supervisor};
@@ -513,8 +529,11 @@ Invariants (enforced by `crates/lgwks-bot/tests/rt_async_tier.rs` and
 - **INV-RT-PANIC-ISOLATION** — a panicking *input* is resumed on the awaiting
   task (it does not abort the process); a panicking *spawned task* becomes a
   `JoinError`.
-- **INV-RT-DROP-DETACHES** — dropping a `JoinHandle` detaches the task; only
-  `abort` cancels it.
+- **INV-RT-NO-DETACH** — no public API starts a task or a process and returns a
+  handle to it. Dropping a `JoinSet` aborts what it holds; dropping a
+  `Supervisor` cancels and aborts everything it started. There is no
+  `JoinHandle`, no `LocalSet`, and no `Child` on the public surface, so "started
+  and then forgotten" is not writable rather than merely discouraged.
 - **INV-RT-EXPLICIT-OWNER** — no hidden global reactor; the `Runtime` is owned.
 - **INV-RT-SUPERVISED** — a `Supervisor` retains at most its in-flight bound
   however many times it is spawned into, refuses rather than growing, and stops

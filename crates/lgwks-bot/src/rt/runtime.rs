@@ -10,8 +10,6 @@ use std::io;
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use crate::rt::task::JoinHandle;
-
 /// Maximum number of native worker threads accepted by [`Builder`].
 pub const MAX_WORKER_THREADS: usize = 1024;
 
@@ -33,9 +31,8 @@ pub struct Builder {
     /// The complete OS thread name for native workers, or `None` for the
     /// `lgwks-bot` default. Ignored on WASM, which has no worker thread.
     thread_name: Option<String>,
-    /// Ceiling on the blocking pool shared by `spawn_blocking` and the `fs`
-    /// driver, or `None` for the engine's default. `NonZeroUsize` because the
-    /// engine refuses zero.
+    /// Ceiling on the blocking pool used by the `fs` driver, or `None` for the
+    /// engine's default. `NonZeroUsize` because the engine refuses zero.
     max_blocking_threads: Option<NonZeroUsize>,
 }
 
@@ -65,13 +62,18 @@ impl Builder {
         self
     }
 
-    /// Cap the blocking pool used by `spawn_blocking` and the `fs` driver.
-    /// Pass `None` for Tokio's default (512). The value is a
-    /// [`NonZeroUsize`] because Tokio refuses zero (`assert!(val > 0)`), so
-    /// an unbounded or zero pool cannot be expressed by accident; callers
-    /// that fan out blocking work pair this with
+    /// Cap the blocking pool used by the `fs` driver. Pass `None` for Tokio's
+    /// default (512). The value is a [`NonZeroUsize`] because Tokio refuses
+    /// zero (`assert!(val > 0)`), so an unbounded or zero pool cannot be
+    /// expressed by accident; callers that fan out blocking work pair this with
     /// [`crate::rt::task::join_all_bounded`] to keep both async and blocking
     /// concurrency explicit.
+    ///
+    /// A blocking *call* is made with
+    /// [`lgwks_std::task::spawn_blocking`],
+    /// which owns its own OS thread per call and reports its result through a
+    /// future. This knob bounds the runtime's own pool — the one the `fs`
+    /// driver borrows — not those threads.
     #[must_use]
     pub fn max_blocking_threads(mut self, threads: Option<NonZeroUsize>) -> Self {
         self.max_blocking_threads = threads;
@@ -188,37 +190,23 @@ impl Runtime {
 /// A cloneable capability to run work on a [`Runtime`] owned elsewhere.
 ///
 /// Cloning is cheap. A handle keeps no ownership of the runtime: it does not
-/// keep the runtime alive. A [`Handle::spawn`] issued after the runtime has been
-/// dropped does **not** panic; the task is never scheduled, and awaiting its
-/// [`JoinHandle`] reports [`JoinError::is_cancelled`]. Retain the runtime for as
-/// long as its handles are used when the work must run.
-///
-/// [`JoinError::is_cancelled`]: lgwks_deps::tokio::task::JoinError::is_cancelled
+/// keep the runtime alive. What a handle can do is **drive** work —
+/// [`Handle::block_on`] runs one future to completion on the owning runtime —
+/// and it deliberately cannot *start* work: a `spawn` here would hand back a
+/// droppable handle to a running task, which is the shape this crate removes
+/// everywhere (see [`crate::rt::task`]). Work that outlives the call belongs in
+/// a [`Supervisor`](crate::rt::supervise::Supervisor), which owns it and
+/// reports how it ended.
 #[derive(Clone, Debug)]
 pub struct Handle {
     /// The engine's cloneable handle. Private for the same reason as
     /// [`Runtime::inner`]: the engine type stays behind the facade. It holds no
     /// ownership of the runtime, which is why a handle outliving its runtime
-    /// reports a cancelled join rather than keeping the runtime alive.
+    /// cannot keep the runtime alive.
     inner: lgwks_deps::tokio::runtime::Handle,
 }
 
 impl Handle {
-    /// Place a future on the runtime without waiting for it.
-    ///
-    /// If the owning runtime has already been dropped, the future is never
-    /// scheduled and the returned handle resolves to a cancelled [`JoinError`];
-    /// this call does not panic.
-    ///
-    /// [`JoinError`]: crate::rt::task::JoinError
-    pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
-    where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static,
-    {
-        self.inner.spawn(future)
-    }
-
     /// Drive one future to completion on the owning runtime, blocking the
     /// calling thread. Panics if called from within an async context.
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {

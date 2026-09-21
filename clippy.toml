@@ -15,7 +15,28 @@ disallowed-methods = [
   { path = "tokio::sync::mpsc::unbounded_channel", reason = "unbounded memory growth; use mpsc::channel(NonZeroUsize) — see INV-RT-BOUNDED", replacement = "lgwks_bot::rt::sync::mpsc::channel" },
   { path = "std::sync::mpsc::channel", reason = "std::mpsc has no bounded form and no async receiver; use the bounded channel", replacement = "lgwks_bot::rt::sync::mpsc::channel" },
   # RUST-AP-067: a bare spawn is dropped on the floor unless tracked in a JoinSet.
-  { path = "tokio::spawn", reason = "untracked background task; spawn inside a tracked scope so Drop cancels it", replacement = "lgwks_bot::rt::task::spawn" },
+  # There is deliberately no single `replacement = ...` here any more. A bare
+  # spawn had one sanctioned wrapper, `rt::task::spawn`, and that wrapper handed
+  # back a droppable `JoinHandle` — the very thing the ban is about — so it was
+  # removed. What replaces a bare spawn now depends on what the caller wants:
+  # `rt::supervise::Supervisor::spawn` for background work that must be bounded
+  # and accounted for, `rt::task::JoinSet` for a tracked set the caller joins,
+  # or `rt::task::join_all_bounded` for fan-out with ordered results.
+  { path = "tokio::spawn", reason = "untracked background task whose JoinHandle can be dropped, losing its outcome; use rt::supervise::Supervisor::spawn (bounded, reported) or rt::task::JoinSet (tracked, joined)" },
+  # The same hole for processes. `Command` itself stays public — a caller must
+  # be able to describe what to run — but starting it is the supervisor's job,
+  # because the child has to be bounded by the in-flight ceiling and killed as a
+  # whole process group when the supervisor drops or the task is cancelled.
+  #
+  # `allow-invalid = true` because the path is reachable only when tokio's
+  # `process` feature is on, and clippy validates each entry against the build it
+  # is linting: in a default-feature build of `lgwks_deps` the module is not
+  # compiled, and without this the entry would warn "does not refer to a
+  # reachable function" in exactly the builds that have nothing to ban. It
+  # suppresses that validity warning only — where the path *is* reachable, the
+  # ban still fires, and `lgwks_bot`'s one expected exception is the `start`
+  # helper in `rt::supervise`, which is not reachable from outside the module.
+  { path = "tokio::process::Command::spawn", allow-invalid = true, reason = "a raw Child is a droppable handle to a running process, and Child::kill leaves the grandchildren of a shell alive; use Supervisor::spawn_process", replacement = "lgwks_bot::rt::supervise::Supervisor::spawn_process" },
   { path = "std::thread::spawn", reason = "unjoined OS thread; a panic is invisible and the handle is usually leaked" },
   # RUST-AP-028: UB on types with invalid bit patterns.
   { path = "std::mem::uninitialized", reason = "instant UB for most types; use MaybeUninit", replacement = "std::mem::MaybeUninit" },
