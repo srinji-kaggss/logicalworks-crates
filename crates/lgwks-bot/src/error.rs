@@ -25,7 +25,7 @@
 use std::fmt;
 
 use super::cap::Cap;
-use super::session::Terminal;
+use super::session::{ResourceAxis, Terminal};
 
 /// Error from bot construction, admission, or execution.
 ///
@@ -225,6 +225,100 @@ pub enum BotError {
         intrinsic: Terminal,
         /// The outcome the document declared for it.
         declared: Terminal,
+    },
+    /// One answer utterance is larger than the session may accept.
+    ///
+    /// Checked at the ingress, before the utterance reaches the resolver, the
+    /// journal, or the retained transcript, so an oversized line costs one
+    /// comparison rather than a copy of itself.
+    UtteranceTooLarge {
+        /// Bytes offered.
+        bytes: usize,
+        /// The applied utterance ceiling.
+        limit: usize,
+    },
+    /// A value decoded from an accepted candidate is larger than the scope may
+    /// retain.
+    ValueTooLarge {
+        /// The variable being written.
+        variable: String,
+        /// Bytes the stored value occupies when rendered.
+        bytes: usize,
+        /// The applied value ceiling.
+        limit: usize,
+    },
+    /// An ask node offers a candidate whose stored value is larger than the
+    /// session may retain.
+    ///
+    /// The load-time half of [`BotError::ValueTooLarge`], on the same argument
+    /// as [`BotError::AskOptionNotAssignable`]: the candidate list and the
+    /// applied ceiling are both known when the document loads, so an ask whose
+    /// answer could never be stored is refused there rather than after the
+    /// person has answered it.
+    AskOptionTooLarge {
+        /// The ask node carrying the candidate.
+        node: String,
+        /// The variable the ask writes.
+        variable: String,
+        /// The candidate option string.
+        option: String,
+        /// Bytes the stored value would occupy when rendered.
+        bytes: usize,
+        /// The applied value ceiling.
+        limit: usize,
+    },
+    /// One rendered record payload is larger than the session may retain.
+    RecordTooLarge {
+        /// The node whose text this is.
+        node: String,
+        /// Bytes of the rendered payload.
+        bytes: usize,
+        /// The applied per-record ceiling.
+        limit: usize,
+    },
+    /// A template's expansion would exceed the per-record ceiling.
+    ///
+    /// Refused before the expansion is allocated. A validated document is
+    /// small; what it can *expand to* is not, because a placeholder repeats.
+    /// The compiled template's expanded size is therefore computed with
+    /// checked arithmetic and compared with the ceiling first, so an
+    /// amplification that would materialise a multi-gigabyte string from a
+    /// sub-megabyte document costs one checked addition per template part and
+    /// allocates nothing.
+    TemplateExpansionTooLarge {
+        /// The node whose template this is.
+        node: String,
+        /// Bytes the expansion would occupy.
+        bytes: usize,
+        /// The applied per-record ceiling.
+        limit: usize,
+    },
+    /// A session's retained records have reached its byte ceiling.
+    ///
+    /// The aggregate bound. The per-record ceiling bounds one write; this one
+    /// bounds the sum, so a flow whose graph lets the cursor loop cannot retain
+    /// an unbounded conversation out of individually acceptable records.
+    SessionRetentionExceeded {
+        /// Bytes that would be retained by the refused write.
+        bytes: usize,
+        /// The applied session ceiling.
+        limit: usize,
+    },
+    /// A configured byte ceiling is larger than the operator's hard ceiling.
+    ///
+    /// Author- and operator-supplied bounds may tighten a ceiling and may not
+    /// raise it: a document cannot grant itself a larger budget than the
+    /// embedding application enforces. Refused rather than clamped, because a
+    /// flow that asks for ten gigabytes and silently receives the shipped eight
+    /// mebibytes has been neither obeyed nor corrected, and the next reader of
+    /// that document would have to run it to find out which happened.
+    ResourceLimitAboveCeiling {
+        /// The byte axis the limit applies to.
+        axis: ResourceAxis,
+        /// The value the document or caller asked for.
+        requested: usize,
+        /// The operator's hard ceiling for that axis.
+        ceiling: usize,
     },
     /// A predicate could not compare values of different types.
     PredicateTypeMismatch,
@@ -462,6 +556,67 @@ impl fmt::Display for BotError {
                 f.write_str(" declared as ")?;
                 write_terminal(f, declared)
             }
+            Self::UtteranceTooLarge { bytes, limit } => write!(
+                f,
+                "answer utterance of {bytes} bytes exceeds the {limit}-byte utterance limit"
+            ),
+            Self::ValueTooLarge {
+                ref variable,
+                bytes,
+                limit,
+            } => write!(
+                f,
+                "value for variable {} occupies {bytes} bytes, over the {limit}-byte value limit",
+                Escaped(variable)
+            ),
+            // `option` renders through `Debug` and escapes itself; the two
+            // identifiers are the payloads that do not.
+            Self::AskOptionTooLarge {
+                ref node,
+                ref variable,
+                ref option,
+                bytes,
+                limit,
+            } => write!(
+                f,
+                "ask node {} offers option {option:?} storing {bytes} bytes for variable {}, \
+                 over the {limit}-byte value limit",
+                Escaped(node),
+                Escaped(variable)
+            ),
+            Self::RecordTooLarge {
+                ref node,
+                bytes,
+                limit,
+            } => write!(
+                f,
+                "record for node {} is {bytes} bytes, over the {limit}-byte record limit",
+                Escaped(node)
+            ),
+            Self::TemplateExpansionTooLarge {
+                ref node,
+                bytes,
+                limit,
+            } => write!(
+                f,
+                "template on node {} would expand to {bytes} bytes, over the {limit}-byte \
+                 record limit",
+                Escaped(node)
+            ),
+            Self::SessionRetentionExceeded { bytes, limit } => write!(
+                f,
+                "session would retain {bytes} bytes, over the {limit}-byte session limit"
+            ),
+            // `axis` is a crate-controlled label, not a payload.
+            Self::ResourceLimitAboveCeiling {
+                axis,
+                requested,
+                ceiling,
+            } => write!(
+                f,
+                "{} limit of {requested} bytes exceeds the operator's {ceiling}-byte ceiling",
+                axis.label()
+            ),
             Self::PredicateTypeMismatch => f.write_str("predicate values have incompatible types"),
             Self::VariableUnset { ref name } => {
                 write!(f, "variable {} has no value", Escaped(name))

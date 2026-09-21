@@ -6,8 +6,10 @@ use std::rc::Rc;
 
 use lgwks_bot::{
     AnswerRejection, BotError, DegradedReason, Disposition, EffectLedger, Embedder,
-    EmbedderIdentity, FlowBounds, FlowEdge, FlowSpec, Journal, NodeKind, Predicate, Resolution,
-    Resolver, SemanticResolver, Session, Terminal, TranscriptEntry, Value, ValueExpr, VarType,
+    EmbedderIdentity, FlowBounds, FlowEdge, FlowSpec, Journal, LanguageResolver, MAX_RECORD_BYTES,
+    MAX_SESSION_BYTES, MAX_UTTERANCE_BYTES, MAX_VALUE_BYTES, NodeKind, Predicate, Resolution,
+    Resolver, ResourceAxis, ResourceLimits, SemanticResolver, Session, Terminal, TranscriptEntry,
+    Value, ValueExpr, VarType,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -1634,6 +1636,783 @@ fn a_non_terminal_node_has_no_effective_outcome() -> TestResult {
         flow.effective_terminal("no-such-node"),
         None,
         "a missing node has no effective outcome"
+    );
+    Ok(())
+}
+
+// ── Issue 40: the byte ceilings a flow's shape does not bound ───────────────
+//
+// Validation bounds a document's *shape* and `FlowBounds` bounds its *steps*.
+// Neither bounds bytes, and the two are independent: `${answer}` written forty
+// thousand times is a two-hundred-kilobyte document that interpolates to a
+// hundred and sixty megabytes, and one `say` node is one step however much
+// text it renders. The tests below use ceilings small enough to run in a test
+// binary and pin the byte arithmetic a shipped ceiling applies to the same
+// shape, so the amplification is exercised rather than described.
+
+/// A flow that asks `answer` once, speaks `say_text`, and ends.
+///
+/// The shape the amplification needs: the spoken text is built from an answer
+/// the person supplies, so the document can be small while the expansion is
+/// not.
+fn speak_back_flow(say_text: &str, options: &[String]) -> Result<FlowSpec, BotError> {
+    let routes = options
+        .iter()
+        .map(|option| (option.clone(), String::from("say")))
+        .collect();
+    FlowSpec::new(
+        BTreeMap::from([(String::from("answer"), VarType::String)]),
+        "ask",
+        BTreeMap::from([
+            (
+                String::from("ask"),
+                NodeKind::Ask {
+                    var: String::from("answer"),
+                    options: options.to_vec(),
+                    routes,
+                },
+            ),
+            (
+                String::from("say"),
+                NodeKind::Say {
+                    text: say_text.to_owned(),
+                },
+            ),
+            (String::from("done"), NodeKind::End),
+        ]),
+        vec![FlowEdge::next("say", "done")],
+        BTreeMap::new(),
+        FlowBounds::new(16),
+    )
+}
+
+/// A JSON document for [`speak_back_flow`], carrying the supplied `bounds`.
+///
+/// Written as text rather than serialized so the test reaches the parser a
+/// caller reaches — [`FlowSpec::from_json`] — on a document shaped like a
+/// caller's. Only the template and the candidate list are interpolated, and a
+/// caller of this helper passes strings with no characters the format has to
+/// escape.
+fn speak_back_document(say_text: &str, options: &[String], bounds: &str) -> String {
+    let quoted = options
+        .iter()
+        .map(|option| format!("\"{option}\""))
+        .collect::<Vec<String>>()
+        .join(", ");
+    let routes = options
+        .iter()
+        .map(|option| format!("\"{option}\": \"say\""))
+        .collect::<Vec<String>>()
+        .join(", ");
+    format!(
+        "{{\"vars\": {{\"answer\": {{\"kind\": \"string\"}}}}, \
+         \"entry\": \"ask\", \
+         \"nodes\": {{ \
+         \"ask\": {{\"kind\": \"ask\", \"var\": \"answer\", \"options\": [{quoted}], \
+         \"routes\": {{{routes}}}}}, \
+         \"say\": {{\"kind\": \"say\", \"text\": \"{say_text}\"}}, \
+         \"done\": {{\"kind\": \"end\"}}}}, \
+         \"edges\": [{{\"kind\": \"next\", \"from\": \"say\", \"to\": \"done\"}}], \
+         \"bounds\": {bounds}}}"
+    )
+}
+
+/// A flow whose ask loops back through a say node until the person stops.
+///
+/// The repetition the aggregate ceiling exists for: each turn is a handful of
+/// individually acceptable records, and the sum of them is what needs a bound.
+fn loop_flow() -> Result<FlowSpec, BotError> {
+    FlowSpec::new(
+        BTreeMap::from([(String::from("answer"), VarType::String)]),
+        "ask",
+        BTreeMap::from([
+            (
+                String::from("ask"),
+                NodeKind::Ask {
+                    var: String::from("answer"),
+                    options: vec![String::from("again"), String::from("stop")],
+                    routes: BTreeMap::from([
+                        (String::from("again"), String::from("say")),
+                        (String::from("stop"), String::from("done")),
+                    ]),
+                },
+            ),
+            (
+                String::from("say"),
+                NodeKind::Say {
+                    text: String::from("tick"),
+                },
+            ),
+            (String::from("done"), NodeKind::End),
+        ]),
+        vec![FlowEdge::next("say", "ask")],
+        BTreeMap::new(),
+        FlowBounds::new(64),
+    )
+}
+
+/// The bytes a session retains, recounted from its public surface.
+///
+/// Written out here rather than read from `Session::retained_bytes` so the
+/// assertion compares the counter to what the session actually holds: a
+/// comparison of the counter with itself would agree with itself whatever it
+/// counted.
+fn retained_recorded_bytes(session: &Session) -> usize {
+    let records = session.transcript().iter().fold(0usize, |total, entry| {
+        total
+            .saturating_add(entry.text().len())
+            .saturating_add(entry.path_node().len())
+            .saturating_add(entry.role().len())
+    });
+    session
+        .visited()
+        .iter()
+        .fold(records, |total, node| total.saturating_add(node.len()))
+}
+
+#[test]
+fn a_placeholder_is_charged_the_bytes_it_expands_to() {
+    // Multibyte text is charged its UTF-8 bytes, not its characters: the
+    // expansion pastes bytes into a buffer, and a ceiling counted in characters
+    // would let a document four times its own limit through.
+    let multibyte = Value::String("\u{e9}".repeat(512));
+    assert_eq!(
+        multibyte.rendered_bytes(),
+        1024,
+        "512 two-byte characters occupy 1024 bytes"
+    );
+    assert_eq!(
+        "\u{e9}".repeat(512).chars().count(),
+        512,
+        "the character count is half the byte count, which is why the bytes are what is charged"
+    );
+    // Integers are charged the width of their decimal spelling — what
+    // interpolation writes — and not the width of the candidate that produced
+    // them.
+    assert_eq!(
+        Value::Integer(0).rendered_bytes(),
+        1,
+        "zero renders as one digit"
+    );
+    assert_eq!(
+        Value::Integer(-7).rendered_bytes(),
+        2,
+        "a negative integer renders its sign"
+    );
+    assert_eq!(
+        Value::Integer(12_345).rendered_bytes(),
+        5,
+        "five digits render five bytes"
+    );
+    assert_eq!(
+        Value::Integer(i64::MAX).rendered_bytes(),
+        19,
+        "the widest positive integer is nineteen bytes"
+    );
+    assert_eq!(
+        Value::Integer(i64::MIN).rendered_bytes(),
+        20,
+        "the widest negative integer is twenty, and its magnitude has no positive counterpart"
+    );
+    assert_eq!(
+        Value::Boolean(true).rendered_bytes(),
+        4,
+        "true renders as four bytes"
+    );
+    assert_eq!(
+        Value::Boolean(false).rendered_bytes(),
+        5,
+        "false renders as five bytes"
+    );
+}
+
+#[test]
+fn a_repeated_placeholder_is_refused_at_its_computed_size() -> TestResult {
+    // The report's defect at a scale a test binary can afford. Twenty thousand
+    // repetitions of a value at the shipped utterance ceiling is a two-hundred-
+    // kilobyte document whose expansion is a hundred and sixty-three megabytes:
+    // the document validates, the budget of sixteen steps is untouched, and the
+    // refusal reports the size of a string that was never built. The value is
+    // as large as the ingress ceiling allows, which is the most a document can
+    // get out of one answer and therefore the worst case for this shape.
+    let value = "z".repeat(MAX_UTTERANCE_BYTES);
+    let repeats = 20_000usize;
+    let template = "${answer}".repeat(repeats);
+    let expansion = repeats
+        .checked_mul(value.len())
+        .ok_or("the fixture's expansion overflows usize")?;
+    // Above the prompt's own size, which carries the candidate in full, and far
+    // below the expansion the template asks for.
+    let ceiling = 16_384usize;
+    assert!(
+        expansion > MAX_RECORD_BYTES,
+        "the fixture's expansion ({expansion} bytes) is over the shipped record ceiling too, \
+         so the contraction is not an artefact of a deliberately tiny bound"
+    );
+    let limits = ResourceLimits::shipped().tighten(ResourceAxis::Record, ceiling);
+    let (journal, records) = SharedJournal::new();
+    let mut session = Session::with_components_and_limits(
+        "amplify",
+        speak_back_flow(&template, std::slice::from_ref(&value))?,
+        LanguageResolver::new(),
+        journal,
+        limits,
+    )?;
+    let written_before = records.borrow().len();
+    let retained_before = session.retained_bytes();
+    assert_eq!(
+        session.limits().get(ResourceAxis::Record),
+        ceiling,
+        "the session enforces the tightened ceiling"
+    );
+    match session.answer(&value) {
+        Err(BotError::TemplateExpansionTooLarge { node, bytes, limit }) => {
+            assert_eq!(node, "say", "the refusal names the template's node");
+            assert_eq!(
+                bytes, expansion,
+                "the refusal reports the exact expansion, computed rather than measured: \
+                 164 MB from a 200 KB document"
+            );
+            assert_eq!(limit, ceiling, "the refusal reports the ceiling in force");
+        }
+        other => {
+            return Err(format!("expected the expansion refusal, got {other:?}").into());
+        }
+    }
+    assert!(
+        records.borrow().len() > written_before,
+        "the answer's own record was written before the say node was reached"
+    );
+    assert_eq!(
+        records.borrow().len(),
+        session.transcript().len(),
+        "the journal and the transcript hold the same records: the refused write left no \
+         partial record in either"
+    );
+    assert!(
+        records.borrow().iter().all(|record| record.0 != "say"),
+        "the refused say record was never handed to the journal"
+    );
+    assert_eq!(
+        session.current(),
+        Some("say"),
+        "the session is left at the node whose text it could not speak"
+    );
+    assert!(
+        session.visited().iter().any(|node| node == "say"),
+        "the say node was entered, charged, and then refused its own text"
+    );
+    assert_eq!(
+        session.retained_bytes(),
+        retained_recorded_bytes(&session),
+        "the retained counter is the sum of what the session holds"
+    );
+    assert!(
+        session.retained_bytes() > retained_before,
+        "the accepted part of the answer is retained"
+    );
+    assert_eq!(
+        session.terminal(),
+        None,
+        "a refused expansion does not end the run: the session is not completed, \
+         it is stuck at the node whose text it could not speak"
+    );
+    Ok(())
+}
+
+#[test]
+fn an_expansion_exactly_at_the_ceiling_succeeds_and_one_byte_over_is_refused() -> TestResult {
+    // The boundary, from both sides. Sixteen repetitions of a sixty-four-byte
+    // value is exactly the ceiling; seventeen is one byte past it.
+    let value = "z".repeat(64);
+    let repeats = 16usize;
+    let ceiling = 1_024usize;
+    assert_eq!(
+        repeats.checked_mul(value.len()),
+        Some(ceiling),
+        "the fixture fills the ceiling exactly"
+    );
+    let limits = ResourceLimits::shipped().tighten(ResourceAxis::Record, ceiling);
+    let fits = speak_back_flow(&"${answer}".repeat(repeats), std::slice::from_ref(&value))?;
+    let mut session = Session::with_limits("fits", fits, limits)?;
+    session.answer(&value)?;
+    let spoken = session
+        .transcript()
+        .iter()
+        .find(|entry| entry.path_node() == "say")
+        .ok_or("the say node recorded the text it spoke")?;
+    assert_eq!(
+        spoken.text().len(),
+        ceiling,
+        "the record fills the ceiling exactly and is accepted"
+    );
+    assert_eq!(
+        session.terminal(),
+        Some(&Terminal::Completed),
+        "a record of exactly the ceiling is spoken and the flow completes"
+    );
+
+    let over = repeats
+        .checked_add(1)
+        .ok_or("the fixture's repeat count overflows")?;
+    let refused_bytes = over
+        .checked_mul(value.len())
+        .ok_or("the fixture's expansion overflows usize")?;
+    let (journal, records) = SharedJournal::new();
+    let mut session = Session::with_components_and_limits(
+        "over",
+        speak_back_flow(&"${answer}".repeat(over), std::slice::from_ref(&value))?,
+        LanguageResolver::new(),
+        journal,
+        limits,
+    )?;
+    match session.answer(&value) {
+        Err(BotError::TemplateExpansionTooLarge { node, bytes, limit }) => {
+            assert_eq!(node, "say", "the refusal names the template's node");
+            assert_eq!(bytes, refused_bytes, "one byte over the ceiling");
+            assert_eq!(limit, ceiling, "the refusal reports the ceiling in force");
+        }
+        other => {
+            return Err(format!("expected the expansion refusal, got {other:?}").into());
+        }
+    }
+    assert!(
+        records.borrow().iter().all(|record| record.0 != "say"),
+        "the refused record was never handed to the journal"
+    );
+    assert!(
+        session
+            .transcript()
+            .iter()
+            .all(|entry| entry.path_node() != "say"),
+        "and it is not in the transcript either"
+    );
+    assert_eq!(
+        session.retained_bytes(),
+        retained_recorded_bytes(&session),
+        "the refused expansion retained nothing the session does not hold"
+    );
+    Ok(())
+}
+
+#[test]
+fn an_utterance_at_the_ceiling_is_accepted_and_one_byte_over_is_refused_before_anything_is_written()
+-> TestResult {
+    let ceiling = 8usize;
+    let limits = ResourceLimits::shipped().tighten(ResourceAxis::Utterance, ceiling);
+    let option = String::from("x");
+    let at_ceiling = "12345678";
+    assert_eq!(
+        at_ceiling.len(),
+        ceiling,
+        "the fixture is exactly the ceiling"
+    );
+
+    let (journal, records) = SharedJournal::new();
+    let mut session = Session::with_components_and_limits(
+        "at",
+        speak_back_flow("${answer}", std::slice::from_ref(&option))?,
+        LanguageResolver::new(),
+        journal,
+        limits,
+    )?;
+    let written_before = records.borrow().len();
+    // Not the option, so the ask re-asks: the point is that the size ceiling
+    // did not refuse it.
+    session.answer(at_ceiling)?;
+    assert!(
+        records.borrow().len() > written_before,
+        "an utterance of exactly the ceiling reaches the conversation"
+    );
+
+    let (journal, records) = SharedJournal::new();
+    let mut session = Session::with_components_and_limits(
+        "over",
+        speak_back_flow("${answer}", std::slice::from_ref(&option))?,
+        LanguageResolver::new(),
+        journal,
+        limits,
+    )?;
+    let written_before = records.borrow().len();
+    let steps_before = session.steps();
+    let retained_before = session.retained_bytes();
+    let one_over = "123456789";
+    match session.answer(one_over) {
+        Err(BotError::UtteranceTooLarge { bytes, limit }) => {
+            assert_eq!(
+                bytes,
+                one_over.len(),
+                "the refusal counts the bytes offered"
+            );
+            assert_eq!(limit, ceiling, "the refusal reports the ceiling in force");
+        }
+        other => {
+            return Err(format!("expected the utterance refusal, got {other:?}").into());
+        }
+    }
+    assert_eq!(
+        records.borrow().len(),
+        written_before,
+        "the refused utterance wrote no record"
+    );
+    assert_eq!(
+        session.steps(),
+        steps_before,
+        "and charged no step: the ingress ceiling is checked before the step is charged"
+    );
+    assert_eq!(
+        session.retained_bytes(),
+        retained_before,
+        "and retained nothing, so it is not in the transcript"
+    );
+    Ok(())
+}
+
+#[test]
+fn an_ask_candidate_too_wide_for_the_session_is_refused_at_load() -> TestResult {
+    // The load-time half, and the reason it exists: the candidate list and the
+    // applied ceiling are both known while the document loads, so an ask whose
+    // answer could never be stored is refused there rather than after the
+    // person has typed it.
+    let option = "x".repeat(MAX_VALUE_BYTES);
+    let at_ceiling = single_ask_flow(VarType::String, vec![option.clone()])?;
+    Session::with_limits("at", at_ceiling, ResourceLimits::shipped())?;
+
+    // One byte over, and it is the document that refuses it: the flow never
+    // becomes a session, so the candidate is refused before anyone is asked it.
+    let one_over = "y".repeat(MAX_VALUE_BYTES.saturating_add(1));
+    let refusal = single_ask_flow(VarType::String, vec![one_over.clone()])
+        .err()
+        .ok_or("a document offering a candidate wider than the shipped ceiling loaded")?;
+    match refusal {
+        BotError::AskOptionTooLarge {
+            node,
+            variable,
+            option: offered,
+            bytes,
+            limit,
+        } => {
+            assert_eq!(node, "ask", "the refusal names the ask node");
+            assert_eq!(
+                variable, "answer",
+                "the refusal names the variable the ask writes"
+            );
+            assert_eq!(offered, one_over, "the refusal names the candidate");
+            assert_eq!(bytes, one_over.len(), "one byte over the shipped ceiling");
+            assert_eq!(limit, MAX_VALUE_BYTES, "the shipped value ceiling");
+        }
+        other => {
+            return Err(format!("expected the candidate refusal, got {other:?}").into());
+        }
+    }
+
+    // A tighter session ceiling refuses a candidate the shipped one accepts.
+    // The document is well-formed; it is the session that cannot run it, and
+    // that is why the check runs a second time inside the constructor rather
+    // than only where the document was parsed.
+    let narrow = single_ask_flow(VarType::String, vec![option.clone()])?;
+    let tightened = ResourceLimits::shipped().tighten(ResourceAxis::Value, 32);
+    let refusal = Session::with_limits("narrow", narrow, tightened)
+        .err()
+        .ok_or("a candidate the session cannot store was accepted")?;
+    match refusal {
+        BotError::AskOptionTooLarge { bytes, limit, .. } => {
+            assert_eq!(bytes, option.len(), "the candidate's stored width");
+            assert_eq!(limit, 32, "the ceiling the session applies");
+        }
+        other => {
+            return Err(format!("expected the candidate refusal, got {other:?}").into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_template_whose_literals_alone_exceed_the_ceiling_is_refused_at_load() -> TestResult {
+    // The one size claim that is true whatever the variables turn out to hold:
+    // every render contains the literal bytes, so a template whose literals are
+    // over the ceiling can never render. It is refused where it is authored
+    // rather than at the node that would speak it.
+    let flow = speak_back_flow(&"L".repeat(100), &[String::from("x")])?;
+    // Under the shipped ceiling the document is fine — the flow is not
+    // malformed, it just cannot be spoken under this session's bound.
+    let strict = ResourceLimits::shipped().tighten(ResourceAxis::Record, 64);
+    let refusal = Session::with_limits("strict", flow.clone(), strict)
+        .err()
+        .ok_or("a template whose literals are over the ceiling was accepted")?;
+    match refusal {
+        BotError::TemplateExpansionTooLarge { node, bytes, limit } => {
+            assert_eq!(node, "say", "the refusal names the template's node");
+            assert_eq!(
+                bytes, 100,
+                "the literal floor, which no render can go below"
+            );
+            assert_eq!(limit, 64, "the ceiling the session applies");
+        }
+        other => {
+            return Err(format!("expected the literal refusal, got {other:?}").into());
+        }
+    }
+    Session::with_limits("shipped", flow, ResourceLimits::shipped())?;
+    Ok(())
+}
+
+#[test]
+fn a_document_may_tighten_its_own_ceilings_and_may_not_raise_them() -> TestResult {
+    // The public path: JSON document, validated flow, session.
+    let modest = speak_back_document(
+        "${answer}",
+        &[String::from("yes")],
+        "{\"budget\": 16, \"resources\": {\"record_bytes\": 1024}}",
+    );
+    let flow = FlowSpec::from_json(&modest)?;
+    assert_eq!(
+        flow.bounds()
+            .resources()
+            .map(|limits| limits.get(ResourceAxis::Record)),
+        Some(1_024),
+        "the document's requested ceiling survives parsing"
+    );
+    let session = Session::new("modest", flow)?;
+    assert_eq!(
+        session.limits().get(ResourceAxis::Record),
+        1_024,
+        "the session enforces the narrower of the document's request and the operator's ceiling"
+    );
+    assert_eq!(
+        session.limits().get(ResourceAxis::Utterance),
+        MAX_UTTERANCE_BYTES,
+        "an axis the document did not name keeps the operator's ceiling"
+    );
+
+    let greedy = speak_back_document(
+        "${answer}",
+        &[String::from("yes")],
+        "{\"budget\": 16, \"resources\": {\"session_bytes\": 4294967296}}",
+    );
+    match FlowSpec::from_json(&greedy) {
+        Err(BotError::ResourceLimitAboveCeiling {
+            axis,
+            requested,
+            ceiling,
+        }) => {
+            assert_eq!(axis, ResourceAxis::Session, "the refusal names the axis");
+            assert_eq!(
+                requested, 4_294_967_296,
+                "the ceiling the document asked for"
+            );
+            assert_eq!(
+                ceiling, MAX_SESSION_BYTES,
+                "the operator's hard ceiling, unchanged by the request"
+            );
+        }
+        other => {
+            return Err(format!("expected the ceiling refusal at load, got {other:?}").into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_configured_ceiling_above_the_operators_is_refused_rather_than_clamped() -> TestResult {
+    // A bound that is silently ignored is a bound nobody can reason about, and
+    // an operator that asked for no ceiling must not run believing it has one.
+    let flow = speak_back_flow("${answer}", &[String::from("x")])?;
+    let unbounded = ResourceLimits::shipped().tighten(ResourceAxis::Session, usize::MAX);
+    let refusal = Session::with_limits("unbounded", flow, unbounded)
+        .err()
+        .ok_or("a ceiling above the operator's was accepted")?;
+    match refusal {
+        BotError::ResourceLimitAboveCeiling {
+            axis,
+            requested,
+            ceiling,
+        } => {
+            assert_eq!(axis, ResourceAxis::Session, "the refusal names the axis");
+            assert_eq!(requested, usize::MAX, "the ceiling that was asked for");
+            assert_eq!(ceiling, MAX_SESSION_BYTES, "the operator's hard ceiling");
+        }
+        other => {
+            return Err(format!("expected the ceiling refusal, got {other:?}").into());
+        }
+    }
+    // And an operator ceiling below the document's request wins, per axis.
+    let document = speak_back_document(
+        "${answer}",
+        &[String::from("x")],
+        "{\"budget\": 16, \"resources\": {\"record_bytes\": 1024}}",
+    );
+    let limits = ResourceLimits::shipped().tighten(ResourceAxis::Record, 64);
+    let session = Session::with_limits("narrow", FlowSpec::from_json(&document)?, limits)?;
+    assert_eq!(
+        session.limits().get(ResourceAxis::Record),
+        64,
+        "the operator's smaller ceiling is the one in force"
+    );
+    Ok(())
+}
+
+#[test]
+fn cumulative_records_are_charged_against_the_session_ceiling() -> TestResult {
+    // Every turn of this loop is a handful of individually acceptable records.
+    // The per-record ceiling never refuses one; the aggregate is what bounds
+    // the conversation.
+    let (journal, records) = SharedJournal::new();
+    let mut session = Session::with_components_and_limits(
+        "generous",
+        loop_flow()?,
+        LanguageResolver::new(),
+        journal,
+        ResourceLimits::shipped(),
+    )?;
+    session.answer("again")?;
+    session.answer("again")?;
+    session.answer("stop")?;
+    let total = session.retained_bytes();
+    let full = records.borrow().clone();
+    assert_eq!(
+        total,
+        retained_recorded_bytes(&session),
+        "the retained counter is the sum of the records and the path"
+    );
+    assert!(
+        session
+            .transcript()
+            .iter()
+            .filter(|entry| entry.role() == "assistant")
+            .count()
+            > 1,
+        "the loop recorded repeated prompts, which is what accumulates"
+    );
+
+    // A ceiling of exactly that total admits the whole script: the boundary
+    // from the accepting side.
+    let exact = ResourceLimits::shipped().tighten(ResourceAxis::Session, total);
+    let (journal, _) = SharedJournal::new();
+    let mut session = Session::with_components_and_limits(
+        "exact",
+        loop_flow()?,
+        LanguageResolver::new(),
+        journal,
+        exact,
+    )?;
+    session.answer("again")?;
+    session.answer("again")?;
+    session.answer("stop")?;
+    assert_eq!(
+        session.retained_bytes(),
+        total,
+        "the script that fits exactly is run to completion"
+    );
+    assert_eq!(
+        session.terminal(),
+        Some(&Terminal::Completed),
+        "and reaches its terminal"
+    );
+
+    // Half of it does not, and what was written before the refusal is a prefix
+    // of what the full run wrote: no partial record, no hole.
+    let half = total
+        .checked_div(2)
+        .ok_or("half of a measured positive total is never zero")?;
+    assert!(
+        half > 0 && half < total,
+        "the fixture's half-ceiling ({half}) is a genuine tightening of {total}"
+    );
+    let (journal, records) = SharedJournal::new();
+    let mut session = match Session::with_components_and_limits(
+        "half",
+        loop_flow()?,
+        LanguageResolver::new(),
+        journal,
+        ResourceLimits::shipped().tighten(ResourceAxis::Session, half),
+    ) {
+        Ok(session) => session,
+        // Construction records the opening prompt, so a half-ceiling below that
+        // one record would fail before the loop this test is about. That is a
+        // defect in the fixture's arithmetic, and it says so rather than
+        // reporting a refusal that the bound did not cause.
+        Err(BotError::SessionRetentionExceeded { .. }) => {
+            return Err(
+                "the fixture's first record does not fit half of the run's own total; the \
+                 fixture is wrong, not the bound"
+                    .into(),
+            );
+        }
+        Err(other) => return Err(format!("expected a session, got {other:?}").into()),
+    };
+    let mut refusal = None;
+    for _attempt in 0..8 {
+        if let Err(error) = session.answer("again") {
+            refusal = Some(error);
+            break;
+        }
+    }
+    let Some(BotError::SessionRetentionExceeded { bytes, limit }) = refusal else {
+        return Err(format!("expected the retention refusal, got {refusal:?}").into());
+    };
+    assert_eq!(limit, half, "the refusal reports the ceiling in force");
+    assert!(
+        bytes > limit,
+        "the refusal reports the total the write would have reached ({bytes}), which is past \
+         the {limit}-byte ceiling it was checked against"
+    );
+    assert!(
+        session.retained_bytes() <= half,
+        "nothing past the ceiling was retained: {} stayed within {half}",
+        session.retained_bytes()
+    );
+    let written = records.borrow();
+    assert!(
+        written.len() < full.len(),
+        "the run that hit the ceiling wrote fewer records ({}) than the run that did not ({})",
+        written.len(),
+        full.len()
+    );
+    assert_eq!(
+        written.as_slice(),
+        &full[..written.len()],
+        "and what it wrote is a prefix of the full run, with no partial record at the end"
+    );
+    drop(written);
+    assert_eq!(
+        session.retained_bytes(),
+        retained_recorded_bytes(&session),
+        "the counter and the retained records agree after the refusal"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_session_that_cannot_retain_its_first_record_writes_nothing() -> TestResult {
+    // The construction path, where the aggregate ceiling is hit before any
+    // conversation exists. The refusal is observable through the journal rather
+    // than only asserted, because the error path returns no session to inspect.
+    let (journal, records) = SharedJournal::new();
+    let result = Session::with_components_and_limits(
+        "tiny",
+        loop_flow()?,
+        LanguageResolver::new(),
+        journal,
+        ResourceLimits::shipped().tighten(ResourceAxis::Session, 8),
+    );
+    match result {
+        Err(BotError::SessionRetentionExceeded { bytes, limit }) => {
+            assert!(
+                bytes > limit,
+                "the refusal reports a total past a ceiling of {limit}"
+            );
+        }
+        Ok(_session) => {
+            return Err("expected the retention refusal, got a session".into());
+        }
+        Err(other) => {
+            return Err(format!("expected the retention refusal, got {other:?}").into());
+        }
+    }
+    assert!(
+        records.borrow().is_empty(),
+        "a session refused during construction wrote no record at all"
     );
     Ok(())
 }

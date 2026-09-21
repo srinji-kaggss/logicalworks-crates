@@ -174,9 +174,11 @@ pub use language::LanguageResolver;
 pub use rt::{Builder, Handle, Runtime, block_on};
 pub use semantic::{Embedder, EmbedderIdentity, SemanticError, SemanticPolicy, SemanticResolver};
 pub use session::{
-    AnswerRejection, ChoiceArm, DegradedReason, Disposition, EffectLedger, FlowBounds, FlowEdge,
-    FlowNodeKind, FlowSpec, Interpolate, Journal, MatchTier, MemoryJournal, NodeId, NodeKind,
-    Outcome, Predicate, Resolution, Resolver, Session, SessionId, TemplateInterpolator, Terminal,
+    AnswerRejection, ChoiceArm, CompiledTemplate, DegradedReason, Disposition, EffectLedger,
+    FlowBounds, FlowEdge, FlowNodeKind, FlowSpec, Interpolate, Journal, MAX_FLOW_BYTES,
+    MAX_FLOW_SPEC_BYTES, MAX_RECORD_BYTES, MAX_SESSION_BYTES, MAX_UTTERANCE_BYTES, MAX_VALUE_BYTES,
+    MatchTier, MemoryJournal, NodeId, NodeKind, Outcome, Predicate, Resolution, Resolver,
+    ResourceAxis, ResourceLimits, Session, SessionId, TemplateInterpolator, TemplatePart, Terminal,
     TranscriptEntry, Value, ValueExpr, VarScope, VarType,
 };
 pub use spec::{Bot, BotSpec};
