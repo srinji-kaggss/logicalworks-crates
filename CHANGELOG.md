@@ -34,6 +34,36 @@ explicitly under that crate.
   contributor to send a patch that would wait on a decision no one has made; the
   block is stated as a refusal on arrival instead. It lifts when an instrument is
   chosen and recorded in `LICENSING.md`. The other three crates are unaffected.
+- **Four `lgwks_bot` questions were put to the project owner on 2026-09-21 and
+  decided.** They are recorded here because each was previously stated in a
+  first-party document as *open*, and those documents now say what was decided.
+
+  - **The scheduler is a first-party `lgwks_std` module**, not zed's vendored
+    `scheduler` crate. `docs/bot-on-ecs.md` §9 and §10 reserved the choice,
+    because the doctrine and the instruction to reuse existing open source point
+    at different rungs. It was taken against a finding recorded in full in §9:
+    the tick is already deterministic by construction, so a seeded scheduler has
+    no caller until the recorder lands. One consequence is named there too — a
+    seeded PRNG needs a carve-out from INV-RANDOM-ONE-SOURCE, argued in the
+    module rather than assumed at the call site.
+  - **The `Time<Virtual>` clock root (§10 step 4) is closed as already
+    satisfied.** Two time layers exist and both are tested: `lgwks_std::time`
+    (RFC 3339 and calendar arithmetic, INV-TIME-PURE) and `lgwks_bot::rt::time`
+    (`sleep`, `timeout`, `interval`, `Instant`). No `Clock` trait or mock time
+    source exists anywhere in the workspace, so the two `Instant::now()` reads in
+    `rt::supervise` can still only be tested by genuinely waiting. That is
+    accepted and stated, not overlooked.
+  - **The `from_spec` gap is a gap, and the registry is scheduled work.** The
+    crate doc argued that the absent materializer was a deliberate design
+    position; that reading was rejected. `experience/invariants/sdk.yaml` records
+    the adjudication. Two constraints bind the implementation, because they are
+    what made the absence defensible: grants keep coming from a caller-held
+    `GrantSet` and never from the spec, so wire data cannot choose what a bot
+    reaches, and there is still no `bot!` proc-macro.
+  - **No release is cut yet.** Five public modules (`session`, `language`,
+    `semantic`, `interface`, `frontier`) and the `lgwks_bot` MPL-2.0 relicense
+    are on `main` and unpublished. They ship in one release once the registry and
+    the scheduler have landed.
 
 ### lgwks_bot Fixed
 
@@ -95,6 +125,20 @@ explicitly under that crate.
 - The README, the crate docs, and the `lgwks-bot` guides described the tick as
   one synchronous pass. They now document both adapters, the four phases, the
   refusal, and what a cancelled tick leaves behind.
+- **Three first-party documents described `lgwks_bot`'s state as something other
+  than what the tree shows; they now match it.** `docs/bot-on-ecs.md` listed the
+  `Time<Virtual>` root and the exclusive-systems move as outstanding when both
+  are settled — the second landed with step 2 and the migration list went on
+  showing it as pending — and its §9 reserved the scheduler for sign-off, which
+  has now been given. `crates/lgwks-bot/src/lib.rs` argued that the missing
+  `from_spec` materializer was a deliberate position; the invariant ledger's
+  reading of it prevailed and the paragraph now says so. And two citations in
+  `docs/guides/lgwks-bot/index.md` pointed `Bot::tick` and `Bot::tick_async` at
+  lines inside their doc blocks rather than at the functions
+  (`crates/lgwks-bot/src/ecs.rs:1490`→`1496`, `crates/lgwks-bot/src/ecs.rs:1408`→`1411`)
+  — a class
+  `scripts/check-doc-citations.py` cannot catch, because it verifies that a
+  citation resolves and not that it names the right item.
 
 ### Fixed
 

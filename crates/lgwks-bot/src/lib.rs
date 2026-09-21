@@ -153,11 +153,19 @@ pub mod semantic;
 pub mod session;
 /// The serializable spec contract and the builder that assembles bots.
 ///
-/// `BotSpec` is validate-only: there is no `from_spec` materializer. A spec
-/// that validates still builds through `Bot::builder`, so capability grants
-/// stay explicit at the call site. The builder DSL is the DSL: there is
-/// deliberately no `bot!` proc-macro (it would drag `syn` into every consumer
-/// and hide the per-call `Auth::check` that auditors read).
+/// `BotSpec` is validate-only today: there is no `from_spec` materializer, so a
+/// spec that validates still has to be built through `Bot::builder`, which
+/// takes verbs rather than wire data. Materializing a bot from a spec needs a
+/// `domain_id -> constructor` registry — `"gh::pr_status"` has to become a
+/// concrete `Observe` — and no such registry exists. That absence is recorded
+/// as open in `experience/invariants/sdk.yaml`, not as a design position, and
+/// the registry is the piece of work that closes it.
+///
+/// Whenever it lands, the builder stays the only path that mints authority:
+/// grants come from a `GrantSet` the caller holds, never from the spec, so wire
+/// data still cannot choose what the bot is able to reach. There is
+/// deliberately no `bot!` proc-macro either — it would drag `syn` into every
+/// consumer and hide the per-call `Auth::check` that auditors read.
 pub mod spec;
 /// The four verbs: Observe, Evaluate, Execute, Query. No fifth verb exists.
 pub mod verb;

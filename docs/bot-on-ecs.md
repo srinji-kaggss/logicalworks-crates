@@ -355,9 +355,9 @@ than estimated: **60 packages** for `bevy-ecs`, 63 for `bevy-app`, 64 for
 `bevy-time`, 62 for `bevy-state`, with `bevy_reflect` **absent** from the
 compiled tree. Pinned `^0.19`; 0.20 is an RC and is not taken.
 
-**The scheduler remains open.** Two options are available, and the standing
-instruction to modify and improve existing open-source code rather than rebuild
-it favours the first:
+**The scheduler is decided, against the reuse instruction's preference.** The
+project owner took the `lgwks_std` module on 2026-09-21, having been shown both
+rungs and the finding below. The two options were:
 
 - **VENDOR (ladder rung 7).** Take zed's `scheduler` crate as audited source into
   `vendor/` and extend it for the clock and RNG needs of this workspace. The `vendor/` tree
@@ -365,11 +365,30 @@ it favours the first:
   gets the seeded-interleaving scheduler without taking gpui's UI closure.
 - **ELIMINATE, against the instruction.** Write the seeded scheduler as an
   `lgwks_std` module. Cheaper at the boundary, but it is rebuilding something
-  that already exists and works.
+  that already exists and works. **This is the option taken.**
 
-This is the one place where the instruction to reuse existing open-source code
-and the dependency doctrine point at different rungs, so it requires
-project-owner sign-off.
+**What the decision was taken against, recorded because it bears on the work.**
+The tick is already deterministic by construction, so the seeded scheduler has
+no caller today. `schedule()` sets `SingleThreadedExecutor` explicitly and chains
+its two systems; `run_steps` awaits each recorded effect in its turn; and the one
+concurrent phase — the bounded waves of source polls — documents that its results
+"are collected in declaration order whatever order they resolve in." Four tests
+already hold that line: `ten_thousand_requests_replay_identically` drives 10,000
+steps over 20 hosts and asserts identical verdicts *and* identical egress windows;
+`permits_from_identically_driven_frontiers_compare_equal` states the same
+determinism on the permit itself; and
+`evidence_that_the_effect_happened_records_it_without_replaying_it` and
+`an_attempt_whose_outcome_was_never_recorded_is_held_not_replayed` pin the replay
+semantics that make a recorded run exact. So this adds a capability nothing
+exercises until the recorder lands (`docs/general-bot-fold.md` §6, item 10),
+which §12 names as a failure mode. It is taken deliberately, not overlooked, and
+the recorder is what will exercise it.
+
+One consequence to settle while building it: a seeded scheduler needs a userspace
+deterministic PRNG, and `lgwks_std::random` enforces INV-RANDOM-ONE-SOURCE —
+"never a silent fallback to a clock, a counter, or userspace PRNG". The carve-out
+is that a replay device is not an entropy source, and it has to be argued in the
+module rather than assumed at the call site.
 
 ## 10. Migration order
 
@@ -380,9 +399,9 @@ Each step must leave `cargo test --workspace --all-targets` green.
    `cargo fmt --all -- --check` exit 0; `lgwks-deps check .` exit 0 with 27
    approvals; `lgwks-std-package-smoke.sh` passed.
 1. **The scheduler decision** from §9: vendored zed `scheduler`, or an
-   `lgwks_std` module. **Still open, and deliberately not taken here.** It
-   requires project-owner sign-off because the doctrine and the instruction to
-   reuse existing open-source code point at different rungs.
+   `lgwks_std` module. ✅ **Decided — the `lgwks_std` module**, taken by the
+   project owner on 2026-09-21. Not yet built; §9 records both rungs and what
+   the decision was taken against.
 2. **A `Spec -> Schedule` executor.** ✅ Landed, and it *replaced* the old one
    rather than sitting beside it. `Bot` is the ECS bot: `SourceId`/`Revision`
    components, `Grants`/`Fired`/`TickError` resources, non-`Send` chain and value
@@ -391,23 +410,47 @@ Each step must leave `cargo test --workspace --all-targets` green.
    behind a default-off `ecs` feature) was rejected as a candidate architecture
    that nothing would exercise; see §12.
 
-   **What is not done, stated plainly: the `from_spec` gap is still open.** The
-   builder takes *verbs*, not a [`BotSpec`]. Materializing a `World` from wire
-   data needs a `domain_id -> constructor` registry (`"gh::pr_status"` has to
-   become a concrete `Observe`) and no such registry exists anywhere in this
-   workspace. `experience/invariants/sdk.yaml`'s *"a validated BotSpec cannot be
+   **What is not done, stated plainly: the `from_spec` gap is still open, and it
+   is now scheduled work rather than an open question.** The builder takes
+   *verbs*, not a [`BotSpec`]. Materializing a `World` from wire data needs a
+   `domain_id -> constructor` registry (`"gh::pr_status"` has to become a
+   concrete `Observe`) and no such registry exists anywhere in this workspace.
+   `experience/invariants/sdk.yaml`'s *"a validated BotSpec cannot be
    materialized into a runnable Bot through this SDK alone"* is therefore still
-   true, on both substrates. Closing it is a separate piece of work, and it is
-   the same missing registry the `Lambda`/`Workers` comparison arrived at from
-   the other direction.
+   true, on both substrates.
+
+   The crate doc used to argue that this absence was a design position rather
+   than a gap. That reading was put to the project owner on 2026-09-21 and
+   rejected: the ledger is right and the registry is to be built. Two constraints
+   survive the decision and bind the implementation, because they are what made
+   the absence defensible in the first place — grants still come from a
+   `GrantSet` the caller holds and never from the spec, so wire data cannot
+   choose what a bot reaches; and there is still no `bot!` proc-macro. This is
+   also the same missing registry the `Lambda`/`Workers` comparison arrived at
+   from the other direction.
 3. **Build-time schedule validation**: ✅ landed with step 2, since it has
    nowhere else to live: `Schedule::initialize()` plus `ambiguity_detection:
    LogLevel::Error`, surfaced as `BotError` from `build()`, with a control test
    that the same two systems *ordered* do validate.
 4. **`Time<Virtual>` clock root**, replacing wall-clock reads, with real and
-   virtual implementations.
+   virtual implementations. ✅ **Closed as already satisfied**, 2026-09-21. Two
+   time layers exist and both are tested: `lgwks_std::time` is pure RFC 3339
+   format and parse plus calendar arithmetic over `SystemTime` (INV-TIME-PURE),
+   and `lgwks_bot::rt::time` supplies `sleep`, `sleep_until`, `timeout`,
+   `interval`, `Instant` and `Elapsed`. What does *not* exist anywhere in the
+   workspace is a `Clock` trait or a mock/virtual time source — a search for one
+   across every crate source returns nothing — so the two remaining wall-clock
+   reads, both `Instant::now()` in `rt::supervise` for budget deadlines, can
+   still only be tested by genuinely waiting. That is accepted rather than
+   overlooked; the settlement policy (`docs/general-bot-fold.md` §6, item 9)
+   meets the same wall if it is ever built.
 5. **Effects move to exclusive systems**, and the deferred path is removed so
-   §3's silent-no-op failure cannot recur.
+   §3's silent-no-op failure cannot recur. ✅ **Landed with step 2.** This list
+   went on showing it as outstanding after the fact: effects do not go through
+   `Commands` (see the module doc on `auto_insert_apply_deferred`), `observe_fold`
+   and `fire_plan` are exclusive systems, the schedule adds only
+   `(observe_fold, fire_plan).chain()` with no `ApplyDeferred`, and the effects a
+   tick decided are awaited by `run_steps` outside the schedule.
 6. **bors invariants land on the control plane**: derived readiness, one
    reconciler, checkpoint-after-effect, replay of recorded intent.
 
