@@ -988,17 +988,31 @@ impl Ledger {
         Settled::Decided
     }
 
-    /// The first entry that is open, in `(chain, entry)` order.
-    fn first_open(&self, budget: u32) -> Option<PendingWork> {
+    /// The first entry that is unresolved, in `(chain, entry)` order.
+    ///
+    /// "Unresolved" is open *or* abandoned, and the second half is load-bearing.
+    /// An abandoned entry asks nothing of the substrate — it will not be
+    /// attempted again and no evidence is owed by the tick — so a scan that
+    /// looked only for open entries walked straight past it and reported a clean
+    /// tick. But abandoned work is not handled work: [`Self::pending`] names it,
+    /// and a caller that read `Ok` as "the chain is done" was reading the
+    /// opposite of what the ledger held. It is also a prerequisite that is *not*
+    /// satisfied, so the entries behind it are unresolved through it.
+    ///
+    /// Taking the first in declaration order is deliberate: the abandonment is
+    /// the entry that explains every successor blocked behind it, so naming it
+    /// is naming the reason.
+    fn first_unresolved(&self, budget: u32) -> Option<PendingWork> {
         for (chain, transition) in self.transitions.iter().enumerate() {
             let Some(transition) = transition.as_ref() else {
                 continue;
             };
             for (entry, state) in transition.entries.iter().enumerate() {
-                if !state.is_open() {
+                if !(state.is_open() || state.is_abandoned()) {
                     continue;
                 }
-                // Unreachable in practice: an open state always renders a hold.
+                // Unreachable in practice: an open or abandoned state always
+                // renders a hold.
                 let Some(hold) = state.hold(budget) else {
                     continue;
                 };
@@ -1033,13 +1047,20 @@ impl Ledger {
         pending
     }
 
-    /// How many entries are still open, across every chain.
-    fn open_count(&self) -> usize {
+    /// How many entries are still unresolved, across every chain: open, or
+    /// abandoned and so still blocking whatever is behind them.
+    ///
+    /// Counted the same way [`Self::first_unresolved`] scans, because the two
+    /// are rendered together in [`BotError::PendingTransition`]: a count that
+    /// omitted abandoned entries would report a non-zero entry alongside an
+    /// "0 outstanding", which reads as the one thing the pair is there to rule
+    /// out — a chain that is somehow both stuck and finished.
+    fn unresolved_count(&self) -> usize {
         self.transitions
             .iter()
             .flatten()
             .flat_map(|transition| transition.entries.iter())
-            .filter(|state| state.is_open())
+            .filter(|state| state.is_open() || state.is_abandoned())
             .count()
     }
 }
@@ -1303,9 +1324,25 @@ fn plan_chain(
             continue;
         };
         match *state {
-            // Decided. An entry that ran, one whose condition was false, and one
-            // given up on are all behind us, so the chain continues past them.
-            EntryState::Succeeded | EntryState::Skipped | EntryState::Abandoned { .. } => continue,
+            // Decided, and the chain continues past it: an entry that ran, and
+            // one whose condition was false. Both are facts about the entry that
+            // leave the entry behind it with nothing standing in its way.
+            EntryState::Succeeded | EntryState::Skipped => continue,
+            // Given up on, and a *barrier* to everything behind it. This is the
+            // line between declaration order and success dependency, and it is
+            // the one this walk used to get wrong: an entry in a chain is a
+            // prerequisite of the next, so an abandonment is the strongest
+            // possible statement that the entry behind it must not run — the
+            // draft was never reserved, so there is nothing to send. Continuing
+            // past it completed a command whose prerequisite had been given up
+            // on.
+            //
+            // The successors are not lost or forgotten by stopping here. They
+            // stay `NotStarted`, so [`Ledger::pending`] keeps reporting them and
+            // the tick that finds them names the abandonment in front of them.
+            // The way past it is evidence: `NotApplied` revives the entry, and
+            // the successors with it.
+            EntryState::Abandoned { .. } => break,
             // Held: the effect may be live and only evidence settles that. A
             // later entry is not run ahead of it.
             EntryState::Unrecorded | EntryState::OutcomeUnknown { .. } => break,
@@ -1564,12 +1601,14 @@ impl EcsBot {
         // one the budget gave up on — is held, and a held entry is reported
         // rather than passed over in silence: a caller that read a clean `Ok` as
         // "the transition was handled" would be reading something that is not
-        // true.
+        // true. That includes an abandonment, which is the case this used to
+        // miss: it asks the tick for nothing, so it looks finished from inside
+        // the walk, but it is work nobody resolved.
         let ledger = self.world.resource::<Ledger>();
-        match ledger.first_open(budget) {
+        match ledger.first_unresolved(budget) {
             Some(work) => Err(BotError::PendingTransition {
                 work,
-                outstanding: ledger.open_count(),
+                outstanding: ledger.unresolved_count(),
             }),
             None => Ok(self.world.resource::<Fired>().0),
         }
@@ -2728,27 +2767,62 @@ mod tests {
             "the given-up-on entry is named after the tick that gave up on it"
         );
 
-        // And the work it was holding back is not lost with it. The walk stops
-        // at the attempt that spent the budget, so the successor runs on the
-        // next tick, which reports it rather than leaving it to an unchanged
-        // source that would never come.
+        // And the work it was holding back is not lost with it — but it is not
+        // run either. The walk stops at the attempt that spent the budget, and
+        // the abandonment it leaves is a barrier: the successor stays
+        // `NotStarted` behind it and stays reported.
+        //
+        // These two assertions used to read `assert_eq!(bot.tick()?, 1, "the
+        // unattempted work runs as soon as the entry ahead of it is decided")`
+        // followed by `assert_eq!(*log.borrow(), vec![200])`, and later
+        // `assert_eq!(bot.tick()?, 0, "the resolved transition fires nothing")`
+        // while `pending()` was non-empty. Both are the F02 defect written down
+        // as the intent — a successor executed past an abandoned prerequisite,
+        // and a clean tick reported over work the ledger still names. They are
+        // corrected rather than loosened: the tick is now expected to refuse
+        // where it was expected to succeed.
         assert!(
             log.borrow().is_empty(),
             "the successor is not run ahead of the entry that was just decided"
         );
-        assert_eq!(
-            bot.tick()?,
-            1,
-            "the unattempted work runs as soon as the entry ahead of it is decided"
-        );
-        assert_eq!(*log.borrow(), vec![200], "and that effect happens once");
-
-        // Terminal, and the rest of the chain is resolved, so the transition is
-        // clean from here — except that the abandoned entry stays listed.
-        assert_eq!(bot.tick()?, 0, "the resolved transition fires nothing");
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(format!(
+                    "a tick with an abandoned prerequisite reported {fired} fired and ran {:?}",
+                    log.borrow()
+                )
+                .into());
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::PendingTransition { .. }),
+                "expected the unresolved chain to be reported, got {error:?}"
+            ),
+        }
         assert!(
-            identities(&bot) == vec![(0, 0)],
-            "the abandoned entry is all that is left to report: {:?}",
+            log.borrow().is_empty(),
+            "the unattempted work does not run past the entry that was given up on"
+        );
+
+        // Terminal, and the rest of the chain is blocked behind it, so the
+        // transition stays reported: the abandonment first, because it is the
+        // entry that explains the one behind it.
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(format!(
+                    "an abandoned entry was reported as {fired} fired while pending() still \
+                     names it: {:?}",
+                    bot.pending()
+                )
+                .into());
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::PendingTransition { .. }),
+                "expected the unresolved chain to be reported, got {error:?}"
+            ),
+        }
+        assert!(
+            identities(&bot) == vec![(0, 0), (0, 1)],
+            "the abandoned entry and the entry it blocks are what is left to report: {:?}",
             bot.pending()
         );
         Ok(())
@@ -2780,13 +2854,60 @@ mod tests {
             "the entry behind the abandoned one is not run in the tick that abandoned it"
         );
 
-        assert_eq!(
-            bot.tick()?,
-            1,
-            "the next tick runs the work the abandoned entry was holding back"
-        );
-        assert_eq!(*log.borrow(), vec![200], "that effect happened once");
+        // The next tick does not run what the abandoned entry was holding back,
+        // and does not report a clean tick either. This assertion used to read
+        // `assert_eq!(bot.tick()?, 1, "the next tick runs the work the abandoned
+        // entry was holding back")`, which is the defect written down as the
+        // intent: an abandonment is a prerequisite that is *not* satisfied, so
+        // the send behind an unreserved draft must not run. It is corrected
+        // rather than loosened — the tick is now expected to refuse, which is
+        // strictly more than it was expected to do before.
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(format!(
+                    "a tick with an abandoned prerequisite reported {fired} fired and ran {:?}",
+                    log.borrow()
+                )
+                .into());
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::PendingTransition { .. }),
+                "expected the unresolved chain to be reported, got {error:?}"
+            ),
+        }
         assert_eq!(attempts.get(), 1, "the abandoned entry is not retried");
+        assert!(
+            log.borrow().is_empty(),
+            "the successor of an abandoned entry is not attempted while it stands abandoned"
+        );
+        assert_eq!(
+            identities(&bot),
+            vec![(0, 0), (0, 1)],
+            "the abandonment and the entry it blocks are both still reported: {:?}",
+            bot.pending()
+        );
+
+        // Evidence that the effect did not happen is the way past the barrier:
+        // the entry becomes eligible again and its successor with it. The
+        // action refuses once more, so this tick abandons it again — which is
+        // the point of asserting it: evidence reopens the chain, it does not
+        // promise the retry will succeed.
+        let blocked = bot.pending().into_iter().next().ok_or("held")?;
+        bot.resolve_effect(blocked.id(), blocked.revision(), EffectEvidence::NotApplied)?;
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(format!("a refusal was reported as {fired} fired").into());
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::DomainError { .. }),
+                "expected the retry's own error, got {error:?}"
+            ),
+        }
+        assert_eq!(attempts.get(), 2, "the revived entry attempted again");
+        assert!(
+            log.borrow().is_empty(),
+            "and the successor is behind the barrier again, because the retry failed too"
+        );
         Ok(())
     }
 

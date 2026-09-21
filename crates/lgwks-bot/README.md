@@ -249,7 +249,11 @@ Two consequences follow, and neither is fixed by retrying blindly:
   anything. `tick` returns `Err(BotError::PendingTransition)` while work is held,
   so a clean tick is never "the transition was handled" when it was not, and
   `Bot::pending()` lists every entry that is not finished — including any entry
-  the attempt budget gave up on, with its reason. `RetryPolicy` sets the budget
+  the attempt budget gave up on, with its reason. An entry that was given up on
+  is a *barrier*, not a step behind you: the entries after it are not attempted
+  while it stands, because declaration order is a prerequisite chain, and they
+  stay reported behind it. Evidence
+  (`EffectEvidence::NotApplied`) is the way past. `RetryPolicy` sets the budget
   (three attempts by default, `RetryPolicy::ONE_ATTEMPT` for none).
 - **A retry may duplicate.** An action that failed after its request was sent
   fails as `BotError::EffectIndeterminate`, which says the effect may be live.

@@ -100,6 +100,23 @@ explicitly under that crate.
 
 ### lgwks_bot Fixed
 
+- **An abandoned entry is a barrier to its successors, and a tick over one is
+  never clean.** `plan_chain` treated `Abandoned` like `Succeeded` and walked
+  past it, so the entry behind a prerequisite that had been given up on ran
+  anyway: reserve a draft, fail the reserve under `RetryPolicy::ONE_ATTEMPT`, and
+  the next tick sent the draft that was never reserved. Declaration order is a
+  prerequisite chain, not a list of independent steps, and abandonment is the
+  strongest statement that the entry behind it must not run. The walk now stops
+  there; successors stay `NotStarted` and stay reported, and evidence
+  (`EffectEvidence::NotApplied`) remains the way past, reviving the entry and
+  them with it.
+- `EntryState::is_open` excludes `Abandoned`, so the tick's completion check — a
+  scan for the first open entry — walked past an abandonment too and returned
+  `Ok(0)` while `Bot::pending()` still named it. A caller reading a clean `Ok` as
+  "this chain is handled" read the opposite of what the ledger held. The check is
+  now `Ledger::first_unresolved`, over open *or* abandoned entries, and
+  `outstanding` counts that same set: the abandonment is named first, because it
+  is the entry that explains every successor blocked behind it.
 - **A settlement now names the generation it settles, and one naming any other
   is refused.** A chain holds one transition at a time and reuses its slot for
   every generation over it, so `(chain, entry)` alone could not distinguish a

@@ -41,7 +41,7 @@ use std::time::Duration;
 use lgwks_bot::rt::sync::{Mutex, mpsc};
 use lgwks_bot::rt::task::spawn;
 use lgwks_bot::rt::time::{sleep, timeout};
-use lgwks_bot::spec::{EffectEvidence, TransitionHold};
+use lgwks_bot::spec::{AbandonReason, EffectEvidence, RetryPolicy, TransitionHold};
 use lgwks_bot::{Auth, Bot, BotError, Builder, Cap, Execute, GrantSet, Observe, block_on};
 
 /// What a test reports when its precondition did not hold.
@@ -1302,5 +1302,276 @@ fn a_settlement_names_the_generation_it_settles_and_no_other() -> TestResult {
         "an acknowledged effect is never replayed, whatever was said about it afterwards"
     );
     assert_eq!(*seen.borrow(), vec![1, 2], "and no attempt was run for it");
+    Ok(())
+}
+
+/// An action that definitely did not happen, counting its attempts.
+///
+/// "Definitely" is the whole distinction: [`BotError::DomainError`] is the one
+/// failure the substrate reads as a fact about the effect rather than a doubt
+/// about it, so it is what spends an attempt budget and what eventually makes an
+/// entry abandoned.
+struct Refuses {
+    /// Whether the next attempt refuses. The test flips this to let the entry
+    /// through once it has been revived, which is how the barrier is shown to
+    /// lift rather than merely to hold.
+    refusing: Rc<Cell<bool>>,
+    /// How many times the action was called.
+    attempts: Rc<Cell<usize>>,
+}
+
+impl Execute for Refuses {
+    type Input = u32;
+    type Output = ();
+
+    fn required_caps(&self) -> &[Cap] {
+        &[]
+    }
+
+    async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
+        call.0.check(Execute::required_caps(self))?;
+        self.attempts.set(self.attempts.get().saturating_add(1));
+        if self.refusing.get() {
+            return Err(BotError::DomainError {
+                domain: "test::refuses".to_owned(),
+                cause: "refused".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn domain_id(&self) -> &str {
+        "test::refuses"
+    }
+}
+
+/// An action that succeeds and records the value it ran against.
+struct Noted(Rc<RefCell<Vec<u32>>>);
+
+impl Execute for Noted {
+    type Input = u32;
+    type Output = ();
+
+    fn required_caps(&self) -> &[Cap] {
+        &[]
+    }
+
+    async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
+        call.0.check(Execute::required_caps(self))?;
+        self.0.borrow_mut().push(*call.1);
+        Ok(())
+    }
+
+    fn domain_id(&self) -> &str {
+        "test::noted"
+    }
+}
+
+/// An abandoned entry is never a quiet tick.
+///
+/// The short half of the counterexample, stated as the review states it: with
+/// only the failed entry and nothing behind it, the second tick returned `Ok(0)`
+/// while `pending()` still named the abandonment. A caller reading a clean `Ok`
+/// as "this chain is handled" read something that was not true — the work had
+/// not been handled, it had been given up on, and those call for different
+/// responses from whoever owns the run.
+///
+/// Under [`RetryPolicy::ONE_ATTEMPT`] the first definite failure spends the
+/// budget, so the entry is abandoned and the first tick reports the action's own
+/// typed error rather than a summary of it. The source then holds still. What
+/// the second tick owes the caller is the abandonment, named.
+#[test]
+fn an_abandoned_entry_is_never_a_quiet_tick() -> TestResult {
+    let attempts = Rc::new(Cell::new(0));
+    let mut lonely = Bot::builder("abandoned-alone")
+        .with_retry_policy(RetryPolicy::ONE_ATTEMPT)
+        .observe(Dial {
+            value: Rc::new(Cell::new(1)),
+        })
+        .on(
+            |_observed: &u32| true,
+            Refuses {
+                refusing: Rc::new(Cell::new(true)),
+                attempts: Rc::clone(&attempts),
+            },
+        )
+        .build(&GrantSet::empty())?;
+
+    match lonely.tick() {
+        Ok(fired) => return Err(format!("a definite failure was reported as {fired} fired").into()),
+        Err(error) => assert!(
+            matches!(error, BotError::DomainError { .. }),
+            "expected the action's own error, got {error:?}"
+        ),
+    }
+    assert_eq!(attempts.get(), 1, "the declared budget was one attempt");
+    assert_eq!(
+        held(&lonely).map(|(chain, entry, _, hold)| (chain, entry, hold)),
+        Some((
+            0,
+            0,
+            TransitionHold::Abandoned {
+                reason: AbandonReason::AttemptsExhausted { attempts: 1 },
+                cause: "test::refuses: refused".to_owned(),
+            }
+        )),
+        "the abandonment is named after the tick that caused it"
+    );
+
+    // The source holds still, so there is nothing to attempt and — before the
+    // repair — nothing to report either. The tick must not say the chain is
+    // handled while `pending()` says otherwise.
+    match lonely.tick() {
+        Ok(fired) => {
+            return Err(format!(
+                "an abandoned entry was reported as {fired} fired while pending() still names \
+                 it: {:?}",
+                lonely.pending()
+            )
+            .into());
+        }
+        Err(error) => assert!(
+            matches!(
+                error,
+                BotError::PendingTransition { ref work, outstanding: 1 }
+                    if (work.id().chain(), work.id().entry()) == (0, 0)
+            ),
+            "expected the abandoned entry to be the reported work, got {error:?}"
+        ),
+    }
+    assert_eq!(attempts.get(), 1, "an abandoned entry is not retried");
+    assert!(
+        !lonely.pending().is_empty(),
+        "and it stays reported rather than being dropped"
+    );
+    Ok(())
+}
+
+/// An abandoned entry is a barrier to its successors.
+///
+/// The long half of the counterexample, stated as the review states it: one
+/// chain — reserve a draft, then send it — under [`RetryPolicy::ONE_ATTEMPT`].
+/// The first action definitely fails, so the entry is abandoned and the first
+/// tick reports the action's own typed error. The source then holds still.
+///
+/// Before the repair, the second tick walked past the abandoned entry as though
+/// it had succeeded and ran the send: the chain executed a command whose
+/// prerequisite had been given up on — the draft that was never reserved, then
+/// the send of it. Declaration order is not success dependency, and treating an
+/// abandonment as "behind us" is what confused the two.
+///
+/// The invariant is that an abandonment is a *barrier*, not a decision that the
+/// work is behind us. Successors under the default sequential disposition are
+/// not attempted while it stands, and they stay reported. Abandonment is not a
+/// way to finish a chain, and not a way to finish it quietly: the caller either
+/// supplies evidence that the effect did not happen — which revives the entry
+/// and its successors with it — or the chain stays reported as unresolved.
+#[test]
+fn an_abandoned_entry_blocks_its_successors() -> TestResult {
+    let attempts = Rc::new(Cell::new(0));
+    let refusing = Rc::new(Cell::new(true));
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut chained = Bot::builder("abandoned-then-blocked")
+        .with_retry_policy(RetryPolicy::ONE_ATTEMPT)
+        .observe(Dial {
+            value: Rc::new(Cell::new(1)),
+        })
+        .on(
+            |_observed: &u32| true,
+            Refuses {
+                refusing: Rc::clone(&refusing),
+                attempts: Rc::clone(&attempts),
+            },
+        )
+        .on(|_observed: &u32| true, Noted(Rc::clone(&log)))
+        .build(&GrantSet::empty())?;
+
+    match chained.tick() {
+        Ok(fired) => return Err(format!("a definite failure was reported as {fired} fired").into()),
+        Err(error) => assert!(
+            matches!(error, BotError::DomainError { .. }),
+            "expected the action's own error, got {error:?}"
+        ),
+    }
+    assert!(
+        log.borrow().is_empty(),
+        "the successor is not run in the tick that abandoned its prerequisite"
+    );
+
+    // The tick that used to run the successor. It must not: the send would be
+    // for a draft that was never reserved.
+    match chained.tick() {
+        Ok(fired) => {
+            return Err(format!(
+                "a tick with an abandoned prerequisite reported {fired} fired and ran {:?}",
+                log.borrow()
+            )
+            .into());
+        }
+        Err(error) => assert!(
+            matches!(error, BotError::PendingTransition { .. }),
+            "expected the unresolved chain to be reported, got {error:?}"
+        ),
+    }
+    assert!(
+        log.borrow().is_empty(),
+        "the successor of an abandoned entry is not attempted while it stands abandoned: {:?}",
+        log.borrow()
+    );
+
+    // Both are still reported — the abandonment and the entry it blocks — so
+    // the caller can see which entry is the reason and which is waiting on it.
+    let reported: Vec<(usize, usize)> = chained
+        .pending()
+        .iter()
+        .map(|work| (work.id().chain(), work.id().entry()))
+        .collect();
+    assert_eq!(
+        reported,
+        vec![(0, 0), (0, 1)],
+        "the abandonment and the entry it blocks are both listed: {:?}",
+        chained.pending()
+    );
+    assert!(
+        matches!(
+            held(&chained).map(|(_, _, _, hold)| hold),
+            Some(TransitionHold::Abandoned { .. })
+        ),
+        "and the first of them is the abandonment, which is the fact that explains the other"
+    );
+
+    // Evidence that the effect did not happen is what reopens the chain: the
+    // entry is eligible again and its successor with it. This is the only way
+    // past a barrier, which is what makes the barrier a decision the caller
+    // makes rather than one the substrate makes for them. The action is allowed
+    // through this time, so the chain is shown to complete rather than to stay
+    // wedged.
+    refusing.set(false);
+    let blocked = chained
+        .pending()
+        .into_iter()
+        .next()
+        .ok_or("the abandoned entry is reported")?;
+    chained.resolve_effect(blocked.id(), blocked.revision(), EffectEvidence::NotApplied)?;
+    assert_eq!(
+        chained.tick()?,
+        2,
+        "the revived entry and the successor it was blocking both run"
+    );
+    assert_eq!(
+        attempts.get(),
+        2,
+        "the revived entry attempts again, because evidence is a new fact"
+    );
+    assert_eq!(
+        *log.borrow(),
+        vec![1],
+        "and the successor runs, because its prerequisite is no longer abandoned"
+    );
+    assert!(
+        chained.pending().is_empty(),
+        "the chain is finished: {:?}",
+        chained.pending()
+    );
     Ok(())
 }

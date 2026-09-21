@@ -405,7 +405,14 @@ pub enum BotError {
         /// abandonment instead, since that keeps the typed variant intact;
         /// [`crate::spec::Bot::pending`] is where abandoned entries are named.
         work: PendingWork,
-        /// Entries across every chain that are still open.
+        /// Entries across every chain that are still unresolved: open, or
+        /// abandoned and still blocking the entries behind them.
+        ///
+        /// Abandoned entries are counted because they are counted by the scan
+        /// that picked `work`: a count that omitted them could pair a named
+        /// abandonment with `outstanding: 0`, which is the one reading this
+        /// error exists to prevent — a chain that is somehow both stuck and
+        /// finished.
         outstanding: usize,
     },
     /// `resolve_effect` was given an entry whose outcome is already decided.

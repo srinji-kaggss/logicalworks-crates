@@ -140,17 +140,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "it was given up on, not quietly dropped: {:?}",
         pending[0].hold()
     );
-    assert_eq!(
-        bot.tick()?,
-        0,
-        "the rest of the chain is resolved, so nothing fires"
+    // And the chain is not clean while it stands. The abandoned entry asks the
+    // tick for nothing — it will not be attempted again — but it is work nobody
+    // resolved, and the entry behind a prerequisite that was given up on is not
+    // work that may proceed either. A tick that returned `Ok` here would be
+    // reporting a handled transition over a ledger that says otherwise.
+    assert!(
+        matches!(bot.tick(), Err(BotError::PendingTransition { .. })),
+        "an abandoned entry is never a clean tick"
     );
 
     // A new source value is new work — for the entries that were not given up
-    // on. The abandoned entry is terminal until evidence revives it, so it is
-    // not retried merely because the source moved.
+    // on. The abandoned entry is a barrier to what follows it: it is not
+    // retried merely because the source moved, and nothing behind it is
+    // attempted either, so the tick reports the chain as still unresolved even
+    // though the first entry ran again.
     value.store(1, Ordering::SeqCst);
-    assert_eq!(bot.tick()?, 1, "the new revision's work runs");
+    assert!(
+        matches!(bot.tick(), Err(BotError::PendingTransition { .. })),
+        "the new revision runs its work and still reports the abandonment"
+    );
     assert_eq!(
         counted.load(Ordering::SeqCst),
         2,

@@ -76,7 +76,12 @@ three.
   moves again.** `RetryPolicy` sets the budget (three attempts by default;
   `RetryPolicy::ONE_ATTEMPT` for a domain whose failures are always terminal).
 - **The entries after it wait.** The walk stops at the first entry it cannot
-  settle, so an acknowledged effect is never replayed to reach a successor.
+  settle, so an acknowledged effect is never replayed to reach a successor. That
+  includes an entry it has *given up* on: declaration order is not success
+  dependency, and an abandonment is the strongest statement that the entry behind
+  it must not run — a draft that was never reserved has nothing to send.
+  Successors stay reported behind it, and the way past is evidence
+  (`EffectEvidence::NotApplied`), which revives the entry and them with it.
 - **Giving up is reported, not silent.** When the budget is spent the entry is
   abandoned, the tick still returns the action's own typed error, and
   `Bot::pending()` names the entry, the reason (`AbandonReason`), and the source
@@ -166,11 +171,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pending[0].hold(),
         TransitionHold::Abandoned { reason: AbandonReason::AttemptsExhausted { .. }, .. }
     ));
-    assert_eq!(bot.tick()?, 0, "the rest of the chain is resolved, so nothing fires");
+    // The chain is not clean while the abandonment stands: it asks the tick for
+    // nothing, but it is work nobody resolved, and the entry behind a
+    // prerequisite that was given up on is not work that may proceed.
+    assert!(matches!(bot.tick(), Err(BotError::PendingTransition { .. })));
 
     // A new source value is new work for the entries that were not given up on.
+    // The abandoned entry is a barrier: it is not retried because the source
+    // moved, nothing behind it is attempted either, and the tick still reports
+    // the chain as unresolved even though the first entry ran again.
     value.store(1, Ordering::SeqCst);
-    assert_eq!(bot.tick()?, 1, "the new revision's work runs");
+    assert!(matches!(bot.tick(), Err(BotError::PendingTransition { .. })));
     assert_eq!(counted.load(Ordering::SeqCst), 2);
     Ok(())
 }
