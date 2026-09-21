@@ -1,0 +1,8 @@
+# A register that enforces and approves nothing.
+#
+# `clean` authors no external edge, so it needs no approval, and `enforce = true`
+# means a refusal would be fatal. Pointed at a repository that *does* author an
+# unapproved edge, this register refuses it — which is exactly why the audits
+# below must inspect that repository and not this one.
+[policy]
+enforce = true
