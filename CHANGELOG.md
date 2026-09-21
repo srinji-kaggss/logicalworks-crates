@@ -6,7 +6,12 @@ independently; each release lists per-crate deltas. The format follows
 `0.x`, so any minor may carry breaking changes, which are then listed
 explicitly under that crate.
 
-## [lgwks_bot 0.4.0] — 2026-09-20
+## [lgwks_bot 0.4.0 / lgwks_std 0.6.4 / lgwks_deps 0.1.9 / lgwks_ast 0.2.0] — 2026-09-20
+
+Four crates move together. Two are breaking and take the minor position —
+`lgwks_bot` (the ECS substrate and a synchronous `tick`) and `lgwks_ast` (a
+renamed enum variant). `lgwks_std` and `lgwks_deps` carry compatible additions
+and take patches.
 
 **Breaking.** The four verbs now execute as systems on a `bevy_ecs` schedule,
 and that substrate is the only path — there is no feature flag that selects it,
