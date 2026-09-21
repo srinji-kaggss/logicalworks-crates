@@ -13,14 +13,16 @@ change.
 
 ### lgwks_deps Fixed
 
-- `lgwks_deps` had **no rendered documentation on docs.rs for any published
-  version**. The manifest declared `all-features = true`, and docs.rs builds for
-  `x86_64-unknown-linux-gnu`: `gpui` pulls `objc2`, which refuses to compile off
-  Apple targets, and `ml-candle-metal` selects Candle's Metal backend. Every
-  build failed, so the crate page showed a build error instead of an API. The
-  manifest now names the platform-neutral set the CI doc and clippy lanes
-  already verify on Linux (`tokio-full`, `appcui`); the platform-bound features
-  stay covered by the per-platform jobs.
+- `lgwks_deps` published no rendered documentation on docs.rs for **0.1.9,
+  0.1.10, and 0.1.11**. The manifest declared `all-features = true`, and docs.rs
+  builds for `x86_64-unknown-linux-gnu`: `gpui` pulls `objc2`, which refuses to
+  compile off Apple targets, and `ml-candle-metal` selects Candle's Metal
+  backend. The crate page showed a build error instead of an API. The manifest
+  now names the platform-neutral set the CI doc and clippy lanes already verify
+  on Linux (`tokio-full`, `appcui`); the platform-bound features stay covered by
+  the per-platform jobs.
+- 0.1.4 through 0.1.8 are unaffected; the declaration became unbuildable with
+  the storefront additions that landed in 0.1.9.
 - The `Docs` CI job gained a step that reads each crate's declared
   `[package.metadata.docs.rs]` and builds exactly that set, so an unbuildable
   declaration fails in CI rather than on docs.rs.
