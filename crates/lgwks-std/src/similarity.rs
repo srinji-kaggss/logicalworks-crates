@@ -236,8 +236,13 @@ impl BoundingBox {
     }
 
     /// Returns coordinates in `(x, y, width, height)` order.
+    ///
+    /// Named `to_` rather than `as_` because it returns an owned array by value:
+    /// the four coordinates are separate fields, so there is no contiguous
+    /// array behind `&self` to borrow from, and the conversion therefore costs
+    /// a copy rather than a reborrow.
     #[must_use]
-    pub const fn as_array(&self) -> [f64; 4] {
+    pub const fn to_array(&self) -> [f64; 4] {
         [self.x, self.y, self.width, self.height]
     }
 }
@@ -503,15 +508,6 @@ impl<Value: ?Sized> Weighted<Value> {
         })
     }
 
-    /// Alias for [`Weighted::new`] when a fallible constructor name is clearer
-    /// at a call site.
-    pub fn try_new(
-        components: Vec<(f64, Box<dyn Similarity<Value = Value>>)>,
-        threshold: f64,
-    ) -> Result<Self, WeightedError> {
-        Self::new(components, threshold)
-    }
-
     /// Returns the acceptance threshold.
     #[must_use]
     pub const fn threshold(&self) -> f64 {
@@ -522,6 +518,33 @@ impl<Value: ?Sized> Weighted<Value> {
     #[must_use]
     pub fn is_accepted(&self, left: &Value, right: &Value) -> bool {
         self.score(left, right) >= self.threshold
+    }
+}
+
+impl<Value: ?Sized> core::fmt::Debug for Weighted<Value> {
+    /// Reports the composition rather than the components.
+    ///
+    /// The component list is a set of `dyn Similarity` trait objects, so a
+    /// derived `Debug` would print pointers instead of policy: the useful
+    /// facts are how many scorers there are and where the acceptance line
+    /// sits.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Weighted")
+            .field("components", &self.components.len())
+            .field("weights", &WeightList(self))
+            .field("threshold", &self.threshold)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The component weights, formatted in composition order.
+struct WeightList<'a, Value: ?Sized>(&'a Weighted<Value>);
+
+impl<Value: ?Sized> core::fmt::Debug for WeightList<'_, Value> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_list()
+            .entries(self.0.components.iter().map(|component| component.0))
+            .finish()
     }
 }
 
@@ -913,7 +936,7 @@ mod tests {
         assert_close(box_value.y(), 0.2);
         assert_close(box_value.width(), 0.3);
         assert_close(box_value.height(), 0.4);
-        for (actual, expected) in box_value.as_array().iter().zip([0.1, 0.2, 0.3, 0.4]) {
+        for (actual, expected) in box_value.to_array().iter().zip([0.1, 0.2, 0.3, 0.4]) {
             assert_close(*actual, expected);
         }
     }
