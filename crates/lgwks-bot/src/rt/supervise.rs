@@ -42,6 +42,15 @@
 //! the unbounded case, and it is bounded in the way that matters: it is
 //! cancellation-terminated, not free-running.
 //!
+//! Termination cannot rest on the body suspending. A body that resolves
+//! immediately — the simplest repeating body there is — would otherwise make the
+//! whole loop a single uninterruptible poll, and a cancellation ordered by
+//! another task would not be delivered until the budget ran out. `repeat`
+//! therefore performs a bounded number of iterations per poll and yields, which
+//! is what keeps the cancellation and abort halves of the contract reachable.
+//! The bound is documented on `repeat` itself; the interval is private, and no
+//! caller has to know it.
+//!
 //! ```no_run
 //! use lgwks_bot::rt::supervise::{Budget, Supervisor};
 //!
@@ -75,7 +84,29 @@ use std::time::{Duration, Instant};
 use lgwks_deps::tokio::sync::Semaphore;
 
 use super::cancel::CancellationToken;
-use super::task::JoinSet;
+use super::task::{JoinSet, yield_now};
+
+/// Iterations one poll of [`repeat`] may complete before it hands the executor
+/// back.
+///
+/// A body that resolves immediately — `async {}`, or any future that is ready on
+/// its first poll — never suspends the loop, so without this the whole loop is
+/// one uninterruptible poll: the executor never regains control, and a token
+/// cancelled by another task is not observed until the budget is spent. On a
+/// current-thread runtime that is not a stall but a deadlock, because the task
+/// that would cancel cannot be scheduled at all.
+///
+/// The bound is on *work per poll*, not on the loop: cancellation is still
+/// checked before every iteration, the body is still dropped mid-flight by
+/// [`CancellationToken::run_until_cancelled`], and the iteration count is
+/// unchanged. Yielding is what makes the abort and cancellation half of the
+/// contract reachable, so the interval trades a scheduler round-trip per
+/// `YIELD_INTERVAL` iterations for a bounded cancellation latency.
+///
+/// A body that awaits explicitly pays one extra scheduler poll per interval,
+/// which is why this is not smaller; a ready body pays a round-trip it would
+/// otherwise never make, which is why it is not larger.
+const YIELD_INTERVAL: u64 = 32;
 
 /// How long a repeated body may keep running.
 ///
@@ -349,9 +380,22 @@ impl Supervisor {
     /// Cancel every task and wait for the set to drain.
     ///
     /// A task built on [`Supervisor::spawn_repeating`] or [`repeat`] observes
-    /// the token and returns from its loop. One that never observes its token
-    /// is aborted, so this always terminates: there is no argument or task
-    /// shape that makes it hang.
+    /// the token and returns from its loop, and `repeat` yields the executor
+    /// every few iterations, so a repeating loop no longer has to *suspend* to
+    /// become cancellable. One that never observes its token at all is aborted,
+    /// which takes effect the next time that task yields.
+    ///
+    /// # Limits
+    ///
+    /// Abort is cooperative. A future that never returns from `poll` — a
+    /// blocking call, an unbounded loop with no await, a body that ignores its
+    /// token and never suspends — is not preemptible, and this call waits for
+    /// it. That is a property of cooperative scheduling, not of this
+    /// supervisor: nothing in a thread-per-task executor can stop a poll in
+    /// flight from the outside. Such work belongs behind an explicit budget or
+    /// in another process. What this module guarantees is the other direction:
+    /// every loop *it* drives is bounded per poll, so cancellation and abort do
+    /// land.
     pub async fn shutdown(mut self) {
         self.token.cancel();
         self.set.shutdown().await;
@@ -384,6 +428,22 @@ impl Drop for Supervisor {
 /// A cancel is observed even when the budget is still unspent, and is reported
 /// as [`Outcome::Cancelled`] rather than as exhaustion, so a caller can tell a
 /// completed run from an interrupted one.
+///
+/// # Bounded poll
+///
+/// No single poll of this loop runs an unbounded number of iterations. After a
+/// private interval of iterations the loop yields to the executor, so a
+/// cancellable token is observably cancelled even when the body never suspends:
+/// the task holding the token runs, the token is cancelled, and the loop exits
+/// at its next iteration boundary. Without that, an immediately-ready body
+/// holds the executor for the whole run and a cancellation ordered by another
+/// task is not delivered until the budget is spent — on a current-thread
+/// runtime, never.
+///
+/// This is the loop's own contract and it is the only part of the contract this
+/// crate can enforce: a *body* that never returns from `poll` is noncooperative
+/// user code, and no amount of yielding here can preempt it. See
+/// [`Supervisor::shutdown`].
 pub async fn repeat<F, Fut>(token: &CancellationToken, budget: Budget, mut body: F) -> Outcome
 where
     F: FnMut(u64) -> Fut,
@@ -403,6 +463,11 @@ where
     };
 
     let mut iterations: u64 = 0;
+    // Counts down to the next cooperative yield. A countdown rather than a
+    // modulo of `iterations`: `clippy::modulo_arithmetic` and
+    // `clippy::integer_division` are both forbidden workspace-wide, and a
+    // countdown states the bound without either.
+    let mut until_yield: u64 = YIELD_INTERVAL;
     loop {
         if token.is_cancelled() {
             return Outcome::Cancelled { iterations };
@@ -418,6 +483,17 @@ where
         match token.run_until_cancelled(body(iterations)).await {
             Some(()) => iterations = iterations.saturating_add(1),
             None => return Outcome::Cancelled { iterations },
+        }
+        // Hand the executor back periodically so a ready body cannot hold it
+        // for the whole run. `yield_now` resolves on its second poll, so this
+        // costs one extra poll per interval and never blocks: outside a runtime
+        // the waker is woken immediately, inside one the task is placed behind
+        // the tasks already ready to run, which is how the cancellation this
+        // loop checks for at the top gets a chance to be performed.
+        until_yield = until_yield.saturating_sub(1);
+        if until_yield == 0 {
+            until_yield = YIELD_INTERVAL;
+            yield_now().await;
         }
     }
 }
@@ -470,6 +546,258 @@ mod tests {
             spins = spins.saturating_add(1);
             yield_now().await;
         }
+    }
+
+    /// Yield to the executor until `predicate` holds, or `limit` yields have
+    /// happened.
+    ///
+    /// Returns whether the predicate held. A bounded spin rather than a timer:
+    /// the executor under test here is the one a timer would need, so waiting
+    /// for the thing being measured is the failure mode this helper exists to
+    /// avoid.
+    async fn yield_until(mut predicate: impl FnMut() -> bool, limit: u32) -> bool {
+        let mut yields: u32 = 0;
+        while !predicate() {
+            if yields >= limit {
+                return false;
+            }
+            yields = yields.saturating_add(1);
+            yield_now().await;
+        }
+        true
+    }
+
+    /// Start a task that counts heartbeat increments until it is cancelled.
+    ///
+    /// It only advances when the executor schedules it, which is what makes it
+    /// an observation of executor sharing rather than of wall-clock time.
+    async fn spawn_heartbeat(supervisor: &mut Supervisor, beats: &Arc<AtomicU64>) {
+        let beats = Arc::clone(beats);
+        supervisor
+            .spawn(move |token| async move {
+                while !token.is_cancelled() {
+                    beats.fetch_add(1, Ordering::SeqCst);
+                    yield_now().await;
+                }
+            })
+            .await;
+    }
+
+    #[test]
+    fn a_large_finite_budget_still_yields_to_a_sibling_task() {
+        // A body that resolves immediately never suspends the loop, so before
+        // the loop yielded, one poll of it ran the entire budget and no other
+        // task on the executor got to run at all. The budget is finite so the
+        // old behaviour is a failed assertion here rather than a hung suite; a
+        // current-thread runtime was the case that deadlocked outright, because
+        // the task that would have cancelled could not even be scheduled.
+        const BUDGET: u64 = 1_000_000;
+        block_on(async {
+            let beats = Arc::new(AtomicU64::new(0));
+            let ran = Arc::new(AtomicU64::new(0));
+            // The heartbeat count the body saw on its *first* iteration, and the
+            // highest it saw on any later one. The heartbeat advancing between
+            // two of the loop's own iterations is the observation that the
+            // executor was shared: one uninterruptible poll of the loop sees a
+            // single frozen value for its whole run, whatever that value is.
+            let first_seen = Arc::new(AtomicU64::new(u64::MAX));
+            let later_seen = Arc::new(AtomicU64::new(0));
+
+            let mut supervisor = Supervisor::new(4);
+            spawn_heartbeat(&mut supervisor, &beats).await;
+
+            let body_ran = Arc::clone(&ran);
+            let body_first = Arc::clone(&first_seen);
+            let body_later = Arc::clone(&later_seen);
+            let body_beats = Arc::clone(&beats);
+            supervisor
+                .spawn_repeating(budget_of(BUDGET), move |_tick| {
+                    let body_ran = Arc::clone(&body_ran);
+                    let body_first = Arc::clone(&body_first);
+                    let body_later = Arc::clone(&body_later);
+                    let body_beats = Arc::clone(&body_beats);
+                    async move {
+                        body_ran.fetch_add(1, Ordering::SeqCst);
+                        let now = body_beats.load(Ordering::SeqCst);
+                        if now < body_first.load(Ordering::SeqCst) {
+                            body_first.store(now, Ordering::SeqCst);
+                        }
+                        if now > body_later.load(Ordering::SeqCst) {
+                            body_later.store(now, Ordering::SeqCst);
+                        }
+                    }
+                })
+                .await;
+
+            // Give the repeating worker its first poll before asserting on what
+            // it observed: a worker cancelled before it starts proves nothing.
+            assert!(
+                yield_until(|| ran.load(Ordering::SeqCst) > 0, 1_000).await,
+                "the repeating worker never took a single iteration"
+            );
+            assert!(
+                yield_until(
+                    || later_seen.load(Ordering::SeqCst) > first_seen.load(Ordering::SeqCst),
+                    1_000
+                )
+                .await,
+                "the repeating body ran {} of its {BUDGET} iterations seeing the heartbeat count \
+                 frozen at {}, so one poll of it held the executor for the whole run",
+                ran.load(Ordering::SeqCst),
+                first_seen.load(Ordering::SeqCst)
+            );
+
+            supervisor.shutdown().await;
+        });
+    }
+
+    #[test]
+    fn a_cancel_from_a_sibling_task_stops_an_ongoing_ready_body() {
+        // The case from the issue, in miniature: a loop whose body resolves
+        // immediately, so it never suspends of its own accord, and a canceller
+        // on a *different* task. The canceller can only run if the loop hands
+        // the executor back, so one uninterruptible poll of the loop makes the
+        // cancel unobservable — which on a current-thread runtime is not a
+        // delay, it is a deadlock, because the canceller may never run at all.
+        //
+        // The body carries a brake so an unbounded loop still ends when the
+        // cancel cannot land, turning the old behaviour into a failed assertion
+        // rather than a hung suite. The assertions then distinguish the two:
+        // the brake is three orders of magnitude above what a yielding loop
+        // needs.
+        const BRAKE: u64 = 1_000_000;
+        block_on(async {
+            let root = CancellationToken::new();
+            let ran = Arc::new(AtomicU64::new(0));
+
+            let mut supervisor = Supervisor::new(2);
+            // The canceller holds the root, so its `cancel` reaches the loop's
+            // child token. It waits for the loop's first iteration before
+            // cancelling, so the cancel provably lands on a running loop rather
+            // than on a task that never started.
+            let canceller_root = root.clone();
+            let canceller_ran = Arc::clone(&ran);
+            supervisor
+                .spawn(move |_task_token| async move {
+                    while canceller_ran.load(Ordering::SeqCst) == 0 {
+                        yield_now().await;
+                    }
+                    canceller_root.cancel();
+                })
+                .await;
+
+            let loop_ran = Arc::clone(&ran);
+            let loop_root = root.clone();
+            let brake = root.clone();
+            let outcome = repeat(&loop_root, Budget::Ongoing, move |_tick| {
+                let brake = brake.clone();
+                let loop_ran = Arc::clone(&loop_ran);
+                async move {
+                    let count = loop_ran.fetch_add(1, Ordering::SeqCst).saturating_add(1);
+                    if count >= BRAKE {
+                        brake.cancel();
+                    }
+                }
+            })
+            .await;
+
+            assert!(
+                outcome.was_cancelled(),
+                "the loop ended as {outcome:?} rather than as cancelled"
+            );
+            let iterations = outcome.iterations();
+            assert!(
+                iterations < BRAKE,
+                "the loop ran to its own {BRAKE}-iteration brake ({iterations} iterations) \
+                 instead of observing the cancel from the sibling task"
+            );
+
+            // Drain the canceller, then check the body is not invoked again:
+            // the cancel is a boundary, not a hint.
+            assert!(
+                settle(&mut supervisor).await,
+                "the canceller task never finished"
+            );
+            let settled = ran.load(Ordering::SeqCst);
+            for _ in 0..64 {
+                yield_now().await;
+            }
+            assert_eq!(
+                ran.load(Ordering::SeqCst),
+                settled,
+                "the body was invoked again after the loop observed the cancel"
+            );
+        });
+    }
+
+    #[test]
+    fn shutdown_lands_on_an_ongoing_ready_body() {
+        // The shutdown half of the same defect: `Supervisor::shutdown` cancels
+        // and drains, and before the loop yielded it could not even be reached
+        // until the repeating task returned on its own.
+        //
+        // The brake holds the loop's *own* token — the one `repeat` races — so
+        // an unbounded loop whose cancel cannot land ends at the brake rather
+        // than running forever, which is what keeps this a failed assertion
+        // instead of a hung suite.
+        const BRAKE: u64 = 1_000_000;
+        block_on(async {
+            let ran = Arc::new(AtomicU64::new(0));
+            let mut supervisor = Supervisor::new(1);
+            let body_ran = Arc::clone(&ran);
+            supervisor
+                .spawn(move |token| async move {
+                    let brake = token.clone();
+                    let _outcome = repeat(&token, Budget::Ongoing, move |_tick| {
+                        let brake = brake.clone();
+                        let body_ran = Arc::clone(&body_ran);
+                        async move {
+                            let count = body_ran.fetch_add(1, Ordering::SeqCst).saturating_add(1);
+                            if count >= BRAKE {
+                                brake.cancel();
+                            }
+                        }
+                    })
+                    .await;
+                })
+                .await;
+
+            // Prove the loop is running before shutting down, so the shutdown
+            // lands on a live body rather than on a task that never polled.
+            assert!(
+                yield_until(|| ran.load(Ordering::SeqCst) > 0, 1_000).await,
+                "the repeating worker never took a single iteration"
+            );
+            supervisor.shutdown().await;
+
+            let iterations = ran.load(Ordering::SeqCst);
+            assert!(
+                iterations < BRAKE,
+                "the loop ran to its own {BRAKE}-iteration brake ({iterations} iterations) \
+                 instead of being stopped by the shutdown"
+            );
+        });
+    }
+
+    #[test]
+    fn an_already_cancelled_token_never_invokes_the_body() {
+        let token = CancellationToken::new();
+        token.cancel();
+        let ran = AtomicU64::new(0);
+        let body_ran = &ran;
+        let outcome = block_on(repeat(&token, Budget::Ongoing, move |_tick| async move {
+            body_ran.fetch_add(1, Ordering::SeqCst);
+        }));
+        assert_eq!(
+            outcome,
+            Outcome::Cancelled { iterations: 0 },
+            "a token cancelled before the loop starts must stop it with no iterations"
+        );
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "the body must not be invoked at all past a cancellation boundary"
+        );
     }
 
     #[test]
