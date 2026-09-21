@@ -157,6 +157,38 @@ explicitly under that crate.
   having rebound it; field and method segments, macro strings, and comments are
   not evidence, and `drop(binding)` is a discard rather than a use.
 
+- **A validated flow could expand to gigabytes from a sub-megabyte document**
+  (`lgwks_bot`). `FlowBounds` bounded *steps*, validation bounded the document's
+  *shape*, and nothing bounded *bytes*: a template repeating `${answer}` 20,000
+  times is a 200 KB document that interpolates to 163,840,000 bytes in one step,
+  and four such steps reach 10 GB. Four ceilings now bound it — utterance,
+  stored value, computed record expansion, and aggregate session retention — and
+  a template's expansion is *sized* with checked arithmetic before it is
+  rendered, so the amplification costs a bounded number of additions instead of
+  an unbounded allocation. A template whose literal bytes alone exceed the
+  ceiling is refused at load, because it could never render at any value.
+  `ResourceLimits` lets an operator tighten the shipped ceilings; a document may
+  tighten its own and may not raise them.
+- **A declared terminal outcome was accepted and then ignored**
+  (`lgwks_bot`). `Handoff` and `Refer` computed their outcome from the node
+  alone, so a document that said a handoff was not authorized ran as a handoff.
+  One calculation now backs both validation and execution, and a declaration
+  that contradicts its node is refused at load rather than accepted and dropped.
+- **An ask could offer an option the declared variable cannot store**
+  (`lgwks_bot`). Validation did not decode ask candidates, so a flow offering an
+  unanswerable option loaded cleanly and failed for the person answering it. The
+  same decoding that runs at store time now runs at load over every candidate.
+
+### Added
+
+- Nine `BotError` variants (`lgwks_bot`): `AskOptionNotAssignable`,
+  `AskOptionTooLarge`, `ConflictingTerminalDeclaration`, `RecordTooLarge`,
+  `ResourceLimitAboveCeiling`, `SessionRetentionExceeded`,
+  `TemplateExpansionTooLarge`, `UtteranceTooLarge`, and `ValueTooLarge`. All are
+  additive.
+- `ResourceLimits`, `ResourceAxis`, `CompiledTemplate`, `TemplatePart`, and the
+  four `MAX_*` byte ceilings, exported from the crate root (`lgwks_bot`).
+
 ## [lgwks_deps 0.1.12] - 2026-09-20
 
 Documentation release. No API change, no behaviour change, and no command-line
