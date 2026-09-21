@@ -1462,14 +1462,7 @@ fn fire_plan(world: &mut World) {
                 transition.value.as_ref(),
                 failures.get_mut(index),
             ) {
-                plan_chain(
-                    chain,
-                    &transition,
-                    value,
-                    index,
-                    &mut steps,
-                    failure,
-                );
+                plan_chain(chain, &transition, value, index, &mut steps, failure);
             }
             // No chain, or a transition bound to nothing: the work is kept,
             // not discarded. A transition is opened only for a source that was
@@ -3494,7 +3487,7 @@ mod tests {
             // opened with nothing observed, which holds its entries rather than
             // evaluating them against a value nobody read — a real state, but
             // not this one.
-            let mut transition = Transition::opened(revision, 1, Some(Box::new(200_u16)));
+            let mut transition = Transition::opened(revision, 1, Some(Erased::new(200_u16)));
             *transition
                 .entries
                 .first_mut()
@@ -3562,10 +3555,7 @@ mod tests {
             .build(&net_grants())?;
         bot.world.non_send_mut::<Chains>().0[0].entries.insert(
             0,
-            typed_entry::<_, _, String>(
-                |value: &String| value.len() >= 3,
-                Record(Rc::clone(&log)),
-            ),
+            typed_entry::<_, _, String>(|value: &String| value.len() >= 3, Record(Rc::clone(&log))),
         );
 
         match bot.tick() {

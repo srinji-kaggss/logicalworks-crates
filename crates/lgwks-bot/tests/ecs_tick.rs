@@ -872,8 +872,13 @@ fn socket_source_on_the_shipped_runtime() -> TestResult {
                         cause: error.to_string(),
                     })?;
             if let Err(error) = client.write_all(b"7").await {
+                // A write that failed on an established connection is the
+                // `Unsettled` arm, not `NotDelivered`: the connection existed,
+                // so bytes may already have reached the peer and a retry here
+                // is a possible duplicate.
                 return Err(BotError::DomainError {
                     domain,
+                    certainty: DispatchCertainty::Unsettled,
                     cause: error.to_string(),
                 });
             }
@@ -883,7 +888,6 @@ fn socket_source_on_the_shipped_runtime() -> TestResult {
                     .await
                     .map_err(|error| BotError::DomainError {
                         domain: "test::socket_source".to_owned(),
-                        certainty: DispatchCertainty::NotDelivered,
                         certainty: DispatchCertainty::NotDelivered,
                         cause: error.to_string(),
                     })?;
@@ -1621,8 +1625,13 @@ impl Execute for Grudging {
         let left = self.refusals.get();
         if left > 0 {
             self.refusals.set(left.saturating_sub(1));
+            // `NotDelivered` and not `Refused`: this fixture is a *transient*
+            // refusal that the chain is expected to retry while it has budget,
+            // and `Refused` classifies as `RetryClass::Never`, which abandons
+            // the entry on the first failure.
             return Err(BotError::DomainError {
                 domain: "test::grudging".to_owned(),
+                certainty: DispatchCertainty::NotDelivered,
                 cause: "refused".to_owned(),
             });
         }
