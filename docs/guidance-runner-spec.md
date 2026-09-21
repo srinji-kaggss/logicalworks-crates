@@ -36,6 +36,12 @@ when these modules are lifted into this workspace, each is replaced without
 touching a call site. That is the design requirement the rest of this document
 serves.
 
+This table is not the whole picture. A full sweep of adjacent repositories is in
+[`estate-asset-inventory.md`](estate-asset-inventory.md), and it found two assets
+that change the plan: a journal-authoritative session runtime already exists
+under a compatible licence, and so does the similarity scoring primitive. The
+workstreams below are the parts that genuinely do not exist elsewhere.
+
 ## Design rule: every borrowed part is behind a trait
 
 Nothing below may be used directly by a caller at more than one remove.
