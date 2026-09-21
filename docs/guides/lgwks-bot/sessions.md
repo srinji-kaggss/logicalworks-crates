@@ -108,7 +108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `FlowSpec` is the document. It owns variable declarations, an entry node, a node
 map, explicit continuations, terminal overrides, and `FlowBounds`. `FlowSpec::new`
 validates on construction and `FlowSpec::from_json` validates on parse
-(`crates/lgwks-bot/src/session.rs:577`). `MAX_FLOW_BYTES` is 2,097,152, and input
+(`crates/lgwks-bot/src/session.rs:541`). `MAX_FLOW_BYTES` is 2,097,152, and input
 past it is refused with `BotError::FlowTooLarge` before parsing runs.
 
 `NodeKind` is a closed set: `Say`, `Ask`, `Branch`, `Handoff`, `Refer`, `Route`,
@@ -124,19 +124,30 @@ cannot.
 `Session::with_components` replaces both, which is the seam: `Resolver` and
 `Journal` are traits, and neither is required to be a model or a file.
 
+`Journal` has two methods, and they carry different things.
+`Journal::record` receives the rendered conversation — the transcript — and
+cannot report a failure. `Journal::record_decision` receives a
+`DecisionReceipt` and returns `Result<ReceiptAcceptance, JournalError>`; it is
+required rather than defaulted, because a sink that has to do nothing to look
+successful is a sink that silently drops every receipt. A sink that refuses one
+aborts the answer (`BotError::ReceiptNotRecorded`) and the session does not move.
+The receipt is what the run decided and on whose authority; `Session::decisions`
+returns the receipts it recorded, and `Session::transcript` the conversation. See
+`docs/guides/lgwks-bot/resolution.md` for the receipt's fields.
+
 `Session::answer` is synchronous and returns `Result<(), BotError>`. The failure
 cases are typed: `SessionTerminated` for an answer after the flow stopped,
 `SessionNotAwaitingAnswer` for one at a node that is not an ask,
 `ResolverReturnedInvalidOption` for a resolver that names an index outside the
-candidate list, and `MissingAskRoute` for a route table missing the selected
-option.
+candidate list, `MissingAskRoute` for a route table missing the selected option,
+and `ReceiptNotRecorded` for a journal that would not take the decision receipt.
 
 ## The bounds
 
 `FlowBounds::new(budget)` caps runtime steps including answer attempts, and
 `FlowSpec::validate` refuses a node count that exceeds the declared budget
 (`BotError::FlowBudgetExceeded`). The runner charges each step against the same
-budget (`crates/lgwks-bot/src/session.rs:1629`) and returns
+budget (`crates/lgwks-bot/src/session.rs:2167`) and returns
 `BotError::SessionBudgetExceeded`, so a flow whose graph lets the cursor loop
 still terminates.
 
@@ -148,14 +159,14 @@ your own bound.
 `Terminal` records how the run ended: `Completed`, `Referred { target }`,
 `HandedOff { target }`, or `Refused { reason }`.
 
-`Terminal::outcome(EffectLedger) -> Outcome` (`crates/lgwks-bot/src/session.rs:472`)
+`Terminal::outcome(EffectLedger) -> Outcome` (`crates/lgwks-bot/src/session.rs:474`)
 carries two independent facts through unchanged, and that is the whole of the
 method:
 
 - the `Disposition`, one of `Completed`, `Referred`, `HandedOff`, `Refused`
-  (`crates/lgwks-bot/src/session.rs:293`);
+  (`crates/lgwks-bot/src/session.rs:295`);
 - the `EffectLedger`, a `confirmed` count and an `unsettled` count
-  (`crates/lgwks-bot/src/session.rs:320`).
+  (`crates/lgwks-bot/src/session.rs:322`).
 
 It does not classify, and the reason is in the source: an earlier version
 returned a single enum and had to choose, for a refused run that also left an
