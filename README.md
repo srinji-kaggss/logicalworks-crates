@@ -84,7 +84,7 @@ lgwks-deps check .        # audit, and refuse any unowned external edge
 
 ## Use cases
 
-**Automation that runs unattended**
+### Automation that runs unattended
 
 - A bot that watches an endpoint, a file, or a queue and acts when something
   changes, rather than on every timer tick. → `lgwks_bot`
@@ -93,7 +93,7 @@ lgwks-deps check .        # audit, and refuse any unowned external edge
 - Long-running background work that cancels cleanly on shutdown, without a
   leaked task or a loop that never ends. → `lgwks_bot::rt::supervise`
 
-**Giving an agent real authority, safely**
+### Giving an agent real authority, safely
 
 - An LLM-driven or rule-driven agent that must not be able to do more than you
   granted it. Every verb checks a capability proof before it acts, so "what can
@@ -101,7 +101,7 @@ lgwks-deps check .        # audit, and refuse any unowned external edge
   of the code. → `lgwks_bot`. You bring the model; this is the execution
   substrate, not a model client.
 
-**HTTP and data without an async runtime**
+### HTTP and data without an async runtime
 
 - Calling an HTTP API from a CLI, a build script, or a synchronous service, where
   pulling in a whole async runtime is the wrong trade. → `lgwks_std::http` is
@@ -112,7 +112,7 @@ lgwks-deps check .        # audit, and refuse any unowned external edge
 - Config in RON, or a compact binary wire format. → `lgwks_std::ron`,
   `lgwks_std::wire`
 
-**Tools that read source code**
+### Tools that read source code
 
 - Building a linter, a codemod, a repository audit, or an "explain this file"
   tool across several languages. → `lgwks_ast` gives one AST type and one
@@ -120,13 +120,13 @@ lgwks-deps check .        # audit, and refuse any unowned external edge
 - Reporting a parse failure with a real span. → `lgwks_ast` diagnostics carry
   file, range, and severity
 
-**Logging you can query**
+### Logging you can query
 
 - Structured, levelled logs from a library without `println!` and without
   committing your consumers to a subscriber. → `lgwks_std`, feature `trace`
   (default on)
 
-**A dependency graph you can defend**
+### A dependency graph you can defend
 
 - Answering "what third-party code is in our build, and who approved it?" with a
   command instead of an archaeology project. → `lgwks_deps`, and `lgwks-deps check`
