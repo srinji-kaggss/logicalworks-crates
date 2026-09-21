@@ -75,24 +75,30 @@ mod tests {
         assert_eq!(to_rfc3339(instant), "2023-11-14T22:13:20.5Z");
     }
 
+    // Tests that parse return `Result`: a parse refusal reports its own `Debug`
+    // on failure, which is the same report `.expect` would have panicked with,
+    // without an `expect` in the tree.
     #[test]
-    fn parse_reverses_render_for_the_current_instant() {
+    fn parse_reverses_render_for_the_current_instant() -> Result<(), ParseError> {
         let original = SystemTime::now();
         let rendered = to_rfc3339(original);
-        let parsed = parse_rfc3339(&rendered).expect("roundtrips");
+        let parsed = parse_rfc3339(&rendered)?;
         assert_eq!(to_rfc3339(parsed), rendered);
+        Ok(())
     }
 
     #[test]
-    fn lowercase_separator_and_zulu_are_accepted() {
-        let parsed = parse_rfc3339("2023-11-14t22:13:20z").expect("parses lowercase");
+    fn lowercase_separator_and_zulu_are_accepted() -> Result<(), ParseError> {
+        let parsed = parse_rfc3339("2023-11-14t22:13:20z")?;
         assert_eq!(parsed, at(1_700_000_000));
+        Ok(())
     }
 
     #[test]
-    fn a_numeric_offset_is_folded_into_utc() {
-        let parsed = parse_rfc3339("2023-11-15T00:13:20+02:00").expect("parses +02:00");
+    fn a_numeric_offset_is_folded_into_utc() -> Result<(), ParseError> {
+        let parsed = parse_rfc3339("2023-11-15T00:13:20+02:00")?;
         assert_eq!(parsed, at(1_700_000_000));
+        Ok(())
     }
 
     #[test]
@@ -150,29 +156,33 @@ mod tests {
     }
 
     #[test]
-    fn pre_epoch_instants_are_preserved_not_clamped() {
+    fn pre_epoch_instants_are_preserved_not_clamped() -> Result<(), ParseError> {
         let stamp = "1969-12-31T23:59:59Z";
-        let parsed = parse_rfc3339(stamp).expect("parses pre-epoch");
+        let parsed = parse_rfc3339(stamp)?;
         assert_eq!(to_rfc3339(parsed), stamp);
+        Ok(())
     }
 
     #[test]
-    fn pre_epoch_fractions_round_trip() {
+    fn pre_epoch_fractions_round_trip() -> Result<(), ParseError> {
         let stamp = "1969-12-31T23:59:59.5Z";
-        let parsed = parse_rfc3339(stamp).expect("parses pre-epoch fraction");
+        let parsed = parse_rfc3339(stamp)?;
         assert_eq!(to_rfc3339(parsed), stamp);
+        Ok(())
     }
 
     #[test]
-    fn the_instant_type_is_std_system_time() {
-        let parsed: SystemTime = parse_rfc3339("2026-08-17T00:00:00Z").unwrap();
+    fn the_instant_type_is_std_system_time() -> Result<(), ParseError> {
+        let parsed: SystemTime = parse_rfc3339("2026-08-17T00:00:00Z")?;
         assert!(parsed > UNIX_EPOCH);
+        Ok(())
     }
 
     #[test]
-    fn now_is_after_the_start_of_twenty_twenty_six() {
+    fn now_is_after_the_start_of_twenty_twenty_six() -> Result<(), ParseError> {
         let now = SystemTime::now();
-        let twenty_twenty_six = parse_rfc3339("2026-01-01T00:00:00Z").unwrap();
+        let twenty_twenty_six = parse_rfc3339("2026-01-01T00:00:00Z")?;
         assert!(now > twenty_twenty_six);
+        Ok(())
     }
 }

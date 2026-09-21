@@ -23,18 +23,21 @@ impl Uuid {
     }
 
     /// The identifier's raw bytes in network order.
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8; 16] {
         &self.0
     }
 
     /// Builds an identifier from raw bytes without imposing version bits. Use
     /// this only to rehydrate a value that was generated elsewhere.
+    #[must_use]
     pub fn from_bytes(raw: [u8; 16]) -> Self {
         Self(raw)
     }
 
     /// The RFC 4122 version nibble, or `None` for a value that carries no
     /// recognisable variant.
+    #[must_use]
     pub fn version(&self) -> Option<u8> {
         if self.0[8] & 0xc0 == 0x80 {
             Some(self.0[6] >> 4)
@@ -53,6 +56,11 @@ impl Uuid {
     }
 }
 
+/// Refuses any text that is not exactly the 36 bytes of the canonical form.
+///
+/// Both `len` and `at` carry the observed length: there is no meaningful
+/// interior offset for a length violation, and reporting the length twice keeps
+/// the error's two fields self-describing for a machine consumer.
 fn check_uuid_length(len: usize) -> Result<(), ParseError> {
     if len != 36 {
         Err(ParseError::WrongLength { len, at: len })
@@ -61,6 +69,11 @@ fn check_uuid_length(len: usize) -> Result<(), ParseError> {
     }
 }
 
+/// Requires the group separator at `cursor`.
+///
+/// `bytes.get` is used deliberately: a truncated input reports
+/// [`ParseError::MissingHyphen`] at the exact offset instead of indexing past
+/// the end.
 fn check_hyphen(bytes: &[u8], cursor: usize) -> Result<(), ParseError> {
     if bytes.get(cursor) != Some(&b'-') {
         Err(ParseError::MissingHyphen { at: cursor })
@@ -69,39 +82,56 @@ fn check_hyphen(bytes: &[u8], cursor: usize) -> Result<(), ParseError> {
     }
 }
 
+/// Decodes one hyphen-delimited hex group into `out`.
+///
+/// `bytes` must hold at least `cursor + width` bytes: the caller walks the
+/// fixed 8-4-4-4-12 layout of an input that `check_uuid_length` already proved
+/// to be 36 bytes, so the slice is in range. `out` is the destination for this
+/// group's bytes and must be exactly `width / 2` bytes wide; both offsets are
+/// inside the same input, so their sum cannot saturate.
 fn parse_uuid_group(
     bytes: &[u8],
     cursor: usize,
     width: usize,
     out: &mut [u8],
 ) -> Result<(), ParseError> {
-    let group = &bytes[cursor..cursor + width];
+    let group = &bytes[cursor..cursor.saturating_add(width)];
     let decoded = crate::hex::decode(group).map_err(|err| match err {
-        DecodeError::NotHexDigit { at, .. } => ParseError::NotHexDigit { at: cursor + at },
-        DecodeError::OddLength { at, .. } => ParseError::NotHexDigit { at: cursor + at },
+        DecodeError::NotHexDigit { at, .. } => ParseError::NotHexDigit {
+            at: cursor.saturating_add(at),
+        },
+        DecodeError::OddLength { at, .. } => ParseError::NotHexDigit {
+            at: cursor.saturating_add(at),
+        },
     })?;
     out[..decoded.len()].copy_from_slice(&decoded);
     Ok(())
 }
 
+/// Decodes the five canonical groups of the hyphenated form into `raw`.
+///
+/// `GROUPS` pairs each group's hex-character width with the number of bytes it
+/// decodes to (8-4-4-4-12 characters become 4-2-2-2-6 bytes), so no width is
+/// ever divided at run time. A hyphen is required before every group after the
+/// first. The cursors stay inside a 36-byte input and the offsets stay inside
+/// the 16-byte output, so none of the accumulations can saturate.
 fn parse_uuid_groups(bytes: &[u8], raw: &mut [u8; 16]) -> Result<(), ParseError> {
-    const GROUPS: [usize; 5] = [8, 4, 4, 4, 12];
+    const GROUPS: [(usize, usize); 5] = [(8, 4), (4, 2), (4, 2), (4, 2), (12, 6)];
     let mut out_offset = 0usize;
     let mut cursor = 0usize;
-    for (group_index, &width) in GROUPS.iter().enumerate() {
+    for (group_index, &(width, byte_count)) in GROUPS.iter().enumerate() {
         if group_index > 0 {
             check_hyphen(bytes, cursor)?;
-            cursor += 1;
+            cursor = cursor.saturating_add(1);
         }
-        let byte_count = width / 2;
         parse_uuid_group(
             bytes,
             cursor,
             width,
-            &mut raw[out_offset..out_offset + byte_count],
+            &mut raw[out_offset..out_offset.saturating_add(byte_count)],
         )?;
-        out_offset += byte_count;
-        cursor += width;
+        out_offset = out_offset.saturating_add(byte_count);
+        cursor = cursor.saturating_add(width);
     }
     Ok(())
 }
@@ -122,7 +152,12 @@ impl fmt::Display for Uuid {
 }
 
 /// Why a string is not a canonical UUID.
+///
+/// Variants are stable and machine-readable; callers match on them rather than
+/// on the message text, and `#[non_exhaustive]` keeps a future rejection reason
+/// an additive change.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ParseError {
     /// The canonical form is exactly 36 characters.
     WrongLength {
@@ -145,7 +180,7 @@ pub enum ParseError {
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
+        match *self {
             Self::WrongLength { len, at: _ } => {
                 write!(f, "UUID text has length {len}; expected exactly 36 bytes")
             }
@@ -167,46 +202,59 @@ impl Error for ParseError {}
 mod tests {
     use super::*;
 
+    // These tests return `Result` rather than unwrapping: an entropy or parse
+    // refusal reports its own `Debug` on failure, which is the same report
+    // `.unwrap` would have panicked with, without an `unwrap` in the tree.
     #[test]
-    fn generated_value_carries_version_four_and_the_rfc_variant() {
-        let id = Uuid::new_v4().expect("entropy available");
+    fn generated_value_carries_version_four_and_the_rfc_variant()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let id = Uuid::new_v4()?;
         assert_eq!(id.version(), Some(4));
         assert_eq!(id.as_bytes()[6] >> 4, 4);
         assert_eq!(id.as_bytes()[8] & 0xc0, 0x80);
+        Ok(())
     }
 
     #[test]
-    fn successive_identifiers_differ() {
-        let a = Uuid::new_v4().unwrap();
-        let b = Uuid::new_v4().unwrap();
-        assert_ne!(a, b);
+    fn successive_identifiers_differ() -> Result<(), Box<dyn std::error::Error>> {
+        let first = Uuid::new_v4()?;
+        let second = Uuid::new_v4()?;
+        assert_ne!(first, second);
+        Ok(())
     }
 
     #[test]
-    fn display_is_hyphenated_lowercase_in_eight_four_four_four_twelve() {
-        let id = Uuid::new_v4().unwrap();
-        let s = id.to_string();
-        assert_eq!(s.len(), 36);
-        assert_eq!(&s[8..9], "-");
-        assert_eq!(&s[13..14], "-");
-        assert_eq!(&s[18..19], "-");
-        assert_eq!(&s[23..24], "-");
-        assert!(s.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
+    fn display_is_hyphenated_lowercase_in_eight_four_four_four_twelve()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let id = Uuid::new_v4()?;
+        let text = id.to_string();
+        assert_eq!(text.len(), 36);
+        assert_eq!(&text[8..9], "-");
+        assert_eq!(&text[13..14], "-");
+        assert_eq!(&text[18..19], "-");
+        assert_eq!(&text[23..24], "-");
+        assert!(
+            text.chars()
+                .all(|char_value| char_value.is_ascii_hexdigit() || char_value == '-')
+        );
+        Ok(())
     }
 
     #[test]
-    fn parse_reverses_display() {
-        let id = Uuid::new_v4().unwrap();
-        let parsed = Uuid::parse(&id.to_string()).expect("valid UUID");
+    fn parse_reverses_display() -> Result<(), Box<dyn std::error::Error>> {
+        let id = Uuid::new_v4()?;
+        let parsed = Uuid::parse(&id.to_string())?;
         assert_eq!(id, parsed);
+        Ok(())
     }
 
     #[test]
-    fn parse_accepts_uppercase() {
-        let id = Uuid::new_v4().unwrap();
+    fn parse_accepts_uppercase() -> Result<(), Box<dyn std::error::Error>> {
+        let id = Uuid::new_v4()?;
         let upper = id.to_string().to_ascii_uppercase();
-        let parsed = Uuid::parse(&upper).expect("uppercase accepted");
+        let parsed = Uuid::parse(&upper)?;
         assert_eq!(id, parsed);
+        Ok(())
     }
 
     #[test]

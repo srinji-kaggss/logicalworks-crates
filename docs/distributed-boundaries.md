@@ -62,10 +62,18 @@ consensus.
 
 ## Observability
 
-`log` / `tracing` / `env_logger` are not estate capabilities (doctrine §6):
-machine output stays parseable `eprintln!` / `stderr`. Meshes needing spans,
-W3C `traceparent` propagation, or counters admit `tracing` / `metrics` through
-the storefront as BOUNDARY edges — do not hand-roll a facade in `lgwks_std`.
+`log` / `tracing` / `env_logger` are not estate capabilities (doctrine §6), and
+the older phrasing here — that machine output stays parseable via `eprintln!` /
+`stderr` — is **superseded** (doctrine §6.1). `print_stdout` and `print_stderr`
+are `forbid` in the workspace lint table, so library code has no print path at
+all: it returns information in its result and error types. Only a binary writes,
+through an explicit locked handle, so a broken pipe is an ordinary `Err` rather
+than a panic. Machine output must still stay parseable
+(`experience/invariants/sdk.yaml`).
+
+Meshes needing spans, W3C `traceparent` propagation, or counters admit `tracing`
+/ `metrics` through the storefront as BOUNDARY edges — do not hand-roll a facade
+in `lgwks_std`.
 
 ## Schema evolution
 

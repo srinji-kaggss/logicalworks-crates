@@ -12,7 +12,12 @@ use std::fmt;
 use super::cap::Cap;
 
 /// Error from bot construction, admission, or execution.
+///
+/// `#[non_exhaustive]`: the vocabulary is expected to grow as domains gain
+/// failure modes, and a consumer matching on it must keep a wildcard arm so a
+/// new variant is a compile-time prompt there rather than a silent fallthrough.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum BotError {
     /// A required capability was not granted.
     CapabilityDenied {
@@ -57,8 +62,12 @@ pub enum BotError {
 
 impl fmt::Display for BotError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::CapabilityDenied { required } => {
+        // The scrutinee is `*self` so each pattern's type is the enum's own
+        // type rather than a reference to it, and non-`Copy` payloads are bound
+        // by `ref`. `field` is `&'static str` and the two lengths are `usize`,
+        // so those bind by copy from behind the deref.
+        match *self {
+            Self::CapabilityDenied { ref required } => {
                 write!(f, "capability denied: {required}")
             }
             Self::IncompleteSpec { field } => {
@@ -67,11 +76,14 @@ impl fmt::Display for BotError {
             Self::SpecTooLarge { bytes, limit } => {
                 write!(f, "bot spec is {bytes} bytes, over the {limit}-byte limit")
             }
-            Self::MalformedSpec { cause } => write!(f, "malformed bot spec: {cause}"),
-            Self::DomainError { domain, cause } => {
+            Self::MalformedSpec { ref cause } => write!(f, "malformed bot spec: {cause}"),
+            Self::DomainError {
+                ref domain,
+                ref cause,
+            } => {
                 write!(f, "{domain}: {cause}")
             }
-            Self::EvaluateError { cause } => {
+            Self::EvaluateError { ref cause } => {
                 write!(f, "evaluate: {cause}")
             }
         }

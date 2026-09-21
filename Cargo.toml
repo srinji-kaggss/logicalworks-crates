@@ -130,5 +130,28 @@ unwrap_or_default = "forbid"
 unwrap_used = "forbid"
 wildcard_imports = "forbid"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# API bans — the two `deny` entries, and why they differ.
+#
+# `clippy.toml` states WHICH APIs are banned. These two names are what make a
+# violation fatal; without them the entire ban list is inert, because
+# `disallowed_methods` and `disallowed_types` are warn-by-default. That second
+# half was missing until 2026-09-20, and the ban list had never once failed a
+# build. Verified by applying `-D` by hand across the workspace, which
+# immediately surfaced 10 violations that CI had been passing.
+#
+# These are `deny` rather than `forbid` for a reason the `forbid` rule above
+# does not cover. Every other entry here is an anti-pattern with no legitimate
+# use anywhere, so an exception could only ever be a mistake. These are API
+# bans whose exceptions are real, narrow, and test-scoped: `lgwks_std::task` is
+# a thread-parking executor, so a test of it must spawn a thread and must sleep,
+# and `forbid` would make those tests unwritable rather than correct. The
+# escape is a reasoned `#[expect]` at the test module, which
+# `allow_attributes_without_reason = "forbid"` above already forces to carry a
+# justification. That lint is in fact the tell: it exists so exceptions can be
+# audited, and it would be dead config if every lint were `forbid`.
+disallowed_methods = "deny"
+disallowed_types = "deny"
+
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"

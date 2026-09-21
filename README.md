@@ -30,23 +30,28 @@ cargo add lgwks_deps --no-default-features
 ```
 
 ```rust
-fn main() {
+use std::io::Write;
+
+// Output goes through an explicit locked handle. The workspace lint table makes
+// `print_stdout`/`print_stderr` a hard error, and this is also where a broken
+// pipe (`demo | head`) becomes an ordinary `Err` instead of a panic.
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut out = std::io::stdout().lock();
+
     // std+ core: zero-config primitives, zero external deps by default.
     let now = lgwks_std::time::now_rfc3339();
-    println!("now: {now} hex: {}", lgwks_std::hex::encode(b"hi"));
+    writeln!(out, "now: {now} hex: {}", lgwks_std::hex::encode(b"hi"))?;
 
     // bot: capability-gated actors (needs grants to build, not just to run).
-    let bot = lgwks_bot::Bot::builder("demo")
-        .build(&lgwks_bot::GrantSet::empty())
-        .expect("empty bot builds with no grants");
+    // `build` returns a typed error; the caller decides what to do with it.
+    let bot = lgwks_bot::Bot::builder("demo").build(&lgwks_bot::GrantSet::empty())?;
     let _ = bot;
 
-    // deps: audit your own tree the way CI does.
+    // deps: audit your own tree the way CI does. A non-empty refusal list is a
+    // refused build, not a warning.
     let root = std::path::Path::new(".");
-    match lgwks_deps::check_dependencies(root) {
-        Ok((_register, refusals)) => assert!(refusals.is_empty()),
-        Err(e) => eprintln!("gate refused: {e}"),
-    }
+    let (_register, refusals) = lgwks_deps::check_dependencies(root)?;
+    writeln!(out, "{} refusal(s)", refusals.len())
 }
 ```
 

@@ -9,12 +9,19 @@ use crate::verb;
 
 /// Observe the status of a pull request. Supports Observe and Query.
 pub struct PrStatus {
+    /// The `owner/repo` observed; echoed in the "binding required" diagnostic.
     repo: String,
+    /// Forced to `[bot.net]` by the constructor: every GitHub call is an HTTP
+    /// call, and no constructor omits the capability.
     caps: Vec<Cap>,
 }
 
 /// PR state returned by observation or query.
+///
+/// `#[non_exhaustive]`: the reported shape grows with the domain, and a
+/// consumer that destructured this literally would break on each addition.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PrState {
     /// Whether any check status changed since last poll.
     pub checks_changed: bool,
@@ -86,12 +93,19 @@ pub fn pr_status(repo: impl Into<String>) -> PrStatus {
 
 /// Observe CI run status. Supports Observe, Query.
 pub struct CiRun {
+    /// The `owner/repo` observed; echoed in the "binding required" diagnostic.
     repo: String,
+    /// Forced to `[bot.net]` by the constructor — reading a run's status is an
+    /// API call, so there is no ungated path to it.
     caps: Vec<Cap>,
 }
 
 /// CI run state returned by observation or query.
+///
+/// `#[non_exhaustive]`: the reported shape grows with the domain, and a
+/// consumer that destructured this literally would break on each addition.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CiState {
     /// Whether the run failed.
     pub failed: bool,
@@ -163,7 +177,10 @@ pub fn ci_run(repo: impl Into<String>) -> CiRun {
 
 /// Execute a PR merge. Supports Execute only.
 pub struct Merge {
+    /// The `owner/repo` merged; echoed in the "binding required" diagnostic.
     repo: String,
+    /// Forced to `[bot.net]` by the constructor: a merge is a mutating API
+    /// call, so it is gated on the same capability a read is.
     caps: Vec<Cap>,
 }
 

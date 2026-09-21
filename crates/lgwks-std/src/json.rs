@@ -35,8 +35,8 @@ pub fn to_writer<W: std::io::Write, T: Serialize>(writer: W, value: &T) -> Resul
 // ── Decoding ────────────────────────────────────────────────────────────────
 
 /// Deserialize a JSON string into the requested type.
-pub fn from_str<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, Error> {
-    serde_json::from_str(s)
+pub fn from_str<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, Error> {
+    serde_json::from_str(text)
 }
 
 /// Deserialize a JSON byte slice into the requested type.
@@ -76,27 +76,33 @@ mod tests {
         y: i32,
     }
 
+    // These tests return `Result` rather than unwrapping: a JSON refusal
+    // reports its own `Debug` on failure, which is the same report `.unwrap`
+    // would have panicked with, without an `unwrap` in the tree.
     #[test]
-    fn roundtrips_through_string() {
-        let p = Point { x: 1, y: 2 };
-        let s = to_string(&p).unwrap();
-        let q: Point = from_str(&s).unwrap();
-        assert_eq!(p, q);
+    fn roundtrips_through_string() -> Result<(), Error> {
+        let point = Point { x: 1, y: 2 };
+        let text = to_string(&point)?;
+        let restored: Point = from_str(&text)?;
+        assert_eq!(point, restored);
+        Ok(())
     }
 
     #[test]
-    fn compact_output_has_no_whitespace() {
-        let p = Point { x: 1, y: 2 };
-        let s = to_string(&p).unwrap();
-        assert!(!s.contains('\n'));
-        assert!(!s.contains("  "));
+    fn compact_output_has_no_whitespace() -> Result<(), Error> {
+        let point = Point { x: 1, y: 2 };
+        let text = to_string(&point)?;
+        assert!(!text.contains('\n'));
+        assert!(!text.contains("  "));
+        Ok(())
     }
 
     #[test]
-    fn pretty_output_has_indentation() {
-        let p = Point { x: 1, y: 2 };
-        let s = to_string_pretty(&p).unwrap();
-        assert!(s.contains('\n'));
+    fn pretty_output_has_indentation() -> Result<(), Error> {
+        let point = Point { x: 1, y: 2 };
+        let text = to_string_pretty(&point)?;
+        assert!(text.contains('\n'));
+        Ok(())
     }
 
     #[test]

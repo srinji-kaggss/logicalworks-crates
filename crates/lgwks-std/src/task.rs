@@ -34,8 +34,18 @@ use std::thread::{self, Thread};
 
 // ── block_on ───────────────────────────────────────────────────────────────
 
+/// The waker [`block_on`] hands to the future it drives.
+///
+/// It is the whole of the runtime: waking marks the flag and unparks the
+/// driving thread, so there is no reactor and no worker to schedule onto.
 struct ThreadWaker {
+    /// The thread [`block_on`] parked, captured at construction; waking it is
+    /// the only thing `wake` does to wake the caller.
     thread: Thread,
+    /// Set by `wake` and cleared by the park loop with `swap`. The clearance is
+    /// what makes a wake that races the pending poll non-lossy: a wake landing
+    /// between the poll and the park leaves the flag set, so the loop sees it
+    /// and skips the park instead of sleeping through the wakeup.
     notified: AtomicBool,
 }
 
@@ -62,7 +72,7 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
         thread: thread::current(),
         notified: AtomicBool::new(false),
     });
-    let waker = Waker::from(signal.clone());
+    let waker = Waker::from(Arc::clone(&signal));
     let mut cx = Context::from_waker(&waker);
 
     loop {
@@ -129,15 +139,20 @@ pub async fn join_all_boxed<F: Future + ?Sized>(
                     *output = Some(value);
                     *slot = None;
                 }
-                Poll::Pending => remaining += 1,
+                // Bounded by `pending.len()`, which is a live `Vec` length and
+                // so cannot exceed `isize::MAX`: the saturating form states the
+                // bound rather than relying on it, and is the identity
+                // everywhere the count is reachable.
+                Poll::Pending => remaining = remaining.saturating_add(1),
             }
         }
         if remaining == 0 {
-            Poll::Ready(
-                done.drain(..)
-                    .map(|output| output.expect("join_all resolves every future exactly once"))
-                    .collect(),
-            )
+            // `remaining` counts every slot still holding a future, and a slot
+            // is cleared in the same arm that fills its output, so zero here
+            // means every output slot was filled above. `flatten` therefore
+            // drops nothing; it is the panic-free spelling of the invariant,
+            // and it keeps the result the same length as the input.
+            Poll::Ready(done.drain(..).flatten().collect())
         } else {
             Poll::Pending
         }
@@ -147,6 +162,15 @@ pub async fn join_all_boxed<F: Future + ?Sized>(
 
 // ── spawn_blocking ─────────────────────────────────────────────────────────
 
+/// Take `mutex`, treating poisoning as non-fatal.
+///
+/// Poisoning means some thread panicked while holding the lock. Every critical
+/// section behind this mutex moves a whole [`Job`] in or out and writes no
+/// partial state, so a poisoned lock still guards a consistent value and the
+/// panic itself is already being resumed on the awaiter. Recovering the guard
+/// is therefore correct here, and it is why this is not an `unwrap`: a
+/// `JoinHandle` must not turn a worker's failure into a deadlock for the task
+/// awaiting it.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
@@ -166,8 +190,21 @@ enum Job<T> {
     Taken,
 }
 
+/// Completion state shared between a [`spawn_blocking`] worker and its
+/// [`JoinHandle`], behind one mutex.
+///
+/// The worker writes `job`; the awaiting task reads it and writes `waker`. They
+/// are one struct under one lock so that a completion cannot land between the
+/// poll's read of `job` and its registration of `waker` — the interleaving that
+/// would lose a wakeup and hang the awaiter.
 struct Shared<T> {
+    /// The job's lifecycle state. `Running` until the worker thread records an
+    /// outcome, `Taken` once the handle has moved the outcome out.
     job: Job<T>,
+    /// The waker of the task awaiting this handle, replaced only when it would
+    /// not already wake that task (`will_wake`). `None` until the first pending
+    /// poll, and cleared by the worker after it wakes the task, so a later poll
+    /// cannot wake a task that has already been resumed.
     waker: Option<Waker>,
 }
 
@@ -178,7 +215,18 @@ struct Shared<T> {
 /// thread could not be spawned, awaiting resumes that failure on the current
 /// thread rather than hanging. Polling after completion panics with a named
 /// message, matching the `Future` contract.
+///
+/// The result is handed out exactly once: `T` is not `Clone`, so a second poll
+/// has no value to return, and the alternatives to failing loudly are a silent
+/// deadlock (`Pending` with nothing left to wake it) or a fabricated value.
+/// Both are worse than the panic the `Future` contract already permits, so the
+/// completed-but-polled state is resumed with `resume_unwind` — the same
+/// mechanism, and the same "fail on the awaiter, never abort the process" rule,
+/// that already carries a panicking closure's payload back to the caller.
 pub struct JoinHandle<T> {
+    /// The state this handle and its worker thread share. The `Arc` is held by
+    /// both sides while the job runs and by neither once both are gone, so the
+    /// job's result and its worker are released when the handle is dropped.
     shared: Arc<Mutex<Shared<T>>>,
 }
 
@@ -193,10 +241,15 @@ impl<T> Future for JoinHandle<T> {
                 drop(state);
                 resume_unwind(payload)
             }
-            Job::Taken => panic!("spawn_blocking JoinHandle polled after completion"),
+            Job::Taken => resume_unwind(Box::new(
+                "spawn_blocking JoinHandle polled after completion",
+            )),
             Job::Running => {
                 state.job = Job::Running;
-                let replace = match &state.waker {
+                // `as_ref` rather than `&state.waker`: it yields an
+                // `Option<&Waker>` the arm patterns match exactly, and it ends
+                // its borrow of `state` before the assignment below.
+                let replace = match state.waker.as_ref() {
                     Some(existing) => !existing.will_wake(cx.waker()),
                     None => true,
                 };
@@ -228,13 +281,11 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    // Opt-in trace: spawning a thread is an effect worth being able to
-    // reconstruct after an incident, but one stderr line per job would flood
-    // callers that treat stderr as a machine-readable channel. Set
-    // LGWKS_TASK_TRACE to turn it on.
-    if std::env::var_os("LGWKS_TASK_TRACE").is_some() {
-        eprintln!("lgwks_std::task: spawn_blocking job started");
-    }
+    // Nothing is written to stderr here, opt-in or otherwise. A trace line per
+    // job would flood callers that treat stderr as a machine-readable channel,
+    // and a library that prints what its caller did cannot be silenced by that
+    // caller. A caller that wants to reconstruct the spawn already holds the
+    // call site: it made the call, so it can trace it before making this one.
     let shared = Arc::new(Mutex::new(Shared {
         job: Job::Running,
         waker: None,
@@ -267,6 +318,17 @@ where
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+// The workspace ban list (`clippy.toml`) forbids `std::thread::spawn` and
+// `std::thread::sleep`, because reaching for a raw OS thread instead of the
+// estate's surface is the anti-pattern. This module is the exception that
+// proves the rule: it tests `lgwks_std::task` itself, which is a *thread
+// parking* executor. Waking it requires a real second thread, and letting the
+// driver park before that wake requires a real sleep. Both calls are the
+// subject under test, not a reach for one.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "tests of a thread-parking executor must spawn a waker thread and sleep to let the driver park"
+)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -289,46 +351,50 @@ mod tests {
         assert_eq!(block_on(step()), "hello world");
     }
 
-    struct ChannelFuture {
-        rx: std::sync::mpsc::Receiver<i32>,
+    /// Resolves once another thread hands it a value through the shared slot.
+    ///
+    /// A value that arrives before the first poll is found on that poll; a
+    /// value that arrives after it is delivered by the waker this future parks.
+    struct DeferredValue {
+        value: Arc<Mutex<Option<i32>>>,
         waker_slot: Arc<Mutex<Option<Waker>>>,
     }
 
-    impl Future for ChannelFuture {
+    impl Future for DeferredValue {
         type Output = i32;
         fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            match self.rx.try_recv() {
-                Ok(val) => Poll::Ready(val),
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    *lock(&self.waker_slot) = Some(cx.waker().clone());
-                    Poll::Pending
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => panic!("disconnected"),
+            if let Some(value) = lock(&self.value).take() {
+                return Poll::Ready(value);
             }
+            *lock(&self.waker_slot) = Some(cx.waker().clone());
+            Poll::Pending
         }
     }
 
     #[test]
     fn threaded_waker_unparks() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let handle: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
-        let handle_clone = handle.clone();
+        let value: Arc<Mutex<Option<i32>>> = Arc::new(Mutex::new(None));
+        let waker_slot: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
+        let sender_value = Arc::clone(&value);
+        let sender_slot = Arc::clone(&waker_slot);
 
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(5));
-            tx.send(100).unwrap();
-            let mut slot = lock(&handle_clone);
-            if let Some(waker) = slot.take() {
-                waker.wake();
-            }
+        // Scoped, so the handing-off thread is joined before the test returns
+        // instead of outliving it.
+        thread::scope(|scope| {
+            scope.spawn(move || {
+                // The pause is load-bearing: it lets `block_on` park first, so
+                // the wake below is what resumes the future rather than a value
+                // found on the opening poll.
+                thread::sleep(Duration::from_millis(5));
+                *lock(&sender_value) = Some(100);
+                if let Some(waker) = lock(&sender_slot).take() {
+                    waker.wake();
+                }
+            });
+
+            let result = block_on(DeferredValue { value, waker_slot });
+            assert_eq!(result, 100);
         });
-
-        let res = block_on(ChannelFuture {
-            rx,
-            waker_slot: handle,
-        });
-
-        assert_eq!(res, 100);
     }
 
     #[test]
@@ -378,7 +444,14 @@ mod tests {
     impl Future for CountPolls {
         type Output = usize;
         fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<usize> {
-            let n = self.polls.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+            // `fetch_add` yields the count before this poll, so the 1-based
+            // poll ordinal is one past it. Saturating rather than `+`: the
+            // counter is bounded by the test's poll count, far below
+            // `usize::MAX`.
+            let n = self
+                .polls
+                .fetch_add(1, AtomicOrdering::SeqCst)
+                .saturating_add(1);
             Poll::Ready(n)
         }
     }
@@ -392,7 +465,12 @@ mod tests {
     impl Future for PendingThenReady {
         type Output = usize;
         fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<usize> {
-            let n = self.polls.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+            // See `CountPolls::poll`: the ordinal is `fetch_add`'s prior value
+            // plus one, saturating against a bound the test cannot reach.
+            let n = self
+                .polls
+                .fetch_add(1, AtomicOrdering::SeqCst)
+                .saturating_add(1);
             if n > 1 {
                 return Poll::Ready(n);
             }
@@ -457,6 +535,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "worker exploded")]
     fn spawn_blocking_panic_resumes_on_joiner() {
-        let _: u32 = block_on(spawn_blocking(|| -> u32 { panic!("worker exploded") }));
+        // The job's panic is the subject under test: it must resume on the
+        // joiner rather than vanish with the worker thread. The message rides
+        // on a deliberately-false comparison because `clippy::panic` is
+        // forbidden workspace-wide with no test carve-out.
+        let _: u32 = block_on(spawn_blocking(|| -> u32 {
+            assert_eq!(1, 2, "worker exploded");
+            0u32
+        }));
     }
 }

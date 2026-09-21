@@ -106,6 +106,20 @@ pub const MAX_AST_NODES: usize = 2_000_000;
 /// show one clean reading.
 pub const MAX_DETECT_BYTES: usize = 64 * 1024;
 
+/// Define `Language` and its lookup tables from one row per grammar.
+///
+/// A row is `Variant, doc, feature, name, [extensions], SupportLang`: the enum
+/// variant, its doc line, the cargo feature that compiles its grammar, the
+/// stable lowercase name reported in findings, the file extensions it answers
+/// for without the leading dot, and the `ast-grep-language` twin of the same
+/// variant.
+///
+/// Everything a language owns is generated from that one row — the variant, its
+/// slot in `Language::ALL`, and its arm in each of the four lookup tables — so a
+/// row cannot be added by halves. The feature gate is applied to all of them
+/// together, which is what makes `Language` exhaustive without a wildcard arm
+/// when a grammar is compiled out: a disabled language has no variant for a
+/// table arm to mention.
 macro_rules! define_languages {
     ($(
         $variant:ident, $doc:literal, $feature:literal, $name:literal,
@@ -240,9 +254,21 @@ impl Language {
 /// this type makes that a localized change, not a fork of upstream's tables.
 #[derive(Clone)]
 pub struct CustomLang {
+    /// Stable lowercase name, reported in findings and diagnostics and used by
+    /// the caller to match on. `'static` because the registration outlives any
+    /// one parse; a name built at runtime is not registrable.
     name: &'static str,
+    /// The grammar itself, cloned into every `StrDoc` this language parses.
+    /// `LanguageExt::get_ts_language` hands out a clone, so one registration
+    /// serves any number of parses and no parse holds a borrow of it.
     grammar: TSLanguage,
+    /// The character standing in for `$` while patterns are compiled: `$`
+    /// unless the language treats `$` as an identifier character.
     expando: char,
+    /// Extensions answered for, without the leading dot, matched
+    /// ASCII-case-insensitively. Empty until [`CustomLang::with_extensions`]
+    /// sets them, and never consulted unless a caller passes the registration
+    /// to [`CustomLang::of_path`].
     extensions: &'static [&'static str],
 }
 
@@ -374,6 +400,14 @@ pub struct AstMetrics {
 }
 
 impl AstMetrics {
+    /// Fold one visited `node`, seen at `depth`, into the running metrics.
+    ///
+    /// Called once per node of a walk, so this is where the three accumulators
+    /// are kept monotone: `nodes` saturates instead of wrapping (unreachable at
+    /// any real tree size, but the bound is stated rather than assumed),
+    /// `max_depth` keeps the deepest branch seen, and `has_syntax_issues` is
+    /// sticky — once an `ERROR` or `MISSING` node is seen, no later clean node
+    /// may clear it, because the walk has no way to unsee it.
     fn including<L: LanguageExt>(mut self, node: &AstNode<'_, L>, depth: usize) -> Self {
         self.nodes = self.nodes.saturating_add(1);
         self.max_depth = self.max_depth.max(depth);
@@ -410,6 +444,14 @@ pub fn try_detect_content(
     Ok(detect_by_parsing(source, candidates))
 }
 
+/// The one candidate that parses `source` cleanly, or `None` when zero or more
+/// than one do.
+///
+/// `source` is assumed already size-checked by the caller — [`try_detect_content`]
+/// is the only one, and it applies [`MAX_DETECT_BYTES`] before reaching here.
+/// "Several clean readings" is a refusal rather than a tie-break: picking among
+/// grammars that all accept the source would attach a rule set on no evidence,
+/// which is the same defect as reporting a guess.
 fn detect_by_parsing(source: &str, candidates: &[Language]) -> Option<Language> {
     let mut readable = candidates
         .iter()
@@ -441,6 +483,19 @@ pub fn try_parse_with<L: LanguageExt>(
     parse_bounded(code, language, name, MAX_SOURCE_BYTES, MAX_AST_NODES)
 }
 
+/// The one body behind [`try_parse`] and [`try_parse_with`]: byte bound, then
+/// tree, then node bound, then recovery refusal.
+///
+/// The bounds are parameters rather than constants read in place so both entry
+/// points state the policy they apply at the call site, and so a later caller
+/// with a different budget reuses this ordering instead of restating it. The
+/// order is the point: the byte check runs before the parser allocates, the
+/// node check before any walk of the tree, and both before any tree reaches a
+/// caller.
+///
+/// `language` is borrowed and cloned into the `StrDoc` because a grammar may be
+/// a registered [`CustomLang`] or a built-in [`Language`]; `name` is the stable
+/// name the error variants carry, since they cannot hold the grammar itself.
 fn parse_bounded<L: LanguageExt>(
     code: &str,
     language: &L,
@@ -482,6 +537,12 @@ pub fn parse_with<L: LanguageExt>(code: &str, language: &L) -> AstGrep<StrDoc<L>
     language.ast_grep(code)
 }
 
+/// Refuse `source` over `limit` bytes, naming both numbers in the refusal.
+///
+/// The measure is bytes, not characters: the bound exists to keep parse work
+/// linear in input, and what the parser is handed is bytes. `actual` travels
+/// into the error rather than being dropped, so a caller can report how far
+/// over the input was without measuring it a second time.
 fn validate_source_size(source: &str, limit: usize) -> Result<(), ParseError> {
     let actual = source.len();
     (actual <= limit)
@@ -599,23 +660,34 @@ mod tests {
     fn no_two_enabled_languages_claim_one_extension() {
         let mut claimed: Vec<(&str, &str)> = Vec::new();
         for &language in Language::ALL {
-            for extension in language.extensions() {
-                if let Some((other, _)) = claimed.iter().find(|(ext, _)| ext == extension) {
-                    panic!(
-                        ".{other} is claimed by both {} and an earlier language",
-                        language.name()
-                    );
-                }
+            // `&extension` binds the `&str` itself rather than the `&&str` a
+            // bare binding would take, so the comparison below is `&str` to
+            // `&str` and no pattern sits between the reference and the value.
+            for &extension in language.extensions() {
+                let previous = claimed
+                    .iter()
+                    .find(|entry| entry.0 == extension)
+                    .map(|entry| entry.1);
+                assert_eq!(
+                    previous,
+                    None,
+                    ".{extension} is claimed by {} and by an earlier language",
+                    language.name()
+                );
                 claimed.push((extension, language.name()));
             }
         }
     }
 
     #[test]
-    fn checked_parse_accepts_valid_rust() {
-        let parsed = try_parse("fn f() {}", Language::Rust).expect("valid rust parses");
+    fn checked_parse_accepts_valid_rust() -> Result<(), ParseError> {
+        // A test that returns `Result` reports the refusal's own `Debug` on
+        // failure, which is the same report `.expect` would have produced,
+        // without an `expect` in the tree.
+        let parsed = try_parse("fn f() {}", Language::Rust)?;
         assert!(max_depth(&parsed.root()) > 1);
         assert!(!has_syntax_issues(&parsed.root()));
+        Ok(())
     }
 
     #[test]
@@ -674,21 +746,30 @@ mod tests {
         // parse_bounded is the one place the node bound is enforced, so drive it
         // directly with a bound small enough to exceed without a megabyte of
         // source. The walk stops at limit + 1, which is what proves refusal.
-        match parse_bounded(
+        let refusal = parse_bounded(
             "fn f() { let x = 1; }",
             &SupportLang::Rust,
             "rust",
             MAX_SOURCE_BYTES,
             2,
-        ) {
-            Err(ParseError::AstTooLarge {
-                observed, limit, ..
-            }) => {
-                assert_eq!(limit, 2);
-                assert!(observed > limit, "observed {observed} must exceed {limit}");
-            }
-            Err(other) => panic!("expected AstTooLarge, got {other:?}"),
-            Ok(_) => panic!("a tree past the bound must refuse"),
+        );
+        // The gate is this assertion, which reports whatever came back
+        // instead. The `if let` below only reads the numbers, and the pattern
+        // is the same one asserted here, so it always matches when the test
+        // reaches it.
+        assert!(
+            matches!(refusal, Err(ParseError::AstTooLarge { .. })),
+            "a tree past the node bound must refuse as AstTooLarge, got {:?}",
+            // `as_ref().err()` rather than the whole `Result`: a successful
+            // parse holds a `Parsed`, which is not `Debug`.
+            refusal.as_ref().err()
+        );
+        if let Err(ParseError::AstTooLarge {
+            observed, limit, ..
+        }) = refusal
+        {
+            assert_eq!(limit, 2);
+            assert!(observed > limit, "observed {observed} must exceed {limit}");
         }
     }
 
@@ -703,11 +784,12 @@ mod tests {
     }
 
     #[test]
-    fn a_registered_grammar_parses_through_the_bounded_api() {
+    fn a_registered_grammar_parses_through_the_bounded_api() -> Result<(), ParseError> {
         let custom = CustomLang::new("rust-as-custom", SupportLang::Rust.get_ts_language());
-        let parsed = try_parse_with("fn f() {}", &custom, custom.name()).expect("custom parses");
+        let parsed = try_parse_with("fn f() {}", &custom, custom.name())?;
         assert!(max_depth(&parsed.root()) > 1);
         assert!(!has_syntax_issues(&parsed.root()));
+        Ok(())
     }
 
     #[test]
@@ -734,11 +816,13 @@ mod tests {
         let custom = CustomLang::new("rust-as-custom", SupportLang::Rust.get_ts_language())
             .with_extensions(&["custom", "CU"]);
         assert_eq!(
-            CustomLang::of_path("a/file.custom", std::slice::from_ref(&custom)).map(|l| l.name()),
+            CustomLang::of_path("a/file.custom", std::slice::from_ref(&custom))
+                .map(|language| language.name()),
             Some("rust-as-custom")
         );
         assert_eq!(
-            CustomLang::of_path("a/file.cu", std::slice::from_ref(&custom)).map(|l| l.name()),
+            CustomLang::of_path("a/file.cu", std::slice::from_ref(&custom))
+                .map(|language| language.name()),
             Some("rust-as-custom")
         );
         assert!(CustomLang::of_path("a/file.rs", &[custom]).is_none());

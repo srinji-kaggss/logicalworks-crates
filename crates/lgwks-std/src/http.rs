@@ -48,6 +48,17 @@ impl Default for Options {
 }
 
 impl Options {
+    /// Set the total request timeout, covering connect, TLS, send, and receive.
+    ///
+    /// [`Options`] is `#[non_exhaustive]`, so a caller outside this crate
+    /// cannot construct it with a struct expression. Start from
+    /// [`Options::default`] and set the field through this method.
+    #[must_use]
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
     /// Attach an idempotency key (`Idempotency-Key` header) so a retried
     /// request is deduplicated by the receiver. Pair with
     /// [`crate::retry::RetryPolicy`] and a caller-generated key
@@ -84,6 +95,17 @@ impl Response {
             Error::Transport(format!("response body is not valid UTF-8: {utf8_error}"))
         })
     }
+
+    /// The body as UTF-8, replacing every invalid sequence with `U+FFFD`.
+    ///
+    /// Use this where the body is a preview rather than a payload: a caller
+    /// that only wants a diagnostic excerpt should not have to invent a
+    /// fallback for a body it is about to truncate anyway. For a strict read
+    /// that reports non-UTF-8 as a transport failure, use [`Response::text`].
+    #[must_use]
+    pub fn text_lossy(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.body)
+    }
 }
 
 // ── Error ───────────────────────────────────────────────────────────────────
@@ -104,12 +126,15 @@ pub enum Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
+        // Matched through `*self` so every arm's pattern is the enum's own
+        // type; `Transport` binds its payload by reference, since `Error` is
+        // not `Copy` and formatting must not consume it.
+        match *self {
             Self::InvalidUrl => {
                 write!(f, "invalid http(s) URL (absolute http(s) URI required)")
             }
             Self::Timeout => write!(f, "request timed out"),
-            Self::Transport(cause) => write!(f, "transport failure: {cause}"),
+            Self::Transport(ref cause) => write!(f, "transport failure: {cause}"),
         }
     }
 }
@@ -118,38 +143,59 @@ impl std::error::Error for Error {}
 
 // ── Exchange ────────────────────────────────────────────────────────────────
 
-/// Reject anything that is not an absolute http(s) URI before dialing. The
-/// diagnostics name the failure class, never the raw URL: a caller-supplied URL
-/// can carry credentials or tokens in its userinfo or query string.
+/// Reject anything that is not an absolute http(s) URI before dialing.
+///
+/// Four shapes are refused, and all four return the same [`Error::InvalidUrl`]:
+/// a string that is not an absolute URI at all, a missing or non-http(s)
+/// scheme, a URL with no authority, and a URL whose host is empty. The
+/// rejection is silent — nothing is written to stderr — and the diagnostic
+/// names the failure class, never the raw URL: a caller-supplied URL can carry
+/// credentials or tokens in its userinfo or its query string. The caller already
+/// holds the URL it passed in, so the class is the whole of what it does not
+/// have.
+///
+/// A URL that fails here never reaches a socket.
 pub fn validate_url(url: &str) -> Result<(), Error> {
-    UriAbsoluteStr::new(url).map_err(|cause| {
-        eprintln!("lgwks_std::http: rejecting malformed URL: {cause}");
-        Error::InvalidUrl
-    })?;
+    UriAbsoluteStr::new(url).map_err(|_malformed| Error::InvalidUrl)?;
     let Some(scheme) = url.split_once(':').map(|(scheme, _)| scheme) else {
-        eprintln!("lgwks_std::http: rejecting URL with no scheme");
         return Err(Error::InvalidUrl);
     };
     if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
-        eprintln!("lgwks_std::http: rejecting non-http(s) scheme {scheme:?}");
         return Err(Error::InvalidUrl);
     }
     // An absolute URI may be authority-less — `http:user:SECRET@host` parses —
     // but it is not a valid request target. ureq refuses such a URL with a
     // message that embeds the raw text, so reject it here, class-only, rather
     // than let a lower layer echo it.
-    let Some(authority) = url[scheme.len() + 1..].strip_prefix("//") else {
-        eprintln!("lgwks_std::http: rejecting URL without authority");
+    //
+    // `scheme` is a slice of `url`, so its length is already bounded by
+    // `url.len()`; the offset past the `:` therefore cannot overflow, and
+    // `checked_add` states that bound rather than relying on it. `get` rather
+    // than an index: the offset is `url`'s only ASCII byte by construction, but
+    // a `Some` here proves the bound instead of asserting it.
+    let Some(rest) = scheme
+        .len()
+        .checked_add(1)
+        .and_then(|after| url.get(after..))
+    else {
+        return Err(Error::InvalidUrl);
+    };
+    let Some(authority) = rest.strip_prefix("//") else {
         return Err(Error::InvalidUrl);
     };
     let host_end = authority.find(['/', '?', '#']).unwrap_or(authority.len());
     if authority[..host_end].is_empty() {
-        eprintln!("lgwks_std::http: rejecting URL with empty host");
         return Err(Error::InvalidUrl);
     }
     Ok(())
 }
 
+/// Build the one-shot agent for `options`.
+///
+/// A fresh agent per call is the documented cost model: no connection pooling,
+/// no shared state between requests. `http_status_as_error(false)` is what makes
+/// a 4xx/5xx a [`Response`] rather than an [`Error`]; the timeout is applied
+/// globally, so it covers connect, TLS, send, and receive.
 fn agent(options: &Options) -> ureq::Agent {
     let config = ureq::Agent::config_builder()
         .timeout_global(Some(options.timeout))
@@ -159,6 +205,15 @@ fn agent(options: &Options) -> ureq::Agent {
     ureq::Agent::new_with_config(config)
 }
 
+/// Read a completed ureq response into the owned [`Response`].
+///
+/// Header values are decoded lossily: a non-UTF-8 header must not fail the
+/// whole exchange, and the replacement character keeps the wire bytes
+/// distinguishable from a header that was genuinely invalid UTF-8. The body, by
+/// contrast, is read strictly — only the I/O read can fail here, and a partial
+/// read is reported as [`Error::Transport`] rather than returned as a short
+/// body. Non-UTF-8 *bodies* are not an error at this layer: [`Response::text`]
+/// is where that is decided.
 fn response_of(mut response: ureq::http::Response<ureq::Body>) -> Result<Response, Error> {
     let status = response.status().as_u16();
     let headers = response
@@ -176,7 +231,7 @@ fn response_of(mut response: ureq::http::Response<ureq::Body>) -> Result<Respons
         .body_mut()
         .as_reader()
         .read_to_end(&mut body)
-        .map_err(|e| Error::Transport(e.to_string()))?;
+        .map_err(|read_error| Error::Transport(read_error.to_string()))?;
     Ok(Response {
         status,
         headers,
@@ -184,6 +239,14 @@ fn response_of(mut response: ureq::http::Response<ureq::Body>) -> Result<Respons
     })
 }
 
+/// Fold a ureq failure into this crate's [`Error`].
+///
+/// `Timeout` is preserved as its own variant because it is the one transport
+/// failure a caller can act on by widening [`Options::timeout`]. `BadUri` is
+/// collapsed to [`Error::InvalidUrl`] for the same reason `validate_url` is
+/// class-only: ureq's message embeds the raw URI, so the string is dropped
+/// rather than carried into a caller's logs. Everything else keeps the
+/// underlying detail, which names DNS, TCP, TLS, or protocol failure.
 fn map_error(error: ureq::Error) -> Error {
     match error {
         ureq::Error::Timeout(_) => Error::Timeout,
@@ -205,8 +268,12 @@ pub fn get_response(url: &str) -> Result<Response, Error> {
 pub fn get_with(url: &str, options: &Options) -> Result<Response, Error> {
     validate_url(url)?;
     let mut call = agent(options).get(url);
-    for (name, value) in &options.headers {
-        call = call.header(name.as_str(), value.as_str());
+    // Bound whole rather than destructured: the elements are `&String` behind
+    // the tuple, so a `(name, value)` pattern would not match the scrutinee
+    // type, and spelling the borrow out (`&(ref name, ref value)`) is the
+    // redundant-reference form clippy rejects. The fields stay as written.
+    for header in &options.headers {
+        call = call.header(header.0.as_str(), header.1.as_str());
     }
     call.call().map_err(map_error).and_then(response_of)
 }
@@ -224,20 +291,17 @@ pub fn post_with(
     options: &Options,
 ) -> Result<Response, Error> {
     validate_url(url)?;
-    // The URL is intentionally not logged: it can carry credentials in its
-    // userinfo or query string. Method, content type, and size are enough to
-    // correlate the request. `content_type` is caller-controlled, so it is
-    // debug-formatted: that escapes CR/LF and keeps a crafted value from
-    // forging a second log line.
-    eprintln!(
-        "lgwks_std::http: POST ({content_type:?}, {} bytes)",
-        body.len()
-    );
+    // Nothing about this request is written anywhere, and deliberately so: the
+    // URL can carry credentials in its userinfo or a token in its query string,
+    // and a library that prints on a request the caller itself authored tells
+    // the caller nothing it does not already hold — it has the URL, the content
+    // type, and the body length. A caller that wants a request trace owns that
+    // decision, and owns redacting the URL when it does.
     let mut request = agent(options)
         .post(url)
         .header("Content-Type", content_type);
-    for (name, value) in &options.headers {
-        request = request.header(name.as_str(), value.as_str());
+    for header in &options.headers {
+        request = request.header(header.0.as_str(), header.1.as_str());
     }
     let response = request.send(body).map_err(map_error)?;
     response_of(response)
@@ -246,6 +310,15 @@ pub fn post_with(
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+// Same exception as `task.rs`, for the same reason: these tests stand up a real
+// loopback server on a real thread and sleep to hold it open past the client's
+// read timeout. The ban targets production code that blocks or leaks a thread;
+// here the thread *is* the fixture, and there is no estate surface that serves
+// a socket from a test.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "loopback test servers need a real thread, and holding one open past a read timeout needs a real sleep"
+)]
 mod tests {
     use super::*;
     use std::io::{Read, Write};
@@ -257,16 +330,21 @@ mod tests {
     /// Serve `replies` canned responses, then exit. Returns the bound port.
     /// Reads full requests (headers plus any `Content-Length` body) before
     /// replying, so POST bodies are never mistaken for missing.
-    fn serve(replies: Vec<(&'static str, &'static str)>) -> (u16, thread::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let handle = thread::spawn(move || {
+    ///
+    /// Fallible rather than unwrapping, so a bind or socket refusal is reported
+    /// to the test that asked for the server instead of panicking in a helper.
+    fn serve(
+        replies: Vec<(&'static str, &'static str)>,
+    ) -> std::io::Result<(u16, thread::JoinHandle<std::io::Result<()>>)> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        let handle = thread::spawn(move || -> std::io::Result<()> {
             for (status, body) in replies {
-                let (mut stream, _) = listener.accept().unwrap();
+                let (mut stream, _) = listener.accept()?;
                 let mut request = vec![0u8; 4096];
                 let mut head = Vec::new();
                 loop {
-                    let n = stream.read(&mut request).unwrap();
+                    let n = stream.read(&mut request)?;
                     head.extend_from_slice(&request[..n]);
                     if head.windows(4).any(|w| w == b"\r\n\r\n") {
                         break;
@@ -275,20 +353,25 @@ mod tests {
                 let header_end = head
                     .windows(4)
                     .position(|w| w == b"\r\n\r\n")
-                    .map(|p| p + 4)
+                    // `position` reports the delimiter's first byte, so the
+                    // header end is four past it; in a 4096-byte buffer that
+                    // cannot approach `usize::MAX`.
+                    .map(|position| position.saturating_add(4))
                     .unwrap_or(head.len());
                 let text = String::from_utf8_lossy(&head[..header_end]);
                 let content_length = text
                     .lines()
                     .filter_map(|line| line.split_once(':'))
-                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .find(|entry| entry.0.eq_ignore_ascii_case("content-length"))
                     .and_then(|(_, value)| value.trim().parse::<usize>().ok())
                     .unwrap_or(0);
-                let mut received = head.len() - header_end;
+                // `header_end` is either the delimiter's end or the whole
+                // buffer, so it never exceeds `head.len()`.
+                let mut received = head.len().saturating_sub(header_end);
                 while received < content_length {
-                    let n = stream.read(&mut request).unwrap();
+                    let n = stream.read(&mut request)?;
                     head.extend_from_slice(&request[..n]);
-                    received += n;
+                    received = received.saturating_add(n);
                 }
                 let full = String::from_utf8_lossy(&head);
                 let echoed = full.contains(ECHO);
@@ -297,23 +380,39 @@ mod tests {
                     "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
                     payload.len()
                 );
-                stream.write_all(reply.as_bytes()).unwrap();
+                stream.write_all(reply.as_bytes())?;
             }
+            Ok(())
         });
-        (port, handle)
+        Ok((port, handle))
     }
 
+    /// Joins the canned server, surfacing its refusal or a panic inside it.
+    fn join_server(
+        server: thread::JoinHandle<std::io::Result<()>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let served = server
+            .join()
+            .map_err(|_| "the canned server thread panicked before replying")?;
+        served?;
+        Ok(())
+    }
+
+    // These tests return `Result` rather than unwrapping: a refusal reports its
+    // own `Debug` on failure, which is the same report `.unwrap` would have
+    // panicked with, without an `unwrap` in the tree.
     #[test]
-    fn default_option_wrappers_reach_the_same_path() {
-        let (port, server) = serve(vec![("200 OK", "hello"), ("200 OK", "ok")]);
+    fn default_option_wrappers_reach_the_same_path() -> Result<(), Box<dyn std::error::Error>> {
+        let (port, server) = serve(vec![("200 OK", "hello"), ("200 OK", "ok")])?;
         let url = format!("http://127.0.0.1:{port}/");
-        let got = get_response(&url).unwrap();
+        let got = get_response(&url)?;
         assert_eq!(got.status, 200);
         assert_eq!(got.body, b"hello");
-        let posted = post(&url, "text/plain", ECHO.as_bytes()).unwrap();
+        let posted = post(&url, "text/plain", ECHO.as_bytes())?;
         assert_eq!(posted.status, 200);
-        assert_eq!(posted.text().unwrap(), ECHO);
-        server.join().unwrap();
+        assert_eq!(posted.text()?, ECHO);
+        join_server(server)?;
+        Ok(())
     }
 
     fn quiet() -> Options {
@@ -325,43 +424,45 @@ mod tests {
     }
 
     #[test]
-    fn gets_status_headers_and_body() {
-        let (port, server) = serve(vec![("200 OK", "hello")]);
-        let response = get_with(&format!("http://127.0.0.1:{port}/"), &quiet()).unwrap();
+    fn gets_status_headers_and_body() -> Result<(), Box<dyn std::error::Error>> {
+        let (port, server) = serve(vec![("200 OK", "hello")])?;
+        let response = get_with(&format!("http://127.0.0.1:{port}/"), &quiet())?;
         assert_eq!(response.status, 200);
         assert_eq!(response.body, b"hello");
-        assert_eq!(response.text().unwrap(), "hello");
+        assert_eq!(response.text()?, "hello");
         assert!(
             response
                 .headers
                 .iter()
-                .any(|(n, _)| n.eq_ignore_ascii_case("content-length"))
+                .any(|header| header.0.eq_ignore_ascii_case("content-length"))
         );
-        server.join().unwrap();
+        join_server(server)?;
+        Ok(())
     }
 
     #[test]
-    fn error_statuses_are_responses_not_errors() {
-        let (port, server) = serve(vec![("404 Not Found", "missing")]);
-        let response = get_with(&format!("http://127.0.0.1:{port}/"), &quiet()).unwrap();
+    fn error_statuses_are_responses_not_errors() -> Result<(), Box<dyn std::error::Error>> {
+        let (port, server) = serve(vec![("404 Not Found", "missing")])?;
+        let response = get_with(&format!("http://127.0.0.1:{port}/"), &quiet())?;
         assert_eq!(response.status, 404);
-        assert_eq!(response.text().unwrap(), "missing");
-        server.join().unwrap();
+        assert_eq!(response.text()?, "missing");
+        join_server(server)?;
+        Ok(())
     }
 
     #[test]
-    fn posts_body_with_content_type() {
-        let (port, server) = serve(vec![("200 OK", "")]);
+    fn posts_body_with_content_type() -> Result<(), Box<dyn std::error::Error>> {
+        let (port, server) = serve(vec![("200 OK", "")])?;
         let response = post_with(
             &format!("http://127.0.0.1:{port}/"),
             "text/plain",
             ECHO.as_bytes(),
             &quiet(),
-        )
-        .unwrap();
+        )?;
         assert_eq!(response.status, 200);
-        assert_eq!(response.text().unwrap(), ECHO);
-        server.join().unwrap();
+        assert_eq!(response.text()?, ECHO);
+        join_server(server)?;
+        Ok(())
     }
 
     #[test]
@@ -392,24 +493,29 @@ mod tests {
     }
 
     #[test]
-    fn refused_connection_is_transport_not_timeout() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
+    fn refused_connection_is_transport_not_timeout() -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
         drop(listener);
-        let error = get_with(&format!("http://127.0.0.1:{port}/"), &quiet()).unwrap_err();
+        let Err(error) = get_with(&format!("http://127.0.0.1:{port}/"), &quiet()) else {
+            return Err("a refused connection must not yield a response".into());
+        };
         assert!(matches!(error, Error::Transport(_)));
+        Ok(())
     }
 
     #[test]
-    fn custom_headers_reach_the_server() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+    fn custom_headers_reach_the_server() -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        // The recorder returns the request it saw, so a socket refusal in the
+        // thread reaches the test through the join below instead of panicking.
+        let handle = thread::spawn(move || -> std::io::Result<String> {
+            let (mut stream, _) = listener.accept()?;
             let mut request = vec![0u8; 4096];
             let mut head = Vec::new();
             loop {
-                let n = stream.read(&mut request).unwrap();
+                let n = stream.read(&mut request)?;
                 head.extend_from_slice(&request[..n]);
                 if head.windows(4).any(|w| w == b"\r\n\r\n") {
                     break;
@@ -417,8 +523,8 @@ mod tests {
             }
             let text = String::from_utf8_lossy(&head).into_owned();
             let reply = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
-            stream.write_all(reply.as_bytes()).unwrap();
-            text
+            stream.write_all(reply.as_bytes())?;
+            Ok(text)
         });
         let options = Options {
             timeout: Duration::from_secs(5),
@@ -430,32 +536,41 @@ mod tests {
             "text/plain",
             b"hi",
             &options,
-        )
-        .unwrap();
+        )?;
         assert_eq!(response.status, 200);
-        let seen = handle.join().unwrap();
+        let seen = handle
+            .join()
+            .map_err(|_| "the recording server thread panicked before replying")??;
         assert!(
             seen.to_ascii_lowercase()
                 .contains("authorization: bearer test-token"),
             "server never saw the Authorization header:\n{seen}"
         );
+        Ok(())
     }
 
     #[test]
-    fn silent_server_hits_timeout() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let handle = thread::spawn(move || {
-            let (_stream, _) = listener.accept().unwrap();
+    fn silent_server_hits_timeout() -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        // Held open past the client's timeout: the accept must succeed (so the
+        // dial is not what fails) and the reply must never come, leaving the
+        // client's read timeout as the only thing that can end the request.
+        let handle = thread::spawn(move || -> std::io::Result<()> {
+            let (_stream, _) = listener.accept()?;
             thread::sleep(Duration::from_secs(30));
+            Ok(())
         });
         let options = Options {
             timeout: Duration::from_millis(200),
             user_agent: "lgwks-std-test".into(),
             headers: Vec::new(),
         };
-        let error = get_with(&format!("http://127.0.0.1:{port}/"), &options).unwrap_err();
+        let Err(error) = get_with(&format!("http://127.0.0.1:{port}/"), &options) else {
+            return Err("a silent server must hit the read timeout".into());
+        };
         assert_eq!(error, Error::Timeout);
         drop(handle);
+        Ok(())
     }
 }

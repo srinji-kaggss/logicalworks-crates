@@ -59,6 +59,15 @@ tokio-full = [
     "tokio-fs",
     "tokio-signal",
 ]
+# ECS storefront. One state substrate serves three consumers: `lgwks_bot`'s
+# four-verb actors, drishti's incremental derivation, and the GPU framework's
+# demand-driven execution. `bevy-ecs` is the substrate; the other three are what
+# turn it into a runtime rather than a data structure. All four stay default-off
+# and pull no renderer, no windowing, and no audio.
+bevy-ecs = ["dep:bevy_ecs"]
+bevy-app = ["bevy-ecs", "dep:bevy_app"]
+bevy-time = ["bevy-ecs", "dep:bevy_time"]
+bevy-state = ["bevy-ecs", "dep:bevy_state"]
 
 [dependencies]
 lgwks_std = { workspace = true, features = ["json"] }
@@ -66,6 +75,17 @@ syn = { version = "2", features = ["full", "visit", "parsing"], optional = true 
 proc-macro2 = { version = "1", features = ["span-locations"], optional = true }
 gpui = { version = "0.2", optional = true }
 appcui = { version = "=0.5.1", default-features = false, optional = true }
+# Bevy's ECS and the three crates that make it a runtime. `default-features =
+# false` throughout, and two omissions are deliberate: `bevy_reflect` stays off
+# (it is the expensive half of `bevy_ecs`'s default set and the estate does not
+# need runtime type reflection), and `multi_threaded` stays off, because the
+# multithreaded executor admits any system whose access set is disjoint from the
+# running set, so the order of two non-conflicting systems is not fixed. A bot
+# polling sources does not need parallel scheduling and cannot afford that.
+bevy_ecs = { version = "0.19", default-features = false, features = ["std"], optional = true }
+bevy_app = { version = "0.19", default-features = false, optional = true }
+bevy_time = { version = "0.19", default-features = false, optional = true }
+bevy_state = { version = "0.19", default-features = false, optional = true }
 # The engine is compiled `default-features = false` with the portable `rt`
 # feature always on. Native targets add `rt-multi-thread`; WASM targets use the
 # current-thread runtime because Tokio does not provide its multi-thread driver

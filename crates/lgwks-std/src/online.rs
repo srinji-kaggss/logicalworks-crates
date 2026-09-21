@@ -21,7 +21,7 @@ pub fn probe(addr: impl ToSocketAddrs, timeout: Duration) -> bool {
     let Ok(mut addrs) = addr.to_socket_addrs() else {
         return false;
     };
-    addrs.any(|a| TcpStream::connect_timeout(&a, timeout).is_ok())
+    addrs.any(|candidate| TcpStream::connect_timeout(&candidate, timeout).is_ok())
 }
 
 /// True when the public internet is reachable within `timeout`.
@@ -29,6 +29,7 @@ pub fn probe(addr: impl ToSocketAddrs, timeout: Duration) -> bool {
 /// Dials anycast endpoints over TCP (1.1.1.1:443, 8.8.8.8:53); true when
 /// either answers. This is a heuristic for UI gating and diagnostics, not
 /// a guarantee a given host is reachable — use [`crate::online::probe`] for that.
+#[must_use]
 pub fn is_online(timeout: Duration) -> bool {
     probe("1.1.1.1:443", timeout) || probe("8.8.8.8:53", timeout)
 }
@@ -42,19 +43,24 @@ mod tests {
 
     const WAIT: Duration = Duration::from_secs(2);
 
+    // These tests return `Result` rather than unwrapping: a bind refusal
+    // reports its own `Debug` on failure, which is the same report `.unwrap`
+    // would have panicked with, without an `unwrap` in the tree.
     #[test]
-    fn open_port_probes_true() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
+    fn open_port_probes_true() -> Result<(), std::io::Error> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
         assert!(probe(format!("127.0.0.1:{port}"), WAIT));
+        Ok(())
     }
 
     #[test]
-    fn closed_port_probes_false() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
+    fn closed_port_probes_false() -> Result<(), std::io::Error> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
         drop(listener);
         assert!(!probe(format!("127.0.0.1:{port}"), WAIT));
+        Ok(())
     }
 
     #[test]

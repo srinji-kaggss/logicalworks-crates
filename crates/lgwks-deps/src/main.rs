@@ -10,7 +10,18 @@
 //! `vendor check` is the physical counterpart: the register says which edges
 //! are owned, the vendor tree says which bytes the offline build resolves,
 //! and the subcommand proves the lockfile is fully covered by the tree.
+//!
+//! ## Output and the exit code
+//!
+//! Every command writes through an `io::Write` handle passed down from `main`
+//! rather than through `print!`/`println!`. The two are the same bytes on a
+//! terminal, but only the explicit handle lets this binary decide what a closed
+//! reader means: `lgwks-deps check . | head -1` is ordinary usage, so a broken
+//! pipe is a clean exit, not a panic. `print!` cannot express that, and it also
+//! trips `clippy::print_stdout`, which the workspace forbids outright. The
+//! policy lives in one place — `settle` — instead of at each write site.
 
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -19,6 +30,17 @@ use lgwks_deps::{
     repository_root,
 };
 
+/// Exit code for a write that failed for a reason other than the reader going
+/// away.
+///
+/// The crate's generic failure code, already used for an unknown command and a
+/// refused audit. It is deliberately not `1`: `freshness` owns `1` for a stale
+/// dependency, and a consumer scripting on that number must not see a write
+/// fault spelled the same way as an out-of-date lockfile.
+const EXIT_IO: u8 = 2;
+
+/// The command summary printed by `--help`, by an unknown command, and by a
+/// subcommand invoked with the wrong number of arguments.
 const USAGE: &str = "\
 lgwks-deps — dependency admission for the std+ estate
 
@@ -44,130 +66,229 @@ EXIT
    2  a refusal, a missing register, or an unparseable one
 ";
 
-fn parse_check_args(args: &[String]) -> (Option<PathBuf>, Option<PathBuf>) {
-    let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
-    let override_path = args
-        .iter()
-        .position(|a| a == "--contract")
-        .and_then(|i| args.get(i + 1))
-        .map(PathBuf::from);
-    let target_path = positional.first().map(|p| PathBuf::from(p.as_str()));
-    (target_path, override_path)
-}
-
-fn handle_check(args: &[String]) -> ExitCode {
-    let (target_path, override_path) = parse_check_args(args);
-    run_check(target_path, override_path)
-}
-
-fn handle_help() -> ExitCode {
-    print!("{USAGE}");
-    ExitCode::SUCCESS
-}
-
-fn handle_tiers() -> ExitCode {
-    print!("{LADDER}");
-    ExitCode::SUCCESS
-}
-
-fn handle_unknown(other: &str) -> ExitCode {
-    eprintln!("lgwks-deps: unknown command {other:?}\n");
-    eprint!("{USAGE}");
-    ExitCode::from(2)
-}
-
-fn dispatch(command: &str, args: &[String]) -> ExitCode {
-    match command {
-        "check" => handle_check(&args[1..]),
-        "request" => run_request(args.get(1), args.get(2)),
-        "init" => run_init(args.get(1).map(PathBuf::from)),
-        "tiers" => handle_tiers(),
-        "freshness" => handle_freshness(&args[1..]),
-        "vendor" => handle_vendor(&args[1..]),
-        "scan" => handle_scan(&args[1..]),
-        "-h" | "--help" | "help" => handle_help(),
-        other => handle_unknown(other),
+/// Turns a command's write result into the process exit code.
+///
+/// `BrokenPipe` is success: the reader closed the pipe on purpose, which is
+/// what `| head -1` does, and the command's own verdict was never in question.
+/// Any other write error is a real fault and reports ``EXIT_IO``. This is the
+/// single place the policy is written down; the commands themselves propagate
+/// their first write failure with `?` and never inspect its kind.
+fn settle(result: io::Result<ExitCode>) -> ExitCode {
+    match result {
+        Ok(code) => code,
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+        Err(_) => ExitCode::from(EXIT_IO),
     }
 }
 
+/// Splits `check`'s arguments into the path to audit and an optional
+/// `--contract` register override.
+///
+/// The first non-flag argument is the target; the value after `--contract` is
+/// the override. Anything else is ignored rather than rejected, so an
+/// unrecognised flag is a no-op instead of a hard failure on a path that is
+/// already diagnosed by `check` itself.
+fn parse_check_args(args: &[String]) -> (Option<PathBuf>, Option<PathBuf>) {
+    let positional: Vec<&String> = args.iter().filter(|arg| !arg.starts_with("--")).collect();
+    let override_path = args
+        .iter()
+        .position(|arg| arg == "--contract")
+        // `position` yields an index strictly inside `args`, so its successor
+        // cannot overflow `usize`; `get` still bounds-checks it.
+        .and_then(|index| args.get(index.saturating_add(1)))
+        .map(PathBuf::from);
+    let target_path = positional
+        .first()
+        .map(|candidate| PathBuf::from(candidate.as_str()));
+    (target_path, override_path)
+}
+
+/// Runs `check`, keeping the argument parsing out of the audit path.
+fn handle_check(
+    args: &[String],
+    out: &mut impl io::Write,
+    err: &mut impl io::Write,
+) -> io::Result<ExitCode> {
+    let (target_path, override_path) = parse_check_args(args);
+    run_check(target_path, override_path, out, err)
+}
+
+/// Prints the usage block and reports success.
+fn handle_help(out: &mut impl io::Write) -> io::Result<ExitCode> {
+    write!(out, "{USAGE}")?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Prints the admission ladder and reports success.
+fn handle_tiers(out: &mut impl io::Write) -> io::Result<ExitCode> {
+    write!(out, "{LADDER}")?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Reports an unrecognised command on stderr with the usage block.
+///
+/// Exits 2: an unknown command is a failure of the invocation, not a refused
+/// audit, but both are "this did not do what you asked" and share the code the
+/// usage block documents.
+fn handle_unknown(other: &str, err: &mut impl io::Write) -> io::Result<ExitCode> {
+    writeln!(err, "lgwks-deps: unknown command {other:?}\n")?;
+    write!(err, "{USAGE}")?;
+    Ok(ExitCode::from(2))
+}
+
+/// Routes the first argument to its command, with the remaining arguments.
+fn dispatch(
+    command: &str,
+    args: &[String],
+    out: &mut impl io::Write,
+    err: &mut impl io::Write,
+) -> io::Result<ExitCode> {
+    match command {
+        "check" => handle_check(&args[1..], out, err),
+        "request" => run_request(args.get(1), args.get(2), out, err),
+        "init" => run_init(args.get(1).map(PathBuf::from), out, err),
+        "tiers" => handle_tiers(out),
+        "freshness" => handle_freshness(&args[1..], out, err),
+        "vendor" => handle_vendor(&args[1..], out, err),
+        "scan" => handle_scan(&args[1..], out, err),
+        "-h" | "--help" | "help" => handle_help(out),
+        other => handle_unknown(other, err),
+    }
+}
+
+/// Locks both output handles once and runs the requested command.
+///
+/// The handles are locked for the life of the process rather than per line:
+/// `scan` writes one line per finding, and re-acquiring the lock thousands of
+/// times would be pure overhead. [`settle`] turns the command's write result
+/// into the exit code.
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = args.first().map(String::as_str).unwrap_or("");
-    dispatch(command, &args)
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    let stderr = io::stderr();
+    let mut err = stderr.lock();
+    settle(dispatch(command, &args, &mut out, &mut err))
 }
 
 // ── check ───────────────────────────────────────────────────────────────────
 
+/// Audits `root`, optionally against a register held elsewhere.
+///
+/// The error is flattened to a `String` here because every caller only ever
+/// prints it; the structured [`lgwks_deps::GateError`] is preserved for
+/// library embedders who branch on the failure mode.
 fn audit_root(
     root: &Path,
     contract_override: &Option<PathBuf>,
 ) -> Result<(Contract, Vec<Refusal>), String> {
-    let outcome = match contract_override {
+    let outcome = match contract_override.as_ref() {
         Some(path) => check_dependencies_against(root, path),
         None => check_dependencies(root),
     };
-    outcome.map_err(|e| e.to_string())
+    outcome.map_err(|error| error.to_string())
 }
 
-fn report_refusals(root: &Path, register: &Contract, refusals: &[Refusal]) -> ExitCode {
-    eprintln!(
+/// Prints every refusal and returns the verdict's exit code.
+///
+/// Exit 0 when `[policy] enforce = false`: the register has stood enforcement
+/// down deliberately, so the refusals are reported as adoption guidance and the
+/// build still passes. Exit 2 otherwise.
+fn report_refusals(
+    root: &Path,
+    register: &Contract,
+    refusals: &[Refusal],
+    err: &mut impl io::Write,
+) -> io::Result<ExitCode> {
+    writeln!(
+        err,
         "REFUSED  {} — {} dependency-edge violations\n",
         root.display(),
         refusals.len()
-    );
+    )?;
     for refusal in refusals {
-        eprintln!("  {refusal}");
+        writeln!(err, "  {refusal}")?;
     }
-    eprintln!(
+    writeln!(
+        err,
         "\nEach one is a decision, not a paperwork step. Climb the ladder first \
          (`lgwks-deps tiers`);\nif the answer is still a dependency, \
          `lgwks-deps request <crate> <version>` prints the block."
-    );
+    )?;
     if !register.enforce {
-        eprintln!("\nNOTE  [policy] enforce = false, so builds still pass. This is adoption-only.");
-        ExitCode::SUCCESS
+        writeln!(
+            err,
+            "\nNOTE  [policy] enforce = false, so builds still pass. This is adoption-only."
+        )?;
+        Ok(ExitCode::SUCCESS)
     } else {
-        ExitCode::from(2)
+        Ok(ExitCode::from(2))
     }
 }
 
-fn report_ok(root: &Path, count: usize) -> ExitCode {
-    println!(
+/// Prints the admitted-edge summary and returns success.
+///
+/// `count` is the number of approvals in the register, which on this path is
+/// the number of entries every one of which was matched by a real edge.
+fn report_ok(root: &Path, count: usize, out: &mut impl io::Write) -> io::Result<ExitCode> {
+    writeln!(
+        out,
         "OK  {} — {} semantic approvals, every authored external edge is owned",
         root.display(),
         count
-    );
-    ExitCode::SUCCESS
+    )?;
+    Ok(ExitCode::SUCCESS)
 }
 
-fn run_check(path: Option<PathBuf>, contract_override: Option<PathBuf>) -> ExitCode {
+/// Resolves the repository root, audits it, and reports the verdict.
+///
+/// A failure to find a lock file or to read the register is a refusal with exit
+/// code 2, never a pass — the gate is fail-closed, so "could not check" and
+/// "checked and refused" are the same verdict.
+fn run_check(
+    path: Option<PathBuf>,
+    contract_override: Option<PathBuf>,
+    out: &mut impl io::Write,
+    err: &mut impl io::Write,
+) -> io::Result<ExitCode> {
     let start = path.unwrap_or_else(|| PathBuf::from("."));
     let root = match repository_root(&start) {
         Ok(root) => root,
-        Err(e) => return refuse(&e.to_string()),
+        Err(error) => return refuse(&error.to_string(), err),
     };
     let (register, refusals) = match audit_root(&root, &contract_override) {
         Ok(outcome) => outcome,
-        Err(err_msg) => return refuse(&err_msg),
+        Err(err_msg) => return refuse(&err_msg, err),
     };
 
     if refusals.is_empty() {
-        report_ok(&root, register.entries.len())
+        report_ok(&root, register.entries.len(), out)
     } else {
-        report_refusals(&root, &register, &refusals)
+        report_refusals(&root, &register, &refusals, err)
     }
 }
 
-fn refuse(message: &str) -> ExitCode {
-    eprintln!("REFUSED  {message}");
-    ExitCode::from(2)
+/// Prints a one-line refusal on stderr and returns the refusal exit code.
+///
+/// Every refusal path in this binary funnels through here so exit code 2 means
+/// exactly one thing regardless of which check produced it.
+fn refuse(message: &str, err: &mut impl io::Write) -> io::Result<ExitCode> {
+    writeln!(err, "REFUSED  {message}")?;
+    Ok(ExitCode::from(2))
 }
 
 // ── request ─────────────────────────────────────────────────────────────────
 
-fn print_request_template(krate: &str, version: &str) {
-    print!("{LADDER}");
-    println!(
+/// Prints the ladder followed by an approval block pre-filled with the crate
+/// and version.
+///
+/// The blank fields are the point: this command writes a template a human must
+/// complete and commit, and it deliberately cannot write the register itself.
+fn print_request_template(krate: &str, version: &str, out: &mut impl io::Write) -> io::Result<()> {
+    write!(out, "{LADDER}")?;
+    writeln!(
+        out,
         "\n\
          If every rung above still leaves a dependency, append this to {CONTRACT_PATH},\n\
          fill in the blanks, and commit it. The commit is the approval.\n\n\
@@ -184,20 +305,36 @@ fn print_request_template(krate: &str, version: &str) {
          approved_by = \"\"           # the human who decided\n\
          approved_on = \"\"           # YYYY-MM-DD\n\
          review = \"\"                # path or URL to the evidence\n"
-    );
+    )
 }
 
-fn run_request(krate: Option<&String>, version: Option<&String>) -> ExitCode {
+/// Prints an approval template, or the usage block when either argument is
+/// missing.
+///
+/// Both arguments are required — a template with no crate name is not useful —
+/// so a partial invocation is a usage error on stderr with exit code 2.
+fn run_request(
+    krate: Option<&String>,
+    version: Option<&String>,
+    out: &mut impl io::Write,
+    err: &mut impl io::Write,
+) -> io::Result<ExitCode> {
     let (Some(krate), Some(version)) = (krate, version) else {
-        eprint!("{USAGE}");
-        return ExitCode::from(2);
+        write!(err, "{USAGE}")?;
+        return Ok(ExitCode::from(2));
     };
-    print_request_template(krate, version);
-    ExitCode::SUCCESS
+    print_request_template(krate, version, out)?;
+    Ok(ExitCode::SUCCESS)
 }
 
 // ── init ────────────────────────────────────────────────────────────────────
 
+/// The fail-closed register written by `init`.
+///
+/// `enforce = true` is the default on purpose: a repository brought onto the
+/// gate starts refusing unregistered edges immediately, and standing enforcement
+/// down is an explicit, reviewable edit rather than a default someone forgot to
+/// change.
 const STARTER: &str = "\
 # Approved dependency edges — the semantic contract for INV-DEP-EDGE-OWNED.
 #
@@ -217,6 +354,10 @@ enforce = true
 repository = \"\"
 ";
 
+/// Refuses when `init` would overwrite an existing register.
+///
+/// An existing register may carry a human's approvals; `init` never clobbers
+/// one. The caller reports the returned message as a refusal.
 fn check_target_exists(target: &Path) -> Result<(), String> {
     if target.exists() {
         Err(format!(
@@ -228,145 +369,189 @@ fn check_target_exists(target: &Path) -> Result<(), String> {
     }
 }
 
+/// Creates the register's parent directory if it does not exist.
+///
+/// A path with no parent (a bare filename) needs no directory and is not an
+/// error; `create_dir_all` is idempotent, so an existing directory is fine.
 fn create_parent_dirs(target: &Path) -> Result<(), String> {
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|e| format!("cannot create {}: {e}", parent.display()))
+            .map_err(|error| format!("cannot create {}: {error}", parent.display()))
     } else {
         Ok(())
     }
 }
 
+/// Writes the starter register, refusing if one is already present.
 fn prepare_init_file(target: &Path) -> Result<(), String> {
     check_target_exists(target)?;
     create_parent_dirs(target)?;
-    std::fs::write(target, STARTER).map_err(|e| format!("cannot write {}: {e}", target.display()))
+    std::fs::write(target, STARTER)
+        .map_err(|error| format!("cannot write {}: {error}", target.display()))
 }
 
-fn run_init(path: Option<PathBuf>) -> ExitCode {
+/// Writes a fail-closed register at the repository root.
+fn run_init(
+    path: Option<PathBuf>,
+    out: &mut impl io::Write,
+    err: &mut impl io::Write,
+) -> io::Result<ExitCode> {
     let start = path.unwrap_or_else(|| PathBuf::from("."));
     let root = match repository_root(&start) {
         Ok(root) => root,
-        Err(e) => return refuse(&e.to_string()),
+        Err(error) => return refuse(&error.to_string(), err),
     };
     let target = root.join(CONTRACT_PATH);
     if let Err(msg) = prepare_init_file(&target) {
-        return refuse(&msg);
+        return refuse(&msg, err);
     }
-    println!("OK  initialized {}", target.display());
-    ExitCode::SUCCESS
+    writeln!(out, "OK  initialized {}", target.display())?;
+    Ok(ExitCode::SUCCESS)
 }
 
 // ── freshness ──────────────────────────────────────────────────────────────
 
-fn handle_freshness(args: &[String]) -> ExitCode {
-    let json_output = args.iter().any(|a| a == "--json");
-    let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+/// Reports every registry dependency in the lock file against crates.io.
+///
+/// Exit 0 when nothing is stale and 1 when at least one package is behind, so
+/// a cron job can distinguish "up to date" from "action needed". A local or
+/// path package is skipped rather than queried. `--json` selects the stable
+/// object-array form over the human table; both carry the same fields.
+fn handle_freshness(
+    args: &[String],
+    out: &mut impl io::Write,
+    err: &mut impl io::Write,
+) -> io::Result<ExitCode> {
+    let json_output = args.iter().any(|arg| arg == "--json");
+    let positional: Vec<&String> = args.iter().filter(|arg| !arg.starts_with("--")).collect();
     let start = positional
         .first()
-        .map(|p| PathBuf::from(p.as_str()))
+        .map(|candidate| PathBuf::from(candidate.as_str()))
         .unwrap_or_else(|| PathBuf::from("."));
 
     let root = match repository_root(&start) {
         Ok(root) => root,
-        Err(e) => return refuse(&e.to_string()),
+        Err(error) => return refuse(&error.to_string(), err),
     };
 
     let lock_path = root.join("Cargo.lock");
     let lock_text = match std::fs::read_to_string(&lock_path) {
-        Ok(t) => t,
-        Err(e) => return refuse(&format!("cannot read {}: {e}", lock_path.display())),
+        Ok(text) => text,
+        Err(error) => {
+            return refuse(
+                &format!("cannot read {}: {error}", lock_path.display()),
+                err,
+            );
+        }
     };
 
     let resolved = match lgwks_deps::lock::parse(&lock_text) {
-        Ok(r) => r,
-        Err(e) => return refuse(&format!("Cargo.lock: {e}")),
+        Ok(parsed) => parsed,
+        Err(error) => return refuse(&format!("Cargo.lock: {error}"), err),
     };
 
-    let registry: Vec<&lgwks_deps::lock::Resolved> = resolved.iter().filter(|p| !p.local).collect();
+    let registry: Vec<&lgwks_deps::lock::Resolved> =
+        resolved.iter().filter(|package| !package.local).collect();
 
     if registry.is_empty() {
-        println!("no registry dependencies in Cargo.lock");
-        return ExitCode::SUCCESS;
+        writeln!(out, "no registry dependencies in Cargo.lock")?;
+        return Ok(ExitCode::SUCCESS);
     }
 
     let results = query_crates_io(&registry);
 
     if json_output {
-        print_freshness_json(&results);
+        print_freshness_json(&results, out)?;
     } else {
-        print_freshness_table(&results);
+        print_freshness_table(&results, out)?;
     }
 
-    let stale_count = results.iter().filter(|r| r.stale).count();
+    let stale_count = results.iter().filter(|result| result.stale).count();
     if stale_count > 0 {
-        ExitCode::from(1)
+        Ok(ExitCode::from(1))
     } else {
-        ExitCode::SUCCESS
+        Ok(ExitCode::SUCCESS)
     }
 }
 
+/// One registry package's freshness verdict.
+///
+/// A package whose lookup failed carries an `error` and is not stale: a network
+/// fault is not evidence that the dependency is out of date, and reporting it as
+/// stale would fail a build for a reason the lockfile cannot support.
 struct FreshnessResult {
+    /// Package name as it appears in `Cargo.lock`.
     name: String,
+    /// Version the lock file resolved.
     resolved: String,
+    /// Latest version crates.io reports, or empty when unknown.
     latest: String,
+    /// Upstream repository URL reported by crates.io, or empty.
     repository: String,
+    /// Whether `latest` is a real version newer than `resolved`.
     stale: bool,
+    /// Why the lookup failed, when it did.
     error: Option<String>,
 }
 
+/// Queries crates.io for each distinct package name.
+///
+/// Names are de-duplicated first: a lock file commonly resolves several
+/// versions of one package, and the registry answer is per name. The lookup
+/// shells out to `curl` rather than pulling an HTTP client — INV-GATE-ZERO-DEPS
+/// — with a ten-second cap so an unreachable registry cannot hang the command.
 fn query_crates_io(packages: &[&lgwks_deps::lock::Resolved]) -> Vec<FreshnessResult> {
     let mut seen = std::collections::HashSet::new();
     let mut results = Vec::new();
 
-    for pkg in packages {
-        if !seen.insert(&pkg.name) {
+    for package in packages {
+        if !seen.insert(&package.name) {
             continue;
         }
 
-        let output = std::process::Command::new("curl")
+        let completed = std::process::Command::new("curl")
             .args([
                 "-sf",
                 "--max-time",
                 "10",
                 "-H",
                 "User-Agent: lgwks-deps/0.1 (srinji@logicalworks.ca)",
-                &format!("https://crates.io/api/v1/crates/{}", pkg.name),
+                &format!("https://crates.io/api/v1/crates/{}", package.name),
             ])
             .output();
 
-        match output {
-            Ok(o) if o.status.success() => {
-                let body = String::from_utf8_lossy(&o.stdout);
+        match completed {
+            Ok(response) if response.status.success() => {
+                let body = String::from_utf8_lossy(&response.stdout);
                 let (latest, repo) = parse_crate_response(&body);
-                let stale = !latest.is_empty() && latest != pkg.version;
+                let stale = !latest.is_empty() && latest != package.version;
                 results.push(FreshnessResult {
-                    name: pkg.name.clone(),
-                    resolved: pkg.version.clone(),
+                    name: package.name.clone(),
+                    resolved: package.version.clone(),
                     latest,
                     repository: repo,
                     stale,
                     error: None,
                 });
             }
-            Ok(o) => {
+            Ok(response) => {
                 results.push(FreshnessResult {
-                    name: pkg.name.clone(),
-                    resolved: pkg.version.clone(),
+                    name: package.name.clone(),
+                    resolved: package.version.clone(),
                     latest: String::new(),
                     repository: String::new(),
                     stale: false,
-                    error: Some(format!("HTTP {}", o.status)),
+                    error: Some(format!("HTTP {}", response.status)),
                 });
             }
-            Err(e) => {
+            Err(error) => {
                 results.push(FreshnessResult {
-                    name: pkg.name.clone(),
-                    resolved: pkg.version.clone(),
+                    name: package.name.clone(),
+                    resolved: package.version.clone(),
                     latest: String::new(),
                     repository: String::new(),
                     stale: false,
-                    error: Some(e.to_string()),
+                    error: Some(error.to_string()),
                 });
             }
         }
@@ -381,126 +566,205 @@ fn parse_crate_response(body: &str) -> (String, String) {
     (newest, repo)
 }
 
+/// Reads the value of `key` out of a JSON object by scanning for its quoted
+/// form.
+///
+/// Both `"key":"value"` and `"key": "value"` spacing are accepted, and a key
+/// that is absent yields an empty string rather than an error: freshness is a
+/// best-effort advisory, and a missing field must not turn a successful HTTP
+/// lookup into a failure. This is deliberately not a JSON parser — see the
+/// zero-deps invariant above.
 fn extract_json_string(body: &str, key: &str) -> String {
     let needle = format!("\"{}\":\"", key);
     let alt_needle = format!("\"{}\": \"", key);
+    // Each `index` is a byte offset at which `body` matched `needle`, so the
+    // sum is a position inside `body` and cannot exceed `body.len()`; the
+    // additions therefore cannot overflow `usize`.
     let start = body
         .find(&needle)
-        .map(|i| i + needle.len())
-        .or_else(|| body.find(&alt_needle).map(|i| i + alt_needle.len()));
+        .map(|index| index.saturating_add(needle.len()))
+        .or_else(|| {
+            body.find(&alt_needle)
+                .map(|index| index.saturating_add(alt_needle.len()))
+        });
     match start {
-        Some(s) => body[s..]
+        Some(value_start) => body[value_start..]
             .find('"')
-            .map(|e| body[s..s + e].to_string())
+            // `end_offset` indexes the closing quote inside the slice that
+            // begins at `value_start`, so the sum stays within `body`.
+            .map(|end_offset| body[value_start..value_start.saturating_add(end_offset)].to_string())
             .unwrap_or_default(),
         None => String::new(),
     }
 }
 
-// Each label is a column value; the format string owns the alignment.
-#[expect(clippy::print_literal)]
-fn print_freshness_table(results: &[FreshnessResult]) {
-    println!(
-        "{:<30} {:<12} {:<12} {:<5} {}",
-        "crate", "resolved", "latest", "stale", "repository"
-    );
-    println!("{}", "-".repeat(90));
-    for r in results {
-        if let Some(err) = &r.error {
-            println!(
+// Each label is a column value; the format string owns the alignment. The final
+// column is spelled inside the format string rather than passed as an argument:
+// a trailing string literal in a `{}` slot is what `clippy::write_literal`
+// flags, and the rendered line is byte-identical either way.
+/// Prints the human-readable freshness table.
+///
+/// A failed lookup is shown as `?` / `err` rather than as a version, so an
+/// unreachable registry cannot be misread as an up-to-date dependency.
+fn print_freshness_table(results: &[FreshnessResult], out: &mut impl io::Write) -> io::Result<()> {
+    writeln!(
+        out,
+        "{:<30} {:<12} {:<12} {:<5} repository",
+        "crate", "resolved", "latest", "stale"
+    )?;
+    writeln!(out, "{}", "-".repeat(90))?;
+    for result in results {
+        if let Some(failure) = result.error.as_ref() {
+            writeln!(
+                out,
                 "{:<30} {:<12} {:<12} {:<5} {}",
-                r.name, r.resolved, "?", "err", err
-            );
+                result.name, result.resolved, "?", "err", failure
+            )?;
         } else {
-            let stale_mark = if r.stale { "YES" } else { "" };
-            println!(
+            let stale_mark = if result.stale { "YES" } else { "" };
+            writeln!(
+                out,
                 "{:<30} {:<12} {:<12} {:<5} {}",
-                r.name, r.resolved, r.latest, stale_mark, r.repository
-            );
+                result.name, result.resolved, result.latest, stale_mark, result.repository
+            )?;
         }
     }
-    let stale_count = results.iter().filter(|r| r.stale).count();
-    let err_count = results.iter().filter(|r| r.error.is_some()).count();
-    println!(
+    let stale_count = results.iter().filter(|result| result.stale).count();
+    let err_count = results
+        .iter()
+        .filter(|result| result.error.is_some())
+        .count();
+    writeln!(
+        out,
         "\n{} checked, {} stale, {} errors",
         results.len(),
         stale_count,
         err_count
-    );
+    )?;
+    Ok(())
 }
 
-fn print_freshness_json(results: &[FreshnessResult]) {
-    println!("[");
-    for (i, r) in results.iter().enumerate() {
-        let comma = if i + 1 < results.len() { "," } else { "" };
-        let error_field = match &r.error {
-            Some(e) => format!(", \"error\": \"{}\"", e.replace('"', "\\\"")),
+/// Prints the freshness results as a JSON array of objects.
+///
+/// The shape is contractual: one object per checked package, in the order they
+/// were queried, with `error` present only when the lookup failed. A stale
+/// count is not emitted — consumers read `stale` per row and the process exit
+/// code carries the aggregate.
+fn print_freshness_json(results: &[FreshnessResult], out: &mut impl io::Write) -> io::Result<()> {
+    writeln!(out, "[")?;
+    for (index, result) in results.iter().enumerate() {
+        // `index` comes from `enumerate` over `results`, so the successor is at
+        // most `results.len()` and the comparison below cannot overflow.
+        let comma = if index.saturating_add(1) < results.len() {
+            ","
+        } else {
+            ""
+        };
+        let error_field = match result.error.as_ref() {
+            Some(failure) => format!(", \"error\": \"{}\"", failure.replace('"', "\\\"")),
             None => String::new(),
         };
-        println!(
+        writeln!(
+            out,
             "  {{\"name\": \"{}\", \"resolved\": \"{}\", \"latest\": \"{}\", \
              \"stale\": {}, \"repository\": \"{}\"{}}}{}",
-            r.name, r.resolved, r.latest, r.stale, r.repository, error_field, comma
-        );
+            result.name,
+            result.resolved,
+            result.latest,
+            result.stale,
+            result.repository,
+            error_field,
+            comma
+        )?;
     }
-    println!("]");
+    writeln!(out, "]")?;
+    Ok(())
 }
 
 // ── vendor ──────────────────────────────────────────────────────────────────
 
-fn handle_vendor(args: &[String]) -> ExitCode {
+/// Handles `vendor check`, rejecting any other `vendor` subcommand.
+fn handle_vendor(
+    args: &[String],
+    out: &mut impl io::Write,
+    err: &mut impl io::Write,
+) -> io::Result<ExitCode> {
     if args.first().map(String::as_str) != Some("check") {
-        eprint!("{USAGE}");
-        return ExitCode::from(2);
+        write!(err, "{USAGE}")?;
+        return Ok(ExitCode::from(2));
     }
-    let positional: Vec<&String> = args[1..].iter().filter(|a| !a.starts_with("--")).collect();
+    let positional: Vec<&String> = args[1..]
+        .iter()
+        .filter(|arg| !arg.starts_with("--"))
+        .collect();
     let start = positional
         .first()
-        .map(|p| PathBuf::from(p.as_str()))
+        .map(|candidate| PathBuf::from(candidate.as_str()))
         .unwrap_or_else(|| PathBuf::from("."));
-    run_vendor_check(&start)
+    run_vendor_check(&start, out, err)
 }
 
-fn run_vendor_check(start: &Path) -> ExitCode {
+/// Proves every locked package resolves to the shared vendor tree.
+///
+/// Exit 0 when the tree covers the lock file and 2 when any locked package is
+/// missing from it, since an uncovered package means the offline build would
+/// reach the network.
+fn run_vendor_check(
+    start: &Path,
+    out: &mut impl io::Write,
+    err: &mut impl io::Write,
+) -> io::Result<ExitCode> {
     let root = match lgwks_deps::repository_root(start) {
         Ok(root) => root,
-        Err(e) => return refuse(&e.to_string()),
+        Err(error) => return refuse(&error.to_string(), err),
     };
     let tree = match lgwks_deps::vendor::tree_for(&root) {
         Ok(tree) => tree,
-        Err(e) => return refuse(&e.to_string()),
+        Err(error) => return refuse(&error.to_string(), err),
     };
     let lock_path = root.join("Cargo.lock");
     let lock_text = match std::fs::read_to_string(&lock_path) {
         Ok(text) => text,
-        Err(e) => return refuse(&format!("cannot read {}: {e}", lock_path.display())),
+        Err(error) => {
+            return refuse(
+                &format!("cannot read {}: {error}", lock_path.display()),
+                err,
+            );
+        }
     };
     match lgwks_deps::vendor::check_coverage(&lock_text, &tree) {
         Ok(report) if report.missing.is_empty() => {
-            println!(
+            writeln!(
+                out,
                 "OK  {} — {} locked packages covered by {}, {} local skipped",
                 root.display(),
                 report.covered,
                 tree.display(),
                 report.skipped_local
-            );
-            ExitCode::SUCCESS
+            )?;
+            Ok(ExitCode::SUCCESS)
         }
         Ok(report) => {
-            eprintln!(
+            writeln!(
+                err,
                 "REFUSED  {} — {} of {} locked packages missing from {}\n",
                 root.display(),
                 report.missing.len(),
-                report.covered + report.missing.len(),
+                // Both operands are counts of entries in one lock file, so the
+                // sum is bounded by its package count and cannot overflow.
+                report.covered.saturating_add(report.missing.len()),
                 tree.display()
-            );
+            )?;
             for missing in &report.missing {
-                eprintln!("  {} {}", missing.name, missing.version);
+                writeln!(err, "  {} {}", missing.name, missing.version)?;
             }
-            eprintln!("\nRe-run the vendor sync for this repo, then re-check.");
-            ExitCode::from(2)
+            writeln!(
+                err,
+                "\nRe-run the vendor sync for this repo, then re-check."
+            )?;
+            Ok(ExitCode::from(2))
         }
-        Err(e) => refuse(&e.to_string()),
+        Err(error) => refuse(&error.to_string(), err),
     }
 }
 
@@ -543,9 +807,19 @@ fn collect_rs_files(root: &Path, out: &mut Vec<PathBuf>) {
     out.extend(files);
 }
 
+/// Runs the zero-gate detectors over every collected `.rs` file.
+///
+/// Findings are printed one per line and the run exits 2 if there were any, so
+/// a CI lane can gate on the exit code alone. An unreadable file is reported as
+/// a scan error rather than skipped: a detector that silently drops a file
+/// reports a clean tree it never looked at.
 #[cfg(feature = "scan")]
-fn handle_scan(args: &[String]) -> ExitCode {
-    let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+fn handle_scan(
+    args: &[String],
+    out: &mut impl io::Write,
+    err: &mut impl io::Write,
+) -> io::Result<ExitCode> {
+    let positional: Vec<&String> = args.iter().filter(|arg| !arg.starts_with("--")).collect();
     let mut files: Vec<PathBuf> = Vec::new();
     if positional.is_empty() {
         collect_rs_files(&PathBuf::from("."), &mut files);
@@ -564,41 +838,65 @@ fn handle_scan(args: &[String]) -> ExitCode {
         match lgwks_deps::scan::scan_path(file) {
             Ok(hits) => {
                 for hit in &hits {
-                    println!(
+                    writeln!(
+                        out,
                         "{}:{}: [{}] {}",
                         file.display(),
                         hit.line,
                         hit.rule,
                         hit.snippet
-                    );
+                    )?;
                 }
-                total += hits.len();
+                // Both operands are lengths of an in-memory vector and a
+                // single file's findings, so the sum cannot overflow `usize`.
+                total = total.saturating_add(hits.len());
             }
-            Err(e) => {
-                eprintln!("scan error: {e}");
-                return ExitCode::from(2);
+            Err(error) => {
+                writeln!(err, "scan error: {error}")?;
+                return Ok(ExitCode::from(2));
             }
         }
     }
     if total == 0 {
-        println!("OK  scan clean — {} files, zero findings", files.len());
-        ExitCode::SUCCESS
+        writeln!(out, "OK  scan clean — {} files, zero findings", files.len())?;
+        Ok(ExitCode::SUCCESS)
     } else {
-        eprintln!(
+        writeln!(
+            err,
             "REFUSED  scan: {total} findings across {} files",
             files.len()
-        );
-        ExitCode::from(2)
+        )?;
+        Ok(ExitCode::from(2))
     }
 }
 
+/// Reports that the `scan` subcommand needs its feature, which is on by
+/// default.
+///
+/// Only reachable from a build with `--no-default-features`, where `scan` was
+/// compiled out deliberately; the message names the reason rather than failing
+/// silently.
 #[cfg(not(feature = "scan"))]
-fn handle_scan(_args: &[String]) -> ExitCode {
-    eprintln!("lgwks-deps: scan needs the `scan` feature (default on)");
-    ExitCode::from(2)
+fn handle_scan(
+    _args: &[String],
+    _out: &mut impl io::Write,
+    err: &mut impl io::Write,
+) -> io::Result<ExitCode> {
+    writeln!(
+        err,
+        "lgwks-deps: scan needs the `scan` feature (default on)"
+    )?;
+    Ok(ExitCode::from(2))
 }
 
 // ── Ladder text ─────────────────────────────────────────────────────────────
+
+/// The admission ladder printed by `tiers` and prefixed to an approval
+/// template.
+///
+/// Read lowest rung first: each step up is an escalation that needs a stated
+/// reason, and only the last two rungs — `VENDOR` and `BOUNDARY` — produce a
+/// register entry at all.
 const LADDER: &str = "\
 The std+ admission ladder (INV-DEP-EDGE-OWNED)
 

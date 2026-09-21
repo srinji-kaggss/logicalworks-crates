@@ -65,6 +65,11 @@ pub mod vendor;
 pub use tokio;
 
 /// The optional GPUI desktop UI framework selected through the storefront.
+/// Re-exported so a consumer names the storefront, never the crate: `lgwks_bot`
+/// reaches `bevy_ecs` through `lgwks_deps::bevy_ecs`, which is the same rule the
+/// `tokio` edge follows.
+#[cfg(feature = "bevy-ecs")]
+pub use bevy_ecs;
 #[cfg(feature = "gpui")]
 pub use gpui;
 
@@ -116,7 +121,12 @@ const SELF_EXEMPT: [&str; 2] = ["lgwks_std", "lgwks_deps"];
 // ── Refusals ────────────────────────────────────────────────────────────────
 
 /// One dependency the register does not admit.
+///
+/// `#[non_exhaustive]`: the set of drift classes grows as the gate learns to
+/// name them, so a consumer must carry a catch-all arm instead of pinning the
+/// list. Matching a variant you know, and constructing one, are unaffected.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Refusal {
     /// A path target claims a repository outside this workspace authority.
     ForeignWorkspaceMember {
@@ -192,63 +202,66 @@ pub enum Refusal {
 }
 
 impl fmt::Display for Refusal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
             Self::ForeignWorkspaceMember {
-                consumer,
-                krate,
-                declared_repository,
-                expected_repository,
+                ref consumer,
+                ref krate,
+                ref declared_repository,
+                ref expected_repository,
             } => write!(
-                f,
+                formatter,
                 "{consumer} embeds workspace package {krate} from {declared_repository}; consume its published crate instead (workspace authority is {expected_repository})"
             ),
             Self::UnregisteredEdge {
-                consumer,
-                krate,
-                requirement,
-                source,
-                kind,
+                ref consumer,
+                ref krate,
+                ref requirement,
+                ref source,
+                ref kind,
             } => write!(
-                f,
+                formatter,
                 "{consumer} declares unowned {kind} edge {krate} {requirement} from {source}"
             ),
-            Self::ConsumerNotAllowed { consumer, krate } => write!(
-                f,
+            Self::ConsumerNotAllowed {
+                ref consumer,
+                ref krate,
+            } => write!(
+                formatter,
                 "{consumer} declares {krate}, but no approval allows that consumer"
             ),
             Self::RequirementDrift {
-                consumer,
-                krate,
-                approved,
-                declared,
+                ref consumer,
+                ref krate,
+                ref approved,
+                ref declared,
             } => write!(
-                f,
+                formatter,
                 "{consumer} declares {krate} requirement {declared}, contract approves {approved}"
             ),
             Self::SourceDrift {
-                consumer,
-                krate,
-                approved,
-                declared,
+                ref consumer,
+                ref krate,
+                ref approved,
+                ref declared,
             } => write!(
-                f,
+                formatter,
                 "{consumer} declares {krate} from {declared}, contract approves {approved}"
             ),
             Self::KindNotAllowed {
-                consumer,
-                krate,
-                kind,
+                ref consumer,
+                ref krate,
+                ref kind,
             } => write!(
-                f,
+                formatter,
                 "{consumer} declares {krate} as {kind}, but that edge kind is not approved"
             ),
             Self::UnusedApproval {
-                krate,
-                owner,
-                capability,
+                ref krate,
+                ref owner,
+                ref capability,
             } => write!(
-                f,
+                formatter,
                 "unused approval for {krate} capability {capability} owned by {owner}"
             ),
         }
@@ -259,21 +272,25 @@ impl Refusal {
     /// The crate this refusal is about.
     #[must_use]
     pub fn krate(&self) -> &str {
-        match self {
-            Self::ForeignWorkspaceMember { krate, .. }
-            | Self::UnregisteredEdge { krate, .. }
-            | Self::ConsumerNotAllowed { krate, .. }
-            | Self::RequirementDrift { krate, .. }
-            | Self::SourceDrift { krate, .. }
-            | Self::KindNotAllowed { krate, .. }
-            | Self::UnusedApproval { krate, .. } => krate,
+        match *self {
+            Self::ForeignWorkspaceMember { ref krate, .. }
+            | Self::UnregisteredEdge { ref krate, .. }
+            | Self::ConsumerNotAllowed { ref krate, .. }
+            | Self::RequirementDrift { ref krate, .. }
+            | Self::SourceDrift { ref krate, .. }
+            | Self::KindNotAllowed { ref krate, .. }
+            | Self::UnusedApproval { ref krate, .. } => krate,
         }
     }
 }
 
 /// Why the gate could not reach a verdict. Every variant is a refusal, not a
 /// pass — see the fail-closed note on this module.
+///
+/// `#[non_exhaustive]`: a new failure mode is a refusal that must be added, and
+/// adding it must not be a breaking change for embedders matching on this type.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum GateError {
     /// No `Cargo.lock` was found at or above the starting directory.
     LockNotFound {
@@ -301,34 +318,37 @@ pub enum GateError {
 }
 
 impl fmt::Display for GateError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::LockNotFound { from } => {
-                write!(f, "no Cargo.lock at or above {}", from.display())
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::LockNotFound { ref from } => {
+                write!(formatter, "no Cargo.lock at or above {}", from.display())
             }
-            Self::ContractNotFound { path } => write!(
-                f,
+            Self::ContractNotFound { ref path } => write!(
+                formatter,
                 "no dependency register at {} — every repo the gate guards must carry one; \
                  run `lgwks-deps init` to write a fail-closed starting register",
                 path.display()
             ),
-            Self::Unreadable { path, cause } => {
-                write!(f, "cannot read {}: {cause}", path.display())
+            Self::Unreadable {
+                ref path,
+                ref cause,
+            } => {
+                write!(formatter, "cannot read {}: {cause}", path.display())
             }
-            Self::Contract(e) => write!(f, "{CONTRACT_PATH}: {e}"),
-            Self::Lock(e) => write!(f, "Cargo.lock: {e}"),
-            Self::Metadata(e) => write!(f, "Cargo metadata: {e}"),
+            Self::Contract(ref error) => write!(formatter, "{CONTRACT_PATH}: {error}"),
+            Self::Lock(ref error) => write!(formatter, "Cargo.lock: {error}"),
+            Self::Metadata(ref error) => write!(formatter, "Cargo metadata: {error}"),
         }
     }
 }
 
 impl Error for GateError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Unreadable { cause, .. } => Some(cause),
-            Self::Contract(e) => Some(e),
-            Self::Lock(e) => Some(e),
-            Self::Metadata(e) => Some(e),
+        match *self {
+            Self::Unreadable { ref cause, .. } => Some(cause),
+            Self::Contract(ref error) => Some(error),
+            Self::Lock(ref error) => Some(error),
+            Self::Metadata(ref error) => Some(error),
             _ => None,
         }
     }
@@ -336,10 +356,22 @@ impl Error for GateError {
 
 // ── The audit ───────────────────────────────────────────────────────────────
 
+/// Folds a package name to its comparison form: ASCII-lowercased, with `-`
+/// rewritten to `_`.
+///
+/// Cargo treats `foo-bar` and `foo_bar` as the same package, so a register that
+/// wrote one spelling must not read as absent merely because a manifest used
+/// the other. The transform is deliberately ASCII-only: package names are ASCII
+/// by Cargo's own rules, and a Unicode-aware fold would make the verdict depend
+/// on locale.
 fn normalise(name: &str) -> String {
     name.to_ascii_lowercase().replace('-', "_")
 }
 
+/// Whether `entry` names `consumer` among its allowed consumers.
+///
+/// Both sides pass through [`normalise`], so a register entry and a manifest
+/// that spell the same package differently still compare equal.
 fn allows_consumer(entry: &contract::Entry, consumer: &str) -> bool {
     entry
         .allowed_consumers
@@ -347,6 +379,12 @@ fn allows_consumer(entry: &contract::Entry, consumer: &str) -> bool {
         .any(|allowed| normalise(allowed) == normalise(consumer))
 }
 
+/// Whether an approval admits this exact edge.
+///
+/// All four axes must hold: the consumer is allowed, the requirement string is
+/// identical, the source class is identical, and the dependency kind is listed.
+/// A partial match is not a weak admission — it is a refusal with a named axis,
+/// which is why `audit_direct` re-tests each axis to report *which* one drifted.
 fn edge_matches(entry: &contract::Entry, edge: &DirectEdge) -> bool {
     allows_consumer(entry, &edge.consumer)
         && entry.version == edge.requirement
@@ -360,9 +398,9 @@ fn edge_matches(entry: &contract::Entry, edge: &DirectEdge) -> bool {
 /// Audits authored direct dependency edges against semantic ownership.
 pub fn audit_direct(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
     let mut refusals = Vec::new();
-    if let Some(expected) = &register.repository {
+    if let Some(expected) = register.repository.as_ref() {
         for edge in edges.iter().filter(|edge| edge.workspace) {
-            if let Some(declared) = &edge.target_repository
+            if let Some(declared) = edge.target_repository.as_ref()
                 && declared != expected
             {
                 refusals.push(Refusal::ForeignWorkspaceMember {
@@ -448,6 +486,13 @@ pub fn audit_direct(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
     refusals
 }
 
+/// Whether `name` is the gate itself or the substrate it is built on.
+///
+/// The gate cannot be gated by itself — auditing `lgwks_deps` against a register
+/// it parses is circular — and `lgwks_std` is the facade this crate is compiled
+/// against, so an edge to it is the crate's own foundation rather than an
+/// admission decision. Everything else, including an unnamed path copy, is
+/// audited.
 fn is_self_exempt(name: &str) -> bool {
     let normalised = name.to_ascii_lowercase().replace('-', "_");
     SELF_EXEMPT.contains(&normalised.as_str())
@@ -469,6 +514,13 @@ pub fn repository_root(start: &Path) -> Result<PathBuf, GateError> {
     })
 }
 
+/// Refuses when the register file is absent.
+///
+/// This is the fail-closed hinge: a repo with no register has not been audited,
+/// and reporting "no refusals" for it would make the one condition the gate
+/// exists to catch the one condition it passes. Callers reach here before any
+/// audit runs, so a missing register is `GateError::ContractNotFound` rather
+/// than an empty refusal list.
 fn ensure_contract_file(path: &Path) -> Result<(), GateError> {
     if !path.is_file() {
         Err(GateError::ContractNotFound {
@@ -503,6 +555,12 @@ pub fn check_dependencies_against(
     Ok((register, refusals))
 }
 
+/// Reads a file to a `String`, naming the path in the failure.
+///
+/// Only UTF-8 text is accepted: the register and the lock file are both text,
+/// and a lossy read would let a malformed byte sequence silently change what the
+/// gate parsed. The underlying `io::Error` is preserved as [`GateError::Unreadable`]'s
+/// source so the caller can distinguish absent from unreadable.
 fn read(path: &Path) -> Result<String, GateError> {
     std::fs::read_to_string(path).map_err(|cause| GateError::Unreadable {
         path: path.to_path_buf(),
@@ -515,6 +573,13 @@ fn read(path: &Path) -> Result<String, GateError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What every test here returns.
+    ///
+    /// The workspace forbids `unwrap`/`expect` outright, with no test exemption,
+    /// so a test propagates its failure with `?` instead of aborting the run.
+    /// The message is carried in the error rather than in an added `.expect`.
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     const REGISTER: &str = concat!(
         "[policy]\nenforce = true\n\n",
@@ -549,8 +614,8 @@ mod tests {
     }
 
     #[test]
-    fn direct_edge_requires_an_allowed_consumer() {
-        let register = Contract::parse(REGISTER).unwrap();
+    fn direct_edge_requires_an_allowed_consumer() -> TestResult {
+        let register = Contract::parse(REGISTER)?;
         assert_eq!(
             audit_direct(&[edge("braid-cli", "serde", "1.0")], &register),
             vec![
@@ -565,31 +630,33 @@ mod tests {
                 },
             ]
         );
+        Ok(())
     }
 
     #[test]
-    fn exact_owned_direct_edge_passes() {
-        let register = Contract::parse(REGISTER).unwrap();
+    fn exact_owned_direct_edge_passes() -> TestResult {
+        let register = Contract::parse(REGISTER)?;
         assert!(audit_direct(&[edge("lgwks_std", "serde", "1.0")], &register).is_empty());
+        Ok(())
     }
 
     #[test]
-    fn unregistered_path_copy_is_refused() {
-        let register = Contract::parse(REGISTER).unwrap();
+    fn unregistered_path_copy_is_refused() -> TestResult {
+        let register = Contract::parse(REGISTER)?;
         let mut copied = edge("app", "braid-ir", "*");
         copied.source = metadata::DependencySource::Path("../copied-braid-ir".into());
         assert!(matches!(
             audit_direct(&[copied], &register).first(),
             Some(Refusal::UnregisteredEdge { source, .. }) if source.starts_with("path:")
         ));
+        Ok(())
     }
 
     #[test]
-    fn copied_foreign_workspace_member_is_refused() {
+    fn copied_foreign_workspace_member_is_refused() -> TestResult {
         let register = Contract::parse(&format!(
             "[policy]\nrepository = \"https://example.invalid/consumer\"\n{REGISTER}"
-        ))
-        .unwrap();
+        ))?;
         let mut copied = edge("app", "braid-ir", "*");
         copied.source = metadata::DependencySource::Path("vendor/braid-ir".into());
         copied.workspace = true;
@@ -598,11 +665,12 @@ mod tests {
             audit_direct(&[copied], &register).first(),
             Some(Refusal::ForeignWorkspaceMember { .. })
         ));
+        Ok(())
     }
 
     #[test]
-    fn registry_to_git_source_drift_is_refused() {
-        let register = Contract::parse(REGISTER).unwrap();
+    fn registry_to_git_source_drift_is_refused() -> TestResult {
+        let register = Contract::parse(REGISTER)?;
         let mut git = edge("lgwks_std", "serde", "1.0");
         git.source =
             metadata::DependencySource::Git("git+https://example.invalid/serde?rev=abc#abc".into());
@@ -611,27 +679,29 @@ mod tests {
                 .iter()
                 .any(|refusal| matches!(refusal, Refusal::SourceDrift { .. }))
         );
+        Ok(())
     }
 
     #[test]
-    fn unused_approval_is_refused() {
-        let register = Contract::parse(REGISTER).unwrap();
+    fn unused_approval_is_refused() -> TestResult {
+        let register = Contract::parse(REGISTER)?;
         assert!(matches!(
             audit_direct(&[], &register).as_slice(),
             [Refusal::UnusedApproval { .. }]
         ));
+        Ok(())
     }
 
     /// INV-STDPLUS-APPROVED-ONLY: lgwks-std may depend on vetted leaf crates
     /// whose transitive trees bottom out at zero external deps. The gate itself
     /// stays zero-dep (self-refuting otherwise). This test enforces both.
     #[test]
-    fn deps_are_approved_leaves() {
+    fn deps_are_approved_leaves() -> TestResult {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
-            .unwrap()
+            .ok_or("crates/lgwks-deps has no parent")?
             .parent()
-            .unwrap();
+            .ok_or("crates/ has no parent")?;
 
         // The deps storefront may depend only on the estate facade it enforces,
         // plus the reviewed scan exception, plus optional storefront features
@@ -639,21 +709,20 @@ mod tests {
         // every third-party edge other than lgwks_std must be `optional = true`,
         // so `cargo build`/`cargo install` with no features pulls nothing.
         {
-            let manifest = std::fs::read_to_string(workspace.join("crates/lgwks-deps/Cargo.toml"))
-                .expect("gate manifest missing");
+            let manifest = std::fs::read_to_string(workspace.join("crates/lgwks-deps/Cargo.toml"))?;
             let after = manifest
                 .split("[dependencies]")
                 .nth(1)
-                .expect("gate declares [dependencies]");
+                .ok_or("gate declares [dependencies]")?;
             let declared: Vec<&str> = after
                 .lines()
                 .map(str::trim)
-                .take_while(|l| !l.starts_with('['))
-                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .take_while(|line| !line.starts_with('['))
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
                 .collect();
             let names: Vec<&str> = declared
                 .iter()
-                .map(|l| l.split('=').next().unwrap_or("").trim())
+                .map(|line| line.split('=').next().unwrap_or("").trim())
                 .collect();
             assert_eq!(
                 names,
@@ -663,6 +732,10 @@ mod tests {
                     "proc-macro2",
                     "gpui",
                     "appcui",
+                    "bevy_ecs",
+                    "bevy_app",
+                    "bevy_time",
+                    "bevy_state",
                     "tokio",
                     "candle-core",
                     "candle-nn",
@@ -698,17 +771,16 @@ mod tests {
                 "ureq",
             ];
 
-            let manifest = std::fs::read_to_string(workspace.join("crates/lgwks-std/Cargo.toml"))
-                .expect("std manifest missing");
+            let manifest = std::fs::read_to_string(workspace.join("crates/lgwks-std/Cargo.toml"))?;
             let after = manifest
                 .split("[dependencies]")
                 .nth(1)
-                .expect("std declares [dependencies]");
+                .ok_or("std declares [dependencies]")?;
             let declared: Vec<&str> = after
                 .lines()
                 .map(str::trim)
-                .take_while(|l| !l.starts_with('['))
-                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .take_while(|line| !line.starts_with('['))
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
                 .collect();
             for line in &declared {
                 let name = line.split('=').next().unwrap_or("").trim();
@@ -719,12 +791,14 @@ mod tests {
                 );
             }
         }
+        Ok(())
     }
 
     #[test]
-    fn a_repository_root_is_the_nearest_ancestor_holding_a_lock() {
+    fn a_repository_root_is_the_nearest_ancestor_holding_a_lock() -> TestResult {
         let here = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let root = repository_root(here).expect("workspace has a Cargo.lock");
+        let root = repository_root(here)?;
         assert!(root.join("Cargo.lock").is_file());
+        Ok(())
     }
 }

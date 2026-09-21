@@ -8,7 +8,12 @@ use crate::error::BotError;
 use crate::verb;
 
 /// An incoming chat message.
+///
+/// `#[non_exhaustive]`: a chat provider's payload grows (threads, edits,
+/// attachments), and a consumer that destructured this literally would break on
+/// each addition. Read the fields; build one through the domain that produced it.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ChatMessage {
     /// The channel or conversation the message arrived in.
     pub channel: String,
@@ -22,6 +27,7 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     /// Whether the message text contains a substring.
+    #[must_use]
     pub fn contains(&self, pattern: &str) -> bool {
         self.text.contains(pattern)
     }
@@ -29,7 +35,11 @@ impl ChatMessage {
 
 /// Observe a Slack channel for incoming messages.
 pub struct SlackChannel {
+    /// The channel observed; echoed in the "binding required" diagnostic so an
+    /// unbound domain says which channel it was asked for.
     channel: String,
+    /// Forced to `[bot.net]` by the constructor: a Slack read dials out, and
+    /// there is no constructor that omits the capability.
     caps: Vec<Cap>,
 }
 
@@ -91,7 +101,10 @@ pub fn slack_message(channel: impl Into<String>) -> SlackChannel {
 
 /// Observe an HTTP webhook for incoming messages.
 pub struct HttpWebhook {
+    /// The webhook path observed; echoed in the "binding required" diagnostic.
     path: String,
+    /// Forced to `[bot.net]` by the constructor — receiving from a webhook
+    /// still requires the network capability, so there is no ungated path.
     caps: Vec<Cap>,
 }
 

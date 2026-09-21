@@ -34,10 +34,24 @@
 //! let fired = bot.block_on_tick().expect("tick propagates domain errors");
 //! ```
 
-#![allow(async_fn_in_trait)]
 // Verbs are async by design (single-threaded `lgwks_std::task` driver, futures
-// deliberately not `Send`). Remaining lint contract (missing_docs deny,
-// unsafe_code forbid, broken intra-doc links deny) comes from the workspace.
+// deliberately not `Send`). The lint fires on `pub trait` methods declared
+// `async fn` without a `-> impl Future + Send` bound; that is exactly the shape
+// INV-BOT-FOUR-VERBS requires, because a `Send` bound would force every domain
+// to be `Send` and rule out the thread-local state `Bot::tick` is built for.
+//
+// This is the crate's one suppression, and it names its reason. `expect` is not
+// available here: the lint is denied crate-wide rather than triggered by this
+// item alone, so an `#[expect]` would report an unfulfilled expectation at every
+// other `async fn` in `verb`.
+//
+// Remaining lint contract (missing_docs deny, unsafe_code forbid,
+// broken_intra_doc_links deny) comes from the workspace.
+#![allow(
+    async_fn_in_trait,
+    reason = "the four verb traits are the crate's public async contract and must stay non-Send; \
+              see docs/async-sdk-shape.md and INV-BOT-FOUR-VERBS"
+)]
 
 use std::future::Future;
 use std::pin::Pin;
@@ -68,6 +82,9 @@ pub mod domain {
     pub mod notify;
     pub mod sys;
 }
+/// The four verbs on a `bevy_ecs` substrate (feature `ecs`).
+#[cfg(feature = "ecs")]
+pub mod ecs;
 /// Typed bot errors.
 pub mod error;
 /// Grant sets: build-time admission and per-tick proof minting.

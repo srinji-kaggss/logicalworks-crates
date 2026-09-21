@@ -6,7 +6,12 @@ use crate::error::BotError;
 use crate::verb;
 
 /// A message payload for notification delivery.
+///
+/// `#[non_exhaustive]`: a transport grows payload fields (thread, blocks,
+/// attachments), and a consumer that destructured this literally would break on
+/// each addition. Build one with [`Message::new`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Message {
     /// The message text.
     pub text: String,
@@ -14,6 +19,7 @@ pub struct Message {
 
 impl Message {
     /// Create a notification message.
+    #[must_use]
     pub fn new(text: impl Into<String>) -> Self {
         Self { text: text.into() }
     }
@@ -21,7 +27,11 @@ impl Message {
 
 /// Send a notification to a Slack channel. Execute only.
 pub struct Slack {
+    /// The destination channel; echoed in the "binding required" diagnostic.
     channel: String,
+    /// Always `[bot.notify, bot.net]`, in that order, so a denied send names
+    /// `bot.notify` first: delivery is a notification that happens to dial out,
+    /// and the caller should see the domain capability before the transport one.
     caps: Vec<Cap>,
 }
 

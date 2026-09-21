@@ -39,32 +39,39 @@ impl Cap {
     /// Notification delivery — Slack, email, webhook push.
     pub const NOTIFY: &str = "bot.notify";
 
-    /// Construct a capability from its dotted name.
+    /// Construct a capability from its dotted name. Any name is accepted —
+    /// authority is decided by the grant set, not by this constructor, so an
+    /// unknown name is a capability nothing grants rather than an error here.
     pub fn new(name: impl Into<String>) -> Self {
         Self(name.into())
     }
 
     /// The dotted name — the stable identity.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Shorthand for `Cap::new(Cap::NET)`.
+    #[must_use]
     pub fn net() -> Self {
         Self::new(Self::NET)
     }
 
     /// Shorthand for `Cap::new(Cap::FS)`.
+    #[must_use]
     pub fn fs() -> Self {
         Self::new(Self::FS)
     }
 
     /// Shorthand for `Cap::new(Cap::SYS)`.
+    #[must_use]
     pub fn sys() -> Self {
         Self::new(Self::SYS)
     }
 
     /// Shorthand for `Cap::new(Cap::NOTIFY)`.
+    #[must_use]
     pub fn notify() -> Self {
         Self::new(Self::NOTIFY)
     }
@@ -88,17 +95,26 @@ impl fmt::Display for Cap {
 pub struct Auth(Vec<Cap>);
 
 impl Auth {
+    /// Mint a proof covering exactly `caps`. Crate-private on purpose: this is
+    /// the seal. [`GrantSet::issue`](super::gate::GrantSet::issue) is the only
+    /// caller, so a proof can never cover a capability the gate did not admit.
     pub(crate) fn new(caps: Vec<Cap>) -> Self {
         Self(caps)
     }
 
     /// The capabilities this proof covers.
+    #[must_use]
     pub fn covers(&self) -> &[Cap] {
         &self.0
     }
 
     /// Deny with [`BotError::CapabilityDenied`] naming the first required
     /// capability this proof does not cover.
+    ///
+    /// Coverage is exact set membership, not subsumption: a proof also denies
+    /// a call whose caps it covers only partly, and it denies a call requiring a
+    /// capability outside the shipped four just as readily, because no name is
+    /// special-cased at check time.
     pub fn check(&self, required: &[Cap]) -> Result<(), BotError> {
         for cap in required {
             if !self.0.contains(cap) {

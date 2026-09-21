@@ -27,6 +27,11 @@ process = ["rt", "lgwks_deps/tokio-process"]
 fs = ["rt", "lgwks_deps/tokio-fs"]
 signal = ["rt", "lgwks_deps/tokio-signal"]
 full = ["rt", "time", "sync", "macros", "net", "process", "fs", "signal"]
+# The ECS substrate: the same four verbs executed by a `bevy_ecs` schedule, so a
+# condition is change detection rather than a re-derivation. Default-off, and
+# independent of `rt` — the verbs already drive their own futures, so nothing
+# here needs tokio. The storefront owns the `bevy_ecs` edge.
+ecs = ["dep:lgwks_deps", "lgwks_deps/bevy-ecs"]
 
 [dependencies]
 lgwks_std = { workspace = true, features = ["json", "http"] }

@@ -338,3 +338,74 @@ reason = "Vocabulary-driven subword tokenisation compatible with published model
 approved_by = "Director"
 approved_on = "2026-09-18"
 review = "docs/candle-admission.md"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ECS substrate (Director, 2026-09-20).
+#
+# One state substrate serves three consumers: `lgwks_bot`'s four-verb actors,
+# drishti's incremental derivation, and the GPU framework's demand-driven
+# execution. All three need the same three primitives — stable identity,
+# per-value change ticks, and a validated execution order — and none of them
+# exists in `std` or in `lgwks_std`.
+#
+# The estate's zero-dependency executor (`lgwks_std::task`) is deliberately
+# single-threaded, non-incremental, and has no query engine: it can await a
+# bounded set of futures and nothing more. These four are the incremental
+# substrate, admitted default-off like every other storefront capability.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[approved]]
+crate = "bevy_ecs"
+tier = "boundary"
+version = "^0.19"
+owner = "lgwks_deps"
+capability = "ecs.world"
+source = "registry"
+allowed_consumers = "lgwks_deps"
+allowed_kinds = "normal"
+reason = "Archetypal storage, per-component change ticks, and a topologically validated system schedule have no standard-library equivalent. `std` has no query engine, no stable generational identity, and no way to express 'run this when that value changed' without re-deriving it."
+approved_by = "Director"
+approved_on = "2026-09-20"
+review = "docs/bevy-admission.md"
+
+[[approved]]
+crate = "bevy_app"
+tier = "boundary"
+version = "^0.19"
+owner = "lgwks_deps"
+capability = "ecs.app"
+source = "registry"
+allowed_consumers = "lgwks_deps"
+allowed_kinds = "normal"
+reason = "Plugin composition, SubApp separation, and an application loop that the caller steps one frame at a time are absent from the standard library. Manual stepping is the property `lgwks_bot` needs: `App::update()` is called by the bot, and `App::run()` is never called."
+approved_by = "Director"
+approved_on = "2026-09-20"
+review = "docs/bevy-admission.md"
+
+[[approved]]
+crate = "bevy_time"
+tier = "boundary"
+version = "^0.19"
+owner = "lgwks_deps"
+capability = "ecs.virtual-clock"
+source = "registry"
+allowed_consumers = "lgwks_deps"
+allowed_kinds = "normal"
+reason = "A clock with pause, time scaling, and a fixed-timestep overstep accumulator has no standard-library equivalent; `std` offers only a wall clock. This is the virtual time source `docs/distributed-boundaries.md` records as missing."
+approved_by = "Director"
+approved_on = "2026-09-20"
+review = "docs/bevy-admission.md"
+
+[[approved]]
+crate = "bevy_state"
+tier = "boundary"
+version = "^0.19"
+owner = "lgwks_deps"
+capability = "ecs.state-machine"
+source = "registry"
+allowed_consumers = "lgwks_deps"
+allowed_kinds = "normal"
+reason = "A declared state machine with generational transitions, enter/exit schedules, and derived sub-states has no standard-library equivalent. It is the control-plane shape a reconciling bot needs, so the transition is data rather than a chain of conditionals."
+approved_by = "Director"
+approved_on = "2026-09-20"
+review = "docs/bevy-admission.md"

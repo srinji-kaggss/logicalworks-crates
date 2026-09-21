@@ -8,7 +8,12 @@ use crate::verb;
 /// Execute actions in sequence. Each action's output feeds the next.
 /// Capabilities are inherited from the contained actions.
 pub struct Pipeline {
+    /// The steps in execution order.
     steps: Vec<Box<dyn PipelineStep>>,
+    /// The union of every step's `required_caps`, accumulated as steps are
+    /// added. Retaining the union means the pipeline is admitted once at build
+    /// against the authority it will actually present, rather than being
+    /// admitted as cap-free and failing at the first step.
     caps: Vec<Cap>,
 }
 
@@ -45,7 +50,8 @@ where
             match input.downcast_ref::<A::Input>() {
                 Some(typed) => {
                     let value = self.execute_action((auth, typed)).await?;
-                    Ok(Box::new(value) as Box<dyn std::any::Any>)
+                    let boxed: Box<dyn std::any::Any> = Box::new(value);
+                    Ok(boxed)
                 }
                 None => Err(BotError::DomainError {
                     domain: verb::Execute::domain_id(self).into(),
@@ -57,7 +63,9 @@ where
 }
 
 impl Pipeline {
-    /// Create an empty pipeline.
+    /// Create an empty pipeline. An empty pipeline requires no capabilities and
+    /// executes no steps, returning the unit payload it started with.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             steps: Vec::new(),
@@ -65,10 +73,13 @@ impl Pipeline {
         }
     }
 
-    /// Add a step to the pipeline.
-    pub fn step(mut self, s: impl PipelineStep + 'static) -> Self {
-        self.caps.extend(s.required_caps().iter().cloned());
-        self.steps.push(Box::new(s));
+    /// Add a step to the pipeline. Steps run in the order added, and the
+    /// pipeline's required capabilities become the union of every step's, so a
+    /// step that needs `bot.net` makes the whole pipeline need `bot.net`.
+    #[must_use]
+    pub fn step(mut self, step: impl PipelineStep + 'static) -> Self {
+        self.caps.extend(step.required_caps().iter().cloned());
+        self.steps.push(Box::new(step));
         self
     }
 }
@@ -80,6 +91,12 @@ impl Default for Pipeline {
 }
 
 /// Opaque pipeline output — wraps the final step's result.
+///
+/// `#[non_exhaustive]`: the payload is deliberately unnameable, so the only
+/// legitimate way to read it is to downcast the inner `Any` to the type the
+/// last step produced. The attribute keeps construction inside the crate, where
+/// `execute_action` is the single place that builds one.
+#[non_exhaustive]
 pub struct PipelineOutput(pub Box<dyn std::any::Any>);
 
 impl verb::Execute for Pipeline {

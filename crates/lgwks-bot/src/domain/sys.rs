@@ -6,12 +6,20 @@ use crate::verb;
 
 /// Observe or execute a system process. Supports Observe, Execute, Query.
 pub struct Process {
+    /// The command name. Retained for the "binding required" diagnostic and for
+    /// the eventual process binding; the domain performs no parsing of it here.
     command: String,
+    /// Forced to `[bot.sys]` by the constructor: process control is the
+    /// capability this domain exists to gate, and no constructor omits it.
     caps: Vec<Cap>,
 }
 
 /// Process state returned by observation or query.
+///
+/// `#[non_exhaustive]`: the reported shape grows with the domain, and a
+/// consumer that destructured this literally would break on each addition.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ProcessState {
     /// Whether the process is running.
     pub running: bool,

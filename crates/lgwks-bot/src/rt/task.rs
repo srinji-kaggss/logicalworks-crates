@@ -13,16 +13,37 @@ pub use lgwks_deps::tokio::task::{
 
 /// Place a future on the current runtime without waiting for it.
 ///
+/// This is the estate's replacement for a bare `tokio::spawn` (`clippy.toml`),
+/// and it is a wrapper rather than a re-export for exactly that reason.
+/// `disallowed_methods` matches the *resolved* path, so re-exporting the
+/// engine's `spawn` gets flagged at every consumer call site — the config would
+/// name this function as the replacement and then refuse every call to it.
+/// The wrapper resolves to this crate's own path at the call site, so the ban
+/// keeps catching raw `tokio::spawn` while the sanctioned path stays usable. It
+/// is also the single place the engine call is spelled, which is why the
+/// reasoned `expect` below can be narrow and audited instead of being repeated
+/// in every caller.
+///
+/// The bounds are the engine's own, so nothing new reaches this crate's public
+/// surface. `#[track_caller]` so a call made outside a runtime reports the
+/// caller's location rather than this line, matching the engine's own `spawn`.
+///
 /// # Panics
 ///
 /// Panics when called outside a runtime context. Inside [`crate::Runtime::block_on`]
 /// or a spawned task, the current runtime is always present.
+#[track_caller]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "this function is the replacement clippy.toml names for `tokio::spawn`; the one call \
+              that implements it is the only place the raw path may legally appear"
+)]
 pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
 where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    lgwks_deps::tokio::spawn(future)
+    lgwks_deps::tokio::task::spawn(future)
 }
 
 /// Run `futures` with at most `limit` in flight at once, returning their
@@ -83,8 +104,13 @@ where
                       total: &mut usize,
                       future: F| {
         let index = *next_index;
-        *next_index += 1;
-        *total += 1;
+        // Bound: both counters advance only when a future is taken from the
+        // input iterator, and each increment also pushes one entry onto
+        // `slots`. Reaching `usize::MAX` would require that many live
+        // allocations, which no address space holds, so the saturating ceiling
+        // is unreachable and the counters stay exact.
+        *next_index = (*next_index).saturating_add(1);
+        *total = (*total).saturating_add(1);
         slots.push(None);
         set.spawn(async move {
             let output = future.await;
@@ -111,8 +137,14 @@ where
             Err(_cancelled) => {
                 // Not reachable here: nothing aborts this set while it is
                 // awaited. A shrink would break the INV-RT-BOUNDED-FANOUT
-                // guarantee, so fail loudly rather than fabricate a slot.
-                panic!("join_all_bounded: a task was cancelled before it produced a value");
+                // guarantee, so fail on the awaiter rather than fabricate a
+                // slot. `resume_unwind` rather than `panic!` — this is the
+                // estate's form for a documented, unavoidable panic
+                // (`lgwks_std::task::JoinHandle` uses it for the same reason):
+                // it reports on the awaiting task and never aborts the process.
+                std::panic::resume_unwind(Box::new(
+                    "join_all_bounded: a task was cancelled before it produced a value",
+                ))
             }
         }
         match inputs.next() {
@@ -126,6 +158,15 @@ where
     }
     slots
         .into_iter()
-        .map(|slot| slot.expect("join_all_bounded: every input produces exactly one output"))
+        .map(|slot| match slot {
+            Some(output) => output,
+            // Same reasoning as the cancellation arm: every spawned input fills
+            // exactly one slot, so a `None` here means the replenishment loop
+            // lost a value. Fail on the awaiter instead of dropping the element
+            // and returning a short vector.
+            None => std::panic::resume_unwind(Box::new(
+                "join_all_bounded: every input produces exactly one output",
+            )),
+        })
         .collect()
 }

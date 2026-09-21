@@ -233,12 +233,48 @@ pretends coverage nor silently adds a crate:
 | Capability | Path |
 |---|---|
 | `thiserror`, `anyhow` | Implement `std::error::Error` manually; keep typed error enums at library boundaries (the estate's own crates do this). |
-| `log`, `tracing`, `env_logger` | `eprintln!` / `stderr`; there is no logging facade. Machine output must stay parseable (`experience/invariants/sdk.yaml`). |
+| `log`, `tracing`, `env_logger` | Nothing to add, and nowhere to print: library code **returns** information instead of emitting it. `print_stdout`/`print_stderr` are `forbid` (§6.1), so there is no print path to route through. |
 | `clap`, `argh` | Parse `std::env::args` directly; CLI parsing is not an estate capability. |
 | `toml`, `serde_yaml`, `csv` | Not provided. Use `json`/`ron` for data; the gate parses TOML line-wise on purpose to avoid a TOML dependency. |
 | `sha2`, `hmac`, `aes-gcm`, `argon2`, `ed25519` | Not provided (BLAKE3 only). Crypto is a BOUNDARY tier — register it with the concrete reason. |
 | `rand` distributions | `lgwks_std::random` is OS entropy only; derive the distribution you need or register `rand`. |
 | `bytes`, `byteorder` | Use slices and `from_le_bytes`/`to_le_bytes`. |
+
+### 6.1 The print ban is a lint, not a style preference
+
+An earlier revision of this section said machine output stays parseable via
+`eprintln!` / `stderr`. **That is superseded and was never enforceable.**
+`print_stdout` and `print_stderr` are `forbid` in `[workspace.lints.clippy]`, and
+`forbid` cannot be lowered from source — so library code has no print path at
+all, and no `#[allow]` can carve one. This is *stronger* than the PRINTS rule in
+the execution contract, which exempts `main.rs`, `src/bin/`, `examples/`, and
+`benches/`; the lint grants no such exemption. Where the two disagree, the lint
+wins: it is the committed, machine-enforced artifact.
+
+The consequence for the row above is not "where do logs go" but *whether there
+is a log at all*. A diagnostic the caller will need belongs in the return type —
+carry the byte count, the rejected shape, or the failing field in the error
+variant, rather than narrating it to a stream the caller may not be reading. The
+estate's own crates do this: `lgwks_std::ron` reports
+`write_all failed after {n} bytes: {error}` in the error value instead of on
+stderr, because a library cannot be silenced by its caller.
+
+A **binary** still has to produce output, and writes to an explicit handle:
+
+```rust
+use std::io::Write;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut out = std::io::stdout().lock();
+    writeln!(out, "check: admitted")?;
+    Ok(())
+}
+```
+
+An explicit `writeln!` to a locked handle is not what `print_stdout` matches, and
+it forces the caller to confront the case `println!` hides: a broken pipe. A
+program whose consumer went away (`mycmd | head`) must treat
+`io::ErrorKind::BrokenPipe` as a clean exit, not a panic.
 
 When a gap forces a new edge, the edge is not the end of the conversation: the
 register entry must say which owner carries it and what `std` cannot do. If the

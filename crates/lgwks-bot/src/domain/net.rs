@@ -21,18 +21,27 @@ const POLL_TIMEOUT_SECS: u64 = 10;
 
 /// Observe or query a network endpoint. Supports Observe and Query.
 pub struct Endpoint {
+    /// The URL probed on each poll, resolved at construction.
     url: String,
+    /// Forced to `[bot.net]` by the constructor: a probe dials out, and no
+    /// constructor omits the capability.
     caps: Vec<Cap>,
 }
 
 /// Network state returned by observation or query.
+///
+/// `#[non_exhaustive]`: the reported shape grows with the domain, and a
+/// consumer that destructured this literally would break on each addition.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct NetState {
-    /// HTTP status code of the last probe.
+    /// HTTP status code of the last probe. `0` means no response was received —
+    /// the endpoint was unreachable — which is distinct from any real status a
+    /// server can return.
     pub status_code: u16,
     /// Whether the endpoint is reachable.
     pub reachable: bool,
-    /// Response body (truncated for observation).
+    /// Response body, truncated to [`BODY_PREVIEW`] characters for observation.
     pub body: String,
 }
 
@@ -56,25 +65,14 @@ impl verb::Observe for Endpoint {
     async fn poll(&self, call: (Auth, ())) -> Result<NetState, BotError> {
         call.0.check(self.required_caps())?;
         let url = self.url.clone();
-        let options = Options {
-            timeout: Duration::from_secs(POLL_TIMEOUT_SECS),
-            ..Options::default()
-        };
+        let options = Options::default().timeout(Duration::from_secs(POLL_TIMEOUT_SECS));
         let exchange =
             lgwks_std::task::spawn_blocking(move || http::get_with(&url, &options)).await;
         match exchange {
             Ok(response) => Ok(NetState {
                 status_code: response.status,
                 reachable: true,
-                body: response
-                    .text()
-                    .unwrap_or_else(|error| {
-                        eprintln!("lgwks_bot::net: response body is not UTF-8: {error}");
-                        ""
-                    })
-                    .chars()
-                    .take(BODY_PREVIEW)
-                    .collect(),
+                body: response.text_lossy().chars().take(BODY_PREVIEW).collect(),
             }),
             Err(http::Error::InvalidUrl) => Err(BotError::DomainError {
                 domain: self.domain_id().into(),
@@ -124,26 +122,37 @@ mod tests {
     use crate::gate::GrantSet;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::thread;
 
-    fn net_auth() -> Auth {
-        GrantSet::empty()
-            .grant(Cap::net())
-            .issue(&[Cap::net()])
-            .expect("net granted")
+    /// Tests here mix three error domains — socket I/O, `BotError`, and the
+    /// executor — so the tests report `Box<dyn Error>` and propagate each with
+    /// `?`, rather than reducing every failure to an unwind.
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn net_auth() -> Result<Auth, BotError> {
+        GrantSet::empty().grant(Cap::net()).issue(&[Cap::net()])
     }
 
-    fn serve_once(body: &'static str) -> (u16, thread::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+    /// Serve exactly one HTTP request on an ephemeral loopback port.
+    ///
+    /// `lgwks_std::task::spawn_blocking` rather than a raw `std::thread::spawn`:
+    /// it starts the thread immediately, so the listener is accepting before
+    /// the client dials, and its handle is a future the caller must await —
+    /// which is the difference between a joined thread and a leaked one. The
+    /// closure returns its I/O failure instead of unwrapping it so a refused
+    /// connection surfaces as a test error rather than a background panic.
+    fn serve_once(
+        body: &'static str,
+    ) -> std::io::Result<(u16, lgwks_std::task::JoinHandle<std::io::Result<()>>)> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        let handle = lgwks_std::task::spawn_blocking(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
             let mut request = vec![0u8; 1024];
             let mut head = Vec::new();
             loop {
-                let n = stream.read(&mut request).unwrap();
-                head.extend_from_slice(&request[..n]);
-                if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                let read = stream.read(&mut request)?;
+                head.extend_from_slice(&request[..read]);
+                if head.windows(4).any(|window| window == b"\r\n\r\n") {
                     break;
                 }
             }
@@ -151,54 +160,73 @@ mod tests {
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
-            stream.write_all(reply.as_bytes()).unwrap();
+            stream.write_all(reply.as_bytes())
         });
-        (port, handle)
+        Ok((port, handle))
     }
 
     #[test]
-    fn poll_reports_reachable_loopback() {
+    fn poll_reports_reachable_loopback() -> TestResult {
         use crate::verb::Observe;
-        let (port, server) = serve_once("alive");
+        let (port, server) = serve_once("alive")?;
         let state = lgwks_std::task::block_on(
-            Endpoint::new(format!("http://127.0.0.1:{port}/")).poll((net_auth(), ())),
-        )
-        .unwrap();
-        assert!(state.reachable);
+            Endpoint::new(format!("http://127.0.0.1:{port}/")).poll((net_auth()?, ())),
+        )?;
+        assert!(
+            state.reachable,
+            "a loopback server that answered must report reachable"
+        );
         assert_eq!(state.status_code, 200);
         assert_eq!(state.body, "alive");
-        server.join().unwrap();
+        lgwks_std::task::block_on(server)?;
+        Ok(())
     }
 
     #[test]
-    fn poll_reports_unreachable_closed_port() {
+    fn poll_reports_unreachable_closed_port() -> TestResult {
         use crate::verb::Observe;
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
         drop(listener);
         let state = lgwks_std::task::block_on(
-            Endpoint::new(format!("http://127.0.0.1:{port}/")).poll((net_auth(), ())),
-        )
-        .unwrap();
-        assert!(!state.reachable);
+            Endpoint::new(format!("http://127.0.0.1:{port}/")).poll((net_auth()?, ())),
+        )?;
+        assert!(
+            !state.reachable,
+            "a refused connection must report unreachable, not error"
+        );
         assert_eq!(state.status_code, 0);
+        Ok(())
     }
 
     #[test]
-    fn poll_rejects_malformed_url_as_spec_bug() {
+    fn poll_rejects_malformed_url_as_spec_bug() -> TestResult {
         use crate::verb::Observe;
-        let error = lgwks_std::task::block_on(Endpoint::new("not a url").poll((net_auth(), ())))
-            .unwrap_err();
-        assert!(matches!(error, BotError::DomainError { .. }));
+        let Err(error) =
+            lgwks_std::task::block_on(Endpoint::new("not a url").poll((net_auth()?, ())))
+        else {
+            return Err("a malformed URL is a spec bug and must error".into());
+        };
+        assert!(
+            matches!(error, BotError::DomainError { .. }),
+            "a malformed URL must be a typed DomainError, got {error:?}"
+        );
+        Ok(())
     }
 
     #[test]
-    fn poll_without_net_proof_is_denied() {
+    fn poll_without_net_proof_is_denied() -> TestResult {
         use crate::verb::Observe;
-        let vacuous = GrantSet::empty().issue(&[]).expect("empty coverage");
-        let error =
+        let vacuous = GrantSet::empty().issue(&[])?;
+        let Err(error) =
             lgwks_std::task::block_on(Endpoint::new("http://127.0.0.1:9/").poll((vacuous, ())))
-                .unwrap_err();
-        assert!(matches!(error, BotError::CapabilityDenied { .. }));
+        else {
+            return Err("a proof covering no capability must not authorize `bot.net`".into());
+        };
+        assert!(
+            matches!(error, BotError::CapabilityDenied { .. }),
+            "a capped endpoint must deny a vacuous proof, got {error:?}"
+        );
+        Ok(())
     }
 }
