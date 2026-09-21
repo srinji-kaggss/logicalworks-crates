@@ -44,6 +44,7 @@ use core::fmt;
 use core::num::{NonZeroU64, NonZeroU128};
 
 use lgwks_std::hash::Digest;
+use lgwks_std::wire::{AlignedVec, WireError};
 
 /// Why an [`Id128`] could not be parsed.
 ///
@@ -102,7 +103,20 @@ impl std::error::Error for IdError {}
 /// Equality is the ordinary integer comparison: unlike
 /// [`Digest`], these are public identifiers rather than secret-derived values,
 /// and a constant-time comparison would buy nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    lgwks_std::wire::Archive,
+    lgwks_std::wire::Serialize,
+    lgwks_std::wire::Deserialize,
+)]
+#[rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
 pub struct Id128(NonZeroU128);
 
 impl Id128 {
@@ -168,6 +182,12 @@ macro_rules! id_role {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(
+            lgwks_std::wire::Archive,
+            lgwks_std::wire::Serialize,
+            lgwks_std::wire::Deserialize,
+        )]
+        #[rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
         pub struct $name(Id128);
 
         impl $name {
@@ -258,6 +278,12 @@ macro_rules! counter_role {
     ($(#[$meta:meta])* $name:ident, $what:literal) => {
         $(#[$meta])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(
+            lgwks_std::wire::Archive,
+            lgwks_std::wire::Serialize,
+            lgwks_std::wire::Deserialize,
+        )]
+        #[rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
         pub struct $name(NonZeroU64);
 
         impl $name {
@@ -386,18 +412,6 @@ impl DigestAlgorithm {
 
     /// The fixed-width byte this algorithm is tagged with inside a hash chain.
     ///
-    /// Deliberately not [`Self::as_str`]: that is the spelling a person reads in
-    /// `effect-key-v1` JSON, this is the tag the journal hashes into a chain
-    /// position. Zero is left unused so a zeroed buffer can never be read as a
-    /// tagged digest.
-    #[must_use]
-    pub const fn chain_tag(self) -> u8 {
-        match self {
-            Self::Blake3_256 => 1,
-            Self::Sha256 => 2,
-        }
-    }
-
     /// Parse the wire spelling. Exact: no case folding, no aliases.
     #[must_use]
     pub fn from_wire(text: &str) -> Option<Self> {
@@ -451,6 +465,12 @@ macro_rules! digest_role {
     ($(#[$meta:meta])* $name:ident, $what:literal) => {
         $(#[$meta])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(
+            lgwks_std::wire::Archive,
+            lgwks_std::wire::Serialize,
+            lgwks_std::wire::Deserialize,
+        )]
+        #[rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
         pub struct $name(Digest);
 
         impl $name {
@@ -588,7 +608,18 @@ impl From<DigestError> for EffectKeyError {
 /// A slot or entry index is instrumentation, not identity, and is deliberately
 /// absent: it is the one field that changes when a chain is edited, and a
 /// settlement must survive an edit to a different part of the chain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    lgwks_std::wire::Archive,
+    lgwks_std::wire::Serialize,
+    lgwks_std::wire::Deserialize,
+)]
+#[rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
 pub struct EffectKey {
     /// Which run this effect belongs to.
     run: RunId,
@@ -700,78 +731,34 @@ impl EffectKey {
             && self.epoch.get() < other.epoch.get()
     }
 
-    /// Length of [`Self::to_bytes`] output.
+    /// The key as a byte string, for hashing into a chain.
     ///
-    /// Summed from the field widths rather than written as a literal, so that
-    /// adding a field to the key is a compile error here until the encoding is
-    /// extended to carry it. A hand-written total would let a new field be
-    /// silently absent from every chain position computed after it.
-    pub const ENCODED_LEN: usize = WIDTH_ID
-        + WIDTH_ID
-        + WIDTH_COUNTER
-        + WIDTH_TAG
-        + WIDTH_DIGEST
-        + WIDTH_TAG
-        + WIDTH_DIGEST
-        + WIDTH_ID
-        + WIDTH_COUNTER;
-
-    /// The key as a fixed-width byte string, for hashing into a chain.
+    /// Encoded through [`lgwks_std::wire`], the estate's binary format, rather
+    /// than by hand. The format is derived from the type, so a field added to
+    /// this key is carried by the encoding instead of being silently absent
+    /// from every chain position computed after it — the failure the
+    /// hand-summed widths this replaced could catch only if the sum was
+    /// remembered.
     ///
-    /// Every field is written and every field is big-endian, so two keys differ
-    /// in bytes exactly when they differ in identity. The digests carry their
-    /// algorithm tag: the same 32 bytes under a different algorithm is a
-    /// different binding, and folding the two would let a caller swap the
-    /// algorithm without moving the chain position the journal recorded.
+    /// Every field is a fixed-width integer or a 32-byte digest, so the archive
+    /// holds no relative pointers and its layout does not depend on pointer
+    /// width. Two keys are equal exactly when their bytes are, and the test
+    /// below is what holds that.
     ///
-    /// Fixed width, not self-describing. A journal hashes this into a chain, and
-    /// a length prefix is one more thing that can be written two ways by two
-    /// implementations that then disagree about the head hash.
-    #[must_use]
-    pub fn to_bytes(self) -> [u8; Self::ENCODED_LEN] {
-        let mut out = [0_u8; Self::ENCODED_LEN];
-        let mut at = 0;
-        at = write_at(&mut out, at, &self.run.id().get().get().to_be_bytes());
-        at = write_at(&mut out, at, &self.action.id().get().get().to_be_bytes());
-        at = write_at(&mut out, at, &self.attempt.get().to_be_bytes());
-        at = write_at(&mut out, at, &[FlowRevision::algorithm().chain_tag()]);
-        at = write_at(&mut out, at, self.flow.digest().as_bytes());
-        at = write_at(&mut out, at, &[ActionDigest::algorithm().chain_tag()]);
-        at = write_at(&mut out, at, self.digest.digest().as_bytes());
-        at = write_at(
-            &mut out,
-            at,
-            &self.environment.id().get().get().to_be_bytes(),
-        );
-        write_at(&mut out, at, &self.epoch.get().to_be_bytes());
-        out
+    /// The digest algorithm is deliberately *not* written. It was a byte in the
+    /// hand-rolled form, and it was the same byte in every key that form could
+    /// produce: [`FlowRevision`] and [`ActionDigest`] each fix their algorithm
+    /// as a constant of the role, so the tag distinguished nothing. What
+    /// separates two algorithms is the schema version this module's doc names,
+    /// and a second algorithm is a new version rather than a differently-tagged
+    /// key.
+    ///
+    /// # Errors
+    ///
+    /// [`WireError`] if the archive cannot be allocated.
+    pub fn to_bytes(self) -> Result<AlignedVec, WireError> {
+        lgwks_std::wire::to_bytes::<WireError>(&self)
     }
-}
-
-/// Width of one 128-bit identifier in the fixed encoding.
-const WIDTH_ID: usize = 16;
-
-/// Width of one checked counter in the fixed encoding.
-const WIDTH_COUNTER: usize = 8;
-
-/// Width of one algorithm tag in the fixed encoding.
-const WIDTH_TAG: usize = 1;
-
-/// Width of one 256-bit digest in the fixed encoding.
-const WIDTH_DIGEST: usize = 32;
-
-/// Write `bytes` into `out` at `at` and return the next free offset.
-///
-/// Cannot fail short of the layout arithmetic being wrong, which
-/// [`EffectKey::ENCODED_LEN`] and the byte-exact test in this module between
-/// them rule out. Written with `get_mut` rather than indexing so that even the
-/// impossible case is not a panic: the crate refuses a panicking path, and an
-/// encoder is no place to make an exception for one.
-fn write_at(out: &mut [u8], at: usize, bytes: &[u8]) -> usize {
-    if let Some(slot) = out.get_mut(at..at.saturating_add(bytes.len())) {
-        slot.copy_from_slice(bytes);
-    }
-    at.saturating_add(bytes.len())
 }
 
 impl fmt::Display for EffectKey {

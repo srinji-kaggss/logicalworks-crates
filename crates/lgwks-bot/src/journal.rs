@@ -43,6 +43,7 @@ use core::fmt;
 use std::io;
 
 use lgwks_std::hash::{Digest, Hasher, blake3};
+use lgwks_std::wire::{AlignedVec, WireError};
 
 use crate::effect::{EffectKey, Id128};
 
@@ -55,36 +56,20 @@ use crate::effect::{EffectKey, Id128};
 /// keeps one definition with two consumers.
 pub use crate::ecs::EffectEvidence;
 
+mod wire_form;
+
+/// The two journal records whose archived form is an enum, re-exported from the
+/// private `wire_form` module, which records why they are declared there.
+pub use wire_form::{
+    ArchivedEffectEvent, ArchivedVerificationResult, EffectEvent, VerificationResult,
+};
+
 /// The domain separator hashed into the genesis position.
 ///
 /// A chain has to start somewhere, and "started from 32 zero bytes" is a value
 /// any other hash could coincide with. Separating the domain means the genesis
 /// head cannot be mistaken for the hash of an empty or zeroed event.
 const GENESIS_DOMAIN: &[u8] = b"lgwks.journal.v1.genesis";
-
-/// Tag byte for [`EffectEvent::IntentAdmitted`] in the chain encoding.
-const TAG_INTENT_ADMITTED: u8 = 1;
-
-/// Tag byte for [`EffectEvent::DispatchPrepared`] in the chain encoding.
-const TAG_DISPATCH_PREPARED: u8 = 2;
-
-/// Tag byte for [`EffectEvent::OutcomeObserved`] in the chain encoding.
-const TAG_OUTCOME_OBSERVED: u8 = 3;
-
-/// Tag byte for [`EffectEvent::Verified`] in the chain encoding.
-const TAG_VERIFIED: u8 = 4;
-
-/// Tag byte for [`EffectEvidence::Applied`] in the chain encoding.
-const TAG_APPLIED: u8 = 1;
-
-/// Tag byte for [`EffectEvidence::NotApplied`] in the chain encoding.
-const TAG_NOT_APPLIED: u8 = 2;
-
-/// Tag byte for [`VerificationResult::Satisfied`] in the chain encoding.
-const TAG_SATISFIED: u8 = 1;
-
-/// Tag byte for [`VerificationResult::NotSatisfied`] in the chain encoding.
-const TAG_NOT_SATISFIED: u8 = 2;
 
 /// What a journal can promise about an append that it has acknowledged.
 ///
@@ -238,22 +223,6 @@ impl fmt::Display for EventKind {
     }
 }
 
-/// Whether the named predicate held.
-///
-/// Both arms are recorded. A predicate that was evaluated and did not hold is a
-/// fact about the run, and discarding it would leave the report unable to say
-/// why an action was not verified.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum VerificationResult {
-    /// The predicate held.
-    Satisfied,
-    /// The predicate did not hold. This is not a transport failure and not a
-    /// statement about whether the effect landed: it is the answer to the
-    /// question the predicate asked.
-    NotSatisfied,
-}
-
 impl VerificationResult {
     /// The wire spelling.
     #[must_use]
@@ -261,14 +230,6 @@ impl VerificationResult {
         match self {
             Self::Satisfied => "satisfied",
             Self::NotSatisfied => "not_satisfied",
-        }
-    }
-
-    /// The tag byte this result is written as in the chain encoding.
-    const fn chain_tag(self) -> u8 {
-        match self {
-            Self::Satisfied => TAG_SATISFIED,
-            Self::NotSatisfied => TAG_NOT_SATISFIED,
         }
     }
 }
@@ -285,7 +246,18 @@ impl fmt::Display for VerificationResult {
 /// journal stays bounded, and as a digest rather than a summary so the answer
 /// cannot be re-read under a different input set. A bare "done" has no place
 /// here: it names no predicate, so nothing can re-evaluate it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    lgwks_std::wire::Archive,
+    lgwks_std::wire::Serialize,
+    lgwks_std::wire::Deserialize,
+)]
+#[rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
 pub struct Verification {
     /// Which predicate was evaluated.
     predicate: Id128,
@@ -338,52 +310,6 @@ impl Verification {
     pub const fn result(self) -> VerificationResult {
         self.result
     }
-
-    /// Write this record's fixed-width encoding into `out`.
-    fn encode_into(self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.predicate.get().get().to_be_bytes());
-        out.extend_from_slice(&self.predicate_version.to_be_bytes());
-        out.extend_from_slice(self.observations.as_bytes());
-        out.push(self.result.chain_tag());
-    }
-}
-
-/// One fact about one attempt, in the order it has to be recorded.
-///
-/// The order is not a convention the journal trusts the caller to follow: the
-/// ladder in [`EventKind::next`] is enforced at the append point, so an event
-/// that cannot follow what is already committed is refused rather than stored.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum EffectEvent {
-    /// The intent was frozen and admitted, before any authority was sought.
-    IntentAdmitted {
-        /// The attempt this fact is about.
-        key: EffectKey,
-    },
-    /// Authority was obtained and this exact attempt was prepared for handoff.
-    ///
-    /// This is the append that makes a crash survivable. After it, a recovered
-    /// controller knows an attempt *may* have reached the external system, and
-    /// must treat the outcome as unknown until evidence settles it.
-    DispatchPrepared {
-        /// The attempt this fact is about.
-        key: EffectKey,
-    },
-    /// What the evidence says about whether the effect landed.
-    OutcomeObserved {
-        /// The attempt this fact is about.
-        key: EffectKey,
-        /// The fact the caller established.
-        evidence: EffectEvidence,
-    },
-    /// A named predicate was evaluated over observations newer than the effect.
-    Verified {
-        /// The attempt this fact is about.
-        key: EffectKey,
-        /// The predicate, its version, its input and its answer.
-        verification: Verification,
-    },
 }
 
 impl EffectEvent {
@@ -409,33 +335,25 @@ impl EffectEvent {
         }
     }
 
-    /// The event's fixed-width encoding, which is what the chain hashes.
+    /// The event's encoding, which is what the chain hashes.
     ///
     /// Public because an adapter outside this crate has to compute the same
-    /// head to be a journal at all. Every field is written, every integer is
-    /// big-endian, and there is no length prefix, so two encoders cannot
-    /// disagree about the bytes by disagreeing about framing.
-    #[must_use]
-    pub fn to_bytes(self) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.push(match self.kind() {
-            EventKind::IntentAdmitted => TAG_INTENT_ADMITTED,
-            EventKind::DispatchPrepared => TAG_DISPATCH_PREPARED,
-            EventKind::OutcomeObserved => TAG_OUTCOME_OBSERVED,
-            EventKind::Verified => TAG_VERIFIED,
-        });
-        out.extend_from_slice(&self.key().to_bytes());
-        match self {
-            Self::IntentAdmitted { .. } | Self::DispatchPrepared { .. } => {}
-            Self::OutcomeObserved { evidence, .. } => {
-                out.push(match evidence {
-                    EffectEvidence::Applied => TAG_APPLIED,
-                    EffectEvidence::NotApplied => TAG_NOT_APPLIED,
-                });
-            }
-            Self::Verified { verification, .. } => verification.encode_into(&mut out),
-        }
-        out
+    /// head to be a journal at all. The encoding is the estate's, not this
+    /// module's: the record is archived by [`lgwks_std::wire`] exactly as every
+    /// other estate type that crosses a byte boundary, so the discriminant, the
+    /// identity and the payload are one encode rather than a framing this module
+    /// maintains beside it. A reader accesses the archive in place instead of
+    /// decoding it, which is the reason the format exists.
+    ///
+    /// The bytes are what a chain head commits to, so they are part of this
+    /// module's durable contract: a change to the record's shape changes every
+    /// head computed after it.
+    ///
+    /// # Errors
+    ///
+    /// [`WireError`] if the archive cannot be allocated.
+    pub fn to_bytes(self) -> Result<AlignedVec, WireError> {
+        lgwks_std::wire::to_bytes::<WireError>(&self)
     }
 }
 
@@ -524,6 +442,13 @@ pub enum JournalError {
     Exhausted,
     /// The backing store refused the append.
     Storage(io::Error),
+    /// The event could not be encoded for the chain.
+    ///
+    /// Not a caller error and not reachable by anything the caller controls:
+    /// the encoding allocates, and this is that allocation failing. Named
+    /// rather than folded into [`Self::Storage`] because nothing was stored —
+    /// the append is refused before the journal is touched at all.
+    Encoding(WireError),
 }
 
 impl fmt::Display for JournalError {
@@ -561,6 +486,12 @@ impl fmt::Display for JournalError {
             Self::Storage(ref cause) => {
                 write!(f, "journal storage refused the append: {cause}")
             }
+            Self::Encoding(ref cause) => {
+                write!(
+                    f,
+                    "journal could not encode the event for the chain: {cause}"
+                )
+            }
         }
     }
 }
@@ -569,6 +500,7 @@ impl std::error::Error for JournalError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match *self {
             Self::Storage(ref cause) => Some(cause),
+            Self::Encoding(ref cause) => Some(cause),
             _ => None,
         }
     }
@@ -837,44 +769,80 @@ pub fn recover<'a>(events: impl IntoIterator<Item = &'a EffectEvent>) -> Recover
     recovered
 }
 
-/// Where a recomputed chain stopped agreeing with what was recorded.
+/// Where a recomputed chain stopped agreeing with what was recorded, or why it
+/// could not be recomputed at all.
+///
+/// Two arms rather than one, because encoding the events is a fallible step
+/// standing between them and the comparison, and a chain that could not be
+/// walked is *unknown* rather than sound. Folding that into "no disagreement
+/// found" is the one answer this type must not give.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChainBreak {
-    /// The sequence number of the first entry that did not follow.
-    at: u64,
-    /// The position the journal recorded for that entry.
-    recorded: JournalPosition,
-    /// The position recomputed from the events.
-    recomputed: JournalPosition,
+#[non_exhaustive]
+pub enum ChainBreak {
+    /// The recomputed head did not match what was recorded.
+    Disagreement {
+        /// The sequence number of the first entry that did not follow.
+        at: u64,
+        /// The position the journal recorded for that entry.
+        recorded: JournalPosition,
+        /// The position recomputed from the events.
+        recomputed: JournalPosition,
+    },
+    /// The entry could not be re-encoded, so the chain could not be checked.
+    ///
+    /// Nothing was compared. The encoding allocates, and this is that
+    /// allocation failing.
+    Unencodable {
+        /// The sequence number of the entry that could not be encoded.
+        at: u64,
+    },
 }
 
 impl ChainBreak {
-    /// The sequence number of the first entry that did not follow.
+    /// The sequence number of the entry the break is about.
     #[must_use]
     pub const fn at(self) -> u64 {
-        self.at
+        match self {
+            Self::Disagreement { at, .. } | Self::Unencodable { at } => at,
+        }
     }
 
-    /// The position the journal recorded for that entry.
+    /// The position the journal recorded, when the break is a disagreement.
     #[must_use]
-    pub const fn recorded(self) -> JournalPosition {
-        self.recorded
+    pub const fn recorded(self) -> Option<JournalPosition> {
+        match self {
+            Self::Disagreement { recorded, .. } => Some(recorded),
+            Self::Unencodable { .. } => None,
+        }
     }
 
-    /// The position recomputed from the events.
+    /// The position recomputed from the events, when the break is a
+    /// disagreement.
     #[must_use]
-    pub const fn recomputed(self) -> JournalPosition {
-        self.recomputed
+    pub const fn recomputed(self) -> Option<JournalPosition> {
+        match self {
+            Self::Disagreement { recomputed, .. } => Some(recomputed),
+            Self::Unencodable { .. } => None,
+        }
     }
 }
 
 impl fmt::Display for ChainBreak {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "journal chain breaks at {}: recorded {}, recomputed {}",
-            self.at, self.recorded, self.recomputed
-        )
+        match *self {
+            Self::Disagreement {
+                at,
+                recorded,
+                recomputed,
+            } => write!(
+                f,
+                "journal chain breaks at {at}: recorded {recorded}, recomputed {recomputed}"
+            ),
+            Self::Unencodable { at } => write!(
+                f,
+                "journal entry {at} could not be re-encoded, so the chain could not be checked"
+            ),
+        }
     }
 }
 
@@ -886,12 +854,11 @@ impl std::error::Error for ChainBreak {}
 /// to content: the same two events in the other order produce a different head,
 /// which is what makes a reordered or dropped entry detectable rather than
 /// merely suspicious.
-#[must_use]
-fn chain(previous: JournalPosition, event: &EffectEvent) -> Digest {
+fn chain(previous: JournalPosition, event: &EffectEvent) -> Result<Digest, JournalError> {
     let mut hasher = Hasher::new();
     hasher.update(previous.head().as_bytes());
-    hasher.update(&event.to_bytes());
-    hasher.finalize()
+    hasher.update(&event.to_bytes().map_err(JournalError::Encoding)?);
+    Ok(hasher.finalize())
 }
 
 /// What the ladder allows next for `key`, given the entries committed so far.
@@ -918,12 +885,13 @@ pub fn verify_chain(entries: &[JournalEntry]) -> Result<JournalPosition, ChainBr
     let mut position = JournalPosition::genesis();
     for entry in entries {
         let sequence = position.sequence().saturating_add(1);
-        let recomputed = JournalPosition {
-            sequence,
-            head: chain(position, entry.event()),
+        let head = match chain(position, entry.event()) {
+            Ok(head) => head,
+            Err(_) => return Err(ChainBreak::Unencodable { at: sequence }),
         };
+        let recomputed = JournalPosition { sequence, head };
         if recomputed != entry.position() {
-            return Err(ChainBreak {
+            return Err(ChainBreak::Disagreement {
                 at: sequence,
                 recorded: entry.position(),
                 recomputed,
@@ -1032,7 +1000,7 @@ impl EffectJournal for MemoryJournal {
             .ok_or(JournalError::Exhausted)?;
         let position = JournalPosition {
             sequence,
-            head: chain(actual, event),
+            head: chain(actual, event)?,
         };
         self.committed.push(JournalEntry::new(position, *event));
         Ok(DurableAck::new(position, self.durability()))
@@ -1480,12 +1448,18 @@ mod tests {
     }
 
     #[test]
-    fn a_key_encodes_every_field_at_a_fixed_width() -> TestResult {
+    fn a_key_encodes_deterministically() -> TestResult {
         let key = key("1", "1")?;
-        let bytes = key.to_bytes();
-        assert_eq!(bytes.len(), EffectKey::ENCODED_LEN);
-        assert_eq!(bytes.len(), 130);
-        assert_eq!(bytes, key.to_bytes());
+        let bytes = key.to_bytes()?;
+        assert_eq!(
+            bytes.as_slice(),
+            key.to_bytes()?.as_slice(),
+            "one key encodes the same way twice"
+        );
+        assert!(
+            !bytes.is_empty(),
+            "and the encoding carries something: {bytes:?}"
+        );
         Ok(())
     }
 
@@ -1496,34 +1470,64 @@ mod tests {
         let later_epoch = key("1", "2")?;
         let other = other_key("1", "1")?;
 
-        assert_ne!(base.to_bytes(), later_attempt.to_bytes());
-        assert_ne!(base.to_bytes(), later_epoch.to_bytes());
-        assert_ne!(base.to_bytes(), other.to_bytes());
+        assert_ne!(
+            base.to_bytes()?.as_slice(),
+            later_attempt.to_bytes()?.as_slice()
+        );
+        assert_ne!(
+            base.to_bytes()?.as_slice(),
+            later_epoch.to_bytes()?.as_slice()
+        );
+        assert_ne!(base.to_bytes()?.as_slice(), other.to_bytes()?.as_slice());
         Ok(())
     }
 
     #[test]
     fn an_event_encoding_carries_its_kind_and_its_key() -> TestResult {
         let key = key("1", "1")?;
-        let admitted = EffectEvent::IntentAdmitted { key }.to_bytes();
-        let prepared = EffectEvent::DispatchPrepared { key }.to_bytes();
+        let admitted = EffectEvent::IntentAdmitted { key }.to_bytes()?;
+        let prepared = EffectEvent::DispatchPrepared { key }.to_bytes()?;
         let applied = EffectEvent::OutcomeObserved {
             key,
             evidence: EffectEvidence::Applied,
         }
-        .to_bytes();
+        .to_bytes()?;
         let not_applied = EffectEvent::OutcomeObserved {
             key,
             evidence: EffectEvidence::NotApplied,
         }
-        .to_bytes();
+        .to_bytes()?;
 
-        assert_eq!(admitted.len(), EffectKey::ENCODED_LEN + 1);
-        assert_eq!(prepared.len(), admitted.len());
-        assert_eq!(applied.len(), admitted.len() + 1);
-        assert_eq!(not_applied.len(), applied.len());
-        assert_ne!(admitted, prepared);
-        assert_ne!(applied, not_applied);
+        assert_ne!(admitted.as_slice(), prepared.as_slice());
+        assert_ne!(applied.as_slice(), not_applied.as_slice());
+
+        // What the encoding says about the event is read back out of it. A
+        // field that failed to encode would not shorten the buffer, since the
+        // archived form is one width for every variant of a type, so comparing
+        // lengths would not have caught it. Decoding does.
+        for (bytes, event) in [
+            (admitted, EffectEvent::IntentAdmitted { key }),
+            (prepared, EffectEvent::DispatchPrepared { key }),
+            (
+                applied,
+                EffectEvent::OutcomeObserved {
+                    key,
+                    evidence: EffectEvidence::Applied,
+                },
+            ),
+            (
+                not_applied,
+                EffectEvent::OutcomeObserved {
+                    key,
+                    evidence: EffectEvidence::NotApplied,
+                },
+            ),
+        ] {
+            assert_eq!(
+                lgwks_std::wire::from_bytes::<EffectEvent, WireError>(&bytes)?,
+                event
+            );
+        }
         Ok(())
     }
 
@@ -1534,7 +1538,7 @@ mod tests {
             key,
             verification: satisfied()?,
         }
-        .to_bytes();
+        .to_bytes()?;
         let next_version = EffectEvent::Verified {
             key,
             verification: Verification::new(
@@ -1544,9 +1548,27 @@ mod tests {
                 VerificationResult::Satisfied,
             ),
         }
-        .to_bytes();
-        assert_ne!(first, next_version);
-        assert_eq!(first.len(), next_version.len());
+        .to_bytes()?;
+        assert_ne!(first.as_slice(), next_version.as_slice());
+        assert_eq!(
+            lgwks_std::wire::from_bytes::<EffectEvent, WireError>(&first)?,
+            EffectEvent::Verified {
+                key,
+                verification: satisfied()?,
+            }
+        );
+        assert_eq!(
+            lgwks_std::wire::from_bytes::<EffectEvent, WireError>(&next_version)?,
+            EffectEvent::Verified {
+                key,
+                verification: Verification::new(
+                    Id128::from_hex(PREDICATE)?,
+                    2,
+                    blake3(b"observations"),
+                    VerificationResult::Satisfied,
+                ),
+            }
+        );
         Ok(())
     }
 }

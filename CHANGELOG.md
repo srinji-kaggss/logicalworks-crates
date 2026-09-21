@@ -148,6 +148,21 @@ explicitly under that crate.
     are on `main` and unpublished. They ship in one release once the registry and
     the scheduler have landed.
 
+### lgwks_std Added
+
+- **`wire` re-exports the `rkyv` crate, so a consumer crate can derive against
+  it.** The module re-exported the three derive macros but not the crate those
+  macros expand against, and the generated code names `::rkyv::…` absolutely. A
+  type outside `lgwks_std` that derived `Archive` through this module therefore
+  failed with `cannot find 'rkyv' in the crate root` before it ever reached a
+  layout question, which made the estate's binary surface usable only by its own
+  tests. A consumer now writes `#[rkyv(crate = lgwks_std::wire::rkyv)]` and
+  derives the macros from here as before.
+- **`Digest` carries the archive derives behind `wire`.** Thirty-two bytes with
+  no indirection, so it archives in place and any record that contains one
+  reaches it without a pointer — which is the property that makes the journal's
+  chain head a value a reader can compare against without decoding the record.
+
 ### lgwks_bot Breaking
 
 **There is no longer any public API that starts concurrent work or a process and
@@ -235,6 +250,15 @@ Changed:
   This is the intentional tightening RQ-059 asks to be documented — a program
   that named a slot and a revision still compiles if it reads its work from
   `pending()`, and a program that fabricated the pair no longer does.
+
+- **`EffectEvent::to_bytes` returns `lgwks_std::wire::AlignedVec` rather than
+  `Vec<u8>`.** The journal record is archived by the estate's binary format now
+  instead of a framing this crate maintained beside it, and an `AlignedVec` is
+  what the archive has to live in for a reader to access it in place rather than
+  decode it. The tag bytes, the width constants and the hand-written
+  `encode_into` are gone with it. **The bytes are what a chain head commits to**,
+  so this is a durable break as well as a signature one: a journal written before
+  this release does not verify against one written after it.
 
 **No crate version is bumped.** The change is unpublished like the five public
 modules above it, and it ships in the same release.

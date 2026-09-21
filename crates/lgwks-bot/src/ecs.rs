@@ -636,7 +636,18 @@ impl fmt::Display for PendingWork {
 /// decision that matters — attempt it again or not — follows from which one
 /// they are. "Unknown and staying unknown" is not evidence and has no arm: an
 /// entry in that state stays reported, which is the honest outcome.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    lgwks_std::wire::Archive,
+    lgwks_std::wire::Serialize,
+    lgwks_std::wire::Deserialize,
+)]
+#[rkyv(attr(non_exhaustive), crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
 #[non_exhaustive]
 pub enum EffectEvidence {
     /// The effect happened. The entry is acknowledged and never attempted

@@ -16,6 +16,24 @@ pub use rkyv::util::AlignedVec;
 pub use rkyv::{Archive, Deserialize, Serialize};
 pub use rkyv::{access, from_bytes, to_bytes};
 
+/// The archive implementation itself, re-exported so a *consumer* crate can
+/// derive against it.
+///
+/// The derives above re-export the macros but not the crate they expand
+/// against: the generated code names `::rkyv::…` absolutely, and `rkyv` is
+/// `lgwks_std`'s dependency, not the consumer's — so a type in another crate
+/// that derives `Archive` through this module fails with "cannot find `rkyv`
+/// in the crate root" before it ever reaches a layout question.
+///
+/// This is the repair. A consumer writes
+/// `#[rkyv(crate = lgwks_std::wire::rkyv)]` on its type, which points every
+/// generated path at this re-export, and derives the macros from here as
+/// normal. It is a re-export of the crate rather than one more hand-picked
+/// list of items, because the list is the derive's business and it grows with
+/// the derive: naming the items individually is how this module came to be
+/// usable only by its own tests.
+pub use rkyv;
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
