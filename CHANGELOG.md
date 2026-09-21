@@ -6,6 +6,29 @@ independently; each release lists per-crate deltas. The format follows
 `0.x`, so any minor may carry breaking changes, which are then listed
 explicitly under that crate.
 
+## [Unreleased]
+
+### Decision
+
+- **`lgwks_bot` is relicensed to MPL-2.0**, from Apache-2.0. The bot is the
+  artefact the rest of the estate embeds, and a permissive licence on it lets
+  anyone modify it and ship the modifications closed with no later release able
+  to recover that. MPL-2.0 is file-level copyleft: use stays unrestricted
+  including in proprietary products (MPL-2.0 §3.3), and only modification of the
+  MPL-covered files carries the §3.2 source obligation. `lgwks_std`, `lgwks_ast`
+  and `lgwks_deps` remain Apache-2.0.
+- **No published version changed.** Licences are not retroactive; every version
+  on crates.io including `lgwks_bot` 0.4.2 stays Apache-2.0. The new terms take
+  effect at the next version published from this tree, which is why no crate
+  version is bumped here. The four dependent repositories pin exact published
+  versions and none is affected until it moves.
+- **`LICENSING.md` records the model**, including the commercial licence that
+  grants relief from §3.2 for organisations that need to modify the bot without
+  publishing those modifications. Offering two licences requires holding rights
+  in every contribution, so `CONTRIBUTING.md` now states that a contributor
+  licence agreement must be in place before a non-trivial `lgwks_bot`
+  contribution is merged.
+
 ## [lgwks_deps 0.1.12] - 2026-09-20
 
 Documentation release. No API change, no behaviour change, and no command-line

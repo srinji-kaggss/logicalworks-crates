@@ -268,5 +268,16 @@ process in [`SECURITY.md`](SECURITY.md), not as a public issue.
 
 ## License
 
-Apache-2.0, Copyright 2026 Logical Works Incorporated. Each crate ships its own
-`LICENSE` file, for example [`crates/lgwks-std/LICENSE`](crates/lgwks-std/LICENSE).
+Copyright 2026 Logical Works Incorporated. Each crate ships its own `LICENSE`
+file.
+
+`lgwks_std`, `lgwks_ast`, and `lgwks_deps` are Apache-2.0, for example
+[`crates/lgwks-std/LICENSE`](crates/lgwks-std/LICENSE). `lgwks_bot` is
+[MPL-2.0](crates/lgwks-bot/LICENSE) — file-level copyleft rather than
+permissive, so that the artefact the whole estate embeds cannot be taken,
+modified, and shipped closed.
+
+Both permit proprietary *use*; the difference is what happens when someone
+modifies the covered files. [`LICENSING.md`](LICENSING.md) states the rule, why
+the bot differs, and the commercial licence available for the one case MPL-2.0
+does not cover.
