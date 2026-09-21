@@ -32,12 +32,6 @@ the rest of this document is about what the 100x buys and where it goes.
 | `fanout-1x64` | 4 390.8 | 49.7 | 88.83x | [87.89, 97.52] |
 | `wide-256x10` | 31 293.5 | 252.2 | 119.20x | [118.61, 122.36] |
 
-**This table predates two allocation and polling changes to the bot and has not
-been re-measured.** It is the record of the run this document was written
-around, not a statement about the current tree. The scenario names still
-resolve; the ratios are stale, and stale in the direction that understates the
-bot, because the changes removed work rather than adding it.
-
 Every interval excludes parity, so each of these is a distinguishable
 difference rather than noise. The `churn-64x1` interval is the widest, which is
 what a scenario whose cost depends on how much work the scheduler actually
