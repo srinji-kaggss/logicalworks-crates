@@ -91,6 +91,29 @@ impl Default for Pipeline {
     }
 }
 
+/// The number of steps in a pipeline.
+///
+/// `dyn PipelineStep` has no `Debug` and the trait does not gain one: it is a
+/// consumer seam, and its only identifying surface is `required_caps`, whose
+/// union the pipeline already retains in `caps`. The count is the one fact
+/// about the step list that `caps` does not carry, so it is the one printed.
+struct StepCount(usize);
+
+impl core::fmt::Debug for StepCount {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{} step(s)", self.0)
+    }
+}
+
+impl core::fmt::Debug for Pipeline {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Pipeline")
+            .field("steps", &StepCount(self.steps.len()))
+            .field("caps", &self.caps)
+            .finish()
+    }
+}
+
 /// Opaque pipeline output: wraps the final step's result.
 ///
 /// `#[non_exhaustive]`: the payload is deliberately unnameable, so the only
@@ -99,6 +122,18 @@ impl Default for Pipeline {
 /// `execute_action` is the single place that builds one.
 #[non_exhaustive]
 pub struct PipelineOutput(pub Box<dyn std::any::Any>);
+
+impl core::fmt::Debug for PipelineOutput {
+    /// Prints the wrapper, never the payload.
+    ///
+    /// The payload's whole purpose is to be opaque until a caller downcasts it,
+    /// and `dyn Any` carries no `Debug`; printing the concrete type's name
+    /// would defeat the erasure this type exists to perform, so the `Debug`
+    /// reports that an output is present without naming what it is.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("PipelineOutput(..)")
+    }
+}
 
 impl verb::Execute for Pipeline {
     type Input = ();

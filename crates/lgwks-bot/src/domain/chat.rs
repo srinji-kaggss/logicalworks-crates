@@ -34,6 +34,7 @@ impl ChatMessage {
 }
 
 /// Observe a Slack channel for incoming messages.
+#[derive(Debug)]
 pub struct SlackChannel {
     /// The channel observed; echoed in the "binding required" diagnostic so an
     /// unbound domain says which channel it was asked for.
@@ -102,6 +103,7 @@ pub fn slack_message(channel: impl Into<String>) -> SlackChannel {
 }
 
 /// Observe an HTTP webhook for incoming messages.
+#[derive(Debug)]
 pub struct HttpWebhook {
     /// The webhook path observed; echoed in the "binding required" diagnostic.
     path: String,

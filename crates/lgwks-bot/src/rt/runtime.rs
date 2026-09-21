@@ -144,6 +144,7 @@ fn discover_workers() -> Option<NonZeroUsize> {
 /// pool; it does not give async tasks a grace period. A task already executing
 /// non-yielding code cannot be forcibly stopped, and a started blocking task
 /// may continue on its blocking thread after shutdown returns.
+#[derive(Debug)]
 pub struct Runtime {
     /// The owned engine runtime. Private so the engine type never appears in
     /// this crate's public surface: a consumer names [`Runtime`], never

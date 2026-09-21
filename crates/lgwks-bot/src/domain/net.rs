@@ -41,6 +41,7 @@ const BODY_PREVIEW_BYTES: usize = BODY_PREVIEW.saturating_mul(4);
 const POLL_TIMEOUT_SECS: u64 = 10;
 
 /// Observe or query a network endpoint. Supports Observe and Query.
+#[derive(Debug)]
 pub struct Endpoint {
     /// The URL probed on each poll, resolved at construction.
     url: String,

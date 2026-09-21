@@ -2891,6 +2891,45 @@ impl EcsBot {
     }
 }
 
+// ── `Debug` for the assembled bot and its two builders ─────────────────────
+//
+// Written as impls rather than derives because a derive line added above a type
+// would renumber the citations the module's own docs make by line number, and
+// because `EcsObserveBuilder<S>` and `EcsBuilder` hold `dyn` seams that no
+// derive can cross. Each rendering reports the shape a caller can act on — the
+// name, how many chains or entries are staged, the retry policy — and stops
+// short of the engine's own state through `finish_non_exhaustive`, which marks
+// the omission instead of hiding it.
+
+impl core::fmt::Debug for EcsBot {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("EcsBot")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl core::fmt::Debug for EcsBuilder {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("EcsBuilder")
+            .field("name", &self.name)
+            .field("chains", &self.chains.len())
+            .field("policy", &self.policy)
+            .finish()
+    }
+}
+
+impl<S> core::fmt::Debug for EcsObserveBuilder<S> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("EcsObserveBuilder")
+            .field("name", &self.name)
+            .field("prior", &self.prior.len())
+            .field("entries", &self.entries.len())
+            .field("policy", &self.policy)
+            .finish_non_exhaustive()
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 //
 // These run under the ordinary workspace test run: there is no feature to turn
