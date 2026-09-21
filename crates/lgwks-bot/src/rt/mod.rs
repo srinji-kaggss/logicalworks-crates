@@ -53,6 +53,11 @@
 pub mod runtime;
 pub mod task;
 
+/// The estate's own cancellation primitive. Private, because its only public
+/// name is `rt::sync::CancellationToken` — one type, one path — matching how
+/// the ECS substrate is reached through `spec` rather than named directly.
+#[cfg(feature = "sync")]
+mod cancel;
 #[cfg(feature = "fs")]
 pub mod fs;
 #[cfg(feature = "net")]

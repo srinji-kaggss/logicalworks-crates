@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 use std::time::Duration;
 
 use lgwks_bot::rt::runtime::MAX_WORKER_THREADS;
-use lgwks_bot::rt::sync::mpsc;
-use lgwks_bot::rt::task::{JoinError, join_all_bounded, spawn, spawn_blocking, yield_now};
+use lgwks_bot::rt::sync::{CancellationToken, mpsc};
+use lgwks_bot::rt::task::{JoinError, JoinSet, join_all_bounded, spawn, spawn_blocking, yield_now};
 use lgwks_bot::rt::time::{sleep, timeout};
 use lgwks_bot::{Builder, Runtime};
 
@@ -453,5 +453,165 @@ fn a_handle_spawns_from_a_non_runtime_thread() -> TestResult {
         return Err("the spawned thread must not panic".into());
     };
     assert_eq!(value, 5);
+    Ok(())
+}
+
+/// The estate's cancellation primitive, exercised the way a supervisor uses it.
+///
+/// `AGENTS.md` requires every background task to be tracked in a `JoinSet` and
+/// to listen to a `CancellationToken`. Before this test existed the second half
+/// of that rule had no implementation to point at, so the rule was unenforceable
+/// rather than merely unenforced.
+#[test]
+fn a_cancelled_token_stops_every_task_in_a_join_set() -> TestResult {
+    const TASKS: usize = 32;
+    let runtime = Runtime::new()?;
+    let finished = Arc::new(AtomicUsize::new(0));
+    let token = CancellationToken::new();
+
+    let completed = runtime.block_on({
+        let finished = Arc::clone(&finished);
+        // `token` is moved in rather than cloned: the supervisor owns it, and no
+        // handle outside this block needs it afterwards.
+        async move {
+            let mut tasks = JoinSet::new();
+            for _ in 0..TASKS {
+                let waiting = token.clone();
+                let counter = Arc::clone(&finished);
+                tasks.spawn(async move {
+                    // `cancelled_owned` and not `cancelled`: a spawned task must
+                    // own everything it captures and outlive this scope, and
+                    // `cancelled` borrows the token.
+                    //
+                    // The 50 ms below is long enough that the cancel provably
+                    // arrives while these are parked, not after they returned.
+                    waiting.cancelled_owned().await;
+                    counter.fetch_add(1, SeqCst);
+                });
+            }
+
+            // Let every task reach its wait, then cancel from the same runtime
+            // but a different task than any waiter — which is the shape a
+            // supervisor actually has.
+            sleep(Duration::from_millis(50)).await;
+            token.cancel();
+
+            while let Some(joined) = tasks.join_next().await {
+                joined?;
+            }
+            Ok::<usize, JoinError>(finished.load(SeqCst))
+        }
+    })?;
+
+    assert_eq!(
+        completed, TASKS,
+        "one cancel must release every parked task"
+    );
+    Ok(())
+}
+
+/// A child token is cancellable on its own, and cancelling it must not disturb
+/// the sibling that shares its parent.
+#[test]
+fn cancelling_one_child_leaves_its_sibling_running() -> TestResult {
+    let runtime = Runtime::new()?;
+    let parent = CancellationToken::new();
+    let stopped = parent.child_token();
+    let surviving = parent.child_token();
+    let ran_to_completion = Arc::new(AtomicBool::new(false));
+
+    let outcome = runtime.block_on({
+        let ran_to_completion = Arc::clone(&ran_to_completion);
+        // Two clones: one the supervisor cancels, one the task waits on. They
+        // are the same token, so the cancel reaches the waiter.
+        let controller = stopped.clone();
+        let surviving_still_live = surviving.clone();
+        // `parent` is moved rather than cloned: it is needed only inside this
+        // block, to release the sibling once the claim has been asserted.
+        async move {
+            let mut tasks = JoinSet::new();
+            tasks.spawn(async move {
+                stopped.cancelled_owned().await;
+                "stopped"
+            });
+            tasks.spawn(async move {
+                surviving.cancelled_owned().await;
+                ran_to_completion.store(true, SeqCst);
+                "survivor"
+            });
+
+            sleep(Duration::from_millis(50)).await;
+            // Only the one child: a supervisor abandoning a single subtask must
+            // not take its siblings with it.
+            controller.cancel();
+
+            // The sibling must still be live *after* its peer was cancelled —
+            // that is the claim. It is asserted here rather than after the join
+            // because the join below deliberately does not wait for it.
+            let sibling_survived = !surviving_still_live.is_cancelled();
+
+            // Release the sibling's own wait so the set can be drained. This is
+            // the parent cancel, not a second child cancel: the point is that
+            // the sibling was stopped by the parent, never by its peer.
+            parent.cancel();
+
+            let mut seen = Vec::new();
+            while let Some(joined) = tasks.join_next().await {
+                seen.push(joined?);
+            }
+            seen.sort_unstable();
+            Ok::<(Vec<&str>, bool), JoinError>((seen, sibling_survived))
+        }
+    })?;
+
+    let (seen, sibling_survived) = outcome;
+    assert_eq!(
+        seen,
+        vec!["stopped", "survivor"],
+        "both tasks must finish once released"
+    );
+    assert!(
+        sibling_survived,
+        "cancelling one child must leave its sibling live, not cancel it too"
+    );
+    assert!(
+        ran_to_completion.load(SeqCst),
+        "the sibling of a cancelled child must run to completion"
+    );
+    // No assertion that `parent` is live: the test cancels it deliberately to
+    // release the sibling. The direction being tested is the other one —
+    // cancelling a *child* must not reach the parent — and that is covered in
+    // the unit tests, where the parent has no sibling to release.
+    Ok(())
+}
+
+/// A token cancelled before it is awaited still releases its task.
+///
+/// This is the race a supervisor actually hits: the decision to stop can land
+/// before the worker reaches its wait. A primitive that only wakes *registered*
+/// waiters would hang here forever.
+#[test]
+fn a_token_cancelled_before_the_await_still_releases_the_task() -> TestResult {
+    let runtime = Runtime::new()?;
+    let token = CancellationToken::new();
+    // Cancelled with no waiter in existence at all.
+    token.cancel();
+
+    let outcome = runtime.block_on(async move {
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async move {
+            token.cancelled_owned().await;
+            "released"
+        });
+        tasks.join_next().await
+    });
+
+    let Some(joined) = outcome else {
+        return Err("the JoinSet must yield one result".into());
+    };
+    assert_eq!(
+        joined?, "released",
+        "a pre-cancelled token must still release its waiter"
+    );
     Ok(())
 }
