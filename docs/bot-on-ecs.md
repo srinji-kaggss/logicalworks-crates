@@ -386,7 +386,7 @@ Each step must leave `cargo test --workspace --all-targets` green.
 2. **A `Spec -> Schedule` executor.** ✅ Landed, and it *replaced* the old one
    rather than sitting beside it. `Bot` is the ECS bot: `SourceId`/`Revision`
    components, `Grants`/`Fired`/`TickError` resources, non-`Send` chain and value
-   storage, the `observe` and `fire` exclusive systems, and bounded concurrent
+   storage, the `observe_fold` and `fire_plan` exclusive systems, and bounded concurrent
    polling retained from the previous executor. The interim state (two bots, one
    behind a default-off `ecs` feature) was rejected as a candidate architecture
    that nothing would exercise; see §12.

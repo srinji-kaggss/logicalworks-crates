@@ -239,6 +239,15 @@ jobs:
           set -eu
           python3 scripts/gen-llms-txt.py
           git diff --exit-code -- llms.txt
+      - name: Documentation citations resolve
+        # The guides cite `path:NNN` for each factual claim, and every merge
+        # moves the lines under them. A rotted citation is invisible: the page
+        # still reads as sourced, and a reader who checks one and finds
+        # something unrelated stops trusting the rest. This checks the part
+        # that is not a judgement call — the file exists, and the line exists
+        # in it. `docs/bevy-admission.md` is exempt because it cites Bevy's own
+        # repository; the script names that exemption rather than guessing.
+        run: python3 scripts/check-doc-citations.py
       - name: Root README quickstart matches its compiled example
         run: |
           python - <<'PY'

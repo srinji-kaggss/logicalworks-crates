@@ -105,16 +105,6 @@ explicitly under that crate.
   keeps its weight missing, which is what lets the acceptance threshold state
   which facts a match actually requires.
 
-### Added
-
-- `DegradedReason::UnmeasurableEmbedding` (`lgwks_bot`) and
-  `CosineError::NonFinite` (`lgwks_std`). A vector no angle can be computed from
-  is reported apart from an unavailable embedder, because the causes and the
-  repairs differ — nothing is down, one of the vectors is degenerate. Both enums
-  are `#[non_exhaustive]`, so these variants are additive.
-
-### Fixed
-
 - **The invariant audit reported "enforced" for states it never examined**
   (`lgwks_deps`). A register entry naming a lint no manifest declares, a file
   that exists but declares no test, or a lint declared at `allow` all produced a
@@ -137,8 +127,6 @@ explicitly under that crate.
   or Git package wearing that name, so an unapproved source could be admitted by
   being called the right thing. The name list is gone; the only exemption is
   Cargo's own `workspace_members` list.
-
-### Fixed
 
 - **Flow validation accepted a read before initialization** (`lgwks_bot`).
   Validation tested variable names for *global* writer membership, so a document
@@ -185,18 +173,6 @@ explicitly under that crate.
   (`lgwks_bot`). Validation did not decode ask candidates, so a flow offering an
   unanswerable option loaded cleanly and failed for the person answering it. The
   same decoding that runs at store time now runs at load over every candidate.
-
-### Added
-
-- Nine `BotError` variants (`lgwks_bot`): `AskOptionNotAssignable`,
-  `AskOptionTooLarge`, `ConflictingTerminalDeclaration`, `RecordTooLarge`,
-  `ResourceLimitAboveCeiling`, `SessionRetentionExceeded`,
-  `TemplateExpansionTooLarge`, `UtteranceTooLarge`, and `ValueTooLarge`. All are
-  additive.
-- `ResourceLimits`, `ResourceAxis`, `CompiledTemplate`, `TemplatePart`, and the
-  four `MAX_*` byte ceilings, exported from the crate root (`lgwks_bot`).
-
-### Fixed
 
 - **Punctuation normalization turned a negative integer into a positive match**
   (`lgwks_bot`). The fold maps `-5` and `5` to the same normalized form, so an
@@ -248,16 +224,6 @@ explicitly under that crate.
   because `--manifest-path` is resolved by cargo against cargo's own cwd; it is
   now made absolute before the child sees it.
 
-### Changed
-
-- `Resolver` takes a `Question` — id, options and answer domain — instead of an
-  option slice, because resolving a tier needs the question's identity.
-  `Resolution::Ambiguous` gained a `tier` field; the enum is `#[non_exhaustive]`,
-  so that part is additive. These are development APIs and are not in any
-  published version.
-
-### Fixed
-
 - **A clean tick could mean work had been silently abandoned** (`lgwks_bot`).
   The `fire` system selected on `Changed<Revision>` and the revision was
   committed before anything ran, so a mid-chain failure marked the source
@@ -283,15 +249,21 @@ explicitly under that crate.
   opaque non-clonable `InFlightPermit` that completion consumes, and the
   release/record methods that took a key are gone.
 
-### Changed
-
-- `Bot::tick` reports held work as `Err(PendingTransition)`. A caller that
-  treated `Ok` as "nothing outstanding" now sees the distinction. Where a
-  failure and held work coincide the tick keeps the action's **typed error** in
-  preference to the pending report, so a retry classifier still sees
-  `EffectIndeterminate` as a variant.
-
 ### Added
+
+- `DegradedReason::UnmeasurableEmbedding` (`lgwks_bot`) and
+  `CosineError::NonFinite` (`lgwks_std`). A vector no angle can be computed from
+  is reported apart from an unavailable embedder, because the causes and the
+  repairs differ — nothing is down, one of the vectors is degenerate. Both enums
+  are `#[non_exhaustive]`, so these variants are additive.
+
+- Nine `BotError` variants (`lgwks_bot`): `AskOptionNotAssignable`,
+  `AskOptionTooLarge`, `ConflictingTerminalDeclaration`, `RecordTooLarge`,
+  `ResourceLimitAboveCeiling`, `SessionRetentionExceeded`,
+  `TemplateExpansionTooLarge`, `UtteranceTooLarge`, and `ValueTooLarge`. All are
+  additive.
+- `ResourceLimits`, `ResourceAxis`, `CompiledTemplate`, `TemplatePart`, and the
+  four `MAX_*` byte ceilings, exported from the crate root (`lgwks_bot`).
 
 - `BotError::PendingTransition` and `BotError::NoSuchWork` (`lgwks_bot`), and the
   work-tracking vocabulary re-exported from `spec`: `AbandonReason`,
@@ -299,6 +271,20 @@ explicitly under that crate.
   (`lgwks_bot`). All additive.
 - `crates/lgwks-bot/examples/failed_tick.rs`, so the guide's program is compiled
   and run by the gate rather than being prose that nothing checks.
+
+### Changed
+
+- `Resolver` takes a `Question` — id, options and answer domain — instead of an
+  option slice, because resolving a tier needs the question's identity.
+  `Resolution::Ambiguous` gained a `tier` field; the enum is `#[non_exhaustive]`,
+  so that part is additive. These are development APIs and are not in any
+  published version.
+
+- `Bot::tick` reports held work as `Err(PendingTransition)`. A caller that
+  treated `Ok` as "nothing outstanding" now sees the distinction. Where a
+  failure and held work coincide the tick keeps the action's **typed error** in
+  preference to the pending report, so a retry classifier still sees
+  `EffectIndeterminate` as a variant.
 
 ## [lgwks_deps 0.1.12] - 2026-09-20
 
