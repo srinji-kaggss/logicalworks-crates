@@ -147,6 +147,31 @@ pub enum BotError {
         /// What went wrong.
         cause: String,
     },
+    /// A value at the erasure boundary was handed to a stage that expects a
+    /// different type.
+    ///
+    /// A wiring defect in the chain, not a domain failure, and this variant
+    /// exists so the two cannot be confused for one another. The action never
+    /// ran; no domain was reached; there is nothing to retry. It used to be
+    /// reported as a [`DomainError`](Self::DomainError), which read as "the
+    /// domain failed" and — before certainty was carried — spent a whole retry
+    /// budget on a defect no attempt could repair.
+    ///
+    /// The fields are all `&'static str` because this is a *constructive* error:
+    /// it is caught where the concrete types are still in hand, so it can name
+    /// them, and naming them is the whole diagnostic. It is never built from
+    /// runtime text.
+    TypeMismatch {
+        /// Where it was caught, as a stable site name (`"spec::typed_entry"`,
+        /// `"observe_fold rendezvous"`), so the loud report is also greppable.
+        site: &'static str,
+        /// The chain index, when the site knows which chain it was walking.
+        chain: Option<usize>,
+        /// The type the stage was built for.
+        expected: &'static str,
+        /// The type it was handed.
+        observed: &'static str,
+    },
     /// The serialized flow exceeds [`crate::session::MAX_FLOW_BYTES`].
     FlowTooLarge {
         /// Observed length in bytes.
@@ -742,6 +767,21 @@ impl fmt::Display for BotError {
             Self::EvaluateError { ref cause } => {
                 write!(f, "evaluate: {}", Escaped(cause))
             }
+            Self::TypeMismatch {
+                site,
+                chain,
+                expected,
+                observed,
+            } => match chain {
+                Some(index) => write!(
+                    f,
+                    "{site}: type mismatch on chain {index} — expected {expected}, got {observed}"
+                ),
+                None => write!(
+                    f,
+                    "{site}: type mismatch — expected {expected}, got {observed}"
+                ),
+            },
             Self::FlowTooLarge { bytes, limit } => {
                 write!(f, "flow is {bytes} bytes, over the {limit}-byte limit")
             }

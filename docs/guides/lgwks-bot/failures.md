@@ -291,10 +291,19 @@ so they cannot be mistaken for a condition that simply did not fire.
   pins the other.
 - The erased chain wrappers downcast the observed value back to the type the
   condition was registered with. A mismatch in the condition is
-  `EvaluateError`; a mismatch in the action's input is `BotError::DomainError`
-  naming the action's domain (`crates/lgwks-bot/src/spec.rs`). The `Auth` is
-  issued before the downcast in the action path, so a type mismatch fails
-  without a side effect.
+  `EvaluateError`; a mismatch in the action's input is
+  `BotError::TypeMismatch`, naming the site that caught it and both types
+  (`crates/lgwks-bot/src/spec.rs`). It names no domain, because a mismatch
+  means no domain was reached — and it is `Terminal`, so it costs one attempt
+  rather than a whole retry budget. The `Auth` is issued before the downcast in
+  the action path, so a type mismatch fails without a side effect.
+- The witness is checked before either downcast. Each chain records the type its
+  source produces (`TypeId`, taken where the type was still a parameter) and
+  every polled value carries the type it was erased from; `observe_fold` compares
+  them at the rendezvous and reports `BotError::TypeMismatch` from site
+  `observe_fold rendezvous` if they disagree, committing nothing. This is the
+  half a typed builder cannot prove: the builder fixes the pairing at
+  construction, and the witness checks it still holds across erasure.
 
 ## The order errors are reported in
 

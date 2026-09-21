@@ -3,9 +3,10 @@
 //! INV-BOT-TUPLE-WIRE: causal chains are `(condition, action)` tuples.
 
 use lgwks_std::json::{Deserialize, Serialize};
+use std::any::{Any, TypeId, type_name};
 
 use super::cap::{Auth, Cap};
-use super::error::{BotError, DispatchCertainty};
+use super::error::BotError;
 use super::gate::GrantSet;
 
 // ── Serializable spec ──────────────────────────────────────────────────────
@@ -128,11 +129,15 @@ where
     }
 
     impl<C: super::verb::Evaluate<T>, T: 'static> EvaluateAny for TypedEval<C, T> {
-        fn check_any(&self, value: &dyn std::any::Any) -> Result<bool, BotError> {
-            match value.downcast_ref::<T>() {
+        fn check_any(&self, value: &Erased) -> Result<bool, BotError> {
+            match value.as_any().downcast_ref::<T>() {
                 Some(typed) => self.inner.check(typed),
                 None => Err(BotError::EvaluateError {
-                    cause: "type mismatch in evaluate".into(),
+                    cause: format!(
+                        "type mismatch in evaluate — expected {}, got {}",
+                        type_name::<T>(),
+                        value.witness.name(),
+                    ),
                 }),
             }
         }
@@ -156,20 +161,21 @@ where
         fn run_any<'a>(
             &'a self,
             grants: &'a GrantSet,
-            input: &'a dyn std::any::Any,
-        ) -> crate::BoxFuture<'a, Result<Box<dyn std::any::Any>, BotError>> {
+            input: &'a Erased,
+        ) -> crate::BoxFuture<'a, Result<Box<dyn Any>, BotError>> {
             Box::pin(async move {
-                match input.downcast_ref::<A::Input>() {
+                match input.as_any().downcast_ref::<A::Input>() {
                     Some(typed) => {
                         let auth: Auth = grants.issue(self.0.required_caps())?;
                         let value = self.0.execute_action((auth, typed)).await?;
-                        let boxed: Box<dyn std::any::Any> = Box::new(value);
+                        let boxed: Box<dyn Any> = Box::new(value);
                         Ok(boxed)
                     }
-                    None => Err(BotError::DomainError {
-                        domain: self.0.domain_id().into(),
-                        certainty: DispatchCertainty::Refused,
-                        cause: "type mismatch in execute input".into(),
+                    None => Err(BotError::TypeMismatch {
+                        site: "spec::typed_entry",
+                        chain: None,
+                        expected: type_name::<A::Input>(),
+                        observed: input.witness.name(),
                     }),
                 }
             })
@@ -219,6 +225,81 @@ pub(crate) struct ChainEntry {
 
 // ── Type-erased verb wrappers ──────────────────────────────────────────────
 
+/// What a value's type was, captured where the type was still a type parameter.
+///
+/// The erasure boundary is crossed in two places — the source is boxed into
+/// `Box<dyn ObserveAny>` when the chain is declared, and the value it produces is
+/// boxed into `Box<dyn Any>` when it is polled — and nothing in those types
+/// survives to prove the two halves still agree. `Witness` is what does.
+///
+/// [`TypeId`] is the identity: two types are the same type exactly when their
+/// ids are equal. The name is carried beside it only so a mismatch can be
+/// reported as prose, and is never compared — the name is a hint, not an
+/// identity, and shortening it can make two distinct types render alike.
+///
+/// The id is process-local and is not serializable, so this serves the Rust
+/// path only. A durable identity for the same question — which type a chain's
+/// source produces, readable by a materializer that has only wire data — is a
+/// schema key, and that belongs to the `domain_id -> constructor` registry this
+/// crate does not have yet (see the [`spec`](self) module docs). Do not reach
+/// for `TypeId` to answer it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Witness {
+    /// The type, as an identity. This is the comparison.
+    id: TypeId,
+    /// The type, as prose. This is not.
+    name: &'static str,
+}
+
+impl Witness {
+    /// The witness for `T`, taken where `T` is still a type parameter.
+    pub(crate) fn of<T: 'static>() -> Self {
+        Self {
+            id: TypeId::of::<T>(),
+            name: type_name::<T>(),
+        }
+    }
+
+    /// Whether these two witnesses name the same type.
+    pub(crate) fn agrees_with(self, other: Self) -> bool {
+        self.id == other.id
+    }
+
+    /// The type's name, for a diagnostic.
+    pub(crate) fn name(self) -> &'static str {
+        self.name
+    }
+}
+
+/// A value at the erasure boundary, with the witness of the type it was erased
+/// from.
+///
+/// One allocation, the same `Box<dyn Any>` the value had to become anyway; the
+/// witness rides alongside it in the staging vector rather than in a second box.
+/// It is not an `Option`: a value that was boxed here was boxed from a concrete
+/// type, so the witness always exists.
+pub(crate) struct Erased {
+    /// The value itself.
+    pub(crate) value: Box<dyn Any>,
+    /// What type it was before it was erased.
+    pub(crate) witness: Witness,
+}
+
+impl Erased {
+    /// Box `value` and record the type it is being erased from.
+    pub(crate) fn new<T: 'static>(value: T) -> Self {
+        Self {
+            witness: Witness::of::<T>(),
+            value: Box::new(value),
+        }
+    }
+
+    /// The value as an erased reference, for a consumer that only needs `Any`.
+    pub(crate) fn as_any(&self) -> &dyn Any {
+        self.value.as_ref()
+    }
+}
+
 /// Object-safe view of [`Observe`](crate::verb::Observe) that erases
 /// `Output`. The blanket impl forwards each call to the concrete verb, so the
 /// erasure costs one vtable hop and no extra allocation: `poll_any` boxes the
@@ -233,10 +314,15 @@ pub(crate) trait ObserveAny {
     /// Issue an [`Auth`] for the observer's own caps and poll it, boxing the
     /// output as `Any`. Denies with [`BotError::CapabilityDenied`] before
     /// polling when the grant set does not cover those caps.
+    ///
+    /// The boxed value carries its own [`Witness`], taken here, where the
+    /// output type is still `T::Output`. That is the only place it can be
+    /// taken: by the time the value reaches the chain that will consume it,
+    /// both halves are erased and nothing remains to compare.
     fn poll_any<'a>(
         &'a self,
         grants: &'a GrantSet,
-    ) -> crate::BoxFuture<'a, Result<Box<dyn std::any::Any>, BotError>>;
+    ) -> crate::BoxFuture<'a, Result<Erased, BotError>>;
 }
 
 impl<T: super::verb::Observe + 'static> ObserveAny for T
@@ -254,12 +340,11 @@ where
     fn poll_any<'a>(
         &'a self,
         grants: &'a GrantSet,
-    ) -> crate::BoxFuture<'a, Result<Box<dyn std::any::Any>, BotError>> {
+    ) -> crate::BoxFuture<'a, Result<Erased, BotError>> {
         Box::pin(async move {
             let auth: Auth = grants.issue(super::verb::Observe::required_caps(self))?;
             let value = self.poll((auth, ())).await?;
-            let boxed: Box<dyn std::any::Any> = Box::new(value);
-            Ok(boxed)
+            Ok(Erased::new(value))
         })
     }
 }
@@ -272,7 +357,7 @@ pub(crate) trait EvaluateAny {
     /// Downcast `value` to this condition's `T` and evaluate it. Returns
     /// [`BotError::EvaluateError`] when the observed value is a different type,
     /// which is a chain-wiring bug rather than a domain failure.
-    fn check_any(&self, value: &dyn std::any::Any) -> Result<bool, BotError>;
+    fn check_any(&self, value: &Erased) -> Result<bool, BotError>;
 }
 
 /// Object-safe view of [`Execute`](crate::verb::Execute) that erases both the
@@ -293,12 +378,20 @@ pub(crate) trait ExecuteAny {
     /// Issue an [`Auth`] for the action's caps, downcast `input` to the
     /// action's `Input`, run it, and box the output as `Any`. Denies with
     /// [`BotError::CapabilityDenied`] before acting; reports a type mismatch as
-    /// [`BotError::DomainError`] without acting.
+    /// [`BotError::TypeMismatch`] without acting.
+    ///
+    /// Takes the erased value rather than a bare `&dyn Any` so the mismatch arm
+    /// can name what it was handed. That arm is a backstop: the rendezvous in
+    /// `observe_fold` compares the value's witness against the chain's before
+    /// this is ever reached, so a mismatch here is a world mutated behind the
+    /// schedule's back. It is still worth naming both types when it fires,
+    /// because a diagnostic that can only say "not the type this action wanted"
+    /// leaves the reader to guess what it got.
     fn run_any<'a>(
         &'a self,
         grants: &'a GrantSet,
-        input: &'a dyn std::any::Any,
-    ) -> crate::BoxFuture<'a, Result<Box<dyn std::any::Any>, BotError>>;
+        input: &'a Erased,
+    ) -> crate::BoxFuture<'a, Result<Box<dyn Any>, BotError>>;
 }
 
 // ── Builder ────────────────────────────────────────────────────────────────
@@ -348,6 +441,7 @@ impl BotSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::DispatchCertainty;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
