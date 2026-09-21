@@ -29,6 +29,44 @@ explicitly under that crate.
   licence agreement must be in place before a non-trivial `lgwks_bot`
   contribution is merged.
 
+### Fixed
+
+- **A resolver measured its margin against a field the threshold had already
+  emptied** (`lgwks_bot`). Below-threshold candidates were discarded before the
+  lead was computed, so a winner holding a `0.02` lead against a required `0.08`
+  reported its whole score as the lead and resolved where it should have stayed
+  ambiguous. The threshold and the margin are two questions asked in that order:
+  the threshold asks whether an option *may* win, the margin asks whether it
+  separated itself from the next best thing actually observed, and that second
+  question cannot be answered against a field the first has emptied. Both tiers
+  now hand every measured score to `decide`, which applies the threshold and
+  then measures the lead against the real runner-up, including one below it.
+- **A comparison that was never made no longer reads as one that was**
+  (`lgwks_bot`, `lgwks_std`). A zero or non-finite embedding was scored
+  `ZeroMagnitude` and then skipped, so a degenerate candidate vanished from the
+  field and a degenerate utterance was reported as `Absent { best_score: 0.0 }`
+  — the value a healthy model returns for a field it rejected. A comparison set
+  missing even one member cannot produce the verdict a complete set produces, so
+  an unusable vector now refuses the set and the session records
+  `resolver-degraded` rather than advancing.
+- **Missing element facts no longer score as matching facts** (`lgwks_bot`).
+  Every recognition component delegated to a metric that scores two empty inputs
+  `1.0`, so "no identifying attribute was observed" became maximum identity
+  confidence, and an element's tag was never checked at all. Identity, path and
+  text now decide presence before consulting their metric — absent on either
+  side contributes nothing — and the tag is a gate rather than a weight. The
+  component weights are deliberately *not* renormalized: a missing component
+  keeps its weight missing, which is what lets the acceptance threshold state
+  which facts a match actually requires.
+
+### Added
+
+- `DegradedReason::UnmeasurableEmbedding` (`lgwks_bot`) and
+  `CosineError::NonFinite` (`lgwks_std`). A vector no angle can be computed from
+  is reported apart from an unavailable embedder, because the causes and the
+  repairs differ — nothing is down, one of the vectors is degenerate. Both enums
+  are `#[non_exhaustive]`, so these variants are additive.
+
 ## [lgwks_deps 0.1.12] - 2026-09-20
 
 Documentation release. No API change, no behaviour change, and no command-line
