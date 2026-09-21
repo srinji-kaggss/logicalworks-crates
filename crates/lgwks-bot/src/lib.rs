@@ -138,6 +138,10 @@ pub mod verb;
 
 pub use cap::{Auth, Cap};
 pub use error::BotError;
+pub use frontier::{
+    Admission, ConstraintKey, DeferralKind, Frontier, PolitenessError, PolitenessPolicy,
+    RejectKind, Resolved, RulesState,
+};
 pub use gate::GrantSet;
 pub use language::LanguageResolver;
 #[cfg(feature = "rt")]
