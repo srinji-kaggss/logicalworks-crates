@@ -1210,7 +1210,173 @@ fn validate_flow_within(spec: &FlowSpec, limits: ResourceLimits) -> Result<(), B
         }
         check_target(&spec.nodes, from, to)?;
     }
+    reject_uninitialized_reads(spec)?;
     reject_unreachable(spec)
+}
+
+/// Reject every read of a variable that is not definitely assigned on all
+/// paths reaching the reading node.
+///
+/// A global writer set answers "does some node write this variable", which is
+/// not the question a read has to pass: a session starts with an empty
+/// [`VarScope`], so a writer that executes only after the read, or only on a
+/// branch the read is not reached through, leaves the read with no value and
+/// [`TemplateInterpolator`] returning [`BotError::VariableUnset`] on the first
+/// step. This is a forward *must* (definite-assignment) analysis over the
+/// execution graph instead of a membership test over the document.
+///
+/// The state of a node is the set of variables assigned on **every** path from
+/// the entry to that node, which is a greatest fixed point: every node is
+/// seeded with the full declaration set and each step intersects an outgoing
+/// state into its successors, so states only shrink and a cycle converges. A
+/// node no entry path reaches keeps that top element and is never accused
+/// here — reachability is [`reject_unreachable`]'s single verdict, and one
+/// defect must not surface as two.
+///
+/// Supported assignments and guards, stated so the boundary is not guessed at:
+/// an [`NodeKind::Ask`] assigns its variable on each outgoing route and
+/// nowhere earlier; every other node kind passes its incoming state through
+/// unchanged. No symbolic reasoning about [`Predicate`] values is attempted,
+/// so a branch is treated as able to take both successors, and a variable
+/// assigned on one predecessor of a join but not another is *not* available at
+/// the join. Both choices fail toward silence rather than rejecting a flow the
+/// runner would have executed.
+fn reject_uninitialized_reads(spec: &FlowSpec) -> Result<(), BotError> {
+    let universe: BTreeSet<String> = spec.vars.keys().cloned().collect();
+    let mut available: BTreeMap<NodeId, BTreeSet<String>> = spec
+        .nodes
+        .keys()
+        .map(|node_id| (node_id.clone(), universe.clone()))
+        .collect();
+    available.insert(spec.entry.clone(), BTreeSet::new());
+
+    let mut pending: VecDeque<NodeId> = spec.nodes.keys().cloned().collect();
+    while let Some(node_id) = pending.pop_front() {
+        let Some(kind) = spec.nodes.get(&node_id) else {
+            continue;
+        };
+        let Some(incoming) = available.get(&node_id).cloned() else {
+            continue;
+        };
+        let mut outgoing = incoming;
+        if let NodeKind::Ask { ref var, .. } = *kind {
+            outgoing.insert(var.clone());
+        }
+        for target in successor_targets(spec, &node_id, kind) {
+            let Some(state) = available.get_mut(&target) else {
+                continue;
+            };
+            let before = state.len();
+            state.retain(|name| outgoing.contains(name));
+            if state.len() != before {
+                pending.push_back(target);
+            }
+        }
+    }
+
+    for (node_id, kind) in &spec.nodes {
+        let Some(state) = available.get(node_id) else {
+            continue;
+        };
+        for name in node_reads(spec, node_id, kind)? {
+            if !state.contains(&name) {
+                return Err(BotError::VariableReadBeforeInit {
+                    node: node_id.clone(),
+                    name,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Collect every variable a node reads when it executes.
+///
+/// "Reads" means the references the executor actually resolves, not every name
+/// a node mentions. [`NodeKind::Branch`] is the case that separates the two:
+/// its `var` field is documented as the branch subject, but the executor
+/// destructures `when` alone and never resolves `var` against the scope, so a
+/// branch subject that some path leaves unassigned cannot fail a run and is
+/// not counted here. The predicate's own [`ValueExpr::Var`] references are
+/// where a branch reads, and they are counted.
+///
+/// Only declared names are returned. An undeclared one is already
+/// [`BotError::UndeclaredVariable`] from `validate_node`, which runs first, so
+/// the definite-assignment pass cannot preempt it with a second verdict on the
+/// same defect.
+fn node_reads(
+    spec: &FlowSpec,
+    node_id: &str,
+    kind: &NodeKind,
+) -> Result<BTreeSet<String>, BotError> {
+    match *kind {
+        NodeKind::Say { ref text } => declared_template_reads(spec, node_id, text, "say.text"),
+        NodeKind::Refer { ref text, .. } => {
+            declared_template_reads(spec, node_id, text, "refer.text")
+        }
+        NodeKind::Branch { ref when, .. } => {
+            let mut names = BTreeSet::new();
+            collect_predicate_variables(when, &mut names);
+            names.retain(|name| spec.vars.contains_key(name));
+            Ok(names)
+        }
+        NodeKind::Ask { .. }
+        | NodeKind::Handoff { .. }
+        | NodeKind::Route { .. }
+        | NodeKind::End => Ok(BTreeSet::new()),
+    }
+}
+
+/// Return the declared variables a template interpolates.
+fn declared_template_reads(
+    spec: &FlowSpec,
+    node_id: &str,
+    text: &str,
+    field: &'static str,
+) -> Result<BTreeSet<String>, BotError> {
+    let compiled =
+        CompiledTemplate::compile(text).map_err(|_error| BotError::MalformedTemplate {
+            node: node_id.to_owned(),
+            field,
+        })?;
+    let mut names = BTreeSet::new();
+    for part in compiled.parts() {
+        if let TemplatePart::Variable(name) = *part
+            && spec.vars.contains_key(name)
+        {
+            names.insert(name.to_owned());
+        }
+    }
+    Ok(names)
+}
+
+/// Collect the variable references of a predicate expression.
+fn collect_predicate_variables(predicate: &Predicate, into: &mut BTreeSet<String>) {
+    match *predicate {
+        Predicate::Const(_) => {}
+        Predicate::Eq(ref left, ref right)
+        | Predicate::Ne(ref left, ref right)
+        | Predicate::Lt(ref left, ref right)
+        | Predicate::Le(ref left, ref right)
+        | Predicate::Gt(ref left, ref right)
+        | Predicate::Ge(ref left, ref right) => {
+            collect_expr_variables(left, into);
+            collect_expr_variables(right, into);
+        }
+        Predicate::And(ref items) | Predicate::Or(ref items) => {
+            for item in items {
+                collect_predicate_variables(item, into);
+            }
+        }
+        Predicate::Not(ref inner) => collect_predicate_variables(inner, into),
+    }
+}
+
+/// Collect the variable references of one predicate operand.
+fn collect_expr_variables(expression: &ValueExpr, into: &mut BTreeSet<String>) {
+    if let ValueExpr::Var(ref name) = *expression {
+        into.insert(name.clone());
+    }
 }
 
 /// Validate variable declaration names and choice contents.

@@ -3,13 +3,14 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use lgwks_bot::{
     AnswerRejection, BotError, DegradedReason, Disposition, EffectLedger, Embedder,
     EmbedderIdentity, FlowBounds, FlowEdge, FlowSpec, Journal, LanguageResolver, MAX_RECORD_BYTES,
-    MAX_SESSION_BYTES, MAX_UTTERANCE_BYTES, MAX_VALUE_BYTES, NodeKind, Predicate, Resolution,
-    Resolver, ResourceAxis, ResourceLimits, SemanticResolver, Session, Terminal, TranscriptEntry,
-    Value, ValueExpr, VarType,
+    MAX_SESSION_BYTES, MAX_UTTERANCE_BYTES, MAX_VALUE_BYTES, MatchTier, NodeKind, Predicate,
+    Resolution, Resolver, ResourceAxis, ResourceLimits, SemanticResolver, Session, Terminal,
+    TranscriptEntry, Value, ValueExpr, VarType,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -2413,6 +2414,411 @@ fn a_session_that_cannot_retain_its_first_record_writes_nothing() -> TestResult 
     assert!(
         records.borrow().is_empty(),
         "a session refused during construction wrote no record at all"
+    );
+    Ok(())
+}
+
+// ── Definite assignment over the execution graph (issue #36) ────────────────
+
+/// A journal that keeps every record it receives, so a test can assert what
+/// the runner emitted. Shared rather than moved so the assertion can read the
+/// records back after [`Session`] has taken ownership of its sink.
+#[derive(Clone, Default)]
+struct RecordingJournal {
+    records: Arc<Mutex<Vec<String>>>,
+}
+
+impl RecordingJournal {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Every record received so far, oldest first.
+    ///
+    /// A poisoned lock yields the empty vector; the positive control in
+    /// `validation_refuses_before_any_journal_record` fails if that happens,
+    /// so an empty read cannot pass for the wrong reason.
+    fn records(&self) -> Vec<String> {
+        self.records
+            .lock()
+            .map(|records| records.clone())
+            .unwrap_or_default()
+    }
+}
+
+impl Journal for RecordingJournal {
+    fn record(&mut self, path_node: &str, role: &str, text: &str) {
+        if let Ok(mut records) = self.records.lock() {
+            records.push(format!("{path_node}/{role}/{text}"));
+        }
+    }
+}
+
+/// The literal accepted-but-failing document from issue #36.
+///
+/// Every node is reachable and `name` has a writer, so the global writer set is
+/// satisfied; the only writer runs *after* the read, and the session starts
+/// with an empty scope, so `Session::new` failed on the first step with
+/// `VariableUnset` before the user could reach the ask.
+const ENTRY_READ_BEFORE_WRITE: &str = r#"{
+  "vars": {"name": {"kind": "string"}},
+  "entry": "greet",
+  "nodes": {
+    "greet": {"kind": "say", "text": "Hello ${name}"},
+    "ask": {
+      "kind": "ask",
+      "var": "name",
+      "options": ["Ada"],
+      "routes": {"Ada": "end"}
+    },
+    "end": {"kind": "end"}
+  },
+  "edges": [{"kind": "next", "from": "greet", "to": "ask"}],
+  "bounds": {"budget": 8}
+}"#;
+
+/// Build a flow from a node map, an entry, and explicit continuations.
+fn flow_with(
+    vars: BTreeMap<String, VarType>,
+    entry: &str,
+    nodes: BTreeMap<String, NodeKind>,
+    edges: Vec<FlowEdge>,
+    terminals: BTreeMap<String, Terminal>,
+) -> Result<FlowSpec, BotError> {
+    FlowSpec::new(vars, entry, nodes, edges, terminals, FlowBounds::new(32))
+}
+
+/// An ask that routes every option to `target`.
+fn ask_routing(var: &str, options: [&str; 2], target: &str) -> NodeKind {
+    NodeKind::Ask {
+        var: String::from(var),
+        options: options.iter().map(|option| String::from(*option)).collect(),
+        routes: options
+            .iter()
+            .map(|option| (String::from(*option), String::from(target)))
+            .collect(),
+    }
+}
+
+/// A predicate that can take both arms, so the analysis is forced to treat
+/// both continuations as feasible.
+fn both_arms() -> Predicate {
+    Predicate::Const(true)
+}
+
+#[test]
+fn validation_rejects_an_entry_read_before_any_writer() -> TestResult {
+    let error = FlowSpec::from_json(ENTRY_READ_BEFORE_WRITE)
+        .err()
+        .ok_or("a read with no reaching assignment must be refused at load time")?;
+    assert!(
+        matches!(
+            error,
+            BotError::VariableReadBeforeInit { ref node, ref name }
+                if node == "greet" && name == "name"
+        ),
+        "the diagnostic must name the reading node and the variable: {error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn validation_rejects_a_branch_path_that_bypasses_initialization() -> TestResult {
+    // `answer` is assignable, and every node is reachable — the defect is that
+    // the writer sits on one arm of the branch while the read sits after the
+    // join, so the other arm reaches the read with an empty scope.
+    let declarations = BTreeMap::from([(
+        String::from("answer"),
+        VarType::Choice(vec![String::from("yes"), String::from("no")]),
+    )]);
+    let nodes = BTreeMap::from([
+        (
+            String::from("start"),
+            NodeKind::Branch {
+                var: String::from("answer"),
+                when: both_arms(),
+                then: String::from("ask"),
+                otherwise: String::from("read"),
+            },
+        ),
+        (
+            String::from("ask"),
+            ask_routing("answer", ["yes", "no"], "read"),
+        ),
+        (
+            String::from("read"),
+            NodeKind::Say {
+                text: String::from("You said ${answer}"),
+            },
+        ),
+        (String::from("end"), NodeKind::End),
+    ]);
+    let error = flow_with(
+        declarations,
+        "start",
+        nodes,
+        vec![FlowEdge::next("read", "end")],
+        BTreeMap::from([(String::from("end"), Terminal::Completed)]),
+    )
+    .err()
+    .ok_or("a read reachable through an uninitialized arm must be refused")?;
+    assert!(
+        matches!(
+            error,
+            BotError::VariableReadBeforeInit { ref node, ref name }
+                if node == "read" && name == "answer"
+        ),
+        "the diagnostic must name the reading node and the variable: {error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn validation_rejects_a_read_in_a_cycle_before_its_writer() -> TestResult {
+    // The read is the entry and the writer is one edge further on, so the
+    // cycle re-reads it every iteration; the fixed point must not let the
+    // back edge supply the assignment to the node that precedes it.
+    let declarations = BTreeMap::from([(
+        String::from("answer"),
+        VarType::Choice(vec![String::from("yes"), String::from("no")]),
+    )]);
+    let nodes = BTreeMap::from([
+        (
+            String::from("head"),
+            NodeKind::Say {
+                text: String::from("You said ${answer}"),
+            },
+        ),
+        (
+            String::from("ask"),
+            ask_routing("answer", ["yes", "no"], "head"),
+        ),
+    ]);
+    let error = flow_with(
+        declarations,
+        "head",
+        nodes,
+        vec![FlowEdge::next("head", "ask")],
+        BTreeMap::new(),
+    )
+    .err()
+    .ok_or("a read that only a back edge's writer reaches must be refused")?;
+    assert!(
+        matches!(
+            error,
+            BotError::VariableReadBeforeInit { ref node, ref name }
+                if node == "head" && name == "answer"
+        ),
+        "the diagnostic must name the reading node and the variable: {error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn validation_accepts_an_ask_read_by_its_successor() -> TestResult {
+    let declarations = BTreeMap::from([(
+        String::from("answer"),
+        VarType::Choice(vec![String::from("yes"), String::from("no")]),
+    )]);
+    let nodes = BTreeMap::from([
+        (
+            String::from("ask"),
+            ask_routing("answer", ["yes", "no"], "read"),
+        ),
+        (
+            String::from("read"),
+            NodeKind::Say {
+                text: String::from("You said ${answer}"),
+            },
+        ),
+        (String::from("end"), NodeKind::End),
+    ]);
+    let flow = flow_with(
+        declarations,
+        "ask",
+        nodes,
+        vec![FlowEdge::next("read", "end")],
+        BTreeMap::from([(String::from("end"), Terminal::Completed)]),
+    )?;
+    // The verdict is only half the claim: a session over the accepted flow
+    // must actually run. It stops at the ask awaiting an answer, which is a
+    // node it could only reach by executing the entry — not by failing on an
+    // unassigned read.
+    let session = Session::new("review", flow)?;
+    assert_eq!(
+        session.current(),
+        Some("ask"),
+        "an accepted ask-then-read flow runs to its ask"
+    );
+    Ok(())
+}
+
+#[test]
+fn validation_accepts_a_join_where_every_predecessor_assigns() -> TestResult {
+    let declarations = BTreeMap::from([(
+        String::from("answer"),
+        VarType::Choice(vec![String::from("yes"), String::from("no")]),
+    )]);
+    let nodes = BTreeMap::from([
+        (
+            String::from("start"),
+            NodeKind::Branch {
+                var: String::from("answer"),
+                when: both_arms(),
+                then: String::from("ask_a"),
+                otherwise: String::from("ask_b"),
+            },
+        ),
+        (
+            String::from("ask_a"),
+            ask_routing("answer", ["yes", "no"], "join"),
+        ),
+        (
+            String::from("ask_b"),
+            ask_routing("answer", ["yes", "no"], "join"),
+        ),
+        (
+            String::from("join"),
+            NodeKind::Say {
+                text: String::from("You said ${answer}"),
+            },
+        ),
+        (String::from("end"), NodeKind::End),
+    ]);
+    flow_with(
+        declarations,
+        "start",
+        nodes,
+        vec![FlowEdge::next("join", "end")],
+        BTreeMap::from([(String::from("end"), Terminal::Completed)]),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn validation_rejects_a_join_where_one_predecessor_assigns() -> TestResult {
+    let declarations = BTreeMap::from([(
+        String::from("answer"),
+        VarType::Choice(vec![String::from("yes"), String::from("no")]),
+    )]);
+    let nodes = BTreeMap::from([
+        (
+            String::from("start"),
+            NodeKind::Branch {
+                var: String::from("answer"),
+                when: both_arms(),
+                then: String::from("ask"),
+                otherwise: String::from("skip"),
+            },
+        ),
+        (
+            String::from("ask"),
+            ask_routing("answer", ["yes", "no"], "join"),
+        ),
+        (
+            String::from("skip"),
+            NodeKind::Say {
+                text: String::from("No answer taken"),
+            },
+        ),
+        (
+            String::from("join"),
+            NodeKind::Say {
+                text: String::from("You said ${answer}"),
+            },
+        ),
+        (String::from("end"), NodeKind::End),
+    ]);
+    let error = flow_with(
+        declarations,
+        "start",
+        nodes,
+        vec![
+            FlowEdge::next("skip", "join"),
+            FlowEdge::next("join", "end"),
+        ],
+        BTreeMap::from([(String::from("end"), Terminal::Completed)]),
+    )
+    .err()
+    .ok_or("a join that one predecessor reaches unassigned must be refused")?;
+    assert!(
+        matches!(
+            error,
+            BotError::VariableReadBeforeInit { ref node, ref name }
+                if node == "join" && name == "answer"
+        ),
+        "the diagnostic must name the reading node and the variable: {error}"
+    );
+    Ok(())
+}
+
+/// A resolver that never recognizes an answer, so the flows below stop at
+/// their ask instead of driving past it.
+const UNRESOLVING: Resolution = Resolution::Absent { best_score: 0.0 };
+
+#[test]
+fn validation_refuses_before_any_journal_record() -> TestResult {
+    // The ordering claim: validation is what refuses the document, so a
+    // custom sink never sees output. The valid control runs the same sink, so
+    // an empty read means "the sink was never given anything" rather than
+    // "the sink never works".
+    let refused_sink = RecordingJournal::new();
+    let refused = FlowSpec::from_json(ENTRY_READ_BEFORE_WRITE).and_then(|flow| {
+        Session::with_components(
+            "review",
+            flow,
+            FixedResolver(UNRESOLVING),
+            refused_sink.clone(),
+        )
+        .map(|_| ())
+    });
+    assert!(
+        matches!(refused, Err(BotError::VariableReadBeforeInit { .. })),
+        "the document is refused by validation, before a session exists: {refused:?}"
+    );
+    assert!(
+        refused_sink.records().is_empty(),
+        "a refused document must reach no journal: {:?}",
+        refused_sink.records()
+    );
+
+    let accepted_sink = RecordingJournal::new();
+    let accepted = FlowSpec::from_json(
+        r#"{
+  "vars": {"name": {"kind": "string"}},
+  "entry": "ask",
+  "nodes": {
+    "ask": {
+      "kind": "ask",
+      "var": "name",
+      "options": ["Ada"],
+      "routes": {"Ada": "greet"}
+    },
+    "greet": {"kind": "say", "text": "Hello ${name}"},
+    "end": {"kind": "end"}
+  },
+  "edges": [{"kind": "next", "from": "greet", "to": "end"}],
+  "bounds": {"budget": 8}
+}"#,
+    )
+    .and_then(|flow| {
+        Session::with_components(
+            "review",
+            flow,
+            FixedResolver(Resolution::Resolved {
+                index: 0,
+                tier: MatchTier::Exact,
+                score: 1.0,
+                lead: 1.0,
+            }),
+            accepted_sink.clone(),
+        )
+        .map(|_| ())
+    });
+    accepted?;
+    assert!(
+        !accepted_sink.records().is_empty(),
+        "the control flow must reach the sink, or the empty read above proves nothing"
     );
     Ok(())
 }

@@ -133,6 +133,30 @@ explicitly under that crate.
 
 ### Fixed
 
+- **Flow validation accepted a read before initialization** (`lgwks_bot`).
+  Validation tested variable names for *global* writer membership, so a document
+  was accepted whenever a writer existed anywhere — including one that runs only
+  after the read. Validation now runs a forward definite-assignment analysis: a
+  node may read a variable only if every entry-reaching path assigns it. Reads
+  of undeclared names still report `UndeclaredVariable` first, and a branch's
+  own condition variable is not counted as a read because the executor never
+  resolves it. New typed variant `BotError::VariableReadBeforeInit`.
+- **The scanner reported discarded errors that were never errors**
+  (`lgwks_deps`). ERROR-SWALLOW was a claim with no evidence behind it: every
+  `.unwrap_or_default()` and every initialized `let _` was reported, including
+  `Option` fallbacks and infallible bindings. Fallibility is now resolved from
+  the file being scanned — a free function whose written or aliased return type
+  is `Result`, a curated table of std routines, or an annotated binding — and a
+  receiver resolved to a non-`Result` is never reported. Where the type is not
+  visible the finding says so, and its evidence states that the shape is all
+  there is rather than implying proof.
+- **A shadowing binding satisfied the use check while the error was discarded**
+  (`lgwks_deps`). Any ident spelling counted as a read, so a local that rebound
+  the error's name cleared the finding and the error was dropped. A read now
+  requires a value-position path naming the binding with no enclosing scope
+  having rebound it; field and method segments, macro strings, and comments are
+  not evidence, and `drop(binding)` is a discard rather than a use.
+
 - **A validated flow could expand to gigabytes from a sub-megabyte document**
   (`lgwks_bot`). `FlowBounds` bounded *steps*, validation bounded the document's
   *shape*, and nothing bounded *bytes*: a template repeating `${answer}` 20,000
