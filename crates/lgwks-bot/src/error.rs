@@ -68,6 +68,19 @@ pub enum BotError {
         /// What is missing.
         field: &'static str,
     },
+    /// The spec names a domain this binary does not run.
+    ///
+    /// The registry is the list of domains a binary declares at compile time —
+    /// see [`crate::DomainRegistry`] — so this is a mismatch between the
+    /// document and the program it was handed to, not a runtime failure. The
+    /// domain may exist and be registered elsewhere; it is simply not linked
+    /// here, and no amount of retrying adds it. The identifier is carried as a
+    /// `String` because it came from the document, and is escaped where it is
+    /// rendered so a hostile spec cannot forge a log line with it.
+    UnregisteredDomain {
+        /// The identifier the spec named, spelled as the spec spelled it.
+        domain: String,
+    },
     /// The serialized spec exceeds [`crate::spec::MAX_SPEC_BYTES`]. The bound is
     /// defensive: it stops a hostile or runaway manifest from allocating
     /// without limit before any validation runs.
@@ -756,6 +769,9 @@ impl fmt::Display for BotError {
             }
             Self::IncompleteSpec { field } => {
                 write!(f, "incomplete bot spec: missing {field}")
+            }
+            Self::UnregisteredDomain { ref domain } => {
+                write!(f, "unregistered domain: {}", Escaped(domain))
             }
             Self::SpecTooLarge { bytes, limit } => {
                 write!(f, "bot spec is {bytes} bytes, over the {limit}-byte limit")

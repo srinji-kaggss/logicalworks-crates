@@ -13,6 +13,9 @@ lanes:
   - id: deps
     rule: "Every other dep is registered in contract/APPROVED.toml; lgwks-deps check refuses anything else with the repair named."
     falsified_by: [dep-admission]
+  - id: registry
+    rule: "A spec's identifiers resolve only through the DomainRegistry the binary declares. An identifier outside it is refused with BotError::UnregisteredDomain naming it, escaped; a source identifier never resolves as an action, nor an action as a source; and a constructor's own refusal (a target it cannot parse) surfaces unchanged through build_source/build_action."
+    falsified_by: [agent-spec]
 
 machine_contract:
   - "check: exit 0 admitted, 2 refused; human-readable lines, deterministic per tree."
@@ -26,13 +29,18 @@ machine_contract:
 
 known_gaps:
   - "No from_spec: a validated BotSpec cannot be materialized into a runnable Bot through this SDK alone.
-     Materializing a world from wire data needs a domain_id -> constructor registry that
-     does not exist in the workspace; the builder takes verbs, not specs. Recorded as open,
-     not as done. Adjudicated 2026-09-21: this entry is right, and the crate doc that argued the
-     absence was a deliberate design position was wrong. The registry is scheduled work, not a
-     question. Two constraints bind the implementation, because they are what made the absence
-     defensible: grants keep coming from a caller-held GrantSet and never from the spec, so wire
-     data cannot choose what a bot reaches, and there is still no bot! proc-macro."
+     The registry half landed 2026-09-21 (DomainRegistry, the domains! list, Source/Action handles,
+     BotError::UnregisteredDomain; enforced by crates/lgwks-bot/tests/registry.rs). The materializer
+     half is open, and two obstacles are named rather than assumed away, because neither is plumbing:
+     (a) ChainSpec.on is Vec<(String, ActionSpec)>, so a condition is a bare identifier with no slot
+     for its parameters — Above<u16> cannot be expressed in a spec at all; and (b) an erased
+     Box<dyn ObserveAny> carries no durable statement of the type its Output is, so a condition
+     constructor has no serializable type key to resolve against (spec::Witness is TypeId, process
+     local). Both must be closed before from_spec can be more than a partial build.
+     Two constraints still bind, because they are what made the absence defensible: grants keep
+     coming from a caller-held GrantSet and never from the spec, so wire data cannot choose what a
+     bot reaches, and there is still no bot! proc-macro — domains! declares the registry as data
+     with no proc macro and no new dependency."
   - "No CLI acceptance harness. The dep-admission journey's four probes (no-register,
      unregistered-edge, ladder-then-form, double-init) are verified by hand, not by a
      test in crates/lgwks-deps/tests/. Every other invariants file has an enforcing

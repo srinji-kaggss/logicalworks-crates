@@ -26,7 +26,7 @@ each tick and runs the action on the ticks where the polled value moved. A
 condition that stays true does not re-fire, which is the difference between this
 and a timer that re-evaluates a predicate every interval.
 
-`Bot` is not a separate type with a separate implementation. `crates/lgwks-bot/src/spec.rs:329`
+`Bot` is not a separate type with a separate implementation. `crates/lgwks-bot/src/spec.rs:290`
 re-exports the ECS bot under the shorter name:
 
 ```rust
@@ -102,10 +102,13 @@ you to discover.
   a clone of the set it was admitted with. See [authority](authority.md).
 - **No spec materializer yet.** `BotSpec` validates a JSON document. There is no
   `Bot::from_spec`; you build through the builder chain, and
-  `crates/lgwks-bot/src/spec.rs:574` validates shape only. Unlike the entries
+  `crates/lgwks-bot/src/spec.rs:641` validates shape only. Unlike the entries
   around it, this one is scheduled work rather than a permanent limit: it is
-  recorded as open in `experience/invariants/sdk.yaml`, and closing it means
-  building a `domain_id -> constructor` registry.
+  recorded as open in `experience/invariants/sdk.yaml`. Half of it exists —
+  `DomainRegistry` and the `domains!` list, see [domains](domains.md) — and the
+  materializer that would consume it is blocked by two named obstacles rather
+  than by plumbing: a condition has no slot in the wire format for its
+  parameters, and an erased source states no durable type.
 - **No `#[tokio::main]` equivalent.** Entry to the async surface is
   `Runtime::block_on`.
 - **No exactly-once delivery.** An action that may have taken effect after its
