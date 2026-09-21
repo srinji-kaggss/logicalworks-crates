@@ -168,10 +168,10 @@ pub use language::LanguageResolver;
 pub use rt::{Builder, Handle, Runtime, block_on};
 pub use semantic::{Embedder, EmbedderIdentity, SemanticError, SemanticPolicy, SemanticResolver};
 pub use session::{
-    ChoiceArm, DegradedReason, FlowBounds, FlowEdge, FlowNodeKind, FlowSpec, Interpolate, Journal,
-    MatchTier, MemoryJournal, NodeId, NodeKind, Predicate, Resolution, Resolver, Session,
-    SessionId, TemplateInterpolator, Terminal, TerminalOutcome, TranscriptEntry, Value, ValueExpr,
-    VarScope, VarType,
+    ChoiceArm, DegradedReason, Disposition, EffectLedger, FlowBounds, FlowEdge, FlowNodeKind,
+    FlowSpec, Interpolate, Journal, MatchTier, MemoryJournal, NodeId, NodeKind, Outcome, Predicate,
+    Resolution, Resolver, Session, SessionId, TemplateInterpolator, Terminal, TranscriptEntry,
+    Value, ValueExpr, VarScope, VarType,
 };
 pub use spec::{Bot, BotSpec};
 pub use verb::{Evaluate, Execute, Observe, Query};
