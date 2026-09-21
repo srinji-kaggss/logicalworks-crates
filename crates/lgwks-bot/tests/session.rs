@@ -889,3 +889,224 @@ fn a_confirmation_whose_option_was_removed_reasks_instead_of_selecting_its_succe
     );
     Ok(())
 }
+
+/// An ask/route flow whose every option routes to a `Refer` terminal named
+/// after the option itself.
+///
+/// The option text is the route identity on purpose: "the session went where
+/// the value says" then reads as one equality against the option, and a test
+/// never has to know a node id to assert a route.
+fn option_routed_flow(
+    var: &str,
+    declared: VarType,
+    options: &[&str],
+) -> Result<FlowSpec, BotError> {
+    let offered: Vec<String> = options.iter().map(|option| (*option).to_owned()).collect();
+    let mut routes = BTreeMap::new();
+    let mut nodes = BTreeMap::new();
+    let mut terminals = BTreeMap::new();
+    for (position, option) in offered.iter().enumerate() {
+        let target = format!("routed_{position}");
+        routes.insert(option.clone(), target.clone());
+        nodes.insert(
+            target.clone(),
+            NodeKind::Refer {
+                target: option.clone(),
+                text: String::from("Noted"),
+            },
+        );
+        terminals.insert(
+            target,
+            Terminal::Referred {
+                target: option.clone(),
+            },
+        );
+    }
+    nodes.insert(
+        String::from("ask"),
+        NodeKind::Ask {
+            var: String::from(var),
+            options: offered,
+            routes,
+        },
+    );
+    FlowSpec::new(
+        BTreeMap::from([(String::from(var), declared)]),
+        "ask",
+        nodes,
+        Vec::new(),
+        terminals,
+        FlowBounds::new(16),
+    )
+}
+
+/// Reads the route a session took as the option text it named.
+fn routed_to(session: &Session) -> Option<String> {
+    session.terminal().and_then(|terminal| match *terminal {
+        Terminal::Referred { ref target } => Some(target.clone()),
+        _ => None,
+    })
+}
+
+/// The filed counterexample for #38, at session level: `-5` is not one of the
+/// two numbers this question offers.
+///
+/// Before the fix, normalization folded the sign away, `-5` matched `"5"` at
+/// the Exact tier, and the session stored `Value::Integer(5)` and advanced down
+/// the positive route — an answer the person never gave, reported at maximum
+/// confidence.
+#[test]
+fn a_negative_answer_is_not_folded_into_the_positive_option() -> TestResult {
+    let mut session = Session::new(
+        "sign",
+        option_routed_flow("amount", VarType::Integer, &["5", "10"])?,
+    )?;
+
+    session.answer("-5")?;
+
+    assert_eq!(
+        session.scope().get("amount"),
+        None,
+        "a number the question does not offer must not be stored as one it does"
+    );
+    assert_eq!(
+        session.current(),
+        Some("ask"),
+        "the question is re-asked rather than answered by a different number"
+    );
+    assert_eq!(
+        session.terminal(),
+        None,
+        "and no route is taken, so nothing downstream acts on the invented value"
+    );
+    Ok(())
+}
+
+/// The value, not the spelling, decides: every reading of one number lands on
+/// that number's option, and both signed choices stay distinguishable.
+#[test]
+fn an_integer_answer_stores_its_value_and_takes_its_own_route() -> TestResult {
+    for (utterance, expected_value, expected_option) in [
+        ("-5", -5_i64, "-5"),
+        ("5", 5, "5"),
+        ("+5", 5, "5"),
+        (" 5 ", 5, "5"),
+        ("0", 0, "0"),
+        ("10", 10, "10"),
+    ] {
+        let mut session = Session::new(
+            "values",
+            option_routed_flow("amount", VarType::Integer, &["-5", "5", "0", "10"])?,
+        )?;
+        session.answer(utterance)?;
+        assert_eq!(
+            session.scope().get("amount"),
+            Some(&Value::Integer(expected_value)),
+            "{utterance:?} must store the parsed value, not the option's spelling"
+        );
+        assert_eq!(
+            routed_to(&session).as_deref(),
+            Some(expected_option),
+            "{utterance:?} must take the route of the option holding that value"
+        );
+    }
+    Ok(())
+}
+
+/// The ends of the range are values like any other, and one past them is not a
+/// value at all.
+#[test]
+fn the_integer_boundaries_round_trip_and_overflow_is_refused() -> TestResult {
+    let low = i64::MIN.to_string();
+    let high = i64::MAX.to_string();
+    for (utterance, expected) in [(low.as_str(), i64::MIN), (high.as_str(), i64::MAX)] {
+        let mut session = Session::new(
+            "bounds",
+            option_routed_flow("amount", VarType::Integer, &[low.as_str(), high.as_str()])?,
+        )?;
+        session.answer(utterance)?;
+        assert_eq!(
+            session.scope().get("amount"),
+            Some(&Value::Integer(expected)),
+            "{utterance:?} is representable and must be stored exactly"
+        );
+        assert_eq!(
+            routed_to(&session).as_deref(),
+            Some(utterance),
+            "{utterance:?} must take the route of the option holding that value"
+        );
+    }
+
+    // One past each end parses as nothing, so it matches nothing: the failure
+    // is a re-ask, never a wrapped or clamped value.
+    for utterance in ["9223372036854775808", "-9223372036854775809"] {
+        let mut session = Session::new(
+            "overflow",
+            option_routed_flow("amount", VarType::Integer, &["5", "10"])?,
+        )?;
+        session.answer(utterance)?;
+        assert_eq!(
+            session.scope().get("amount"),
+            None,
+            "{utterance:?} is out of range and must not be stored"
+        );
+        assert_eq!(
+            session.current(),
+            Some("ask"),
+            "{utterance:?} must re-ask rather than wrap into a nearby value"
+        );
+    }
+    Ok(())
+}
+
+/// The control for #38: folding punctuation away is still what a *label*
+/// question wants, and the fix must not have withdrawn it.
+#[test]
+fn punctuation_tolerant_matching_still_answers_a_label_question() -> TestResult {
+    let mut session = Session::new(
+        "labels",
+        option_routed_flow("answer", VarType::Boolean, &["yes", "no"])?,
+    )?;
+
+    session.answer("yes!")?;
+
+    assert_eq!(
+        session.scope().get("answer"),
+        Some(&Value::Boolean(true)),
+        "an ordinary word answer keeps the tolerant reading it has always had"
+    );
+    assert_eq!(
+        routed_to(&session).as_deref(),
+        Some("yes"),
+        "and still takes the route of the option it matched"
+    );
+    Ok(())
+}
+
+/// The policy is what decides, so the same authored strings are one answer or
+/// two depending on the declared type: `-5` and `5` are two values and one
+/// label, and `5` and `05` are two spellings of one value.
+#[test]
+fn option_collisions_are_judged_under_the_declared_policy() -> TestResult {
+    let as_values = option_routed_flow("amount", VarType::Integer, &["-5", "5"])?;
+    assert_eq!(
+        as_values.nodes().len(),
+        3,
+        "a signed question offering both signs is accepted: two values"
+    );
+
+    let as_labels = option_routed_flow("answer", VarType::String, &["-5", "5"]);
+    assert!(
+        matches!(as_labels, Err(BotError::MalformedFlow { .. })),
+        "the same two strings are one label once the sign folds, and a flow that \
+         offers them that way can never tell the person's answer apart: {as_labels:?}"
+    );
+
+    let duplicate_values = option_routed_flow("amount", VarType::Integer, &["5", "05"]);
+    assert!(
+        matches!(duplicate_values, Err(BotError::MalformedFlow { .. })),
+        "two options holding one value are the numeric form of the same \
+         collision: {duplicate_values:?}"
+    );
+    Ok(())
+}

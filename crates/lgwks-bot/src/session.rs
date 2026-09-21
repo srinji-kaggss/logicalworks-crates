@@ -71,6 +71,72 @@ pub enum VarType {
     Choice(Vec<String>),
 }
 
+impl VarType {
+    /// Returns how an answer to a question writing this variable must be read.
+    ///
+    /// `Integer` is the only declaration whose answers are not text. The other
+    /// three are labels: a `Choice` answer is matched against its own option
+    /// strings, and a `Boolean` answer is a word (`yes`/`no`) that the same
+    /// punctuation folding should tolerate.
+    #[must_use]
+    pub const fn answer_domain(&self) -> AnswerDomain {
+        match *self {
+            Self::Integer => AnswerDomain::Integer,
+            Self::String | Self::Boolean | Self::Choice(_) => AnswerDomain::Label,
+        }
+    }
+}
+
+/// Decodes one whole-number answer, preserving its sign.
+///
+/// The single typed decoder for integer answers, shared by the scope that stores
+/// the value and the resolver that selects it. Two decoders is one decoder and
+/// one dialect: a resolver that accepted `+5` while the scope refused it, or
+/// vice versa, would resolve an answer and then fail to store it, and the person
+/// would see a session that accepted their number and did not act on it.
+///
+/// `None` means *not a whole number in range* — an empty answer, prose, a
+/// decimal, or a magnitude beyond [`i64`]. It is not an error: an unrecognized
+/// answer is re-asked, and the caller decides whether that or a refusal is the
+/// right report.
+pub(crate) fn decode_integer(raw: &str) -> Option<i64> {
+    raw.trim().parse::<i64>().ok()
+}
+
+/// How a question's answers are meant to be read.
+///
+/// A property of the *answer*, not of the option text. Two questions can offer
+/// option lists that look identical and mean different things by them, and
+/// nothing in the option strings says which: `["-5", "5"]` at an integer
+/// question is two distinct answers, while the same pair at a label question is
+/// two spellings the resolver cannot tell apart, because the label policy folds
+/// punctuation and the sign is punctuation.
+///
+/// That is the whole reason this exists as an explicit product of states rather
+/// than a flag on one code path. The folding is correct for labels — `"yes!"`
+/// and `"yes"` are one answer, and a person should not be re-asked for typing an
+/// exclamation mark — and it is destructive for numbers, where it silently turns
+/// `-5` into `5` and reports it at maximum confidence. One policy cannot be
+/// both, so the answer says which one applies and the resolver reads the
+/// question accordingly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AnswerDomain {
+    /// Natural-language option labels: compared after [`crate::language::normalize`].
+    Label,
+    /// Whole numbers: compared as decoded values, sign preserved.
+    Integer,
+}
+
+impl fmt::Display for AnswerDomain {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Label => formatter.write_str("label"),
+            Self::Integer => formatter.write_str("integer"),
+        }
+    }
+}
+
 /// A variable reference or literal used by a branch predicate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
@@ -784,6 +850,20 @@ fn validate_node(
                     cause: format!("ask node {node_id:?} has invalid options"),
                 });
             }
+            // Distinct strings are not distinct answers. Two options the answer
+            // policy cannot tell apart are one option the person cannot choose
+            // between, and the resolver can only ever report the tie — so the
+            // authoring mistake is refused here, where it names an option,
+            // rather than at run time, where it names none.
+            if let Some((first, second)) = colliding_options(options, answer_domain_of(spec, var)) {
+                return Err(BotError::MalformedFlow {
+                    cause: format!(
+                        "ask node {node_id:?} offers {first:?} and {second:?} as the same \
+                         {} answer",
+                        answer_domain_of(spec, var)
+                    ),
+                });
+            }
             for option in options {
                 let Some(target) = routes.get(option) else {
                     return Err(BotError::MissingAskRoute {
@@ -827,6 +907,41 @@ fn validate_node(
         NodeKind::End => {}
     }
     Ok(())
+}
+
+/// Returns how answers writing `name` are read in `spec`.
+///
+/// The flow's own reading of a node's answers, so validation and resolution
+/// cannot disagree about which policy a question is under — the same reason
+/// there is one decoder rather than two.
+fn answer_domain_of(spec: &FlowSpec, name: &str) -> AnswerDomain {
+    spec.vars
+        .get(name)
+        .map_or(AnswerDomain::Label, VarType::answer_domain)
+}
+
+/// Returns the first pair of options the answer policy cannot tell apart.
+///
+/// `None` under [`AnswerDomain::Integer`] for an option that is not a whole
+/// number: an option that cannot produce the declared value is a different
+/// defect, owned by the check that reports it, and folding it into a collision
+/// report would name the wrong cause.
+fn colliding_options(options: &[String], domain: AnswerDomain) -> Option<(String, String)> {
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
+    for option in options {
+        let identity = match domain {
+            AnswerDomain::Label => crate::language::normalize(option),
+            AnswerDomain::Integer => match decode_integer(option) {
+                Some(value) => value.to_string(),
+                None => continue,
+            },
+        };
+        if let Some(first) = seen.get(&identity) {
+            return Some((first.clone(), option.clone()));
+        }
+        seen.insert(identity, option.clone());
+    }
+    None
 }
 
 /// Validate a variable reference in a node.
@@ -1059,6 +1174,19 @@ impl VarScope {
         &self.declarations
     }
 
+    /// Returns how an answer writing `name` must be read.
+    ///
+    /// Defaults to [`AnswerDomain::Label`] for a name that is not declared,
+    /// which is the permissive reading rather than a silent claim: flow
+    /// validation rejects an undeclared writer, so reaching this with an unknown
+    /// name is a caller's mistake and not a question about the answer.
+    #[must_use]
+    pub fn answer_domain(&self, name: &str) -> AnswerDomain {
+        self.declarations
+            .get(name)
+            .map_or(AnswerDomain::Label, VarType::answer_domain)
+    }
+
     /// Return all currently assigned values.
     #[must_use]
     pub fn values(&self) -> &BTreeMap<String, Value> {
@@ -1097,9 +1225,9 @@ impl VarScope {
         };
         let value = match *declared {
             VarType::String => Value::String(answer.to_owned()),
-            VarType::Integer => match answer.trim().parse::<i64>() {
-                Ok(value) => Value::Integer(value),
-                Err(_) => {
+            VarType::Integer => match decode_integer(answer) {
+                Some(value) => Value::Integer(value),
+                None => {
                     return Err(BotError::InvalidVariableValue {
                         variable: name.to_owned(),
                         value: answer.to_owned(),
@@ -1219,6 +1347,12 @@ impl Interpolate for TemplateInterpolator {
 ///
 /// Borrowed rather than owned, because the caller already holds both: an owned
 /// copy would be a second copy of the same fact, and two copies of a fact drift.
+///
+/// The third fact is how the answers are read. [`AnswerDomain`] travels with the
+/// options because it is a property of *this* question, and a resolver that had
+/// to infer it from the option strings would be guessing: the same list is two
+/// distinct answers at an integer question and one folded answer at a label
+/// question.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct Question<'a> {
@@ -1226,13 +1360,31 @@ pub struct Question<'a> {
     id: &'a str,
     /// The options offered right now.
     options: &'a [String],
+    /// How this question's answers are meant to be read.
+    domain: AnswerDomain,
 }
 
 impl<'a> Question<'a> {
-    /// Names one question's vocabulary.
+    /// Names one question's vocabulary, read as natural-language labels.
     #[must_use]
     pub const fn new(id: &'a str, options: &'a [String]) -> Self {
-        Self { id, options }
+        Self {
+            id,
+            options,
+            domain: AnswerDomain::Label,
+        }
+    }
+
+    /// Reads this question's answers under `domain`.
+    ///
+    /// A builder rather than a fourth argument on [`Self::new`], because the
+    /// overwhelming majority of questions are label questions and a resolver
+    /// call site should not have to spell that out. The default is the one the
+    /// option strings are written in; a caller that has a typed variable in hand
+    /// has the one fact that changes it.
+    #[must_use]
+    pub const fn with_domain(self, domain: AnswerDomain) -> Self {
+        Self { domain, ..self }
     }
 
     /// Returns the question's stable identity.
@@ -1245,6 +1397,12 @@ impl<'a> Question<'a> {
     #[must_use]
     pub const fn options(&self) -> &'a [String] {
         self.options
+    }
+
+    /// Returns how this question's answers are meant to be read.
+    #[must_use]
+    pub const fn domain(&self) -> AnswerDomain {
+        self.domain
     }
 }
 
@@ -1655,7 +1813,8 @@ impl Session {
             return Err(BotError::SessionNotAwaitingAnswer);
         };
         self.charge_step()?;
-        let question = Question::new(&node_id, &options);
+        let question =
+            Question::new(&node_id, &options).with_domain(self.scope.answer_domain(&var));
         let index = match self.resolver.resolve(utterance, &question) {
             Resolution::Resolved { index, .. } => index,
             Resolution::Ambiguous { tied, .. } => {

@@ -72,7 +72,7 @@ use std::fmt;
 use lgwks_std::similarity::{Cosine, CosineError};
 
 use crate::language::{Alias, LanguageResolver, decide};
-use crate::session::{DegradedReason, MatchTier, Question, Resolution, Resolver};
+use crate::session::{AnswerDomain, DegradedReason, MatchTier, Question, Resolution, Resolver};
 
 /// A source of dense vector representations for text, and its own identity.
 ///
@@ -490,6 +490,16 @@ impl<E: Embedder> SemanticResolver<E> {
 impl<E: Embedder> Resolver for SemanticResolver<E> {
     fn resolve(&self, utterance: &str, question: &Question<'_>) -> Resolution {
         let deterministic = self.lexicon.decide_for(utterance, question);
+        // A numeric question never reaches the model, at all. The lexicon's
+        // integer path answers by decoded value and reports `Absent` for an
+        // answer that no option holds — and that `Absent` must stay `Absent`.
+        // Handing it to an embedding comparison is how a model would pick
+        // whichever numeral *looks* closest to a number nobody offered, which is
+        // the same sign-erasing guess the typed path exists to remove, arrived
+        // at from the other end.
+        if question.domain() == AnswerDomain::Integer {
+            return deterministic;
+        }
         if !matches!(deterministic, Resolution::Absent { .. }) {
             return deterministic;
         }
@@ -508,7 +518,7 @@ mod tests {
     use super::{
         Alias, Embedder, EmbedderIdentity, SemanticError, SemanticPolicy, SemanticResolver,
     };
-    use crate::session::{DegradedReason, MatchTier, Question, Resolution, Resolver};
+    use crate::session::{AnswerDomain, DegradedReason, MatchTier, Question, Resolution, Resolver};
     use std::cell::Cell;
     use std::collections::BTreeMap;
     use std::fmt;
@@ -870,6 +880,55 @@ mod tests {
             calls.get(),
             0,
             "and must not spend the model trying to legitimate it"
+        );
+        Ok(())
+    }
+
+    /// A question read as values is never handed to the model.
+    ///
+    /// The embedder here is loaded with exactly the geometry that would lose the
+    /// sign — `"-5"` sits closest to `"5"` — and the assertion is that it is
+    /// never consulted, because a similarity judgement over numerals is the
+    /// folded-sign defect reached through another tier.
+    #[test]
+    fn a_numeric_question_never_reaches_the_model() -> Result<(), Box<dyn std::error::Error>> {
+        let (embedder, calls) = stub(
+            vec![
+                ("-5", vec![1.0, 0.0]),
+                ("5", vec![1.0, 0.1]),
+                ("10", vec![0.0, 1.0]),
+            ],
+            vec![1.0, 0.0],
+            false,
+        )?;
+        let resolver = SemanticResolver::new(embedder);
+        let options = options(&["5", "10"]);
+        let question = ask(&options).with_domain(AnswerDomain::Integer);
+
+        assert_eq!(
+            resolver.resolve("-5", &question),
+            Resolution::Absent { best_score: 0.0 },
+            "a value the question does not offer is absent, not the number it resembles"
+        );
+        assert_eq!(
+            calls.get(),
+            0,
+            "no tier may spend the model on relating two numbers"
+        );
+        assert_eq!(
+            resolver.resolve("5", &question),
+            Resolution::Resolved {
+                index: 0,
+                tier: MatchTier::Exact,
+                score: 1.0,
+                lead: 1.0,
+            },
+            "and the values that are offered resolve exactly, by value"
+        );
+        assert_eq!(
+            calls.get(),
+            0,
+            "with the model still untouched after a successful numeric answer"
         );
         Ok(())
     }

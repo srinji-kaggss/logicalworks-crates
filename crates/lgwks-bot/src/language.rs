@@ -67,7 +67,7 @@ use std::collections::BTreeMap;
 
 use lgwks_std::similarity::{EditDistance, Jaccard, Similarity};
 
-use crate::session::{MatchTier, Question, Resolution};
+use crate::session::{AnswerDomain, MatchTier, Question, Resolution, decode_integer};
 
 /// The longest normalized input the shipped resolver will compare.
 pub const MAX_UTTERANCE_CHARS: usize = 512;
@@ -412,6 +412,46 @@ impl Alias {
     }
 }
 
+/// Resolves a whole-number answer by value, with the sign intact.
+///
+/// The typed counterpart of the tiered lexical search, and deliberately not a
+/// tier of it. Every tier below folds text, and the fold is what makes a numeric
+/// question dangerous: [`normalize`] turns punctuation into a separator, so
+/// `normalize("-5") == normalize("5")`, and a lexical tier then reports the
+/// negative answer as an `Exact` match of the positive option with score `1.0`.
+/// Comparing decoded [`i64`]s cannot do that: `-5 != 5`, and no amount of
+/// spelling similarity between two numerals makes them the same number.
+///
+/// The four outcomes are the same four the lexical path reports, computed over
+/// values:
+///
+/// - the utterance decodes and one option holds that value — `Resolved`,
+/// - several options do (`"5"` and `"05"`) — `Ambiguous`, both tied,
+/// - it decodes but no option holds it — `Absent`, and *no fallback*: an
+///   out-of-set number is not lexically close to the numbers that are offered,
+///   it is simply not offered,
+/// - it does not decode at all — `Absent`, with no phonetic or fuzzy attempt,
+///   because the answer to a numeric question is the number.
+///
+/// The alias table is not consulted either, and that is not an oversight: an
+/// alias key is a *normalized* utterance, so the lookup for `-5` is the same
+/// lookup as for `5` — routing a numeric answer through it would reintroduce
+/// exactly the sign loss this path exists to remove.
+fn decide_integer(utterance: &str, question: &Question<'_>, margin: f64) -> Resolution {
+    let Some(spoken) = decode_integer(utterance) else {
+        return Resolution::Absent { best_score: 0.0 };
+    };
+    let scored: Vec<(usize, MatchTier, f64)> = question
+        .options()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, option)| {
+            (decode_integer(option) == Some(spoken)).then_some((index, MatchTier::Exact, 1.0))
+        })
+        .collect();
+    decide(&scored, margin)
+}
+
 /// Decides a [`Resolution`] from scored candidates, best-first.
 ///
 /// Shared with the semantic tier rather than reimplemented there. The rule it
@@ -580,8 +620,16 @@ impl LanguageResolver {
     }
 
     /// Resolves `utterance` against `question` as a four-way verdict.
+    ///
+    /// The question's [`AnswerDomain`] chooses the reading, and it is a branch
+    /// rather than a tier because the two readings are not comparable: lexical
+    /// similarity measures how alike two strings look, and a number is not
+    /// answered by how much it looks like another number.
     #[must_use]
     pub fn decide_for(&self, utterance: &str, question: &Question<'_>) -> Resolution {
+        if question.domain() == AnswerDomain::Integer {
+            return decide_integer(utterance, question, MATCH_MARGIN);
+        }
         let verdict = decide(
             &score_all(utterance, question, &self.aliases, &self.distance),
             MATCH_MARGIN,
@@ -1182,5 +1230,165 @@ mod tests {
                 "the winning option must follow its text, not its position: {choices:?} gave {verdict:?}"
             );
         }
+    }
+
+    /// Builds an option list from literals, for the numeric-domain tests below.
+    fn amounts(choices: &[&str]) -> Vec<String> {
+        choices.iter().map(|choice| (*choice).to_owned()).collect()
+    }
+
+    /// Names an integer question over `options`.
+    fn numeric(options: &[String]) -> Question<'_> {
+        Question::new("amount", options).with_domain(AnswerDomain::Integer)
+    }
+
+    #[test]
+    fn integer_decoding_trims_surrounding_space_and_reads_a_leading_sign() {
+        for (raw, expected) in [
+            ("5", Some(5_i64)),
+            ("+5", Some(5)),
+            ("-5", Some(-5)),
+            (" 5 ", Some(5)),
+            ("0", Some(0)),
+            ("-0", Some(0)),
+            ("007", Some(7)),
+            ("", None),
+            ("five", None),
+            ("5.0", None),
+            ("5,000", None),
+            ("9223372036854775807", Some(i64::MAX)),
+            ("-9223372036854775808", Some(i64::MIN)),
+            ("9223372036854775808", None),
+            ("-9223372036854775809", None),
+        ] {
+            assert_eq!(
+                decode_integer(raw),
+                expected,
+                "{raw:?} must decode to {expected:?} and nothing else"
+            );
+        }
+    }
+
+    #[test]
+    fn the_label_fold_is_exactly_why_a_number_needs_its_own_domain() {
+        // The premise of the defect, stated as an assertion: the normalization
+        // every label match runs through erases the sign, so a numeric answer
+        // read as a label cannot tell "-5" from "5".
+        assert_eq!(
+            normalize("-5"),
+            normalize("5"),
+            "the fold collapses the sign, which is why it must not be applied to a value"
+        );
+        // And that is what the label domain does with the same two options: it
+        // reports a tie rather than claiming either one. (A validated flow
+        // refuses to offer them as labels at all — see `session.rs`.)
+        let options = amounts(&["-5", "5"]);
+        let verdict = LanguageResolver::new().resolve("-5", &ask(&options));
+        assert_eq!(
+            tied(&verdict),
+            Some((vec![0, 1], MatchTier::Exact)),
+            "under the label domain the sign is punctuation: {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn a_numeric_question_selects_the_value_and_never_the_spelling() {
+        let resolver = LanguageResolver::new();
+        let options = amounts(&["-5", "5", "0", "10"]);
+        let question = numeric(&options);
+        for (utterance, expected) in [
+            ("-5", 0_usize),
+            ("5", 1),
+            ("+5", 1),
+            (" 5 ", 1),
+            ("0", 2),
+            ("10", 3),
+        ] {
+            let verdict = resolver.resolve(utterance, &question);
+            assert_eq!(
+                selected(&verdict),
+                Some((expected, MatchTier::Exact)),
+                "{utterance:?} must select the option holding that value: {verdict:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_number_no_option_holds_is_absent_rather_than_a_nearby_option() {
+        let resolver = LanguageResolver::new();
+        let options = amounts(&["5", "10"]);
+        let question = numeric(&options);
+
+        // The filed counterexample, reproduced: the same utterance against the
+        // same options, read the way the defect read every question. This is the
+        // verdict #38 reported — `-5` becoming option 0 at the Exact tier — and
+        // it is asserted rather than removed, because it is the behaviour the
+        // domain exists to withhold. Delete the domain and this is what the
+        // assertion below starts returning.
+        assert_eq!(
+            selected(&resolver.resolve("-5", &ask(&options))),
+            Some((0, MatchTier::Exact)),
+            "the untyped reading of this question is the defect, exactly as filed"
+        );
+
+        for utterance in ["-5", "five", "5.0", "9223372036854775808", ""] {
+            assert_eq!(
+                resolver.resolve(utterance, &question),
+                Resolution::Absent { best_score: 0.0 },
+                "{utterance:?} is not one of the offered values and no lexical, \
+                 phonetic or fuzzy tier may turn it into one that is"
+            );
+        }
+    }
+
+    #[test]
+    fn a_numeric_reading_is_not_vetoed_by_a_similar_number() {
+        // No fuzzy competitor exists in this domain: "-50" is not a near miss
+        // for "-5", it is a different value.
+        let options = amounts(&["-5", "-50"]);
+        let verdict = LanguageResolver::new().resolve("-5", &numeric(&options));
+        assert_eq!(
+            selected(&verdict),
+            Some((0, MatchTier::Exact)),
+            "the value, not its similarity: {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn a_numeric_question_does_not_consult_the_alias_table() {
+        // An alias key is a normalized utterance, and `-5` and `5` share one,
+        // so reading a numeric answer through the table would put the sign loss
+        // back through a second door.
+        let resolver = LanguageResolver::with_aliases(vec![Alias::new("amount", "-5", "5")]);
+        assert_eq!(
+            resolver.learned(),
+            1,
+            "the premise: the alias really is held under the folded key"
+        );
+        let options = amounts(&["5", "10"]);
+        assert_eq!(
+            resolver.resolve("-5", &numeric(&options)),
+            Resolution::Absent { best_score: 0.0 },
+            "the taught phrase must not reach a question read as values"
+        );
+        assert_eq!(
+            selected(&resolver.resolve("5", &numeric(&options))),
+            Some((0, MatchTier::Exact)),
+            "and the value itself still resolves, by value rather than by alias"
+        );
+    }
+
+    #[test]
+    fn two_options_holding_one_value_tie_rather_than_taking_the_first() {
+        // A `FlowSpec` refuses to author this (see `session.rs`); asserted here
+        // so the resolver is honest rather than silently positional even when
+        // a caller constructs the question directly.
+        let options = amounts(&["5", "05"]);
+        let verdict = LanguageResolver::new().resolve("5", &numeric(&options));
+        assert_eq!(
+            tied(&verdict),
+            Some((vec![0, 1], MatchTier::Exact)),
+            "two options hold 5, so no option is preferred: {verdict:?}"
+        );
     }
 }
