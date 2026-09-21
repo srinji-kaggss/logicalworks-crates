@@ -3,7 +3,7 @@
 //! This module wraps the engine's timer constructors rather than re-exporting
 //! them. tokio's `sleep`/`timeout` capture the runtime timer **at
 //! construction**, so building one before entering the runtime panics with
-//! "there is no reactor running" — the single most common tokio footgun. The
+//! "there is no reactor running", the single most common tokio footgun. The
 //! wrappers here defer construction to first poll, so `sleep(d)` may be built
 //! anywhere and awaited inside a runtime.
 //!

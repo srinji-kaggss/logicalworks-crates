@@ -1,5 +1,5 @@
 id: logicalworks-sdk-charter
-scope: Bringing the four estate crates into a consumer and trusting the result.
+scope: Bringing the four crates into a consumer and trusting the result.
 actors:
   - human-dev: Rust developer, knows cargo, has never seen lgwks crates.
   - ai-agent: coding agent, emits JSON specs, runs CLI, reads exit codes.

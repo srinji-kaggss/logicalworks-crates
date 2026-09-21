@@ -6,16 +6,27 @@ use crate::verb;
 
 /// A JSON store backed by a file path. Supports Observe and Query.
 pub struct JsonStore {
+    /// The file read on each poll. Resolved at construction and retained, so a
+    /// relative path is relative to the process working directory at the time
+    /// the domain was built, not at poll time.
     path: std::path::PathBuf,
+    /// Forced to `[bot.fs]` by the constructor: reading the store is a
+    /// filesystem operation and no constructor omits the capability.
     caps: Vec<Cap>,
 }
 
 /// Data state returned by observation or query.
-#[derive(Debug, Clone)]
+///
+/// `#[non_exhaustive]`: the store's reported shape grows with the domain, and a
+/// consumer that destructured this literally would break on each addition.
+#[derive(PartialEq, Debug, Clone)]
+#[non_exhaustive]
 pub struct DataState {
     /// Whether the store contents changed since last poll.
     pub changed: bool,
-    /// The raw JSON string.
+    /// The raw JSON string, exactly as read. It is not parsed here: a store
+    /// whose contents are malformed JSON is reported, not rejected, so a
+    /// condition can act on the malformed state.
     pub raw: String,
 }
 
@@ -41,9 +52,9 @@ impl verb::Observe for JsonStore {
         let path = self.path.clone();
         let raw = lgwks_std::task::spawn_blocking(move || std::fs::read_to_string(&path))
             .await
-            .map_err(|e| BotError::DomainError {
+            .map_err(|error| BotError::DomainError {
                 domain: self.domain_id().into(),
-                cause: e.to_string(),
+                cause: error.to_string(),
             })?;
         Ok(DataState {
             changed: false,

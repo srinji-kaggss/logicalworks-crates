@@ -1,4 +1,4 @@
-//! `eval` owns shipped evaluators — composable conditions for the Evaluate verb.
+//! `eval` owns shipped evaluators: composable conditions for the Evaluate verb.
 
 use crate::error::BotError;
 use crate::verb::Evaluate;
@@ -6,6 +6,11 @@ use crate::verb::Evaluate;
 /// True when a value has changed since last check. Requires the observed type
 /// to implement `PartialEq + Clone`.
 pub struct Changed<T: Clone + PartialEq> {
+    /// The value seen on the previous check, or `None` before the first one.
+    /// Interior mutability because `Evaluate::check` takes `&self`: a condition
+    /// keeps state between ticks without the bot holding it mutably. `RefCell`
+    /// rather than a lock: a bot is driven on one thread and a condition is
+    /// never shared across threads.
     last: std::cell::RefCell<Option<T>>,
 }
 
@@ -42,6 +47,8 @@ impl<T: Clone + PartialEq + 'static> Evaluate<T> for Changed<T> {
 
 /// True when a numeric value crosses below a threshold.
 pub struct Below<T> {
+    /// The comparison bound. Strictly below: a value equal to the threshold
+    /// does not fire.
     threshold: T,
 }
 
@@ -64,6 +71,8 @@ impl<T: PartialOrd + 'static> Evaluate<T> for Below<T> {
 
 /// True when a numeric value crosses above a threshold.
 pub struct Above<T> {
+    /// The comparison bound. Strictly above: a value equal to the threshold
+    /// does not fire.
     threshold: T,
 }
 
@@ -86,11 +95,14 @@ impl<T: PartialOrd + 'static> Evaluate<T> for Above<T> {
 
 /// True when a string field contains a pattern.
 pub struct Contains {
+    /// The substring searched for, literally: this is not a pattern language,
+    /// so a value that looks like a regex is matched as its own bytes.
     pattern: String,
 }
 
 impl Contains {
     /// Create a contains evaluator.
+    #[must_use]
     pub fn new(pattern: impl Into<String>) -> Self {
         Self {
             pattern: pattern.into(),
@@ -119,32 +131,41 @@ impl Evaluate<super::chat::ChatMessage> for Contains {
 }
 
 /// Convenience: create a `Contains` evaluator.
+#[must_use]
 pub fn contains(pattern: impl Into<String>) -> Contains {
     Contains::new(pattern)
 }
 
 /// Convenience: create a `Changed` evaluator.
+#[must_use]
 pub fn changed<T: Clone + PartialEq>() -> Changed<T> {
     Changed::new()
 }
 
 /// Convenience: create a `Below` evaluator.
+#[must_use]
 pub fn below<T: PartialOrd + 'static>(threshold: T) -> Below<T> {
     Below::new(threshold)
 }
 
 /// Convenience: create an `Above` evaluator.
+#[must_use]
 pub fn above<T: PartialOrd + 'static>(threshold: T) -> Above<T> {
     Above::new(threshold)
 }
 
 /// True when all inner conditions pass.
 pub struct All<T> {
+    /// The inner conditions. Boxed and dynamic because `All` composes
+    /// heterogeneous evaluators over the same `T`; a condition that errors is
+    /// propagated rather than treated as a `false`, so a structural failure
+    /// never reads as "the condition did not hold".
     conditions: Vec<Box<dyn Evaluate<T>>>,
 }
 
 impl<T: 'static> All<T> {
     /// Create an all-of combinator.
+    #[must_use]
     pub fn new(conditions: Vec<Box<dyn Evaluate<T>>>) -> Self {
         Self { conditions }
     }
@@ -167,11 +188,15 @@ impl<T: 'static> Evaluate<T> for All<T> {
 
 /// True when any inner condition passes.
 pub struct Any<T> {
+    /// The inner conditions, checked in order and short-circuited on the first
+    /// `true`. A condition that errors is propagated rather than treated as a
+    /// `false`, so a structural failure never reads as "nothing matched".
     conditions: Vec<Box<dyn Evaluate<T>>>,
 }
 
 impl<T: 'static> Any<T> {
     /// Create an any-of combinator.
+    #[must_use]
     pub fn new(conditions: Vec<Box<dyn Evaluate<T>>>) -> Self {
         Self { conditions }
     }

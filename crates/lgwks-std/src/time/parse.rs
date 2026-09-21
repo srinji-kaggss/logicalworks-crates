@@ -35,9 +35,12 @@ fn expect_byte(bytes: &[u8], at: usize, expected: u8) -> Result<(), ParseError> 
 }
 
 /// Converts an ASCII digit byte to its numeric value.
+///
+/// The caller has already established `byte.is_ascii_digit()`, so `byte - b'0'`
+/// is in `0..=9`; `saturating_sub` states that bound rather than relying on it.
 fn check_digit(byte: u8, target_field: Field, at: usize) -> Result<u32, ParseError> {
     if byte.is_ascii_digit() {
-        Ok(u32::from(byte - b'0'))
+        Ok(u32::from(byte.saturating_sub(b'0')))
     } else {
         Err(ParseError::NonDigit {
             field: target_field,
@@ -48,6 +51,12 @@ fn check_digit(byte: u8, target_field: Field, at: usize) -> Result<u32, ParseErr
 }
 
 /// Parses fixed-width ASCII digit sequences into an unsigned integer.
+///
+/// `len` is 2 or 4 at every call site and never exceeds the caller's bounds, so
+/// `start + offset` stays inside the input: both operands are bounded by
+/// `bytes.len()`, which no slice index can exceed. At most four digits are
+/// accumulated, so `acc` tops out at `9_999` and neither `saturating_*` below
+/// can saturate.
 fn parse_digit_field(
     bytes: &[u8],
     start: usize,
@@ -56,13 +65,13 @@ fn parse_digit_field(
 ) -> Result<u32, ParseError> {
     let mut acc = 0u32;
     for offset in 0..len {
-        let at = start + offset;
+        let at = start.saturating_add(offset);
         let byte = *bytes.get(at).ok_or(ParseError::TooShort {
             len: bytes.len(),
             at,
         })?;
         let digit = check_digit(byte, target_field, at)?;
-        acc = acc * 10 + digit;
+        acc = acc.saturating_mul(10).saturating_add(digit);
     }
     Ok(acc)
 }
@@ -113,10 +122,15 @@ fn parse_date(bytes: &[u8]) -> Result<(i64, u32, u32), ParseError> {
 }
 
 /// Validates the date-time separator character (`T`, `t`, or space).
+///
+/// RFC 3339 makes `T` the canonical separator and permits a lower-case `t` or a
+/// space in its place; all three are accepted here.
 fn check_time_separator(bytes: &[u8]) -> Result<(), ParseError> {
-    match bytes.get(10) {
+    // `copied()` puts the match on `u8` rather than `&u8`, so every arm binds a
+    // value and the byte patterns below read as written.
+    match bytes.get(10).copied() {
         Some(b'T' | b't' | b' ') => Ok(()),
-        Some(&byte) => Err(ParseError::Malformed { at: 10, byte }),
+        Some(byte) => Err(ParseError::Malformed { at: 10, byte }),
         None => Err(ParseError::TooShort {
             len: bytes.len(),
             at: 10,
@@ -157,20 +171,35 @@ fn parse_time(bytes: &[u8]) -> Result<(u32, u32, u32), ParseError> {
 }
 
 /// Computes scaled nanoseconds from variable fractional digit slice.
+///
+/// `digits` is `1..=9`. Position `digit_idx` is read only while
+/// `digit_idx < digits`, so every index is inside the fractional run the caller
+/// measured; a byte that is not there contributes `0`, which is exactly what
+/// left-aligning a short fraction means (`0.12` is `120_000_000` ns). Nine
+/// digits scale to at most `999_999_999`, so neither `saturating_*` below can
+/// saturate.
 fn compute_fraction(bytes: &[u8], start: usize, digits: usize) -> u32 {
     let mut scaled = 0u32;
     for digit_idx in 0..9 {
-        scaled = scaled * 10
-            + if digit_idx < digits {
-                u32::from(bytes[start + digit_idx] - b'0')
-            } else {
-                0
-            };
+        let digit = if digit_idx < digits {
+            let byte = bytes
+                .get(start.saturating_add(digit_idx))
+                .copied()
+                .unwrap_or(b'0');
+            u32::from(byte.saturating_sub(b'0'))
+        } else {
+            0
+        };
+        scaled = scaled.saturating_mul(10).saturating_add(digit);
     }
     scaled
 }
 
 /// Collects and scales fractional digits after the decimal dot.
+///
+/// Advances `cursor` past the run of digits and reports the run's width, which
+/// must be `1..=9`: RFC 3339 permits truncation, but not an empty fraction nor
+/// more precision than a nanosecond.
 fn parse_fraction_digits(
     bytes: &[u8],
     cursor: &mut usize,
@@ -178,9 +207,12 @@ fn parse_fraction_digits(
 ) -> Result<u32, ParseError> {
     let start = *cursor;
     while *cursor < bytes.len() && bytes[*cursor].is_ascii_digit() {
-        *cursor += 1;
+        // `*cursor < bytes.len()` on entry, so this cannot saturate.
+        *cursor = cursor.saturating_add(1);
     }
-    let digits = *cursor - start;
+    // The cursor only ever advances, so `*cursor >= start`; both are bounded by
+    // `bytes.len()`.
+    let digits = cursor.saturating_sub(start);
     if digits == 0 || digits > 9 {
         Err(ParseError::FractionWidth {
             digits,
@@ -192,48 +224,78 @@ fn parse_fraction_digits(
 }
 
 /// Parses optional fractional nanoseconds if present.
+///
+/// A missing fraction is `0` nanoseconds rather than an error, because RFC 3339
+/// makes the fractional part optional; a present but empty or over-wide one is
+/// refused by [`parse_fraction_digits`].
 fn parse_fraction(bytes: &[u8], cursor: &mut usize) -> Result<u32, ParseError> {
     if bytes.get(*cursor) != Some(&b'.') {
         return Ok(0);
     }
     let dot_pos = *cursor;
-    *cursor += 1;
+    // `*cursor` indexes a `.` inside the input, so the step stays in bounds.
+    *cursor = cursor.saturating_add(1);
     parse_fraction_digits(bytes, cursor, dot_pos)
 }
 
 /// Parses a fixed-width `±HH:MM` numeric timezone offset into signed minutes.
+///
+/// The caller has established that `cursor` indexes a `+` or `-`. The offset is
+/// `6` bytes wide, so the check below is also what proves the four inner
+/// offsets stay in bounds; each is at most `4`, and `cursor + 4 <= bytes.len()`
+/// once the check passes, so none of the `saturating_*` calls can saturate.
 fn parse_numeric_offset(
     bytes: &[u8],
     cursor: usize,
     sign_negative: bool,
 ) -> Result<i64, ParseError> {
-    if cursor + 6 != bytes.len() {
+    if cursor.saturating_add(6) != bytes.len() {
         Err(ParseError::MissingOffset { at: cursor })
     } else {
-        let offset_hour = parse_digit_field(bytes, cursor + 1, 2, Field::OffsetHour)?;
-        expect_byte(bytes, cursor + 3, b':')?;
-        let offset_minute = parse_digit_field(bytes, cursor + 4, 2, Field::OffsetMinute)?;
-        let magnitude = i64::from(offset_hour) * 60 + i64::from(offset_minute);
+        let offset_hour = parse_digit_field(bytes, cursor.saturating_add(1), 2, Field::OffsetHour)?;
+        expect_byte(bytes, cursor.saturating_add(3), b':')?;
+        let offset_minute =
+            parse_digit_field(bytes, cursor.saturating_add(4), 2, Field::OffsetMinute)?;
+        // Both fields are two digits, so the magnitude is at most
+        // `99 * 60 + 99` and neither operation can saturate.
+        let magnitude = i64::from(offset_hour)
+            .saturating_mul(60)
+            .saturating_add(i64::from(offset_minute));
         if sign_negative {
-            Ok(-magnitude)
+            Ok(magnitude.saturating_neg())
         } else {
             Ok(magnitude)
         }
     }
 }
 
-/// Parses timezone offset (`Z` or `±HH:MM`).
+/// Parses timezone offset (`Z` or `±HH:MM`) into signed minutes from UTC.
+///
+/// `Z` (and its lower-case form) is only accepted as the last byte, so trailing
+/// junk after a zulu designator is a [`ParseError::Malformed`] rather than a
+/// silent success.
 fn parse_offset(bytes: &[u8], cursor: usize) -> Result<i64, ParseError> {
-    match bytes.get(cursor) {
+    // `copied()` puts the match on `u8` rather than `&u8`, so the byte patterns
+    // below read as written instead of as `&b'Z'` alternatives.
+    match bytes.get(cursor).copied() {
         None => Err(ParseError::MissingOffset { at: cursor }),
-        Some(b'Z' | b'z') if cursor + 1 == bytes.len() => Ok(0),
+        Some(b'Z' | b'z') if cursor.saturating_add(1) == bytes.len() => Ok(0),
         Some(b'+') => parse_numeric_offset(bytes, cursor, false),
         Some(b'-') => parse_numeric_offset(bytes, cursor, true),
-        Some(&byte) => Err(ParseError::Malformed { at: cursor, byte }),
+        Some(byte) => Err(ParseError::Malformed { at: cursor, byte }),
     }
 }
 
 /// Parses RFC 3339 formatted text into a [`SystemTime`].
+///
+/// The instant is normalised to UTC: a numeric `±HH:MM` offset is subtracted
+/// from the civil time rather than stored, so two stamps naming the same
+/// instant compare equal whatever offset they were written with.
+///
+/// # Errors
+///
+/// Returns [`ParseError`] naming the first field or separator that failed, with
+/// the byte offset it failed at.
 pub fn parse_rfc3339(text: &str) -> Result<SystemTime, ParseError> {
     let bytes = text.as_bytes();
     check_min_len(bytes)?;
@@ -243,10 +305,16 @@ pub fn parse_rfc3339(text: &str) -> Result<SystemTime, ParseError> {
     let nanos = parse_fraction(bytes, &mut cursor)?;
     let offset_minutes = parse_offset(bytes, cursor)?;
 
-    let secs = days_from_civil(year, month, day) * 86_400
-        + i64::from(hour) * 3600
-        + i64::from(minute) * 60
-        + i64::from(second)
-        - offset_minutes * 60;
+    // Every field is bounded before it gets here: a four-digit year is at most
+    // `2_932_896` days from the epoch, each clock field is two digits, and the
+    // offset is at most `99 * 60 + 99` minutes. The largest intermediate is
+    // therefore about `2.53e11`, sixteen orders of magnitude below `i64::MAX`,
+    // so no `saturating_*` below can saturate.
+    let secs = days_from_civil(year, month, day)
+        .saturating_mul(86_400)
+        .saturating_add(i64::from(hour).saturating_mul(3_600))
+        .saturating_add(i64::from(minute).saturating_mul(60))
+        .saturating_add(i64::from(second))
+        .saturating_sub(offset_minutes.saturating_mul(60));
     Ok(from_unix_parts(secs, nanos))
 }

@@ -8,12 +8,21 @@ use crate::verb;
 
 /// Observe a filesystem path for changes. Supports Observe and Query.
 pub struct Path {
+    /// The path inspected on each poll. Resolved at construction, so a relative
+    /// path is relative to the working directory as it was when the domain was
+    /// built rather than at poll time.
     target: PathBuf,
+    /// Forced to `[bot.fs]` by the constructor: a stat is a filesystem
+    /// operation and no constructor omits the capability.
     caps: Vec<Cap>,
 }
 
 /// Filesystem state returned by observation or query.
-#[derive(Debug, Clone)]
+///
+/// `#[non_exhaustive]`: the reported shape grows with the domain, and a
+/// consumer that destructured this literally would break on each addition.
+#[derive(PartialEq, Debug, Clone)]
+#[non_exhaustive]
 pub struct FsState {
     /// Whether the path was modified since last poll.
     pub modified: bool,
@@ -46,7 +55,9 @@ impl verb::Observe for Path {
         let (exists, size) = lgwks_std::task::spawn_blocking(move || {
             let exists = target.exists();
             let size = if exists {
-                std::fs::metadata(&target).ok().map(|m| m.len())
+                std::fs::metadata(&target)
+                    .ok()
+                    .map(|metadata| metadata.len())
             } else {
                 None
             };

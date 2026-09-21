@@ -10,11 +10,16 @@ use super::error::BotError;
 /// required capabilities against this set.
 #[derive(Debug, Clone)]
 pub struct GrantSet {
+    /// The granted names. A `HashSet` because membership is the only question
+    /// asked of it (admission and proof minting are both `contains`), and a
+    /// duplicate `grant` for the same capability must be idempotent rather than
+    /// accumulate.
     granted: HashSet<Cap>,
 }
 
 impl GrantSet {
-    /// An empty grant — nothing is permitted.
+    /// An empty grant: nothing is permitted.
+    #[must_use]
     pub fn empty() -> Self {
         Self {
             granted: HashSet::new(),
@@ -22,6 +27,7 @@ impl GrantSet {
     }
 
     /// Grant all shipped capabilities (`bot.net`, `bot.fs`, `bot.sys`, `bot.notify`).
+    #[must_use]
     pub fn all_shipped() -> Self {
         let mut granted = HashSet::new();
         granted.insert(Cap::net());
@@ -31,7 +37,10 @@ impl GrantSet {
         Self { granted }
     }
 
-    /// Grant a single capability.
+    /// Grant a single capability. Idempotent: granting a capability already
+    /// present leaves the set unchanged, so a caller need not track what a
+    /// prior grant added.
+    #[must_use]
     pub fn grant(mut self, cap: Cap) -> Self {
         self.granted.insert(cap);
         self

@@ -10,21 +10,21 @@ resolver = "2"
 # ─────────────────────────────────────────────────────────────────────────────
 # logicalworks-crates workspace dependencies.
 #
-# Source of truth for `lgwks_std` (estate std+ surface), `lgwks_bot`
+# Source of truth for `lgwks_std` (the core surface), `lgwks_bot`
 # (capability-gated automation verbs and the async runner surface), `lgwks_ast`
-# (the estate's one multi-language AST parser), and `lgwks_deps` (dependency
+# (the multi-language AST parser), and `lgwks_deps` (dependency
 # admission, audit, freshness, and the third-party storefront). This repo is now
 # the source of truth: versions bump here and the tagged commit publishes to
 # crates.io.
 # ─────────────────────────────────────────────────────────────────────────────
 [workspace.dependencies]
-lgwks_std = { version = "0.6.3", path = "crates/lgwks-std" }
-lgwks_bot = { version = "0.3.2", path = "crates/lgwks-bot" }
-lgwks_ast = { version = "0.1.3", path = "crates/lgwks-ast" }
+lgwks_std = { version = "0.6.6", path = "crates/lgwks-std" }
+lgwks_bot = { version = "0.4.2", path = "crates/lgwks-bot" }
+lgwks_ast = { version = "0.2.2", path = "crates/lgwks-ast" }
 # Dependents reach the storefront without its `scan` default (the gate tool's
 # Rust parser is not a runtime dependency); they opt into storefront features
 # such as `tokio` explicitly.
-lgwks_deps = { version = "0.1.8", path = "crates/lgwks-deps", default-features = false }
+lgwks_deps = { version = "0.1.12", path = "crates/lgwks-deps", default-features = false }
 
 [profile.release]
 opt-level = 3
@@ -46,8 +46,8 @@ improper_ctypes_definitions = "forbid"
 # Anti-pattern contract.
 #
 # Every lint below is `forbid`, not `deny`. A `deny` is defeated by any single
-# `#[allow]` anywhere in the crate — including one smuggled in by a macro the
-# estate does not own (verified: a macro-internal allow silenced a crate-level
+# `#[allow]` anywhere in the crate, including one smuggled in by a macro this
+# workspace does not own (verified: a macro-internal allow silenced a crate-level
 # deny with zero diagnostics). `forbid` cannot be lowered from source; a
 # conflicting allow is a hard E0453. That property is the entire reason this
 # file can be binding without a human in the loop.
@@ -129,6 +129,29 @@ unwrap_in_result = "forbid"
 unwrap_or_default = "forbid"
 unwrap_used = "forbid"
 wildcard_imports = "forbid"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# API bans — the two `deny` entries, and why they differ.
+#
+# `clippy.toml` states WHICH APIs are banned. These two names are what make a
+# violation fatal; without them the entire ban list is inert, because
+# `disallowed_methods` and `disallowed_types` are warn-by-default. That second
+# half was missing until 2026-09-20, and the ban list had never once failed a
+# build. Verified by applying `-D` by hand across the workspace, which
+# immediately surfaced 10 violations that CI had been passing.
+#
+# These are `deny` rather than `forbid` for a reason the `forbid` rule above
+# does not cover. Every other entry here is an anti-pattern with no legitimate
+# use anywhere, so an exception could only ever be a mistake. These are API
+# bans whose exceptions are real, narrow, and test-scoped: `lgwks_std::task` is
+# a thread-parking executor, so a test of it must spawn a thread and must sleep,
+# and `forbid` would make those tests unwritable rather than correct. The
+# escape is a reasoned `#[expect]` at the test module, which
+# `allow_attributes_without_reason = "forbid"` above already forces to carry a
+# justification. That lint is in fact the tell: it exists so exceptions can be
+# audited, and it would be dead config if every lint were `forbid`.
+disallowed_methods = "deny"
+disallowed_types = "deny"
 
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"

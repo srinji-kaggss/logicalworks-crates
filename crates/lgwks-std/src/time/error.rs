@@ -25,8 +25,12 @@ pub enum Field {
     OffsetMinute,
 }
 
+/// The lower-case name of a field as it appears in an error message.
+///
+/// Names are hyphenated (`offset-hour`) so the text reads as a single token
+/// inside a sentence without needing quoting.
 fn field_name(field: &Field) -> &'static str {
-    match field {
+    match *field {
         Field::Year => "year",
         Field::Month => "month",
         Field::Day => "day",
@@ -98,23 +102,41 @@ pub enum ParseError {
     },
 }
 
-fn fmt_too_short(f: &mut fmt::Formatter<'_>, len: usize, at: usize) -> fmt::Result {
+/// Renders [`ParseError::TooShort`]: the observed length and the offset at
+/// which the input ran out.
+fn fmt_too_short(formatter: &mut fmt::Formatter<'_>, len: usize, at: usize) -> fmt::Result {
     write!(
-        f,
+        formatter,
         "RFC 3339 input too short: {len} bytes (ended at offset {at})"
     )
 }
 
-fn fmt_malformed(f: &mut fmt::Formatter<'_>, at: usize, byte: u8) -> fmt::Result {
-    write!(f, "unexpected character {byte:?} at offset {at}")
+/// Renders [`ParseError::Malformed`]: the offending byte and where it sat.
+///
+/// The byte is printed with `{:?}` so a control character or a byte that is
+/// not valid UTF-8 on its own is still readable.
+fn fmt_malformed(formatter: &mut fmt::Formatter<'_>, at: usize, byte: u8) -> fmt::Result {
+    write!(formatter, "unexpected character {byte:?} at offset {at}")
 }
 
-fn fmt_non_digit(f: &mut fmt::Formatter<'_>, field: Field, at: usize, byte: u8) -> fmt::Result {
-    write!(f, "non-digit character {byte:?} in {field} at offset {at}")
+/// Renders [`ParseError::NonDigit`]: the field that was being read, the byte
+/// that was not a digit, and the offset of that byte.
+fn fmt_non_digit(
+    formatter: &mut fmt::Formatter<'_>,
+    field: Field,
+    at: usize,
+    byte: u8,
+) -> fmt::Result {
+    write!(
+        formatter,
+        "non-digit character {byte:?} in {field} at offset {at}"
+    )
 }
 
+/// Renders [`ParseError::OutOfRange`]: the field, its value, the inclusive
+/// bounds it failed, and the offset the field started at.
 fn fmt_out_of_range(
-    f: &mut fmt::Formatter<'_>,
+    formatter: &mut fmt::Formatter<'_>,
     field: Field,
     value: u32,
     min: u32,
@@ -122,40 +144,46 @@ fn fmt_out_of_range(
     at: usize,
 ) -> fmt::Result {
     write!(
-        f,
+        formatter,
         "{field} {value} out of range {min}..={max} at offset {at}"
     )
 }
 
-fn fmt_fraction_width(f: &mut fmt::Formatter<'_>, digits: usize, at: usize) -> fmt::Result {
+/// Renders [`ParseError::FractionWidth`]: how many fractional digits were
+/// found, and the offset of the `.` that introduced them.
+fn fmt_fraction_width(formatter: &mut fmt::Formatter<'_>, digits: usize, at: usize) -> fmt::Result {
     write!(
-        f,
+        formatter,
         "fractional seconds width {digits} out of range 1..=9 at offset {at}"
     )
 }
 
-fn fmt_missing_offset(f: &mut fmt::Formatter<'_>, at: usize) -> fmt::Result {
+/// Renders [`ParseError::MissingOffset`]: the offset at which the timezone
+/// designator was expected.
+fn fmt_missing_offset(formatter: &mut fmt::Formatter<'_>, at: usize) -> fmt::Result {
     write!(
-        f,
+        formatter,
         "missing timezone offset ('Z' or '+-HH:MM') at offset {at}"
     )
 }
 
 impl fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::TooShort { len, at } => fmt_too_short(f, *len, *at),
-            Self::Malformed { at, byte } => fmt_malformed(f, *at, *byte),
-            Self::NonDigit { field, at, byte } => fmt_non_digit(f, *field, *at, *byte),
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Every field of every variant is `Copy`, so matching on `*self` binds
+        // them by value and no arm needs to dereference.
+        match *self {
+            Self::TooShort { len, at } => fmt_too_short(formatter, len, at),
+            Self::Malformed { at, byte } => fmt_malformed(formatter, at, byte),
+            Self::NonDigit { field, at, byte } => fmt_non_digit(formatter, field, at, byte),
             Self::OutOfRange {
                 field,
                 value,
                 min,
                 max,
                 at,
-            } => fmt_out_of_range(f, *field, *value, *min, *max, *at),
-            Self::FractionWidth { digits, at } => fmt_fraction_width(f, *digits, *at),
-            Self::MissingOffset { at } => fmt_missing_offset(f, *at),
+            } => fmt_out_of_range(formatter, field, value, min, max, at),
+            Self::FractionWidth { digits, at } => fmt_fraction_width(formatter, digits, at),
+            Self::MissingOffset { at } => fmt_missing_offset(formatter, at),
         }
     }
 }

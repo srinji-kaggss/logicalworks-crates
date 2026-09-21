@@ -1,24 +1,44 @@
 # logicalworks-crates
 
-Source of truth for the estate's shared Rust foundation crates, extracted from
-[Braid](https://github.com/srinji-kaggss/Braid) and released from this workspace:
+Four independently versioned Rust crates: a zero-dependency core, a runtime for
+long-running automation, a multi-language AST front end, and an audited
+dependency storefront. Each is usable on its own. Take one and ignore the rest.
 
-| Crate | Version | Docs | Role |
+They share a workspace and a release process, not a dependency graph. Only
+`lgwks_bot` depends on `lgwks_std`, and nothing depends on `lgwks_ast`.
+
+**Contents**
+
+- [Crates](#crates)
+- [Quickstart](#quickstart)
+- [Use cases](#use-cases)
+- [What these crates are not](#what-these-crates-are-not)
+- [Relationship to adjacent crates](#relationship-to-adjacent-crates)
+- [Agent security](#agent-security)
+- [In-process background work](#in-process-background-work)
+- [Choosing a crate](#choosing-a-crate)
+- [Documentation](#documentation)
+- [Building and testing](#building-and-testing)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Crates
+
+| Crate | Version | Docs | What it gives you |
 |---|---|---|---|
-| `lgwks_std` | 0.6.3 | [docs.rs](https://docs.rs/lgwks_std) | Core functions: hex, time, id, hash, glob, pattern, json, ron, wire, fs, http, online, process, task, retry, leb128, encoding |
-| `lgwks_bot` | 0.3.2 | [docs.rs](https://docs.rs/lgwks_bot) | Async, runner, and actor surface: Observe, Evaluate, Execute, Query verbs plus the curated runtime |
-| `lgwks_ast` | 0.1.3 | [docs.rs](https://docs.rs/lgwks_ast) | The estate's code-observability lane: multi-language AST parsing plus the shared typed-diagnostic derive |
-| `lgwks_deps` | 0.1.8 | [docs.rs](https://docs.rs/lgwks_deps) | The third-party storefront: opt-in dependency features, admission, audit, freshness (`lgwks-deps check`) |
+| `lgwks_std` | 0.6.6 | [docs.rs](https://docs.rs/lgwks_std) | Everyday primitives with no async runtime required: JSON/RON/wire codecs, a blocking HTTP client, retry policies, structured logging, time and calendars, hashing, ids, globs, process control |
+| `lgwks_bot` | 0.4.2 | [docs.rs](https://docs.rs/lgwks_bot) | A runtime for bots that run for weeks: four verbs (Observe, Evaluate, Execute, Query), capability-gated authority, change-triggered execution, and supervision that bounds background work |
+| `lgwks_ast` | 0.2.2 | [docs.rs](https://docs.rs/lgwks_ast) | Parse many languages into one AST type. tree-sitter grammars behind cargo features, bounded traversal, and typed diagnostics for tools that report on code |
+| `lgwks_deps` | 0.1.12 | [docs.rs](https://docs.rs/lgwks_deps) | One audited place to opt into third-party stacks, plus `lgwks-deps check` to prove no dependency entered your build unreviewed |
 
-All four crates are Apache-2.0, Logical Works Incorporated. Versions move
-independently from one repo and one tag; the table lists the current published
-versions and the next bump publishes here.
+Versions move independently from one repository and one tag. The table lists the
+current published versions.
 
-> **Names:** package `lgwks_std` (underscore) == directory `crates/lgwks-std`
-> (hyphen) == `use lgwks_std::...`. The one exception is the gate binary
-> `lgwks-deps` (hyphen) built from library `lgwks_deps` (underscore):
-> `cargo install lgwks_deps` for the CLI, `cargo add lgwks_deps` for the
-> storefront library.
+> **Names.** Package `lgwks_std` (underscore) lives in directory
+> `crates/lgwks-std` (hyphen) and is imported as `use lgwks_std::...`. The one
+> exception is the gate binary `lgwks-deps` (hyphen), built from the library
+> `lgwks_deps` (underscore): `cargo install lgwks_deps` for the CLI,
+> `cargo add lgwks_deps` for the storefront library.
 
 ## Quickstart
 
@@ -26,31 +46,144 @@ versions and the next bump publishes here.
 cargo new demo && cd demo
 cargo add lgwks_std --features json,http
 cargo add lgwks_bot
-cargo add lgwks_deps --no-default-features
 ```
 
 ```rust
-fn main() {
-    // std+ core: zero-config primitives, zero external deps by default.
-    let now = lgwks_std::time::now_rfc3339();
-    println!("now: {now} hex: {}", lgwks_std::hex::encode(b"hi"));
+use std::io::Write;
 
-    // bot: capability-gated actors (needs grants to build, not just to run).
-    let bot = lgwks_bot::Bot::builder("demo")
-        .build(&lgwks_bot::GrantSet::empty())
-        .expect("empty bot builds with no grants");
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Output goes through an explicit locked handle, which turns a broken pipe
+    // (`demo | head`) into an ordinary `Err` instead of a panic.
+    let mut out = std::io::stdout().lock();
+
+    // Core primitives: zero-config, zero external deps by default.
+    let now = lgwks_std::time::now_rfc3339();
+    writeln!(out, "now: {now} hex: {}", lgwks_std::hex::encode(b"hi"))?;
+
+    // bot: capability-gated actors. Grants are required to build, not only to run.
+    // `build` returns a typed error; the caller decides what to do with it.
+    let bot = lgwks_bot::Bot::builder("demo").build(&lgwks_bot::GrantSet::empty())?;
     let _ = bot;
 
-    // deps: audit your own tree the way CI does.
-    let root = std::path::Path::new(".");
-    match lgwks_deps::check_dependencies(root) {
-        Ok((_register, refusals)) => assert!(refusals.is_empty()),
-        Err(e) => eprintln!("gate refused: {e}"),
-    }
+    Ok(())
 }
 ```
 
-## Which crate do I want?
+The snippet above is compiled by the workspace gate, from
+[`crates/lgwks-bot/examples/quickstart.rs`](crates/lgwks-bot/examples/quickstart.rs).
+
+The dependency gate reads a project's lockfile and its committed register, so it
+runs as a command against a project rather than from a library call:
+
+```sh
+cargo generate-lockfile   # the gate reads Cargo.lock
+cargo install lgwks_deps
+lgwks-deps init .         # write a fail-closed register
+lgwks-deps check .        # audit, and refuse any unowned external edge
+```
+
+## Use cases
+
+### Automation that runs unattended
+
+- A bot that watches an endpoint, a file, or a queue and acts when something
+  changes, rather than on every timer tick. → `lgwks_bot`
+- A webhook- or cron-driven job that retries with backoff and is safe to kill
+  mid-flight. → `lgwks_bot` for the loop, `lgwks_std::retry` for the policy
+- Long-running background work that cancels cleanly on shutdown, without a
+  leaked task or a loop that never ends. → `lgwks_bot::rt::supervise`
+
+### Giving an agent real authority, safely
+
+- An LLM-driven or rule-driven agent that must not be able to do more than you
+  granted it. Every verb checks a capability proof before it acts, so "what can
+  this agent touch?" is answerable from its grant set rather than from a reading
+  of the code. → `lgwks_bot`. You bring the model; this is the execution
+  substrate, not a model client.
+
+### HTTP and data without an async runtime
+
+- Calling an HTTP API from a CLI, a build script, or a synchronous service, where
+  pulling in a whole async runtime is the wrong trade. → `lgwks_std::http` is
+  blocking, rustls-only, and needs no tokio
+- Parsing JSON that may be truncated, streamed, or hostile. → `lgwks_std::json`
+  reports the offset it stopped at, so a partial body is a value rather than an
+  error you have to guess your way out of
+- Config in RON, or a compact binary wire format. → `lgwks_std::ron`,
+  `lgwks_std::wire`
+
+### Tools that read source code
+
+- Building a linter, a codemod, a repository audit, or an "explain this file"
+  tool across several languages. → `lgwks_ast` gives one AST type and one
+  diagnostic type across every grammar you enable
+- Reporting a parse failure with a real span. → `lgwks_ast` diagnostics carry
+  file, range, and severity
+
+### Logging you can query
+
+- Structured, levelled logs from a library without `println!` and without
+  committing your consumers to a subscriber. → `lgwks_std`, feature `trace`
+  (default on)
+
+### A dependency graph you can defend
+
+- Answering "what third-party code is in our build, and who approved it?" with a
+  command instead of an archaeology project. → `lgwks_deps`, and `lgwks-deps check`
+
+## What these crates are not
+
+- **Not an agent framework.** `lgwks_bot` runs your logic and gates its
+  authority; it does not call a model for you.
+- **Not an async runtime.** `lgwks_bot::rt` is a curated surface over tokio,
+  which owns the engine. Parity and the deliberate divergences are documented in
+  [`docs/async-parity.md`](docs/async-parity.md).
+- **Not a logging facade.** `lgwks_std::trace` re-exports `tracing`; bring your
+  own subscriber.
+- **Not a parser generator.** `lgwks_ast` wraps tree-sitter grammars; it does not
+  produce them.
+
+## Relationship to adjacent crates
+
+The crates a reader is most likely to encounter first when searching these
+problems, and where the boundary between them lies.
+
+| If you're looking for | You'll find first | How this differs |
+|---|---|---|
+| An LLM agent framework | Rig, ADK-Rust, AutoAgents, Metalcraft, neuron, anda | Those own model integration: providers, prompts, tool schemas, orchestration. `lgwks_bot` owns none of that. It is the layer beneath: what the agent is permitted to do, and a loop that terminates on request. The two compose. |
+| Zero-trust agents | Symbiont, ZeroTrustAgent, agentmesh | The same premise at a narrower boundary. See [Agent security](#agent-security). |
+| Background job processing | fang, backie, apalis, tokio-cron-scheduler | Those are queue- and database-backed workers. `lgwks_bot` provides bounded in-process supervision, for work owned by the process rather than by a broker. |
+| Multi-language parsing | tree-sitter-language-pack, rust-code-analysis, ast-grep | The same grammars. `lgwks_ast` narrows the surface to one `Language` enum, one AST type, and typed diagnostics carrying spans, selectable by cargo feature so only the shipped grammars compile. |
+| Blocking HTTP without an async runtime | `ureq`, `reqwest::blocking` | `lgwks_std::http` is the same approach with rustls-only TLS and no tokio, alongside JSON, retry, and time, so a CLI depends on one crate rather than five. |
+
+### Agent security
+
+Agent security practice has converged on a shared vocabulary: deny by default,
+runtime gating, tool allowlists, task-scoped permissions. `lgwks_bot`
+implements the first two under those names.
+
+- **Runtime gating.** Every verb invokes `Auth::check(&self.required_caps())?`
+  before it touches anything, so an unauthorized call is refused before the
+  effect rather than after it.
+- **Deny by default.** A proof covering no capability authorizes nothing. A
+  vacuous proof presented against `bot.net` is denied; that case is covered by
+  test.
+
+It does not implement short-lived credentials, MCP tool routing, human approval
+gates, or isolated enclaves. Those are absent, not partially built.
+
+### In-process background work
+
+The two conventional options for Rust background work are a fire-and-forget
+`tokio::spawn`, for short-lived tasks that do not survive a restart, and a
+database- or broker-backed queue for work that must.
+
+Neither covers the common case: work that is in-process, long-lived, and
+required to stop cleanly on shutdown. `lgwks_bot::rt::supervise` is that middle.
+Concurrency is bounded, tasks are tracked rather than detached, and a cancelled
+loop stops without waiting on a body that will never observe the cancellation.
+
+## Choosing a crate
 
 | I need... | Reach for | Feature |
 |---|---|---|
@@ -64,73 +197,41 @@ fn main() {
 | Rust source lint scan (zero-gate detectors) | `lgwks_deps` | `scan` (default for CLI) |
 | Raw `tokio` engine without the bot facade | `lgwks_deps` | `tokio*` with `default-features = false` |
 | GPU desktop UI (Zed's GPUI) | `lgwks_deps` | `gpui` with `default-features = false` |
-| Native terminal UI (AppCUI) | `lgwks_deps` | `appcui` with `default-features = false`, version 0.1.8 or newer |
+| Native terminal UI (AppCUI) | `lgwks_deps` | `appcui` with `default-features = false`, version 0.1.10 or newer |
 
-Surprises, documented once so no one re-discovers them: `online` is
-feature-gated (not in `core`); `tempfile` is dev-only (no production tempdir
-path); typed errors derive through `lgwks_ast` (`extern crate lgwks_ast as
-thiserror`), not `lgwks_std`; `lgwks_bot`'s `join!`/`select!`/`try_join!`
-re-exports need the `macros` feature and there is deliberately no `#[tokio::main]`
-equivalent — enter through `Runtime::block_on`.
+Three behaviours are worth knowing before you depend on them, and each is
+documented where it applies. `online` is feature-gated and is not part of
+`core`. `tempfile` is a development-only edge, so there is no production
+temporary-directory path. Typed errors derive through `lgwks_ast`
+(`extern crate lgwks_ast as thiserror`) rather than `lgwks_std`. The
+`join!`/`select!`/`try_join!` re-exports in `lgwks_bot` require the `macros`
+feature, and there is deliberately no `#[tokio::main]` equivalent: entry is
+through `Runtime::block_on`.
 
-## The deps law
+## Documentation
 
-Cognitive load is three surfaces plus one grandfathered parser:
+Depth lives in [`docs/`](docs/), not in this file.
 
-- **`lgwks_std`** — the std+ core.
-- **`lgwks_bot`** — async, runners, and the actor roles.
-- **`lgwks_deps`** — everything else: the **storefront**. Install it and select
-  the dependency features you want; capability features are default-off. The
-  reviewed `scan` gate-tool feature is the explicit default-on exception.
-- **`lgwks_ast`** — standalone. Already adopted; grandfathered, not a lane to
-  grow.
+| Document | Covers |
+|---|---|
+| [`docs/dependency-doctrine.md`](docs/dependency-doctrine.md) | How a dependency is admitted, the replacement matrix, and where no equivalent exists. Read this before adding a crate. |
+| [`docs/async-parity.md`](docs/async-parity.md) | The `lgwks_bot::rt` surface against tokio and the alternatives: the capability matrix, the open gaps, and the deliberate divergences. |
+| [`docs/async-sdk-shape.md`](docs/async-sdk-shape.md) | The async surface as an SDK: its shape, its invariants, and how to migrate. |
+| [`docs/bot-on-ecs.md`](docs/bot-on-ecs.md) | Bot semantics on an ECS substrate, and what that mapping costs. |
+| [`docs/bevy-admission.md`](docs/bevy-admission.md) | The Bevy ECS decision and the alternatives measured against it. |
+| [`docs/candle-admission.md`](docs/candle-admission.md) | ML inference admission: authority, transitive surface, verification. |
+| [`docs/appcui-admission.md`](docs/appcui-admission.md) | Native terminal UI admission: authority and verification. |
+| [`docs/distributed-boundaries.md`](docs/distributed-boundaries.md) | What these crates do and refuse on a distributed network path. Read it before placing them on one. |
+| [`docs/releasing.md`](docs/releasing.md) | The release process. |
+| [`CHANGELOG.md`](CHANGELOG.md) | Per-release changes across all four crates. |
+| [`SECURITY.md`](SECURITY.md) | Attack surface, reporting process, and advisories assessed. |
 
-Every new third-party dependency is an optional, feature-gated edge of
-`lgwks_deps` — e.g.
-`lgwks_deps = { version = "0.1.7", default-features = false, features = ["gpui"] }` —
-registered with `owner = "lgwks_deps"`. Do NOT `cargo add tokio` / `serde` /
-`regex` / `syn` directly: each maps to an estate path
-(`lgwks_bot::rt`, `lgwks_std::json`, `lgwks_std::pattern`,
-`lgwks_deps::scan`), and `lgwks-deps check` refuses the second edge.
-`lgwks_std`'s core feature stack and `lgwks_ast`'s parser are grandfathered:
-`lgwks_std` cannot route through `lgwks_deps`, because `lgwks_deps` depends on
-`lgwks_std` and the reverse would be a cycle.
+Each crate also carries its own README: [`lgwks_std`](crates/lgwks-std/README.md),
+[`lgwks_bot`](crates/lgwks-bot/README.md),
+[`lgwks_ast`](crates/lgwks-ast/README.md),
+[`lgwks_deps`](crates/lgwks-deps/README.md).
 
-Downstream derive owners note: `lgwks_std::json` re-exports `serde` derives,
-so annotate types with `#[serde(crate = "lgwks_std::json::serde")]` — never add
-a direct `serde` edge to get the derive to resolve.
-
-## Consumption contract
-
-1. **Core functions → `std` + `lgwks_std`.** If the capability exists in
-   `lgwks_std`, depending on the upstream crate directly is duplication, not
-   choice — it becomes an `lgwks_std` module (CONSOLIDATE) or is removed
-   (ELIMINATE).
-2. **Async, runners, actor roles → `lgwks_bot`.** Capability-gated
-   `(condition, action)` chains over the shipped domains; a bot missing a grant
-   fails at build time, not at runtime.
-3. **Multi-language parsing → `lgwks_ast`.** Language identification, grammar
-   selection, and bounded tree traversal for code tools. Consumers do not
-   depend on `ast-grep` directly; a language's grammar is a cargo feature, so
-   each tool compiles exactly the languages it selects.
-4. **Everything else → an `lgwks_deps` storefront feature.** Register the edge
-   in `contract/APPROVED.toml` (owner, capability, source, requirement,
-   consumers, kinds) and expose it as an optional feature. `lgwks-deps check`
-   refuses unregistered edges, drifted requirements or sources, and stale unused
-   approvals — that is the duplication protection.
-
-`BotSpec` JSON is validate-only: specs never materialize into bots without an
-explicit `Bot::builder` call carrying grants. There is deliberately no `bot!`
-proc-macro — the builder chain is the DSL, and codegen would hide the
-per-call `Auth::check` auditors read while dragging `syn` into every consumer.
-
-Distributed mesh boundaries (retries execute caller-side via
-`lgwks_std::retry`, single-attempt HTTP, no pooling, no mTLS material, no
-consensus/WAL/gossip, no tracing facade) are declared in
-[`docs/distributed-boundaries.md`](docs/distributed-boundaries.md) — read it
-before putting these crates on a mesh data path.
-
-## Checks
+## Building and testing
 
 ```sh
 cargo test --workspace --all-targets --locked
@@ -140,7 +241,12 @@ cargo run -p lgwks_deps -- check .
 ./scripts/lgwks-std-package-smoke.sh
 ```
 
-## Releasing
+## Contributing
 
-Versions bump here; the tagged commit publishes to crates.io. Process:
-`CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md). Report vulnerabilities through the
+process in [`SECURITY.md`](SECURITY.md), not as a public issue.
+
+## License
+
+Apache-2.0, Copyright 2026 Logical Works Incorporated. Each crate ships its own
+`LICENSE` file, for example [`crates/lgwks-std/LICENSE`](crates/lgwks-std/LICENSE).

@@ -10,7 +10,13 @@
 pub struct Regex(regex::Regex);
 
 /// Error returned when a pattern fails to compile.
+///
+/// The two fields are the caller's pattern and the regex engine's own
+/// description of what it rejected. `#[non_exhaustive]` lets a later revision
+/// carry a structured span or a category without breaking a caller that
+/// destructures the struct.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PatternError {
     /// The pattern that failed.
     pub pattern: String,
@@ -39,48 +45,61 @@ impl Regex {
     pub fn new(pattern: &str) -> Result<Self, PatternError> {
         regex::Regex::new(pattern)
             .map(Self)
-            .map_err(|e| PatternError {
-                pattern: pattern.to_string(),
-                message: e.to_string(),
+            .map_err(|err| PatternError {
+                pattern: pattern.to_owned(),
+                message: err.to_string(),
             })
     }
 
     /// Reports whether the pattern matches anywhere in `text`.
+    #[must_use]
     pub fn is_match(&self, text: &str) -> bool {
         self.0.is_match(text)
     }
 
     /// Returns the first match in `text`, or `None`.
+    ///
+    /// Offsets are byte offsets into `text`; the borrowed slice is the matched
+    /// text itself, so a caller that only needs the span still pays nothing for
+    /// the `Match`.
+    #[must_use]
     pub fn find<'t>(&self, text: &'t str) -> Option<Match<'t>> {
-        self.0.find(text).map(|m| Match {
-            text: m.as_str(),
-            start: m.start(),
-            end: m.end(),
+        self.0.find(text).map(|matched| Match {
+            text: matched.as_str(),
+            start: matched.start(),
+            end: matched.end(),
         })
     }
 
     /// Returns all non-overlapping matches in `text`.
+    #[must_use]
     pub fn find_all<'t>(&self, text: &'t str) -> Vec<Match<'t>> {
         self.0
             .find_iter(text)
-            .map(|m| Match {
-                text: m.as_str(),
-                start: m.start(),
-                end: m.end(),
+            .map(|matched| Match {
+                text: matched.as_str(),
+                start: matched.start(),
+                end: matched.end(),
             })
             .collect()
     }
 
     /// Returns the capture groups for the first match, or `None`.
+    ///
+    /// Index 0 is the whole match. A group that did not participate in the
+    /// match is `Some("")` when it matched empty and `None` when it did not
+    /// participate; the length is always the pattern's group count plus one.
+    #[must_use]
     pub fn captures<'t>(&self, text: &'t str) -> Option<Vec<Option<&'t str>>> {
         self.0.captures(text).map(|caps| {
             (0..caps.len())
-                .map(|i| caps.get(i).map(|m| m.as_str()))
+                .map(|i| caps.get(i).map(|matched| matched.as_str()))
                 .collect()
         })
     }
 
     /// Replace the first match with `replacement`.
+    #[must_use]
     pub fn replace(&self, text: &str, replacement: &str) -> String {
         self.0.replace(text, replacement).into_owned()
     }
@@ -88,11 +107,16 @@ impl Regex {
     /// The text with every non-overlapping match replaced by `replacement`;
     /// `$name` and `${name}` in the replacement expand to capture groups, and
     /// an empty match at the cursor advances rather than looping.
+    #[must_use]
     pub fn replace_all(&self, text: &str, replacement: &str) -> String {
         self.0.replace_all(text, replacement).into_owned()
     }
 
     /// Split `text` by occurrences of the pattern.
+    ///
+    /// The separators are removed and the borrowed pieces are the text between
+    /// them; a pattern that can match empty splits between every character.
+    #[must_use]
     pub fn split<'t>(&self, text: &'t str) -> Vec<&'t str> {
         self.0.split(text).collect()
     }
@@ -105,7 +129,12 @@ impl core::fmt::Debug for Regex {
 }
 
 /// A single match result.
+///
+/// `text` is the matched slice of the haystack and the offsets are the byte
+/// range it occupies, so `start` and `end` stay meaningful for a caller that
+/// only kept the numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Match<'t> {
     /// The matched text.
     pub text: &'t str,
@@ -131,76 +160,96 @@ mod tests {
         assert!(Regex::new(r"[unclosed").is_err());
     }
 
+    // A test that must observe a refusal returns `Result` and binds the
+    // refusal explicitly, so a successful compile fails the test naming the
+    // expectation it broke instead of panicking inside an `unwrap_err`.
     #[test]
-    fn error_display_escapes_control_characters() {
+    fn error_display_escapes_control_characters() -> Result<(), Box<dyn std::error::Error>> {
         // An invalid pattern containing a newline must render as an escaped
         // `\n`, not a raw byte that forges a second line in a caller's log.
-        let error = Regex::new("(\n").unwrap_err();
+        let Err(error) = Regex::new("(\n") else {
+            return Err("a pattern with an unclosed group must not compile".into());
+        };
         let rendered = error.to_string();
         assert!(
             !rendered.contains('\n'),
             "raw newline survived: {rendered:?}"
         );
         assert!(rendered.contains("invalid pattern"));
+        Ok(())
     }
 
     #[test]
-    fn is_match_finds_substring() {
-        let re = Regex::new(r"\d+").unwrap();
+    fn is_match_finds_substring() -> Result<(), PatternError> {
+        let re = Regex::new(r"\d+")?;
         assert!(re.is_match("abc123def"));
         assert!(!re.is_match("abcdef"));
+        Ok(())
     }
 
     #[test]
-    fn find_returns_first_match() {
-        let re = Regex::new(r"\d+").unwrap();
-        let m = re.find("abc123def456").unwrap();
-        assert_eq!(m.text, "123");
-        assert_eq!(m.start, 3);
-        assert_eq!(m.end, 6);
+    fn find_returns_first_match() -> Result<(), Box<dyn std::error::Error>> {
+        let re = Regex::new(r"\d+")?;
+        let matched = re
+            .find("abc123def456")
+            .ok_or("the digit pattern must match abc123def456")?;
+        assert_eq!(matched.text, "123");
+        assert_eq!(matched.start, 3);
+        assert_eq!(matched.end, 6);
+        Ok(())
     }
 
     #[test]
-    fn find_all_returns_every_match() {
-        let re = Regex::new(r"\d+").unwrap();
+    fn find_all_returns_every_match() -> Result<(), PatternError> {
+        let re = Regex::new(r"\d+")?;
         let matches = re.find_all("a1b22c333");
         assert_eq!(matches.len(), 3);
         assert_eq!(matches[0].text, "1");
         assert_eq!(matches[1].text, "22");
         assert_eq!(matches[2].text, "333");
+        Ok(())
     }
 
     #[test]
-    fn captures_extracts_groups() {
-        let re = Regex::new(r"(\w+)@(\w+)\.(\w+)").unwrap();
-        let caps = re.captures("user@host.com").unwrap();
-        assert_eq!(caps[1], Some("user"));
-        assert_eq!(caps[2], Some("host"));
-        assert_eq!(caps[3], Some("com"));
+    fn captures_extracts_groups() -> Result<(), Box<dyn std::error::Error>> {
+        let re = Regex::new(r"(\w+)@(\w+)\.(\w+)")?;
+        let captures = re
+            .captures("user@host.com")
+            .ok_or("the three-group pattern must match user@host.com")?;
+        assert_eq!(captures[1], Some("user"));
+        assert_eq!(captures[2], Some("host"));
+        assert_eq!(captures[3], Some("com"));
+        Ok(())
     }
 
     #[test]
-    fn replace_substitutes_first() {
-        let re = Regex::new(r"\d+").unwrap();
+    fn replace_substitutes_first() -> Result<(), PatternError> {
+        let re = Regex::new(r"\d+")?;
         assert_eq!(re.replace("a1b2c3", "X"), "aXb2c3");
+        Ok(())
     }
 
     #[test]
-    fn replace_all_substitutes_every_match() {
-        let re = Regex::new(r"\d+").unwrap();
+    fn replace_all_substitutes_every_match() -> Result<(), PatternError> {
+        let re = Regex::new(r"\d+")?;
         assert_eq!(re.replace_all("a1b2c3", "X"), "aXbXcX");
+        Ok(())
     }
 
     #[test]
-    fn split_divides_on_pattern() {
-        let re = Regex::new(r"[,;]\s*").unwrap();
+    fn split_divides_on_pattern() -> Result<(), PatternError> {
+        let re = Regex::new(r"[,;]\s*")?;
         assert_eq!(re.split("a, b; c,d"), vec!["a", "b", "c", "d"]);
+        Ok(())
     }
 
     #[test]
-    fn error_includes_pattern_text() {
-        let err = Regex::new(r"(unclosed").unwrap_err();
-        assert!(err.pattern.contains("unclosed"));
-        assert!(!err.message.is_empty());
+    fn error_includes_pattern_text() -> Result<(), Box<dyn std::error::Error>> {
+        let Err(error) = Regex::new(r"(unclosed") else {
+            return Err("a pattern with an unclosed group must not compile".into());
+        };
+        assert!(error.pattern.contains("unclosed"));
+        assert!(!error.message.is_empty());
+        Ok(())
     }
 }

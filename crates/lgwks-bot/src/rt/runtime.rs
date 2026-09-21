@@ -1,6 +1,6 @@
 //! Explicit ownership of the async runtime.
 //!
-//! The estate does not hide a global reactor. A [`Runtime`] is constructed,
+//! This crate does not hide a global reactor. A [`Runtime`] is constructed,
 //! owned, and dropped by its caller; every task runs on a runtime the caller
 //! can name. [`Handle`] is the cloneable capability to place work on a runtime
 //! that is owned elsewhere.
@@ -26,8 +26,16 @@ pub const MAX_WORKER_THREADS: usize = 1024;
 /// that value to keep resource use bounded.
 #[derive(Debug, Default)]
 pub struct Builder {
+    /// Explicit native worker count, or `None` to discover it. `NonZeroUsize`
+    /// because a runtime with no worker cannot make progress; `Option` because
+    /// discovery, not a hardcoded constant, is the default.
     worker_threads: Option<NonZeroUsize>,
+    /// The complete OS thread name for native workers, or `None` for the
+    /// `lgwks-bot` default. Ignored on WASM, which has no worker thread.
     thread_name: Option<String>,
+    /// Ceiling on the blocking pool shared by `spawn_blocking` and the `fs`
+    /// driver, or `None` for the engine's default. `NonZeroUsize` because the
+    /// engine refuses zero.
     max_blocking_threads: Option<NonZeroUsize>,
 }
 
@@ -110,6 +118,16 @@ impl Builder {
     }
 }
 
+/// The native worker count discovered from the OS, or `None` when the platform
+/// cannot report it.
+///
+/// Discovery rather than a constant: a hardcoded worker count is either too
+/// small for the machine it lands on or wastes threads on a small one, and the
+/// engine's own default would be a second, invisible policy. A caller that
+/// wants a fixed count sets [`Builder::worker_threads`] explicitly.
+///
+/// Native-only: WASM has no worker-thread driver, so the current-thread
+/// scheduler is used unconditionally there and this is not compiled.
 #[cfg(not(target_family = "wasm"))]
 fn discover_workers() -> Option<NonZeroUsize> {
     std::thread::available_parallelism().ok()
@@ -125,6 +143,9 @@ fn discover_workers() -> Option<NonZeroUsize> {
 /// non-yielding code cannot be forcibly stopped, and a started blocking task
 /// may continue on its blocking thread after shutdown returns.
 pub struct Runtime {
+    /// The owned engine runtime. Private so the engine type never appears in
+    /// this crate's public surface: a consumer names [`Runtime`], never
+    /// `lgwks_deps::tokio::runtime::Runtime`.
     inner: lgwks_deps::tokio::runtime::Runtime,
 }
 
@@ -175,6 +196,10 @@ impl Runtime {
 /// [`JoinError::is_cancelled`]: lgwks_deps::tokio::task::JoinError::is_cancelled
 #[derive(Clone, Debug)]
 pub struct Handle {
+    /// The engine's cloneable handle. Private for the same reason as
+    /// [`Runtime::inner`]: the engine type stays behind the facade. It holds no
+    /// ownership of the runtime, which is why a handle outliving its runtime
+    /// reports a cancelled join rather than keeping the runtime alive.
     inner: lgwks_deps::tokio::runtime::Handle,
 }
 
@@ -182,8 +207,8 @@ impl Handle {
     /// Place a future on the runtime without waiting for it.
     ///
     /// If the owning runtime has already been dropped, the future is never
-    /// scheduled and the returned handle resolves to a cancelled [`JoinError`]
-    /// — this call does not panic.
+    /// scheduled and the returned handle resolves to a cancelled [`JoinError`];
+    /// this call does not panic.
     ///
     /// [`JoinError`]: crate::rt::task::JoinError
     pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
@@ -207,12 +232,24 @@ impl Handle {
 /// code. It builds and tears down a runtime per call, so code that makes
 /// repeated async calls should hold a [`Runtime`] instead. Panics if called
 /// from within an async context, and panics if the OS refuses the runtime's
-/// driver resources — a condition under which no async work could proceed.
+/// driver resources, a condition under which no async work could proceed.
 pub fn block_on<F: Future>(future: F) -> F::Output {
     let mut builder = lgwks_deps::tokio::runtime::Builder::new_current_thread();
     builder.enable_all();
-    let runtime = builder
-        .build()
-        .expect("lgwks_bot::rt: the OS refused a current-thread runtime");
+    let runtime = match builder.build() {
+        Ok(runtime) => runtime,
+        // The contract is that this reports on the calling thread rather than
+        // returning an error, and there is no error channel in `F::Output` to
+        // report through. `resume_unwind` is the crate's form for a documented,
+        // unavoidable panic (`lgwks_std::task::JoinHandle` uses it for the same
+        // reason): the caller is a synchronous frame with nowhere to propagate
+        // to, and the alternative (hanging on a future no driver can poll) is
+        // strictly worse. A current-thread runtime needs only the driver's
+        // resources, so an OS refusal means every timer and IO operation in
+        // `future` would be unrunnable anyway.
+        Err(error) => std::panic::resume_unwind(Box::new(format!(
+            "lgwks_bot::rt: the OS refused a current-thread runtime: {error}"
+        ))),
+    };
     runtime.block_on(future)
 }

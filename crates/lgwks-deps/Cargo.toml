@@ -1,7 +1,7 @@
 [package]
 name = "lgwks_deps"
-description = "Dependency admission, the third-party storefront, and freshness for the std+ estate: every external edge names a human-approved owner."
-version = "0.1.8"
+description = "Dependency admission and supply-chain policy for a Rust workspace: every external edge names a human-approved owner, verified in CI."
+version = "0.1.12"
 edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"
@@ -9,24 +9,24 @@ repository = "https://github.com/srinji-kaggss/logicalworks-crates"
 documentation = "https://docs.rs/lgwks_deps"
 readme = "README.md"
 homepage = "https://github.com/srinji-kaggss/logicalworks-crates/tree/main/crates/lgwks-deps"
-categories = ["development-tools"]
-keywords = ["dependencies", "audit", "supply-chain", "lgwks"]
+categories = ["development-tools", "config"]
+keywords = ["dependencies", "audit", "supply-chain", "cargo", "policy"]
 
-# The deps crate consumes JSON only through the estate facade it enforces.
+# This crate consumes JSON only through the facade it enforces.
 # Depending on serde_json directly here would make the checker its own first
 # bypass.
 #
 # syn is the one exception to the zero-dependency gate-tool rule, and it is
 # not self-refuting: a Rust parser is the only honest way to police Rust
-# source (the `scan` subcommand ports keel's zero-gate detectors so every
-# estate repo runs the same verdicts from one binary). Pinned to the same
-# major the estate already vets for serde's derive stack. `scan` is a default
+# source (the `scan` subcommand carries the same fallible-check detectors, so
+# every repository here runs the same verdicts from one binary). Pinned to the same
+# major already vetted for serde's derive stack. `scan` is a default
 # feature so `cargo install lgwks_deps` keeps working with no flags;
 # embedders who only call `check_dependencies` can disable default features.
 [features]
 default = ["scan"]
 scan = ["dep:syn", "dep:proc-macro2"]
-# Storefront features. `lgwks_deps` is the estate's install-and-select surface:
+# Storefront features. `lgwks_deps` is the install-and-select surface:
 # the end user enables exactly the third-party capability they want, and the
 # default build pulls none of them. gpui is Zed's GPU desktop UI framework;
 # `tokio` is the async engine behind `lgwks_bot`'s runner surface.
@@ -46,7 +46,12 @@ tokio = ["dep:tokio"]
 tokio-time = ["tokio", "tokio/time"]
 tokio-sync = ["tokio", "tokio/sync"]
 tokio-macros = ["tokio", "tokio/macros"]
-tokio-net = ["tokio", "tokio/io-util", "tokio/net"]
+# The reader/writer traits and their extensions. Split out from `net` because a
+# consumer can need `AsyncRead`/`AsyncWrite` over a pipe, a file, or its own
+# transport without ever opening a socket — and until this existed, `io-util`
+# was reachable only by enabling the whole networking stack to get it.
+tokio-io = ["tokio", "tokio/io-util", "tokio/io-std"]
+tokio-net = ["tokio-io", "tokio/net"]
 tokio-process = ["tokio", "tokio/process"]
 tokio-fs = ["tokio", "tokio/fs"]
 tokio-signal = ["tokio", "tokio/signal"]
@@ -54,11 +59,21 @@ tokio-full = [
     "tokio-time",
     "tokio-sync",
     "tokio-macros",
+    "tokio-io",
     "tokio-net",
     "tokio-process",
     "tokio-fs",
     "tokio-signal",
 ]
+# ECS storefront. One state substrate serves three consumers: `lgwks_bot`'s
+# four-verb actors, drishti's incremental derivation, and the GPU framework's
+# demand-driven execution. `bevy-ecs` is the substrate; the other three are what
+# turn it into a runtime rather than a data structure. All four stay default-off
+# and pull no renderer, no windowing, and no audio.
+bevy-ecs = ["dep:bevy_ecs"]
+bevy-app = ["bevy-ecs", "dep:bevy_app"]
+bevy-time = ["bevy-ecs", "dep:bevy_time"]
+bevy-state = ["bevy-ecs", "dep:bevy_state"]
 
 [dependencies]
 lgwks_std = { workspace = true, features = ["json"] }
@@ -66,6 +81,17 @@ syn = { version = "2", features = ["full", "visit", "parsing"], optional = true 
 proc-macro2 = { version = "1", features = ["span-locations"], optional = true }
 gpui = { version = "0.2", optional = true }
 appcui = { version = "=0.5.1", default-features = false, optional = true }
+# Bevy's ECS and the three crates that make it a runtime. `default-features =
+# false` throughout, and two omissions are deliberate: `bevy_reflect` stays off
+# (it is the expensive half of `bevy_ecs`'s default set and this workspace does not
+# need runtime type reflection), and `multi_threaded` stays off, because the
+# multithreaded executor admits any system whose access set is disjoint from the
+# running set, so the order of two non-conflicting systems is not fixed. A bot
+# polling sources does not need parallel scheduling and cannot afford that.
+bevy_ecs = { version = "0.19", default-features = false, features = ["std"], optional = true }
+bevy_app = { version = "0.19", default-features = false, optional = true }
+bevy_time = { version = "0.19", default-features = false, optional = true }
+bevy_state = { version = "0.19", default-features = false, optional = true }
 # The engine is compiled `default-features = false` with the portable `rt`
 # feature always on. Native targets add `rt-multi-thread`; WASM targets use the
 # current-thread runtime because Tokio does not provide its multi-thread driver
@@ -96,5 +122,12 @@ path = "src/lib.rs"
 workspace = true
 
 [package.metadata.docs.rs]
-all-features = true
+# Not `all-features`. docs.rs builds for x86_64-unknown-linux-gnu, and two
+# storefront features are platform-bound: `gpui` pulls `objc2`, which refuses to
+# compile off Apple targets, and `ml-candle-metal` selects Candle's Metal
+# backend. With `all-features = true` every published version failed to build,
+# so this crate had no rendered documentation at all. This list is the set the
+# CI doc and clippy lanes already verify on Linux; the platform-bound features
+# are covered by the per-platform jobs instead.
+features = ["tokio-full", "appcui"]
 rustdoc-args = ["--cfg", "docsrs"]

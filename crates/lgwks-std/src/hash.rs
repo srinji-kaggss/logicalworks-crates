@@ -1,6 +1,6 @@
 //! `hash` owns content-addressable hashing and enforces INV-HASH-DETERMINISTIC:
 //! the same input bytes always produce the same digest, and the digest is the
-//! BLAKE3 algorithm — the sole content-identity hash in this crate.
+//! BLAKE3 algorithm, the sole content-identity hash in this crate.
 
 /// A 32-byte BLAKE3 digest.
 ///
@@ -28,28 +28,47 @@ impl Eq for Digest {}
 
 impl Digest {
     /// The raw 32-byte digest.
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
     /// Lowercase hex encoding of the digest (64 characters).
+    #[must_use]
     pub fn to_hex(&self) -> String {
         crate::hex::encode(self.0)
     }
 
     /// Parse a 64-character hex string into a digest.
-    pub fn from_hex(s: &str) -> Result<Self, DigestParseError> {
-        if s.len() != 64 {
-            return Err(DigestParseError::WrongLength { len: s.len() });
+    ///
+    /// Upper and lower case are both accepted. Length is validated first, so a
+    /// short or long input reports [`DigestParseError::WrongLength`] with the
+    /// observed length rather than a hex offset rebased onto a string that was
+    /// never the right shape. The decoded bytes are then moved into the fixed
+    /// 32-byte array without a panic path: the conversion is fallible in the
+    /// type system, and although the length check above makes it infallible in
+    /// practice, a failure maps back to the same `WrongLength` rather than
+    /// aborting the process.
+    pub fn from_hex(text: &str) -> Result<Self, DigestParseError> {
+        if text.len() != 64 {
+            return Err(DigestParseError::WrongLength { len: text.len() });
         }
-        let bytes = crate::hex::decode(s).map_err(DigestParseError::Hex)?;
-        let arr: [u8; 32] = bytes.try_into().expect("64 hex chars = 32 bytes");
-        Ok(Self(arr))
+        let bytes = crate::hex::decode(text).map_err(DigestParseError::Hex)?;
+        let raw: [u8; 32] = bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| DigestParseError::WrongLength { len: bytes.len() })?;
+        Ok(Self(raw))
     }
 }
 
 /// Error from parsing a hex string into a [`Digest`].
+///
+/// Variants are stable and machine-readable; `#[non_exhaustive]` lets a later
+/// revision add a rejection reason without breaking callers that match on the
+/// current two.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum DigestParseError {
     /// Input was not exactly 64 hex characters (32 bytes).
     WrongLength {
@@ -62,11 +81,11 @@ pub enum DigestParseError {
 
 impl core::fmt::Display for DigestParseError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
+        match *self {
             Self::WrongLength { len } => {
                 write!(f, "digest hex must be 64 characters, got {len}")
             }
-            Self::Hex(e) => write!(f, "{e}"),
+            Self::Hex(ref err) => write!(f, "{err}"),
         }
     }
 }
@@ -86,17 +105,19 @@ impl core::fmt::Display for Digest {
 }
 
 /// Hash `data` with BLAKE3 and return the 32-byte digest.
+#[must_use]
 pub fn blake3(data: &[u8]) -> Digest {
     Digest(*blake3::hash(data).as_bytes())
 }
 
 /// Hash `data` with keyed BLAKE3 under `key` and return the 32-byte digest.
 ///
-/// This is the estate's message-authentication primitive: whoever holds `key`
+/// This is the message-authentication primitive: whoever holds `key`
 /// can recompute the tag, whoever does not cannot forge one. Use it where a
 /// checksum is not enough because the writer is adversarial (audit chains,
 /// sealed receipts). The key must come from outside the sealed artifact
 /// (environment, keyring); a key stored beside the tags proves nothing.
+#[must_use]
 pub fn keyed(key: &[u8; 32], data: &[u8]) -> Digest {
     Digest(*blake3::keyed_hash(key, data).as_bytes())
 }
@@ -106,17 +127,25 @@ pub struct Hasher(blake3::Hasher);
 
 impl Hasher {
     /// Create a new incremental hasher.
+    #[must_use]
     pub fn new() -> Self {
         Self(blake3::Hasher::new())
     }
 
     /// Feed bytes into the hasher.
+    ///
+    /// Returns `&mut Self` so calls chain; the digest is unchanged by how the
+    /// input was split across calls, which the test below pins.
     pub fn update(&mut self, data: &[u8]) -> &mut Self {
         self.0.update(data);
         self
     }
 
     /// Finalize and return the digest.
+    ///
+    /// Borrows rather than consumes, so a caller can keep feeding the same
+    /// hasher; the digest is a snapshot of the bytes written so far.
+    #[must_use]
     pub fn finalize(&self) -> Digest {
         Digest(*self.0.finalize().as_bytes())
     }
@@ -136,18 +165,18 @@ mod tests {
 
     #[test]
     fn empty_input_matches_blake3_spec() {
-        let d = blake3(b"");
+        let digest = blake3(b"");
         assert_eq!(
-            d.to_hex(),
+            digest.to_hex(),
             "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
         );
     }
 
     #[test]
     fn deterministic_across_calls() {
-        let a = blake3(b"hello world");
-        let b = blake3(b"hello world");
-        assert_eq!(a, b);
+        let first = blake3(b"hello world");
+        let second = blake3(b"hello world");
+        assert_eq!(first, second);
     }
 
     #[test]
@@ -158,24 +187,25 @@ mod tests {
     #[test]
     fn incremental_matches_oneshot() {
         let oneshot = blake3(b"hello world");
-        let mut h = Hasher::new();
-        h.update(b"hello ");
-        h.update(b"world");
-        assert_eq!(h.finalize(), oneshot);
+        let mut hasher = Hasher::new();
+        hasher.update(b"hello ");
+        hasher.update(b"world");
+        assert_eq!(hasher.finalize(), oneshot);
     }
 
     #[test]
-    fn hex_roundtrip() {
-        let d = blake3(b"test");
-        let hex = d.to_hex();
-        let parsed = Digest::from_hex(&hex).unwrap();
-        assert_eq!(d, parsed);
+    fn hex_roundtrip() -> Result<(), DigestParseError> {
+        let digest = blake3(b"test");
+        let hex = digest.to_hex();
+        let parsed = Digest::from_hex(&hex)?;
+        assert_eq!(digest, parsed);
+        Ok(())
     }
 
     #[test]
     fn display_is_hex() {
-        let d = blake3(b"");
-        assert_eq!(format!("{d}"), d.to_hex());
+        let digest = blake3(b"");
+        assert_eq!(format!("{digest}"), digest.to_hex());
     }
 
     #[test]

@@ -1,23 +1,26 @@
-# Dependency doctrine — how the estate avoids a million crates
+# Dependency doctrine
 
-This is the document an agent reads before typing `cargo add`. It exists
-because the default failure of an AI coding agent in a Rust repo is to reach
-for the crate it saw most often in training — `tokio`, `syn`, `serde_json`,
-`regex`, `uuid`, `chrono`, `walkdir`, `reqwest` — even when the code in front
-of it already has a first-party equivalent. Every added edge is supply-chain
-surface, a build-time cost, and a license and advisory obligation. The estate
-pays for a small number of those on purpose, and refuses the rest.
+This document defines the dependency policy for the Logical Works crates: which
+capabilities are provided in-tree, which third-party crates are admitted, and
+how a new dependency is registered. It applies to every crate in this workspace.
+
+Every dependency edge carries supply-chain surface, build-time cost, and license
+and advisory obligations. Widely used crates (`tokio`, `syn`, `serde_json`,
+`regex`, `uuid`, `chrono`, `walkdir`, `reqwest`) are frequently added by habit
+even when a first-party equivalent already exists in the tree. This project pays
+those costs for a small, deliberate set of dependencies and declines the
+remainder.
 
 The rule, in one line: **if the capability is in `std`, `lgwks_std`,
 `lgwks_bot`, or `lgwks_ast`, use it; a new third-party dependency is an
 optional, feature-gated edge of `lgwks_deps`, registered with a reason and
 never built unless the end user selects it.**
 
-## 0. The deps law (Director, 2026-09-12)
+## 0. The dependency law (Decision, 2026-09-12)
 
 Cognitive load is `std` + `bot` + `deps`, plus the standalone `ast`:
 
-- `lgwks_std` — the std+ core.
+- `lgwks_std`: the core surface, depended on by the other three or used alone.
 - `lgwks_bot` — async, runners, actors.
 - `lgwks_deps` — the **storefront**: install it, select features, get deps.
 - `lgwks_ast` — standalone, grandfathered.
@@ -38,15 +41,15 @@ step up is an escalation that needs a stated reason:
 | # | Rung | Meaning |
 |---|------|---------|
 | 1 | `std` / `core` / `alloc` | Preferred unconditionally. Zero supply-chain cost. |
-| 2 | `lgwks_std` | The estate substrate: hex, base64, time, id, hash, glob, pattern, json, ron, wire, fs, task, leb128, encoding, http, online. |
+| 2 | `lgwks_std` | The workspace substrate: hex, base64, time, id, hash, glob, pattern, json, ron, wire, fs, task, leb128, encoding, http, online. |
 | 3 | `lgwks_bot` | Async, runners, and actor roles, including the curated runtime surface. |
 | 4 | `lgwks_deps` storefront | Every other third-party capability, as an optional feature the end user selects. |
-| 5 | ELIMINATE | The capability belongs in `lgwks_std`/std — write the minimal zero-dep implementation there. |
-| 6 | CONSOLIDATE | Several crates solve the same problem — pick one, retire the rest. |
+| 5 | ELIMINATE | The capability belongs in `lgwks_std`/std: write the minimal zero-dep implementation there. |
+| 6 | CONSOLIDATE | Several crates solve the same problem: pick one, retire the rest. |
 | 7 | VENDOR | Audited upstream source checked into the workspace, not a registry edge. |
 | 8 | BOUNDARY | A third-party crate approved in `contract/APPROVED.toml` with a human sign-off and a reason naming what `std` cannot do. |
 
-ELIMINATE and CONSOLIDATE crates never get a register entry — they become a
+ELIMINATE and CONSOLIDATE crates never get a register entry: they become a
 module in `lgwks_std` (or are removed). `tier` in the register admits only
 `boundary` and `vendor`. A new BOUNDARY edge is normally an optional feature of
 the `lgwks_deps` storefront (`owner = "lgwks_deps"`), so it is never built
@@ -60,26 +63,25 @@ Before adding any edge:
    `available_parallelism` (not `num_cpus`), `std::sync::mpsc`,
    `std::thread`, `std::fs`, `std::net`, integer `from_le_bytes` (not
    `byteorder`). If yes, stop.
-2. **Does an estate module do it?** Check the matrix in §3. If yes, import
-   `lgwks_std`, `lgwks_bot`, or `lgwks_ast` — not the crate underneath.
-3. **Is it a Rust parser or multi-language parser?** Rust source scanning is
-   owned by `lgwks_deps::scan`; multi-language parsing by `lgwks_ast`. Do not
-   add a second parser (§5).
+2. **Does a workspace module do it?** Check the matrix in §3. If yes, import
+   `lgwks_std`, `lgwks_bot`, or `lgwks_ast`, not the crate underneath.
+3. **Is it a Rust parser or multi-language parser?** Rust source scanning
+   belongs to `lgwks_deps::scan` and multi-language parsing to `lgwks_ast`. A
+   second parser is not admitted (§5).
 4. **Is it async / actor work?** Async, runners, and actor roles are
    `lgwks_bot`; its tokio engine is selected through the `lgwks_deps` storefront.
    The zero-dependency synchronous executor is `lgwks_std::task`. See §4.
 5. **Otherwise** it is a storefront BOUNDARY decision: add the crate as an
    optional feature of `lgwks_deps`, run
    `cargo run -p lgwks_deps -- request <crate> <version>`, fill the block with
-   `owner = "lgwks_deps"`, and commit. The commit is the approval. See
-   `skills/lgwks-dependency-admission/SKILL.md`.
+   `owner = "lgwks_deps"`, and commit. The commit is the approval.
 
 A direct edge that skips this flow fails `lgwks-deps check` with the exact
 crate, requirement, and source class named.
 
 ## 3. Replacement matrix
 
-Import from the estate column. "Feature" is the `lgwks_std` cargo feature.
+Import from the in-tree column. "Feature" is the `lgwks_std` cargo feature.
 
 | Reaching for | Use instead | Feature | Notes |
 |---|---|---|---|
@@ -131,11 +133,11 @@ struct Doc { n: u32 }
 
 Verified downstream with no direct `serde` dependency.
 
-## 4. Worked example — `tokio`
+## 4. Worked example: `tokio`
 
 Two tiers share one owned engine.
 
-**Synchronous tier — `lgwks_std::task` (feature `core`, zero dependencies).**
+**Synchronous tier: `lgwks_std::task` (feature `core`, zero dependencies).**
 Its header states the scope: `block_on`, `join_all`, `join_all_boxed`, and
 `spawn_blocking` replace `futures`, `pollster`, and `async-trait` **for
 applications that only need to await futures, await a bounded set of them
@@ -158,7 +160,7 @@ The tick executor itself uses no `futures` or `async-trait`; its synchronous
 path remains `lgwks_std::task`. The bot's separate runtime feature reaches
 tokio through the `lgwks_deps` storefront.
 
-**Async tier — `lgwks_bot` (the estate's async and runner surface).** Timers, wakeable
+**Async tier: `lgwks_bot` (the async and runner surface of this workspace).** Timers, wakeable
 channels, async sockets, and a multi-threaded worker pool cannot be built on
 `std` without an I/O reactor and `unsafe`, and `lgwks_std` forbids both.
 `lgwks_bot` therefore wraps **tokio core** through the `lgwks_deps` storefront,
@@ -196,16 +198,16 @@ What `lgwks_bot` adds over importing `tokio` directly:
   `lgwks_bot::rt::time` wrappers defer construction to first poll.
 
 **Boundary.** `lgwks_bot` is not a realtime scheduler, and worker-thread
-completion order is nondeterministic — only `join_all_bounded` result order is
+completion order is nondeterministic, only `join_all_bounded` result order is
 guaranteed. `net` sockets do not pass the HTTP egress policy; a caller applies
 policy before connecting. `fs` operations occupy a blocking thread (not
-io_uring). A hard-realtime or io_uring workload is outside the estate's domain
-and must be stated, not smuggled in as a dependency. On `wasm32-wasip1`, the
+io_uring). A hard-realtime or io_uring workload is outside the domain of these
+crates and must be declared as a boundary rather than added as a dependency. On `wasm32-wasip1`, the
 `rt` feature uses a current-thread runtime; supplying `worker_threads` is an
 explicit `Unsupported` error, and Tokio's native-only driver features are
 outside the WASM domain.
 
-## 5. Worked example — `syn`
+## 5. Worked example: `syn`
 
 Two distinct jobs get confused under "parsing Rust":
 
@@ -219,26 +221,62 @@ Two distinct jobs get confused under "parsing Rust":
   Rust grammar is the only honest oracle for Rust source, and a parser is not a
   data format the gate polices, so it is not self-refuting.
 
-**Boundary:** there is no general-purpose Rust semantic API (types, trait
-resolution, macro expansion) in the estate, because nothing here needs one.
-Do not add a second Rust parser; if you need Rust semantics, route through
-`lgwks_ast::Language::Rust` for structure, or state that `syn` is required and
-register it with that reason.
+**Boundary:** the workspace provides no general-purpose Rust semantic API
+(types, trait resolution, macro expansion), because nothing here requires one. A
+second Rust parser is not admitted. Structural queries route through
+`lgwks_ast::Language::Rust`; a caller that genuinely requires `syn` for semantic
+work states that reason and registers it.
 
-## 6. Where no equivalent exists — do not fake it
+## 6. Where no equivalent exists
 
-These are real gaps. The doctrine is explicit about them so an agent neither
-pretends coverage nor silently adds a crate:
+These are documented gaps. The policy names them explicitly so that a missing
+capability is neither assumed to be present nor added as an unregistered edge:
 
 | Capability | Path |
 |---|---|
-| `thiserror`, `anyhow` | Implement `std::error::Error` manually; keep typed error enums at library boundaries (the estate's own crates do this). |
-| `log`, `tracing`, `env_logger` | `eprintln!` / `stderr`; there is no logging facade. Machine output must stay parseable (`experience/invariants/sdk.yaml`). |
-| `clap`, `argh` | Parse `std::env::args` directly; CLI parsing is not an estate capability. |
+| `thiserror`, `anyhow` | Implement `std::error::Error` manually; keep typed error enums at library boundaries (the workspace's own crates do this). |
+| `log`, `tracing`, `env_logger` | Nothing to add, and nowhere to print: library code **returns** information instead of emitting it. `print_stdout`/`print_stderr` are `forbid` (§6.1), so there is no print path to route through. |
+| `clap`, `argh` | Parse `std::env::args` directly; CLI parsing is not a capability of this workspace. |
 | `toml`, `serde_yaml`, `csv` | Not provided. Use `json`/`ron` for data; the gate parses TOML line-wise on purpose to avoid a TOML dependency. |
-| `sha2`, `hmac`, `aes-gcm`, `argon2`, `ed25519` | Not provided (BLAKE3 only). Crypto is a BOUNDARY tier — register it with the concrete reason. |
+| `sha2`, `hmac`, `aes-gcm`, `argon2`, `ed25519` | Not provided (BLAKE3 only). Crypto is a BOUNDARY tier: register it with the concrete reason. |
 | `rand` distributions | `lgwks_std::random` is OS entropy only; derive the distribution you need or register `rand`. |
 | `bytes`, `byteorder` | Use slices and `from_le_bytes`/`to_le_bytes`. |
+
+### 6.1 The print ban is a lint, not a style preference
+
+An earlier revision of this section said machine output stays parseable via
+`eprintln!` / `stderr`. **That is superseded and was never enforceable.**
+`print_stdout` and `print_stderr` are `forbid` in `[workspace.lints.clippy]`, and
+`forbid` cannot be lowered from source, so library code has no print path at
+all, and no `#[allow]` can carve one. The lint is stricter than a source-level
+convention would be: it grants no exemption for `main.rs`, `src/bin/`,
+`examples/`, or `benches/`. It is committed and machine-enforced, and it is the
+artifact that governs.
+
+The consequence for the row above is not "where do logs go" but *whether there
+is a log at all*. A diagnostic the caller will need belongs in the return type:
+carry the byte count, the rejected shape, or the failing field in the error
+variant, rather than narrating it to a stream the caller may not be reading. The
+workspace's own crates follow this rule: `lgwks_std::ron` reports
+`write_all failed after {n} bytes: {error}` in the error value instead of on
+stderr, because a library cannot be silenced by its caller.
+
+A **binary** still has to produce output, and writes to an explicit handle:
+
+```rust
+use std::io::Write;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut out = std::io::stdout().lock();
+    writeln!(out, "check: admitted")?;
+    Ok(())
+}
+```
+
+An explicit `writeln!` to a locked handle is not what `print_stdout` matches, and
+it forces the caller to confront the case `println!` hides: a broken pipe. A
+program whose consumer went away (`mycmd | head`) must treat
+`io::ErrorKind::BrokenPipe` as a clean exit, not a panic.
 
 When a gap forces a new edge, the edge is not the end of the conversation: the
 register entry must say which owner carries it and what `std` cannot do. If the
@@ -247,8 +285,7 @@ module (ELIMINATE), not a consumer-local crate.
 
 ## 7. Adding a dependency
 
-The short version; the exact procedure is
-`skills/lgwks-dependency-admission/SKILL.md`.
+The procedure in short form:
 
 ```sh
 cargo run -p lgwks_deps -- tiers            # find the rung
@@ -261,11 +298,11 @@ An approval with no authored Cargo edge is refused as stale authority
 (`UnusedApproval`); an authored edge with no approval is refused as
 unregistered (`UnregisteredEdge`). Both directions are enforced.
 
-## 8. Why this holds up
+## 8. Enforcement
 
-- `lgwks-deps check` runs as the first CI lane locally and remotely, and the
-  same `check_dependencies` API is available to embedders — the verdict cannot
-  drift between a developer's machine and CI.
+- `lgwks-deps check` runs as the first CI job, locally and on the build server.
+  The same `check_dependencies` API is available to embedders, so the verdict
+  cannot drift between a developer's machine and CI.
 - The gate is fail-closed: a missing register, unparseable metadata, or
   unreadable lock is a refusal, never a pass.
 - `deps_are_approved_leaves` in `crates/lgwks-deps/src/lib.rs` pins the exact

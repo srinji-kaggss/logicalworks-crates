@@ -1,6 +1,6 @@
 //! `vendor` owns lockfile-to-tree coverage and enforces
 //! INV-VENDOR-SINGLE-TREE: every registry package a repo's `Cargo.lock`
-//! resolves must be present in the estate's single shared vendor tree with
+//! resolves must be present in the single shared vendor tree with
 //! the exact bytes the lock pins, or the offline build it feeds is a lie.
 //!
 //! The check binds on hashes, not names: a lock package carries the sha256 of
@@ -20,7 +20,11 @@ use crate::lock;
 // ── Report ──────────────────────────────────────────────────────────────────
 
 /// One lock package with no matching bytes in the tree.
+///
+/// Non-exhaustive: the report compares on name and version, so a diagnostic
+/// field added later is an additive change for consumers.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Missing {
     /// Package name exactly as `Cargo.lock` spells it.
     pub name: String,
@@ -29,7 +33,12 @@ pub struct Missing {
 }
 
 /// The coverage verdict for one repository.
+///
+/// The three fields partition the lock's non-empty package list: `covered`
+/// plus `missing.len()` is every non-local package, and `skipped_local` is
+/// every local one. A report is only a pass when `missing` is empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Report {
     /// Lock registry packages matched by hash (or by manifest for sourceless hashes).
     pub covered: usize,
@@ -42,9 +51,10 @@ pub struct Report {
 // ── Errors ──────────────────────────────────────────────────────────────────
 
 /// Why coverage could not be verified. Every variant is a refusal, not a
-/// pass — a gate that passes when it cannot read its own inputs reports
+/// pass: a gate that passes when it cannot read its own inputs reports
 /// success for the one condition it exists to catch.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum VendorError {
     /// The lock file could not be read.
     Lock(lock::LockError),
@@ -70,18 +80,23 @@ pub enum VendorError {
 }
 
 impl fmt::Display for VendorError {
+    /// Each arm names the path that failed, so a refusal identifies the tree or
+    /// config to repair rather than only the class of failure.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Lock(cause) => write!(f, "Cargo.lock: {cause}"),
-            Self::NoTree { config } => write!(
+        match *self {
+            Self::Lock(ref cause) => write!(f, "Cargo.lock: {cause}"),
+            Self::NoTree { ref config } => write!(
                 f,
                 "{} names no [source.vendored-sources] directory — vendor check needs a tree",
                 config.display()
             ),
-            Self::TreeUnreadable { tree, cause } => {
+            Self::TreeUnreadable {
+                ref tree,
+                ref cause,
+            } => {
                 write!(f, "cannot list {}: {cause}", tree.display())
             }
-            Self::ChecksumUnreadable { dir, cause } => {
+            Self::ChecksumUnreadable { ref dir, ref cause } => {
                 write!(f, "{}: {cause}", dir.display())
             }
         }
@@ -98,7 +113,7 @@ impl From<lock::LockError> for VendorError {
 
 // ── Tree location ───────────────────────────────────────────────────────────
 
-/// Reads the vendored-sources directory out of a cargo config — the same file
+/// Reads the vendored-sources directory out of a cargo config: the same file
 /// cargo itself uses for source replacement, so the check can never drift to
 /// a tree cargo is not resolving.
 fn tree_from_config(config: &Path) -> Result<Option<PathBuf>, VendorError> {
@@ -160,10 +175,13 @@ fn package_hash(checksum_file: &Path) -> Result<String, String> {
     let text =
         std::fs::read_to_string(checksum_file).map_err(|cause| format!("unreadable: {cause}"))?;
     let key = "\"package\"";
-    let found = text
-        .find(key)
+    // Splitting on the key takes everything after its first occurrence, which
+    // is exactly the tail `find` plus `key.len()` would have addressed, with
+    // no index arithmetic to overflow.
+    let (_, tail) = text
+        .split_once(key)
         .ok_or_else(|| "no \"package\" hash".to_owned())?;
-    let rest = text[found + key.len()..].trim_start();
+    let rest = tail.trim_start();
     let rest = rest
         .strip_prefix(':')
         .ok_or_else(|| "no \"package\" hash".to_owned())?;
@@ -210,10 +228,24 @@ fn manifest_identity(manifest: &Path) -> Option<(String, String)> {
 /// Indexes the tree once: package-hash to directory, plus manifest
 /// identities for the hashless (git-source) fallback.
 struct Index {
+    /// `.cargo-checksum.json` `"package"` sha256 to the directory carrying it.
+    /// This is the binding that matters: a directory whose name matches but
+    /// whose bytes differ hashes differently, so it is absent here and the
+    /// package is reported missing rather than covered.
     by_hash: std::collections::HashMap<String, PathBuf>,
+    /// `(name, version)` from the vendored `Cargo.toml` to its directory.
+    /// Consulted only for lock packages that carry no checksum: git sources,
+    /// which Cargo pins by revision rather than by `.crate` hash.
     by_name_version: std::collections::HashMap<(String, String), PathBuf>,
 }
 
+/// Walks `tree` once and builds the hash and identity indexes.
+///
+/// Directories are visited in sorted order so a duplicate hash resolves
+/// deterministically rather than by filesystem enumeration order. A directory
+/// with no readable `"package"` hash is refused, not skipped: a partial index
+/// would silently turn unreadable bytes into a pass, which is the condition
+/// this check exists to catch.
 fn index_tree(tree: &Path) -> Result<Index, VendorError> {
     let entries = std::fs::read_dir(tree).map_err(|cause| VendorError::TreeUnreadable {
         tree: tree.to_path_buf(),
@@ -266,17 +298,20 @@ pub fn check_coverage(lock_text: &str, tree: &Path) -> Result<Report, VendorErro
     };
     for package in &resolved {
         if package.local {
-            report.skipped_local += 1;
+            // Both counters are bounded by `resolved.len()`, and a `Vec` cannot
+            // exceed `isize::MAX` bytes, so neither can reach `usize::MAX` and
+            // this cannot saturate.
+            report.skipped_local = report.skipped_local.saturating_add(1);
             continue;
         }
-        let covered = match &package.checksum {
+        let covered = match package.checksum.as_deref() {
             Some(hash) => index.by_hash.contains_key(hash),
             None => index
                 .by_name_version
                 .contains_key(&(package.name.clone(), package.version.clone())),
         };
         if covered {
-            report.covered += 1;
+            report.covered = report.covered.saturating_add(1);
         } else {
             report.missing.push(Missing {
                 name: package.name.clone(),
@@ -284,9 +319,11 @@ pub fn check_coverage(lock_text: &str, tree: &Path) -> Result<Report, VendorErro
             });
         }
     }
+    // Sorted so the refusal message and the exit code are stable across runs
+    // and across platforms, whatever order the lockfile listed packages in.
     report
         .missing
-        .sort_by(|a, b| (&a.name, &a.version).cmp(&(&b.name, &b.version)));
+        .sort_by(|left, right| (&left.name, &left.version).cmp(&(&right.name, &right.version)));
     Ok(report)
 }
 
@@ -321,45 +358,53 @@ version = "0.0.0"
 source = "git+https://example.com/org/git-crate#abc123"
 "#;
 
+    /// Test bodies propagate with `?` rather than panicking: `unwrap` is
+    /// forbidden workspace-wide, and a refused input should surface as the
+    /// `VendorError` it is, not as a panic with no variant attached.
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     struct Fixture {
         root: PathBuf,
     }
 
     impl Fixture {
-        fn create() -> Fixture {
+        /// Creates a throwaway tree holding one hash-matched crate and one
+        /// hashless git crate, plus a `.cargo-checksum.json` for each.
+        ///
+        /// The root is unique per call via pid and nanosecond timestamp so
+        /// concurrent test binaries cannot share a directory. The `Drop` impl
+        /// removes it, so a failing assertion cannot leak temp state.
+        fn create() -> Result<Fixture, Box<dyn std::error::Error>> {
             let root = std::env::temp_dir().join(format!(
                 "lgwks-deps-vendor-test-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.subsec_nanos())
+                    .map(|elapsed| elapsed.subsec_nanos())
                     .unwrap_or(0)
             ));
-            std::fs::create_dir_all(root.join("tree/covered-crate")).unwrap();
+            std::fs::create_dir_all(root.join("tree/covered-crate"))?;
             std::fs::write(
                 root.join("tree/covered-crate/.cargo-checksum.json"),
                 "{\"files\": {}, \"package\": \"aaaabbbbccccddddeeeeffff0000111122223333444455556666777788889999\"}\n",
-            )
-            .unwrap();
+            )?;
             std::fs::write(
                 root.join("tree/covered-crate/Cargo.toml"),
                 "[package]\nname = \"covered-crate\"\nversion = \"1.2.3\"\n",
-            )
-            .unwrap();
-            std::fs::create_dir_all(root.join("tree/git-crate")).unwrap();
+            )?;
+            std::fs::create_dir_all(root.join("tree/git-crate"))?;
             std::fs::write(
                 root.join("tree/git-crate/.cargo-checksum.json"),
                 "{\"files\": {}, \"package\": \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}\n",
-            )
-            .unwrap();
+            )?;
             std::fs::write(
                 root.join("tree/git-crate/Cargo.toml"),
                 "[package]\nname = \"git-crate\"\nversion = \"0.0.0\"\n",
-            )
-            .unwrap();
-            Fixture { root }
+            )?;
+            Ok(Fixture { root })
         }
 
+        /// The `tree/` directory inside the fixture root.
         fn tree(&self) -> PathBuf {
             self.root.join("tree")
         }
@@ -372,9 +417,9 @@ source = "git+https://example.com/org/git-crate#abc123"
     }
 
     #[test]
-    fn hash_matched_packages_are_covered_and_locals_skipped() {
-        let fixture = Fixture::create();
-        let report = check_coverage(LOCK, &fixture.tree()).unwrap();
+    fn hash_matched_packages_are_covered_and_locals_skipped() -> TestResult {
+        let fixture = Fixture::create()?;
+        let report = check_coverage(LOCK, &fixture.tree())?;
         assert_eq!(report.covered, 2);
         assert_eq!(report.skipped_local, 1);
         assert_eq!(
@@ -384,64 +429,71 @@ source = "git+https://example.com/org/git-crate#abc123"
                 version: "4.5.6".to_owned(),
             }]
         );
+        Ok(())
     }
 
     #[test]
-    fn a_tree_directory_without_a_package_hash_is_refused() {
-        let fixture = Fixture::create();
-        std::fs::create_dir_all(fixture.tree().join("broken-crate")).unwrap();
+    fn a_tree_directory_without_a_package_hash_is_refused() -> TestResult {
+        let fixture = Fixture::create()?;
+        std::fs::create_dir_all(fixture.tree().join("broken-crate"))?;
         std::fs::write(
             fixture.tree().join("broken-crate/.cargo-checksum.json"),
             "{\"files\": {}}\n",
-        )
-        .unwrap();
-        let error = check_coverage(LOCK, &fixture.tree()).unwrap_err();
+        )?;
+        let Err(error) = check_coverage(LOCK, &fixture.tree()) else {
+            return Err("a hashless tree directory must be refused, not reported covered".into());
+        };
         assert!(matches!(error, VendorError::ChecksumUnreadable { .. }));
+        Ok(())
     }
 
     #[test]
-    fn a_missing_tree_is_refused_not_passed() {
-        let fixture = Fixture::create();
-        let error = check_coverage(LOCK, &fixture.root.join("no-such-tree")).unwrap_err();
+    fn a_missing_tree_is_refused_not_passed() -> TestResult {
+        let fixture = Fixture::create()?;
+        let Err(error) = check_coverage(LOCK, &fixture.root.join("no-such-tree")) else {
+            return Err("an unlistable tree must be refused, not reported covered".into());
+        };
         assert!(matches!(error, VendorError::TreeUnreadable { .. }));
+        Ok(())
     }
 
     #[test]
-    fn tree_for_reads_the_same_config_cargo_resolves() {
-        let fixture = Fixture::create();
-        std::fs::create_dir_all(fixture.root.join("repo/.cargo")).unwrap();
+    fn tree_for_reads_the_same_config_cargo_resolves() -> TestResult {
+        let fixture = Fixture::create()?;
+        std::fs::create_dir_all(fixture.root.join("repo/.cargo"))?;
         std::fs::write(
             fixture.root.join("repo/.cargo/config.toml"),
             "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"../tree\"\n",
-        )
-        .unwrap();
+        )?;
         assert_eq!(
-            tree_for(&fixture.root.join("repo")).unwrap(),
-            fixture.tree().canonicalize().unwrap()
+            tree_for(&fixture.root.join("repo"))?,
+            fixture.tree().canonicalize()?
         );
+        Ok(())
     }
 
     #[test]
-    fn tree_for_without_a_vendored_section_is_refused() {
-        let fixture = Fixture::create();
-        std::fs::create_dir_all(fixture.root.join("bare/.cargo")).unwrap();
+    fn tree_for_without_a_vendored_section_is_refused() -> TestResult {
+        let fixture = Fixture::create()?;
+        std::fs::create_dir_all(fixture.root.join("bare/.cargo"))?;
         std::fs::write(
             fixture.root.join("bare/.cargo/config.toml"),
             "[net]\noffline = true\n",
-        )
-        .unwrap();
+        )?;
         assert!(matches!(
             tree_for(&fixture.root.join("bare")),
             Err(VendorError::NoTree { .. })
         ));
+        Ok(())
     }
 
     #[test]
-    fn tree_for_without_any_config_is_refused() {
-        let fixture = Fixture::create();
+    fn tree_for_without_any_config_is_refused() -> TestResult {
+        let fixture = Fixture::create()?;
         assert!(matches!(
             tree_for(&fixture.root.join("no-config-here")),
             Err(VendorError::NoTree { .. })
         ));
+        Ok(())
     }
 }

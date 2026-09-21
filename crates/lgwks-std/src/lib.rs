@@ -1,15 +1,21 @@
 //! Zero-config primitives that replace a dozen crates.
 //!
-//! Every module is a single-import, single-call primitive — hex, base64,
-//! timestamps, UUIDs, hashing, glob matching, regex, JSON, async — backed by
-//! a vetted dependency stack that bottoms out at zero external deps.
+//! Every module is a single-import, single-call primitive (hex, base64,
+//! timestamps, UUIDs, hashing, glob matching, regex, JSON, async), backed by
+//! a vetted dependency stack that bottoms out at two leaves.
 //!
-//! The default `core` feature compiles with **zero external dependencies**.
-//! Each optional feature unlocks one capability with one audited stack.
+//! Each optional feature unlocks one capability with one audited stack. The
+//! default build carries `core` **and `trace`**: this workspace forbids
+//! `println!` in library code and names `tracing` as the replacement, so a
+//! build without `trace` would leave that rule with nothing to point at.
+//! `--no-default-
+//! features --features core` restores a genuinely zero-dependency build.
 //!
 //! ## Feature map
 //!
 //! - `core` (default) — encoding, fs, glob, hex, leb128, retry, task, time. Zero deps.
+//! - `trace` (default) — trace. Adds `tracing` (`std` only; no `attributes`,
+//!   so no `syn`).
 //! - `random` — random, id. Adds `getrandom`.
 //! - `hash` — hash. Adds `blake3`.
 //! - `pattern` — pattern. Adds `regex`.
@@ -23,7 +29,7 @@
 //! - `full` — all of the above.
 //!
 //! Lint contract: workspace `missing_docs` deny, `unsafe_code` forbid,
-//! `broken_intra_doc_links` deny — see the workspace root `Cargo.toml`.
+//! `broken_intra_doc_links` deny; see the workspace root `Cargo.toml`.
 ///
 /// Single-import encoding primitives: base64 and percent-encoding.
 pub mod encoding;
@@ -68,6 +74,9 @@ pub mod ron;
 pub mod task;
 /// RFC 3339 timestamps and calendar math.
 pub mod time;
+/// Structured, levelled logging via `tracing` (feature `trace`, default-on).
+#[cfg(feature = "trace")]
+pub mod trace;
 /// Zero-copy binary wire serialization via rkyv (feature `wire`).
 #[cfg(feature = "wire")]
 pub mod wire;

@@ -140,11 +140,94 @@ jobs:
           RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
           -p lgwks_deps --features tokio-full
       - name: Doc build without default features
+        # lgwks_std is included because a module in `core` that links to a
+        # feature-gated module resolves under `--all-features` and breaks here.
+        # retry linked to `random` and only this lane could see it.
         run: >
+          RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
+          --manifest-path crates/lgwks-std/Cargo.toml --no-default-features &&
           RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
           --manifest-path crates/lgwks-bot/Cargo.toml --no-default-features &&
           RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
           --manifest-path crates/lgwks-ast/Cargo.toml --no-default-features
+      - name: docs.rs metadata names a buildable feature set
+        # docs.rs builds with whatever `[package.metadata.docs.rs]` declares,
+        # and a failure there is invisible from the repository: the crate page
+        # just shows a build error. `all-features = true` on a crate whose
+        # features include platform-bound ones fails on every publish, which is
+        # what happened to lgwks_deps: `gpui` pulls `objc2`, which refuses to
+        # compile off Apple targets. Build with the declared set so an
+        # unbuildable declaration fails here instead of on docs.rs.
+        run: |
+          set -eu
+          python - <<'PY' > /tmp/docsrs_features.sh
+          import tomllib
+          from pathlib import Path
+
+          for manifest in sorted(Path("crates").glob("*/Cargo.toml")):
+              parsed = tomllib.loads(manifest.read_text(encoding="utf-8"))
+              # `[package.metadata.docs.rs]` parses as metadata["docs"]["rs"].
+              meta = (
+                  parsed.get("package", {})
+                  .get("metadata", {})
+                  .get("docs", {})
+                  .get("rs")
+              )
+              if meta is None:
+                  continue
+              name = parsed["package"]["name"]
+              if meta.get("all-features"):
+                  print(f"# {name}: all-features")
+                  print(f'cargo doc --no-deps --locked -p {name} --all-features')
+              else:
+                  feats = meta.get("features", [])
+                  joined = ",".join(feats)
+                  print(f"# {name}: {joined or '(defaults only)'}")
+                  if feats:
+                      print(f'cargo doc --no-deps --locked -p {name} --features {joined}')
+                  else:
+                      print(f'cargo doc --no-deps --locked -p {name}')
+          PY
+          cat /tmp/docsrs_features.sh
+          RUSTDOCFLAGS='-D warnings --cfg docsrs' sh -e /tmp/docsrs_features.sh
+
+      - name: Root README quickstart matches its compiled example
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+
+          # README.md at the repository root is not a crate README, so nothing
+          # type-checks its code blocks; only crates/lgwks-bot/README.md is
+          # compiled, via include_str! in lib.rs. The quickstart is mirrored in
+          # an example that `cargo test --all-targets` does compile, and this
+          # keeps the two identical, so an API change breaks the build instead
+          # of silently invalidating the first code a new user copies.
+          readme = Path("README.md").read_text(encoding="utf-8")
+          section = readme.split("## Quickstart", 1)[1].split("\n## ", 1)[0]
+          blocks = re.findall(r"```rust\n(.*?)```", section, re.S)
+          if len(blocks) != 1:
+              raise SystemExit(
+                  f"expected one rust block under Quickstart, found {len(blocks)}"
+              )
+          readme_block = blocks[0].strip()
+
+          example = Path(
+              "crates/lgwks-bot/examples/quickstart.rs"
+          ).read_text(encoding="utf-8")
+          body = "\n".join(
+              line for line in example.split("\n") if not line.startswith("//!")
+          ).strip()
+
+          if readme_block != body:
+              raise SystemExit(
+                  "README quickstart drifted from "
+                  "crates/lgwks-bot/examples/quickstart.rs:\n"
+                  f"--- README.md ---\n{readme_block}\n"
+                  f"--- quickstart.rs ---\n{body}"
+              )
+          print("README quickstart matches the compiled example")
+          PY
 
   feature-matrix:
     name: lgwks-std feature matrix
@@ -249,7 +332,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Validate std+ contract alignment
+      - name: Validate the dependency contract alignment
         run: |
           python - <<'PY'
           import re
@@ -312,6 +395,14 @@ jobs:
                   major, minor, *_ = version.split(".")
                   for m in _re.finditer(
                       rf"{crate}\s*=\s*(?:\{{\s*version\s*=\s*)?\"(\d+)\.(\d+)(?:\.(\d+))?\"",
+                      text,
+                  ):
+                      if (m.group(1), m.group(2)) != (major, minor):
+                          bad.append(f"{md}: {m.group(0)} (manifest is {version})")
+                  # Markdown table rows, as in the root README crate table:
+                  # | `lgwks_std` | 0.6.4 | [docs.rs](...) | ...
+                  for m in _re.finditer(
+                      rf"\|\s*`{crate}`\s*\|\s*(\d+)\.(\d+)(?:\.(\d+))?\s*\|",
                       text,
                   ):
                       if (m.group(1), m.group(2)) != (major, minor):

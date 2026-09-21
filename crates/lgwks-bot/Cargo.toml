@@ -1,7 +1,7 @@
 [package]
 name = "lgwks_bot"
-description = "Capability-gated automation bots (Observe, Evaluate, Execute, Query) and the estate's async runner surface."
-version = "0.3.2"
+description = "Capability-gated automation bots on a change-detecting ECS schedule: Observe, Evaluate, Execute, and Query, with an async runtime facade."
+version = "0.4.2"
 edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"
@@ -9,28 +9,44 @@ repository = "https://github.com/srinji-kaggss/logicalworks-crates"
 documentation = "https://docs.rs/lgwks_bot"
 homepage = "https://github.com/srinji-kaggss/logicalworks-crates/tree/main/crates/lgwks-bot"
 readme = "README.md"
-categories = ["development-tools", "config"]
-keywords = ["automation", "bot", "capabilities", "observe", "execute"]
+categories = ["development-tools", "asynchronous", "concurrency"]
+keywords = ["automation", "bot", "workflow", "agent", "ecs"]
 
 # The async engine is the bot's, per the deps law; its `tokio` edge is owned by
 # the `lgwks_deps` storefront. `--no-default-features` withdraws the async
-# surface entirely (no `lgwks_deps`, no tokio), leaving the actor verbs on the
-# synchronous `lgwks_std::task` executor.
+# surface entirely (no tokio), leaving the four verbs on `lgwks_std::task`'s
+# zero-dependency executor — the ECS schedule and every verb still work.
+#
+# `io` is not implied by `rt` for the same reason the storefront splits it: a
+# consumer reading a pipe needs `AsyncRead` without a socket layer.
 [features]
 default = ["rt", "time", "sync", "macros"]
-rt = ["dep:lgwks_deps", "lgwks_deps/tokio"]
+rt = ["lgwks_deps/tokio"]
 time = ["rt", "lgwks_deps/tokio-time"]
 sync = ["rt", "lgwks_deps/tokio-sync"]
 macros = ["rt", "lgwks_deps/tokio-macros"]
-net = ["rt", "lgwks_deps/tokio-net"]
-process = ["rt", "lgwks_deps/tokio-process"]
-fs = ["rt", "lgwks_deps/tokio-fs"]
+# Reader/writer traits. Not implied by `rt`: a consumer reading from a pipe or a
+# file needs `AsyncRead` without any of the drivers, and it is the module that
+# makes `net`, `process`, and `fs` composable with each other.
+io = ["rt", "lgwks_deps/tokio-io"]
+net = ["io", "lgwks_deps/tokio-net"]
+process = ["io", "lgwks_deps/tokio-process"]
+fs = ["io", "lgwks_deps/tokio-fs"]
 signal = ["rt", "lgwks_deps/tokio-signal"]
-full = ["rt", "time", "sync", "macros", "net", "process", "fs", "signal"]
+full = ["rt", "time", "sync", "macros", "io", "net", "process", "fs", "signal"]
 
 [dependencies]
 lgwks_std = { workspace = true, features = ["json", "http"] }
-lgwks_deps = { workspace = true, default-features = false, optional = true }
+# Not optional, and not behind a feature. The ECS substrate is **how a bot
+# executes** — the condition is change detection rather than a re-derivation —
+# so it is not a candidate the caller may decline. A default-off flag would mean
+# nothing exercises it, the workspace gate never compiles it, and it rots into a
+# second opinion nobody chose.
+#
+# `rt` still gates the async surface, so `--no-default-features` remains a real
+# build: no tokio, no drivers. It does pull `bevy_ecs`, and that is the honest
+# cost of one path rather than two.
+lgwks_deps = { workspace = true, default-features = false, features = ["bevy-ecs"] }
 
 [lints]
 workspace = true

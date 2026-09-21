@@ -1,6 +1,6 @@
-//! Estate async runtime — the async and runner surface of [`lgwks_bot`].
+//! Async runtime: the async and runner surface of [`lgwks_bot`].
 //!
-//! This is the estate's async tier. It wraps tokio **core** behind a deliberate
+//! This is the crate's async tier. It wraps tokio **core** behind a deliberate
 //! surface and sources the engine from the [`lgwks_deps`] storefront
 //! (`feature = "tokio"`), so `lgwks_deps` is the only crate that authors a
 //! `tokio` edge (`INV-DEP-EDGE-OWNED`) and `lgwks_bot` is the crate a consumer
@@ -53,14 +53,23 @@
 pub mod runtime;
 pub mod task;
 
+/// This crate's own cancellation primitive. Private, because its only public
+/// name is `rt::sync::CancellationToken` (one type, one path), matching how
+/// the ECS substrate is reached through `spec` rather than named directly.
+#[cfg(feature = "sync")]
+mod cancel;
 #[cfg(feature = "fs")]
 pub mod fs;
+#[cfg(feature = "io")]
+pub mod io;
 #[cfg(feature = "net")]
 pub mod net;
 #[cfg(feature = "process")]
 pub mod process;
 #[cfg(all(feature = "signal", any(unix, windows)))]
 pub mod signal;
+#[cfg(feature = "sync")]
+pub mod supervise;
 #[cfg(feature = "sync")]
 pub mod sync;
 #[cfg(feature = "time")]

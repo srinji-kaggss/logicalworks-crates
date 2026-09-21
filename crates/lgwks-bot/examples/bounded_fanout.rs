@@ -8,7 +8,14 @@
 //! ```text
 //! cargo run -p lgwks_bot --example bounded_fanout
 //! ```
+//!
+//! The output line is written through `std::io::Write` rather than `println!`
+//! because `clippy::print_stdout` is forbidden workspace-wide with no
+//! example-only carve-out; the lint is what is enforced, and an example that
+//! writes explicitly says the
+//! same thing fallibly.
 
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::time::Instant;
@@ -16,10 +23,14 @@ use std::time::Instant;
 use lgwks_bot::rt::task::join_all_bounded;
 use lgwks_bot::rt::time::{Duration, sleep};
 
-const TASKS: u32 = 512;
+/// Number of tasks fanned out under each concurrency ceiling. `usize` so the
+/// count and the output vector's length are the same type and no lossy
+/// conversion sits between the workload and the assertion on it.
+const TASKS: usize = 512;
 
-fn main() {
-    let runtime = lgwks_bot::Runtime::new().expect("runtime");
+fn main() -> std::io::Result<()> {
+    let runtime = lgwks_bot::Runtime::new()?;
+    let mut stdout = std::io::stdout();
     for &(label, limit) in &[("limit=4", 4usize), ("limit=64", 64), ("uncapped", 1024)] {
         let current = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
@@ -29,7 +40,10 @@ fn main() {
             let current = Arc::clone(&current);
             let peak = Arc::clone(&peak);
             async move {
-                let now = current.fetch_add(1, SeqCst) + 1;
+                // Bound: at most `limit` of these run at once and only
+                // `TASKS` exist in total, so the previous count cannot
+                // approach `usize::MAX` and the counter stays exact.
+                let now = current.fetch_add(1, SeqCst).saturating_add(1);
                 peak.fetch_max(now, SeqCst);
                 sleep(Duration::from_millis(1)).await;
                 current.fetch_sub(1, SeqCst);
@@ -38,12 +52,18 @@ fn main() {
         });
 
         let outputs = runtime.block_on(join_all_bounded(limit, futures));
-        assert_eq!(outputs.len(), TASKS as usize);
+        assert_eq!(
+            outputs.len(),
+            TASKS,
+            "every input must produce exactly one output"
+        );
         assert_eq!(outputs[0], 0, "input order is preserved");
-        println!(
+        writeln!(
+            stdout,
             "{label:>8}: peak_in_flight={:>4} elapsed={:?}",
             peak.load(SeqCst),
             started.elapsed()
-        );
+        )?;
     }
+    Ok(())
 }

@@ -1,9 +1,10 @@
-# Distributed-mesh boundaries — what these crates do and refuse on a network path
+# Distributed-mesh boundaries
 
-Read this before putting `lgwks_std` / `lgwks_bot` on a mesh data path. The
-doctrine is explicit about gaps so callers neither pretend coverage nor
-silently add a crate (`docs/dependency-doctrine.md` §6). Each row names the
-owner: implemented here, caller policy, storefront BOUNDARY (needs
+This document records what `lgwks_std` and `lgwks_bot` provide and refuse on a
+mesh data path. Gaps are named explicitly, on the same principle as the
+dependency doctrine (`docs/dependency-doctrine.md` §6), so that a caller neither
+assumes coverage nor adds an unregistered dependency. Each row names the owner of
+the capability: implemented here, caller policy, storefront BOUNDARY (requires
 `lgwks_deps` admission with a concrete reason), or explicitly out of scope.
 
 ## Transport
@@ -15,7 +16,7 @@ owner: implemented here, caller policy, storefront BOUNDARY (needs
 | Retries, exponential backoff, total deadlines | Caller policy | `lgwks_std::retry::RetryPolicy` (zero-dep values) + caller sleep |
 | `Idempotency-Key` attachment | Shipped helper | `Options::idempotency_key` (caller generates the key) |
 | Connection pooling / keep-alive reuse | Not implemented | Caller concern; the client builds one agent per call. Bursts stay bounded via `lgwks_bot::rt::task::join_all_bounded` |
-| Per-phase timeouts (connect / TLS / TTFB / body) | Single total `timeout` only | `lgwks_std` — needs a stated use case before growing `Options` |
+| Per-phase timeouts (connect / TLS / TTFB / body) | Single total `timeout` only | `lgwks_std`: needs a stated use case before growing `Options` |
 | mTLS, custom CA bundles, client identity material | Missing | Storefront BOUNDARY (`rustls-pki`/`pem`-class crate with reason); `std` has no PKI loader |
 | Pagination cursors, streaming bodies, SSE | Missing | `lgwks_std` for sync-reader shapes; async streaming is a storefront transport decision |
 | Raw-socket egress policy | Caller applies policy | `lgwks_bot::rt::net` explicitly does NOT pass the HTTP gate |
@@ -46,14 +47,14 @@ consensus are **explicitly out of scope** for `lgwks_std` / `lgwks_bot`.
 `online::is_online` is a boolean TCP probe, not a detector (no latency, no
 phi-accrual, no flap damping); `domain::net` is a single-endpoint poll. A
 Raft-class edge would be a new `lgwks_deps` BOUNDARY plus a new bot-domain
-surface with Director approval — never a silent addition, never faked
-consensus.
+surface, approved as a recorded decision, never a silent addition, and never a
+faked consensus.
 
 ## Backpressure
 
 - `join_all_bounded(limit, ...)` (bot, feature `sync`) never exceeds `limit`
   in flight, runs every input, returns input order. Raw `JoinSet` gives
-  completion order and no ceiling — prefer the bounded form.
+  completion order and no ceiling. Prefer the bounded form.
 - `lgwks_std::task::join_all` is unbounded O(n): callers chunk it themselves.
 - Channel re-exports (`rt::sync`) carry no default bound: choose depth plus an
   overflow policy (drop-oldest / drop-newest / block-with-deadline) per queue.
@@ -62,16 +63,25 @@ consensus.
 
 ## Observability
 
-`log` / `tracing` / `env_logger` are not estate capabilities (doctrine §6):
-machine output stays parseable `eprintln!` / `stderr`. Meshes needing spans,
-W3C `traceparent` propagation, or counters admit `tracing` / `metrics` through
-the storefront as BOUNDARY edges — do not hand-roll a facade in `lgwks_std`.
+`log` / `tracing` / `env_logger` are not capabilities of this workspace
+(doctrine §6), and an earlier revision of this section (which stated that
+machine output stays parseable via `eprintln!` / `stderr`) is **superseded**
+(doctrine §6.1). `print_stdout` and `print_stderr`
+are `forbid` in the workspace lint table, so library code has no print path at
+all: it returns information in its result and error types. Only a binary writes,
+through an explicit locked handle, so a broken pipe is an ordinary `Err` rather
+than a panic. Machine output must still stay parseable
+(`experience/invariants/sdk.yaml`).
+
+A mesh that needs spans, W3C `traceparent` propagation, or counters admits
+`tracing` / `metrics` through the storefront as BOUNDARY edges. A hand-rolled
+facade in `lgwks_std` is not the mechanism.
 
 ## Schema evolution
 
 - `lgwks_std::wire` (rkyv) is deterministic internal binary with no envelope:
   version the envelope before putting it on a wire that outlives one deploy.
-- `BotSpec` uses `deny_unknown_fields` — correct for strict manifests, wrong
+- `BotSpec` uses `deny_unknown_fields`, correct for strict manifests, wrong
   for rolling mesh channels. `BotSpec` has no `version` field yet; adding one
   plus a per-channel unknown-field policy is recorded future work.
 - `ron` is config-format, not wire: same versioning absence, same rule.

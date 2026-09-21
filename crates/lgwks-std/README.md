@@ -1,13 +1,27 @@
-# lgwks_std — zero-config primitives that replace a dozen crates
+# lgwks_std
 
-The standard library gets you 90% of the way. This crate is the last 10% —
-hex, base64, timestamps, UUIDs, hashing, glob matching, regex, JSON, async — as
-single-import, zero-config calls backed by a dependency stack that bottoms out
-at zero external deps.
+Everyday Rust primitives with no async runtime required: hex, base64,
+timestamps, UUIDs, hashing, glob matching, regex, JSON, HTTP, and structured
+logging, as single-import calls, each behind one audited dependency stack.
 
-Pick exactly what you need. The default feature compiles with **zero external
-dependencies**. Each optional feature unlocks one capability with one vetted
-stack beneath it — no transitive surprises, no feature flag archaeology.
+Pick exactly what you need. The default build is `core` plus `trace`; every
+other capability is one feature with one vetted stack beneath it.
+
+`trace` is default-on. Structured logging is the replacement for terminal
+output in library code, so it has to be reachable without selecting a feature
+first. It costs four small crates (`tracing`, `tracing-core`,
+`pin-project-lite`, `once_cell`), with no proc macro and no `syn`.
+
+**Want a zero-dependency build?**
+
+```sh
+cargo add lgwks_std --no-default-features --features core
+```
+
+That is the only configuration in which this crate pulls nothing at all, and it
+is verified by command rather than asserted. `cargo tree -p lgwks_std
+--no-default-features --features core -e normal` prints one line: `lgwks_std`
+itself.
 
 Package `lgwks_std` (underscore) lives in directory `crates/lgwks-std`
 (hyphen): `cargo add lgwks_std` then `use lgwks_std::...`.
@@ -15,8 +29,9 @@ Package `lgwks_std` (underscore) lives in directory `crates/lgwks-std`
 ## Install
 
 ```sh
-cargo add lgwks_std                                    # core only, zero deps
+cargo add lgwks_std                                    # core + trace
 cargo add lgwks_std --features json,http               # pick what you need
+cargo add lgwks_std --no-default-features --features core   # zero deps
 cargo run -p lgwks_std --example quickstart            # 10-line tour (this repo)
 ```
 
@@ -50,12 +65,12 @@ struct Point { x: i32, y: i32 }
 let point: Point = json::from_str(r#"{"x":1,"y":2}"#).expect("valid JSON");
 ```
 
-> **The `#[serde(crate = ...)]` line is required, not optional.** `serde`'s
-> derive macro resolves a crate named `serde`; the gate forbids consumers from
-> declaring `serde` directly (it is owned by `lgwks_std`), so the attribute
-> points the expansion at the re-export instead. If the compiler says
-> `cannot find - serde in this scope`, add the attribute — do NOT
-> `cargo add serde`; `lgwks-deps check` will refuse that edge.
+> **The `#[serde(crate = ...)]` line is required.** The derive macro resolves a
+> crate named `serde`, and the dependency policy forbids consumers from
+> declaring `serde` directly, because `lgwks_std` owns that edge. The attribute
+> points the expansion at the re-export instead. If the compiler reports
+> `cannot find serde in this scope`, add the attribute rather than running
+> `cargo add serde`; `lgwks-deps check` refuses that edge.
 
 ## Feature map
 
@@ -118,9 +133,14 @@ Cargo metadata; Cargo.lock preserves the exact transitive provenance.
 - **ureq** — blocking HTTP client, rustls-only TLS stack plus small leaves
 - **iri-string** — zero-dep URI validation leaf at default features
 - **rustix** — safe POSIX syscall surface for the `fs-raw` primitive; Unix-only, optional
+- **tracing** — 4 crates (`tracing`, `tracing-core`, `pin-project-lite`,
+  `once_cell`), no proc macro because `attributes` is off. Default-on:
+  structured logging replaces terminal output in library code, so it has to be
+  reachable without selecting a feature.
 
-The `core` feature carries zero external dependencies. You choose what you pull
-in; every feature flag is one capability, one stack, no surprises.
+`core` alone carries zero external dependencies; the default build is `core`
+plus `trace`. You choose what you pull in; every other feature flag is one
+capability, one stack, no surprises.
 
 ## Minimum supported Rust version
 

@@ -2,7 +2,7 @@
 //!
 //! A [`RetryPolicy`](crate::retry::RetryPolicy) is a pure value: attempts,
 //! exponential backoff, and a total deadline. It performs no I/O, spawns no
-//! threads, and holds no clock — the caller sleeps (via
+//! threads, and holds no clock: the caller sleeps (via
 //! [`task`](crate::task) synchronously or `lgwks_bot::rt::time`
 //! asynchronously) and checks
 //! [`deadline_exceeded`](crate::retry::RetryPolicy::deadline_exceeded)
@@ -11,7 +11,7 @@
 //! smuggled inside a client.
 //!
 //! Jitter is caller-supplied (`u64` entropy the caller already holds, e.g.
-//! from [`random`](crate::random)) so `core` stays free of entropy sources:
+//! from `lgwks_std::random`) so `core` stays free of entropy sources:
 //!
 //! ```rust
 //! use std::time::Duration;
@@ -87,8 +87,18 @@ impl RetryPolicy {
         if backoff.is_zero() {
             return Duration::ZERO;
         }
-        let nanos = backoff.as_nanos().min(u64::MAX as u128) as u64;
-        let jitter = jitter_entropy % nanos.saturating_add(1);
+        // Saturation, not truncation: a delay beyond `u64::MAX` nanoseconds
+        // (~584 years) has already exceeded every usable deadline, so clamping
+        // to `u64::MAX` keeps the cap honest where the old cast would have
+        // silently wrapped the duration around to a short one.
+        let nanos = u64::try_from(backoff.as_nanos()).unwrap_or(u64::MAX);
+        // `backoff` is non-zero here, so `nanos` is at least one and the
+        // modulus is never zero; the fallback is unreachable and is spelled out
+        // rather than panicking. `saturating_add` only clamps the modulus for
+        // the `u64::MAX` case above, where the remainder is exact anyway.
+        let jitter = jitter_entropy
+            .checked_rem(nanos.saturating_add(1))
+            .unwrap_or(0);
         Duration::from_nanos(nanos.saturating_sub(jitter))
     }
 
@@ -126,10 +136,10 @@ mod tests {
     fn jitter_only_shrinks() {
         let policy = RetryPolicy::new(4, Duration::from_millis(200), Duration::from_secs(60));
         for entropy in [0u64, 1, 7, 1_000, u64::MAX] {
-            let d = policy.delay(2, entropy);
+            let delay = policy.delay(2, entropy);
             assert!(
-                d <= Duration::from_millis(800),
-                "jitter grew backoff: {d:?}"
+                delay <= Duration::from_millis(800),
+                "jitter grew backoff: {delay:?}"
             );
         }
         assert_eq!(policy.delay(2, 0), Duration::from_millis(800));
@@ -146,8 +156,8 @@ mod tests {
     #[test]
     fn huge_attempt_counts_cannot_overflow_or_hang() {
         let policy = RetryPolicy::new(u32::MAX, Duration::from_millis(1), Duration::MAX);
-        let d = policy.delay(u32::MAX, u64::MAX);
-        assert!(d <= Duration::from_secs(30));
+        let delay = policy.delay(u32::MAX, u64::MAX);
+        assert!(delay <= Duration::from_secs(30));
     }
 
     #[test]

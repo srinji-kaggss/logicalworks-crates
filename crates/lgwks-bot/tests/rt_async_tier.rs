@@ -1,22 +1,71 @@
 //! Black-box acceptance for the async surface.
 //!
-//! These exercise the SDK the way a consumer does — through `lgwks_bot`, never
-//! `tokio` — and assert the invariants that justify the facade: bounded fan-out
+//! These exercise the SDK the way a consumer does, through `lgwks_bot` and never
+//! `tokio`, and assert the invariants that justify the facade: bounded fan-out
 //! never exceeds its limit and preserves input order, a panicking input is
 //! resumed on the awaiter (not converted to a `JoinError`), abort is
 //! cancellation, and dropping a handle detaches rather than cancels.
-#![cfg(all(feature = "rt", feature = "time", feature = "sync", feature = "macros"))]
+#![cfg(all(
+    feature = "rt",
+    feature = "time",
+    feature = "sync",
+    feature = "macros",
+    feature = "io"
+))]
 
+use std::cell::Cell;
 use std::num::NonZeroUsize;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 use std::time::Duration;
 
+use lgwks_bot::rt::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter, duplex};
 use lgwks_bot::rt::runtime::MAX_WORKER_THREADS;
-use lgwks_bot::rt::sync::mpsc;
-use lgwks_bot::rt::task::{join_all_bounded, spawn, spawn_blocking, yield_now};
+use lgwks_bot::rt::sync::{CancellationToken, mpsc};
+use lgwks_bot::rt::task::{
+    JoinError, JoinSet, LocalSet, join_all_bounded, spawn, spawn_blocking, spawn_local, yield_now,
+};
 use lgwks_bot::rt::time::{sleep, timeout};
 use lgwks_bot::{Builder, Runtime};
+
+/// What a test reports when its precondition did not hold.
+///
+/// The tests here cross three error domains (`BotError`, the engine's
+/// `JoinError`, and `std::io`), so they return `Box<dyn Error>` and propagate
+/// each with `?`. A mismatch is then a named failure carrying the reason,
+/// rather than an unwind that reports only that something unwound.
+type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+/// Block the calling blocking-pool thread for `duration`.
+///
+/// Two of these tests have blocking work as their subject rather than their
+/// setup: one measures that a *started* blocking task cannot be aborted by
+/// `shutdown_timeout`, the other that the pool bound is applied to it. That
+/// requires a real OS thread and a real wait, because `rt::time::sleep` cannot be
+/// awaited from inside a `spawn_blocking` closure, and the runtime this test
+/// shuts down has no timer driver left to await. `lgwks_std::task`'s own test
+/// module carries the same reasoned exception for the same reason.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a blocking-pool thread has no async timer to await, and the blocking work that must \
+              outlive shutdown is this test's subject rather than its scaffolding"
+)]
+fn block_pool_thread(duration: Duration) {
+    std::thread::sleep(duration);
+}
+
+/// Panic on the calling task, carrying `message` as the payload.
+///
+/// `resume_unwind` and not `panic!`: the workspace forbids `panic` outright with
+/// no suppression path, and this is the documented form for a
+/// deliberate panic: it reports on the task that observes it and never aborts
+/// the process. Declared to return `()` rather than leaving its body to diverge,
+/// so a future that calls it keeps a concrete output type instead of inferring
+/// the never type into the handle it returns.
+fn explode(message: &'static str) {
+    std::panic::resume_unwind(Box::new(message));
+}
 
 #[test]
 fn free_block_on_runs_a_future() {
@@ -24,29 +73,31 @@ fn free_block_on_runs_a_future() {
 }
 
 #[test]
-fn an_explicit_worker_count_above_the_resource_bound_is_rejected() {
-    let workers = NonZeroUsize::new(MAX_WORKER_THREADS + 1).expect("nonzero");
-    let result = Builder::new().worker_threads(Some(workers)).build();
-    let error = match result {
-        Ok(_) => panic!("oversized worker count must be rejected"),
-        Err(error) => error,
+fn an_explicit_worker_count_above_the_resource_bound_is_rejected() -> TestResult {
+    let Some(workers) = NonZeroUsize::new(MAX_WORKER_THREADS + 1) else {
+        return Err("the bound itself must exceed zero".into());
+    };
+    let Err(error) = Builder::new().worker_threads(Some(workers)).build() else {
+        return Err("oversized worker count must be rejected".into());
     };
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    Ok(())
 }
 
 #[test]
-fn runtime_spawns_and_joins_a_task() {
-    let runtime = Runtime::new().expect("runtime");
+fn runtime_spawns_and_joins_a_task() -> TestResult {
+    let runtime = Runtime::new()?;
     let value = runtime.block_on(async {
         let handle = spawn(async { 21u32 });
-        handle.await.expect("task did not panic") * 2
-    });
+        Ok::<u32, JoinError>(handle.await? * 2)
+    })?;
     assert_eq!(value, 42);
+    Ok(())
 }
 
 #[test]
-fn select_picks_the_ready_branch() {
-    let runtime = Runtime::new().expect("runtime");
+fn select_picks_the_ready_branch() -> TestResult {
+    let runtime = Runtime::new()?;
     let picked = runtime.block_on(async {
         lgwks_bot::select! {
             biased;
@@ -55,18 +106,20 @@ fn select_picks_the_ready_branch() {
         }
     });
     assert_eq!(picked, 9);
+    Ok(())
 }
 
 #[test]
-fn join_resolves_every_branch() {
-    let runtime = Runtime::new().expect("runtime");
+fn join_resolves_every_branch() -> TestResult {
+    let runtime = Runtime::new()?;
     let pair = runtime.block_on(async { lgwks_bot::join!(async { 1u8 }, async { 2u8 }) });
     assert_eq!(pair, (1, 2));
+    Ok(())
 }
 
 #[test]
-fn timeout_distinguishes_elapsed_from_value() {
-    let runtime = Runtime::new().expect("runtime");
+fn timeout_distinguishes_elapsed_from_value() -> TestResult {
+    let runtime = Runtime::new()?;
     let elapsed = runtime.block_on(timeout(
         Duration::from_millis(10),
         sleep(Duration::from_secs(30)),
@@ -75,40 +128,52 @@ fn timeout_distinguishes_elapsed_from_value() {
 
     let ready = runtime.block_on(timeout(Duration::from_secs(5), async { 7u8 }));
     assert_eq!(ready.ok(), Some(7));
+    Ok(())
 }
 
 #[test]
-fn a_sleep_built_before_the_runtime_still_fires() {
+fn a_sleep_built_before_the_runtime_still_fires() -> TestResult {
     // tokio's own `sleep` panics here; the facade defers construction to poll.
     let timer = sleep(Duration::from_millis(10));
-    let runtime = Runtime::new().expect("runtime");
+    let runtime = Runtime::new()?;
     runtime.block_on(timer);
+    Ok(())
 }
 
 #[test]
-fn channel_carries_values_between_tasks() {
-    let runtime = Runtime::new().expect("runtime");
+fn channel_carries_values_between_tasks() -> TestResult {
+    let runtime = Runtime::new()?;
     let sum = runtime.block_on(async {
         let (tx, mut rx) = mpsc::channel::<u32>(8);
+        let mut senders = Vec::new();
         for value in 1..=4u32 {
             let tx = tx.clone();
-            spawn(async move {
-                tx.send(value).await.expect("receiver is alive");
-            });
+            senders.push(spawn(async move { tx.send(value).await }));
         }
         drop(tx);
         let mut sum = 0;
         while let Some(value) = rx.recv().await {
             sum += value;
         }
-        sum
-    });
+        // Every send is awaited rather than discarded: a send that failed inside
+        // a detached task would otherwise be invisible, and the received total
+        // would still be correct for the values that did get through.
+        for sender in senders {
+            let sent = sender.await?;
+            assert!(
+                sent.is_ok(),
+                "the receiver outlives every sender, so no send may fail"
+            );
+        }
+        Ok::<u32, JoinError>(sum)
+    })?;
     assert_eq!(sum, 10);
+    Ok(())
 }
 
 #[test]
-fn bounded_fanout_respects_the_limit_and_preserves_order() {
-    let runtime = Runtime::new().expect("runtime");
+fn bounded_fanout_respects_the_limit_and_preserves_order() -> TestResult {
+    let runtime = Runtime::new()?;
     let current = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
 
@@ -117,7 +182,9 @@ fn bounded_fanout_respects_the_limit_and_preserves_order() {
             let current = Arc::clone(&current);
             let peak = Arc::clone(&peak);
             async move {
-                let now = current.fetch_add(1, SeqCst) + 1;
+                // Bound: 8 inputs exist in total and at most 2 run at once, so
+                // the previous count cannot approach `usize::MAX`.
+                let now = current.fetch_add(1, SeqCst).saturating_add(1);
                 peak.fetch_max(now, SeqCst);
                 sleep(Duration::from_millis(20)).await;
                 current.fetch_sub(1, SeqCst);
@@ -137,11 +204,12 @@ fn bounded_fanout_respects_the_limit_and_preserves_order() {
         "peak concurrency {observed} exceeded limit 2"
     );
     assert!(observed >= 1, "no task ever ran");
+    Ok(())
 }
 
 #[test]
-fn bounded_fanout_limit_one_is_sequential() {
-    let runtime = Runtime::new().expect("runtime");
+fn bounded_fanout_limit_one_is_sequential() -> TestResult {
+    let runtime = Runtime::new()?;
     let current = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
 
@@ -150,7 +218,9 @@ fn bounded_fanout_limit_one_is_sequential() {
             let current = Arc::clone(&current);
             let peak = Arc::clone(&peak);
             async move {
-                let now = current.fetch_add(1, SeqCst) + 1;
+                // Bound: 5 inputs exist in total and one runs at a time, so the
+                // previous count is always 0.
+                let now = current.fetch_add(1, SeqCst).saturating_add(1);
                 peak.fetch_max(now, SeqCst);
                 sleep(Duration::from_millis(5)).await;
                 current.fetch_sub(1, SeqCst);
@@ -162,19 +232,24 @@ fn bounded_fanout_limit_one_is_sequential() {
 
     assert_eq!(outputs, vec![0, 1, 2, 3, 4]);
     assert_eq!(peak.load(SeqCst), 1);
+    Ok(())
 }
 
 #[test]
-fn bounded_fanout_with_empty_input_resolves_immediately() {
-    let runtime = Runtime::new().expect("runtime");
+fn bounded_fanout_with_empty_input_resolves_immediately() -> TestResult {
+    let runtime = Runtime::new()?;
     let outputs: Vec<u8> =
         runtime.block_on(join_all_bounded(4, Vec::<std::future::Ready<u8>>::new()));
-    assert!(outputs.is_empty());
+    assert!(
+        outputs.is_empty(),
+        "no inputs must resolve to no outputs, not to a blocked fan-out"
+    );
+    Ok(())
 }
 
 #[test]
-fn bounded_fanout_streams_a_large_input_without_exceeding_the_limit() {
-    let runtime = Runtime::new().expect("runtime");
+fn bounded_fanout_streams_a_large_input_without_exceeding_the_limit() -> TestResult {
+    let runtime = Runtime::new()?;
     let current = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
 
@@ -188,7 +263,9 @@ fn bounded_fanout_streams_a_large_input_without_exceeding_the_limit() {
             let current = Arc::clone(&current);
             let peak = Arc::clone(&peak);
             async move {
-                let now = current.fetch_add(1, SeqCst) + 1;
+                // Bound: 64 inputs exist in total and at most 4 run at once, so
+                // the previous count cannot approach `usize::MAX`.
+                let now = current.fetch_add(1, SeqCst).saturating_add(1);
                 peak.fetch_max(now, SeqCst);
                 sleep(Duration::from_millis(5)).await;
                 current.fetch_sub(1, SeqCst);
@@ -208,48 +285,55 @@ fn bounded_fanout_streams_a_large_input_without_exceeding_the_limit() {
         "peak concurrency {observed} exceeded limit 4"
     );
     assert!(observed >= 1, "no task ever ran");
+    Ok(())
 }
 
 #[test]
-fn builder_applies_an_explicit_blocking_pool_bound() {
-    let max_blocking = NonZeroUsize::new(4).expect("nonzero");
+fn builder_applies_an_explicit_blocking_pool_bound() -> TestResult {
+    let Some(max_blocking) = NonZeroUsize::new(4) else {
+        return Err("4 is non-zero".into());
+    };
     let runtime = Builder::new()
         .max_blocking_threads(Some(max_blocking))
-        .build()
-        .expect("bounded blocking pool builds");
+        .build()?;
     let value = runtime.block_on(async {
         let handle = spawn(async { 6u32 });
-        handle.await.expect("task did not panic") * 7
-    });
+        Ok::<u32, JoinError>(handle.await? * 7)
+    })?;
     assert_eq!(value, 42);
+    Ok(())
 }
 
 #[test]
-fn bounded_fanout_treats_limit_zero_as_one() {
-    let runtime = Runtime::new().expect("runtime");
+fn bounded_fanout_treats_limit_zero_as_one() -> TestResult {
+    let runtime = Runtime::new()?;
     let outputs = runtime.block_on(join_all_bounded(0, (0..4u32).map(std::future::ready)));
     assert_eq!(outputs, vec![0, 1, 2, 3]);
+    Ok(())
 }
 
 #[test]
-fn bounded_fanout_clamps_a_limit_above_max_permits() {
+fn bounded_fanout_clamps_a_limit_above_max_permits() -> TestResult {
     // `Semaphore::new` panics above `MAX_PERMITS`; the facade clamps, so the
     // natural "unbounded" argument cannot abort the process.
-    let runtime = Runtime::new().expect("runtime");
+    let runtime = Runtime::new()?;
     let outputs = runtime.block_on(join_all_bounded(
         usize::MAX,
         (0..4u32).map(std::future::ready),
     ));
     assert_eq!(outputs, vec![0, 1, 2, 3]);
+    Ok(())
 }
 
 #[test]
-fn bounded_fanout_resumes_a_panicking_input_on_the_awaiter() {
-    let runtime = Runtime::new().expect("runtime");
+fn bounded_fanout_resumes_a_panicking_input_on_the_awaiter() -> TestResult {
+    let runtime = Runtime::new()?;
     let resumed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         runtime.block_on(join_all_bounded(
             2,
-            (0..2u8).map(|_| async { panic!("input exploded") }),
+            (0..2u8).map(|_| async {
+                explode("input exploded");
+            }),
         ));
     }));
     assert!(
@@ -260,27 +344,29 @@ fn bounded_fanout_resumes_a_panicking_input_on_the_awaiter() {
     // A non-panicking run through the same path is unaffected.
     let ok = runtime.block_on(join_all_bounded(2, (0..3u32).map(std::future::ready)));
     assert_eq!(ok, vec![0, 1, 2]);
+    Ok(())
 }
 
 #[test]
-fn a_handle_spawning_after_its_runtime_is_dropped_reports_cancellation() {
-    let runtime = Runtime::new().expect("runtime");
+fn a_handle_spawning_after_its_runtime_is_dropped_reports_cancellation() -> TestResult {
+    let runtime = Runtime::new()?;
     let handle = runtime.handle();
     drop(runtime);
 
     // The doc contract: this does not panic. The task is never scheduled, and
     // the loss is observable as a cancelled join rather than a silent success.
     let joined = handle.spawn(async { 1u8 });
-    let next = Runtime::new().expect("runtime");
-    let error = next
-        .block_on(joined)
-        .expect_err("a task with no runtime cannot produce a value");
+    let next = Runtime::new()?;
+    let Err(error) = next.block_on(joined) else {
+        return Err("a task with no runtime cannot produce a value".into());
+    };
     assert!(error.is_cancelled());
+    Ok(())
 }
 
 #[test]
-fn shutdown_timeout_does_not_claim_to_abort_started_blocking_work() {
-    let runtime = Runtime::new().expect("runtime");
+fn shutdown_timeout_does_not_claim_to_abort_started_blocking_work() -> TestResult {
+    let runtime = Runtime::new()?;
     let started = Arc::new(AtomicBool::new(false));
     let finished = Arc::new(AtomicBool::new(false));
     let worker_started = Arc::clone(&started);
@@ -289,7 +375,7 @@ fn shutdown_timeout_does_not_claim_to_abort_started_blocking_work() {
     runtime.block_on(async move {
         spawn_blocking(move || {
             worker_started.store(true, SeqCst);
-            std::thread::sleep(Duration::from_millis(40));
+            block_pool_thread(Duration::from_millis(40));
             worker_finished.store(true, SeqCst);
         });
         while !started.load(SeqCst) {
@@ -298,16 +384,17 @@ fn shutdown_timeout_does_not_claim_to_abort_started_blocking_work() {
     });
 
     runtime.shutdown_timeout(Duration::ZERO);
-    std::thread::sleep(Duration::from_millis(80));
+    block_pool_thread(Duration::from_millis(80));
     assert!(
         finished.load(SeqCst),
         "a started blocking task cannot be aborted by shutdown_timeout"
     );
+    Ok(())
 }
 
 #[test]
-fn dropping_a_join_handle_detaches_rather_than_cancels() {
-    let runtime = Runtime::new().expect("runtime");
+fn dropping_a_join_handle_detaches_rather_than_cancels() -> TestResult {
+    let runtime = Runtime::new()?;
     let ran = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&ran);
     runtime.block_on(async move {
@@ -322,43 +409,269 @@ fn dropping_a_join_handle_detaches_rather_than_cancels() {
         ran.load(SeqCst),
         "a dropped JoinHandle must not cancel its task"
     );
+    Ok(())
 }
 
 #[test]
-fn abort_is_cancellation() {
-    let runtime = Runtime::new().expect("runtime");
-    let error = runtime.block_on(async {
+fn abort_is_cancellation() -> TestResult {
+    let runtime = Runtime::new()?;
+    let joined = runtime.block_on(async {
         let handle = spawn(async {
             sleep(Duration::from_secs(30)).await;
         });
         handle.abort();
-        handle
-            .await
-            .expect_err("an aborted task yields a JoinError")
+        handle.await
     });
+    let Err(error) = joined else {
+        return Err("an aborted task yields a JoinError".into());
+    };
     assert!(error.is_cancelled());
+    Ok(())
 }
 
 #[test]
-fn a_panicking_task_surfaces_as_a_join_error() {
-    let runtime = Runtime::new().expect("runtime");
-    let error = runtime.block_on(async {
+fn a_panicking_task_surfaces_as_a_join_error() -> TestResult {
+    let runtime = Runtime::new()?;
+    let joined = runtime.block_on(async {
         let handle = spawn(async {
-            panic!("task exploded");
+            explode("task exploded");
         });
-        handle
-            .await
-            .expect_err("a panicking task yields a JoinError")
+        handle.await
     });
+    let Err(error) = joined else {
+        return Err("a panicking task yields a JoinError".into());
+    };
     assert!(error.is_panic());
+    Ok(())
 }
 
 #[test]
-fn a_handle_spawns_from_a_non_runtime_thread() {
-    let runtime = Runtime::new().expect("runtime");
+fn a_handle_spawns_from_a_non_runtime_thread() -> TestResult {
+    let runtime = Runtime::new()?;
     let handle = runtime.handle();
-    let value = std::thread::spawn(move || handle.block_on(async { 5u8 }))
-        .join()
-        .expect("thread did not panic");
+    // `std::thread::spawn` and not the runtime's `spawn`: the claim is that a
+    // handle works from a thread the runtime does not own, so the thread must be
+    // one the runtime did not make. What `clippy.toml` bans is an *unjoined* OS
+    // thread — one whose panic is invisible and whose handle is leaked — and
+    // this thread is joined on the next line.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the claim under test is that a Handle drives work from a thread the runtime did \
+                  not create; the thread is joined immediately, so nothing is leaked"
+    )]
+    let joined = std::thread::spawn(move || handle.block_on(async { 5u8 })).join();
+    let Ok(value) = joined else {
+        return Err("the spawned thread must not panic".into());
+    };
     assert_eq!(value, 5);
+    Ok(())
+}
+
+/// The cancellation primitive, exercised the way a supervisor uses it.
+///
+/// Every background task in this crate is tracked in a `JoinSet` and listens to
+/// a `CancellationToken`. Before this test existed the second half
+/// of that rule had no implementation to point at, so the rule was unenforceable
+/// rather than merely unenforced.
+#[test]
+fn a_cancelled_token_stops_every_task_in_a_join_set() -> TestResult {
+    const TASKS: usize = 32;
+    let runtime = Runtime::new()?;
+    let finished = Arc::new(AtomicUsize::new(0));
+    let token = CancellationToken::new();
+
+    let completed = runtime.block_on({
+        let finished = Arc::clone(&finished);
+        // `token` is moved in rather than cloned: the supervisor owns it, and no
+        // handle outside this block needs it afterwards.
+        async move {
+            let mut tasks = JoinSet::new();
+            for _ in 0..TASKS {
+                let waiting = token.clone();
+                let counter = Arc::clone(&finished);
+                tasks.spawn(async move {
+                    // `cancelled_owned` and not `cancelled`: a spawned task must
+                    // own everything it captures and outlive this scope, and
+                    // `cancelled` borrows the token.
+                    //
+                    // The 50 ms below is long enough that the cancel provably
+                    // arrives while these are parked, not after they returned.
+                    waiting.cancelled_owned().await;
+                    counter.fetch_add(1, SeqCst);
+                });
+            }
+
+            // Let every task reach its wait, then cancel from the same runtime
+            // but a different task than any waiter — which is the shape a
+            // supervisor actually has.
+            sleep(Duration::from_millis(50)).await;
+            token.cancel();
+
+            while let Some(joined) = tasks.join_next().await {
+                joined?;
+            }
+            Ok::<usize, JoinError>(finished.load(SeqCst))
+        }
+    })?;
+
+    assert_eq!(
+        completed, TASKS,
+        "one cancel must release every parked task"
+    );
+    Ok(())
+}
+
+/// A child token is cancellable on its own, and cancelling it must not disturb
+/// the sibling that shares its parent.
+#[test]
+fn cancelling_one_child_leaves_its_sibling_running() -> TestResult {
+    let runtime = Runtime::new()?;
+    let parent = CancellationToken::new();
+    let stopped = parent.child_token();
+    let surviving = parent.child_token();
+    let ran_to_completion = Arc::new(AtomicBool::new(false));
+
+    let outcome = runtime.block_on({
+        let ran_to_completion = Arc::clone(&ran_to_completion);
+        // Two clones: one the supervisor cancels, one the task waits on. They
+        // are the same token, so the cancel reaches the waiter.
+        let controller = stopped.clone();
+        let surviving_still_live = surviving.clone();
+        // `parent` is moved rather than cloned: it is needed only inside this
+        // block, to release the sibling once the claim has been asserted.
+        async move {
+            let mut tasks = JoinSet::new();
+            tasks.spawn(async move {
+                stopped.cancelled_owned().await;
+                "stopped"
+            });
+            tasks.spawn(async move {
+                surviving.cancelled_owned().await;
+                ran_to_completion.store(true, SeqCst);
+                "survivor"
+            });
+
+            sleep(Duration::from_millis(50)).await;
+            // Only the one child: a supervisor abandoning a single subtask must
+            // not take its siblings with it.
+            controller.cancel();
+
+            // The sibling must still be live *after* its peer was cancelled —
+            // that is the claim. It is asserted here rather than after the join
+            // because the join below deliberately does not wait for it.
+            let sibling_survived = !surviving_still_live.is_cancelled();
+
+            // Release the sibling's own wait so the set can be drained. This is
+            // the parent cancel, not a second child cancel: the point is that
+            // the sibling was stopped by the parent, never by its peer.
+            parent.cancel();
+
+            let mut seen = Vec::new();
+            while let Some(joined) = tasks.join_next().await {
+                seen.push(joined?);
+            }
+            seen.sort_unstable();
+            Ok::<(Vec<&str>, bool), JoinError>((seen, sibling_survived))
+        }
+    })?;
+
+    let (seen, sibling_survived) = outcome;
+    assert_eq!(
+        seen,
+        vec!["stopped", "survivor"],
+        "both tasks must finish once released"
+    );
+    assert!(
+        sibling_survived,
+        "cancelling one child must leave its sibling live, not cancel it too"
+    );
+    assert!(
+        ran_to_completion.load(SeqCst),
+        "the sibling of a cancelled child must run to completion"
+    );
+    // No assertion that `parent` is live: the test cancels it deliberately to
+    // release the sibling. The direction being tested is the other one —
+    // cancelling a *child* must not reach the parent — and that is covered in
+    // the unit tests, where the parent has no sibling to release.
+    Ok(())
+}
+
+/// A token cancelled before it is awaited still releases its task.
+///
+/// This is the race a supervisor actually hits: the decision to stop can land
+/// before the worker reaches its wait. A primitive that only wakes *registered*
+/// waiters would hang here forever.
+#[test]
+fn a_token_cancelled_before_the_await_still_releases_the_task() -> TestResult {
+    let runtime = Runtime::new()?;
+    let token = CancellationToken::new();
+    // Cancelled with no waiter in existence at all.
+    token.cancel();
+
+    let outcome = runtime.block_on(async move {
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async move {
+            token.cancelled_owned().await;
+            "released"
+        });
+        tasks.join_next().await
+    });
+
+    let Some(joined) = outcome else {
+        return Err("the JoinSet must yield one result".into());
+    };
+    assert_eq!(
+        joined?, "released",
+        "a pre-cancelled token must still release its waiter"
+    );
+    Ok(())
+}
+
+/// The crate's own thesis: its verbs are deliberately not `Send`, so a domain
+/// may hold thread-local state. Until `LocalSet` was exposed there was no way to
+/// spawn a future with that property, because `spawn` requires `Send`, which every verb
+/// in this crate violates on purpose.
+#[test]
+fn a_local_set_runs_a_task_that_is_not_send() -> TestResult {
+    let runtime = Runtime::new()?;
+    let observed = runtime.block_on(async {
+        let local = LocalSet::new();
+        local
+            .run_until(async {
+                // `Rc` and `Cell` are the point: this future cannot be `Send`,
+                // and `spawn` would refuse it at compile time.
+                let shared = Rc::new(Cell::new(0u8));
+                let held = Rc::clone(&shared);
+                let handle = spawn_local(async move {
+                    held.set(7);
+                    held.get()
+                });
+                handle.await
+            })
+            .await
+    })?;
+    assert_eq!(observed, 7, "the local task must run and return its value");
+    Ok(())
+}
+
+/// `rt::io` is what makes the drivers composable: without the traits in scope a
+/// consumer can open a socket or a pipe but cannot read from it.
+#[test]
+fn io_traits_compose_over_a_duplex_stream() -> TestResult {
+    let runtime = Runtime::new()?;
+    let echoed = runtime.block_on(async {
+        let (client, server) = duplex(64);
+        let mut writer = BufWriter::new(client);
+        let mut reader = BufReader::new(server);
+        writer.write_all(b"ping\n").await?;
+        writer.flush().await?;
+        let mut line = String::new();
+        reader.read_line(&mut line).await?;
+        Ok::<String, std::io::Error>(line)
+    })?;
+    assert_eq!(
+        echoed, "ping\n",
+        "a buffered reader must recover the written line"
+    );
+    Ok(())
 }

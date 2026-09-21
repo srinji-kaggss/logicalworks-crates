@@ -5,8 +5,8 @@
 //! sources to side effects. Authority is proof-carrying: every `poll`,
 //! `execute_action`, and `query` takes an `(Auth, input)` tuple, and only
 //! `GrantSet::issue` can mint the `Auth` half. Capabilities are validated at
-//! build time — a bot that requires `bot.net` without a grant fails before it
-//! runs — and proven again on every call, so a grant revoked after build cannot
+//! build time (a bot that requires `bot.net` without a grant fails before it
+//! runs) and proven again on every call, so a grant revoked after build cannot
 //! fire.
 //!
 //! `Evaluate` takes no proof: it is pure (boolean in, boolean out) with no
@@ -14,30 +14,58 @@
 //!
 //! # Async surface
 //!
-//! With the default `rt` feature, `lgwks_bot` is also the estate's async and
-//! runner surface: `Runtime`, `rt::task::join_all_bounded`, timers, channels,
-//! and the opt-in `net`/`process`/`fs`/`signal` drivers. The engine is sourced
-//! from the `lgwks_deps` storefront (`feature = "tokio"`), so no other crate
-//! authors a `tokio` edge. `--no-default-features` withdraws the async surface
-//! and leaves the synchronous `lgwks_std::task` executor as the only runtime.
+//! With the default `rt` feature, `lgwks_bot` is also the async and runner
+//! surface of this workspace: `Runtime`, `rt::task::join_all_bounded`, timers,
+//! channels, and the opt-in `net`/`process`/`fs`/`signal` drivers. The engine is
+//! sourced from the `lgwks_deps` dependency facade (`feature = "tokio"`), so no
+//! other crate authors a `tokio` edge. `--no-default-features` withdraws the
+//! async surface and leaves the synchronous `lgwks_std::task` executor as the
+//! only runtime.
 //!
 //! # Quick start
 //!
 //! ```rust,no_run
 //! use lgwks_bot::{Bot, Cap, GrantSet};
 //!
-//! let bot = Bot::builder("my-bot")
+//! let mut bot = Bot::builder("my-bot")
 //!     // .observe(source).on(condition, action)
 //!     .build(&GrantSet::all_shipped())
 //!     .expect("shipped domains are covered by all_shipped");
 //!
-//! let fired = bot.block_on_tick().expect("tick propagates domain errors");
+//! let fired = bot.tick().expect("tick propagates domain errors");
 //! ```
 
-#![allow(async_fn_in_trait)]
 // Verbs are async by design (single-threaded `lgwks_std::task` driver, futures
-// deliberately not `Send`). Remaining lint contract (missing_docs deny,
-// unsafe_code forbid, broken intra-doc links deny) comes from the workspace.
+// deliberately not `Send`). The lint fires on `pub trait` methods declared
+// `async fn` without a `-> impl Future + Send` bound; that is exactly the shape
+// INV-BOT-FOUR-VERBS requires, because a `Send` bound would force every domain
+// to be `Send` and rule out the thread-local state `Bot::tick` is built for.
+//
+// This is the crate's one suppression, and it names its reason. `expect` is not
+// available here: the lint is denied crate-wide rather than triggered by this
+// item alone, so an `#[expect]` would report an unfulfilled expectation at every
+// other `async fn` in `verb`.
+//
+// Remaining lint contract (missing_docs deny, unsafe_code forbid,
+// broken_intra_doc_links deny) comes from the workspace.
+#![allow(
+    async_fn_in_trait,
+    reason = "the four verb traits are the crate's public async contract and must stay non-Send; \
+              see docs/async-sdk-shape.md and INV-BOT-FOUR-VERBS"
+)]
+
+/// Compiles every Rust block in `README.md` as a doctest.
+///
+/// The README is the first thing a consumer reads and the last thing anyone
+/// updates: it described a `lgwks_std::task` executor and an `async fn tick`
+/// for two commits after both had been replaced, and nothing failed, because a
+/// prose example is not compiled by anything. This makes it compiled.
+///
+/// `#[cfg(doctest)]` so the item exists only under `cargo test --doc`: it is
+/// not part of the library, not built by a normal compile, and not exported.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeExamples;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -68,11 +96,14 @@ pub mod domain {
     pub mod notify;
     pub mod sys;
 }
+/// The `bevy_ecs` substrate the verbs execute on. Private: it is the
+/// implementation, not a second way to run a bot.
+mod ecs;
 /// Typed bot errors.
 pub mod error;
 /// Grant sets: build-time admission and per-tick proof minting.
 pub mod gate;
-/// JSON through the estate facade (`lgwks_std::json`).
+/// JSON through the shared facade (`lgwks_std::json`).
 pub mod json;
 /// Async runtime surface (feature `rt`): owned `Runtime`, bounded fan-out,
 /// timers, channels, and opt-in drivers.
@@ -82,7 +113,7 @@ pub mod rt;
 ///
 /// `BotSpec` is validate-only: there is no `from_spec` materializer. A spec
 /// that validates still builds through `Bot::builder`, so capability grants
-/// stay explicit at the call site. The builder DSL is the DSL — there is
+/// stay explicit at the call site. The builder DSL is the DSL: there is
 /// deliberately no `bot!` proc-macro (it would drag `syn` into every consumer
 /// and hide the per-call `Auth::check` that auditors read).
 pub mod spec;
@@ -94,24 +125,24 @@ pub use error::BotError;
 pub use gate::GrantSet;
 #[cfg(feature = "rt")]
 pub use rt::{Builder, Handle, Runtime, block_on};
-pub use spec::{Bot, BotSpec, Chain, ChainEntry};
+pub use spec::{Bot, BotSpec};
 pub use verb::{Evaluate, Execute, Observe, Query};
 
 /// Wait for all of a set of futures, returning their outputs in input order.
 ///
-/// Re-exported from the storefront engine so callers never name `tokio`. For a
+/// Re-exported from the `lgwks_deps` engine so callers never name `tokio`. For a
 /// fan-out that must be bounded, prefer `rt::task::join_all_bounded`.
 #[cfg(all(feature = "rt", feature = "macros"))]
 pub use lgwks_deps::tokio::join;
 
 /// Race a set of futures, running the first branch that becomes ready.
 ///
-/// Re-exported from the storefront engine so callers never name `tokio`.
+/// Re-exported from the `lgwks_deps` engine so callers never name `tokio`.
 #[cfg(all(feature = "rt", feature = "macros"))]
 pub use lgwks_deps::tokio::select;
 
 /// Wait for all of a set of fallible futures, short-circuiting on the first
-/// error. Re-exported from the storefront engine so callers never name `tokio`.
+/// error. Re-exported from the `lgwks_deps` engine so callers never name `tokio`.
 #[cfg(all(feature = "rt", feature = "macros"))]
 pub use lgwks_deps::tokio::try_join;
 

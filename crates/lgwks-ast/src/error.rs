@@ -1,4 +1,4 @@
-//! `error` owns the estate's typed-diagnostic derive.
+//! `error` owns this crate's typed-diagnostic derive.
 //!
 //! `std::error::Error` is a trait, and stable `std` has no derive that
 //! generates `Display` or `source`. [`ParseError`](crate::ParseError) is built
