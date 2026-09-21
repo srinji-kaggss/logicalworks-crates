@@ -1,6 +1,6 @@
 [package]
 name = "lgwks_std"
-description = "A std+ toolkit with zero dependencies by default: hex, base64, timestamps, UUIDs, hashing, glob, regex, JSON, HTTP, and an async executor."
+description = "Zero-config std+ primitives — hex, base64, time, UUIDs, hashing, glob, regex, JSON, HTTP, tracing, async — one audited dependency per feature."
 version = "0.6.3"
 edition = "2024"
 rust-version = "1.98"
@@ -35,9 +35,20 @@ keywords = ["stdlib", "zero-dependencies", "json", "hex", "async"]
 #                   primitives stable std does not expose; Unix-only, optional
 #   thiserror     — not here; the typed-error derive is owned by `lgwks_ast`
 #                   (the code-observability lane) so the std+ stack stays lean
+#   tracing       — 4 crates measured (`tracing`, `tracing-core`,
+#                   `pin-project-lite`, `once_cell`), no proc macro because
+#                   `attributes` is off. Default-on: see the `[features]` note.
 [features]
-default = ["core"]
+# `trace` is default-on, and that is a Director decision recorded here rather
+# than a convenience. The estate's PRINTS rule forbids `println!`/`eprintln!` in
+# library code and names `tracing` as the replacement — but until this feature
+# existed, no crate in the estate could reach `tracing` at all, so the rule
+# banned the only logging path that was actually available and named one that
+# was not. `--no-default-features --features core` withdraws it and restores a
+# genuinely zero-dependency build.
+default = ["core", "trace"]
 core = []
+trace = ["dep:tracing"]
 random = ["dep:getrandom"]
 hash = ["dep:blake3"]
 pattern = ["dep:regex"]
@@ -48,9 +59,18 @@ http = ["dep:ureq", "dep:iri-string"]
 online = []
 fs-raw = ["dep:rustix"]
 process = ["dep:rustix", "rustix?/process"]
-full = ["random", "hash", "pattern", "json", "ron", "wire", "http", "online", "fs-raw", "process"]
+full = ["trace", "random", "hash", "pattern", "json", "ron", "wire", "http", "online", "fs-raw", "process"]
 
 [dependencies]
+# `attributes` is deliberately NOT enabled. It is the half of `tracing` that
+# provides `#[instrument]`, and it expands through `tracing-attributes`, which
+# expands through `syn` — a proc-macro stack the estate bans outside the
+# `lgwks_deps` gate tool. Leaving it off keeps this edge at four small crates —
+# `tracing`, `tracing-core`, `pin-project-lite`, `once_cell` — with no proc
+# macro and no build step beyond a normal compile. A consumer who wants
+# `#[instrument]` can add `tracing` with
+# `attributes` themselves; that is their audited edge, not the foundation's.
+tracing = { version = "0.1", default-features = false, features = ["std"], optional = true }
 blake3 = { version = "1.8", default-features = false, optional = true }
 regex = { version = "1.13", optional = true }
 rkyv = { version = "0.8", default-features = false, features = ["alloc", "bytecheck"], optional = true }

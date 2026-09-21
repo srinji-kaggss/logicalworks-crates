@@ -768,6 +768,7 @@ mod tests {
                 "rustix",
                 "serde",
                 "serde_json",
+                "tracing",
                 "ureq",
             ];
 

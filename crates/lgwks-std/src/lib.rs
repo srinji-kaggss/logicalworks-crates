@@ -2,14 +2,19 @@
 //!
 //! Every module is a single-import, single-call primitive — hex, base64,
 //! timestamps, UUIDs, hashing, glob matching, regex, JSON, async — backed by
-//! a vetted dependency stack that bottoms out at zero external deps.
+//! a vetted dependency stack that bottoms out at two leaves.
 //!
-//! The default `core` feature compiles with **zero external dependencies**.
-//! Each optional feature unlocks one capability with one audited stack.
+//! Each optional feature unlocks one capability with one audited stack. The
+//! default build carries `core` **and `trace`**: the estate's PRINTS rule
+//! forbids `println!` in library code and names `tracing` as the replacement,
+//! and a rule that names an unavailable facility is not a rule. `--no-default-
+//! features --features core` restores a genuinely zero-dependency build.
 //!
 //! ## Feature map
 //!
 //! - `core` (default) — encoding, fs, glob, hex, leb128, retry, task, time. Zero deps.
+//! - `trace` (default) — trace. Adds `tracing` (`std` only; no `attributes`,
+//!   so no `syn`).
 //! - `random` — random, id. Adds `getrandom`.
 //! - `hash` — hash. Adds `blake3`.
 //! - `pattern` — pattern. Adds `regex`.
@@ -68,6 +73,9 @@ pub mod ron;
 pub mod task;
 /// RFC 3339 timestamps and calendar math.
 pub mod time;
+/// Structured, levelled logging via `tracing` (feature `trace`, default-on).
+#[cfg(feature = "trace")]
+pub mod trace;
 /// Zero-copy binary wire serialization via rkyv (feature `wire`).
 #[cfg(feature = "wire")]
 pub mod wire;

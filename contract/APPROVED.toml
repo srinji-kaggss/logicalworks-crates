@@ -409,3 +409,17 @@ reason = "A declared state machine with generational transitions, enter/exit sch
 approved_by = "Director"
 approved_on = "2026-09-20"
 review = "docs/bevy-admission.md"
+
+[[approved]]
+crate = "tracing"
+tier = "boundary"
+version = "^0.1"
+owner = "lgwks_std"
+capability = "observability.structured-logging"
+source = "registry"
+allowed_consumers = "lgwks_std"
+allowed_kinds = "normal"
+reason = "The estate's PRINTS rule forbids println!/eprintln! in library code and names tracing as the replacement, but tracing was absent from every crate — so the rule banned the available path and named an unavailable one. Registered default-on in lgwks_std (feature `trace`); `attributes` stays off so no proc-macro stack enters the foundation, and no subscriber is bundled because choosing an output format is the binary's decision, not the library's."
+approved_by = "Director"
+approved_on = "2026-09-20"
+review = "crates/lgwks-std/src/trace.rs"

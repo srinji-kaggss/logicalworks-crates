@@ -1,13 +1,26 @@
 # lgwks_std — zero-config primitives that replace a dozen crates
 
 The standard library gets you 90% of the way. This crate is the last 10% —
-hex, base64, timestamps, UUIDs, hashing, glob matching, regex, JSON, async — as
-single-import, zero-config calls backed by a dependency stack that bottoms out
-at zero external deps.
+hex, base64, timestamps, UUIDs, hashing, glob matching, regex, JSON, HTTP,
+tracing, async — as single-import, zero-config calls, each behind one audited
+dependency stack. No transitive surprises, no feature flag archaeology.
 
-Pick exactly what you need. The default feature compiles with **zero external
-dependencies**. Each optional feature unlocks one capability with one vetted
-stack beneath it — no transitive surprises, no feature flag archaeology.
+Pick exactly what you need. The default build is `core` plus `trace`; every
+other capability is one feature with one vetted stack beneath it.
+
+`trace` is default-on because the estate's PRINTS rule forbids `println!` in
+library code and names `tracing` as the replacement — a rule that names an
+unavailable facility is not a rule. It costs four small crates
+(`tracing`, `tracing-core`, `pin-project-lite`, `once_cell`), with no proc
+macro and no `syn`. **Want a genuinely zero-dependency build?**
+
+```sh
+cargo add lgwks_std --no-default-features --features core
+```
+
+That is the only configuration in which this crate pulls nothing at all, and it
+is measured, not asserted: `cargo tree -p lgwks_std --no-default-features
+--features core -e normal` prints one line — `lgwks_std` itself.
 
 Package `lgwks_std` (underscore) lives in directory `crates/lgwks-std`
 (hyphen): `cargo add lgwks_std` then `use lgwks_std::...`.
@@ -15,8 +28,9 @@ Package `lgwks_std` (underscore) lives in directory `crates/lgwks-std`
 ## Install
 
 ```sh
-cargo add lgwks_std                                    # core only, zero deps
+cargo add lgwks_std                                    # core + trace
 cargo add lgwks_std --features json,http               # pick what you need
+cargo add lgwks_std --no-default-features --features core   # zero deps
 cargo run -p lgwks_std --example quickstart            # 10-line tour (this repo)
 ```
 
