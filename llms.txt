@@ -13,6 +13,18 @@ Source: https://github.com/srinji-kaggss/logicalworks-crates
 
 ## Documentation
 
+- [Consumer guides](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/index.md) — Choose a crate, and which symbols are stable versus main-only.
+- [lgwks_bot](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-bot/index.md) — `lgwks_bot`: purpose, non-goals, and the supported versions.
+- [Getting started with lgwks_bot](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-bot/getting-started.md) — One source, one condition, one effect, compiled and run.
+- [lgwks_bot features](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-bot/features.md) — Every `lgwks_bot` feature, and what `--no-default-features` does not remove.
+- [Authority in lgwks_bot](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-bot/authority.md) — Admission, the `Auth` snapshot, and the no-sandbox boundary.
+- [What a failed tick means](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-bot/failures.md) — Poll failure, partial action failure, and unknown effect.
+- [Bounded background work](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-bot/background-work.md) — Bounded fan-out, supervision, and the cancellation limits.
+- [Guidance sessions](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-bot/sessions.md) — Unreleased: validated guidance flows and the session runner.
+- [Resolution and degraded verdicts](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-bot/resolution.md) — Unreleased: lexical and semantic resolution, and degraded verdicts.
+- [lgwks_std consumer guide](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-std/index.md) — `lgwks_std`: install, feature selection, and logging.
+- [lgwks_ast consumer guide](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-ast/index.md) — `lgwks_ast`: install, grammar selection, bounds, and diagnostics.
+- [lgwks_deps: library and CLI](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-deps/index.md) — `lgwks_deps`: library use versus CLI and policy adoption.
 - [Dependency doctrine](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/dependency-doctrine.md) — How a dependency is admitted, the replacement matrix, and where no equivalent exists. Read this before adding a crate.
 - [Async runtime parity](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/async-parity.md) — The `lgwks_bot::rt` surface against tokio and the alternatives: the capability matrix, the open gaps, and the deliberate divergences.
 - [The async surface as an SDK](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/async-sdk-shape.md) — The async surface as an SDK: its shape, its invariants, and how to migrate.

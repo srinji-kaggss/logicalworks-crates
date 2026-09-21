@@ -210,10 +210,24 @@ through `Runtime::block_on`.
 
 ## Documentation
 
-Depth lives in [`docs/`](docs/), not in this file.
+Depth lives in [`docs/`](docs/), not in this file. If you are here to use a
+crate rather than to change one, start with the [consumer guides](docs/guides/index.md);
+the rest of this table is design history and contributor policy.
 
 | Document | Covers |
 |---|---|
+| [`docs/guides/index.md`](docs/guides/index.md) | Choose a crate, and which symbols are stable versus main-only. |
+| [`docs/guides/lgwks-bot/index.md`](docs/guides/lgwks-bot/index.md) | `lgwks_bot`: purpose, non-goals, and the supported versions. |
+| [`docs/guides/lgwks-bot/getting-started.md`](docs/guides/lgwks-bot/getting-started.md) | One source, one condition, one effect, compiled and run. |
+| [`docs/guides/lgwks-bot/features.md`](docs/guides/lgwks-bot/features.md) | Every `lgwks_bot` feature, and what `--no-default-features` does not remove. |
+| [`docs/guides/lgwks-bot/authority.md`](docs/guides/lgwks-bot/authority.md) | Admission, the `Auth` snapshot, and the no-sandbox boundary. |
+| [`docs/guides/lgwks-bot/failures.md`](docs/guides/lgwks-bot/failures.md) | Poll failure, partial action failure, and unknown effect. |
+| [`docs/guides/lgwks-bot/background-work.md`](docs/guides/lgwks-bot/background-work.md) | Bounded fan-out, supervision, and the cancellation limits. |
+| [`docs/guides/lgwks-bot/sessions.md`](docs/guides/lgwks-bot/sessions.md) | Unreleased: validated guidance flows and the session runner. |
+| [`docs/guides/lgwks-bot/resolution.md`](docs/guides/lgwks-bot/resolution.md) | Unreleased: lexical and semantic resolution, and degraded verdicts. |
+| [`docs/guides/lgwks-std/index.md`](docs/guides/lgwks-std/index.md) | `lgwks_std`: install, feature selection, and logging. |
+| [`docs/guides/lgwks-ast/index.md`](docs/guides/lgwks-ast/index.md) | `lgwks_ast`: install, grammar selection, bounds, and diagnostics. |
+| [`docs/guides/lgwks-deps/index.md`](docs/guides/lgwks-deps/index.md) | `lgwks_deps`: library use versus CLI and policy adoption. |
 | [`docs/dependency-doctrine.md`](docs/dependency-doctrine.md) | How a dependency is admitted, the replacement matrix, and where no equivalent exists. Read this before adding a crate. |
 | [`docs/async-parity.md`](docs/async-parity.md) | The `lgwks_bot::rt` surface against tokio and the alternatives: the capability matrix, the open gaps, and the deliberate divergences. |
 | [`docs/async-sdk-shape.md`](docs/async-sdk-shape.md) | The async surface as an SDK: its shape, its invariants, and how to migrate. |
