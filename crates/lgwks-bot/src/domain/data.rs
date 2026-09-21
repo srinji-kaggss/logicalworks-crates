@@ -19,7 +19,7 @@ pub struct JsonStore {
 ///
 /// `#[non_exhaustive]`: the store's reported shape grows with the domain, and a
 /// consumer that destructured this literally would break on each addition.
-#[derive(Debug, Clone)]
+#[derive(PartialEq, Debug, Clone)]
 #[non_exhaustive]
 pub struct DataState {
     /// Whether the store contents changed since last poll.

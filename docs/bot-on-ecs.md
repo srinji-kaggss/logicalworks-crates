@@ -5,8 +5,9 @@ the async surface is allowed to think about. This one answers a different
 question: **what substrate executes a `BotSpec`, and does the four-verb model
 extend onto it naturally?**
 
-Status: design, with a measured spike behind §2–§3 and **step 2 of §10 landed**
-as `lgwks_bot::ecs` (feature `ecs`). `bevy_ecs` is **admitted**
+Status: **implemented, and it is the only path.** Steps 0, 2 and 3 of §10 have
+landed; `Bot` *is* the ECS bot — there is one bot, one builder and one executor,
+with no feature flag and no parallel implementation. `bevy_ecs` is admitted
 (`docs/bevy-admission.md`). The scheduler decision — §9, step 1 — remains open,
 and is a Director call rather than an agent's.
 
@@ -137,10 +138,16 @@ So the value lives in a `NonSend` resource and the component is a `Revision(u64)
 marker the observe system bumps **only when the value actually differs**. That
 keeps §4's property — the condition is still a tick comparison, not a
 re-derivation — while keeping `lgwks_bot`'s non-`Send` contract intact rather
-than tightening it to fit the substrate. It also means the ECS path needs
-`PartialEq` on an observer's `Output`, which `Bot::builder` does not: a value that
-cannot be compared cannot be detected as changed. That bound belongs on
-`EcsBuilder::observe` and nowhere else.
+than tightening it to fit the substrate.
+
+The cost is a `PartialEq` bound on an observer's `Output` in `Bot::builder`. It
+is semantic, not incidental: this substrate's condition *is* change detection,
+and a value that cannot be compared cannot be detected as changed. Every shipped
+domain's observed state carries the derive.
+
+The alternative was rejected: tightening the erasure to `Box<dyn Any + Send +
+Sync>` would fit the substrate better and charge every observer a bound it does
+not otherwise need, to solve a problem the substrate introduced.
 
 ## 5. Determinism on this substrate
 
@@ -369,12 +376,13 @@ Each step must leave `cargo test --workspace --all-targets` green.
    `lgwks_std` module. **Still open, and deliberately not taken here.** It is a
    Director call because the doctrine and the "don't rebuild" instruction point
    at different rungs.
-2. **A `Spec -> Schedule` bridge alongside the current executor.** ⚠️ **Landed in
-   part**, as `lgwks_bot::ecs` (feature `ecs`). What exists: `EcsBot`, a parallel
-   builder, `SourceId`/`Revision` components, `Grants`/`Fired`/`TickError`
-   resources, non-`Send` chain and value storage, the `observe` and `fire`
-   exclusive systems, and the build-time validation of step 3. `Bot` and
-   `Bot::tick()` are untouched; this is a seam, not a replacement.
+2. **A `Spec -> Schedule` executor.** ✅ Landed, and it *replaced* the old one
+   rather than sitting beside it. `Bot` is the ECS bot: `SourceId`/`Revision`
+   components, `Grants`/`Fired`/`TickError` resources, non-`Send` chain and value
+   storage, the `observe` and `fire` exclusive systems, and bounded concurrent
+   polling retained from the previous executor. The interim state — two bots, one
+   behind a default-off `ecs` feature — was rejected as a candidate architecture
+   that nothing would exercise; see §12.
 
    **What is not done, stated plainly: the `from_spec` gap is still open.** The
    builder takes *verbs*, not a [`BotSpec`]. Materializing a `World` from wire
@@ -405,11 +413,44 @@ stay working throughout. Parallel seams, not demolition.
 substrate whose tests never run is a substrate whose guarantees are claims:
 
 ```sh
-cargo test  -p lgwks_bot --features ecs
-cargo clippy -p lgwks_bot --all-features --all-targets -- -D warnings
+cargo test  --workspace --all-targets --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
-Five tests, one per guarantee, including the semantic delta pinned against the
-plain executor: on the same five-tick script and the same condition, `Bot` fires
-**2** and `EcsBot` fires **1**. That test exists so the difference between "the
-value is true" and "the value moved" cannot be quietly forgotten.
+There is no feature flag. The substrate is how `Bot` executes, so the ordinary
+workspace gate compiles and runs its tests — four of them, one per guarantee.
+A default-off flag was tried first and rejected: it would have left the
+substrate unexercised, unowned, and free to rot.
+
+## 12. One path (Director, 2026-09-20)
+
+The first landing made the substrate a **default-off feature**: `EcsBot` beside
+`Bot`, compiled only when a caller asked. That was corrected. A default-off
+parallel path is how work fails to carry forward — nothing exercises it, the gate
+never compiles it, and it rots into a second opinion nobody chose.
+
+What changed:
+
+- **The `ecs` feature is gone.** `lgwks_bot` depends on the storefront's
+  `bevy-ecs` unconditionally. The storefront keeps its features default-off — that
+  is its stated purpose — but a *consumer* states its opinion, and this crate's
+  opinion is that the ECS substrate is how a bot executes.
+- **The second builder is gone.** `EcsBot`, `EcsBuilder` and `EcsObserveBuilder`
+  are now `Bot`, `BotBuilder` and `ObserveBuilder`, re-exported from a private
+  module. There is no other way to build or run a bot.
+- **`cargo test --workspace` runs it.** No flag, no separate command.
+- **Two behaviours changed, and both are pinned by tests rather than noted:**
+  - A tick is now **all-or-nothing**: the observe system polls every source
+    before any effect runs, so a tick that errors fires *nothing*. The previous
+    contract fired the chains declared before the failure.
+  - A condition is evaluated on **transition**, not on every tick. The bot acts
+    when the value moves. A condition that must hold continuously belongs on a
+    domain that models it, not on change detection.
+- **Bounded concurrent polling was restored, not dropped.** The first ECS
+  `observe` polled sources one at a time, and `tick_polls_sources_concurrently`
+  caught it — a real regression the collapse introduced. Polls run in bounded
+  waves of `MAX_IN_FLIGHT_POLLS`, exactly as before; results are still collected
+  in declaration order, so determinism is unaffected.
+
+`--no-default-features` remains a real build (no tokio, no drivers), and it does
+now pull `bevy_ecs`. That is the honest cost of one path rather than two.

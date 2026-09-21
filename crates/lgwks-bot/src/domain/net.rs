@@ -32,7 +32,7 @@ pub struct Endpoint {
 ///
 /// `#[non_exhaustive]`: the reported shape grows with the domain, and a
 /// consumer that destructured this literally would break on each addition.
-#[derive(Debug, Clone)]
+#[derive(PartialEq, Debug, Clone)]
 #[non_exhaustive]
 pub struct NetState {
     /// HTTP status code of the last probe. `0` means no response was received —

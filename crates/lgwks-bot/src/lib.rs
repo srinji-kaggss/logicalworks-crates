@@ -26,7 +26,7 @@
 //! ```rust,no_run
 //! use lgwks_bot::{Bot, Cap, GrantSet};
 //!
-//! let bot = Bot::builder("my-bot")
+//! let mut bot = Bot::builder("my-bot")
 //!     // .observe(source).on(condition, action)
 //!     .build(&GrantSet::all_shipped())
 //!     .expect("shipped domains are covered by all_shipped");
@@ -82,9 +82,9 @@ pub mod domain {
     pub mod notify;
     pub mod sys;
 }
-/// The four verbs on a `bevy_ecs` substrate (feature `ecs`).
-#[cfg(feature = "ecs")]
-pub mod ecs;
+/// The `bevy_ecs` substrate the verbs execute on. Private: it is the
+/// implementation, not a second way to run a bot.
+mod ecs;
 /// Typed bot errors.
 pub mod error;
 /// Grant sets: build-time admission and per-tick proof minting.
@@ -111,7 +111,7 @@ pub use error::BotError;
 pub use gate::GrantSet;
 #[cfg(feature = "rt")]
 pub use rt::{Builder, Handle, Runtime, block_on};
-pub use spec::{Bot, BotSpec, Chain, ChainEntry};
+pub use spec::{Bot, BotSpec};
 pub use verb::{Evaluate, Execute, Observe, Query};
 
 /// Wait for all of a set of futures, returning their outputs in input order.

@@ -108,37 +108,93 @@ impl ActionSpec {
     }
 }
 
+/// Build one `(condition, action)` tuple, erased for storage on a chain.
+///
+/// Shared rather than duplicated: the `Auth` issue, the downcast and the
+/// type-mismatch error must not drift between call sites — and issuing the proof
+/// *before* the downcast is the property that makes a type mismatch fail without
+/// a side effect.
+pub(crate) fn typed_entry<C, A, T>(condition: C, action: A) -> ChainEntry
+where
+    T: 'static,
+    C: super::verb::Evaluate<T> + 'static,
+    A: super::verb::Execute + 'static,
+    A::Input: 'static,
+    A::Output: 'static,
+{
+    struct TypedEval<C, T> {
+        inner: C,
+        _marker: std::marker::PhantomData<T>,
+    }
+
+    impl<C: super::verb::Evaluate<T>, T: 'static> EvaluateAny for TypedEval<C, T> {
+        fn check_any(&self, value: &dyn std::any::Any) -> Result<bool, BotError> {
+            match value.downcast_ref::<T>() {
+                Some(typed) => self.inner.check(typed),
+                None => Err(BotError::EvaluateError {
+                    cause: "type mismatch in evaluate".into(),
+                }),
+            }
+        }
+    }
+
+    struct TypedExec<A>(A);
+
+    impl<A: super::verb::Execute> ExecuteAny for TypedExec<A>
+    where
+        A::Input: 'static,
+        A::Output: 'static,
+    {
+        fn required_caps(&self) -> &[Cap] {
+            self.0.required_caps()
+        }
+
+        fn run_any<'a>(
+            &'a self,
+            grants: &'a GrantSet,
+            input: &'a dyn std::any::Any,
+        ) -> crate::BoxFuture<'a, Result<Box<dyn std::any::Any>, BotError>> {
+            Box::pin(async move {
+                match input.downcast_ref::<A::Input>() {
+                    Some(typed) => {
+                        let auth: Auth = grants.issue(self.0.required_caps())?;
+                        let value = self.0.execute_action((auth, typed)).await?;
+                        let boxed: Box<dyn std::any::Any> = Box::new(value);
+                        Ok(boxed)
+                    }
+                    None => Err(BotError::DomainError {
+                        domain: self.0.domain_id().into(),
+                        cause: "type mismatch in execute input".into(),
+                    }),
+                }
+            })
+        }
+    }
+
+    ChainEntry {
+        condition: Box::new(TypedEval {
+            inner: condition,
+            _marker: std::marker::PhantomData::<T>,
+        }),
+        action: Box::new(TypedExec(action)),
+    }
+}
+
 // ── Live bot ───────────────────────────────────────────────────────────────
 
-/// A built bot — name, typed observation chains, validated capabilities.
-/// Constructed via `Bot::builder("name")`. Holds the grant set so every
-/// `tick` mints fresh [`Auth`] proofs per domain instead of trusting
-/// build-time admission alone.
-pub struct Bot {
-    /// The name reported by [`Bot::name`]; set once by [`Bot::builder`], never
-    /// derived from the chains.
-    name: String,
-    /// The chains in declaration order. [`Bot::tick`] polls and fires in this
-    /// order.
-    chains: Vec<Chain>,
-    /// The grant set the bot was admitted against, retained so every tick
-    /// re-issues an `Auth` per domain. Cloned at build, so revoking a grant on
-    /// the caller's set after build does not affect this bot — a bot that must
-    /// see a revocation is rebuilt from the new grant set.
-    grants: GrantSet,
-}
-
-/// A typed observation chain: source → `[(condition, action)]`.
-pub struct Chain {
-    /// The type-erased source. Boxed because the builder takes it as
-    /// `impl Observe` and each chain may hold a different concrete observer.
-    source: Box<dyn ObserveAny>,
-    /// The `(condition, action)` tuples, in the order they were attached.
-    entries: Vec<ChainEntry>,
-}
+/// A built bot: name, admitted capabilities, and the `bevy_ecs` world its
+/// chains execute in.
+///
+/// **One bot, one executor.** `Bot` *is* the ECS bot — `tick` runs one schedule
+/// step, and a condition is `Changed<Revision>` on the source entity rather than
+/// a re-evaluation of a value that did not move. There is no second way to run a
+/// bot, and no feature flag that adds one.
+pub use crate::ecs::{
+    EcsBot as Bot, EcsBuilder as BotBuilder, EcsObserveBuilder as ObserveBuilder,
+};
 
 /// One `(condition, action)` tuple in a chain.
-pub struct ChainEntry {
+pub(crate) struct ChainEntry {
     /// The condition half. Type-erased because the builder accepts any
     /// `Evaluate<T>`; it downcasts the observed value back to `T` on check.
     pub(crate) condition: Box<dyn EvaluateAny>,
@@ -199,8 +255,6 @@ where
 /// with; a mismatch is [`BotError::EvaluateError`], never a false result, so a
 /// wiring bug cannot masquerade as a condition that simply did not fire.
 pub(crate) trait EvaluateAny {
-    /// Forwards to [`Evaluate::condition_id`](crate::verb::Evaluate::condition_id).
-    fn condition_id(&self) -> &str;
     /// Downcast `value` to this condition's `T` and evaluate it. Returns
     /// [`BotError::EvaluateError`] when the observed value is a different type,
     /// which is a chain-wiring bug rather than a domain failure.
@@ -212,8 +266,6 @@ pub(crate) trait EvaluateAny {
 /// for the action's own caps and checks the downcast input before the action
 /// runs, so a type mismatch fails without a side effect.
 pub(crate) trait ExecuteAny {
-    /// Forwards to [`Execute::domain_id`](crate::verb::Execute::domain_id).
-    fn domain_id(&self) -> &str;
     /// Forwards to [`Execute::required_caps`](crate::verb::Execute::required_caps).
     fn required_caps(&self) -> &[Cap];
     /// Issue an [`Auth`] for the action's caps, downcast `input` to the
@@ -228,310 +280,6 @@ pub(crate) trait ExecuteAny {
 }
 
 // ── Builder ────────────────────────────────────────────────────────────────
-
-/// Upper bound on sources polled simultaneously by one `tick`. A source poll
-/// may occupy one `spawn_blocking` thread, so this caps tick's blocking-thread
-/// fan-out regardless of how many chains a spec declares. Chains beyond the
-/// cap are polled in additional waves.
-const MAX_IN_FLIGHT_POLLS: usize = 32;
-
-/// Intermediate builder for attaching `(condition, action)` tuples to an
-/// observed source.
-pub struct ObserveBuilder {
-    /// The name carried through from [`Bot::builder`]; the chain being built
-    /// does not consume it.
-    name: String,
-    /// Chains already finished by an earlier `observe` call, in order. They are
-    /// held here rather than on the `Bot` until `build` so admission runs once,
-    /// on the complete set.
-    prior_chains: Vec<Chain>,
-    /// The source this builder is currently binding.
-    source: Box<dyn ObserveAny>,
-    /// The tuples attached to `source` so far.
-    entries: Vec<ChainEntry>,
-}
-
-impl Bot {
-    /// Start building a named bot. The name must be non-empty; `build` refuses
-    /// an empty one with [`BotError::IncompleteSpec`].
-    pub fn builder(name: impl Into<String>) -> BotBuilder {
-        BotBuilder {
-            name: name.into(),
-            chains: Vec::new(),
-        }
-    }
-
-    /// The name the built [`Bot`] will report; it is set once by
-    /// [`Bot::builder`] and never derived from the chains.
-    #[must_use]
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// The chains in declaration order. [`Bot::tick`] polls and fires in this
-    /// order, so reordering changes which side effects run before an error.
-    #[must_use]
-    pub fn chains(&self) -> &[Chain] {
-        &self.chains
-    }
-
-    /// Tick all observation chains: poll every source concurrently, evaluate
-    /// conditions, and fire matching actions in declaration order. Returns the
-    /// count of actions fired.
-    ///
-    /// Async and concurrent: sources are polled in bounded waves of
-    /// `MAX_IN_FLIGHT_POLLS` via `lgwks_std::task::join_all`, so a set of
-    /// slow observers overlaps without unbounded blocking threads. Actions run
-    /// sequentially in chain order so side effects stay deterministic. Every
-    /// poll and `execute_action` carries a freshly issued `Auth` proof — a
-    /// grant revoked after build cannot fire.
-    ///
-    /// Error ordering: sources are all polled before any action runs; the first
-    /// error in declaration order is returned, and chains declared before it
-    /// have already fired.
-    pub async fn tick(&self) -> Result<usize, BotError> {
-        let mut values: Vec<Result<Box<dyn std::any::Any>, BotError>> =
-            Vec::with_capacity(self.chains.len());
-        for wave in self.chains.chunks(MAX_IN_FLIGHT_POLLS) {
-            // `poll_any` already boxes at the type-erasure boundary, so this is
-            // the no-rebox entry point: one allocation per source, not two.
-            let batch = lgwks_std::task::join_all_boxed(
-                wave.iter().map(|chain| chain.source.poll_any(&self.grants)),
-            )
-            .await;
-            values.extend(batch);
-        }
-
-        let mut fired: usize = 0;
-        for (chain, value) in self.chains.iter().zip(values) {
-            let value = value?;
-            for entry in &chain.entries {
-                if entry.condition.check_any(value.as_ref())? {
-                    entry.action.run_any(&self.grants, value.as_ref()).await?;
-                    // Bound: `fired` counts at most one increment per entry, so
-                    // it is bounded by the total entry count. Reaching
-                    // `usize::MAX` entries would require that many live
-                    // `ChainEntry` allocations, which cannot fit in an address
-                    // space, so the saturating ceiling is unreachable and this
-                    // is a total count rather than a wrapping one.
-                    fired = fired.saturating_add(1);
-                }
-            }
-        }
-        Ok(fired)
-    }
-
-    /// Blocking convenience for [`Bot::tick`]: drive it to completion on the
-    /// current thread with `lgwks_std::task::block_on`. Callers already in an
-    /// async context should `tick().await` the same computation.
-    pub fn block_on_tick(&self) -> Result<usize, BotError> {
-        lgwks_std::task::block_on(self.tick())
-    }
-}
-
-impl Chain {
-    /// The `domain_id()` reported by this chain's source observer, for
-    /// diagnostics.
-    #[must_use]
-    pub fn source_domain(&self) -> &str {
-        self.source.domain_id()
-    }
-
-    /// The condition–action entries.
-    #[must_use]
-    pub fn entries(&self) -> &[ChainEntry] {
-        &self.entries
-    }
-}
-
-impl ChainEntry {
-    /// The condition identifier (e.g. `"changed"`, `"<closure>"`).
-    #[must_use]
-    pub fn condition_id(&self) -> &str {
-        self.condition.condition_id()
-    }
-
-    /// The action's domain identifier (e.g. `"notify::slack"`).
-    #[must_use]
-    pub fn action_domain(&self) -> &str {
-        self.action.domain_id()
-    }
-}
-
-/// Validate the name and every chain's capabilities, then assemble the `Bot`.
-/// Shared by both builder entry points so the admission rules cannot drift.
-fn assemble(name: String, chains: Vec<Chain>, grants: &GrantSet) -> Result<Bot, BotError> {
-    if name.is_empty() {
-        return Err(BotError::IncompleteSpec { field: "name" });
-    }
-    for chain in &chains {
-        grants.admit(chain.source.required_caps())?;
-        for entry in &chain.entries {
-            grants.admit(entry.action.required_caps())?;
-        }
-    }
-    Ok(Bot {
-        name,
-        chains,
-        grants: grants.clone(),
-    })
-}
-
-/// Builder for `Bot`. Collects observation chains before validation.
-pub struct BotBuilder {
-    /// The bot name, carried into every chain this builder starts.
-    name: String,
-    /// Chains completed with a bare [`BotBuilder::observe`] before [`BotBuilder::build`];
-    /// admission runs over these plus any in-progress chain.
-    chains: Vec<Chain>,
-}
-
-impl BotBuilder {
-    /// Bind a source to observe. Returns an `ObserveBuilder` to attach
-    /// `(condition, action)` tuples.
-    pub fn observe<S>(self, source: S) -> ObserveBuilder
-    where
-        S: super::verb::Observe + 'static,
-        S::Output: 'static,
-    {
-        ObserveBuilder {
-            name: self.name,
-            prior_chains: self.chains,
-            source: Box::new(source),
-            entries: Vec::new(),
-        }
-    }
-
-    /// Build with no observation chains — a bot that only supports direct
-    /// `query()` and `execute()` calls.
-    pub fn build(self, grants: &GrantSet) -> Result<Bot, BotError> {
-        assemble(self.name, self.chains, grants)
-    }
-}
-
-impl ObserveBuilder {
-    /// Add a `(condition, action)` tuple to this observation chain.
-    pub fn on<C, A, T>(mut self, condition: C, action: A) -> Self
-    where
-        T: 'static,
-        C: super::verb::Evaluate<T> + 'static,
-        A: super::verb::Execute + 'static,
-    {
-        self.entries.push(typed_entry(condition, action));
-        self
-    }
-}
-
-/// Build one `(condition, action)` tuple, erased for storage on a `Chain`.
-///
-/// A free function rather than a method because two builders need identical
-/// semantics: `ObserveBuilder::on` for the `Bot` executor, and
-/// `crate::ecs::EcsObserveBuilder::on` for the `bevy_ecs` substrate. Two copies
-/// of this downcast-and-authorize pair would be two places for the `Auth` issue
-/// to drift — and issuing the proof *before* the downcast is the property that
-/// makes a type mismatch fail without a side effect.
-pub(crate) fn typed_entry<C, A, T>(condition: C, action: A) -> ChainEntry
-where
-    T: 'static,
-    C: super::verb::Evaluate<T> + 'static,
-    A: super::verb::Execute + 'static,
-    A::Input: 'static,
-    A::Output: 'static,
-{
-    struct TypedEval<C, T> {
-        inner: C,
-        _marker: std::marker::PhantomData<T>,
-    }
-
-    impl<C: super::verb::Evaluate<T>, T: 'static> EvaluateAny for TypedEval<C, T> {
-        fn condition_id(&self) -> &str {
-            self.inner.condition_id()
-        }
-
-        fn check_any(&self, value: &dyn std::any::Any) -> Result<bool, BotError> {
-            match value.downcast_ref::<T>() {
-                Some(typed) => self.inner.check(typed),
-                None => Err(BotError::EvaluateError {
-                    cause: "type mismatch in evaluate".into(),
-                }),
-            }
-        }
-    }
-
-    struct TypedExec<A>(A);
-
-    impl<A: super::verb::Execute> ExecuteAny for TypedExec<A>
-    where
-        A::Input: 'static,
-        A::Output: 'static,
-    {
-        fn domain_id(&self) -> &str {
-            self.0.domain_id()
-        }
-
-        fn required_caps(&self) -> &[Cap] {
-            self.0.required_caps()
-        }
-
-        fn run_any<'a>(
-            &'a self,
-            grants: &'a GrantSet,
-            input: &'a dyn std::any::Any,
-        ) -> crate::BoxFuture<'a, Result<Box<dyn std::any::Any>, BotError>> {
-            Box::pin(async move {
-                match input.downcast_ref::<A::Input>() {
-                    Some(typed) => {
-                        let auth: Auth = grants.issue(self.0.required_caps())?;
-                        let value = self.0.execute_action((auth, typed)).await?;
-                        let boxed: Box<dyn std::any::Any> = Box::new(value);
-                        Ok(boxed)
-                    }
-                    None => Err(BotError::DomainError {
-                        domain: self.0.domain_id().into(),
-                        cause: "type mismatch in execute input".into(),
-                    }),
-                }
-            })
-        }
-    }
-
-    ChainEntry {
-        condition: Box::new(TypedEval {
-            inner: condition,
-            _marker: std::marker::PhantomData::<T>,
-        }),
-        action: Box::new(TypedExec(action)),
-    }
-}
-
-impl ObserveBuilder {
-    /// Finish this observation chain and start another.
-    pub fn observe<S>(mut self, source: S) -> ObserveBuilder
-    where
-        S: super::verb::Observe + 'static,
-        S::Output: 'static,
-    {
-        self.prior_chains.push(Chain {
-            source: self.source,
-            entries: self.entries,
-        });
-        ObserveBuilder {
-            name: self.name,
-            prior_chains: self.prior_chains,
-            source: Box::new(source),
-            entries: Vec::new(),
-        }
-    }
-
-    /// Build the bot, validating all capabilities against the grant set.
-    pub fn build(mut self, grants: &GrantSet) -> Result<Bot, BotError> {
-        self.prior_chains.push(Chain {
-            source: self.source,
-            entries: self.entries,
-        });
-        assemble(self.name, self.prior_chains, grants)
-    }
-}
 
 // ── Serialization ──────────────────────────────────────────────────────────
 
@@ -958,7 +706,7 @@ mod tests {
             .on(|_: &u32| true, FakeAction)
             .build(&grants)?;
         assert_eq!(bot.name(), "test");
-        assert_eq!(bot.chains().len(), 1);
+        assert_eq!(bot.source_domains().len(), 1);
         Ok(())
     }
 
@@ -1002,7 +750,7 @@ mod tests {
 
         let counter = Arc::new(AtomicUsize::new(0));
 
-        let bot = Bot::builder("ticker")
+        let mut bot = Bot::builder("ticker")
             .observe(CountSource)
             .on(|seen: &u32| *seen > 5, CountAction(Arc::clone(&counter)))
             .on(|seen: &u32| *seen > 100, CountAction(Arc::clone(&counter)))
@@ -1116,13 +864,13 @@ mod tests {
     }
 
     #[test]
-    fn tick_is_directly_awaitable() -> Result<(), BotError> {
+    fn tick_drives_sources_in_one_step() -> Result<(), BotError> {
         let counter = Arc::new(AtomicUsize::new(0));
-        let bot = Bot::builder("direct")
+        let mut bot = Bot::builder("direct")
             .observe(Immediate)
             .on(|_: &u32| true, Counting(Arc::clone(&counter)))
             .build(&GrantSet::empty())?;
-        let fired = lgwks_std::task::block_on(bot.tick())?;
+        let fired = bot.tick()?;
         assert_eq!(fired, 1);
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         Ok(())
@@ -1138,7 +886,7 @@ mod tests {
             in_flight: Arc::clone(&in_flight),
             peak: Arc::clone(&peak),
         };
-        let bot = Bot::builder("concurrent")
+        let mut bot = Bot::builder("concurrent")
             .observe(source())
             .on(|_: &u32| true, Counting(Arc::new(AtomicUsize::new(0))))
             .observe(source())
@@ -1166,17 +914,17 @@ mod tests {
                 .observe(Immediate)
                 .on(|_: &u32| true, Counting(Arc::clone(&counter)));
         }
-        let bot = builder.build(&GrantSet::empty())?;
-        assert_eq!(bot.chains().len(), 40);
+        let mut bot = builder.build(&GrantSet::empty())?;
+        assert_eq!(bot.source_domains().len(), 40);
         assert_eq!(bot.block_on_tick()?, 40);
         assert_eq!(counter.load(Ordering::SeqCst), 40);
         Ok(())
     }
 
     #[test]
-    fn tick_fires_earlier_chains_then_returns_first_error() -> Result<(), BotError> {
+    fn a_failing_poll_fires_nothing_and_returns_the_first_error() -> Result<(), BotError> {
         let counter = Arc::new(AtomicUsize::new(0));
-        let bot = Bot::builder("ordered")
+        let mut bot = Bot::builder("ordered")
             .observe(Immediate)
             .on(|_: &u32| true, Counting(Arc::clone(&counter)))
             .observe(Failing)
@@ -1190,7 +938,11 @@ mod tests {
                 )));
             }
         }
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        // All-or-nothing per tick: the observe system polls every source before
+        // any effect runs, so a tick that errors commits nothing. The earlier
+        // chain does not fire. That is stronger than the previous contract,
+        // where chains declared before the failure had already acted.
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
         Ok(())
     }
 }

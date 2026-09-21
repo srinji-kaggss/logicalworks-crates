@@ -18,7 +18,7 @@ keywords = ["automation", "bot", "capabilities", "observe", "execute"]
 # synchronous `lgwks_std::task` executor.
 [features]
 default = ["rt", "time", "sync", "macros"]
-rt = ["dep:lgwks_deps", "lgwks_deps/tokio"]
+rt = ["lgwks_deps/tokio"]
 time = ["rt", "lgwks_deps/tokio-time"]
 sync = ["rt", "lgwks_deps/tokio-sync"]
 macros = ["rt", "lgwks_deps/tokio-macros"]
@@ -27,15 +27,19 @@ process = ["rt", "lgwks_deps/tokio-process"]
 fs = ["rt", "lgwks_deps/tokio-fs"]
 signal = ["rt", "lgwks_deps/tokio-signal"]
 full = ["rt", "time", "sync", "macros", "net", "process", "fs", "signal"]
-# The ECS substrate: the same four verbs executed by a `bevy_ecs` schedule, so a
-# condition is change detection rather than a re-derivation. Default-off, and
-# independent of `rt` — the verbs already drive their own futures, so nothing
-# here needs tokio. The storefront owns the `bevy_ecs` edge.
-ecs = ["dep:lgwks_deps", "lgwks_deps/bevy-ecs"]
 
 [dependencies]
 lgwks_std = { workspace = true, features = ["json", "http"] }
-lgwks_deps = { workspace = true, default-features = false, optional = true }
+# Not optional, and not behind a feature. The ECS substrate is **how a bot
+# executes** — the condition is change detection rather than a re-derivation —
+# so it is not a candidate the caller may decline. A default-off flag would mean
+# nothing exercises it, the workspace gate never compiles it, and it rots into a
+# second opinion nobody chose.
+#
+# `rt` still gates the async surface, so `--no-default-features` remains a real
+# build: no tokio, no drivers. It does pull `bevy_ecs`, and that is the honest
+# cost of one path rather than two.
+lgwks_deps = { workspace = true, default-features = false, features = ["bevy-ecs"] }
 
 [lints]
 workspace = true

@@ -21,7 +21,7 @@ pub struct Path {
 ///
 /// `#[non_exhaustive]`: the reported shape grows with the domain, and a
 /// consumer that destructured this literally would break on each addition.
-#[derive(Debug, Clone)]
+#[derive(PartialEq, Debug, Clone)]
 #[non_exhaustive]
 pub struct FsState {
     /// Whether the path was modified since last poll.

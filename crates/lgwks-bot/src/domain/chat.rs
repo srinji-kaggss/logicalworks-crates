@@ -12,7 +12,7 @@ use crate::verb;
 /// `#[non_exhaustive]`: a chat provider's payload grows (threads, edits,
 /// attachments), and a consumer that destructured this literally would break on
 /// each addition. Read the fields; build one through the domain that produced it.
-#[derive(Debug, Clone)]
+#[derive(PartialEq, Debug, Clone)]
 #[non_exhaustive]
 pub struct ChatMessage {
     /// The channel or conversation the message arrived in.

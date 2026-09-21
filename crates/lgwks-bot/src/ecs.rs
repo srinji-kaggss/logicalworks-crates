@@ -54,14 +54,21 @@
 //!   effect by a tick, giving 2 of 3. Both are silent. Here the effect is a
 //!   direct resource write from an exclusive system, ordered by `.chain()`.
 //!
+//! # One path
+//!
+//! This is how a bot executes, not a candidate the caller may decline. There is
+//! no `ecs` feature: `Bot` *is* this, and the workspace gate compiles and tests
+//! it like any other code. A default-off flag would have left it unexercised
+//! and unowned.
+//!
 //! # Build-time validation
 //!
-//! [`EcsObserveBuilder::build`](crate::ecs::EcsObserveBuilder::build) runs `Schedule::initialize()` with
+//! `EcsObserveBuilder::build` runs `Schedule::initialize()` with
 //! `ambiguity_detection: LogLevel::Error`, so a schedule whose systems cannot be
 //! totally ordered is a refusal at build rather than a silent misordering at
 //! tick. An exclusive system cannot return an error, so a failure at *tick* time
 //! is recorded in the `TickError` resource and surfaced by
-//! [`EcsBot::tick`](crate::ecs::EcsBot::tick) — the same error ordering `Bot::tick` documents, where the
+//! `EcsBot::tick` — the same error ordering `Bot::tick` documents, where the
 //! first error in declaration order is returned.
 
 use std::any::Any;
@@ -90,7 +97,7 @@ use super::verb::{Evaluate, Execute, Observe};
 /// this is not fused with the observed value: a component that carries both is
 /// marked changed by every poll, and `Changed<T>` degenerates to "always true".
 #[derive(Component, Debug, Clone)]
-pub struct SourceId {
+pub(crate) struct SourceId {
     /// The chain's index in declaration order; the key into `Chains` and
     /// `Observed`.
     pub(crate) chain: usize,
@@ -100,15 +107,8 @@ pub struct SourceId {
 
 impl SourceId {
     /// The observed source's domain identifier (e.g. `"net::endpoint"`).
-    #[must_use]
-    pub fn domain(&self) -> &str {
+    pub(crate) fn domain(&self) -> &str {
         &self.domain
-    }
-
-    /// The chain's index in declaration order.
-    #[must_use]
-    pub fn chain(&self) -> usize {
-        self.chain
     }
 }
 
@@ -119,7 +119,7 @@ impl SourceId {
 /// only the fact of its movement is shared — which keeps the archetype count
 /// bounded, as `docs/bot-on-ecs.md` §4 requires.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Revision(u64);
+pub(crate) struct Revision(u64);
 
 // ── Resources ──────────────────────────────────────────────────────────────
 
@@ -170,6 +170,12 @@ struct Chains(Vec<EcsChain>);
 #[derive(Default)]
 struct Observed(Vec<Option<Box<dyn Any>>>);
 
+/// Upper bound on sources polled simultaneously by one tick. A source poll may
+/// occupy one `spawn_blocking` thread, so this caps the blocking-thread fan-out
+/// regardless of how many chains a spec declares. Chains beyond the cap are
+/// polled in additional waves.
+const MAX_IN_FLIGHT_POLLS: usize = 32;
+
 /// Compare two erased outputs as `S::Output`.
 ///
 /// A downcast that fails is reported as *different* rather than equal: treating
@@ -210,14 +216,23 @@ fn observe(world: &mut World) {
         return;
     }
 
+    // Bounded waves, joined concurrently: a source poll may occupy one
+    // `spawn_blocking` thread, so polling them one at a time would make a tick
+    // as slow as the sum of its sources rather than as slow as its slowest. The
+    // wave cap is what keeps that from becoming unbounded blocking-thread
+    // fan-out. Determinism is unaffected — the results are collected in
+    // declaration order, and actions still run sequentially.
     let polled: Vec<Result<Box<dyn Any>, BotError>> = {
         let chains = world.non_send::<Chains>();
         let grants = world.resource::<Grants>();
-        chains
-            .0
-            .iter()
-            .map(|chain| lgwks_std::task::block_on(chain.source.poll_any(&grants.0)))
-            .collect()
+        let mut polled = Vec::with_capacity(chains.0.len());
+        for wave in chains.0.chunks(MAX_IN_FLIGHT_POLLS) {
+            let batch = lgwks_std::task::join_all_boxed(
+                wave.iter().map(|chain| chain.source.poll_any(&grants.0)),
+            );
+            polled.extend(lgwks_std::task::block_on(batch));
+        }
+        polled
     };
 
     // `collect` into a `Result<Vec<_>, _>` keeps the first error and drops the
@@ -410,6 +425,30 @@ impl EcsBot {
             .collect()
     }
 
+    /// Run one tick on the current thread.
+    ///
+    /// `tick` is already synchronous — the systems drive the non-`Send` verb
+    /// futures themselves — so this is the readable name for a blocking call,
+    /// not a second execution path.
+    pub fn block_on_tick(&mut self) -> Result<usize, BotError> {
+        self.tick()
+    }
+
+    /// The observed sources' domain identifiers, in chain order.
+    ///
+    /// Replaces the old `chains()` accessor: what a caller wanted from it was
+    /// "what is this bot watching", and that is identity, not the erased
+    /// observer objects.
+    #[must_use]
+    pub fn source_domains(&self) -> Vec<String> {
+        let order = self.world.resource::<Order>().0.clone();
+        order
+            .iter()
+            .filter_map(|entity| self.world.get::<SourceId>(*entity))
+            .map(|id| id.domain().to_owned())
+            .collect()
+    }
+
     /// Run one tick. Returns the number of actions fired.
     ///
     /// Synchronous: the systems drive the non-`Send` verb futures on this
@@ -453,6 +492,12 @@ impl EcsBuilder {
             same: same_output::<S>,
             entries: Vec::new(),
         }
+    }
+
+    /// Build with no observation chains — a bot that only serves direct
+    /// `Query` and `Execute` calls.
+    pub fn build(self, grants: &GrantSet) -> Result<EcsBot, BotError> {
+        EcsBot::assemble(self.name, self.chains, grants)
     }
 }
 
@@ -594,9 +639,9 @@ impl EcsBot {
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 //
-// Run with `cargo test -p lgwks_bot --features ecs`. The `ecs` feature is
-// default-off, so the workspace gate does not compile this module; a substrate
-// whose tests never run is a substrate whose guarantees are claims.
+// These run under the ordinary workspace gate — there is no feature to turn on,
+// because a substrate whose tests only run when someone remembers a flag is a
+// substrate whose guarantees are claims.
 
 #[cfg(test)]
 mod tests {
@@ -605,7 +650,6 @@ mod tests {
 
     use super::*;
     use crate::cap::{Auth, Cap};
-    use crate::spec::Bot;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -738,46 +782,6 @@ mod tests {
         // effect runs once — on the transition.
         assert_eq!(fired, vec![0, 0, 1, 0, 0]);
         assert_eq!(counter.get(), 1);
-        Ok(())
-    }
-
-    #[test]
-    fn the_plain_bot_fires_twice_where_this_substrate_fires_once() -> TestResult {
-        // The semantic delta, pinned rather than documented and hoped for. Both
-        // bots see the same script and the same condition; the difference is
-        // that `Bot::tick` re-evaluates a held value and this substrate does
-        // not.
-        let ecs_counter = Rc::new(Cell::new(0));
-        let mut ecs = EcsBot::builder("delta")
-            .observe(Script::new(SCRIPT.to_vec()))
-            .on(|value: &u16| *value >= 500, Count(Rc::clone(&ecs_counter)))
-            .build(&net_grants())?;
-        for _ in 0..5 {
-            ecs.tick()?;
-        }
-
-        let plain_counter = Rc::new(Cell::new(0));
-        let plain = Bot::builder("delta")
-            .observe(Script::new(SCRIPT.to_vec()))
-            .on(
-                |value: &u16| *value >= 500,
-                Count(Rc::clone(&plain_counter)),
-            )
-            .build(&net_grants())?;
-        for _ in 0..5 {
-            plain.block_on_tick()?;
-        }
-
-        assert_eq!(
-            plain_counter.get(),
-            2,
-            "Bot re-evaluates a held 503 on both ticks it is held"
-        );
-        assert_eq!(
-            ecs_counter.get(),
-            1,
-            "the ECS substrate fires on the transition only"
-        );
         Ok(())
     }
 

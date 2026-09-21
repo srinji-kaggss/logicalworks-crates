@@ -20,7 +20,7 @@ pub struct PrStatus {
 ///
 /// `#[non_exhaustive]`: the reported shape grows with the domain, and a
 /// consumer that destructured this literally would break on each addition.
-#[derive(Debug, Clone)]
+#[derive(PartialEq, Debug, Clone)]
 #[non_exhaustive]
 pub struct PrState {
     /// Whether any check status changed since last poll.
@@ -104,7 +104,7 @@ pub struct CiRun {
 ///
 /// `#[non_exhaustive]`: the reported shape grows with the domain, and a
 /// consumer that destructured this literally would break on each addition.
-#[derive(Debug, Clone)]
+#[derive(PartialEq, Debug, Clone)]
 #[non_exhaustive]
 pub struct CiState {
     /// Whether the run failed.
