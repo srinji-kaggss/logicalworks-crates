@@ -335,6 +335,42 @@ modules above it, and it ships in the same release.
   - **Nothing is wired to a real store or to the ledger yet.** `MemoryJournal` is
     a reference adapter that exists in order to be refused at the boundary, and
     no call site outside the tests appends to it.
+- **`broker`, the environment fence: authority for one attempt at one
+  generation, and the refusal that stops a stale command from dispatching.** A
+  durable record of a dispatch aimed at an environment that has already been
+  replaced is accurate and still wrong, so the record cannot be where that is
+  caught. `Broker` owns which environments a run has and which generation each
+  is at, and `authorize` mints an `Authority` only when the generation named by
+  the `EffectKey` is the one currently held.
+  - **A stale generation and a generation the broker never issued are different
+    errors.** `Superseded` means the key names an older generation: the real
+    case, a command that was correct and is now fenced. `NeverIssued` means it
+    names a newer one the broker never minted, so the key did not come from this
+    broker at all. One "generation mismatch" error would print the same sentence
+    for both while calling for opposite investigations.
+  - **`Authority` is a sealed proof, and the seal is the constructor.** Fields
+    private, no public constructor, `Broker::authorize` the only minter, the same
+    shape as `cap`'s `Auth`. It is deliberately not `Clone`, which stops a
+    warrant being scattered. That is not what makes a double dispatch impossible:
+    the journal's ordering ladder is, and the type documents that rather than
+    implying otherwise.
+  - **`prepare_dispatch` is where the RQ-007 order stops being prose.** It
+    authorizes, then appends `DispatchPrepared`, and only then returns a
+    `Prepared` holding both. A caller cannot append before it is authorized, or
+    hand over before the append landed, because there is nothing to hand over
+    until both steps have run. A superseded key never reaches the append, so a
+    fenced command cannot become a recorded attempt.
+  - **An environment is a resource with a declared lifetime.** `register` takes
+    ownership, `replace` bumps the generation and invalidates every warrant
+    already handed out, and `close` releases it. Closing is idempotent, because a
+    cleanup path that has to know whether it already ran is one that will
+    sometimes not run. Generation exhaustion is named rather than wrapped, since
+    a wrapped generation would re-authorize commands the broker already fenced.
+  - **16 unit tests.** They pin each refusal, both directions of the fencing
+    comparison, the exhaustion path, and that a superseded key leaves the journal
+    untouched. What they do not do is reach a real environment: no process,
+    socket or input seat exists here, so `EnvironmentId` arrives from the host's
+    own entropy and nothing in this crate creates one.
 - **`Observe::fingerprint`, and with it the lazy seam: a source that holds still
   is no longer polled.** Change detection is an *equality* question — the
   substrate reduces every observation to one bit and discards the value — so

@@ -105,6 +105,14 @@ use std::pin::Pin;
 /// implementer must be able to name the return type.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
+/// The environment broker: which environments a run owns, which generation each
+/// is at, and the authority to hand one exact attempt to one of them.
+///
+/// Fencing lives here rather than in the journal because a durable record of a
+/// dispatch aimed at a replaced environment would be accurate and still wrong.
+/// See [`broker`](broker) for why a stale generation and a generation the broker
+/// never issued are deliberately different errors.
+pub mod broker;
 /// Capability tokens and sealed authority proofs.
 pub mod cap;
 pub mod domain {
