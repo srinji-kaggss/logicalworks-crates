@@ -114,9 +114,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `FlowSpec` is the document. It owns variable declarations, an entry node, a node
 map, explicit continuations, terminal overrides, and `FlowBounds`. `FlowSpec::new`
-validates on construction and `FlowSpec::from_json` validates on parse
-(`crates/lgwks-bot/src/session.rs:1081`). `MAX_FLOW_BYTES` is 2,097,152, and input
+validates on construction, and both parsers validate on parse
+(`crates/lgwks-bot/src/session.rs:1059`). `MAX_FLOW_BYTES` is 2,097,152, and input
 past it is refused with `BotError::FlowTooLarge` before parsing runs.
+
+A flow can be written in JSON or in RON. RON is the estate's notation for
+human-facing documents, so it is the one to reach for by hand: it takes
+comments, trailing commas and unquoted keys. The two are one document, and the
+size limit, the node-kind check and the structural validation are the same on
+both paths, so nothing is acceptable in one notation and refused in the other
+(`crates/lgwks-bot/src/session.rs:1059`). One diagnostic does read differently,
+and the cause is the notation rather than the flow: JSON checks a variant name
+against nothing, so the guard names the node and the kind it carried, while RON
+checks the name against the variant list it is handed and refuses before our own
+visitor runs, so it names the variant and the enum but cannot name the node. Both
+refuse (`crates/lgwks-bot/src/session.rs:1092`).
+
+```ron
+// review-pr.flow.ron
+FlowSpec(
+    vars: {},
+    entry: "end",
+    nodes: {
+        "end": end,   // the only node
+    },
+)
+```
+
+A variant is written with its own name. `NodeKind` is a serde externally tagged
+enum, so a unit variant is its own name (`end`) and a variant carrying fields
+takes them in parentheses (`say(text: "hello")`). This is the document's contract
+rather than a notation detail: the same variant is the bare string `"end"` in
+JSON, and `{"say": {"text": "hello"}}` there. Every enum a flow document carries
+is tagged this way — `NodeKind`, `FlowEdge`, `Terminal`, `Predicate`,
+`ValueExpr`, `Value` and `VarType` — so no part of a document has a `kind` field.
+`from_ron` says so in its own documentation, and
+`crates/lgwks-bot/tests/flow_ron.rs` pins it in both directions, including that
+the older `(kind: "end")` spelling no longer decodes.
 
 `NodeKind` is a closed set: `Say`, `Ask`, `Branch`, `Handoff`, `Refer`, `Route`,
 `End`. `NodeKind::Ask` carries the variable it writes, the candidate option
@@ -129,7 +163,7 @@ store: it returns `BotError::InvalidVariableValue` when the answer cannot be
 converted.
 
 The same decoder runs at load, over every candidate of every ask
-(`crates/lgwks-bot/src/session.rs:1587`). An ask whose options include one the
+(`crates/lgwks-bot/src/session.rs:1596`). An ask whose options include one the
 declared variable cannot hold is refused by `FlowSpec::validate` with
 `BotError::AskOptionNotAssignable` — naming the node, the variable, the option,
 the expected type and the cause — so a flow that loads is a flow every one of
@@ -165,7 +199,7 @@ and `ReceiptNotRecorded` for a journal that would not take the decision receipt.
 `FlowBounds::new(budget)` caps runtime steps including answer attempts, and
 `FlowSpec::validate` refuses a node count that exceeds the declared budget
 (`BotError::FlowBudgetExceeded`). The runner charges each step against the same
-budget (`crates/lgwks-bot/src/session.rs:3549`) and returns
+budget (`crates/lgwks-bot/src/session.rs:3692`) and returns
 `BotError::SessionBudgetExceeded`, so a flow whose graph lets the cursor loop
 still terminates.
 
@@ -221,18 +255,18 @@ declared outcome is a genuine override there — that is how a flow refuses
 already names its target, so the only declaration it accepts is the one that
 repeats that outcome; one that contradicts it, whether a different target or a
 refusal, is refused at load with `BotError::ConflictingTerminalDeclaration`
-(`crates/lgwks-bot/src/session.rs:1517`). A document that says a handoff is not
+(`crates/lgwks-bot/src/session.rs:1523`). A document that says a handoff is not
 authorized therefore never runs as a handoff, which is what a consumer
 dispatching on the returned disposition depends on.
 
-`Terminal::outcome(EffectLedger) -> Outcome` (`crates/lgwks-bot/src/session.rs:950`)
+`Terminal::outcome(EffectLedger) -> Outcome` (`crates/lgwks-bot/src/session.rs:918`)
 carries two independent facts through unchanged, and that is the whole of the
 method:
 
 - the `Disposition`, one of `Completed`, `Referred`, `HandedOff`, `Refused`
-  (`crates/lgwks-bot/src/session.rs:771`);
+  (`crates/lgwks-bot/src/session.rs:743`);
 - the `EffectLedger`, a `confirmed` count and an `unsettled` count
-  (`crates/lgwks-bot/src/session.rs:798`).
+  (`crates/lgwks-bot/src/session.rs:770`).
 
 It does not classify, and the reason is in the source: an earlier version
 returned a single enum and had to choose, for a refused run that also left an

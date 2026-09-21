@@ -520,7 +520,7 @@ fn validation_rejects_an_unknown_node_kind() -> TestResult {
     let source = r#"{
         "vars": {},
         "entry": "start",
-        "nodes": {"start": {"kind": "teleport"}},
+        "nodes": {"start": "teleport"},
         "edges": [],
         "terminals": {},
         "bounds": {"budget": 4}
@@ -2035,16 +2035,15 @@ fn the_boolean_ask_from_the_report_is_refused_by_from_json() -> TestResult {
     // because the session stores the selected option, not the raw utterance.
     let document = r#"
     {
-      "vars": {"decision": {"kind": "boolean"}},
+      "vars": {"decision": "boolean"},
       "entry": "ask",
       "nodes": {
-        "ask": {
-          "kind": "ask",
+        "ask": {"ask": {
           "var": "decision",
           "options": ["Continue", "Cancel"],
           "routes": {"Continue": "done", "Cancel": "done"}
-        },
-        "done": {"kind": "end"}
+        }},
+        "done": "end"
       }
     }
     "#;
@@ -2514,10 +2513,10 @@ fn the_handoff_refusal_from_the_report_is_refused_by_from_json() -> TestResult {
       "vars": {},
       "entry": "handoff",
       "nodes": {
-        "handoff": {"kind": "handoff", "target": "external-support"}
+        "handoff": {"handoff": {"target": "external-support"}}
       },
       "terminals": {
-        "handoff": {"kind": "refused", "reason": "handoff is not authorized"}
+        "handoff": {"refused": {"reason": "handoff is not authorized"}}
       }
     }
     "#;
@@ -2556,10 +2555,10 @@ fn a_json_terminal_declaration_is_executed_and_not_merely_accepted() -> TestResu
       "vars": {},
       "entry": "handoff",
       "nodes": {
-        "handoff": {"kind": "handoff", "target": "external-support"}
+        "handoff": {"handoff": {"target": "external-support"}}
       },
       "terminals": {
-        "handoff": {"kind": "handed_off", "target": "external-support"}
+        "handoff": {"handed_off": {"target": "external-support"}}
       }
     }
     "#;
@@ -2677,9 +2676,9 @@ fn a_conflicting_terminal_is_refused_before_the_session_writes_anything() -> Tes
     {
       "vars": {},
       "entry": "handoff",
-      "nodes": {"handoff": {"kind": "handoff", "target": "external-support"}},
+      "nodes": {"handoff": {"handoff": {"target": "external-support"}}},
       "terminals": {
-        "handoff": {"kind": "refused", "reason": "handoff is not authorized"}
+        "handoff": {"refused": {"reason": "handoff is not authorized"}}
       }
     }
     "#;
@@ -2867,14 +2866,14 @@ fn speak_back_document(say_text: &str, options: &[String], bounds: &str) -> Stri
         .collect::<Vec<String>>()
         .join(", ");
     format!(
-        "{{\"vars\": {{\"answer\": {{\"kind\": \"string\"}}}}, \
+        "{{\"vars\": {{\"answer\": \"string\"}}, \
          \"entry\": \"ask\", \
          \"nodes\": {{ \
-         \"ask\": {{\"kind\": \"ask\", \"var\": \"answer\", \"options\": [{quoted}], \
-         \"routes\": {{{routes}}}}}, \
-         \"say\": {{\"kind\": \"say\", \"text\": \"{say_text}\"}}, \
-         \"done\": {{\"kind\": \"end\"}}}}, \
-         \"edges\": [{{\"kind\": \"next\", \"from\": \"say\", \"to\": \"done\"}}], \
+         \"ask\": {{\"ask\": {{\"var\": \"answer\", \"options\": [{quoted}], \
+         \"routes\": {{{routes}}}}}}}, \
+         \"say\": {{\"say\": {{\"text\": \"{say_text}\"}}}}, \
+         \"done\": \"end\"}}, \
+         \"edges\": [{{\"next\": {{\"from\": \"say\", \"to\": \"done\"}}}}], \
          \"bounds\": {bounds}}}"
     )
 }
@@ -3635,19 +3634,18 @@ impl Journal for RecordingJournal {
 /// with an empty scope, so `Session::new` failed on the first step with
 /// `VariableUnset` before the user could reach the ask.
 const ENTRY_READ_BEFORE_WRITE: &str = r#"{
-  "vars": {"name": {"kind": "string"}},
+  "vars": {"name": "string"},
   "entry": "greet",
   "nodes": {
-    "greet": {"kind": "say", "text": "Hello ${name}"},
-    "ask": {
-      "kind": "ask",
+    "greet": {"say": {"text": "Hello ${name}"}},
+    "ask": {"ask": {
       "var": "name",
       "options": ["Ada"],
       "routes": {"Ada": "end"}
-    },
-    "end": {"kind": "end"}
+    }},
+    "end": "end"
   },
-  "edges": [{"kind": "next", "from": "greet", "to": "ask"}],
+  "edges": [{"next": {"from": "greet", "to": "ask"}}],
   "bounds": {"budget": 8}
 }"#;
 
@@ -3959,19 +3957,18 @@ fn validation_refuses_before_any_journal_record() -> TestResult {
     let accepted_sink = RecordingJournal::new();
     let accepted = FlowSpec::from_json(
         r#"{
-  "vars": {"name": {"kind": "string"}},
+  "vars": {"name": "string"},
   "entry": "ask",
   "nodes": {
-    "ask": {
-      "kind": "ask",
+    "ask": {"ask": {
       "var": "name",
       "options": ["Ada"],
       "routes": {"Ada": "greet"}
-    },
-    "greet": {"kind": "say", "text": "Hello ${name}"},
-    "end": {"kind": "end"}
+    }},
+    "greet": {"say": {"text": "Hello ${name}"}},
+    "end": "end"
   },
-  "edges": [{"kind": "next", "from": "greet", "to": "end"}],
+  "edges": [{"next": {"from": "greet", "to": "end"}}],
   "bounds": {"budget": 8}
 }"#,
     )

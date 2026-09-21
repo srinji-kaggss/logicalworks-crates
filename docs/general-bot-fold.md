@@ -44,12 +44,12 @@ That is this workspace's bot model, arrived at independently:
 | Described platform | This workspace | Where |
 |---|---|---|
 | `WhereWhatPair` | a `ChainSpec`: a condition bound to an action | `crates/lgwks-bot/src/spec.rs` |
-| `Where` boolean algebra | `Predicate::{And, Or, Not}` over a closed expression language | `crates/lgwks-bot/src/session.rs:585` |
+| `Where` boolean algebra | `Predicate::{And, Or, Not}` over a closed expression language | `crates/lgwks-bot/src/session.rs:565` |
 | `Where` URL / cookie / selector guards | the conditions an `Observe` domain reports | `domain/*.rs` |
 | `What[]` action pipeline | `Execute::execute_action`, one effect per call | `verb.rs` |
 | `WorkflowInterpreter` state matcher | the ECS schedule: a condition is `Changed<T>` | `docs/bot-on-ecs.md` §1 |
-| `WorkflowFile.meta` + graph | `FlowSpec` (vars, entry, nodes, edges, terminals) | `crates/lgwks-bot/src/session.rs:1023` |
-| a step that dispatches to a subsystem | `NodeKind::Route { dispatch, fallback }` | `crates/lgwks-bot/src/session.rs:660` |
+| `WorkflowFile.meta` + graph | `FlowSpec` (vars, entry, nodes, edges, terminals) | `crates/lgwks-bot/src/session.rs:991` |
+| a step that dispatches to a subsystem | `NodeKind::Route { dispatch, fallback }` | `crates/lgwks-bot/src/session.rs:636` |
 
 So the first and largest correction to make is that **the fold does not need a
 new IR**. A recorder's output is a `FlowSpec`; a scheduler's unit of work is a

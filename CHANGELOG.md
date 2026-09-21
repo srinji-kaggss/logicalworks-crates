@@ -263,7 +263,43 @@ Changed:
 **No crate version is bumped.** The change is unpublished like the five public
 modules above it, and it ships in the same release.
 
+### lgwks_std Added
+
+- **`ron::Error` and `ron::error::SpannedError` are re-exported.** The `ron`
+  module's own functions returned them and no caller could name them, because
+  the `ron` crate is an optional dependency and nothing re-exported the types.
+  A facade that returns a type has to let a caller write it down, which is the
+  same reason `wire` re-exports `rkyv`. Additive.
+
 ### lgwks_bot Added
+
+- **A flow can be written in RON, as well as JSON.** `FlowSpec::from_ron` and
+  `FlowSpec::to_ron` are the codec, over the same serde types, so no second set
+  of impls exists. RON is the estate's notation for human-facing documents and a
+  flow is one, so a hand-written flow now takes comments, trailing commas and
+  unquoted keys.
+  - **The two notations are one document.** Both parsers converge on one
+    validation, so the `MAX_FLOW_BYTES` size limit, the
+    `BotError::UnknownNodeKind` diagnostic and the structural checks are
+    identical on either path. A document cannot be acceptable in one notation and
+    refused in the other.
+  - **A variant is spelled with its own name.** Every enum in a flow document is
+    externally tagged, so a unit variant is its own name (`end`) and a variant
+    carrying fields takes them in parentheses (`say(text: "hello")`); in JSON the
+    same two are the bare string `"end"` and `{"say": {"text": "hello"}}`. This
+    is a change to the wire spelling rather than to the notation: the seven enums
+    a document carries (`NodeKind`, `FlowEdge`, `Terminal`, `Predicate`,
+    `ValueExpr`, `Value`, `VarType`) previously took a `kind` field, and a
+    document written in the older spelling is now refused rather than
+    reinterpreted.
+  - **The unknown-kind diagnostic reads differently on each path.** JSON checks a
+    variant name against nothing, so `BotError::UnknownNodeKind` names the node
+    and the kind it carried; RON checks the name against the variant list it is
+    handed and refuses before our own visitor runs, so its refusal names the
+    variant and the enum but cannot name the node. Both refuse; only what each
+    can say differs.
+  - `crates/lgwks-bot/tests/flow_ron.rs` pins all of the above, including that
+    the internally tagged spelling no longer decodes.
 
 - **`effect`, the durable effect identity the ledger was missing: a settlement
   now names *which attempt* it is about.** The ECS ledger already settles an

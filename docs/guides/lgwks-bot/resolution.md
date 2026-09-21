@@ -14,9 +14,9 @@ space. They answer different questions and they have different failure modes.
 ## The question goes in, not just its options
 
 `Resolver::resolve(&self, utterance, &Question)` takes the question
-(`crates/lgwks-bot/src/session.rs:2415`). A `Question` carries the id the answer
+(`crates/lgwks-bot/src/session.rs:2554`). A `Question` carries the id the answer
 is being given for, the options currently on offer, and the kind of answer the
-variable declares (`crates/lgwks-bot/src/session.rs:2269`). Both additions past
+variable declares (`crates/lgwks-bot/src/session.rs:2408`). Both additions past
 the option list exist because a resolver that sees only a list of strings cannot
 tell two different questions apart, and cannot tell a number from a label.
 
@@ -25,7 +25,7 @@ different fact from the same phrase at another question, and the resolver is tol
 which question it is answering.
 
 The kind is an `AnswerDomain`, derived from the declared `VarType` rather than
-chosen per call (`crates/lgwks-bot/src/session.rs:384`): an `Integer` variable
+chosen per call (`crates/lgwks-bot/src/session.rs:374`): an `Integer` variable
 declares `Integer`, and `String`, `Boolean` and `Choice` declare `Label`.
 `Question::new` defaults to `Label`, so a caller that says nothing gets the
 lexical reading described below and no caller's meaning changes by surprise.
@@ -34,7 +34,7 @@ lexical reading described below and no caller's meaning changes by surprise.
 
 `Resolver::resolve` returns a `Verdict` — a `Resolution` together with the
 `Provenance` that produced it, in one value — and never an `Option<usize>`
-(`crates/lgwks-bot/src/session.rs:2415`). The trait documentation gives the
+(`crates/lgwks-bot/src/session.rs:2554`). The trait documentation gives the
 reason the verdict is five-valued: a two-way verdict collapses "nothing matched"
 and "several matched equally well" into one `None`, and the second is the
 dangerous one, because the session re-asks the identical list and the identical
@@ -55,7 +55,7 @@ willingness to keep answering the same way.
 | `Degraded { reason }` | the resolver never got to consider the options | re-asks, and records the cause under its own role |
 
 `Degraded` is `Absent`'s neighbour, not a spelling of it
-(`crates/lgwks-bot/src/session.rs:2731`). `Absent` means the person was not
+(`crates/lgwks-bot/src/session.rs:2870`). `Absent` means the person was not
 understood, so asking again in different words can help. `Degraded` means a
 dependency the resolver needs is unavailable, so the same utterance will degrade
 identically every time. That is why `Degraded` carries no `best_score`: no
@@ -63,13 +63,13 @@ measurement was taken, and reporting `0.0` would be an observation that never
 happened.
 
 `StaleAlias` is separated from `Absent` for the same reason
-(`crates/lgwks-bot/src/session.rs:2705`). `Absent` says the words did not fit the
+(`crates/lgwks-bot/src/session.rs:2844`). `Absent` says the words did not fit the
 options and a rephrase may help. `StaleAlias` says the words *did* have a
 confirmed meaning at this question and the option it was bound to is no longer
 offered — so the repair is not a rephrase, it is a conversation, and it names
 both halves of the broken binding because either alone is unactionable.
 
-`Provenance` (`crates/lgwks-bot/src/session.rs:2489`) holds two fields, and the
+`Provenance` (`crates/lgwks-bot/src/session.rs:2628`) holds two fields, and the
 second is optional on purpose:
 
 - **`PolicyVersion`** — always present, including on the lexicon path, because
@@ -84,7 +84,7 @@ second is optional on purpose:
   and did not, so a record of the failure that omits it cannot be reproduced.
 
 `DegradedReason` has two variants in the inspected source
-(`crates/lgwks-bot/src/session.rs:2606`). `EmbedderUnavailable` is reached when
+(`crates/lgwks-bot/src/session.rs:2745`). `EmbedderUnavailable` is reached when
 the semantic tier's embedder returns an error or a vector of the wrong length.
 `UnmeasurableEmbedding` is reached when an embedding comes back as a value no
 angle can be computed from — an all-zero vector, or one carrying `NaN` or an
@@ -120,9 +120,9 @@ any matching happens, and the two readings share no tier.
 ### An `Integer` answer is decoded and compared as a value
 
 The raw utterance goes through the resolver's integer decoder
-(`crates/lgwks-bot/src/session.rs:478`), which runs the same `parse::<i64>` over
+(`crates/lgwks-bot/src/session.rs:468`), which runs the same `parse::<i64>` over
 the same trimmed bytes as the store's `VarType::decode_answer`
-(`crates/lgwks-bot/src/session.rs:424`) — so an answer the resolver can compare
+(`crates/lgwks-bot/src/session.rs:414`) — so an answer the resolver can compare
 is an answer the variable can hold, and the two cannot disagree about which
 answers are whole numbers. It trims surrounding space and accepts a leading
 sign, so `" 5 "`, `"+5"` and `"5"` all name the value `5`, while `"5.0"`,
@@ -165,7 +165,7 @@ tier that produced it.
 
 They are ordered tiers rather than one weighted sum because an exact match has to
 short-circuit, and a weighted sum cannot express that. `MatchTier` is reported
-rather than inferred (`crates/lgwks-bot/src/session.rs:2587`), because the tier
+rather than inferred (`crates/lgwks-bot/src/session.rs:2726`), because the tier
 names the repair: an `Exact` miss is a learned alias pointing at the wrong
 option, a `Phonetic` miss is the English bias of the sound-alike key, a `Fuzzy`
 miss is a threshold.
@@ -265,7 +265,7 @@ receipt below.
 ## The decision receipt
 
 Every answer a `Session` takes is recorded as a `DecisionReceipt`
-(`crates/lgwks-bot/src/session.rs:2778`) through
+(`crates/lgwks-bot/src/session.rs:2917`) through
 `Journal::record_decision`. The receipt is the run's audit record; the
 transcript is a rendering of the conversation and cannot be one, because it
 says what was said and the receipt says what was decided. Its fields:
@@ -343,8 +343,8 @@ resolver change fixes an option list that does not contain the answer.
 
 `Degraded` exists so an operator can tell a person who was unclear from a
 dependency that is down. The session records the degraded re-ask under its own
-transcript role (`crates/lgwks-bot/src/session.rs:3764`), and a superseded
-binding under a different one (`crates/lgwks-bot/src/session.rs:3776`), so the
+transcript role (`crates/lgwks-bot/src/session.rs:3848`), and a superseded
+binding under a different one (`crates/lgwks-bot/src/session.rs:3860`), so the
 three do not render identically. If you are building a dashboard, the degraded
 role is the signal to alert on; `Absent` is not. The superseded-binding role is
 neither: it is a prompt for someone to ask the person what they meant, and it
