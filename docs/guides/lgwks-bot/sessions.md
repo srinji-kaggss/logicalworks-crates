@@ -108,7 +108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `FlowSpec` is the document. It owns variable declarations, an entry node, a node
 map, explicit continuations, terminal overrides, and `FlowBounds`. `FlowSpec::new`
 validates on construction and `FlowSpec::from_json` validates on parse
-(`crates/lgwks-bot/src/session.rs:577`). `MAX_FLOW_BYTES` is 2,097,152, and input
+(`crates/lgwks-bot/src/session.rs:643`). `MAX_FLOW_BYTES` is 2,097,152, and input
 past it is refused with `BotError::FlowTooLarge` before parsing runs.
 
 `NodeKind` is a closed set: `Say`, `Ask`, `Branch`, `Handoff`, `Refer`, `Route`,
@@ -136,7 +136,7 @@ option.
 `FlowBounds::new(budget)` caps runtime steps including answer attempts, and
 `FlowSpec::validate` refuses a node count that exceeds the declared budget
 (`BotError::FlowBudgetExceeded`). The runner charges each step against the same
-budget (`crates/lgwks-bot/src/session.rs:1629`) and returns
+budget (`crates/lgwks-bot/src/session.rs:1886`) and returns
 `BotError::SessionBudgetExceeded`, so a flow whose graph lets the cursor loop
 still terminates.
 
@@ -148,14 +148,14 @@ your own bound.
 `Terminal` records how the run ended: `Completed`, `Referred { target }`,
 `HandedOff { target }`, or `Refused { reason }`.
 
-`Terminal::outcome(EffectLedger) -> Outcome` (`crates/lgwks-bot/src/session.rs:472`)
+`Terminal::outcome(EffectLedger) -> Outcome` (`crates/lgwks-bot/src/session.rs:538`)
 carries two independent facts through unchanged, and that is the whole of the
 method:
 
 - the `Disposition`, one of `Completed`, `Referred`, `HandedOff`, `Refused`
-  (`crates/lgwks-bot/src/session.rs:293`);
+  (`crates/lgwks-bot/src/session.rs:359`);
 - the `EffectLedger`, a `confirmed` count and an `unsettled` count
-  (`crates/lgwks-bot/src/session.rs:320`).
+  (`crates/lgwks-bot/src/session.rs:386`).
 
 It does not classify, and the reason is in the source: an earlier version
 returned a single enum and had to choose, for a refused run that also left an
