@@ -1,0 +1,15 @@
+# The unapproved external edge the subject authors.
+#
+# It is a sibling directory rather than a workspace member on purpose: a path
+# dependency outside the workspace is the case the gate refuses with
+# `UnregisteredEdge`, and it is the case an operator reaches for a second
+# register to diagnose.
+#
+# Its own `[workspace]` keeps Cargo from walking up into this repository's
+# workspace root and rejecting the fixture as a non-member.
+[package]
+name = "helper"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]

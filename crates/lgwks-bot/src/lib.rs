@@ -54,6 +54,12 @@
 //!
 //! let fired = bot.tick().expect("tick propagates domain errors");
 //! ```
+//!
+//! `tick` is the synchronous adapter and belongs outside an async runtime:
+//! inside one it returns `BotError::TickInsideRuntime` rather than park the
+//! thread whose reactor the bot's own verbs need. Await `bot.tick_async()`
+//! there instead — the same four phases, the same `Result`, driven on the
+//! caller's executor.
 
 // Verbs are async by design (single-threaded `lgwks_std::task` driver, futures
 // deliberately not `Send`). The lint fires on `pub trait` methods declared
@@ -163,16 +169,19 @@ pub use frontier::{
     RejectKind, Resolved, RulesState,
 };
 pub use gate::GrantSet;
-pub use language::LanguageResolver;
+pub use language::{Alias, LanguageResolver};
 #[cfg(feature = "rt")]
 pub use rt::{Builder, Handle, Runtime, block_on};
 pub use semantic::{Embedder, EmbedderIdentity, SemanticError, SemanticPolicy, SemanticResolver};
 pub use session::{
-    ChoiceArm, DecisionReceipt, DegradedReason, Disposition, EffectLedger, FlowBounds, FlowEdge,
-    FlowNodeKind, FlowSpec, Interpolate, Journal, JournalError, MatchTier, MemoryJournal, NodeId,
-    NodeKind, Outcome, PolicyVersion, Predicate, Provenance, RECEIPT_VERSION, ReceiptAcceptance,
-    RecordedDecision, Resolution, Resolver, Session, SessionId, TemplateInterpolator, Terminal,
-    TranscriptEntry, Value, ValueExpr, VarScope, VarType, Verdict,
+    AnswerDomain, AnswerRejection, ChoiceArm, CompiledTemplate, DecisionReceipt, DegradedReason,
+    Disposition, EffectLedger, FlowBounds, FlowEdge, FlowNodeKind, FlowSpec, Interpolate, Journal,
+    JournalError, MAX_FLOW_BYTES, MAX_FLOW_SPEC_BYTES, MAX_RECORD_BYTES, MAX_SESSION_BYTES,
+    MAX_UTTERANCE_BYTES, MAX_VALUE_BYTES, MatchTier, MemoryJournal, NodeId, NodeKind, Outcome,
+    PolicyVersion, Predicate, Provenance, Question, RECEIPT_VERSION, ReceiptAcceptance,
+    RecordedDecision, Resolution, Resolver, ResourceAxis, ResourceLimits, Session, SessionId,
+    TemplateInterpolator, TemplatePart, Terminal, TranscriptEntry, Value, ValueExpr, VarScope,
+    VarType, Verdict,
 };
 pub use spec::{Bot, BotSpec};
 pub use verb::{Evaluate, Execute, Observe, Query};

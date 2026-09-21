@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 
 use lgwks_bot::Resolver;
 use lgwks_bot::session::{
-    FlowBounds, FlowSpec, MatchTier, NodeKind, Resolution, Session, VarType,
+    FlowBounds, FlowSpec, MatchTier, NodeKind, Question, Resolution, Session, VarType,
 };
 
 /// A two-option ask: `size` routes to `small_end` or `large_end`.
@@ -83,18 +83,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // A resolver reports *which* tier matched, which is what makes a wrong
     // resolution repairable. The default resolver is the lexicon, not a model.
+    // It is handed the question, not just the options: the ask node's id scopes
+    // any learned alias, and the domain says how the answers are read.
     let resolver = lgwks_bot::language::LanguageResolver::new();
     let options = vec![String::from("small"), String::from("large")];
+    let question = Question::new("ask_size", &options);
+    // `resolve` hands back a `Verdict`: the resolution and the provenance
+    // behind it, in one value. `resolution()` borrows the half this check is
+    // about.
+    let verdict = resolver.resolve("small", &question);
     assert_eq!(
-        resolver.resolve("small", &options),
-        Resolution::Resolved {
+        verdict.resolution(),
+        &Resolution::Resolved {
             index: 0,
             tier: MatchTier::Exact,
             score: 1.0,
             lead: 1.0,
         }
     );
-    match resolver.resolve("no idea", &options) {
+    match resolver.resolve("no idea", &question).into_resolution() {
         Resolution::Absent { .. } => {}
         other => return Err(format!("expected Absent, got {other:?}").into()),
     }
@@ -108,7 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `FlowSpec` is the document. It owns variable declarations, an entry node, a node
 map, explicit continuations, terminal overrides, and `FlowBounds`. `FlowSpec::new`
 validates on construction and `FlowSpec::from_json` validates on parse
-(`crates/lgwks-bot/src/session.rs:541`). `MAX_FLOW_BYTES` is 2,097,152, and input
+(`crates/lgwks-bot/src/session.rs:1081`). `MAX_FLOW_BYTES` is 2,097,152, and input
 past it is refused with `BotError::FlowTooLarge` before parsing runs.
 
 `NodeKind` is a closed set: `Say`, `Ask`, `Branch`, `Handoff`, `Refer`, `Route`,
@@ -116,9 +123,20 @@ past it is refused with `BotError::FlowTooLarge` before parsing runs.
 strings handed to the resolver, and a route map from option string to node id.
 
 `VarScope` holds the typed variables. `VarType` is `String`, `Integer`,
-`Boolean`, or `Choice(Vec<String>)`. `set_from_answer` converts an accepted
-option into the declared type and returns `BotError::InvalidVariableValue` when it
-cannot.
+`Boolean`, or `Choice(Vec<String>)`. `VarType::decode_answer` converts one answer
+string into the declared type, and `set_from_answer` is that decoder plus the
+store: it returns `BotError::InvalidVariableValue` when the answer cannot be
+converted.
+
+The same decoder runs at load, over every candidate of every ask
+(`crates/lgwks-bot/src/session.rs:1587`). An ask whose options include one the
+declared variable cannot hold is refused by `FlowSpec::validate` with
+`BotError::AskOptionNotAssignable` — naming the node, the variable, the option,
+the expected type and the cause — so a flow that loads is a flow every one of
+whose options can be answered. A candidate is a *label* the resolver matches and
+a *value* the variable stores, and they need not be the same string: `yes`
+offered for a boolean variable stores `Value::Boolean(true)`, and a candidate
+differing from a declared choice only in case stores the declared spelling.
 
 `Session::new` installs the default language resolver and an in-memory journal.
 `Session::with_components` replaces both, which is the seam: `Resolver` and
@@ -147,26 +165,74 @@ and `ReceiptNotRecorded` for a journal that would not take the decision receipt.
 `FlowBounds::new(budget)` caps runtime steps including answer attempts, and
 `FlowSpec::validate` refuses a node count that exceeds the declared budget
 (`BotError::FlowBudgetExceeded`). The runner charges each step against the same
-budget (`crates/lgwks-bot/src/session.rs:2167`) and returns
+budget (`crates/lgwks-bot/src/session.rs:3549`) and returns
 `BotError::SessionBudgetExceeded`, so a flow whose graph lets the cursor loop
 still terminates.
 
 `Session::steps()` reports the charged count, which is what you compare against
 your own bound.
 
+### Bytes, which the step budget does not bound
+
+A step budget bounds how many times something happens and not how large it is,
+and the two are independent: one `say` node is one step whether it says four
+bytes or four gigabytes, and a document that names `${answer}` twenty thousand
+times is a two-hundred-kilobyte file whose expansion is a hundred and sixty
+megabytes. `Session` therefore enforces four byte ceilings as well
+(`crates/lgwks-bot/src/session.rs:64`):
+
+- `MAX_UTTERANCE_BYTES` — the bytes accepted in one answer, checked in
+  `Session::answer` before the step is charged and before the utterance is
+  copied anywhere, so a refused line consumes no budget and leaves no record.
+- `MAX_VALUE_BYTES` — the bytes one stored variable value occupies when
+  rendered. Checked at load, against every candidate of every ask, so a
+  candidate the session could never store is refused before anyone is asked it
+  (`BotError::AskOptionTooLarge`).
+- `MAX_RECORD_BYTES` — the bytes of one rendered record payload.
+- `MAX_SESSION_BYTES` — the total bytes one session retains across its whole
+  transcript and visited path, which is what bounds a conversation the graph
+  lets repeat.
+
+Expansion is bounded at the *computed* size rather than the built one. A
+template is compiled once into literal and placeholder parts, and the sum of the
+parts is accumulated with `checked_add` before any output buffer exists; a
+template whose computed expansion exceeds the record ceiling is refused with
+`BotError::TemplateExpansionTooLarge`, and arithmetic that would overflow is the
+same refusal at a larger size. A template whose *literal* bytes alone exceed the
+ceiling is refused when the document loads, because no value can shrink it.
+
+`FlowBounds::resources` lets a document declare ceilings of its own, and
+`Session::with_limits` lets an operator declare theirs. Neither can widen the
+other: an axis takes the smaller of the two, a request above the shipped ceiling
+is refused (`BotError::ResourceLimitAboveCeiling`) rather than clamped, and the
+ceiling in force is what `Session::limits()` reports. `Session::retained_bytes()`
+reports the aggregate charged so far.
+
 ## What a finished run reports
 
 `Terminal` records how the run ended: `Completed`, `Referred { target }`,
 `HandedOff { target }`, or `Refused { reason }`.
 
-`Terminal::outcome(EffectLedger) -> Outcome` (`crates/lgwks-bot/src/session.rs:474`)
+Which one a node produces is computed in exactly one place,
+`FlowSpec::effective_terminal`, and validation and execution both read it. An
+`End` node completes unless the terminal map declares something else, and every
+declared outcome is a genuine override there — that is how a flow refuses
+(`Terminal::Refused`) rather than ending quietly. A `Handoff` or `Refer` node
+already names its target, so the only declaration it accepts is the one that
+repeats that outcome; one that contradicts it, whether a different target or a
+refusal, is refused at load with `BotError::ConflictingTerminalDeclaration`
+(`crates/lgwks-bot/src/session.rs:1517`). A document that says a handoff is not
+authorized therefore never runs as a handoff, which is what a consumer
+dispatching on the returned disposition depends on.
+
+`Terminal::outcome(EffectLedger) -> Outcome` (`crates/lgwks-bot/src/session.rs:950`)
 carries two independent facts through unchanged, and that is the whole of the
 method:
 
 - the `Disposition`, one of `Completed`, `Referred`, `HandedOff`, `Refused`
-  (`crates/lgwks-bot/src/session.rs:295`);
+  (`crates/lgwks-bot/src/session.rs:771`);
 - the `EffectLedger`, a `confirmed` count and an `unsettled` count
-  (`crates/lgwks-bot/src/session.rs:322`).
+  (`crates/lgwks-bot/src/session.rs:798`).
 
 It does not classify, and the reason is in the source: an earlier version
 returned a single enum and had to choose, for a refused run that also left an
