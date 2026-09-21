@@ -278,6 +278,31 @@ impl Witness {
 /// witness rides alongside it in the staging vector rather than in a second box.
 /// It is not an `Option`: a value that was boxed here was boxed from a concrete
 /// type, so the witness always exists.
+///
+/// The witness travels *with the value* rather than being read off it where it
+/// arrives. `dyn Any` exposes `type_id()`, so the actual type was never out of
+/// reach; what the carrier adds is the producer's own statement of what it
+/// produced, made at the one point where the type was still a type parameter.
+/// The rendezvous then compares one claim against another — a producer's against
+/// a consumer's — which is the comparison this check exists for. Reading the
+/// `type_id` instead would compare ground truth against an expectation, which is
+/// a different and weaker thing: it can only say whether the value fits, never
+/// whether the two halves were built to agree.
+///
+/// Two limits, both real, neither addressed here:
+///
+/// - [`TypeId`] is process-local and is not serializable, so this serves the
+///   Rust path only. A materializer holding wire data instead of a `Witness`
+///   needs a durable identity for the same question, and this field is where
+///   that key goes once the `domain_id -> constructor` registry exists — see the
+///   [`spec`](self) module docs for that absence. Do not reach for `TypeId` to
+///   answer it.
+/// - A witness is `TypeId::of::<S::Output>()`, so it distinguishes *types*, not
+///   *chains*. Two chains that both produce a `u16` are indistinguishable to it:
+///   a value produced by one and delivered to the other passes this check. It
+///   proves the pairing is type-correct, which is all a type can prove, and that
+///   is strictly more than the index pairing proved before it — but it is not a
+///   chain identity, and the next reader should not assume it is one.
 pub(crate) struct Erased {
     /// The value itself.
     pub(crate) value: Box<dyn Any>,
@@ -380,13 +405,18 @@ pub(crate) trait ExecuteAny {
     /// [`BotError::CapabilityDenied`] before acting; reports a type mismatch as
     /// [`BotError::TypeMismatch`] without acting.
     ///
-    /// Takes the erased value rather than a bare `&dyn Any` so the mismatch arm
-    /// can name what it was handed. That arm is a backstop: the rendezvous in
-    /// `observe_fold` compares the value's witness against the chain's before
-    /// this is ever reached, so a mismatch here is a world mutated behind the
-    /// schedule's back. It is still worth naming both types when it fires,
-    /// because a diagnostic that can only say "not the type this action wanted"
-    /// leaves the reader to guess what it got.
+    /// Takes the erased value rather than a bare `&dyn Any` so that every method
+    /// on this boundary takes the same carrier. The witness belongs to the value
+    /// — see [`Erased`] for why that is the shape this check needs — and the
+    /// mismatch arm reports the producer's claim against what this action was
+    /// built for, rather than reading a `type_id` off the value and comparing
+    /// ground truth against an expectation.
+    ///
+    /// The mismatch arm is a backstop. The rendezvous in `observe_fold` compares
+    /// the value's witness against the chain's before this is ever reached, so a
+    /// mismatch here means the world moved behind the schedule's back. It still
+    /// names both types when it fires, because a diagnostic that can say only
+    /// "not the type this action wanted" leaves the reader to guess what it got.
     fn run_any<'a>(
         &'a self,
         grants: &'a GrantSet,
