@@ -454,23 +454,49 @@ pub(crate) trait ObserveAny {
     fn domain_id(&self) -> &str;
     /// Forwards to [`Observe::required_caps`](crate::verb::Observe::required_caps).
     fn required_caps(&self) -> &[Cap];
-    /// Issue an [`Auth`] for the observer's own caps and poll it, boxing the
-    /// output as `Any`. Denies with [`BotError::CapabilityDenied`] before
-    /// polling when the grant set does not cover those caps.
+    /// Issue an [`Auth`] for the observer's own caps and poll it.
+    ///
+    /// Returns `Ok(None)` when the source produced a value **equal** to
+    /// `previous`, and `Ok(Some(_))` when it did not. Denies with
+    /// [`BotError::CapabilityDenied`] before polling when the grant set does not
+    /// cover the observer's caps.
+    ///
+    /// # Why the comparison is here and not at the caller
+    ///
+    /// This is the last point at which the output is a concrete `T::Output`.
+    /// One frame further out it is a `Box<dyn Any>`, and `==` on two boxed
+    /// values is an allocation, a memcpy and a free apiece, spent to answer a
+    /// question that could be asked of the value in hand. In a steady-state bot
+    /// the answer is "equal" on nearly every tick, so the box a caller-side
+    /// comparison forces is pure waste: it is built, compared, and dropped.
     ///
     /// The boxed value carries its own [`Witness`], taken here, where the
     /// output type is still `T::Output`. That is the only place it can be
     /// taken: by the time the value reaches the chain that will consume it,
     /// both halves are erased and nothing remains to compare.
+    ///
+    /// # What `previous` is compared against
+    ///
+    /// `previous` is the payload the substrate is currently holding for this
+    /// chain — the newest committed observation, or failing that the binding of
+    /// a transition that owns it. A `None` return therefore means *equal to
+    /// what the substrate already has*, which is the same question the chain's
+    /// own `same` answers, and it is answered here by the same `PartialEq`.
     fn poll_any<'a>(
         &'a self,
         grants: &'a GrantSet,
-    ) -> crate::BoxFuture<'a, Result<Erased, BotError>>;
+        previous: Option<&'a Erased>,
+    ) -> crate::BoxFuture<'a, Result<Option<Erased>, BotError>>;
 }
 
+/// The blanket impl carries `PartialEq` on the output because the comparison
+/// above needs it. That is not a new requirement on a source: every chain is
+/// closed by `EcsObserveBuilder::observe`, which already demands
+/// `S::Output: PartialEq` for its change filter, so a source that could reach
+/// this impl without it could not have been admitted to a chain anyway.
 impl<T: super::verb::Observe + 'static> ObserveAny for T
 where
-    T::Output: 'static,
+    T::Output: PartialEq + 'static,
 {
     fn domain_id(&self) -> &str {
         super::verb::Observe::domain_id(self)
@@ -483,11 +509,25 @@ where
     fn poll_any<'a>(
         &'a self,
         grants: &'a GrantSet,
-    ) -> crate::BoxFuture<'a, Result<Erased, BotError>> {
+        previous: Option<&'a Erased>,
+    ) -> crate::BoxFuture<'a, Result<Option<Erased>, BotError>> {
         Box::pin(async move {
             let auth: Auth = grants.issue(super::verb::Observe::required_caps(self))?;
             let value = self.poll((auth, ())).await?;
-            Ok(Erased::new(value))
+            // A `previous` of the wrong type is not equality and must not be
+            // read as it: the downcast failing falls through to boxing the
+            // value, which reports the chain as moved. That is the same answer
+            // `same_output` gives for a failed downcast, so the two never
+            // disagree about which one of them is authoritative.
+            if let Some(previous) = previous
+                && previous
+                    .as_any()
+                    .downcast_ref::<T::Output>()
+                    .is_some_and(|previous| *previous == value)
+            {
+                return Ok(None);
+            }
+            Ok(Some(Erased::new(value)))
         })
     }
 }

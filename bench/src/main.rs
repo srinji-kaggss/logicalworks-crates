@@ -34,12 +34,78 @@
 
 mod stats;
 
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::fmt::Write as _;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use lgwks_bot::{Auth, Bot, BotError, Cap, Evaluate, Execute, GrantSet, Observe};
+
+// ── The allocation counter ───────────────────────────────────────────────────
+//
+// Timing alone says a tick is slow; it does not say what the tick is spending
+// its time on, and "reduce allocations" is then a guess. This counts them, so
+// the hot path's allocation model is a measured number rather than an inference
+// from reading `Box::new` in a source file.
+//
+// Two counters, because they answer different questions: `ALLOCS` is the count
+// the tick pays, and `BYTES` says whether those allocations are small handovers
+// or large buffers. A tick that is allocation-bound shows a count in the
+// hundreds per tick with a small mean size.
+//
+// Counting is a relaxed atomic add and a subtraction on the free path. That is
+// not free, and it inflates the measured wall time of the timed loops below.
+// The two are therefore run separately: `--alloc-report` counts, the timing
+// scenarios do not, and no ratio in `results.json` is taken from a counting run.
+
+static ALLOCS: AtomicU64 = AtomicU64::new(0);
+static BYTES: AtomicU64 = AtomicU64::new(0);
+static COUNTING: AtomicU64 = AtomicU64::new(0);
+
+struct Counting;
+
+impl Counting {
+    /// Whether the counters are live. Reads are relaxed: the flag is only ever
+    /// flipped between measurement phases, never inside one.
+    fn on() -> bool {
+        COUNTING.load(Ordering::Relaxed) == 1
+    }
+}
+
+// SAFETY: every method forwards to `System` unchanged, so the allocator
+// contract (`alloc`/`dealloc`/`realloc` paired on the same `Layout`) is the
+// system allocator's. The only addition is a counter increment on either side,
+// which allocates nothing and touches no memory the caller owns.
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if Self::on() {
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+            BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        }
+        // SAFETY: `layout` is forwarded verbatim from the caller.
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: `ptr`/`layout` are forwarded verbatim from the caller, which
+        // obtained them from this allocator's `alloc`/`realloc`.
+        unsafe { System.dealloc(ptr, layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        if Self::on() {
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+            BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
+        }
+        // SAFETY: `ptr`/`layout`/`new_size` are forwarded verbatim.
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
 
 // ── The workload ─────────────────────────────────────────────────────────────
 
@@ -456,11 +522,125 @@ fn determinism_probe(scenario: &Scenario, ticks: u64) -> Result<(bool, usize), B
     Ok((first == second, fired as usize))
 }
 
+// ── The allocation model ─────────────────────────────────────────────────────
+
+/// Count the heap allocations one tick costs, per scenario.
+///
+/// The bot is built and warmed *outside* the counted window, so what is counted
+/// is the steady-state tick and not the admission cost. The baseline is counted
+/// through the same window, which is the control: a hand-rolled loop over the
+/// same workload should allocate nothing, and a non-zero count there would mean
+/// the counter is picking up something other than the bot.
+fn alloc_report() -> Result<String, Box<dyn std::error::Error>> {
+    let mut out = String::new();
+    writeln!(
+        out,
+        "\nallocation model -- steady-state tick, built and warmed outside the counted window\n\
+         =================================================================================="
+    )?;
+    writeln!(
+        out,
+        "  scenario                allocs/tick   bytes/tick   mean bytes   baseline allocs/tick"
+    )?;
+
+    for scenario in SCENARIOS {
+        let clock = Clock::new();
+        let tally = Rc::new(Cell::new(0u64));
+        let evals_bot_cell = Rc::new(Cell::new(0u64));
+        let evals_base_cell = Cell::new(0u64);
+
+        let mut bot = build_bot(scenario, &clock, &tally, &evals_bot_cell)?;
+        let mut chains = build_handrolled(scenario);
+
+        // Warm up, so anything allocated once by the schedule's first run (a
+        // lazily-grown buffer, a query's internal state) is already in place.
+        let warm = 64u64;
+        for tick in 0..warm {
+            clock.set(tick);
+            let _ = bot.tick()?;
+        }
+        for tick in 0..warm {
+            let _ = chains
+                .iter_mut()
+                .map(|c| c.tick(tick, &evals_base_cell))
+                .sum::<u64>();
+        }
+
+        let ticks = 512u64;
+        ALLOCS.store(0, Ordering::Relaxed);
+        BYTES.store(0, Ordering::Relaxed);
+        COUNTING.store(1, Ordering::Relaxed);
+        for tick in warm..warm.saturating_add(ticks) {
+            clock.set(tick);
+            let _ = bot.tick()?;
+        }
+        COUNTING.store(0, Ordering::Relaxed);
+        let bot_allocs = ALLOCS.load(Ordering::Relaxed);
+        let bot_bytes = BYTES.load(Ordering::Relaxed);
+
+        ALLOCS.store(0, Ordering::Relaxed);
+        COUNTING.store(1, Ordering::Relaxed);
+        for tick in warm..warm.saturating_add(ticks) {
+            let _ = chains
+                .iter_mut()
+                .map(|c| c.tick(tick, &evals_base_cell))
+                .sum::<u64>();
+        }
+        COUNTING.store(0, Ordering::Relaxed);
+        let base_allocs = ALLOCS.load(Ordering::Relaxed);
+
+        let per_tick = bot_allocs as f64 / ticks as f64;
+        writeln!(
+            out,
+            "  {:<20} {:>10.1}   {:>10.1}   {:>10.1}   {:>19.1}",
+            scenario.name,
+            per_tick,
+            bot_bytes as f64 / ticks as f64,
+            bot_bytes as f64 / bot_allocs.max(1) as f64,
+            base_allocs as f64 / ticks as f64,
+        )?;
+    }
+    // Per-tick trace for one scenario. A mean over 512 ticks hides the shape of
+    // the cost: a bot that allocates nothing on a steady tick and heavily on a
+    // moving one has the same mean as one that allocates the same amount every
+    // tick, and only the trace tells them apart. This is what says whether the
+    // observation path still allocates on a tick where nothing moved.
+    let scenario = &SCENARIOS[1];
+    let clock = Clock::new();
+    let tally = Rc::new(Cell::new(0u64));
+    let evals = Rc::new(Cell::new(0u64));
+    let mut bot = build_bot(scenario, &clock, &tally, &evals)?;
+    for tick in 0..64u64 {
+        clock.set(tick);
+        let _ = bot.tick()?;
+    }
+    write!(
+        out,
+        "\n  per-tick allocations, {} (a value moves every {} ticks)\n    ",
+        scenario.name, scenario.period
+    )?;
+    for tick in 64..124u64 {
+        clock.set(tick);
+        ALLOCS.store(0, Ordering::Relaxed);
+        COUNTING.store(1, Ordering::Relaxed);
+        let _ = bot.tick()?;
+        COUNTING.store(0, Ordering::Relaxed);
+        write!(out, "{}:{} ", tick, ALLOCS.load(Ordering::Relaxed))?;
+    }
+    writeln!(out, "\n")?;
+    Ok(out)
+}
+
 // ── Reporting ────────────────────────────────────────────────────────────────
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let run_timings = !args.iter().any(|a| a == "--capcheck-only");
+
+    if args.iter().any(|a| a == "--alloc-report") {
+        print!("{}", alloc_report()?);
+        return Ok(());
+    }
 
     let mut json = String::from("{\n");
     let mut human = String::new();
