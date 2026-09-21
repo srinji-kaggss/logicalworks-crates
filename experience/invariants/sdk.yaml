@@ -27,7 +27,7 @@ machine_contract:
 known_gaps:
   - "No from_spec: a validated BotSpec cannot be materialized into a runnable Bot through this SDK alone.
      Materializing a world from wire data needs a domain_id -> constructor registry that
-     does not exist in the estate; the builder takes verbs, not specs. Recorded as open,
+     does not exist in the workspace; the builder takes verbs, not specs. Recorded as open,
      not as done."
   - "No CLI acceptance harness. The dep-admission journey's four probes (no-register,
      unregistered-edge, ladder-then-form, double-init) are verified by hand, not by a

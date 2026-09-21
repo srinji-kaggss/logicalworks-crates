@@ -1,7 +1,7 @@
 [package]
 name = "lgwks_deps"
 description = "Dependency admission and supply-chain policy for a Rust workspace: every external edge names a human-approved owner, verified in CI."
-version = "0.1.11"
+version = "0.1.12"
 edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"
@@ -122,5 +122,12 @@ path = "src/lib.rs"
 workspace = true
 
 [package.metadata.docs.rs]
-all-features = true
+# Not `all-features`. docs.rs builds for x86_64-unknown-linux-gnu, and two
+# storefront features are platform-bound: `gpui` pulls `objc2`, which refuses to
+# compile off Apple targets, and `ml-candle-metal` selects Candle's Metal
+# backend. With `all-features = true` every published version failed to build,
+# so this crate had no rendered documentation at all. This list is the set the
+# CI doc and clippy lanes already verify on Linux; the platform-bound features
+# are covered by the per-platform jobs instead.
+features = ["tokio-full", "appcui"]
 rustdoc-args = ["--cfg", "docsrs"]

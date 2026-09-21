@@ -1,6 +1,6 @@
 ---
 name: lgwks-dependency-admission
-description: Use when adding, upgrading, or auditing a third-party dependency in a LogicalWorks estate repo, when `lgwks-deps check` refuses an edge (unregistered edge, consumer not allowed, requirement/source drift, kind not allowed, unused approval), or when deciding whether a crate belongs in lgwks_std, lgwks_bot, lgwks_ast, or the register. Covers the admission ladder, the APPROVED.toml schema, and the fail-closed rules.
+description: Use when adding, upgrading, or auditing a third-party dependency in a LogicalWorks repository, when `lgwks-deps check` refuses an edge (unregistered edge, consumer not allowed, requirement/source drift, kind not allowed, unused approval), or when deciding whether a crate belongs in lgwks_std, lgwks_bot, lgwks_ast, or the register. Covers the admission ladder, the APPROVED.toml schema, and the fail-closed rules.
 ---
 
 # Adding a dependency to a gated LogicalWorks repo
@@ -54,7 +54,7 @@ source = "registry"              # registry | git | path
 allowed_consumers = "lgwks_std"  # comma-separated workspace crate names
 allowed_kinds = "normal"         # normal, build, and/or dev
 reason = "Filesystem capacity available to an unprivileged process is absent from the stable standard library."
-approved_by = "Director"         # the human who decided
+approved_by = "maintainer"         # the human who decided
 approved_on = "2026-09-12"       # ISO YYYY-MM-DD
 review = "https://github.com/..." # path or URL to the evidence
 ```

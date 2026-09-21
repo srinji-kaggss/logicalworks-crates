@@ -4195,7 +4195,7 @@ dependencies = [
 
 [[package]]
 name = "lgwks_deps"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "appcui",
  "bevy_app",

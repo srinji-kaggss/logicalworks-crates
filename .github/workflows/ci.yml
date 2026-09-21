@@ -150,6 +150,47 @@ jobs:
           --manifest-path crates/lgwks-bot/Cargo.toml --no-default-features &&
           RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
           --manifest-path crates/lgwks-ast/Cargo.toml --no-default-features
+      - name: docs.rs metadata names a buildable feature set
+        # docs.rs builds with whatever `[package.metadata.docs.rs]` declares,
+        # and a failure there is invisible from the repository: the crate page
+        # just shows a build error. `all-features = true` on a crate whose
+        # features include platform-bound ones fails on every publish, which is
+        # what happened to lgwks_deps: `gpui` pulls `objc2`, which refuses to
+        # compile off Apple targets. Build with the declared set so an
+        # unbuildable declaration fails here instead of on docs.rs.
+        run: |
+          set -eu
+          python - <<'PY' > /tmp/docsrs_features.sh
+          import tomllib
+          from pathlib import Path
+
+          for manifest in sorted(Path("crates").glob("*/Cargo.toml")):
+              parsed = tomllib.loads(manifest.read_text(encoding="utf-8"))
+              # `[package.metadata.docs.rs]` parses as metadata["docs"]["rs"].
+              meta = (
+                  parsed.get("package", {})
+                  .get("metadata", {})
+                  .get("docs", {})
+                  .get("rs")
+              )
+              if meta is None:
+                  continue
+              name = parsed["package"]["name"]
+              if meta.get("all-features"):
+                  print(f"# {name}: all-features")
+                  print(f'cargo doc --no-deps --locked -p {name} --all-features')
+              else:
+                  feats = meta.get("features", [])
+                  joined = ",".join(feats)
+                  print(f"# {name}: {joined or '(defaults only)'}")
+                  if feats:
+                      print(f'cargo doc --no-deps --locked -p {name} --features {joined}')
+                  else:
+                      print(f'cargo doc --no-deps --locked -p {name}')
+          PY
+          cat /tmp/docsrs_features.sh
+          RUSTDOCFLAGS='-D warnings --cfg docsrs' sh -e /tmp/docsrs_features.sh
+
       - name: Root README quickstart matches its compiled example
         run: |
           python - <<'PY'
@@ -291,7 +332,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Validate std+ contract alignment
+      - name: Validate the dependency contract alignment
         run: |
           python - <<'PY'
           import re

@@ -3,9 +3,9 @@ name: lgwks-std-first
 description: Use before adding any dependency to a LogicalWorks Rust crate, or when a task suggests tokio, futures, async-trait, pollster, syn, proc-macro2, regex, uuid, chrono, walkdir, glob, base64, hex, percent-encoding, serde_json, ureq, reqwest, ast-grep, once_cell, or num_cpus. Maps each crate to its std / lgwks_std / lgwks_bot / lgwks_ast replacement, gives the storefront and syn boundaries, and routes genuinely missing capability through lgwks-dependency-admission.
 ---
 
-# std-first: the estate replacement map
+# std-first: the workspace replacement map
 
-The estate compiles against `std` + `lgwks_std` first, then `lgwks_bot` (async,
+This workspace compiles against `std` and `lgwks_std` first, then `lgwks_bot` (async,
 runners, actors), and `lgwks_ast`; everything else is a registered BOUNDARY
 feature of the `lgwks_deps` storefront. Reaching for a familiar crate when a
 first-party module exists is the most common agent defect in this repo, and
@@ -16,7 +16,7 @@ first-party module exists is the most common agent defect in this repo, and
 
 1. Is it in `std`? (`OnceLock`/`LazyLock`, `available_parallelism`,
    `mpsc`, `thread`, `fs`, `net`, `from_le_bytes`.)
-2. Is it an estate module? (table below.)
+2. Is it a workspace module? (table below.)
 3. Is it parsing? Rust scanning is `lgwks_deps::scan`; multi-language is
    `lgwks_ast`. Do not add a second parser.
 4. Is it async? `lgwks_bot` for the runtime, runners, and actors;

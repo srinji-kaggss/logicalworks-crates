@@ -6,6 +6,35 @@ independently; each release lists per-crate deltas. The format follows
 `0.x`, so any minor may carry breaking changes, which are then listed
 explicitly under that crate.
 
+## [lgwks_deps 0.1.12] - 2026-09-20
+
+Documentation release. No API change, no behaviour change, and no command-line
+change.
+
+### lgwks_deps Fixed
+
+- `lgwks_deps` had **no rendered documentation on docs.rs for any published
+  version**. The manifest declared `all-features = true`, and docs.rs builds for
+  `x86_64-unknown-linux-gnu`: `gpui` pulls `objc2`, which refuses to compile off
+  Apple targets, and `ml-candle-metal` selects Candle's Metal backend. Every
+  build failed, so the crate page showed a build error instead of an API. The
+  manifest now names the platform-neutral set the CI doc and clippy lanes
+  already verify on Linux (`tokio-full`, `appcui`); the platform-bound features
+  stay covered by the per-platform jobs.
+- The `Docs` CI job gained a step that reads each crate's declared
+  `[package.metadata.docs.rs]` and builds exactly that set, so an unbuildable
+  declaration fails in CI rather than on docs.rs.
+
+### Repository Changed
+
+Not part of any published package; recorded here because it changes files a
+reader of this repository sees.
+
+- `AGENTS.md`, `contract/APPROVED.toml`, `skills/`, `experience/`, and one CI
+  step name carried the same internal vocabulary the crate docs carried. The
+  register's `approved_by` field now reads `maintainer` rather than an internal
+  role title; the field is a free-form string and no code validates its value.
+
 ## [lgwks_std 0.6.6 / lgwks_bot 0.4.2 / lgwks_ast 0.2.2 / lgwks_deps 0.1.11] - 2026-09-20
 
 Documentation release. No API change in any crate. This supersedes 0.6.5 / 0.4.1 /
