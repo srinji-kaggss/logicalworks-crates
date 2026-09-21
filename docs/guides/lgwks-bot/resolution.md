@@ -63,6 +63,17 @@ The two constants are `MATCH_THRESHOLD = 0.55` and `MATCH_MARGIN = 0.08`
 (`crates/lgwks-bot/src/language.rs:70`, `crates/lgwks-bot/src/language.rs:73`). A score at or above the threshold that
 does not lead the runner-up by the margin is `Ambiguous`, not `Resolved`.
 
+The threshold and the margin are asked in that order, and the order is the
+contract. Every option is measured first; the threshold then says which options
+*may win*, and the margin asks whether the winner separated itself from the best
+of everything else that was measured — including an option whose score fell just
+short of the threshold. A below-threshold option does not stop being a measured
+proximity because it may not be selected, so it still counts against the lead
+and still appears in `Ambiguous::tied`. Filtering first and measuring second was
+the defect GitHub issue #31 filed: it let a competitor one hundredth below the
+threshold disappear, so a winner holding a `0.02` lead against a required `0.05`
+reported the whole of its score as a margin and was accepted.
+
 The phonetic tier deliberately does not absorb a differing initial consonant, so
 `cat`/`kat` and `Catherine`/`Kathryn` do not match. The module documentation
 calls that the conservative choice rather than an oversight.

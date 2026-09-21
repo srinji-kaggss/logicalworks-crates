@@ -430,9 +430,12 @@ impl<E: Embedder> SemanticResolver<E> {
 
     /// Scores every option against the utterance, best-first.
     ///
-    /// An option below the threshold is excluded, and so is one whose vector has
-    /// zero magnitude: its angle to anything is undefined, which is the absence
-    /// of a score rather than a score of zero.
+    /// Every option whose vector can be compared is measured and returned,
+    /// including one that falls below the acceptance threshold. The threshold
+    /// is applied by [`decide`], not here, because it decides which option may
+    /// *win*: applying it here would delete the runner-up before the lead over
+    /// it was measured, and a winner whose only competitor was discarded reports
+    /// the whole of its score as a lead it never held.
     fn score_semantically(
         &self,
         utterance: &str,
@@ -445,11 +448,7 @@ impl<E: Embedder> SemanticResolver<E> {
         for (index, option) in options.iter().enumerate() {
             let candidate = self.embed(option)?;
             match metric.try_score(&target, &candidate) {
-                Ok(score) => {
-                    if score >= self.policy.threshold() {
-                        scored.push((index, MatchTier::Semantic, score));
-                    }
-                }
+                Ok(score) => scored.push((index, MatchTier::Semantic, score)),
                 // The two refusals are not the same refusal. A dimension
                 // mismatch means the provider contradicted its own declared
                 // identity, which no candidate can recover from. A degenerate
@@ -493,7 +492,7 @@ impl<E: Embedder> Resolver for SemanticResolver<E> {
         // path on which a model is consulted, so no verdict the lexicon reached
         // can be changed by enabling this tier.
         match self.score_semantically(utterance, options) {
-            Ok(scored) => decide(&scored, self.policy.margin()),
+            Ok(scored) => decide(&scored, self.policy.threshold(), self.policy.margin()),
             Err(reason) => Resolution::Degraded { reason },
         }
     }
@@ -722,6 +721,71 @@ mod tests {
     }
 
     #[test]
+    fn a_runner_up_below_threshold_still_counts_against_the_margin()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Two cosines constructed to be exactly `0.73` and `0.71` against the
+        // utterance: the required margin is `0.05` and the observed lead is
+        // `0.02`. The runner-up misses the `0.72` threshold by one hundredth,
+        // which is exactly what used to delete it. A threshold says an option
+        // may not win; it does not make the proximity that was measured vanish.
+        let (embedder, _) = stub(
+            vec![
+                ("the usual", vec![1.0, 0.0]),
+                (
+                    "Repeat last order",
+                    vec![0.73, (1.0_f32 - 0.73_f32.powi(2)).sqrt()],
+                ),
+                ("Cancel", vec![0.71, (1.0_f32 - 0.71_f32.powi(2)).sqrt()]),
+            ],
+            vec![0.0, 1.0],
+            false,
+        )?;
+        let verdict = SemanticResolver::new(embedder)
+            .resolve("the usual", &options(&["Repeat last order", "Cancel"]));
+        assert!(
+            matches!(&verdict, Resolution::Ambiguous { tied, .. } if *tied == vec![0, 1]),
+            "the near tie must be reported as one, got {verdict:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_below_threshold_runner_up_is_reported_in_the_lead()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // The same field with a wide margin: the winner is decisive, and the
+        // number it reports must be the `0.02` it actually holds, not the `0.73`
+        // of its own score reported over an emptied field.
+        let (embedder, _) = stub(
+            vec![
+                ("the usual", vec![1.0, 0.0]),
+                (
+                    "Repeat last order",
+                    vec![0.73, (1.0_f32 - 0.73_f32.powi(2)).sqrt()],
+                ),
+                ("Cancel", vec![0.71, (1.0_f32 - 0.71_f32.powi(2)).sqrt()]),
+            ],
+            vec![0.0, 1.0],
+            false,
+        )?;
+        let policy = SemanticPolicy::new(0.72, 0.01)?;
+        let verdict = SemanticResolver::with_policy(embedder, policy)
+            .resolve("the usual", &options(&["Repeat last order", "Cancel"]));
+        assert!(
+            matches!(
+                verdict,
+                Resolution::Resolved {
+                    index: 0,
+                    score,
+                    lead,
+                    ..
+                } if (score - 0.73).abs() < 1e-6 && (lead - 0.02).abs() < 1e-6
+            ),
+            "the lead must be the measured gap over the runner-up, got {verdict:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn an_option_below_the_threshold_is_not_a_candidate() -> Result<(), Box<dyn std::error::Error>>
     {
         let (embedder, calls) = stub(paraphrase_vectors(), vec![0.0, 1.0], false)?;
@@ -795,15 +859,18 @@ mod tests {
         );
 
         let resolution = resolver.resolve("the usual", &options);
-        assert_eq!(
-            resolution,
-            Resolution::Resolved {
-                index: 0,
-                tier: MatchTier::Exact,
-                score: 1.0,
-                lead: 1.0,
-            },
-            "a confirmed phrase resolves exactly from then on"
+        assert!(
+            matches!(
+                resolution,
+                Resolution::Resolved {
+                    index: 0,
+                    tier: MatchTier::Exact,
+                    score,
+                    lead,
+                } if (score - 1.0).abs() < 1e-9 && lead < score
+            ),
+            "a confirmed phrase resolves exactly from then on, with a lead that is a \
+             measured gap rather than the whole score, got {resolution:?}"
         );
         assert_eq!(
             calls.get(),
