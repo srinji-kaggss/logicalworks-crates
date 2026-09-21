@@ -38,9 +38,26 @@ serves.
 
 This table is not the whole picture. A full sweep of adjacent repositories is in
 [`estate-asset-inventory.md`](estate-asset-inventory.md), and it found two assets
-that change the plan: a journal-authoritative session runtime already exists
-under a compatible licence, and so does the similarity scoring primitive. The
-workstreams below are the parts that genuinely do not exist elsewhere.
+that are directly relevant: a journal-authoritative session runtime already
+exists under a compatible licence, and so does the similarity scoring primitive.
+
+**They are references, not replacements.** An earlier draft of this document
+proposed collapsing Workstream B onto the existing runtime. That was rejected by
+the maintainer, and the reason governs the whole design:
+
+> The bot is the general instrument. It is not an implementation of one
+> workload, and it does not get narrower because a sibling repository happens to
+> solve a similar problem for a different purpose. The standard is the best bot
+> that can be built, not the smallest one that satisfies today's consumer.
+
+So the estate assets inform the *shape* — a bounded journal, an authoritative
+fold, a revocation clock — while the bot keeps its own seams and its own
+abstractions. Where a sibling asset is genuinely the right mechanism later, it
+arrives as a new `impl` behind a seam that already exists, not by narrowing the
+bot's surface. Workstream A still consumes rather than duplicates the similarity
+primitive, because that is a leaf calculation with one correct answer; the
+distinction is between a leaf that has one answer and a core that must stay
+general.
 
 ## Design rule: every borrowed part is behind a trait
 
