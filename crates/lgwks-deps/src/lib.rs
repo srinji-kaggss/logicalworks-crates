@@ -25,6 +25,23 @@
 //! register itself: a reviewable diff carrying a human's name, never an
 //! environment variable a build can set for itself.
 //!
+//! ## No name-based exemption
+//!
+//! There is no package whose name alone escapes the audit. An edge is exempt
+//! only when Cargo's own `workspace_members` list names its target, so an
+//! internal edge is exempt because it is *this* workspace's code and not
+//! because of how it is spelled. A path or Git package that calls itself
+//! `lgwks_std` — or `lgwks-std`, which Cargo folds to the same name — is an
+//! ordinary external edge and must be approved like any other; the refusal
+//! keeps the source it came from so the two cannot be confused.
+//!
+//! The gate is not gated by itself, but that is a consequence of the build
+//! graph rather than an exemption: the `lgwks_deps` → `lgwks_std` edge in this
+//! repository targets a workspace member, and a consumer that reaches a
+//! *published* `lgwks_std` declares a real registry edge, which the register
+//! must review. Building the checker and interpreting a subject's metadata are
+//! different operations, so auditing a same-named package creates no cycle.
+//!
 //! ## Storefront
 //!
 //! `lgwks_deps` is also the install-and-select surface for third-party
@@ -116,9 +133,6 @@ use metadata::DirectEdge;
 
 /// Register location relative to the repository root.
 pub const CONTRACT_PATH: &str = "contract/APPROVED.toml";
-
-/// Crates that are the gate, and so cannot be gated by it.
-const SELF_EXEMPT: [&str; 2] = ["lgwks_std", "lgwks_deps"];
 
 // ── Refusals ────────────────────────────────────────────────────────────────
 
@@ -420,10 +434,9 @@ pub fn audit_direct(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
             }
         }
     }
-    let external: Vec<&DirectEdge> = edges
-        .iter()
-        .filter(|edge| !edge.workspace && !is_self_exempt(&edge.package))
-        .collect();
+    // Workspace membership is the only exemption, and it is decided by
+    // `workspace_members` in Cargo's own metadata, not by a package name.
+    let external: Vec<&DirectEdge> = edges.iter().filter(|edge| !edge.workspace).collect();
     for edge in &external {
         let approvals: Vec<&contract::Entry> = register.approvals_for(&edge.package).collect();
         if approvals.is_empty() {
@@ -492,18 +505,6 @@ pub fn audit_direct(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
     }
     refusals.sort_by_key(ToString::to_string);
     refusals
-}
-
-/// Whether `name` is the gate itself or the substrate it is built on.
-///
-/// The gate cannot be gated by itself: auditing `lgwks_deps` against a register
-/// it parses is circular. `lgwks_std` is the facade this crate is compiled
-/// against, so an edge to it is the crate's own foundation rather than an
-/// admission decision. Everything else, including an unnamed path copy, is
-/// audited.
-fn is_self_exempt(name: &str) -> bool {
-    let normalised = name.to_ascii_lowercase().replace('-', "_");
-    SELF_EXEMPT.contains(&normalised.as_str())
 }
 
 // ── Filesystem entry points ─────────────────────────────────────────────────
@@ -672,8 +673,12 @@ mod tests {
 
     #[test]
     fn copied_foreign_workspace_member_is_refused() -> TestResult {
-        let register = Contract::parse(&format!(
-            "[policy]\nrepository = \"https://example.invalid/consumer\"\n{REGISTER}"
+        // `repository` goes *inside* the register's one `[policy]` block: the
+        // reader refuses a second `[policy]`, which is the point of the
+        // duplicate-section rule.
+        let register = Contract::parse(&REGISTER.replace(
+            "[policy]\nenforce = true",
+            "[policy]\nrepository = \"https://example.invalid/consumer\"\nenforce = true",
         ))?;
         let mut copied = edge("app", "braid-ir", "*");
         copied.source = metadata::DependencySource::Path("vendor/braid-ir".into());
@@ -682,6 +687,83 @@ mod tests {
         assert!(matches!(
             audit_direct(&[copied], &register).first(),
             Some(Refusal::ForeignWorkspaceMember { .. })
+        ));
+        Ok(())
+    }
+
+    /// The gate's own foundation is exempt because Cargo says it is a member of
+    /// this workspace, not because of what it is called. This is the positive
+    /// control for the name-only exemption the audit no longer has.
+    #[test]
+    fn a_workspace_member_is_exempt_from_external_admission() -> TestResult {
+        let register = Contract::parse(REGISTER)?;
+        let mut foundation = edge("lgwks_deps", "lgwks_std", "^0.6.6");
+        foundation.source = metadata::DependencySource::Path("../lgwks-std".into());
+        foundation.workspace = true;
+        let refusals = audit_direct(&[foundation], &register);
+        assert!(
+            !refusals
+                .iter()
+                .any(|refusal| refusal.krate() == "lgwks_std"),
+            "a validated workspace member needs no external approval; got {refusals:?}"
+        );
+        Ok(())
+    }
+
+    /// A package that is *not* a workspace member cannot buy admission with a
+    /// name. Both the spelling the issue used and Cargo's `-`/`_` equivalent
+    /// must reach the same refusal.
+    #[test]
+    fn an_external_package_claiming_a_self_exempt_name_is_refused() -> TestResult {
+        let register = Contract::parse(REGISTER)?;
+        for name in ["lgwks_std", "lgwks-std", "lgwks_deps", "LGWKS-STD"] {
+            let mut impostor = edge("consumer", name, "*");
+            impostor.source =
+                metadata::DependencySource::Path("/outside-workspace/unreviewed".into());
+            let refusals = audit_direct(&[impostor], &register);
+            assert!(
+                matches!(
+                    refusals.first(),
+                    Some(Refusal::UnregisteredEdge { source, .. })
+                        if source == "path:/outside-workspace/unreviewed"
+                ),
+                "an external {name} must be refused with the source it came from; got {refusals:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The same name from a Git origin is refused too, and the refusal carries
+    /// the Git URL so an approval cannot be satisfied by the spelling.
+    #[test]
+    fn an_external_git_package_claiming_a_self_exempt_name_is_refused() -> TestResult {
+        let register = Contract::parse(REGISTER)?;
+        let mut impostor = edge("consumer", "lgwks_std", "*");
+        impostor.source = metadata::DependencySource::Git(
+            "git+https://example.invalid/not-logical-works?rev=deadbeef".into(),
+        );
+        assert!(
+            matches!(
+                audit_direct(&[impostor], &register).first(),
+                Some(Refusal::UnregisteredEdge { source, .. })
+                    if source == "git:git+https://example.invalid/not-logical-works?rev=deadbeef"
+            ),
+            "a same-named Git source is an ordinary external edge"
+        );
+        Ok(())
+    }
+
+    /// Renaming the manifest key does not help either: metadata reports the
+    /// upstream package name, which is what the audit reads.
+    #[test]
+    fn a_manifest_renamed_edge_is_refused_under_its_upstream_name() -> TestResult {
+        let register = Contract::parse(REGISTER)?;
+        let mut impostor = edge("consumer", "lgwks_std", "*");
+        impostor.source =
+            metadata::DependencySource::Registry("registry+https://example.invalid".into());
+        assert!(matches!(
+            audit_direct(&[impostor], &register).first(),
+            Some(Refusal::UnregisteredEdge { krate, .. }) if krate == "lgwks_std"
         ));
         Ok(())
     }
