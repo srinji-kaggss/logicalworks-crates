@@ -192,10 +192,10 @@ fn withdrawing_authority_after_build_means_building_again() -> TestResult {
         .build(&authority)
     {
         Ok(_) => Err("a source requiring `bot.net` was admitted by an empty grant set".into()),
-        Err(BotError::CapabilityDenied { required }) => {
+        Err(BotError::CapabilityDenied { deficit }) => {
             assert_eq!(
-                required,
-                Cap::net(),
+                deficit.first().required(),
+                &Cap::net(),
                 "the refusal must name the capability that was withdrawn"
             );
             Ok(())

@@ -170,7 +170,7 @@ pub mod spec;
 /// The four verbs: Observe, Evaluate, Execute, Query. No fifth verb exists.
 pub mod verb;
 
-pub use cap::{Auth, Cap};
+pub use cap::{Auth, Cap, Deficit, Demand, Shortage};
 pub use error::BotError;
 pub use frontier::{
     Admission, CompletionError, ConstraintKey, DeferralKind, Frontier, InFlightPermit,

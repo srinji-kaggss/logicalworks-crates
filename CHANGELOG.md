@@ -34,6 +34,18 @@ explicitly under that crate.
   contributor to send a patch that would wait on a decision no one has made; the
   block is stated as a refusal on arrival instead. It lifts when an instrument is
   chosen and recorded in `LICENSING.md`. The other three crates are unaffected.
+- **A capability refusal states the whole shortfall, in real time, and derives
+  its own repair** (owner direction, 2026-09-21). The check returned at the first
+  ungranted capability, so repairing a bot was a loop: grant what you were told,
+  rebuild, be told the next word. Each individual refusal was true and the
+  sequence was still the wrong instrument, because the gate had already computed
+  the whole difference — the required set minus the granted set — and reported
+  only its head. `Deficit` is that difference reported in full, `Shortage` names
+  the domain that declared each requirement, and `Deficit::to_grant_set` turns
+  the diagnostic back into the grant set that closes it, so the repair is derived
+  rather than transcribed. This is the shape the owner asked for explicitly:
+  isolate what is missing at the point of the attempt, hand back the missing
+  pieces, and continue — not a build loop that refuses one word at a time.
 - **Four `lgwks_bot` questions were put to the project owner on 2026-09-21 and
   decided.** They are recorded here because each was previously stated in a
   first-party document as *open*, and those documents now say what was decided.
@@ -354,8 +366,46 @@ explicitly under that crate.
   refused write aborts the answer with `BotError::ReceiptNotRecorded` and leaves
   cursor, scope, transcript and receipt list untouched.
 
+### lgwks_bot Added
+
+- **`Deficit`, `Shortage` and `Demand`: the whole capability shortfall, and the
+  repair it derives.** `Auth::check` and `GrantSet::admit` return
+  `BotError::CapabilityDenied` naming **every** ungranted requirement rather than
+  the first, each `Shortage` carrying the `Demand` — the domain that declared it
+  — where the check site knows it. `Bot::build` walks every source and every
+  action and reports the whole bot's unmet requirements from one pass. New
+  methods: `Auth::uncovered`, `Auth::covers_cap`, `GrantSet::uncovered`,
+  `GrantSet::grants`, `Deficit::shortages/len/is_empty/first/to_grant_set`.
+- **`Deficit::to_grant_set` derives the repair.** The shortfall already names
+  every capability that would close it, so a caller hands back the set the
+  deficit derived instead of writing a repair from the message — the step where a
+  hand-written repair covers the first line and misses the rest. The repair is
+  the *shortfall*, not the requirement: an already-granted capability is not in
+  it, and closing the requirement is that set folded into the held one.
+- **`Cap` names are `Cow<'static, str>`.** The shipped four were `String`-backed,
+  so `Cap::net()` allocated and — because `GrantSet::issue` mints a proof by
+  copying the requirement list — every effect execution re-allocated the same
+  constants. `Cow::Borrowed` makes a shipped capability a pointer copy and
+  authority for it allocation-free. Equality, ordering and hashing compare
+  contents, so a `Cap` deserialized from a spec and one built from a constant are
+  one capability; a test asserts that in both directions, because if they
+  compared unequal the gate would deny a bot it had granted.
+- **`Auth::check` is logarithmic in the granted set.** The covered set is sorted
+  and de-duplicated at mint and queried by binary search, replacing a linear scan
+  inside a loop over the requirement list. The measured defect and its numbers
+  are in `bench/README.md`: 12.9 microseconds for 128 capabilities against 3.4
+  nanoseconds for one, growing with the *product* of the two counts.
+
 ### lgwks_bot Changed
 
+- **Breaking, effective at the next `lgwks_bot` version published from this
+  tree.** `BotError::CapabilityDenied`'s payload changes from
+  `required: Cap` — one capability — to `deficit: Deficit`, which carries all of
+  them. A consumer matching `CapabilityDenied { required }` must read
+  `deficit.first().required()`, or iterate `deficit.shortages()` to see the
+  whole shortfall. The variant name, and every `CapabilityDenied { .. }` match,
+  are unchanged. `lgwks_bot` 0.4.2 on crates.io keeps the old shape; nothing in
+  this tree is published by this change.
 - `MemoryJournal` keeps `PartialEq` and loses `Eq`: it now holds
   `DecisionReceipt`s, which carry the `f64` scores a verdict was reached on, and
   `f64` is not `Eq`. The `session` module is not in the published

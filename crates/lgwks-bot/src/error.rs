@@ -24,7 +24,7 @@
 
 use std::fmt;
 
-use super::cap::Cap;
+use super::cap::Deficit;
 use super::ecs::{PendingWork, WorkId};
 use super::session::{ResourceAxis, Terminal};
 
@@ -36,10 +36,20 @@ use super::session::{ResourceAxis, Terminal};
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum BotError {
-    /// A required capability was not granted.
+    /// One or more required capabilities were not granted.
+    ///
+    /// Carries the **whole** shortfall rather than its first element. A check
+    /// that reported one missing capability at a time made admission a loop in
+    /// which each pass revealed one more word, so a requirement list of length
+    /// `n` cost `n` round trips to discover and the repair could not be written
+    /// until the last of them. [`Deficit`] is what the check already computed,
+    /// reported without discarding the rest of it, and
+    /// [`Deficit::to_grant_set`](crate::Deficit::to_grant_set) turns it back
+    /// into the grant set that closes it.
     CapabilityDenied {
-        /// The capability that was required but missing.
-        required: Cap,
+        /// Every requirement the check found ungranted, with the domain that
+        /// declared each one where the check site knew it.
+        deficit: Deficit,
     },
     /// The bot spec is incomplete: a required field is missing (currently the
     /// name; an empty chain list is allowed).
@@ -409,6 +419,36 @@ pub enum BotError {
     },
 }
 
+/// `Deficit`'s rendering lives here rather than in `cap.rs`, and the reason is
+/// the escaping contract below rather than the module it describes: every
+/// untrusted field a deficit carries is a capability name or a domain id, both
+/// of which are `String`s a caller supplied, so both go through [`Escaped`].
+/// Putting the arm next to `Escaped` is what keeps a later field from being
+/// interpolated without it.
+impl fmt::Display for Deficit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let count = self.len();
+        // The count comes first because it is the number a person triaging
+        // wants: "one thing is missing" and "nine things are missing" call for
+        // different next actions, and the list alone does not say which.
+        write!(f, "{count} ungranted")?;
+        for (index, shortage) in self.shortages().enumerate() {
+            f.write_str(if index == 0 { ": " } else { ", " })?;
+            write!(f, "{}", Escaped(shortage.required().as_str()))?;
+            if let Some(demand) = shortage.demand() {
+                write!(f, " (required by {})", Escaped(demand.domain()))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl From<Deficit> for BotError {
+    fn from(deficit: Deficit) -> Self {
+        Self::CapabilityDenied { deficit }
+    }
+}
+
 /// Render untrusted text so it cannot forge a log record.
 ///
 /// Control characters are the whole of the problem: a newline ends the record,
@@ -485,10 +525,10 @@ impl fmt::Display for BotError {
         // by `ref`. `field` is `&'static str` and the two lengths are `usize`,
         // so those bind by copy from behind the deref.
         match *self {
-            // `Cap` accepts any dotted name, so its text is untrusted here too
-            // even though the shipped four are constants.
-            Self::CapabilityDenied { ref required } => {
-                write!(f, "capability denied: {}", Escaped(required.as_str()))
+            // The deficit renders itself; every untrusted field it holds is
+            // wrapped there, for the reason `Deficit`'s `Display` states.
+            Self::CapabilityDenied { ref deficit } => {
+                write!(f, "capability denied: {deficit}")
             }
             Self::IncompleteSpec { field } => {
                 write!(f, "incomplete bot spec: missing {field}")
@@ -758,7 +798,8 @@ impl std::error::Error for BotError {
 
 #[cfg(test)]
 mod tests {
-    use super::{BotError, Cap, Escaped, Terminal};
+    use super::{BotError, Escaped, Terminal};
+    use crate::cap::{Cap, Deficit, Demand, Shortage};
 
     /// The retry classifier a consumer writes, and the entire reason the two
     /// variants exist: it reads the *variant*, never the cause string.
@@ -831,8 +872,17 @@ mod tests {
     fn hostile_arms() -> Vec<BotError> {
         let payload = String::from(HOSTILE);
         vec![
+            // One row covers both payloads a deficit can carry: the capability
+            // name and the domain that demanded it are both caller-supplied
+            // strings, and both reach the rendering site.
             BotError::CapabilityDenied {
-                required: Cap::new(payload.clone()),
+                deficit: Deficit::new(
+                    Shortage::new(
+                        Cap::new(payload.clone()),
+                        Some(Demand::new(payload.clone())),
+                    ),
+                    Vec::new(),
+                ),
             },
             BotError::MalformedSpec {
                 cause: payload.clone(),

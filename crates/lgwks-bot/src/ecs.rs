@@ -154,6 +154,7 @@ use lgwks_deps::bevy_ecs::{
     },
 };
 
+use super::cap::{Deficit, Demand, Shortage};
 use super::error::{BotError, Escaped};
 use super::gate::GrantSet;
 use super::spec::{ChainEntry, ObserveAny, typed_entry};
@@ -1879,11 +1880,31 @@ impl EcsBot {
         }
         // The same admission gate `Bot::build` applies: a bot requiring a
         // capability it was not granted fails before it runs, not at tick.
+        //
+        // Every unmet requirement in the bot, from one pass, each attributed to
+        // the domain that declared it. Admission that returned at the first one
+        // made "what does this bot need" a loop: each answer revealed the next
+        // question, so a bot short of four capabilities took four refusals to
+        // diagnose and the fourth was the first time the caller had the whole
+        // picture. The gate already computes the whole difference — it is the
+        // required set minus the granted set — so it reports the whole of it,
+        // and the caller has one list to act on rather than a sequence to
+        // discover.
+        let mut shortages: Vec<Shortage> = Vec::new();
         for chain in &chains {
-            grants.admit(chain.source.required_caps())?;
+            shortages.extend(grants.uncovered(
+                chain.source.required_caps(),
+                &Demand::new(chain.source.domain_id()),
+            ));
             for entry in &chain.entries {
-                grants.admit(entry.action.required_caps())?;
+                shortages.extend(grants.uncovered(
+                    entry.action.required_caps(),
+                    &Demand::new(entry.action.domain_id()),
+                ));
             }
+        }
+        if let Some(deficit) = Deficit::from_shortages(shortages) {
+            return Err(BotError::CapabilityDenied { deficit });
         }
 
         let mut world = World::new();
@@ -1946,7 +1967,7 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
-    use crate::cap::{Auth, Cap};
+    use crate::cap::{Auth, Cap, Demand};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -2177,6 +2198,58 @@ mod tests {
         }
     }
 
+    /// A source requiring exactly the capabilities it is handed, so a test can
+    /// put more than one unmet requirement in front of admission. `Script`
+    /// fixes its own list to `bot.net`, which is one requirement and therefore
+    /// cannot distinguish a whole shortfall from its first element.
+    struct Needs {
+        caps: Vec<Cap>,
+        value: u16,
+    }
+
+    impl Observe for Needs {
+        type Output = u16;
+
+        fn required_caps(&self) -> &[Cap] {
+            &self.caps
+        }
+
+        async fn poll(&self, call: (Auth, ())) -> Result<u16, BotError> {
+            call.0.check(&self.caps)?;
+            Ok(self.value)
+        }
+
+        fn domain_id(&self) -> &str {
+            "test::needs"
+        }
+    }
+
+    /// The action half of the same arrangement: `Count` requires nothing, so a
+    /// test built on it can only ever put a source's requirements in front of
+    /// the gate.
+    struct NeedsCaps {
+        caps: Vec<Cap>,
+        domain: &'static str,
+    }
+
+    impl Execute for NeedsCaps {
+        type Input = u16;
+        type Output = ();
+
+        fn required_caps(&self) -> &[Cap] {
+            &self.caps
+        }
+
+        async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
+            call.0.check(&self.caps)?;
+            Ok(())
+        }
+
+        fn domain_id(&self) -> &str {
+            self.domain
+        }
+    }
+
     fn net_grants() -> GrantSet {
         GrantSet::empty().grant(Cap::net())
     }
@@ -2232,6 +2305,63 @@ mod tests {
                 );
                 Ok(())
             }
+        }
+    }
+
+    /// Admission as one answer rather than a loop.
+    ///
+    /// This bot is short of `bot.net` on its source and `bot.fs` on its action.
+    /// Admission that returned at the first unmet requirement told the caller
+    /// `bot.net`, and `bot.fs` only appeared on the next build — so a person
+    /// repairing a bot discovered its requirements one refusal at a time. The
+    /// gate already knows both; one refusal now carries both, and each says
+    /// which domain declared it.
+    #[test]
+    fn admission_names_every_unmet_requirement_and_the_domain_that_declared_it() -> TestResult {
+        match EcsBot::builder("short")
+            .observe(Needs {
+                caps: vec![Cap::net()],
+                value: 1,
+            })
+            .on(
+                |value: &u16| *value > 0,
+                NeedsCaps {
+                    caps: vec![Cap::fs()],
+                    domain: "test::writes",
+                },
+            )
+            .build(&GrantSet::empty())
+        {
+            Ok(_) => Err("a bot requiring two ungranted capabilities built".into()),
+            Err(BotError::CapabilityDenied { deficit }) => {
+                let named: Vec<(&str, Option<&str>)> = deficit
+                    .shortages()
+                    .map(|shortage| {
+                        (
+                            shortage.required().as_str(),
+                            shortage.demand().map(Demand::domain),
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    named,
+                    vec![
+                        (Cap::NET, Some("test::needs")),
+                        (Cap::FS, Some("test::writes")),
+                    ],
+                    "one refusal must name both requirements and both domains: {deficit}"
+                );
+                // And the repair is one call, not one per refusal.
+                assert!(
+                    deficit
+                        .to_grant_set()
+                        .admit(&[Cap::net(), Cap::fs()])
+                        .is_ok(),
+                    "the deficit must derive the whole repair: {deficit}"
+                );
+                Ok(())
+            }
+            Err(other) => Err(format!("expected a capability denial, got {other:?}").into()),
         }
     }
 
