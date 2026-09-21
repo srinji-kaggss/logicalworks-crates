@@ -95,14 +95,53 @@ organization of an invariant register whose refusal is unconditional rather than
 configurable, which is the shape the companion specification's invariant register
 should copy.
 
+### 6. `forge-md-runtime` (repo `forge-harness`, MIT, archived)
+
+A durable memory lifecycle runtime, and the strongest match in the organization
+for the model-facing half of this work. It is substantially more than a journal:
+it owns the deterministic part of a task lifecycle, journals the exact
+task and transcript bytes, derives a source-addressable episode record, and
+builds a bounded context snapshot before any successor runs.
+
+The property that matters most: **model-generated candidates stay advisory.**
+Candidates are proposed, evaluated, and quarantined through distinct operations,
+and only a mechanically derived record is promoted. A model's claim is never
+itself the record.
+
+Other properties worth taking:
+
+- A bounded context snapshot with an explicit token budget, rather than an
+  unbounded history.
+- A retention policy with an enforced eviction path.
+- An HMAC-authenticated append-only event log with an issuer identity, so a
+  recorded event carries who wrote it.
+- A context envelope whose opening marker states that the historical material
+  inside is escaped untrusted reference data and not instructions, permissions,
+  or authority. That is a prompt-injection boundary expressed as a first-class
+  constant rather than a convention.
+
+This repository is **archived and MIT licensed** (`sdk/LICENSE`; the GitHub
+repository metadata reports `mit`). An earlier pass recorded it as unlicensed
+because it read the crate manifests, which declare no `license` field, and did
+not look for the file. That was wrong.
+
+### 7. `forge-md-store` (repo `forge-harness`, MIT, archived)
+
+Reducer is the sole owner of lifecycle semantics; the store supplies a
+transactional append-only tape, and replay through the reducer decides whether
+that tape is coherent. There are deliberately no model calls, no clocks, and no
+prompt rendering in it.
+
+Cost to weigh: it pulls a bundled SQLite build, which compiles the database from
+source and is the heaviest single dependency in this inventory. It is the reason
+this is ranked below `forge-md-runtime` rather than beside it.
+
 ## Document as future
 
 Recorded now so the design does not preclude them.
 
 | Asset | Repository | Why deferred |
 |---|---|---|
-| `forge-md-runtime` | `forge-harness` | Closest match to "session transcript plus resumability plus content-addressed episode", and its rule that model-generated candidates stay advisory while only mechanically derived records are promoted is worth copying. **Declares no license**, which blocks ingestion into this workspace |
-| `forge-md-store` | `forge-harness` | Reducer-is-sole-authority with replay deciding tape coherence. Same license blocker, and it pulls a bundled SQLite build, which is a real cost against this workspace's dependency posture |
 | `keel` gates | `keel` | A mature pure-policy / effectful-adapter split applied across a family of refusal gates, with typed verdicts and effects exiled to an adapter. Transferable as a pattern; the build closure is large and the license needs verification first |
 | `wwfd/comply` | `wwfd` | The only shipped refusal gate over prose, requiring evidence to outnumber inference two to one. **Proprietary**, so at most the rule may be restated, never the code |
 | `moo-core`, `moo-text`, `moo-blocks` | `moo` | Signed event log, CRDT text layer, and a three-way replay equality check that a bounded replay equals a full fold equals the stored relation. The equality check is the most valuable idea here for a resumable session. Heavy closure: bundled SQLite, an elliptic-curve signature stack, and a pinned cross-repository git dependency |
@@ -146,17 +185,27 @@ duplicates of each other: `cairn` and `world-model` hold the same core crates,
 and `keel` exists in several working copies. Establish which is canonical before
 any of them is named in workspace documentation.
 
-**Licence blocks three strong candidates.** `forge-harness` declares no licence
-at all and `wwfd` is proprietary. Those two are excluded on licensing, not on
-merit, and both would otherwise rank near the top. That is a decision for the
-owner, and until it is made neither can be ingested.
+**One candidate is blocked on licence.** `wwfd/comply` is proprietary, so at most
+its rule may be restated and never its code. `forge-harness` was recorded here as
+unlicensed in a first pass and is in fact MIT; the correction is above. Verify a
+licence by looking for a licence file and the repository metadata, not only by
+reading crate manifests, which frequently omit the field.
 
 ## What this changes
 
 The specification assumed the session and journal layer had to be written from
-nothing. That is half wrong. `rocco-runtime` already carries the
-journal-authoritative, bounded, replayable session with an authorization gate,
-under an Apache-2.0 licence with an already-compatible dependency closure, and
-`lgwks-algorithms` already carries the similarity scoring primitive. The
-in-flight workstreams are therefore the parts that genuinely do not exist
-elsewhere: the flow document, its validation, and the invariant register.
+nothing. That is half wrong, and the correction has two parts.
+
+`rocco-runtime` already carries the deterministic tick, the bounded journal, the
+authorization gate, and replay, under an Apache-2.0 licence with an
+already-compatible dependency closure. `lgwks-algorithms` already carries the
+similarity scoring primitive. And `forge-md-runtime` carries the model-facing
+lifecycle: advisory candidates, mechanical promotion, provenance, a bounded
+context snapshot, and an untrusted-data envelope around historical material.
+
+Together those cover capability areas two, three, and five. The in-flight
+workstreams are therefore the parts that genuinely do not exist elsewhere: the
+flow document, its validation, and the invariant register.
+
+The remaining gap, and the one no asset in this inventory closes, is element and
+selector resolution.
