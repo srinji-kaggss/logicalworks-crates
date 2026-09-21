@@ -281,7 +281,9 @@ jobs:
     name: lgwks-std feature matrix
     needs: [build]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 30 minutes covered the check lanes only; the grammar matrix below builds
+    # and runs 31 test configurations, so the budget matches the work.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.98.0
@@ -327,6 +329,40 @@ jobs:
            cargo check --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --no-default-features
            cargo check --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets
            cargo check --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --all-features
+      - name: Execute the lgwks-ast grammar matrix
+        # The check above proves each combination compiles; this executes it. A
+        # grammar that compiles but does not read its own language is the
+        # failure `cargo check` cannot see, and the grammar features are
+        # admitted independently, so each standalone grammar is exercised on its
+        # own rather than inferred from the all-features lane.
+        #
+        # One runner with a warm target directory rather than a 28-leg strategy
+        # matrix: the legs would each rebuild the shared parser stack from cold
+        # for the same evidence. Every combination runs even after one fails, so
+        # a single pass reports every grammar out of step.
+        run: |
+          set -u
+          failed=0
+          execute() {
+            echo "::group::$*"
+            if ! "$@"; then
+              echo "::error::lgwks-ast grammar matrix failed: $*"
+              failed=1
+            fi
+            echo "::endgroup::"
+          }
+          # No grammar, the default set, every declared grammar, and the lot.
+          execute cargo test --locked -p lgwks_ast --lib --no-default-features
+          execute cargo test --locked -p lgwks_ast --lib
+          for grammar in \
+            bash c cpp csharp css dart elixir go haskell hcl html java \
+            javascript json kotlin lua md nix php python ruby rust scala \
+            solidity swift tsx typescript yaml; do
+            execute cargo test --locked -p lgwks_ast --lib \
+              --no-default-features --features "lang-$grammar"
+          done
+          execute cargo test --locked -p lgwks_ast --lib --all-features
+          exit "$failed"
 
   appcui-native:
     name: AppCUI native storefront
