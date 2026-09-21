@@ -226,6 +226,41 @@ modules above it, and it ships in the same release.
 
 ### lgwks_bot Changed
 
+- **The tick no longer allocates its own bookkeeping, and a source that holds
+  still is no longer boxed.** A steady-state tick at 64 chains made **171 heap
+  allocations**; it now makes **97**, and the tick is up to **1.6x faster**.
+  Four changes, all measured by the `bench/` rig rather than argued:
+  - `fire_plan` cleared the plan and then assigned it freshly collected `Vec`s,
+    so the `clear` bought nothing and every tick paid two allocations per chain
+    to rebuild buffers it was about to overwrite. The per-tick scratch
+    (`Plan::steps`, `Plan::failures`, `Polled`, `Observed`, `Moving`, `Moved`)
+    is now taken, cleared and handed back, and the intermediate `Vec<usize>` of
+    moved chains and the per-tick `Order::clone()` are gone.
+  - **`ObserveAny::poll_any` takes the payload the substrate currently holds for
+    its chain and returns `Ok(None)` when the source produces an equal value.**
+    The comparison now happens where the output is still a concrete
+    `T::Output`, which is the only place it can happen without boxing: a
+    caller-side `==` on two `Box<dyn Any>` costs an allocation, a memcpy and a
+    free apiece, spent to answer a question that could be asked of the value in
+    hand — and in a steady-state bot the answer is "equal" on nearly every tick.
+    The blanket `impl ObserveAny` therefore carries `T::Output: PartialEq`,
+    which is not a new requirement: every chain is closed by
+    `EcsObserveBuilder::observe`, which already demands it.
+  - **A source whose equality is narrower than its identity now holds the
+    *earlier* of two equal values.** This is a real semantic tightening and it
+    is the one to read carefully. `Observed` keeps the payload it already has
+    when the source reports equality, rather than being overwritten with the
+    newer-but-equal instance. Nothing an effect observes changes — a retained
+    transition already refuses to let an equal-valued observation displace its
+    binding, so the action was receiving the older instance anyway. What changes
+    is a caller reading the observation back after an equal-valued tick. A type
+    whose `PartialEq` ignores a field it nevertheless carries should not be a
+    chain's output type.
+  - The measurement, and the per-tick allocation trace that gives it, are
+    `bench/`'s `--alloc-report` mode, which counts through a forwarding
+    `#[global_allocator]` in that rig only. It is a diagnostic: no timing in
+    `results.json` is taken from a counting run, and no `unsafe` reaches
+    `lgwks_bot` or `lgwks_std`.
 - **`ObserveBuilder` is now generic over its source, and a chain that does not
   type against that source no longer builds.** `EcsObserveBuilder::on` tied the
   condition to a *free* type parameter connected to nothing else, so the builder
@@ -270,6 +305,24 @@ modules above it, and it ships in the same release.
 
 ### lgwks_bot Fixed
 
+- **A transition that is dropped hands its payload back to the chain that owned
+  it, so a settled chain settles.** Found by `bench/`'s fairness gate and by
+  nothing else, which is the point: **the bot fired 896,000 effects where the
+  hand-rolled baseline fired 17,920 for identical input — a 50x over-run — and
+  every one of the crate's 611 tests passed straight through it.** A transition
+  *takes* the observed value out of its slot, and while the transition is
+  retained that binding is where the chain's newest value lives; when the
+  transition finished and was dropped, the value went with it and the chain was
+  left with no baseline at all. The next tick read "no baseline" as "the source
+  moved", re-opened the chain and fired the entry again, every tick, forever.
+  The binding now goes back into the empty slot — only into an empty one, since
+  a slot the observation phase filled this tick holds something newer.
+  Regression: `ecs::tests::a_settled_chain_does_not_fire_again_on_every_later_tick`,
+  which fails against the defect with `tick 3: left: 1, right: 0` and passes
+  after it. It uses a new `Holds` fixture rather than the existing `Script`,
+  because a source that advances on every poll cannot tell a chain that settled
+  from a chain that is still working — which is the reason the existing
+  change-filter tests did not catch this.
 - **A transition is bound to the observed payload it was opened under, and a
   newer value is admitted only once it has nothing open.** Conditions were
   evaluated and actions were run against the *newest* observation, while a

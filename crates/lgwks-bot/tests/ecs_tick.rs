@@ -1623,6 +1623,12 @@ impl Execute for Grudging {
             self.refusals.set(left.saturating_sub(1));
             return Err(BotError::DomainError {
                 domain: "test::grudging".to_owned(),
+                // `NotDelivered`, not `Refused`: the same input succeeds on a
+                // later attempt, so nothing here is permanent and nothing was
+                // dispatched. It must stay retryable, or the transition closes
+                // after one attempt and the movement this fixture exists to
+                // overlap never arrives while it is open.
+                certainty: DispatchCertainty::NotDelivered,
                 cause: "refused".to_owned(),
             });
         }
