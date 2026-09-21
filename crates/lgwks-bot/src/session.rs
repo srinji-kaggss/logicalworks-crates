@@ -372,6 +372,20 @@ pub enum VarType {
 }
 
 impl VarType {
+    /// Returns how an answer to a question writing this variable must be read.
+    ///
+    /// `Integer` is the only declaration whose answers are not text. The other
+    /// three are labels: a `Choice` answer is matched against its own option
+    /// strings, and a `Boolean` answer is a word (`yes`/`no`) that the same
+    /// punctuation folding should tolerate.
+    #[must_use]
+    pub const fn answer_domain(&self) -> AnswerDomain {
+        match *self {
+            Self::Integer => AnswerDomain::Integer,
+            Self::String | Self::Boolean | Self::Choice(_) => AnswerDomain::Label,
+        }
+    }
+
     /// The stable label naming this declared type.
     ///
     /// Stable prose for diagnostics and nothing else: it is not the serde
@@ -441,6 +455,58 @@ impl VarType {
                 };
                 Ok(Value::Choice(option.clone()))
             }
+        }
+    }
+}
+
+/// Decodes one whole-number answer, preserving its sign.
+///
+/// The **resolver's** reading of a whole number: presence-only, because the
+/// question the tiered search asks is *does this decode to the value the person
+/// named*, and the answer to that is yes or no. The scope's reading is
+/// [`VarType::decode_answer`], which has to say *why* an answer cannot be
+/// stored and therefore distinguishes an overflow from prose; both run the same
+/// `parse::<i64>` over the same trimmed bytes, so they cannot disagree about
+/// which answers are whole numbers.
+///
+/// `None` means *not a whole number in range* — an empty answer, prose, a
+/// decimal, or a magnitude beyond [`i64`]. It is not an error: an unrecognized
+/// answer is re-asked, and the caller decides whether that or a refusal is the
+/// right report.
+pub(crate) fn decode_integer(raw: &str) -> Option<i64> {
+    raw.trim().parse::<i64>().ok()
+}
+
+/// How a question's answers are meant to be read.
+///
+/// A property of the *answer*, not of the option text. Two questions can offer
+/// option lists that look identical and mean different things by them, and
+/// nothing in the option strings says which: `["-5", "5"]` at an integer
+/// question is two distinct answers, while the same pair at a label question is
+/// two spellings the resolver cannot tell apart, because the label policy folds
+/// punctuation and the sign is punctuation.
+///
+/// That is the whole reason this exists as an explicit product of states rather
+/// than a flag on one code path. The folding is correct for labels — `"yes!"`
+/// and `"yes"` are one answer, and a person should not be re-asked for typing an
+/// exclamation mark — and it is destructive for numbers, where it silently turns
+/// `-5` into `5` and reports it at maximum confidence. One policy cannot be
+/// both, so the answer says which one applies and the resolver reads the
+/// question accordingly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AnswerDomain {
+    /// Natural-language option labels: compared after [`crate::language::normalize`].
+    Label,
+    /// Whole numbers: compared as decoded values, sign preserved.
+    Integer,
+}
+
+impl fmt::Display for AnswerDomain {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Label => formatter.write_str("label"),
+            Self::Integer => formatter.write_str("integer"),
         }
     }
 }
@@ -1490,6 +1556,20 @@ fn validate_node(
                     cause: format!("ask node {node_id:?} has invalid options"),
                 });
             }
+            // Distinct strings are not distinct answers. Two options the answer
+            // policy cannot tell apart are one option the person cannot choose
+            // between, and the resolver can only ever report the tie — so the
+            // authoring mistake is refused here, where it names an option,
+            // rather than at run time, where it names none.
+            if let Some((first, second)) = colliding_options(options, answer_domain_of(spec, var)) {
+                return Err(BotError::MalformedFlow {
+                    cause: format!(
+                        "ask node {node_id:?} offers {first:?} and {second:?} as the same \
+                         {} answer",
+                        answer_domain_of(spec, var)
+                    ),
+                });
+            }
             for option in options {
                 let Some(target) = routes.get(option) else {
                     return Err(BotError::MissingAskRoute {
@@ -1566,6 +1646,41 @@ fn validate_node(
         NodeKind::End => {}
     }
     Ok(())
+}
+
+/// Returns how answers writing `name` are read in `spec`.
+///
+/// The flow's own reading of a node's answers, so validation and resolution
+/// cannot disagree about which policy a question is under — the same reason
+/// there is one decoder rather than two.
+fn answer_domain_of(spec: &FlowSpec, name: &str) -> AnswerDomain {
+    spec.vars
+        .get(name)
+        .map_or(AnswerDomain::Label, VarType::answer_domain)
+}
+
+/// Returns the first pair of options the answer policy cannot tell apart.
+///
+/// `None` under [`AnswerDomain::Integer`] for an option that is not a whole
+/// number: an option that cannot produce the declared value is a different
+/// defect, owned by the check that reports it, and folding it into a collision
+/// report would name the wrong cause.
+fn colliding_options(options: &[String], domain: AnswerDomain) -> Option<(String, String)> {
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
+    for option in options {
+        let identity = match domain {
+            AnswerDomain::Label => crate::language::normalize(option),
+            AnswerDomain::Integer => match decode_integer(option) {
+                Some(value) => value.to_string(),
+                None => continue,
+            },
+        };
+        if let Some(first) = seen.get(&identity) {
+            return Some((first.clone(), option.clone()));
+        }
+        seen.insert(identity, option.clone());
+    }
+    None
 }
 
 /// Validate a variable reference in a node.
@@ -1820,6 +1935,19 @@ impl VarScope {
         &self.declarations
     }
 
+    /// Returns how an answer writing `name` must be read.
+    ///
+    /// Defaults to [`AnswerDomain::Label`] for a name that is not declared,
+    /// which is the permissive reading rather than a silent claim: flow
+    /// validation rejects an undeclared writer, so reaching this with an unknown
+    /// name is a caller's mistake and not a question about the answer.
+    #[must_use]
+    pub fn answer_domain(&self, name: &str) -> AnswerDomain {
+        self.declarations
+            .get(name)
+            .map_or(AnswerDomain::Label, VarType::answer_domain)
+    }
+
     /// Return all currently assigned values.
     #[must_use]
     pub fn values(&self) -> &BTreeMap<String, Value> {
@@ -1883,6 +2011,12 @@ impl VarScope {
                 name: name.to_owned(),
             });
         };
+        // One decoder, not two: `VarType::decode_answer` is the same reading of
+        // an answer that flow validation runs, so a value this store accepts is
+        // a value the declaration would have accepted. The variant is dropped
+        // here because the scope's contract is a single "cannot hold this"
+        // error; the distinction between a non-integer and an out-of-range one
+        // is a resolver's business and is kept there.
         let value = declared.decode_answer(answer).map_err(|_rejection| {
             BotError::InvalidVariableValue {
                 variable: name.to_owned(),
@@ -2108,6 +2242,79 @@ impl<'a> CompiledTemplate<'a> {
     }
 }
 
+/// One question's candidate vocabulary, as the resolver seam sees it.
+///
+/// A resolver is handed three things and a slice of options is only two of
+/// them: what the person typed, the options in front of them, and the *identity
+/// of the question* those options belong to. The identity is not decoration. A
+/// learned alias is a confirmed fact about a question — *in this question, "the
+/// usual" means "Repeat last order"* — and a slice of strings is not a question:
+/// the same slice can appear in two different questions, and the same question
+/// offers a *different* slice after an edit or a reorder. Carrying the identity
+/// alongside the options is what lets a confirmation follow its option to a new
+/// position, and refuse to follow whatever occupies its old one.
+///
+/// Borrowed rather than owned, because the caller already holds both: an owned
+/// copy would be a second copy of the same fact, and two copies of a fact drift.
+///
+/// The third fact is how the answers are read. [`AnswerDomain`] travels with the
+/// options because it is a property of *this* question, and a resolver that had
+/// to infer it from the option strings would be guessing: the same list is two
+/// distinct answers at an integer question and one folded answer at a label
+/// question.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct Question<'a> {
+    /// Stable identity of the question. In a flow this is the ask node id.
+    id: &'a str,
+    /// The options offered right now.
+    options: &'a [String],
+    /// How this question's answers are meant to be read.
+    domain: AnswerDomain,
+}
+
+impl<'a> Question<'a> {
+    /// Names one question's vocabulary, read as natural-language labels.
+    #[must_use]
+    pub const fn new(id: &'a str, options: &'a [String]) -> Self {
+        Self {
+            id,
+            options,
+            domain: AnswerDomain::Label,
+        }
+    }
+
+    /// Reads this question's answers under `domain`.
+    ///
+    /// A builder rather than a fourth argument on [`Self::new`], because the
+    /// overwhelming majority of questions are label questions and a resolver
+    /// call site should not have to spell that out. The default is the one the
+    /// option strings are written in; a caller that has a typed variable in hand
+    /// has the one fact that changes it.
+    #[must_use]
+    pub const fn with_domain(self, domain: AnswerDomain) -> Self {
+        Self { domain, ..self }
+    }
+
+    /// Returns the question's stable identity.
+    #[must_use]
+    pub const fn id(&self) -> &'a str {
+        self.id
+    }
+
+    /// Returns the options offered right now.
+    #[must_use]
+    pub const fn options(&self) -> &'a [String] {
+        self.options
+    }
+
+    /// Returns how this question's answers are meant to be read.
+    #[must_use]
+    pub const fn domain(&self) -> AnswerDomain {
+        self.domain
+    }
+}
+
 /// Interpolation seam for replacing the template engine later.
 pub trait Interpolate {
     /// Expand `${name}` markers using the supplied scope, refusing an
@@ -2186,7 +2393,7 @@ impl Interpolate for TemplateInterpolator {
 
 /// Free-text option resolver seam.
 pub trait Resolver {
-    /// Resolves an utterance against the candidate options.
+    /// Resolves an utterance against the question in front of the person.
     ///
     /// Returns a [`Resolution`], never an `Option<usize>`. The two-way form
     /// collapses *nothing matched* and *several matched equally well* into one
@@ -2194,7 +2401,10 @@ pub trait Resolver {
     /// options as well as each other is reported as unrecognized, so the
     /// session re-asks the full list and the identical answer resolves the
     /// identical way forever. A caller that cannot see the tie cannot narrow.
-    fn resolve(&self, utterance: &str, options: &[String]) -> Resolution;
+    ///
+    /// A question is more than its option list — see [`Question`] for why the
+    /// identity travels with the options.
+    fn resolve(&self, utterance: &str, question: &Question<'_>) -> Resolution;
 }
 
 /// Which match tier produced a resolution.
@@ -2269,7 +2479,13 @@ pub enum Resolution {
         tier: MatchTier,
         /// The match score.
         score: f64,
-        /// The lead held over the runner-up.
+        /// The lead held over the runner-up *within the winning tier*.
+        ///
+        /// Within, not across: tier scores are not comparable, and a resolver
+        /// that applied precedence has already excluded every lower tier from
+        /// the comparison. A `lead` of `1.0` on a lone exact candidate therefore
+        /// says "nothing in the exact tier contested this", not "nothing at all
+        /// came close".
         lead: f64,
     },
     /// Options matched but none led by the required margin.
@@ -2280,6 +2496,14 @@ pub enum Resolution {
     Ambiguous {
         /// Every option index still in play, lowest first.
         tied: Vec<usize>,
+        /// The tier whose candidates tied.
+        ///
+        /// Reported for the reason [`Self::Resolved::tier`] is: two exact
+        /// candidates that fold to one normalized form, two phonetic candidates
+        /// that share a sound-alike key, and two fuzzy candidates inside a
+        /// margin are three different ties with three different repairs, and a
+        /// bare list of indices names none of them.
+        tier: MatchTier,
         /// The highest score observed.
         score: f64,
     },
@@ -2287,6 +2511,28 @@ pub enum Resolution {
     Absent {
         /// The highest score observed.
         best_score: f64,
+    },
+    /// The person used a phrase whose confirmed meaning has been withdrawn.
+    ///
+    /// Distinct from [`Self::Absent`] in the same way [`Self::Degraded`] is, and
+    /// for the same reason: the two render identically in a transcript and need
+    /// different repairs. `Absent` says the person's words did not fit the
+    /// options and a rephrase may help. `StaleAlias` says the words *did* have a
+    /// confirmed meaning, at this question, and the option it was bound to is no
+    /// longer offered — so the answer is not a rephrase but a conversation, and
+    /// the operator reading the record is the one who can have it.
+    ///
+    /// Returning this rather than a fuzzy reading is the whole point: the
+    /// binding is authority a person granted, and re-spending it on whatever now
+    /// occupies the old option's position would be using a confirmation the
+    /// person never gave. The persona's own reading of the phrase still stands
+    /// when the current list produces one; this verdict appears where the
+    /// superseded binding is the only thing that would have matched.
+    StaleAlias {
+        /// The question whose vocabulary the confirmation was made in.
+        question: String,
+        /// The option text the confirmation bound, which is no longer offered.
+        option: String,
     },
     /// The resolver could not reach a verdict at all.
     ///
@@ -2678,7 +2924,9 @@ impl Session {
             });
         }
         self.charge_step()?;
-        let index = match self.resolver.resolve(utterance, &options) {
+        let question =
+            Question::new(&node_id, &options).with_domain(self.scope.answer_domain(&var));
+        let index = match self.resolver.resolve(utterance, &question) {
             Resolution::Resolved { index, .. } => index,
             Resolution::Ambiguous { tied, .. } => {
                 // Narrow the re-ask to the options still in play. Repeating the
@@ -2700,6 +2948,21 @@ impl Session {
             }
             Resolution::Absent { .. } => {
                 self.record(&node_id, "user", utterance)?;
+                self.record_prompt(&node_id, &options)?;
+                return Ok(());
+            }
+            Resolution::StaleAlias {
+                question: bound_question,
+                option,
+            } => {
+                // Re-ask, as for `Absent`, but record what was withdrawn under
+                // its own role. The resolver is not asked to forget the binding:
+                // the seam is read-only by design, and a session that silently
+                // rewrote its resolver's learned vocabulary would be editing the
+                // audit record it is supposed to be producing. The record names
+                // the binding and the question; retiring it is the owner's call.
+                self.record(&node_id, "user", utterance)?;
+                self.record_stale_alias(&node_id, &bound_question, &option)?;
                 self.record_prompt(&node_id, &options)?;
                 return Ok(());
             }
@@ -2950,6 +3213,23 @@ impl Session {
     fn record_degraded(&mut self, node_id: &str, reason: DegradedReason) -> Result<(), BotError> {
         let text = format!("Resolver unavailable: {reason}");
         self.record(node_id, "resolver-degraded", &text)
+    }
+
+    /// Records that a confirmed phrase's option is no longer offered.
+    ///
+    /// A distinct role for the reason the degraded case has one: this record is
+    /// read by whoever maintains the vocabulary, and it has to name both halves
+    /// of the broken binding — the question it was confirmed in and the option
+    /// that went away — because either one alone is unactionable. "A stale alias
+    /// was ignored" tells that reader nothing they can repair.
+    fn record_stale_alias(
+        &mut self,
+        node_id: &str,
+        question: &str,
+        option: &str,
+    ) -> Result<(), BotError> {
+        let text = format!("Superseded alias: question {question} no longer offers \"{option}\"");
+        self.record(node_id, "resolver-stale-alias", &text)
     }
 }
 
@@ -3297,16 +3577,17 @@ mod tests {
     #[test]
     fn the_default_resolver_has_an_explicit_unrecognized_case() {
         let options = vec![String::from("yes"), String::from("no")];
+        let question = Question::new("ask", &options);
         let resolver = crate::language::LanguageResolver::new();
         assert!(
             matches!(
-                resolver.resolve("maybe", &options),
+                resolver.resolve("maybe", &question),
                 Resolution::Absent { .. }
             ),
             "an unrecognized answer is Absent, which is not the same as Ambiguous"
         );
         assert_eq!(
-            resolver.resolve("yes", &options),
+            resolver.resolve("yes", &question),
             Resolution::Resolved {
                 index: 0,
                 tier: MatchTier::Exact,

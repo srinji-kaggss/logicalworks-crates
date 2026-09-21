@@ -82,8 +82,8 @@ use std::fmt;
 
 use lgwks_std::similarity::{Cosine, CosineError};
 
-use crate::language::{LanguageResolver, decide};
-use crate::session::{DegradedReason, MatchTier, Resolution, Resolver};
+use crate::language::{Alias, LanguageResolver, decide};
+use crate::session::{AnswerDomain, DegradedReason, MatchTier, Question, Resolution, Resolver};
 
 /// A source of dense vector representations for text, and its own identity.
 ///
@@ -412,13 +412,17 @@ impl<E: Embedder> SemanticResolver<E> {
     /// something it will answer from without a model. That is the direction of
     /// travel this module wants — a confirmed correction should move a phrase
     /// *out* of the semantic tier and into the reproducible one.
-    pub fn learn(&mut self, utterance: &str, index: usize) -> Option<usize> {
-        self.lexicon.learn(utterance, index)
+    ///
+    /// Takes the question scope for the reason [`crate::language::Alias`] exists:
+    /// a confirmation is a fact about one question's vocabulary, and the model
+    /// below is not a licence to carry it to another.
+    pub fn learn(&mut self, question: &str, utterance: &str, option: &str) -> Option<Alias> {
+        self.lexicon.learn(question, utterance, option)
     }
 
-    /// Removes a learned alias, returning whether one was present.
-    pub fn forget(&mut self, utterance: &str) -> bool {
-        self.lexicon.forget(utterance)
+    /// Removes one question's learned alias, returning the row removed.
+    pub fn forget(&mut self, question: &str, utterance: &str) -> Option<Alias> {
+        self.lexicon.forget(question, utterance)
     }
 
     /// Returns the number of learned aliases.
@@ -528,15 +532,25 @@ impl<E: Embedder> SemanticResolver<E> {
 }
 
 impl<E: Embedder> Resolver for SemanticResolver<E> {
-    fn resolve(&self, utterance: &str, options: &[String]) -> Resolution {
-        let deterministic = self.lexicon.decide_for(utterance, options);
+    fn resolve(&self, utterance: &str, question: &Question<'_>) -> Resolution {
+        let deterministic = self.lexicon.decide_for(utterance, question);
+        // A numeric question never reaches the model, at all. The lexicon's
+        // integer path answers by decoded value and reports `Absent` for an
+        // answer that no option holds — and that `Absent` must stay `Absent`.
+        // Handing it to an embedding comparison is how a model would pick
+        // whichever numeral *looks* closest to a number nobody offered, which is
+        // the same sign-erasing guess the typed path exists to remove, arrived
+        // at from the other end.
+        if question.domain() == AnswerDomain::Integer {
+            return deterministic;
+        }
         if !matches!(deterministic, Resolution::Absent { .. }) {
             return deterministic;
         }
         // The lexicon considered every option and none fit. This is the only
         // path on which a model is consulted, so no verdict the lexicon reached
         // can be changed by enabling this tier.
-        match self.score_semantically(utterance, options) {
+        match self.score_semantically(utterance, question.options()) {
             Ok(scored) => decide(&scored, self.policy.threshold(), self.policy.margin()),
             Err(reason) => Resolution::Degraded { reason },
         }
@@ -545,8 +559,10 @@ impl<E: Embedder> Resolver for SemanticResolver<E> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Embedder, EmbedderIdentity, SemanticError, SemanticPolicy, SemanticResolver};
-    use crate::session::{DegradedReason, MatchTier, Resolution, Resolver};
+    use super::{
+        Alias, Embedder, EmbedderIdentity, SemanticError, SemanticPolicy, SemanticResolver,
+    };
+    use crate::session::{AnswerDomain, DegradedReason, MatchTier, Question, Resolution, Resolver};
     use std::cell::Cell;
     use std::collections::BTreeMap;
     use std::fmt;
@@ -627,6 +643,11 @@ mod tests {
         names.iter().map(|name| (*name).to_owned()).collect()
     }
 
+    /// Names the question the resolver tests resolve against.
+    fn ask(options: &[String]) -> Question<'_> {
+        Question::new("ask", options)
+    }
+
     /// The two vectors a paraphrase relationship is built from, plus an
     /// unrelated one. `"the usual"` and `"Repeat last order"` share no word and
     /// no sound-alike key, which is the point: the lexicon cannot relate them,
@@ -664,7 +685,7 @@ mod tests {
         let (embedder, calls) = stub(paraphrase_vectors(), vec![0.0, 1.0], false)?;
         let resolver = SemanticResolver::new(embedder);
 
-        let resolution = resolver.resolve("yes", &options(&["yes", "no"]));
+        let resolution = resolver.resolve("yes", &ask(&options(&["yes", "no"])));
 
         assert_eq!(
             resolution,
@@ -693,7 +714,7 @@ mod tests {
         let (embedder, calls) = stub(paraphrase_vectors(), vec![0.0, 1.0], false)?;
         let resolver = SemanticResolver::new(embedder);
 
-        let resolution = resolver.resolve("order", &options(&["order", "order"]));
+        let resolution = resolver.resolve("order", &ask(&options(&["order", "order"])));
 
         assert!(
             matches!(resolution, Resolution::Ambiguous { .. }),
@@ -718,13 +739,13 @@ mod tests {
         let lexicon = crate::language::LanguageResolver::new();
         assert!(
             matches!(
-                lexicon.resolve("the usual", &options),
+                lexicon.resolve("the usual", &ask(&options)),
                 Resolution::Absent { .. }
             ),
             "\"the usual\" must not be reachable by letters alone, or this test proves nothing"
         );
 
-        let resolution = resolver.resolve("the usual", &options);
+        let resolution = resolver.resolve("the usual", &ask(&options));
 
         assert!(
             matches!(
@@ -755,7 +776,7 @@ mod tests {
         // the whole reason the verdict is three-way.
         let resolution = resolver.resolve(
             "the usual",
-            &options(&["Repeat last order", "Repeat last order"]),
+            &ask(&options(&["Repeat last order", "Repeat last order"])),
         );
 
         assert!(
@@ -785,8 +806,10 @@ mod tests {
             vec![0.0, 1.0],
             false,
         )?;
-        let verdict = SemanticResolver::new(embedder)
-            .resolve("the usual", &options(&["Repeat last order", "Cancel"]));
+        let verdict = SemanticResolver::new(embedder).resolve(
+            "the usual",
+            &ask(&options(&["Repeat last order", "Cancel"])),
+        );
         assert!(
             matches!(&verdict, Resolution::Ambiguous { tied, .. } if *tied == vec![0, 1]),
             "the near tie must be reported as one, got {verdict:?}"
@@ -813,8 +836,10 @@ mod tests {
             false,
         )?;
         let policy = SemanticPolicy::new(0.72, 0.01)?;
-        let verdict = SemanticResolver::with_policy(embedder, policy)
-            .resolve("the usual", &options(&["Repeat last order", "Cancel"]));
+        let verdict = SemanticResolver::with_policy(embedder, policy).resolve(
+            "the usual",
+            &ask(&options(&["Repeat last order", "Cancel"])),
+        );
         assert!(
             matches!(
                 verdict,
@@ -838,7 +863,7 @@ mod tests {
 
         // Both options are orthogonal or opposed to the utterance, so the tier
         // has nothing to say and must say nothing rather than pick the least bad.
-        let resolution = resolver.resolve("the usual", &options(&["Cancel", "Later"]));
+        let resolution = resolver.resolve("the usual", &ask(&options(&["Cancel", "Later"])));
 
         assert!(
             matches!(resolution, Resolution::Absent { .. }),
@@ -868,8 +893,10 @@ mod tests {
             vec![0.0, 1.0],
             false,
         )?;
-        let verdict = SemanticResolver::new(embedder)
-            .resolve("the usual", &options(&["Repeat last order", "Cancel"]));
+        let verdict = SemanticResolver::new(embedder).resolve(
+            "the usual",
+            &ask(&options(&["Repeat last order", "Cancel"])),
+        );
         assert_eq!(
             verdict,
             Resolution::Degraded {
@@ -894,7 +921,10 @@ mod tests {
         let lexicon = crate::language::LanguageResolver::new();
         for phrase in ["the usual", "a second phrasing"] {
             assert!(
-                matches!(lexicon.resolve(phrase, &options), Resolution::Absent { .. }),
+                matches!(
+                    lexicon.resolve(phrase, &ask(&options)),
+                    Resolution::Absent { .. }
+                ),
                 "{phrase:?} must not be reachable by the lexicon, or this proves nothing"
             );
         }
@@ -916,7 +946,7 @@ mod tests {
             )?;
             let resolver = SemanticResolver::new(embedder);
 
-            let verdict = resolver.resolve("the usual", &options);
+            let verdict = resolver.resolve("the usual", &ask(&options));
             assert_eq!(
                 verdict,
                 Resolution::Degraded {
@@ -928,7 +958,7 @@ mod tests {
             // Recovery with valid measurements: the same resolver, an utterance
             // whose vector carries a direction, resolves normally. The tier is
             // not poisoned by the previous failure.
-            let healthy = resolver.resolve("a second phrasing", &options);
+            let healthy = resolver.resolve("a second phrasing", &ask(&options));
             assert!(
                 matches!(
                     healthy,
@@ -969,7 +999,7 @@ mod tests {
             )?;
             let verdict = SemanticResolver::new(embedder).resolve(
                 "the usual",
-                &options(&["Repeat last order", "Cancel", "Later"]),
+                &ask(&options(&["Repeat last order", "Cancel", "Later"])),
             );
             assert_eq!(
                 verdict,
@@ -997,8 +1027,10 @@ mod tests {
             vec![0.0, 1.0],
             false,
         )?;
-        let verdict = SemanticResolver::new(embedder)
-            .resolve("the usual", &options(&["Repeat last order", "Cancel"]));
+        let verdict = SemanticResolver::new(embedder).resolve(
+            "the usual",
+            &ask(&options(&["Repeat last order", "Cancel"])),
+        );
         assert_eq!(
             verdict,
             Resolution::Degraded {
@@ -1032,7 +1064,10 @@ mod tests {
         let (embedder, _calls) = stub(paraphrase_vectors(), vec![0.0, 1.0], true)?;
         let resolver = SemanticResolver::new(embedder);
 
-        let resolution = resolver.resolve("the usual", &options(&["Repeat last order", "Cancel"]));
+        let resolution = resolver.resolve(
+            "the usual",
+            &ask(&options(&["Repeat last order", "Cancel"])),
+        );
 
         assert_eq!(
             resolution,
@@ -1057,7 +1092,10 @@ mod tests {
         )?;
         let resolver = SemanticResolver::new(embedder);
 
-        let resolution = resolver.resolve("the usual", &options(&["Repeat last order", "Cancel"]));
+        let resolution = resolver.resolve(
+            "the usual",
+            &ask(&options(&["Repeat last order", "Cancel"])),
+        );
 
         assert_eq!(
             resolution,
@@ -1076,12 +1114,12 @@ mod tests {
         let options = options(&["Repeat last order", "Cancel"]);
 
         assert_eq!(
-            resolver.learn("the usual", 0),
+            resolver.learn("ask", "the usual", "Repeat last order"),
             None,
             "the first binding for a phrase has no predecessor"
         );
 
-        let resolution = resolver.resolve("the usual", &options);
+        let resolution = resolver.resolve("the usual", &ask(&options));
         assert!(
             matches!(
                 resolution,
@@ -1090,10 +1128,15 @@ mod tests {
                     tier: MatchTier::Exact,
                     score,
                     lead,
-                } if (score - 1.0).abs() < 1e-9 && lead < score
+                } if (score - 1.0).abs() < 1e-9 && (lead - score).abs() < 1e-9
             ),
-            "a confirmed phrase resolves exactly from then on, with a lead that is a \
-             measured gap rather than the whole score, got {resolution:?}"
+            "a confirmed phrase resolves exactly from then on. The lead is the whole \
+             score and that is the measurement, not a gap left unmeasured: an alias \
+             puts exactly one candidate in the exact tier, and the lead is held over \
+             the runner-up in the tier the question is answered in, so a lone exact \
+             winner has none to lead. A below-tier competitor does not count against \
+             it — see `the_lead_is_measured_against_the_highest_other_measured_score` \
+             for the measurement itself. Got {resolution:?}"
         );
         assert_eq!(
             calls.get(),
@@ -1101,8 +1144,98 @@ mod tests {
             "and a confirmed correction leaves the model out of it entirely"
         );
         assert_eq!(resolver.learned(), 1);
-        assert!(resolver.forget("the usual"));
+        assert_eq!(
+            resolver
+                .forget("ask", "the usual")
+                .as_ref()
+                .map(Alias::option),
+            Some("Repeat last order")
+        );
         assert_eq!(resolver.learned(), 0);
+        Ok(())
+    }
+
+    /// A withdrawn confirmation is a verdict, and the model is not asked to
+    /// overturn it. The embedder here is loaded with exactly the geometry that
+    /// would rescue the stale phrase — it places `"the usual"` next to
+    /// `"Repeat last order"` — and the assertion is that it is never consulted,
+    /// because a model that could rehabilitate a superseded binding would be a
+    /// second, unreviewable way for a withdrawn confirmation to select an
+    /// option.
+    #[test]
+    fn a_superseded_alias_is_not_handed_to_the_model() -> Result<(), Box<dyn std::error::Error>> {
+        let (embedder, calls) = stub(paraphrase_vectors(), vec![0.0, 1.0], false)?;
+        let mut resolver = SemanticResolver::new(embedder);
+        assert_eq!(
+            resolver.learn("ask", "the usual", "Repeat last order"),
+            None
+        );
+
+        // The same question, after the option the person confirmed is gone.
+        let edited = options(&["Delete account", "Keep account"]);
+        let resolution = resolver.resolve("the usual", &ask(&edited));
+        assert_eq!(
+            resolution,
+            Resolution::StaleAlias {
+                question: String::from("ask"),
+                option: String::from("Repeat last order"),
+            },
+            "the semantic tier must return a stale verdict verbatim"
+        );
+        assert_eq!(
+            calls.get(),
+            0,
+            "and must not spend the model trying to legitimate it"
+        );
+        Ok(())
+    }
+
+    /// A question read as values is never handed to the model.
+    ///
+    /// The embedder here is loaded with exactly the geometry that would lose the
+    /// sign — `"-5"` sits closest to `"5"` — and the assertion is that it is
+    /// never consulted, because a similarity judgement over numerals is the
+    /// folded-sign defect reached through another tier.
+    #[test]
+    fn a_numeric_question_never_reaches_the_model() -> Result<(), Box<dyn std::error::Error>> {
+        let (embedder, calls) = stub(
+            vec![
+                ("-5", vec![1.0, 0.0]),
+                ("5", vec![1.0, 0.1]),
+                ("10", vec![0.0, 1.0]),
+            ],
+            vec![1.0, 0.0],
+            false,
+        )?;
+        let resolver = SemanticResolver::new(embedder);
+        let options = options(&["5", "10"]);
+        let question = ask(&options).with_domain(AnswerDomain::Integer);
+
+        assert_eq!(
+            resolver.resolve("-5", &question),
+            Resolution::Absent { best_score: 0.0 },
+            "a value the question does not offer is absent, not the number it resembles"
+        );
+        assert_eq!(
+            calls.get(),
+            0,
+            "no tier may spend the model on relating two numbers"
+        );
+        assert_eq!(
+            resolver.resolve("5", &question),
+            Resolution::Resolved {
+                index: 0,
+                tier: MatchTier::Exact,
+                score: 1.0,
+                lead: 1.0,
+            },
+            "and the values that are offered resolve exactly, by value"
+        );
+        assert_eq!(
+            calls.get(),
+            0,
+            "with the model still untouched after a successful numeric answer"
+        );
         Ok(())
     }
 
