@@ -53,7 +53,7 @@ full = ["rt", "time", "sync", "macros", "io", "net", "process", "fs", "signal"]
 # option-set identity are BLAKE3 digests (`lgwks_std::hash`), which is the
 # estate's only content-identity hash. The edge is already approved and already
 # compiled into `lgwks_std`'s own dependency set; this only turns it on.
-lgwks_std = { workspace = true, features = ["json", "http", "hash"] }
+lgwks_std = { workspace = true, features = ["json", "http", "hash", "wire"] }
 # Not optional, and not behind a feature. The ECS substrate is **how a bot
 # executes** — the condition is change detection rather than a re-derivation —
 # so it is not a candidate the caller may decline. A default-off flag would mean
