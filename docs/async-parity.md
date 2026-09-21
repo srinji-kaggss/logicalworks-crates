@@ -116,7 +116,7 @@ will spend a day looking for it.
 4. **Task introspection** (`task::id`, per-task metrics). Nothing in the estate
    needs it yet.
 
-## 5. Two deliberate divergences
+## 5. Three deliberate divergences
 
 - **No `#[main]`/`#[test]` attribute macro.** A re-exported proc-macro expands
   to `::tokio` paths a consumer without a `tokio` edge cannot resolve, so it
@@ -129,6 +129,15 @@ will spend a day looking for it.
   divergence in behaviour and a strict improvement in ergonomics. `interval` is
   the exception, because it is a value rather than a future and must still be
   built inside a runtime; the module documents that.
+- **Supervised execution is stricter than the ecosystem's, not wider.**
+  `rt::supervise::Supervisor` has no direct counterpart in §2. `tokio_util`'s
+  `TaskTracker` tracks tasks and lets a caller wait for them, but it does not
+  bound how many run at once, does not refuse when full, and carries no loop
+  budget. Requiring a `Budget` before a loop can be written is a tighter
+  contract than any runtime here imposes, and that is the point: the estate's
+  rule is that no background task is untracked and no loop is unbounded, so the
+  shipped API is one that cannot express either. A consumer who wants the looser
+  model still has `rt::task::spawn` and a bare `JoinSet`.
 
 ## 6. What parity is not claimed
 
