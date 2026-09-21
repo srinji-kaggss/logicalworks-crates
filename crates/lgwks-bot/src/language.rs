@@ -288,6 +288,13 @@ fn winning_tier(mut scored: Vec<(usize, MatchTier, f64)>) -> Vec<(usize, MatchTi
 /// Deterministic: the returned order is by descending score, and ties keep
 /// lowest-index-first, so the caller's verdict does not depend on iteration
 /// order — the comparator rule `docs/bot-on-ecs.md` §8 takes from Heritrix.
+///
+/// Every option is measured and every measurement is returned, including one
+/// that falls below [`MATCH_THRESHOLD`]. The threshold is not applied here
+/// because it is not this function's decision to make: it says which option may
+/// *win*, and a winner can only be chosen against a field. Applying it here
+/// would delete a competitor before [`decide`] measured the lead over it, which
+/// is how a near tie comes to be reported as a decisive win.
 fn score_all(
     utterance: &str,
     question: &Question<'_>,
@@ -321,12 +328,12 @@ fn score_all(
         } else {
             let lexical = distance.score(&spoken, &canonical);
             let set = overlap.score(&spoken_tokens, &tokens(option));
-            let blended = (TOKEN_WEIGHT * set) + (DISTANCE_WEIGHT * lexical);
-            if blended >= MATCH_THRESHOLD {
-                Some((MatchTier::Fuzzy, blended))
-            } else {
-                None
-            }
+            // Kept whatever it measures. A blend below the threshold is a
+            // measured proximity that `decide` still has to see.
+            Some((
+                MatchTier::Fuzzy,
+                (TOKEN_WEIGHT * set) + (DISTANCE_WEIGHT * lexical),
+            ))
         };
         if let Some((tier, score)) = tier_and_score {
             scored.push((index, tier, score));
@@ -449,27 +456,60 @@ fn decide_integer(utterance: &str, question: &Question<'_>, margin: f64) -> Reso
             (decode_integer(option) == Some(spoken)).then_some((index, MatchTier::Exact, 1.0))
         })
         .collect();
-    decide(&scored, margin)
+    decide(&scored, MATCH_THRESHOLD, margin)
 }
 
-/// Decides a [`Resolution`] from scored candidates, best-first.
+/// Decides a [`Resolution`] from measured candidates, best-first.
 ///
 /// Shared with the semantic tier rather than reimplemented there. The rule it
-/// encodes — the best candidate must lead the runner-up by a stated margin, and
-/// everything inside that margin is still in play — is the *policy* of a
-/// three-way verdict, and two copies of it would be two policies that drift.
-/// Only the margin differs between callers, so the margin is a parameter.
+/// encodes — the best candidate must clear `threshold`, and must then lead the
+/// runner-up by `margin`, with everything inside that margin still in play — is
+/// the *policy* of a three-way verdict, and two copies of it would be two
+/// policies that drift. Only the two constants differ between callers, so both
+/// are parameters.
 ///
-/// The lead is measured **within** the tier of the candidates it is given, and
-/// never across tiers: they are not comparable, and `score_all` has already
-/// reduced the set to a single tier. Two exact candidates therefore tie at
-/// `lead == 0.0` however far the nearest fuzzy competitor is — which is the
-/// intended reading, because a fuzzy competitor is not a rival for an exact
-/// answer, and the tie that matters is between the two exact ones.
-pub(crate) fn decide(scored: &[(usize, MatchTier, f64)], margin: f64) -> Resolution {
+/// `scored` must carry **every candidate that was measured**, including those
+/// below `threshold`. The two questions are separate and the order they are
+/// asked in is the whole contract. The threshold asks *may this option win?*
+/// and it answers that question about one option at a time. The margin asks
+/// *did the winner separate itself from the next best thing actually observed?*
+/// and that question cannot be answered against a field the threshold has
+/// already emptied. Filtering first and measuring second is what lets a
+/// competitor on the far side of the threshold manufacture confidence: an
+/// option measured at `0.71` against a threshold of `0.72` disappears, and a
+/// winner at `0.73` then reports a lead of `0.73` over nothing instead of the
+/// `0.02` it actually holds.
+///
+/// A shared `decide` over pre-filtered input cannot be fixed by the caller
+/// choosing a better threshold. It is the ordering that is wrong.
+///
+/// The field `scored` is measured over is the **winning tier's**, because
+/// `score_all` has already reduced the candidate set to the one tier that
+/// produced anything. The lead is therefore measured **within** a tier and
+/// never across tiers: the numbers are not comparable, and a fuzzy competitor
+/// is not a rival for an exact answer. A unique exact winner consequently
+/// reports `lead == score`, exactly as a lone option does — the field really is
+/// empty of rivals, and the tie that matters is between the two exact
+/// candidates when there are two. Two exact candidates therefore tie at
+/// `lead == 0.0` however far the nearest fuzzy competitor is.
+pub(crate) fn decide(
+    scored: &[(usize, MatchTier, f64)],
+    threshold: f64,
+    margin: f64,
+) -> Resolution {
     let Some(&(index, tier, score)) = scored.first() else {
         return Resolution::Absent { best_score: 0.0 };
     };
+    if score < threshold {
+        // Nothing was accepted. The maximum is still reported rather than
+        // `0.0`: the closest option *was* measured, and `0.0` is a value no
+        // comparison produced — the same claim [`Resolution::Degraded`] refuses
+        // to make about a resolver that never ran.
+        return Resolution::Absent { best_score: score };
+    }
+    // The runner-up is the highest *other* score observed, including one below
+    // the threshold. An option that may not win is still an option that was
+    // measured, and its proximity is evidence about the winner.
     let lead = match scored.get(1) {
         Some(&(_, _, next)) => score - next,
         None => score,
@@ -483,12 +523,15 @@ pub(crate) fn decide(scored: &[(usize, MatchTier, f64)], margin: f64) -> Resolut
         };
     }
     // Everything within the margin of the best is still in play, and the caller
-    // narrows the re-ask to exactly that set.
-    let tied: Vec<usize> = scored
+    // narrows the re-ask to exactly that set. Ascending index order, as
+    // [`Resolution::Ambiguous::tied`] documents: the caller's list order must
+    // not change the verdict, and an index list is compared by its contents.
+    let mut tied: Vec<usize> = scored
         .iter()
         .take_while(|candidate| score - candidate.2 < margin)
         .map(|candidate| candidate.0)
         .collect();
+    tied.sort_unstable();
     Resolution::Ambiguous { tied, tier, score }
 }
 
@@ -632,6 +675,7 @@ impl LanguageResolver {
         }
         let verdict = decide(
             &score_all(utterance, question, &self.aliases, &self.distance),
+            MATCH_THRESHOLD,
             MATCH_MARGIN,
         );
         // Staleness is reported only where it would otherwise decide the
@@ -774,17 +818,45 @@ mod tests {
         assert_eq!(phonetic_key("!!!"), "");
     }
 
+    /// Whether a resolved verdict's lead clears the margin — the property that
+    /// makes `Resolved` the right variant rather than `Ambiguous`.
+    ///
+    /// Note what this does *not* assert. A lead equal to the score is not by
+    /// itself evidence of the discarded-runner-up defect: when the best score
+    /// is `0.9` and the runner-up legitimately measured `0.0`, the gap really is
+    /// `0.9`. The two states are told apart by the score the runner-up was
+    /// given, not by the width of the gap, which is why the regression tests
+    /// below build the candidate field explicitly instead of inferring it from a
+    /// real phrase pair.
+    fn clears_the_margin(lead: f64) -> bool {
+        lead >= MATCH_MARGIN
+    }
+
     #[test]
     fn an_exact_normalized_match_resolves_at_the_exact_tier() {
         let resolution = LanguageResolver::new().resolve("  yes, CONTINUE ", &ask(&options()));
-        assert_eq!(
-            resolution,
-            Resolution::Resolved {
-                index: 0,
-                tier: MatchTier::Exact,
-                score: 1.0,
-                lead: 1.0,
-            }
+        // The other two options only ever reach the fuzzy tier, and `score_all`
+        // reduces the field to the winning tier before `decide` measures
+        // anything, so the rival field this winner is measured against is empty
+        // and the lead is the whole of its score — the same honest equality a
+        // lone option reports. It is not the discarded-runner-up defect: that was
+        // a *same-tier* competitor deleted by the threshold before the lead was
+        // taken, and `the_lead_is_measured_against_the_highest_other_measured_score`
+        // below pins the arithmetic that fixes it. Cross-tier, the gap would be
+        // a subtraction between two numbers that do not mean the same thing.
+        assert!(
+            matches!(
+                resolution,
+                Resolution::Resolved {
+                    index: 0,
+                    tier: MatchTier::Exact,
+                    score,
+                    lead,
+                } if (score - 1.0).abs() < 1e-9
+                    && (lead - score).abs() < 1e-9
+                    && clears_the_margin(lead)
+            ),
+            "expected an exact resolution of option 0 over a field with no exact rival, got {resolution:?}"
         );
     }
 
@@ -959,10 +1031,14 @@ mod tests {
             None,
             "another question must not consume this question's confirmation: {elsewhere:?}"
         );
-        assert_eq!(
-            elsewhere,
-            Resolution::Absent { best_score: 0.0 },
-            "the phrase is simply unrecognized there, not quietly bound to row 0"
+        assert!(
+            matches!(
+                elsewhere,
+                Resolution::Absent { best_score }
+                    if best_score > 0.0 && best_score < MATCH_THRESHOLD
+            ),
+            "the phrase is simply unrecognized there — measured, and nowhere near \
+             the threshold — not quietly bound to row 0: {elsewhere:?}"
         );
     }
 
@@ -1389,6 +1465,199 @@ mod tests {
             tied(&verdict),
             Some((vec![0, 1], MatchTier::Exact)),
             "two options hold 5, so no option is preferred: {verdict:?}"
+        );
+    }
+
+    /// Builds a measured candidate field from `(index, score)` pairs.
+    ///
+    /// The tier is irrelevant to the decision arithmetic, so every entry is
+    /// `Semantic`: the point of these tests is the relationship between the
+    /// scores, and a tier label would be noise a reader has to skip past.
+    fn measured(scores: &[(usize, f64)]) -> Vec<(usize, MatchTier, f64)> {
+        scores
+            .iter()
+            .copied()
+            .map(|(index, score)| (index, MatchTier::Semantic, score))
+            .collect()
+    }
+
+    #[test]
+    fn the_lead_is_measured_against_the_highest_other_measured_score() {
+        let field = measured(&[(0, 0.90), (1, 0.10)]);
+        assert_eq!(
+            decide(&field, 0.5, 0.08),
+            Resolution::Resolved {
+                index: 0,
+                tier: MatchTier::Semantic,
+                score: 0.90,
+                lead: 0.80,
+            },
+            "the lead is the gap to the runner-up, not the score"
+        );
+    }
+
+    #[test]
+    fn a_runner_up_just_below_the_threshold_still_counts_against_the_margin() {
+        // The winner clears the threshold by 0.01 and the runner-up misses it by
+        // 0.01. The measured lead is 0.02 against a required 0.05, so this is a
+        // near tie. Filtering the runner-up away first made `decide` report the
+        // winner's whole score as its lead and accept it.
+        let field = measured(&[(0, 0.73), (1, 0.71)]);
+        assert_eq!(
+            decide(&field, 0.72, 0.05),
+            Resolution::Ambiguous {
+                tied: vec![0, 1],
+                tier: MatchTier::Semantic,
+                score: 0.73,
+            },
+            "a competitor below the threshold is still a competitor"
+        );
+    }
+
+    #[test]
+    fn the_straddling_pair_is_not_special_to_a_whole_hundredth() {
+        // The same shape with the pair separated from the threshold by an
+        // arbitrarily small epsilon: `0.72` exactly is accepted, `0.72 - 1e-12`
+        // is not, and either way the *other* measurement is what sets the lead.
+        let below = 0.72 - 1e-12;
+        let field = measured(&[(0, 0.72), (1, below)]);
+        assert_eq!(
+            decide(&field, 0.72, 0.05),
+            Resolution::Ambiguous {
+                tied: vec![0, 1],
+                tier: MatchTier::Semantic,
+                score: 0.72,
+            },
+            "a one-epsilon perturbation across the threshold must not manufacture confidence"
+        );
+    }
+
+    #[test]
+    fn a_field_entirely_below_the_threshold_is_absent_at_its_best_measured_score() {
+        let field = measured(&[(0, 0.40), (1, 0.30)]);
+        assert_eq!(
+            decide(&field, 0.72, 0.05),
+            Resolution::Absent { best_score: 0.40 },
+            "the closest option was measured, so `0.0` would be a value nothing produced"
+        );
+    }
+
+    #[test]
+    fn a_lone_option_reports_its_whole_score_as_the_lead() {
+        // There is no runner-up, so the lead is over an empty field and the
+        // score is the whole of it. This is the one case where the two are
+        // equal and the equality is honest.
+        let field = measured(&[(0, 0.80)]);
+        assert_eq!(
+            decide(&field, 0.72, 0.05),
+            Resolution::Resolved {
+                index: 0,
+                tier: MatchTier::Semantic,
+                score: 0.80,
+                lead: 0.80,
+            }
+        );
+        assert_eq!(
+            decide(&measured(&[(0, 0.50)]), 0.72, 0.05),
+            Resolution::Absent { best_score: 0.50 },
+            "a lone option that does not clear the threshold is absent, not resolved"
+        );
+        assert_eq!(
+            decide(&[], 0.72, 0.05),
+            Resolution::Absent { best_score: 0.0 },
+            "no measured candidate at all is the empty field"
+        );
+    }
+
+    #[test]
+    fn an_exact_tie_is_ambiguous_under_a_positive_margin() {
+        let field = measured(&[(0, 0.80), (1, 0.80)]);
+        assert_eq!(
+            decide(&field, 0.72, 0.05),
+            Resolution::Ambiguous {
+                tied: vec![0, 1],
+                tier: MatchTier::Semantic,
+                score: 0.80,
+            },
+            "a tie holds no lead at all"
+        );
+    }
+
+    #[test]
+    fn a_zero_margin_resolves_a_tie_at_the_lowest_index_by_declared_policy() {
+        // Margin `0.0` is a caller stating that no separation is required. The
+        // arithmetic is left literal rather than special-cased, so `0.0 >= 0.0`
+        // accepts the tie and the lowest index wins it — the comparator rule the
+        // module documents. The threshold is still enforced first: an exact tie
+        // below it is absent, not a coin flip.
+        let field = measured(&[(0, 0.80), (1, 0.80)]);
+        assert_eq!(
+            decide(&field, 0.72, 0.0),
+            Resolution::Resolved {
+                index: 0,
+                tier: MatchTier::Semantic,
+                score: 0.80,
+                lead: 0.0,
+            }
+        );
+        assert_eq!(
+            decide(&measured(&[(0, 0.40), (1, 0.40)]), 0.72, 0.0),
+            Resolution::Absent { best_score: 0.40 }
+        );
+    }
+
+    #[test]
+    fn the_tied_set_is_lowest_index_first_whatever_order_it_arrives_in() {
+        // `Resolution::Ambiguous::tied` documents "lowest first". A caller's
+        // candidate order must not change the verdict, and for equal scores the
+        // sort alone cannot guarantee it, so the set is ordered explicitly.
+        let ascending = measured(&[(0, 0.80), (1, 0.80), (2, 0.80)]);
+        let descending = measured(&[(2, 0.80), (1, 0.80), (0, 0.80)]);
+        let expected = Resolution::Ambiguous {
+            tied: vec![0, 1, 2],
+            tier: MatchTier::Semantic,
+            score: 0.80,
+        };
+        assert_eq!(decide(&ascending, 0.72, 0.05), expected);
+        assert_eq!(decide(&descending, 0.72, 0.05), expected);
+    }
+
+    #[test]
+    fn permuting_the_option_list_does_not_change_the_verdict() {
+        // End to end through the resolver, where a permutation means the same
+        // options in a different order. The winner is the same option, and the
+        // tied set is the same set.
+        let resolver = LanguageResolver::new();
+        let forwards = vec![
+            String::from("Accept the offer"),
+            String::from("Accept the order"),
+        ];
+        let backwards = vec![
+            String::from("Accept the order"),
+            String::from("Accept the offer"),
+        ];
+        assert_eq!(
+            resolver.resolve("accept the", &ask(&forwards)),
+            resolver.resolve("accept the", &ask(&backwards)),
+            "the same options in a different order must reach the same verdict"
+        );
+    }
+
+    #[test]
+    fn every_option_is_measured_even_when_none_clears_the_threshold() {
+        // Neither option is a candidate: "yes" is not "Yes, continue" and not
+        // "No, go back" by any tier that accepts. Both were measured anyway, so
+        // the reported `best_score` is the closest proximity actually observed
+        // rather than the `0.0` a resolver that never ran would report.
+        let choices = vec![String::from("Yes, continue"), String::from("No, go back")];
+        let resolution = LanguageResolver::new().resolve("yes", &ask(&choices));
+        assert!(
+            matches!(
+                resolution,
+                Resolution::Absent { best_score }
+                    if best_score > 0.0 && best_score < MATCH_THRESHOLD
+            ),
+            "expected Absent at the best measured score below the threshold, got {resolution:?}"
         );
     }
 }

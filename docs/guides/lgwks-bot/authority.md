@@ -9,7 +9,7 @@ boundary is worth reading before you design around it.
 `GrantSet::admit` (`crates/lgwks-bot/src/gate.rs:50`) walks the required
 capabilities and returns `BotError::CapabilityDenied { required }` for the first
 one the set does not contain. `EcsBot::assemble` calls it for every source and
-every action before the world is built (`crates/lgwks-bot/src/ecs.rs:592`):
+every action before the world is built (`crates/lgwks-bot/src/ecs.rs:837`):
 
 ```rust
 for chain in &chains {
@@ -49,7 +49,7 @@ never thread an `Auth` through your own call sites for the chained path.
 ## The grant set is a snapshot
 
 This is the part that surprises people. `EcsBot::assemble` clones the set into
-the world (`crates/lgwks-bot/src/ecs.rs:599`):
+the world (`crates/lgwks-bot/src/ecs.rs:844`):
 
 ```rust
 world.insert_resource(Grants(grants.clone()));

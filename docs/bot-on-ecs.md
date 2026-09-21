@@ -447,12 +447,27 @@ What changed:
   module. There is no other way to build or run a bot.
 - **`cargo test --workspace` runs it.** No flag, no separate command.
 - **Two behaviours changed, and both are pinned by tests rather than noted:**
-  - A tick is now **all-or-nothing**: the observe system polls every source
-    before any effect runs, so a tick that errors fires *nothing*. The previous
-    contract fired the chains declared before the failure.
+  - A tick is now **all-or-nothing on the poll side**: the observe system polls
+    every source and commits the whole observation before any effect runs, so a
+    tick whose *poll* fails fires *nothing*. The previous contract fired the
+    chains declared before the failure. An *action* failure is the other case
+    and unchanged: the effects before it already ran and are live.
   - A condition is evaluated on **transition**, not on every tick. The bot acts
     when the value moves. A condition that must hold continuously belongs on a
     domain that models it, not on change detection.
+- **Deciding and doing are two systems.** `observe_fold` commits and detects,
+  `fire_plan` records the effect program as an ordered list of steps, and the
+  driver then awaits those steps in order (`EcsBot::run_steps`). The plan is
+  fixed before any effect runs, which is what makes the order a property of the
+  declaration rather than of when a future happened to be polled. It also gives
+  a condition failure a defined position: the steps the walk cleared before the
+  failing condition are still run, and the tick reports the failure.
+- **`tick` and `tick_async` are the two adapters over that one tick.**
+  `tick_async` awaits the phases on the caller's executor; `tick` drives them
+  with `lgwks_std::task::block_on`, and refuses with
+  `BotError::TickInsideRuntime` when an async runtime already owns the calling
+  thread, because parking that thread starves the reactor the bot's own verbs
+  register with. There is no third path and no feature flag between them.
 - **Bounded concurrent polling was restored, not dropped.** The first ECS
   `observe` polled sources one at a time, and `tick_polls_sources_concurrently`
   caught it, a real regression the collapse introduced. Polls run in bounded

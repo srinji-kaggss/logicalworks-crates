@@ -3,9 +3,44 @@
 //! The module deliberately has no relation to [`crate::domain::flow::Pipeline`].
 //! A pipeline composes capability-gated effects; this module interprets a
 //! human-facing, validated graph and records the cursor's conversation.
+//!
+//! # Resource bounds
+//!
+//! Validation bounds the *shape* of a document and [`FlowBounds`] bounds the
+//! number of *steps* a session takes. Neither bounds bytes, and the two are
+//! independent: `${value}` written a hundred thousand times is a
+//! two-hundred-kilobyte document that interpolates to ten gigabytes, and a
+//! step budget of two hundred and fifty-six does not notice, because a single
+//! `say` node performs one step however much text it renders.
+//!
+//! [`ResourceLimits`] is the byte bound, and it is enforced in four places:
+//!
+//! - [`MAX_UTTERANCE_BYTES`] — one answer, checked at the ingress of
+//!   [`Session::answer`] before the utterance is resolved, stored, or recorded;
+//! - [`MAX_VALUE_BYTES`] — one stored value, checked when an answer is assigned
+//!   and again when the document names a candidate no session could store;
+//! - [`MAX_RECORD_BYTES`] — one rendered record payload, checked against the
+//!   compiled template's *computed* expansion before that expansion is
+//!   allocated ([`CompiledTemplate::expanded_bytes`]) and against the built
+//!   prompt's computed size before the prompt is built;
+//! - [`MAX_SESSION_BYTES`] — every record and every visited node id a session
+//!   retains, checked before either sink is written.
+//!
+//! Every one of them refuses rather than truncates: a record cut in half is a
+//! record the journal claims happened and nobody can read. The refusal is
+//! always before the write, so a rejected expansion leaves no partial journal
+//! entry behind.
+//!
+//! These are the *operator's* ceilings. A document may ask for tighter ones in
+//! its [`FlowBounds`], and an embedding application may ask for tighter ones on
+//! a session ([`Session::with_limits`]); neither may ask for looser, and a
+//! request above the ceiling is [`BotError::ResourceLimitAboveCeiling`] rather
+//! than a silently applied bound. The two requests combine by taking the
+//! smaller value on each axis.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
+use std::num::IntErrorKind;
 
 use lgwks_std::json::Value as JsonValue;
 use lgwks_std::json::{Deserialize, Serialize};
@@ -17,6 +52,223 @@ pub const MAX_FLOW_BYTES: usize = 2_097_152;
 
 /// Alias for [`MAX_FLOW_BYTES`] with an explicit schema-oriented name.
 pub const MAX_FLOW_SPEC_BYTES: usize = MAX_FLOW_BYTES;
+
+/// Maximum bytes accepted in one answer utterance.
+///
+/// An ingress ceiling, checked before the utterance is resolved or recorded.
+/// A person typing an answer does not need more than this, and a caller
+/// feeding a session from a file or a socket is the case where an unbounded
+/// one costs memory for nothing.
+pub const MAX_UTTERANCE_BYTES: usize = 8_192;
+
+/// Maximum bytes one stored variable value may occupy when rendered.
+///
+/// Applies to the *value*, not to the option string that produced it: an
+/// integer stores its decimal digits whatever the candidate said, and a choice
+/// candidate stores the declared spelling. It is therefore a bound on what
+/// interpolation can later paste into a record, which is the size that matters.
+pub const MAX_VALUE_BYTES: usize = 65_536;
+
+/// Maximum bytes of one rendered record payload.
+///
+/// The ceiling that makes expansion a linear operation. Compiling and sizing a
+/// template under this bound costs no more than the bound itself, so a
+/// document of a few hundred kilobytes cannot become a record of a few
+/// gigabytes: the expansion is refused before it is allocated.
+pub const MAX_RECORD_BYTES: usize = 1_048_576;
+
+/// Maximum bytes one session retains across all of its records and visited
+/// node ids.
+///
+/// The aggregate ceiling. Per-record and per-value bounds compose into an
+/// unbounded total only if the graph can be walked again, and a budget bounds
+/// steps rather than bytes, so the sum needs its own bound.
+pub const MAX_SESSION_BYTES: usize = 8_388_608;
+
+/// The byte axis a [`ResourceLimits`] ceiling applies to.
+///
+/// Reported by [`BotError::ResourceLimitAboveCeiling`] so a refusal names which
+/// limit was raised, and used to tighten one axis without spelling the other
+/// three. A typed axis rather than a flag per axis, because a caller that wants
+/// to raise every ceiling should have to write every axis down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ResourceAxis {
+    /// Bytes accepted in one answer utterance ([`MAX_UTTERANCE_BYTES`]).
+    Utterance,
+    /// Bytes one stored variable value may occupy ([`MAX_VALUE_BYTES`]).
+    Value,
+    /// Bytes of one rendered record payload ([`MAX_RECORD_BYTES`]).
+    Record,
+    /// Bytes one session retains in total ([`MAX_SESSION_BYTES`]).
+    Session,
+}
+
+impl ResourceAxis {
+    /// The stable label naming this axis.
+    ///
+    /// A label for diagnostics and serialization prose, not a serde
+    /// discriminator: a `ResourceLimits` document spells the axes as its field
+    /// names.
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        match *self {
+            Self::Utterance => "utterance",
+            Self::Value => "value",
+            Self::Record => "record",
+            Self::Session => "session",
+        }
+    }
+}
+
+/// Byte ceilings applied to every session, and the one place they are resolved.
+///
+/// A validated flow bounds *shape*: steps, nodes, reachable transitions, and
+/// templates whose markers name declared variables. It does not bound *bytes*,
+/// and the two are independent — `${value}` repeated a hundred thousand times
+/// in a two-hundred-kilobyte document is a valid flow that interpolates to ten
+/// gigabytes. These four ceilings are the byte bound:
+///
+/// - [`ResourceAxis::Utterance`] — one answer;
+/// - [`ResourceAxis::Value`] — one stored value;
+/// - [`ResourceAxis::Record`] — one rendered record payload, checked against
+///   the compiled template's computed expansion *before* it is allocated;
+/// - [`ResourceAxis::Session`] — everything one session retains.
+///
+/// [`ResourceLimits::shipped`] is the operator's hard ceiling, and it is a
+/// ceiling rather than a default: a shorthand constructor may ask for less on
+/// any axis and never for more. A request above the ceiling is refused with
+/// [`BotError::ResourceLimitAboveCeiling`] where it is made rather than clamped
+/// quietly, because a bound that is silently ignored is a bound nobody can
+/// reason about.
+///
+/// # Examples
+///
+/// ```
+/// use lgwks_bot::{BotError, ResourceAxis, ResourceLimits};
+///
+/// let tight = ResourceLimits::shipped().tighten(ResourceAxis::Record, 4_096);
+/// assert_eq!(tight.get(ResourceAxis::Record), 4_096);
+/// assert_eq!(tight.get(ResourceAxis::Session), ResourceLimits::shipped().get(ResourceAxis::Session));
+/// assert!(tight.within_ceiling().is_ok());
+///
+/// let greedy = ResourceLimits::shipped().tighten(ResourceAxis::Session, usize::MAX);
+/// assert!(matches!(
+///     greedy.within_ceiling(),
+///     Err(BotError::ResourceLimitAboveCeiling {
+///         axis: ResourceAxis::Session,
+///         ..
+///     })
+/// ));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde", deny_unknown_fields, default)]
+#[non_exhaustive]
+pub struct ResourceLimits {
+    /// Bytes accepted in one answer utterance.
+    utterance_bytes: usize,
+    /// Bytes one stored variable value may occupy when rendered.
+    value_bytes: usize,
+    /// Bytes of one rendered record payload.
+    record_bytes: usize,
+    /// Bytes one session retains in total.
+    session_bytes: usize,
+}
+
+impl ResourceLimits {
+    /// The operator's shipped ceilings, applied when nothing tighter is asked
+    /// for.
+    #[must_use]
+    pub const fn shipped() -> Self {
+        Self {
+            utterance_bytes: MAX_UTTERANCE_BYTES,
+            value_bytes: MAX_VALUE_BYTES,
+            record_bytes: MAX_RECORD_BYTES,
+            session_bytes: MAX_SESSION_BYTES,
+        }
+    }
+
+    /// Return the ceiling applied to one axis.
+    #[must_use]
+    pub const fn get(self, axis: ResourceAxis) -> usize {
+        match axis {
+            ResourceAxis::Utterance => self.utterance_bytes,
+            ResourceAxis::Value => self.value_bytes,
+            ResourceAxis::Record => self.record_bytes,
+            ResourceAxis::Session => self.session_bytes,
+        }
+    }
+
+    /// Return these ceilings with one axis set to `bytes`.
+    ///
+    /// Tightening only in intent: a value above the operator's ceiling is
+    /// accepted by this constructor and refused by [`Self::within_ceiling`],
+    /// so the caller learns that the bound it asked for is not the bound in
+    /// force. `const` so a caller can build a ceiling at compile time.
+    #[must_use]
+    pub const fn tighten(mut self, axis: ResourceAxis, bytes: usize) -> Self {
+        match axis {
+            ResourceAxis::Utterance => self.utterance_bytes = bytes,
+            ResourceAxis::Value => self.value_bytes = bytes,
+            ResourceAxis::Record => self.record_bytes = bytes,
+            ResourceAxis::Session => self.session_bytes = bytes,
+        }
+        self
+    }
+
+    /// The stricter of two ceiling sets, axis by axis.
+    ///
+    /// How an author's tightening and an operator's tightening combine: the
+    /// smaller bound wins, so neither can widen what the other narrowed.
+    #[must_use]
+    pub const fn narrowed(self, other: Self) -> Self {
+        Self {
+            utterance_bytes: smaller(self.utterance_bytes, other.utterance_bytes),
+            value_bytes: smaller(self.value_bytes, other.value_bytes),
+            record_bytes: smaller(self.record_bytes, other.record_bytes),
+            session_bytes: smaller(self.session_bytes, other.session_bytes),
+        }
+    }
+
+    /// Refuse any axis set above the operator's ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BotError::ResourceLimitAboveCeiling`] naming the first axis
+    /// that exceeds its ceiling.
+    pub fn within_ceiling(self) -> Result<Self, BotError> {
+        let ceiling = Self::shipped();
+        for axis in [
+            ResourceAxis::Utterance,
+            ResourceAxis::Value,
+            ResourceAxis::Record,
+            ResourceAxis::Session,
+        ] {
+            let requested = self.get(axis);
+            let allowed = ceiling.get(axis);
+            if requested > allowed {
+                return Err(BotError::ResourceLimitAboveCeiling {
+                    axis,
+                    requested,
+                    ceiling: allowed,
+                });
+            }
+        }
+        Ok(self)
+    }
+}
+
+impl Default for ResourceLimits {
+    /// The operator's shipped ceilings — not "no limits".
+    fn default() -> Self {
+        Self::shipped()
+    }
+}
+
+/// The smaller of two byte counts, named because `Ord::min` is not `const`.
+const fn smaller(left: usize, right: usize) -> usize {
+    if left < right { left } else { right }
+}
 
 /// Stable identifier of a flow node.
 pub type NodeId = String;
@@ -49,6 +301,54 @@ impl fmt::Display for Value {
             Self::Boolean(value) => write!(formatter, "{value}"),
         }
     }
+}
+
+impl Value {
+    /// The number of bytes this value occupies when a template interpolates
+    /// it.
+    ///
+    /// The exact cost, computed without rendering the value: for the two string
+    /// variants it is the string's length, and for the two scalar variants it is
+    /// the width of the decimal or boolean spelling that [`fmt::Display`]
+    /// produces. Sizing an expansion needs this before it has the text, and
+    /// measuring by formatting would allocate the buffer the check exists to
+    /// avoid allocating.
+    #[must_use]
+    pub fn rendered_bytes(&self) -> usize {
+        match *self {
+            Self::String(ref value) | Self::Choice(ref value) => value.len(),
+            // "true" is four bytes and "false" is five, and both are constants
+            // rather than a call into the boolean formatter.
+            Self::Boolean(true) => 4,
+            Self::Boolean(false) => 5,
+            Self::Integer(value) => integer_bytes(value),
+        }
+    }
+}
+
+/// The number of bytes [`fmt::Display`] writes for one integer.
+///
+/// Division-free: the digit count is the base-ten logarithm rounded down plus
+/// one, and the sign is one more byte when the value is negative. Zero has one
+/// digit and no logarithm, which is the `None` arm.
+fn integer_bytes(value: i64) -> usize {
+    // `unsigned_abs` rather than `abs`, because `i64::MIN` has no positive
+    // counterpart: negating it in `i64` overflows, and the digit count does not
+    // care which side of zero the magnitude came from.
+    let digits = value
+        .unsigned_abs()
+        .checked_ilog10()
+        .map_or(1, |exponent| exponent.saturating_add(1));
+    let total = if value < 0 {
+        digits.saturating_add(1)
+    } else {
+        digits
+    };
+    // At most twenty digits, so this cannot fail on any target this crate
+    // builds for. The fallback is `usize::MAX` rather than a panic because the
+    // only caller compares the result against a ceiling: an impossible width
+    // reported as enormous is refused, which is the failing-closed direction.
+    usize::try_from(total).unwrap_or(usize::MAX)
 }
 
 /// Declared type of one variable in a flow.
@@ -85,15 +385,89 @@ impl VarType {
             Self::String | Self::Boolean | Self::Choice(_) => AnswerDomain::Label,
         }
     }
+
+    /// The stable label naming this declared type.
+    ///
+    /// Stable prose for diagnostics and nothing else: it is not the serde
+    /// discriminator, which is `rename_all = "snake_case"` on the variants and
+    /// should be read from the document instead of from here.
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        match *self {
+            Self::String => "string",
+            Self::Integer => "integer",
+            Self::Boolean => "boolean",
+            Self::Choice(_) => "choice",
+        }
+    }
+
+    /// Decode one answer string into a value of this declared type.
+    ///
+    /// The single decoder. Flow validation runs it over every `ask` candidate
+    /// when the document is loaded, and runtime assignment runs it over the
+    /// option the resolver selected; one implementation means the two cannot
+    /// disagree about which candidates are storable, and a flow that loads is
+    /// a flow every one of whose options can be stored.
+    ///
+    /// A display label is therefore a *value* of the declared type rather than
+    /// a free string: `"yes"` offered for a boolean variable stores
+    /// [`Value::Boolean`]`(true)`, and a choice candidate that differs from the
+    /// declared spelling only in case stores the declared spelling. The route
+    /// is keyed by the label the resolver matched; the variable receives what
+    /// this returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`AnswerRejection`] naming why the answer cannot be stored.
+    pub fn decode_answer(&self, answer: &str) -> Result<Value, AnswerRejection> {
+        let trimmed = answer.trim();
+        match *self {
+            // A free-form string accepts anything, including the untrimmed
+            // bytes: trimming a person's answer for them is a decision the
+            // flow author makes downstream, not one this decoder makes.
+            Self::String => Ok(Value::String(answer.to_owned())),
+            Self::Integer => match trimmed.parse::<i64>() {
+                Ok(value) => Ok(Value::Integer(value)),
+                Err(error) => Err(match *error.kind() {
+                    IntErrorKind::PosOverflow | IntErrorKind::NegOverflow => {
+                        AnswerRejection::IntegerOutOfRange
+                    }
+                    _ => AnswerRejection::NotAnInteger,
+                }),
+            },
+            Self::Boolean => {
+                if trimmed.eq_ignore_ascii_case("true") || trimmed.eq_ignore_ascii_case("yes") {
+                    Ok(Value::Boolean(true))
+                } else if trimmed.eq_ignore_ascii_case("false")
+                    || trimmed.eq_ignore_ascii_case("no")
+                {
+                    Ok(Value::Boolean(false))
+                } else {
+                    Err(AnswerRejection::NotABoolean)
+                }
+            }
+            Self::Choice(ref options) => {
+                let Some(option) = options
+                    .iter()
+                    .find(|option| option.eq_ignore_ascii_case(trimmed))
+                else {
+                    return Err(AnswerRejection::NotADeclaredChoice);
+                };
+                Ok(Value::Choice(option.clone()))
+            }
+        }
+    }
 }
 
 /// Decodes one whole-number answer, preserving its sign.
 ///
-/// The single typed decoder for integer answers, shared by the scope that stores
-/// the value and the resolver that selects it. Two decoders is one decoder and
-/// one dialect: a resolver that accepted `+5` while the scope refused it, or
-/// vice versa, would resolve an answer and then fail to store it, and the person
-/// would see a session that accepted their number and did not act on it.
+/// The **resolver's** reading of a whole number: presence-only, because the
+/// question the tiered search asks is *does this decode to the value the person
+/// named*, and the answer to that is yes or no. The scope's reading is
+/// [`VarType::decode_answer`], which has to say *why* an answer cannot be
+/// stored and therefore distinguishes an overflow from prose; both run the same
+/// `parse::<i64>` over the same trimmed bytes, so they cannot disagree about
+/// which answers are whole numbers.
 ///
 /// `None` means *not a whole number in range* — an empty answer, prose, a
 /// decimal, or a magnitude beyond [`i64`]. It is not an error: an unrecognized
@@ -133,6 +507,42 @@ impl fmt::Display for AnswerDomain {
         match *self {
             Self::Label => formatter.write_str("label"),
             Self::Integer => formatter.write_str("integer"),
+        }
+    }
+}
+
+/// Why one answer string cannot be stored in a variable.
+///
+/// A closed verdict rather than a message, so a caller branches on the cause
+/// instead of parsing prose, and so the set of ways an answer can be unusable
+/// is stated where a reviewer reads it. It is what
+/// [`VarType::decode_answer`] returns, and therefore what flow validation
+/// reports through [`BotError::AskOptionNotAssignable`] when a candidate is
+/// unusable at load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AnswerRejection {
+    /// The answer is not a decimal integer.
+    NotAnInteger,
+    /// The answer is a decimal integer outside the signed 64-bit range.
+    IntegerOutOfRange,
+    /// The answer is not `true`/`false` or `yes`/`no`.
+    NotABoolean,
+    /// The answer is not one of the variable's declared choice values.
+    NotADeclaredChoice,
+}
+
+impl fmt::Display for AnswerRejection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::NotAnInteger => formatter.write_str("it is not a decimal integer"),
+            Self::IntegerOutOfRange => {
+                formatter.write_str("it is outside the signed 64-bit integer range")
+            }
+            Self::NotABoolean => formatter.write_str("it is not true/false or yes/no"),
+            Self::NotADeclaredChoice => {
+                formatter.write_str("it is not one of the declared choice values")
+            }
         }
     }
 }
@@ -556,19 +966,45 @@ impl Terminal {
 pub struct FlowBounds {
     /// Maximum number of runtime steps, including answer attempts.
     budget: usize,
+    /// Byte ceilings the document asks to be held to, if any.
+    ///
+    /// Absent means "whatever the operator enforces". Present means "no more
+    /// than this", and the requested ceilings are checked against the
+    /// operator's hard ceiling when the document loads: an author may declare
+    /// that this flow's text is small and may not declare that it is allowed to
+    /// be large.
+    #[serde(default)]
+    resources: Option<ResourceLimits>,
 }
 
 impl FlowBounds {
-    /// Construct bounds with a declared step budget.
+    /// Construct bounds with a declared step budget and the operator's shipped
+    /// byte ceilings.
     #[must_use]
     pub const fn new(budget: usize) -> Self {
-        Self { budget }
+        Self {
+            budget,
+            resources: None,
+        }
     }
 
     /// Return the declared step budget.
     #[must_use]
     pub const fn budget(self) -> usize {
         self.budget
+    }
+
+    /// Return the byte ceilings the document asks for, if it asks for any.
+    #[must_use]
+    pub const fn resources(self) -> Option<ResourceLimits> {
+        self.resources
+    }
+
+    /// Return these bounds with a declared byte-ceiling request attached.
+    #[must_use]
+    pub const fn with_resources(mut self, resources: ResourceLimits) -> Self {
+        self.resources = Some(resources);
+        self
     }
 }
 
@@ -707,6 +1143,57 @@ impl FlowSpec {
         self.nodes.get(id)
     }
 
+    /// The outcome one node ends a session with, after the terminal map is
+    /// consulted.
+    ///
+    /// The one calculation of "what does this document say happens here",
+    /// shared by validation and execution. `None` means the node is not a
+    /// terminal node — an `End`, `Handoff`, or `Refer` — and no outcome is
+    /// defined for it.
+    ///
+    /// A declared terminal is authoritative for every terminal node, which is
+    /// what makes an `End` node's refusal override work. On a `Handoff` or
+    /// `Refer` node that same authority would silently discard the target the
+    /// node was written to hand to, so a declaration that *contradicts* the
+    /// node's own outcome is refused at load
+    /// ([`BotError::ConflictingTerminalDeclaration`]) rather than accepted and
+    /// ignored: a document that says a referral is refused is either corrected
+    /// or rejected, never run as a permissive referral. A declaration that
+    /// repeats the node's own outcome is accepted and is what this method
+    /// returns, so the declaration is read rather than merely tolerated.
+    #[must_use]
+    pub fn effective_terminal(&self, node_id: &str) -> Option<Terminal> {
+        // A `?` here is the non-terminal case, and it is why the declared
+        // lookup cannot be written first: an `End`-only declaration on a `Say`
+        // node is refused by validation and has no effective outcome.
+        let intrinsic = self.intrinsic_terminal(node_id)?;
+        match self.terminals.get(node_id) {
+            Some(declared) => Some(declared.clone()),
+            None => Some(intrinsic),
+        }
+    }
+
+    /// The outcome a terminal node carries before the terminal map is
+    /// consulted: `End` completes, `Handoff` names its target, and `Refer`
+    /// names its target.
+    ///
+    /// Private because it is the half of [`Self::effective_terminal`] that is
+    /// only meaningful inside the crate: a caller that wants the document's
+    /// outcome wants the declared one, and getting the intrinsic half would be
+    /// getting the answer this method exists to be corrected from.
+    fn intrinsic_terminal(&self, node_id: &str) -> Option<Terminal> {
+        match *self.nodes.get(node_id)? {
+            NodeKind::End => Some(Terminal::Completed),
+            NodeKind::Handoff { ref target } => Some(Terminal::HandedOff {
+                target: target.clone(),
+            }),
+            NodeKind::Refer { ref target, .. } => Some(Terminal::Referred {
+                target: target.clone(),
+            }),
+            _ => None,
+        }
+    }
+
     /// Return all explicit edge destinations from one node.
     fn edge_targets(&self, from: &str) -> Vec<NodeId> {
         self.edges
@@ -729,8 +1216,26 @@ pub mod flow {
     }
 }
 
-/// Validate a flow's graph, variables, templates, and budget.
+/// Validate a flow's graph, variables, templates, and budget against the
+/// operator's shipped byte ceilings.
 fn validate_flow(spec: &FlowSpec) -> Result<(), BotError> {
+    validate_flow_within(spec, ResourceLimits::shipped())
+}
+
+/// Validate a flow's graph, variables, templates, budget, and byte ceilings.
+///
+/// The ceilings are a parameter because two callers enforce different ones:
+/// [`FlowSpec::validate`] applies the shipped ceilings a document must satisfy
+/// on its own, and a session applies the effective ceilings it will run under —
+/// its own, narrowed by whatever the document asked for. Both runs are the same
+/// validation, so "the document is valid" and "the document can be run here"
+/// cannot disagree about a candidate list or a template.
+fn validate_flow_within(spec: &FlowSpec, limits: ResourceLimits) -> Result<(), BotError> {
+    // First, and before any structural work: a document that asks for a
+    // ceiling above the operator's gets a diagnostic naming the axis it asked
+    // about, not a run under a bound it did not choose.
+    let requested = spec.bounds.resources.unwrap_or_default().within_ceiling()?;
+    let effective = requested.narrowed(limits);
     if spec.nodes.is_empty() {
         return Err(BotError::MalformedFlow {
             cause: "flow declares no nodes".into(),
@@ -754,7 +1259,7 @@ fn validate_flow(spec: &FlowSpec) -> Result<(), BotError> {
 
     let mut writers = BTreeSet::new();
     for (node_id, kind) in &spec.nodes {
-        validate_node(spec, node_id, kind, &mut writers)?;
+        validate_node(spec, node_id, kind, effective, &mut writers)?;
     }
     for name in spec.vars.keys() {
         if !writers.contains(name) {
@@ -771,7 +1276,173 @@ fn validate_flow(spec: &FlowSpec) -> Result<(), BotError> {
         }
         check_target(&spec.nodes, from, to)?;
     }
+    reject_uninitialized_reads(spec)?;
     reject_unreachable(spec)
+}
+
+/// Reject every read of a variable that is not definitely assigned on all
+/// paths reaching the reading node.
+///
+/// A global writer set answers "does some node write this variable", which is
+/// not the question a read has to pass: a session starts with an empty
+/// [`VarScope`], so a writer that executes only after the read, or only on a
+/// branch the read is not reached through, leaves the read with no value and
+/// [`TemplateInterpolator`] returning [`BotError::VariableUnset`] on the first
+/// step. This is a forward *must* (definite-assignment) analysis over the
+/// execution graph instead of a membership test over the document.
+///
+/// The state of a node is the set of variables assigned on **every** path from
+/// the entry to that node, which is a greatest fixed point: every node is
+/// seeded with the full declaration set and each step intersects an outgoing
+/// state into its successors, so states only shrink and a cycle converges. A
+/// node no entry path reaches keeps that top element and is never accused
+/// here — reachability is [`reject_unreachable`]'s single verdict, and one
+/// defect must not surface as two.
+///
+/// Supported assignments and guards, stated so the boundary is not guessed at:
+/// an [`NodeKind::Ask`] assigns its variable on each outgoing route and
+/// nowhere earlier; every other node kind passes its incoming state through
+/// unchanged. No symbolic reasoning about [`Predicate`] values is attempted,
+/// so a branch is treated as able to take both successors, and a variable
+/// assigned on one predecessor of a join but not another is *not* available at
+/// the join. Both choices fail toward silence rather than rejecting a flow the
+/// runner would have executed.
+fn reject_uninitialized_reads(spec: &FlowSpec) -> Result<(), BotError> {
+    let universe: BTreeSet<String> = spec.vars.keys().cloned().collect();
+    let mut available: BTreeMap<NodeId, BTreeSet<String>> = spec
+        .nodes
+        .keys()
+        .map(|node_id| (node_id.clone(), universe.clone()))
+        .collect();
+    available.insert(spec.entry.clone(), BTreeSet::new());
+
+    let mut pending: VecDeque<NodeId> = spec.nodes.keys().cloned().collect();
+    while let Some(node_id) = pending.pop_front() {
+        let Some(kind) = spec.nodes.get(&node_id) else {
+            continue;
+        };
+        let Some(incoming) = available.get(&node_id).cloned() else {
+            continue;
+        };
+        let mut outgoing = incoming;
+        if let NodeKind::Ask { ref var, .. } = *kind {
+            outgoing.insert(var.clone());
+        }
+        for target in successor_targets(spec, &node_id, kind) {
+            let Some(state) = available.get_mut(&target) else {
+                continue;
+            };
+            let before = state.len();
+            state.retain(|name| outgoing.contains(name));
+            if state.len() != before {
+                pending.push_back(target);
+            }
+        }
+    }
+
+    for (node_id, kind) in &spec.nodes {
+        let Some(state) = available.get(node_id) else {
+            continue;
+        };
+        for name in node_reads(spec, node_id, kind)? {
+            if !state.contains(&name) {
+                return Err(BotError::VariableReadBeforeInit {
+                    node: node_id.clone(),
+                    name,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Collect every variable a node reads when it executes.
+///
+/// "Reads" means the references the executor actually resolves, not every name
+/// a node mentions. [`NodeKind::Branch`] is the case that separates the two:
+/// its `var` field is documented as the branch subject, but the executor
+/// destructures `when` alone and never resolves `var` against the scope, so a
+/// branch subject that some path leaves unassigned cannot fail a run and is
+/// not counted here. The predicate's own [`ValueExpr::Var`] references are
+/// where a branch reads, and they are counted.
+///
+/// Only declared names are returned. An undeclared one is already
+/// [`BotError::UndeclaredVariable`] from `validate_node`, which runs first, so
+/// the definite-assignment pass cannot preempt it with a second verdict on the
+/// same defect.
+fn node_reads(
+    spec: &FlowSpec,
+    node_id: &str,
+    kind: &NodeKind,
+) -> Result<BTreeSet<String>, BotError> {
+    match *kind {
+        NodeKind::Say { ref text } => declared_template_reads(spec, node_id, text, "say.text"),
+        NodeKind::Refer { ref text, .. } => {
+            declared_template_reads(spec, node_id, text, "refer.text")
+        }
+        NodeKind::Branch { ref when, .. } => {
+            let mut names = BTreeSet::new();
+            collect_predicate_variables(when, &mut names);
+            names.retain(|name| spec.vars.contains_key(name));
+            Ok(names)
+        }
+        NodeKind::Ask { .. }
+        | NodeKind::Handoff { .. }
+        | NodeKind::Route { .. }
+        | NodeKind::End => Ok(BTreeSet::new()),
+    }
+}
+
+/// Return the declared variables a template interpolates.
+fn declared_template_reads(
+    spec: &FlowSpec,
+    node_id: &str,
+    text: &str,
+    field: &'static str,
+) -> Result<BTreeSet<String>, BotError> {
+    let compiled =
+        CompiledTemplate::compile(text).map_err(|_error| BotError::MalformedTemplate {
+            node: node_id.to_owned(),
+            field,
+        })?;
+    let mut names = BTreeSet::new();
+    for part in compiled.parts() {
+        if let TemplatePart::Variable(name) = *part
+            && spec.vars.contains_key(name)
+        {
+            names.insert(name.to_owned());
+        }
+    }
+    Ok(names)
+}
+
+/// Collect the variable references of a predicate expression.
+fn collect_predicate_variables(predicate: &Predicate, into: &mut BTreeSet<String>) {
+    match *predicate {
+        Predicate::Const(_) => {}
+        Predicate::Eq(ref left, ref right)
+        | Predicate::Ne(ref left, ref right)
+        | Predicate::Lt(ref left, ref right)
+        | Predicate::Le(ref left, ref right)
+        | Predicate::Gt(ref left, ref right)
+        | Predicate::Ge(ref left, ref right) => {
+            collect_expr_variables(left, into);
+            collect_expr_variables(right, into);
+        }
+        Predicate::And(ref items) | Predicate::Or(ref items) => {
+            for item in items {
+                collect_predicate_variables(item, into);
+            }
+        }
+        Predicate::Not(ref inner) => collect_predicate_variables(inner, into),
+    }
+}
+
+/// Collect the variable references of one predicate operand.
+fn collect_expr_variables(expression: &ValueExpr, into: &mut BTreeSet<String>) {
+    if let ValueExpr::Var(ref name) = *expression {
+        into.insert(name.clone());
+    }
 }
 
 /// Validate variable declaration names and choice contents.
@@ -797,8 +1468,19 @@ fn validate_declarations(vars: &BTreeMap<String, VarType>) -> Result<(), BotErro
 }
 
 /// Validate one terminal declaration and its node kind.
+///
+/// Two invariants, and the second is the one that was missing: a declaration
+/// must name a terminal node, and on a node whose kind already fixes the
+/// outcome it must not contradict it. `End` completes with nothing said about
+/// where the person goes, so every declared outcome is a genuine override and
+/// is accepted. A `Handoff` or `Refer` node already names its target, so a
+/// declaration of a different outcome — or of the same kind aimed somewhere
+/// else — is an authoring contradiction between two statements in one
+/// document, and refusing it is the only reading that cannot be wrong. A
+/// declaration that repeats the node's own outcome is accepted; it is then
+/// read by [`FlowSpec::effective_terminal`] rather than ignored.
 fn validate_terminals(spec: &FlowSpec) -> Result<(), BotError> {
-    for node_id in spec.terminals.keys() {
+    for (node_id, declared) in &spec.terminals {
         let Some(kind) = spec.nodes.get(node_id) else {
             return Err(BotError::InvalidTransitionTarget {
                 from: "<terminal>".into(),
@@ -813,6 +1495,29 @@ fn validate_terminals(spec: &FlowSpec) -> Result<(), BotError> {
                 cause: format!("terminal declaration {node_id:?} names a non-terminal node"),
             });
         }
+        // `End` has an intrinsic outcome too, but it is `Completed` — the
+        // absence of a destination rather than a claim about one — so a
+        // declaration replaces it instead of conflicting with it. Only the two
+        // node kinds that name a target can be contradicted.
+        if matches!(*kind, NodeKind::End) {
+            continue;
+        }
+        let Some(intrinsic) = spec.intrinsic_terminal(node_id) else {
+            // Unreachable on a validated document: the kind was just checked to
+            // be one of the three terminal kinds, and every one of them has an
+            // intrinsic outcome. Reported rather than skipped so a future node
+            // kind added to the check above cannot silently lose the rule.
+            return Err(BotError::MalformedFlow {
+                cause: format!("terminal declaration {node_id:?} has no intrinsic outcome"),
+            });
+        };
+        if intrinsic != *declared {
+            return Err(BotError::ConflictingTerminalDeclaration {
+                node: node_id.clone(),
+                intrinsic,
+                declared: declared.clone(),
+            });
+        }
     }
     Ok(())
 }
@@ -822,11 +1527,12 @@ fn validate_node(
     spec: &FlowSpec,
     node_id: &str,
     kind: &NodeKind,
+    limits: ResourceLimits,
     writers: &mut BTreeSet<String>,
 ) -> Result<(), BotError> {
     match *kind {
         NodeKind::Say { ref text } => {
-            validate_template(spec, node_id, text, "say.text")?;
+            validate_template(spec, node_id, text, "say.text", limits)?;
             if spec.edge_targets(node_id).len() > 1 {
                 return Err(BotError::MalformedFlow {
                     cause: format!("say node {node_id:?} has multiple continuations"),
@@ -843,7 +1549,7 @@ fn validate_node(
             ref options,
             ref routes,
         } => {
-            validate_variable_reference(spec, node_id, var)?;
+            let declared = declared_variable(spec, var)?;
             writers.insert(var.clone());
             if options.is_empty() || has_duplicate_strings(options) {
                 return Err(BotError::MalformedFlow {
@@ -872,6 +1578,39 @@ fn validate_node(
                     });
                 };
                 check_target(&spec.nodes, node_id, target)?;
+                // Every candidate is decoded with the same decoder the runtime
+                // assigns with, so "the flow asks a question the variable
+                // cannot hold an answer to" is a load-time refusal rather than
+                // a conversation the person cannot complete.
+                let value = match declared.decode_answer(option) {
+                    Ok(value) => value,
+                    Err(rejection) => {
+                        return Err(BotError::AskOptionNotAssignable {
+                            node: node_id.to_owned(),
+                            variable: var.clone(),
+                            option: option.clone(),
+                            expected: declared.label(),
+                            cause: rejection.to_string(),
+                        });
+                    }
+                };
+                // Then that the value fits the session that will store it.
+                // "The candidate cannot be held" and "the candidate cannot be
+                // held *here*" are different statements, and both are knowable
+                // while the document is loading: the second one is a session
+                // whose value ceiling is below the option it asked for, and
+                // deferring it to the person's answer would charge them a step
+                // for an operator's configuration.
+                let value_bytes = limits.get(ResourceAxis::Value);
+                if value.rendered_bytes() > value_bytes {
+                    return Err(BotError::AskOptionTooLarge {
+                        node: node_id.to_owned(),
+                        variable: var.clone(),
+                        option: option.clone(),
+                        bytes: value.rendered_bytes(),
+                        limit: value_bytes,
+                    });
+                }
             }
             for (option, target) in routes {
                 if !options.iter().any(|candidate| candidate == option) {
@@ -895,7 +1634,7 @@ fn validate_node(
         }
         NodeKind::Handoff { .. } => {}
         NodeKind::Refer { ref text, .. } => {
-            validate_template(spec, node_id, text, "refer.text")?;
+            validate_template(spec, node_id, text, "refer.text", limits)?;
         }
         NodeKind::Route {
             ref dispatch,
@@ -956,6 +1695,15 @@ fn validate_variable_reference(spec: &FlowSpec, node_id: &str, name: &str) -> Re
     }
 }
 
+/// Resolve a variable's declared type, refusing an undeclared name.
+fn declared_variable<'a>(spec: &'a FlowSpec, name: &str) -> Result<&'a VarType, BotError> {
+    spec.vars
+        .get(name)
+        .ok_or_else(|| BotError::UndeclaredVariable {
+            name: name.to_owned(),
+        })
+}
+
 /// Validate a predicate's variable references and non-empty boolean lists.
 fn validate_predicate(
     spec: &FlowSpec,
@@ -998,21 +1746,55 @@ fn validate_expr(spec: &FlowSpec, _node_id: &str, expression: &ValueExpr) -> Res
     Ok(())
 }
 
-/// Validate interpolation markers and their declared names.
+/// Validate one template's syntax, its declared names, and its static floor.
+///
+/// The floor is the part of the expansion that is known without running the
+/// flow: the literal bytes, which every render must contain whatever the
+/// variables turn out to hold. A template whose literals alone exceed the
+/// record ceiling can never render, so it is refused here rather than at the
+/// node that would speak it. That is the only static size claim available —
+/// the rest of the expansion depends on answers this cannot see — and it is
+/// exactly the claim that is true unconditionally.
 fn validate_template(
     spec: &FlowSpec,
     node_id: &str,
     template: &str,
     field: &'static str,
+    limits: ResourceLimits,
 ) -> Result<(), BotError> {
-    let names = template_variables(template).map_err(|()| BotError::MalformedTemplate {
-        node: node_id.to_owned(),
-        field,
-    })?;
-    for name in names {
-        if !spec.vars.contains_key(&name) {
-            return Err(BotError::UndeclaredVariable { name });
+    let compiled =
+        CompiledTemplate::compile(template).map_err(|_error| BotError::MalformedTemplate {
+            node: node_id.to_owned(),
+            field,
+        })?;
+    let mut literals = 0usize;
+    for part in compiled.parts() {
+        match *part {
+            TemplatePart::Literal(text) => {
+                literals = literals.checked_add(text.len()).ok_or(
+                    BotError::TemplateExpansionTooLarge {
+                        node: node_id.to_owned(),
+                        bytes: usize::MAX,
+                        limit: limits.get(ResourceAxis::Record),
+                    },
+                )?;
+            }
+            TemplatePart::Variable(name) => {
+                if !spec.vars.contains_key(name) {
+                    return Err(BotError::UndeclaredVariable {
+                        name: name.to_owned(),
+                    });
+                }
+            }
         }
+    }
+    let record_bytes = limits.get(ResourceAxis::Record);
+    if literals > record_bytes {
+        return Err(BotError::TemplateExpansionTooLarge {
+            node: node_id.to_owned(),
+            bytes: literals,
+            limit: record_bytes,
+        });
     }
     Ok(())
 }
@@ -1102,27 +1884,6 @@ fn valid_identifier(value: &str) -> bool {
     };
     (first.is_ascii_alphabetic() || first == '_')
         && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
-}
-
-/// Find all interpolation names in a template.
-fn template_variables(template: &str) -> Result<BTreeSet<String>, ()> {
-    let mut names = BTreeSet::new();
-    let mut cursor = 0;
-    while let Some(relative_start) = template[cursor..].find("${") {
-        let start = cursor.saturating_add(relative_start);
-        let name_start = start.saturating_add(2);
-        let Some(relative_end) = template[name_start..].find('}') else {
-            return Err(());
-        };
-        let end = name_start.saturating_add(relative_end);
-        let name = &template[name_start..end];
-        if !valid_identifier(name) {
-            return Err(());
-        }
-        names.insert(name.to_owned());
-        cursor = end.saturating_add(1);
-    }
-    Ok(names)
 }
 
 /// Reject unknown tagged node kinds before serde turns them into a generic
@@ -1217,52 +1978,91 @@ impl VarScope {
     }
 
     /// Parse and assign an answer according to the variable declaration.
+    ///
+    /// Runs [`VarType::decode_answer`], the same decoder flow validation runs
+    /// over every ask candidate. For a validated flow the decode cannot fail:
+    /// the candidate that reaches here is one validation already accepted. It
+    /// stays a `Result` because this method is public and a caller may hold a
+    /// scope that no `FlowSpec` validated.
     pub fn set_from_answer(&mut self, name: &str, answer: &str) -> Result<(), BotError> {
+        self.set_from_answer_within(name, answer, MAX_VALUE_BYTES)
+    }
+
+    /// Parse and assign an answer under an explicit value ceiling.
+    ///
+    /// The decoder and the store, plus the third step a session needs: the
+    /// value has to fit. Sizing happens between decoding and storing, so a
+    /// candidate that decodes is refused before the scope holds it — which is
+    /// what keeps "accepted" and "retained" the same word.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BotError::InvalidVariableValue`] for an answer the declared
+    /// type cannot hold, and [`BotError::ValueTooLarge`] for one that decodes
+    /// to a value wider than `value_bytes`.
+    pub fn set_from_answer_within(
+        &mut self,
+        name: &str,
+        answer: &str,
+        value_bytes: usize,
+    ) -> Result<(), BotError> {
         let Some(declared) = self.declarations.get(name) else {
             return Err(BotError::UndeclaredVariable {
                 name: name.to_owned(),
             });
         };
-        let value = match *declared {
-            VarType::String => Value::String(answer.to_owned()),
-            VarType::Integer => match decode_integer(answer) {
-                Some(value) => Value::Integer(value),
-                None => {
-                    return Err(BotError::InvalidVariableValue {
-                        variable: name.to_owned(),
-                        value: answer.to_owned(),
-                    });
-                }
-            },
-            VarType::Boolean => match answer.trim().to_ascii_lowercase().as_str() {
-                "true" | "yes" => Value::Boolean(true),
-                "false" | "no" => Value::Boolean(false),
-                _ => {
-                    return Err(BotError::InvalidVariableValue {
-                        variable: name.to_owned(),
-                        value: answer.to_owned(),
-                    });
-                }
-            },
-            VarType::Choice(ref options) => {
-                let Some(option) = options
-                    .iter()
-                    .find(|option| option.eq_ignore_ascii_case(answer.trim()))
-                else {
-                    return Err(BotError::InvalidVariableValue {
-                        variable: name.to_owned(),
-                        value: answer.to_owned(),
-                    });
-                };
-                Value::Choice(option.clone())
+        // One decoder, not two: `VarType::decode_answer` is the same reading of
+        // an answer that flow validation runs, so a value this store accepts is
+        // a value the declaration would have accepted. The variant is dropped
+        // here because the scope's contract is a single "cannot hold this"
+        // error; the distinction between a non-integer and an out-of-range one
+        // is a resolver's business and is kept there.
+        let value = declared.decode_answer(answer).map_err(|_rejection| {
+            BotError::InvalidVariableValue {
+                variable: name.to_owned(),
+                value: answer.to_owned(),
             }
-        };
+        })?;
+        let bytes = value.rendered_bytes();
+        if bytes > value_bytes {
+            return Err(BotError::ValueTooLarge {
+                variable: name.to_owned(),
+                bytes,
+                limit: value_bytes,
+            });
+        }
         self.set(name, value)
     }
 
-    /// Interpolate `${name}` markers using the assigned values.
+    /// Interpolate `${name}` markers using the assigned values, under the
+    /// operator's shipped record ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BotError::MalformedTemplate`] for invalid syntax,
+    /// [`BotError::VariableUnset`] for an unresolved marker, and
+    /// [`BotError::TemplateExpansionTooLarge`] past the ceiling.
     pub fn interpolate(&self, template: &str) -> Result<String, BotError> {
-        TemplateInterpolator::new().interpolate(template, self)
+        self.interpolate_within(template, MAX_RECORD_BYTES)
+    }
+
+    /// Interpolate `${name}` markers under an explicit byte ceiling.
+    ///
+    /// A scope on its own has no session behind it, so the ceiling is an
+    /// argument. The expansion is sized before it is allocated and refused
+    /// rather than truncated: a truncated record would be a record the journal
+    /// claims happened and that nobody can read.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::interpolate`], with `record_bytes` in place of the shipped
+    /// ceiling.
+    pub fn interpolate_within(
+        &self,
+        template: &str,
+        record_bytes: usize,
+    ) -> Result<String, BotError> {
+        TemplateInterpolator::new().interpolate(template, self, "<scope>", record_bytes)
     }
 }
 
@@ -1279,32 +2079,69 @@ fn value_matches_type(declared: &VarType, value: &Value) -> bool {
     }
 }
 
-/// Interpolation seam for replacing the template engine later.
-pub trait Interpolate {
-    /// Expand `${name}` markers using the supplied scope.
-    fn interpolate(&self, template: &str, scope: &VarScope) -> Result<String, BotError>;
-}
-
-/// The shipped allocation-bounded interpolation implementation.
-#[derive(Debug, Clone, Copy, Default)]
+/// One compiled piece of a template.
+///
+/// Borrowed from the document rather than owned: a compiled template is a
+/// second view of bytes that are already resident, and copying them would make
+/// compiling cost what the expansion costs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct TemplateInterpolator;
-
-impl TemplateInterpolator {
-    /// Construct the default interpolator.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self
-    }
+pub enum TemplatePart<'a> {
+    /// Text copied to the output unchanged.
+    Literal(&'a str),
+    /// A `${name}` marker replaced by the scope's value for `name`.
+    Variable(&'a str),
 }
 
-impl Interpolate for TemplateInterpolator {
-    fn interpolate(&self, template: &str, scope: &VarScope) -> Result<String, BotError> {
-        let mut output = String::with_capacity(template.len());
+/// A template compiled once into literal and variable parts.
+///
+/// Compilation is the step that makes a byte ceiling enforceable before
+/// allocation. The parts are the template's placeholders resolved to nothing
+/// but the names they mention, so the expanded size of the whole is one
+/// addition per part, computed with checked arithmetic
+/// ([`Self::expanded_bytes`]) and compared with the caller's ceiling *before*
+/// [`Self::render`] allocates the output. Rendering an unbounded expansion to
+/// find out that it is unbounded is exactly the failure this ordering removes.
+///
+/// # Examples
+///
+/// ```
+/// use lgwks_bot::{CompiledTemplate, VarScope};
+/// use std::collections::BTreeMap;
+///
+/// let scope = VarScope::new(BTreeMap::new())?;
+/// let compiled = CompiledTemplate::compile("hello ${name}")?;
+/// assert_eq!(compiled.parts().len(), 2);
+/// // The name has no value, so the size cannot be known yet.
+/// assert!(compiled.expanded_bytes(&scope).is_err());
+/// # Ok::<(), lgwks_bot::BotError>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CompiledTemplate<'a> {
+    /// Literal and variable parts in source order.
+    parts: Vec<TemplatePart<'a>>,
+}
+
+impl<'a> CompiledTemplate<'a> {
+    /// Compile `${name}` markers into parts.
+    ///
+    /// The one template parser: the loader's template check uses it to confirm
+    /// every marker names a declared variable, and the interpolator uses it to
+    /// size and render. A second scanner would be a second grammar.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BotError::MalformedTemplate`] for an unterminated marker or a
+    /// name that is not an identifier.
+    pub fn compile(template: &'a str) -> Result<Self, BotError> {
+        let mut parts = Vec::new();
         let mut cursor = 0;
         while let Some(relative_start) = template[cursor..].find("${") {
             let start = cursor.saturating_add(relative_start);
-            output.push_str(&template[cursor..start]);
+            if start > cursor {
+                parts.push(TemplatePart::Literal(&template[cursor..start]));
+            }
             let name_start = start.saturating_add(2);
             let Some(relative_end) = template[name_start..].find('}') else {
                 return Err(BotError::MalformedTemplate {
@@ -1320,15 +2157,87 @@ impl Interpolate for TemplateInterpolator {
                     field: "template",
                 });
             }
-            let Some(value) = scope.get(name) else {
-                return Err(BotError::VariableUnset {
-                    name: name.to_owned(),
-                });
-            };
-            output.push_str(&value.to_string());
+            parts.push(TemplatePart::Variable(name));
             cursor = end.saturating_add(1);
         }
-        output.push_str(&template[cursor..]);
+        if cursor < template.len() {
+            parts.push(TemplatePart::Literal(&template[cursor..]));
+        }
+        Ok(Self { parts })
+    }
+
+    /// Return the compiled parts in source order.
+    #[must_use]
+    pub fn parts(&self) -> &[TemplatePart<'a>] {
+        &self.parts
+    }
+
+    /// The exact number of bytes this template expands to under `scope`.
+    ///
+    /// Exact, and computed before any output is allocated. Every part
+    /// contributes a known count, so the total is a checked sum and cannot
+    /// overflow into a small number that would pass a ceiling it should fail.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BotError::VariableUnset`] for a marker with no value, or
+    /// [`BotError::TemplateExpansionTooLarge`] with `bytes` of [`usize::MAX`]
+    /// if the sum overflows, which no real expansion can and which is reported
+    /// rather than wrapped.
+    pub fn expanded_bytes(&self, scope: &VarScope) -> Result<usize, BotError> {
+        let mut total = 0usize;
+        for part in &self.parts {
+            let bytes = match *part {
+                TemplatePart::Literal(text) => text.len(),
+                TemplatePart::Variable(name) => {
+                    let Some(value) = scope.get(name) else {
+                        return Err(BotError::VariableUnset {
+                            name: name.to_owned(),
+                        });
+                    };
+                    value.rendered_bytes()
+                }
+            };
+            total = total
+                .checked_add(bytes)
+                .ok_or(BotError::TemplateExpansionTooLarge {
+                    node: "<runtime>".into(),
+                    bytes: usize::MAX,
+                    limit: usize::MAX,
+                })?;
+        }
+        Ok(total)
+    }
+
+    /// Render the template into a new string.
+    ///
+    /// Allocates exactly [`Self::expanded_bytes`] and cannot fail where that
+    /// did not: every marker was resolved during sizing, and the values are
+    /// re-read from the same scope. Callers with a ceiling call
+    /// [`Self::expanded_bytes`] first — [`Interpolate::interpolate`] is that
+    /// caller — so the refusal happens before this runs rather than after it
+    /// has produced the text it was supposed to avoid producing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BotError::VariableUnset`] if a value disappeared between
+    /// sizing and rendering. A scope is not mutated during a render, so this is
+    /// reachable only through a caller that interleaves the two.
+    pub fn render(&self, scope: &VarScope) -> Result<String, BotError> {
+        let mut output = String::new();
+        for part in &self.parts {
+            match *part {
+                TemplatePart::Literal(text) => output.push_str(text),
+                TemplatePart::Variable(name) => {
+                    let Some(value) = scope.get(name) else {
+                        return Err(BotError::VariableUnset {
+                            name: name.to_owned(),
+                        });
+                    };
+                    output.push_str(&value.to_string());
+                }
+            }
+        }
         Ok(output)
     }
 }
@@ -1406,6 +2315,82 @@ impl<'a> Question<'a> {
     }
 }
 
+/// Interpolation seam for replacing the template engine later.
+pub trait Interpolate {
+    /// Expand `${name}` markers using the supplied scope, refusing an
+    /// expansion larger than `limit` bytes.
+    ///
+    /// `limit` is a parameter rather than a property of the interpolator
+    /// because the ceiling is the session's, not the engine's: the same
+    /// interpolator serves a scope with the shipped ceiling and a session with
+    /// a tighter one. `node` names the flow node the template came from and is
+    /// carried into the refusal, which is what makes an oversized expansion
+    /// attributable to the line that caused it.
+    ///
+    /// Implementations must check the size *before* allocating the output.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BotError::MalformedTemplate`] for invalid syntax,
+    /// [`BotError::VariableUnset`] for an unresolved marker, and
+    /// [`BotError::TemplateExpansionTooLarge`] for an expansion over `limit`.
+    fn interpolate(
+        &self,
+        template: &str,
+        scope: &VarScope,
+        node: &str,
+        limit: usize,
+    ) -> Result<String, BotError>;
+}
+
+/// The shipped bounded interpolation implementation.
+///
+/// Allocation-bounded in the strict sense: the expanded byte count is computed
+/// from the compiled template and refused when it exceeds the caller's ceiling,
+/// so the output buffer this creates is never larger than that ceiling no
+/// matter how many times a placeholder repeats.
+#[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
+pub struct TemplateInterpolator;
+
+impl TemplateInterpolator {
+    /// Construct the default interpolator.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl Interpolate for TemplateInterpolator {
+    fn interpolate(
+        &self,
+        template: &str,
+        scope: &VarScope,
+        node: &str,
+        limit: usize,
+    ) -> Result<String, BotError> {
+        let compiled = CompiledTemplate::compile(template).map_err(|error| match error {
+            // The compile-time diagnostics name the runtime as their node,
+            // because the compiler is not handed the node it is compiling for.
+            // Here it is known, so it replaces the placeholder.
+            BotError::MalformedTemplate { field, .. } => BotError::MalformedTemplate {
+                node: node.to_owned(),
+                field,
+            },
+            other => other,
+        })?;
+        let bytes = compiled.expanded_bytes(scope)?;
+        if bytes > limit {
+            return Err(BotError::TemplateExpansionTooLarge {
+                node: node.to_owned(),
+                bytes,
+                limit,
+            });
+        }
+        compiled.render(scope)
+    }
+}
+
 /// Free-text option resolver seam.
 pub trait Resolver {
     /// Resolves an utterance against the question in front of the person.
@@ -1453,12 +2438,31 @@ pub enum DegradedReason {
     /// The semantic tier's embedder returned an error, or a vector of the
     /// wrong length.
     EmbedderUnavailable,
+    /// An embedding came back as a value no angle can be computed from, so a
+    /// comparison the decision needs was never made.
+    ///
+    /// The embedder answered, and its answer is not a direction: an all-zero
+    /// vector, or one carrying `NaN` or an infinity. That is a different
+    /// failure from [`Self::EmbedderUnavailable`] and has a different repair —
+    /// nothing is down, one of the vectors is degenerate — which is why it is
+    /// not folded into it.
+    ///
+    /// The finer cause is carried by [`lgwks_std::similarity::CosineError`],
+    /// which separates a zero magnitude from a non-finite one. It is not
+    /// repeated here because the routing is identical: a comparison set missing
+    /// even one member cannot produce the `Resolved` or `Absent` verdict a
+    /// complete set produces, so the session re-asks and records the cause
+    /// whichever of the two it was.
+    UnmeasurableEmbedding,
 }
 
 impl fmt::Display for DegradedReason {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::EmbedderUnavailable => formatter.write_str("the embedder is unavailable"),
+            Self::UnmeasurableEmbedding => {
+                formatter.write_str("an embedding could not be measured")
+            }
         }
     }
 }
@@ -1536,14 +2540,20 @@ pub enum Resolution {
     /// means the options were all considered and none fit: the person was not
     /// understood, and asking again in different words can help. `Degraded`
     /// means the resolver never got to consider them: a dependency it needs is
-    /// unavailable, and asking the person again cannot help — the same
-    /// utterance will degrade identically.
+    /// unavailable, or answered with a value no comparison can be drawn from,
+    /// and asking the person again cannot help — the same utterance will
+    /// degrade identically.
     ///
     /// Carries no `best_score`, deliberately. There is no score; a failed
     /// resolver observed no similarity, and reporting `0.0` would be a
-    /// measurement that was never taken. That is the same two-valued record
+    /// measurement that was never taken. It is the same two-valued record
     /// [`Self::Ambiguous`] exists to remove — *nothing matched* versus *may have
     /// matched, and we could not look* — arriving a fourth time.
+    ///
+    /// That is also why an incomplete comparison set degrades instead of
+    /// deciding: a winner measured against fewer competitors than the list
+    /// holds is a winner over a field that was never fully looked at, and the
+    /// margin it reports would be the whole of its own score.
     Degraded {
         /// The cause, for the caller to record and route on.
         reason: DegradedReason,
@@ -1692,6 +2702,10 @@ pub struct Session {
     steps: usize,
     /// Last accepted answer, used by [`NodeKind::Route`].
     last_utterance: Option<String>,
+    /// Effective byte ceilings for this session.
+    limits: ResourceLimits,
+    /// Bytes retained so far: every transcript record and visited node id.
+    retained: usize,
 }
 
 impl Session {
@@ -1717,18 +2731,46 @@ impl Session {
         Self::with_components(id, flow, resolver, MemoryJournal::new())
     }
 
-    /// Start a session with both replacement seams installed.
-    pub fn with_components<R, J>(
+    /// Start a session with a custom resolver, a custom journal, and explicit
+    /// byte ceilings.
+    ///
+    /// The operator's knob. `limits` may be tighter than
+    /// [`ResourceLimits::shipped`] and may not be looser; a value above the
+    /// shipped ceiling is refused with [`BotError::ResourceLimitAboveCeiling`]
+    /// before the flow is even examined. What the session ends up enforcing is
+    /// the narrower of `limits` and whatever the document asks for in its
+    /// [`FlowBounds`], per axis, so neither side can widen what the other
+    /// narrowed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BotError::ResourceLimitAboveCeiling`] for a ceiling above the
+    /// operator's, and every error [`Self::with_components`] returns.
+    pub fn with_components_and_limits<R, J>(
         id: impl Into<SessionId>,
         flow: FlowSpec,
         resolver: R,
         journal: J,
+        limits: ResourceLimits,
     ) -> Result<Self, BotError>
     where
         R: Resolver + 'static,
         J: Journal + 'static,
     {
-        flow::validate(&flow)?;
+        // Both sets are checked against the ceiling and then narrowed against
+        // each other, in that order: a request above the ceiling is a refusal
+        // wherever it comes from, and two in-range requests combine by taking
+        // the smaller. Doing it the other way round would let a document's
+        // in-range tightening hide an operator's out-of-range one.
+        let operator = limits.within_ceiling()?;
+        let requested = flow.bounds.resources.unwrap_or_default().within_ceiling()?;
+        let effective = operator.narrowed(requested);
+        // Re-validated here rather than trusted from construction, because the
+        // public `json` façade parses a `FlowSpec` without calling
+        // `FlowSpec::from_json`, and because this is the point at which the
+        // effective ceilings — the ones this session will actually enforce —
+        // become known to validation.
+        validate_flow_within(&flow, effective)?;
         let scope = VarScope::new(flow.vars.clone())?;
         let mut session = Self {
             id: id.into(),
@@ -1742,9 +2784,44 @@ impl Session {
             terminal: None,
             steps: 0,
             last_utterance: None,
+            limits: effective,
+            retained: 0,
         };
         session.drive()?;
         Ok(session)
+    }
+
+    /// Start a session with explicit byte ceilings and the default seams.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::with_components_and_limits`].
+    pub fn with_limits(
+        id: impl Into<SessionId>,
+        flow: FlowSpec,
+        limits: ResourceLimits,
+    ) -> Result<Self, BotError> {
+        Self::with_components_and_limits(
+            id,
+            flow,
+            crate::language::LanguageResolver::new(),
+            MemoryJournal::new(),
+            limits,
+        )
+    }
+
+    /// Start a session with both replacement seams installed.
+    pub fn with_components<R, J>(
+        id: impl Into<SessionId>,
+        flow: FlowSpec,
+        resolver: R,
+        journal: J,
+    ) -> Result<Self, BotError>
+    where
+        R: Resolver + 'static,
+        J: Journal + 'static,
+    {
+        Self::with_components_and_limits(id, flow, resolver, journal, ResourceLimits::shipped())
     }
 
     /// Return the session identity.
@@ -1795,6 +2872,28 @@ impl Session {
         self.steps
     }
 
+    /// Return the byte ceilings this session enforces.
+    ///
+    /// The effective set: the operator's shipped ceiling, narrowed by whatever
+    /// this session's caller and this flow's [`FlowBounds`] asked for. Reported
+    /// because a bound a caller cannot read back is a bound they have to
+    /// discover by running into it.
+    #[must_use]
+    pub const fn limits(&self) -> ResourceLimits {
+        self.limits
+    }
+
+    /// Return the bytes this session currently retains.
+    ///
+    /// The sum of every transcript record's payload, path node, and role, plus
+    /// every visited node id. Each is an owned allocation the session holds, so
+    /// the total is what a caller needs to bound their own memory rather than
+    /// an estimate of it.
+    #[must_use]
+    pub const fn retained_bytes(&self) -> usize {
+        self.retained
+    }
+
     /// Submit one free-text answer. Unrecognized input is recorded, the same
     /// ask remains current, and the prompt is recorded again.
     pub fn answer(&mut self, utterance: &str) -> Result<(), BotError> {
@@ -1812,6 +2911,18 @@ impl Session {
         else {
             return Err(BotError::SessionNotAwaitingAnswer);
         };
+        // The ingress ceiling, and it comes before the step is charged and
+        // before the utterance is copied anywhere: a refused line must neither
+        // consume budget nor leave a record that reads as part of the
+        // conversation. The check is one comparison against a bounded length,
+        // so refusing costs nothing that accepting would not have cost more of.
+        let utterance_limit = self.limits.get(ResourceAxis::Utterance);
+        if utterance.len() > utterance_limit {
+            return Err(BotError::UtteranceTooLarge {
+                bytes: utterance.len(),
+                limit: utterance_limit,
+            });
+        }
         self.charge_step()?;
         let question =
             Question::new(&node_id, &options).with_domain(self.scope.answer_domain(&var));
@@ -1827,17 +2938,17 @@ impl Session {
                     .iter()
                     .filter_map(|candidate| options.get(*candidate).cloned())
                     .collect();
-                self.record(&node_id, "user", utterance);
+                self.record(&node_id, "user", utterance)?;
                 if narrowed.len() >= 2 {
-                    self.record_prompt(&node_id, &narrowed);
+                    self.record_prompt(&node_id, &narrowed)?;
                 } else {
-                    self.record_prompt(&node_id, &options);
+                    self.record_prompt(&node_id, &options)?;
                 }
                 return Ok(());
             }
             Resolution::Absent { .. } => {
-                self.record(&node_id, "user", utterance);
-                self.record_prompt(&node_id, &options);
+                self.record(&node_id, "user", utterance)?;
+                self.record_prompt(&node_id, &options)?;
                 return Ok(());
             }
             Resolution::StaleAlias {
@@ -1850,9 +2961,9 @@ impl Session {
                 // rewrote its resolver's learned vocabulary would be editing the
                 // audit record it is supposed to be producing. The record names
                 // the binding and the question; retiring it is the owner's call.
-                self.record(&node_id, "user", utterance);
-                self.record_stale_alias(&node_id, &bound_question, &option);
-                self.record_prompt(&node_id, &options);
+                self.record(&node_id, "user", utterance)?;
+                self.record_stale_alias(&node_id, &bound_question, &option)?;
+                self.record_prompt(&node_id, &options)?;
                 return Ok(());
             }
             Resolution::Degraded { reason } => {
@@ -1860,18 +2971,19 @@ impl Session {
                 // role: a transcript that renders a degraded re-ask exactly as
                 // an unclear one is how an operator concludes the person was
                 // being difficult while the embedder was down.
-                self.record(&node_id, "user", utterance);
-                self.record_degraded(&node_id, reason);
-                self.record_prompt(&node_id, &options);
+                self.record(&node_id, "user", utterance)?;
+                self.record_degraded(&node_id, reason)?;
+                self.record_prompt(&node_id, &options)?;
                 return Ok(());
             }
         };
         let Some(option) = options.get(index) else {
             return Err(BotError::ResolverReturnedInvalidOption { node: node_id });
         };
-        self.scope.set_from_answer(&var, option)?;
+        self.scope
+            .set_from_answer_within(&var, option, self.limits.get(ResourceAxis::Value))?;
         self.last_utterance = Some(utterance.to_owned());
-        self.record(&node_id, "user", utterance);
+        self.record(&node_id, "user", utterance)?;
         let Some(target) = routes.get(option) else {
             return Err(BotError::MissingAskRoute {
                 node: node_id,
@@ -1908,6 +3020,11 @@ impl Session {
                 return Ok(());
             };
             self.charge_step()?;
+            // The path is retained like a record is, and charged like one: a
+            // visited id is an owned copy of the node id the document carries,
+            // so the same loop that produces unbounded records would otherwise
+            // produce an unbounded path out of the same repetition.
+            self.charge_retention(node_id.len())?;
             self.visited.push(node_id.clone());
             let Some(kind) = self.flow.node(&node_id).cloned() else {
                 return Err(BotError::InvalidTransitionTarget {
@@ -1917,15 +3034,15 @@ impl Session {
             };
             match kind {
                 NodeKind::Say { text } => {
-                    let rendered = TemplateInterpolator::new().interpolate(&text, &self.scope)?;
-                    self.record(&node_id, "assistant", &rendered);
+                    let rendered = self.render(&node_id, &text)?;
+                    self.record(&node_id, "assistant", &rendered)?;
                     let Some(target) = self.flow.edge_targets(&node_id).into_iter().next() else {
                         return Err(BotError::MissingTransition { node: node_id });
                     };
                     self.current = Some(target);
                 }
                 NodeKind::Ask { options, .. } => {
-                    self.record_prompt(&node_id, &options);
+                    self.record_prompt(&node_id, &options)?;
                     return Ok(());
                 }
                 NodeKind::Branch {
@@ -1940,15 +3057,20 @@ impl Session {
                         otherwise
                     });
                 }
-                NodeKind::Handoff { target } => {
-                    self.terminal = Some(Terminal::HandedOff { target });
-                    self.current = None;
-                }
-                NodeKind::Refer { target, text } => {
-                    let rendered = TemplateInterpolator::new().interpolate(&text, &self.scope)?;
-                    self.record(&node_id, "assistant", &rendered);
-                    self.terminal = Some(Terminal::Referred { target });
-                    self.current = None;
+                // The two terminal kinds that emit nothing before they end.
+                // Both read the outcome from the document rather than
+                // constructing it from the node, so a declared outcome is
+                // executed here and not only checked at load.
+                NodeKind::Handoff { .. } | NodeKind::End => self.finish(&node_id)?,
+                NodeKind::Refer { text, .. } => {
+                    // The text is emitted before the outcome is set, and the
+                    // only declared outcome a `refer` node can carry is the
+                    // referral itself — validation refuses anything else — so
+                    // this text is never spoken for an outcome that
+                    // contradicts it.
+                    let rendered = self.render(&node_id, &text)?;
+                    self.record(&node_id, "assistant", &rendered)?;
+                    self.finish(&node_id)?;
                 }
                 NodeKind::Route { dispatch, fallback } => {
                     self.current = Some(if self.last_utterance.is_some() {
@@ -1957,34 +3079,129 @@ impl Session {
                         fallback
                     });
                 }
-                NodeKind::End => {
-                    self.terminal = Some(
-                        self.flow
-                            .terminals
-                            .get(&node_id)
-                            .cloned()
-                            .unwrap_or(Terminal::Completed),
-                    );
-                    self.current = None;
-                }
             }
         }
     }
 
+    /// End the session with the outcome the document gives one terminal node.
+    ///
+    /// The one place a session reads a terminal outcome. `drive` reaches this
+    /// for every terminal node kind, so the outcome validation checked and the
+    /// outcome execution returns are the same value from the same calculation
+    /// ([`FlowSpec::effective_terminal`]) and cannot drift: an earlier runner
+    /// consulted the terminal map for `End` alone, and a refusal declared on a
+    /// `handoff` node was accepted by validation and ignored here.
+    fn finish(&mut self, node_id: &str) -> Result<(), BotError> {
+        let Some(outcome) = self.flow.effective_terminal(node_id) else {
+            return Err(BotError::MalformedFlow {
+                cause: format!("node {node_id:?} reached with no terminal outcome"),
+            });
+        };
+        self.terminal = Some(outcome);
+        self.current = None;
+        Ok(())
+    }
+
+    /// Render one node's template under this session's record ceiling.
+    ///
+    /// The ceiling is applied to the *computed* expansion, inside the
+    /// interpolator, before the output buffer exists. What that buys is the
+    /// whole of the amplification fix: a valid document can name a placeholder
+    /// a million times, and the cost of discovering that is a million additions
+    /// rather than a multi-gigabyte allocation.
+    fn render(&self, node_id: &str, template: &str) -> Result<String, BotError> {
+        TemplateInterpolator::new().interpolate(
+            template,
+            &self.scope,
+            node_id,
+            self.limits.get(ResourceAxis::Record),
+        )
+    }
+
+    /// Charge `bytes` against the session's retention ceiling.
+    ///
+    /// Charged before the allocation, so a refused write leaves nothing behind
+    /// to clean up: the journal has not been told, the transcript has not grown,
+    /// and the counter has not moved.
+    fn charge_retention(&mut self, bytes: usize) -> Result<(), BotError> {
+        let limit = self.limits.get(ResourceAxis::Session);
+        let total = self
+            .retained
+            .checked_add(bytes)
+            .ok_or(BotError::SessionRetentionExceeded {
+                bytes: usize::MAX,
+                limit,
+            })?;
+        if total > limit {
+            return Err(BotError::SessionRetentionExceeded {
+                bytes: total,
+                limit,
+            });
+        }
+        self.retained = total;
+        Ok(())
+    }
+
     /// Append one transcript record and forward it to the journal seam.
-    fn record(&mut self, node_id: &str, role: &str, text: &str) {
+    ///
+    /// Two ceilings, in this order, and both before either sink is touched: the
+    /// payload against the per-record ceiling, which is what makes the refusal
+    /// name the node whose text is too long, and the whole record against the
+    /// aggregate, which is what bounds a conversation the graph lets repeat.
+    /// The record's cost counts the path node and the role as well as the text,
+    /// because all three are owned copies this session retains.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BotError::RecordTooLarge`] or
+    /// [`BotError::SessionRetentionExceeded`]. Neither has written anything.
+    fn record(&mut self, node_id: &str, role: &str, text: &str) -> Result<(), BotError> {
+        let record_bytes = self.limits.get(ResourceAxis::Record);
+        if text.len() > record_bytes {
+            return Err(BotError::RecordTooLarge {
+                node: node_id.to_owned(),
+                bytes: text.len(),
+                limit: record_bytes,
+            });
+        }
+        let cost = text
+            .len()
+            .saturating_add(node_id.len())
+            .saturating_add(role.len());
+        self.charge_retention(cost)?;
         self.journal.record(node_id, role, text);
         self.transcript.push(TranscriptEntry {
             path_node: node_id.to_owned(),
             role: role.to_owned(),
             text: text.to_owned(),
         });
+        Ok(())
     }
 
     /// Record the standard prompt for an ask node.
-    fn record_prompt(&mut self, node_id: &str, options: &[String]) {
+    ///
+    /// The prompt is built from the node's candidates, so its size is checked
+    /// before it is built rather than after: a node with many long options
+    /// would otherwise allocate the joined string and *then* discover that the
+    /// record ceiling refuses it. `checked_mul` for the separators and
+    /// `checked_add` for each option, with the overflow case reported as the
+    /// same refusal rather than wrapped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BotError::RecordTooLarge`] for a prompt over the ceiling.
+    fn record_prompt(&mut self, node_id: &str, options: &[String]) -> Result<(), BotError> {
+        let bytes = prompt_bytes(options).unwrap_or(usize::MAX);
+        let record_bytes = self.limits.get(ResourceAxis::Record);
+        if bytes > record_bytes {
+            return Err(BotError::RecordTooLarge {
+                node: node_id.to_owned(),
+                bytes,
+                limit: record_bytes,
+            });
+        }
         let prompt = format!("Choose one: {}", options.join(", "));
-        self.record(node_id, "assistant", &prompt);
+        self.record(node_id, "assistant", &prompt)
     }
 
     /// Records that the resolver could not reach a verdict.
@@ -1993,9 +3210,9 @@ impl Session {
     /// failures need different repairs and a transcript is where that is
     /// decided: an absent resolution says the person's words did not fit the
     /// options, and a degraded one says the resolver never got to compare them.
-    fn record_degraded(&mut self, node_id: &str, reason: DegradedReason) {
+    fn record_degraded(&mut self, node_id: &str, reason: DegradedReason) -> Result<(), BotError> {
         let text = format!("Resolver unavailable: {reason}");
-        self.record(node_id, "resolver-degraded", &text);
+        self.record(node_id, "resolver-degraded", &text)
     }
 
     /// Records that a confirmed phrase's option is no longer offered.
@@ -2005,10 +3222,42 @@ impl Session {
     /// of the broken binding — the question it was confirmed in and the option
     /// that went away — because either one alone is unactionable. "A stale alias
     /// was ignored" tells that reader nothing they can repair.
-    fn record_stale_alias(&mut self, node_id: &str, question: &str, option: &str) {
+    fn record_stale_alias(
+        &mut self,
+        node_id: &str,
+        question: &str,
+        option: &str,
+    ) -> Result<(), BotError> {
         let text = format!("Superseded alias: question {question} no longer offers \"{option}\"");
-        self.record(node_id, "resolver-stale-alias", &text);
+        self.record(node_id, "resolver-stale-alias", &text)
     }
+}
+
+/// The byte cost of the standard ask prompt for `options`.
+///
+/// Computed rather than measured, so the caller can refuse an oversized prompt
+/// without building it. `None` means the arithmetic overflowed, which is the
+/// same refusal at a larger size: the caller maps it to the ceiling with
+/// [`usize::MAX`] bytes, and `usize::MAX` exceeds every ceiling.
+///
+/// The prefix and separator are the literals [`Session::record_prompt`]
+/// formats, and they are named here rather than repeated so the estimate and
+/// the string cannot disagree.
+fn prompt_bytes(options: &[String]) -> Option<usize> {
+    /// Literal prefix in the recorded prompt.
+    const PREFIX: &str = "Choose one: ";
+    /// Literal separator between candidates.
+    const SEPARATOR: &str = ", ";
+    let separators = options
+        .len()
+        .checked_sub(1)
+        .and_then(|count| count.checked_mul(SEPARATOR.len()))?;
+    options
+        .iter()
+        .try_fold(PREFIX.len(), |total, option| {
+            total.checked_add(option.len())
+        })?
+        .checked_add(separators)
 }
 
 /// Resolve one scalar expression from a variable scope.
@@ -2082,6 +3331,246 @@ mod tests {
         scope.set_from_answer("name", "Ada")?;
         let rendered = scope.interpolate("Hello ${name}")?;
         assert_eq!(rendered, "Hello Ada");
+        Ok(())
+    }
+
+    /// One declared type paired with candidate answer strings and the value
+    /// each must decode to.
+    fn decode_cases() -> Vec<(VarType, &'static str, Result<Value, AnswerRejection>)> {
+        let choice = || VarType::Choice(vec![String::from("yes"), String::from("no")]);
+        vec![
+            // A string variable accepts anything, untrimmed: the declared type
+            // is what decides, not a literal spelling.
+            (
+                VarType::String,
+                "Continue",
+                Ok(Value::String(String::from("Continue"))),
+            ),
+            (
+                VarType::String,
+                "  padded  ",
+                Ok(Value::String(String::from("  padded  "))),
+            ),
+            (VarType::Integer, "7", Ok(Value::Integer(7))),
+            (VarType::Integer, " -12 ", Ok(Value::Integer(-12))),
+            (VarType::Integer, "007", Ok(Value::Integer(7))),
+            (VarType::Integer, "7.5", Err(AnswerRejection::NotAnInteger)),
+            (VarType::Integer, "", Err(AnswerRejection::NotAnInteger)),
+            (
+                VarType::Integer,
+                "99999999999999999999",
+                Err(AnswerRejection::IntegerOutOfRange),
+            ),
+            (VarType::Boolean, "yes", Ok(Value::Boolean(true))),
+            (VarType::Boolean, " TRUE ", Ok(Value::Boolean(true))),
+            (VarType::Boolean, "No", Ok(Value::Boolean(false))),
+            (
+                VarType::Boolean,
+                "Continue",
+                Err(AnswerRejection::NotABoolean),
+            ),
+            (choice(), "yes", Ok(Value::Choice(String::from("yes")))),
+            (choice(), " No ", Ok(Value::Choice(String::from("no")))),
+            (
+                choice(),
+                "approve",
+                Err(AnswerRejection::NotADeclaredChoice),
+            ),
+        ]
+    }
+
+    #[test]
+    fn the_answer_decoder_is_one_function_for_validation_and_assignment() {
+        // The decode table is the whole statement of what "this candidate can
+        // be stored" means, and both the load-time check and the runtime
+        // assignment read it. Every branch of every declared type is here,
+        // including the two integer failures, which are distinct verdicts: a
+        // typo and a value too large to store need different repairs.
+        for (declared, answer, expected) in decode_cases() {
+            assert_eq!(
+                declared.decode_answer(answer),
+                expected,
+                "decoding {answer:?} as {} disagreed with the table",
+                declared.label()
+            );
+        }
+    }
+
+    #[test]
+    fn assignment_uses_the_same_decoder_validation_does() -> Result<(), BotError> {
+        // The property that makes the load-time check worth anything: for every
+        // case the decoder accepts, assigning supplies the answer to a scope
+        // and stores exactly the value the decoder named. A second, separately
+        // written assignment path is what let a flow load and then be
+        // unanswerable.
+        for (declared, answer, expected) in decode_cases() {
+            let mut declarations = BTreeMap::new();
+            declarations.insert(String::from("slot"), declared.clone());
+            let mut scope = VarScope::new(declarations)?;
+
+            let assigned = scope.set_from_answer("slot", answer);
+            match expected {
+                Ok(value) => {
+                    assigned?;
+                    assert_eq!(
+                        scope.get("slot"),
+                        Some(&value),
+                        "assigning {answer:?} as {} stored the wrong value",
+                        declared.label()
+                    );
+                }
+                Err(rejection) => {
+                    assert!(
+                        matches!(assigned, Err(BotError::InvalidVariableValue { .. })),
+                        "assigning {answer:?} as {} must refuse with the typed value error, got \
+                         {assigned:?} ({rejection})",
+                        declared.label()
+                    );
+                    assert!(
+                        scope.get("slot").is_none(),
+                        "a refused assignment must not write the variable"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn every_rejection_renders_a_cause_a_reader_can_act_on() {
+        let rejections = [
+            AnswerRejection::NotAnInteger,
+            AnswerRejection::IntegerOutOfRange,
+            AnswerRejection::NotABoolean,
+            AnswerRejection::NotADeclaredChoice,
+        ];
+        for rejection in rejections {
+            let rendered = rejection.to_string();
+            assert!(
+                !rendered.is_empty() && rendered.chars().any(char::is_alphabetic),
+                "a rejection is rendered into a diagnostic, so it cannot be empty: {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ask_whose_variable_cannot_hold_its_options_is_refused_at_load() -> Result<(), BotError> {
+        // The counterexample the review filed: a boolean variable and a
+        // question offering "Continue"/"Cancel". Every candidate is decodable
+        // at load time, and neither one is storable, so the document is refused
+        // rather than accepted and then unanswerable.
+        let outcome = FlowSpec::new(
+            BTreeMap::from([(String::from("decision"), VarType::Boolean)]),
+            "ask",
+            BTreeMap::from([
+                (
+                    String::from("ask"),
+                    NodeKind::Ask {
+                        var: String::from("decision"),
+                        options: vec![String::from("Continue"), String::from("Cancel")],
+                        routes: BTreeMap::from([
+                            (String::from("Continue"), String::from("done")),
+                            (String::from("Cancel"), String::from("done")),
+                        ]),
+                    },
+                ),
+                (String::from("done"), NodeKind::End),
+            ]),
+            Vec::new(),
+            BTreeMap::new(),
+            FlowBounds::new(8),
+        );
+        let BotError::AskOptionNotAssignable {
+            node,
+            variable,
+            option,
+            expected,
+            cause,
+        } = (match outcome {
+            Err(error) => error,
+            Ok(spec) => {
+                return Err(BotError::MalformedFlow {
+                    cause: format!("accepted a flow with {} nodes", spec.nodes().len()),
+                });
+            }
+        })
+        else {
+            return Err(BotError::MalformedFlow {
+                cause: String::from("refused for the wrong reason"),
+            });
+        };
+
+        // The five facts the diagnostic has to carry: where, which variable,
+        // which candidate, what type was expected, and why.
+        assert_eq!(node, "ask", "the refusal names the ask node");
+        assert_eq!(variable, "decision", "the refusal names the variable");
+        assert_eq!(
+            option, "Continue",
+            "the refusal names the candidate, not just the node"
+        );
+        assert_eq!(expected, "boolean", "the refusal names the expected type");
+        assert_eq!(
+            cause,
+            AnswerRejection::NotABoolean.to_string(),
+            "the refusal carries the decoder's own reason"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_ask_the_variable_can_hold_is_still_accepted() -> Result<(), BotError> {
+        // The other half of the rule, so the check above cannot be satisfied by
+        // refusing everything: a boolean variable offered boolean literals, a
+        // choice variable offered its own declared values, and an integer
+        // variable offered integers all load.
+        let accepted = [
+            (
+                VarType::Boolean,
+                vec![String::from("yes"), String::from("no")],
+            ),
+            (
+                VarType::Integer,
+                vec![String::from("0"), String::from("-1")],
+            ),
+            (
+                VarType::Choice(vec![String::from("yes"), String::from("no")]),
+                vec![String::from("Yes"), String::from("NO")],
+            ),
+            (
+                VarType::String,
+                vec![String::from("anything"), String::from("")],
+            ),
+        ];
+        for (declared, options) in accepted {
+            let routes = options
+                .iter()
+                .map(|option| (option.clone(), String::from("done")))
+                .collect();
+            let spec = FlowSpec::new(
+                BTreeMap::from([(String::from("slot"), declared.clone())]),
+                "ask",
+                BTreeMap::from([
+                    (
+                        String::from("ask"),
+                        NodeKind::Ask {
+                            var: String::from("slot"),
+                            options,
+                            routes,
+                        },
+                    ),
+                    (String::from("done"), NodeKind::End),
+                ]),
+                Vec::new(),
+                BTreeMap::new(),
+                FlowBounds::new(8),
+            )?;
+            assert_eq!(
+                spec.nodes().len(),
+                2,
+                "a {} ask over storable candidates must load",
+                declared.label()
+            );
+        }
         Ok(())
     }
 

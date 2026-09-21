@@ -14,8 +14,29 @@
 //! | `GrantSet` | the `Grants` resource: one authority per world |
 //! | `Observe` | a `Chains` entry, polled by the `observe` system |
 //! | `Evaluate::check` | `Changed<Revision>` on the source entity |
-//! | `Execute::execute_action` | the `fire` system |
-//! | `Bot::tick()` | `EcsBot::tick()`, one `Schedule::run` |
+//! | `Execute::execute_action` | the `fire_plan` system, whose effects run between schedule steps |
+//! | `Bot::tick()` | [`EcsBot::tick_async`], one `Schedule::run` between two awaited phases |
+//!
+//! # One execution path, and who drives it
+//!
+//! A tick is four phases, and only the middle one is a synchronous schedule
+//! step:
+//!
+//! 1. **observe** — every source is polled, in bounded waves, awaited on the
+//!    caller's executor.
+//! 2. **decide** — one `Schedule::run` folds those observations into the world
+//!    (committing each value and bumping `Revision` where it moved) and records
+//!    the effect program for this tick.
+//! 3. **act** — the recorded effects run in declaration order, awaited on the
+//!    caller's executor.
+//! 4. **report** — the count and the first failure are written back.
+//!
+//! [`EcsBot::tick_async`] is the whole of it, and it is the way to run a bot
+//! from async code: the verb futures are awaited *by* the caller's runtime, so
+//! a source that waits on a timer, a socket, or a sibling task has a driver
+//! making progress underneath it. [`EcsBot::tick`] is a synchronous adapter
+//! over the same four phases for verbs that need no reactor; it is refused,
+//! not hung, when an async runtime is already driving the calling thread.
 //!
 //! # One semantic delta, stated rather than discovered
 //!
@@ -170,6 +191,47 @@ struct Chains(Vec<EcsChain>);
 #[derive(Default)]
 struct Observed(Vec<Option<Box<dyn Any>>>);
 
+// ── Staging between the awaited phases and the schedule steps ──────────────
+//
+// The verb futures are non-`Send` and may need an executor, so they are awaited
+// by the driver *outside* the schedule. What crosses into the schedule is
+// therefore data, in declaration order, and the two resources below are that
+// handover. Both are overwritten wholesale at the point they are consumed, so
+// a tick that is dropped between phases leaves nothing behind for the next one.
+
+/// The results of the observation phase, staged for `observe_fold`.
+///
+/// In chain order, one entry per chain, exactly as `poll_sources` collected
+/// them: the fold commits them positionally, so a result that arrived early
+/// cannot be committed to the wrong chain.
+#[derive(Default)]
+struct Polled(Vec<Result<Box<dyn Any>, BotError>>);
+
+/// One effect the decision phase selected.
+struct Step {
+    /// Index into [`Chains`].
+    chain: usize,
+    /// Index into that chain's `entries`, in declaration order.
+    entry: usize,
+}
+
+/// The effect program the decision phase recorded, plus the first condition
+/// failure it met on the way.
+///
+/// The failure is carried here rather than parked in [`TickError`] because it
+/// happened at a *position* in the walk rather than at the end of it: the
+/// [`Step`]s alongside it are exactly the effects the walk reached before that
+/// position, and they still run. Whichever failure comes first in walk order is
+/// the one the tick reports, which is the ordering the synchronous loop had
+/// when it evaluated a condition and ran an action in the same iteration.
+#[derive(Default)]
+struct Plan {
+    /// The actions to run, in declaration order.
+    steps: Vec<Step>,
+    /// The first condition failure, if the walk met one.
+    failure: Option<BotError>,
+}
+
 /// Upper bound on sources polled simultaneously by one tick. A source poll may
 /// occupy one `spawn_blocking` thread, so this caps the blocking-thread fan-out
 /// regardless of how many chains a spec declares. Chains beyond the cap are
@@ -205,35 +267,24 @@ fn parked(world: &World) -> bool {
 
 // ── Systems ────────────────────────────────────────────────────────────────
 
-/// Observe: poll every source, then bump `Revision` for the ones that moved.
+/// Observe, fold half: commit the polled values, then bump `Revision` for the
+/// sources that moved.
 ///
-/// Exclusive because the verbs are non-`Send`. All sources are polled before
-/// any `Revision` is written, matching `Bot::tick`'s documented error ordering:
-/// the first error in declaration order is returned, and no source is left
-/// half-updated.
-fn observe(world: &mut World) {
+/// Exclusive because the verbs are non-`Send`. Every source has already been
+/// polled and awaited by the driver by the time this runs, so all that is left
+/// is the commit — and a poll that failed is reported *before* any `Revision`
+/// is written, which is `Bot::tick`'s documented error ordering: the first
+/// error in declaration order, with no source left half-updated.
+///
+/// That the polls themselves happen outside is what makes a timer- or
+/// socket-backed source work: this system is a synchronous step, and a source
+/// awaiting a reactor inside it would have no reactor making progress.
+fn observe_fold(world: &mut World) {
     if parked(world) {
         return;
     }
 
-    // Bounded waves, joined concurrently: a source poll may occupy one
-    // `spawn_blocking` thread, so polling them one at a time would make a tick
-    // as slow as the sum of its sources rather than as slow as its slowest. The
-    // wave cap is what keeps that from becoming unbounded blocking-thread
-    // fan-out. Determinism is unaffected: the results are collected in
-    // declaration order, and actions still run sequentially.
-    let polled: Vec<Result<Box<dyn Any>, BotError>> = {
-        let chains = world.non_send::<Chains>();
-        let grants = world.resource::<Grants>();
-        let mut polled = Vec::with_capacity(chains.0.len());
-        for wave in chains.0.chunks(MAX_IN_FLIGHT_POLLS) {
-            let batch = lgwks_std::task::join_all_boxed(
-                wave.iter().map(|chain| chain.source.poll_any(&grants.0)),
-            );
-            polled.extend(lgwks_std::task::block_on(batch));
-        }
-        polled
-    };
+    let polled = std::mem::take(&mut world.non_send_mut::<Polled>().0);
 
     // `collect` into a `Result<Vec<_>, _>` keeps the first error and drops the
     // rest, which is the ordering `Bot::tick` promises. Nothing is committed on
@@ -275,18 +326,33 @@ fn observe(world: &mut World) {
     }
 }
 
-/// Execute: run the entries of every source whose value moved this tick.
+/// Fire, decide half: record the effects this tick should run, in declaration
+/// order.
 ///
-/// The capability check is not repeated here: `poll_any` and `run_any` each
-/// mint a fresh `Auth` from the retained `GrantSet`, which is where the proof
-/// belongs.
+/// The capability check is not repeated when the effect runs: `run_any` mints a
+/// fresh `Auth` from the retained `GrantSet`, which is where the proof belongs.
 ///
 /// The load-bearing word is *retained*. `assemble` clones the set into the world
 /// as `Grants(grants.clone())` and nothing revokes it, so this substrate offers
 /// exactly the snapshot boundary `Bot` documents and not a live lease: changing
 /// or dropping the caller's `GrantSet` after build cannot narrow a bot that is
 /// already running. An earlier version of this comment claimed the opposite.
-fn fire(world: &mut World) {
+///
+/// Conditions are evaluated here, in the schedule, and the effects they select
+/// are run by the driver afterwards. That is a reordering of *when* each verb
+/// runs, not of which effects happen or in what order: a condition takes only
+/// the observed value (`Evaluate::check` has no other input) and so cannot
+/// observe an action's effect, which makes the selected list and the first
+/// failure the walk meets a pure function of the observations. The plan is
+/// therefore the exact effect program the synchronous loop would have walked,
+/// and the failure it carries stops the walk where that loop stopped.
+fn fire_plan(world: &mut World) {
+    {
+        let mut plan = world.non_send_mut::<Plan>();
+        plan.steps.clear();
+        plan.failure = None;
+    }
+
     if parked(world) {
         return;
     }
@@ -296,12 +362,11 @@ fn fire(world: &mut World) {
         query.iter(world).map(|id| id.chain).collect()
     };
 
-    let mut fired: usize = 0;
+    let mut steps: Vec<Step> = Vec::new();
     let mut failure: Option<BotError> = None;
     {
         let chains = world.non_send::<Chains>();
         let observed = world.non_send::<Observed>();
-        let grants = world.resource::<Grants>();
 
         'chains: for index in moved {
             // Two steps, not `Some(Some(value))`: the pattern would be matched
@@ -316,7 +381,7 @@ fn fire(world: &mut World) {
             let Some(chain) = chains.0.get(index) else {
                 continue;
             };
-            for entry in &chain.entries {
+            for (entry_index, entry) in chain.entries.iter().enumerate() {
                 match entry.condition.check_any(value.as_ref()) {
                     Ok(true) => {}
                     Ok(false) => continue,
@@ -325,21 +390,17 @@ fn fire(world: &mut World) {
                         break 'chains;
                     }
                 }
-                match lgwks_std::task::block_on(entry.action.run_any(&grants.0, value.as_ref())) {
-                    Ok(_) => fired = fired.saturating_add(1),
-                    Err(error) => {
-                        failure = Some(error);
-                        break 'chains;
-                    }
-                }
+                steps.push(Step {
+                    chain: index,
+                    entry: entry_index,
+                });
             }
         }
     }
 
-    world.resource_mut::<Fired>().0 = fired;
-    if let Some(error) = failure {
-        world.resource_mut::<TickError>().0 = Some(error);
-    }
+    let mut plan = world.non_send_mut::<Plan>();
+    plan.steps = steps;
+    plan.failure = failure;
 }
 
 /// Build the schedule this substrate runs, with the two settings that make its
@@ -354,8 +415,9 @@ fn schedule() -> Schedule {
         ambiguity_detection: LogLevel::Error,
         ..Default::default()
     });
-    // `.chain()` is the declared order: poll, then fire.
-    schedule.add_systems((observe, fire).chain());
+    // `.chain()` is the declared order: commit the observations, then decide
+    // the effects.
+    schedule.add_systems((observe_fold, fire_plan).chain());
     schedule
 }
 
@@ -379,7 +441,8 @@ fn validate(schedule: &mut Schedule, world: &mut World) -> Result<(), BotError> 
 
 /// A bot executing on a `bevy_ecs` world.
 ///
-/// Stepped by hand: [`EcsBot::tick`] is one `Schedule::run`. No framework owns
+/// Stepped by hand: one tick is one [`EcsBot::tick_async`], which is one
+/// `Schedule::run` between the awaited observe and act phases. No framework owns
 /// a loop, and no `App::run` is ever called.
 pub struct EcsBot {
     /// The name the spec declared.
@@ -445,18 +508,200 @@ impl EcsBot {
             .collect()
     }
 
-    /// Run one tick. Returns the number of actions fired.
+    /// Run one tick, awaiting the verb futures on the caller's executor.
     ///
-    /// Synchronous: the systems drive the non-`Send` verb futures on this
-    /// thread, so there is nothing for a caller to await.
-    pub fn tick(&mut self) -> Result<usize, BotError> {
-        self.world.resource_mut::<TickError>().0 = None;
-        self.world.resource_mut::<Fired>().0 = 0;
+    /// Returns the number of actions that fired. The bot is `mut` because a
+    /// tick advances its world.
+    ///
+    /// # What this is for
+    ///
+    /// This is the tick to call from async code, and the reason is that the
+    /// verb futures are awaited **by the caller's runtime** rather than by a
+    /// thread parked inside a synchronous system. A source that waits on
+    /// `rt::time`, on a socket, on a channel fed by a sibling task, or on
+    /// anything else that needs a driver resolves while this future is pending,
+    /// because the runtime that owns it is the one driving.
+    ///
+    /// # Phases
+    ///
+    /// 1. every source is polled in bounded waves of `MAX_IN_FLIGHT_POLLS`,
+    ///    concurrently, in declaration order;
+    /// 2. one `Schedule::run` commits those observations, detects which values
+    ///    moved, and records the effect program (`observe_fold`, `fire_plan`);
+    /// 3. the recorded effects run one at a time, in declaration order;
+    /// 4. the count and the first failure are written back.
+    ///
+    /// The middle two phases are what keep this deterministic: the schedule is
+    /// a total order validated at build, the observations are folded
+    /// positionally, and the effect program is fixed before any effect runs.
+    ///
+    /// # Failure
+    ///
+    /// The same two cases [`EcsBot::tick`] documents, and they still mean
+    /// different things: a poll that failed fires nothing (no `Revision` was
+    /// written), while an action that failed leaves the effects before it live
+    /// and returns the first error. A condition that fails stops the walk where
+    /// it failed, so the effects the walk had already reached still run — the
+    /// plan carries the failure and the steps that precede it, and the tick
+    /// reports whichever comes first in walk order.
+    ///
+    /// # Cancellation
+    ///
+    /// Dropping this future before it resolves cancels the tick at the point it
+    /// was dropped. Between phases 2 and 3 that loses the effects phase 2
+    /// selected, and the next tick does not re-fire them: the revisions were
+    /// committed in phase 2, so the sources no longer read as moved. This is
+    /// the same "unattempted work is lost, not queued" rule the failure path
+    /// documents, and it is stated rather than discovered because it is the
+    /// price of a tick that is a future.
+    ///
+    /// # Errors
+    ///
+    /// The first domain failure of the tick, in the order described above.
+    pub async fn tick_async(&mut self) -> Result<usize, BotError> {
+        self.begin_tick();
+
+        let polled = self.poll_sources().await;
+        self.world.non_send_mut::<Polled>().0 = polled;
+
         self.schedule.run(&mut self.world);
+
+        // Taken rather than borrowed: the effects are awaited below, and a
+        // borrow of the plan would outlive the schedule that wrote it. An empty
+        // plan is left behind, so a tick dropped here stages nothing.
+        let plan = {
+            let mut guard = self.world.non_send_mut::<Plan>();
+            std::mem::take(&mut *guard)
+        };
+        let Plan { steps, failure } = plan;
+        let (fired, action_failure) = self.run_steps(&steps).await;
+        // An action failure happens *earlier* in walk order than a condition
+        // failure that follows it, so it is the more specific report.
+        let failure = action_failure.or(failure);
+
+        self.world.resource_mut::<Fired>().0 = fired;
+        if let Some(error) = failure {
+            self.world.resource_mut::<TickError>().0 = Some(error);
+        }
+
         match self.world.resource_mut::<TickError>().0.take() {
             Some(error) => Err(error),
-            None => Ok(self.world.resource::<Fired>().0),
+            None => Ok(fired),
         }
+    }
+
+    /// Run one tick on this thread, without an async runtime.
+    ///
+    /// # Scope
+    ///
+    /// This is the adapter for **runtime-independent futures**: polls and
+    /// actions that complete without a timer or an I/O driver. Immediate
+    /// futures, `lgwks_std::task::spawn_blocking` work, and a channel fed by
+    /// another thread all belong here; it drives the same four phases as
+    /// [`EcsBot::tick_async`] with `lgwks_std::task::block_on`, which parks
+    /// this thread until they resolve.
+    ///
+    /// A verb that needs this crate's timer (`rt::time`) or a driver cannot run
+    /// here, because there is no reactor for it to register with: on this
+    /// adapter `rt::time::sleep` reaches the runtime-context panic its own
+    /// documentation names. Await [`EcsBot::tick_async`] from inside a runtime
+    /// instead.
+    ///
+    /// # The refusal
+    ///
+    /// [`BotError::TickInsideRuntime`] when an async runtime is already driving
+    /// the calling thread. Parking a thread that owns a runtime's driver is not
+    /// a slow tick, it is a deadlock — the timer never fires, the socket never
+    /// reports ready, and the tick never returns — so the one thing this
+    /// adapter must not do is what its name suggests. The check is made here
+    /// rather than left to the caller because the calling mode is not knowable
+    /// from the verb API.
+    ///
+    /// This refuses even on a runtime with several worker threads, where
+    /// parking one worker may happen to work. Which thread the caller was
+    /// handed is not knowable from here, and a deadlock that appears only on
+    /// the current-thread runtime is the failure this exists to prevent rather
+    /// than to mask.
+    ///
+    /// # Errors
+    ///
+    /// [`BotError::TickInsideRuntime`] as above, or the first domain failure of
+    /// the tick.
+    pub fn tick(&mut self) -> Result<usize, BotError> {
+        #[cfg(feature = "rt")]
+        if lgwks_deps::tokio::runtime::Handle::try_current().is_ok() {
+            return Err(BotError::TickInsideRuntime);
+        }
+        lgwks_std::task::block_on(self.tick_async())
+    }
+
+    /// Reset the per-tick scratch, so a tick starts from the same state however
+    /// the previous one ended.
+    ///
+    /// The staged observations and the effect program are not cleared here:
+    /// both are overwritten wholesale by the phase that produces them, which is
+    /// what makes a *dropped* tick safe as well as a completed one.
+    fn begin_tick(&mut self) {
+        self.world.resource_mut::<Fired>().0 = 0;
+        self.world.resource_mut::<TickError>().0 = None;
+    }
+
+    /// Poll every source, `MAX_IN_FLIGHT_POLLS` at a time, awaiting each wave
+    /// on the caller's executor.
+    ///
+    /// Bounded waves, joined concurrently: a source poll may occupy one
+    /// `spawn_blocking` thread, so polling them one at a time would make a tick
+    /// as slow as the sum of its sources rather than as slow as its slowest.
+    /// The wave cap is what keeps that from becoming unbounded blocking-thread
+    /// fan-out. Determinism is unaffected: the results are collected in
+    /// declaration order whatever order they resolve in.
+    async fn poll_sources(&self) -> Vec<Result<Box<dyn Any>, BotError>> {
+        let chains = self.world.non_send::<Chains>();
+        let grants = self.world.resource::<Grants>();
+        let mut polled = Vec::with_capacity(chains.0.len());
+        for wave in chains.0.chunks(MAX_IN_FLIGHT_POLLS) {
+            let batch = lgwks_std::task::join_all_boxed(
+                wave.iter().map(|chain| chain.source.poll_any(&grants.0)),
+            );
+            polled.extend(batch.await);
+        }
+        polled
+    }
+
+    /// Run the effects the decision phase selected, in the order it selected
+    /// them, awaiting each on the caller's executor.
+    ///
+    /// Returns the number that fired and the first action failure, or `None`
+    /// when every one of them resolved. The first failure stops the walk: the
+    /// effects after it are not attempted, which is the "unattempted work is
+    /// lost, not queued" rule a caller reading `Err` as "nothing happened"
+    /// needs to know.
+    async fn run_steps(&self, steps: &[Step]) -> (usize, Option<BotError>) {
+        let chains = self.world.non_send::<Chains>();
+        let observed = self.world.non_send::<Observed>();
+        let grants = self.world.resource::<Grants>();
+
+        let mut fired: usize = 0;
+        let mut failure: Option<BotError> = None;
+        for step in steps {
+            let Some(chain) = chains.0.get(step.chain) else {
+                continue;
+            };
+            let Some(entry) = chain.entries.get(step.entry) else {
+                continue;
+            };
+            let Some(value) = observed.0.get(step.chain).and_then(Option::as_ref) else {
+                continue;
+            };
+            match entry.action.run_any(&grants.0, value.as_ref()).await {
+                Ok(_) => fired = fired.saturating_add(1),
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        (fired, failure)
     }
 }
 
@@ -621,6 +866,13 @@ impl EcsBot {
         // Not `vec![None; count]`: `Box<dyn Any>` is not `Clone`, so the
         // repeat-form macro cannot build this.
         world.insert_non_send(Observed((0..count).map(|_| None).collect()));
+        // The two staging resources the awaited phases hand to the schedule.
+        // Inserted here rather than at first use so every phase can name them
+        // unconditionally: a phase that found one missing would have to decide
+        // what that means, and there is no answer that is better than "this
+        // cannot happen".
+        world.insert_non_send(Polled::default());
+        world.insert_non_send(Plan::default());
 
         let mut schedule = schedule();
         validate(&mut schedule, &mut world)?;
@@ -790,6 +1042,21 @@ mod tests {
         }
     }
 
+    /// A condition that fails structurally rather than evaluating to `false`.
+    struct Refuses;
+
+    impl Evaluate<u16> for Refuses {
+        fn check(&self, observed: &u16) -> Result<bool, BotError> {
+            Err(BotError::EvaluateError {
+                cause: format!("this condition cannot decide about {observed}"),
+            })
+        }
+
+        fn condition_id(&self) -> &str {
+            "test::refuses"
+        }
+    }
+
     fn net_grants() -> GrantSet {
         GrantSet::empty().grant(Cap::net())
     }
@@ -947,6 +1214,49 @@ mod tests {
     }
 
     #[test]
+    fn a_condition_failure_stops_the_walk_after_the_effects_it_cleared() -> TestResult {
+        // The other half of "partial run", on the condition side, and a
+        // characterisation rather than a new guarantee: this passes before and
+        // after the decision phase was split out of the effect phase, and it is
+        // here because that split is only sound if it does.
+        //
+        // Conditions are pure over the observed value, so the whole effect
+        // program can be recorded before any of it runs. The equivalence to the
+        // interleaved loop it replaced rests on exactly three things: the
+        // entries before a failing condition still run, the entries after it
+        // are not attempted, and the tick reports the condition's own error.
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let after = Rc::new(Cell::new(0));
+        let mut bot = EcsBot::builder("condition-failure")
+            .observe(Script::new(vec![200, 200]))
+            .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
+            .on(Refuses, Count(Rc::clone(&after)))
+            .on(|value: &u16| *value >= 200, Count(Rc::clone(&after)))
+            .build(&net_grants())?;
+
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(format!("a refused condition was reported as {fired} fired").into());
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::EvaluateError { .. }),
+                "expected the condition's own error, got {error:?}"
+            ),
+        }
+        assert_eq!(
+            *log.borrow(),
+            vec![200],
+            "the effect the walk cleared before the failing condition ran"
+        );
+        assert_eq!(
+            after.get(),
+            0,
+            "the entries after the failing condition were not attempted"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn an_ambiguous_schedule_is_refused_at_build() -> TestResult {
         let mut world = World::new();
 
@@ -957,7 +1267,7 @@ mod tests {
             ambiguity_detection: LogLevel::Error,
             ..Default::default()
         });
-        ambiguous.add_systems((observe, fire));
+        ambiguous.add_systems((observe_fold, fire_plan));
 
         match validate(&mut ambiguous, &mut world) {
             Ok(()) => return Err("an ambiguous schedule was accepted at build".into()),
@@ -974,7 +1284,7 @@ mod tests {
             ambiguity_detection: LogLevel::Error,
             ..Default::default()
         });
-        ordered.add_systems((observe, fire).chain());
+        ordered.add_systems((observe_fold, fire_plan).chain());
         validate(&mut ordered, &mut world)?;
         Ok(())
     }
