@@ -4,15 +4,15 @@
 //!
 //! The reader is line-oriented on purpose. Taking a TOML parser as a dependency
 //! in order to police dependencies would be self-refuting, and the subset
-//! `Cargo.lock` uses — `[[package]]` blocks of `key = "value"` pairs — needs no
+//! `Cargo.lock` uses (`[[package]]` blocks of `key = "value"` pairs) needs no
 //! general parser. Anything outside that subset is skipped rather than guessed
 //! at, and a `[[package]]` block missing a name is reported, never silently
 //! dropped.
 //!
 //! A package with no `source` key is local: a workspace member or a path
 //! dependency. That is Cargo's own encoding of "this came from the filesystem,
-//! not a registry", and it is what separates the crates the estate wrote from
-//! the crates it took.
+//! not a registry", and it is what separates crates written in this workspace
+//! from crates taken from a registry.
 
 // ── The resolved package ────────────────────────────────────────────────────
 
@@ -28,7 +28,7 @@ pub struct Resolved {
     /// Resolved version.
     pub version: String,
     /// True when the package has no `source` key, meaning Cargo resolved it
-    /// from the filesystem — a workspace member or a path dependency.
+    /// from the filesystem: a workspace member or a path dependency.
     pub local: bool,
     /// The `checksum` key when present: sha256 of the `.crate` file for
     /// registry packages. Absent for local packages and for git sources,
@@ -38,7 +38,7 @@ pub struct Resolved {
 
 /// A `[[package]]` block that could not be read.
 ///
-/// Non-exhaustive so a future refusal — a malformed quoted key, say — is
+/// Non-exhaustive so a future refusal (a malformed quoted key, say) is
 /// additive. Every variant is a refusal rather than a skip: shrinking the
 /// resolved graph silently is the one failure this reader must never make.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,8 +213,8 @@ fn flush(pending: &mut Pending, out: &mut Vec<Resolved>) -> Result<(), LockError
 
 /// Whether `key` is a bare TOML key the reader will accept.
 ///
-/// Only bare keys are read. A quoted key — which is how a v1 `[metadata]` table
-/// spells its `"checksum foo 0.1.0 (registry+…)"` rows — fails this test, so
+/// Only bare keys are read. A quoted key, which is how a v1 `[metadata]` table
+/// spells its `"checksum foo 0.1.0 (registry+…)"` rows, fails this test, so
 /// those rows are skipped rather than mistaken for package fields.
 fn valid_toml_key(key: &str) -> bool {
     !key.is_empty()

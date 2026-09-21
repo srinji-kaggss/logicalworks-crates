@@ -198,7 +198,7 @@ fn compute_fraction(bytes: &[u8], start: usize, digits: usize) -> u32 {
 /// Collects and scales fractional digits after the decimal dot.
 ///
 /// Advances `cursor` past the run of digits and reports the run's width, which
-/// must be `1..=9` — RFC 3339 permits truncation, but not an empty fraction nor
+/// must be `1..=9`: RFC 3339 permits truncation, but not an empty fraction nor
 /// more precision than a nanosecond.
 fn parse_fraction_digits(
     bytes: &[u8],

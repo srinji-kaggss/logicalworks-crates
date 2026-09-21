@@ -1,6 +1,6 @@
 //! `random` owns every source of randomness and enforces
 //! INV-RANDOM-ONE-SOURCE: all randomness comes from a single OS CSPRNG backend,
-//! and a failure to read it is an error the caller must handle — never a
+//! and a failure to read it is an error the caller must handle, never a
 //! silent fallback to a clock, a counter, or userspace PRNG.
 //!
 //! Backs [`crate::id`] UUID v4 generation. Uses `getrandom` for OS entropy.

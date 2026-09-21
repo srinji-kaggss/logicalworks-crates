@@ -43,9 +43,9 @@ fn divide(numerator: i64, denominator: i64) -> i64 {
 /// Determines whether the given astronomical year index is a leap year (366 days).
 ///
 /// `year` is an astronomical year index: year `0` is 1 BCE, and negative values
-/// run backwards from there. The rule is the Gregorian one — every fourth year
+/// run backwards from there. The rule is the Gregorian one: every fourth year
 /// is a leap year except century years, which are leap years only when
-/// divisible by 400 — and it holds for negative years too, because `%` here is
+/// divisible by 400. It holds for negative years too, because `%` here is
 /// only ever compared against zero, where truncation and flooring agree.
 #[must_use]
 pub fn is_leap(year: i64) -> bool {
@@ -85,8 +85,8 @@ pub fn days_in_month(year: i64, month: u32) -> u32 {
 /// that era.
 ///
 /// January and February are counted as the tail of the *previous* era year: the
-/// calendar is re-based onto a March-start year so that February — the month
-/// whose length is the only one that varies — sits at the end of the cycle,
+/// calendar is re-based onto a March-start year so that February (the month
+/// whose length is the only one that varies) sits at the end of the cycle,
 /// where a single linear day-of-year formula can absorb it.
 ///
 /// `div_euclid` floors toward negative infinity, which is the era boundary the

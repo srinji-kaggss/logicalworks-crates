@@ -1,6 +1,6 @@
 //! Explicit ownership of the async runtime.
 //!
-//! The estate does not hide a global reactor. A [`Runtime`] is constructed,
+//! This crate does not hide a global reactor. A [`Runtime`] is constructed,
 //! owned, and dropped by its caller; every task runs on a runtime the caller
 //! can name. [`Handle`] is the cloneable capability to place work on a runtime
 //! that is owned elsewhere.
@@ -144,7 +144,7 @@ fn discover_workers() -> Option<NonZeroUsize> {
 /// may continue on its blocking thread after shutdown returns.
 pub struct Runtime {
     /// The owned engine runtime. Private so the engine type never appears in
-    /// this crate's public surface — a consumer names [`Runtime`], never
+    /// this crate's public surface: a consumer names [`Runtime`], never
     /// `lgwks_deps::tokio::runtime::Runtime`.
     inner: lgwks_deps::tokio::runtime::Runtime,
 }
@@ -207,8 +207,8 @@ impl Handle {
     /// Place a future on the runtime without waiting for it.
     ///
     /// If the owning runtime has already been dropped, the future is never
-    /// scheduled and the returned handle resolves to a cancelled [`JoinError`]
-    /// — this call does not panic.
+    /// scheduled and the returned handle resolves to a cancelled [`JoinError`];
+    /// this call does not panic.
     ///
     /// [`JoinError`]: crate::rt::task::JoinError
     pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
@@ -232,7 +232,7 @@ impl Handle {
 /// code. It builds and tears down a runtime per call, so code that makes
 /// repeated async calls should hold a [`Runtime`] instead. Panics if called
 /// from within an async context, and panics if the OS refuses the runtime's
-/// driver resources — a condition under which no async work could proceed.
+/// driver resources, a condition under which no async work could proceed.
 pub fn block_on<F: Future>(future: F) -> F::Output {
     let mut builder = lgwks_deps::tokio::runtime::Builder::new_current_thread();
     builder.enable_all();
@@ -240,10 +240,10 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
         Ok(runtime) => runtime,
         // The contract is that this reports on the calling thread rather than
         // returning an error, and there is no error channel in `F::Output` to
-        // report through. `resume_unwind` is the estate's form for a documented,
+        // report through. `resume_unwind` is the crate's form for a documented,
         // unavoidable panic (`lgwks_std::task::JoinHandle` uses it for the same
         // reason): the caller is a synchronous frame with nowhere to propagate
-        // to, and the alternative — hanging on a future no driver can poll — is
+        // to, and the alternative (hanging on a future no driver can poll) is
         // strictly worse. A current-thread runtime needs only the driver's
         // resources, so an OS refusal means every timer and IO operation in
         // `future` would be unrunnable anyway.

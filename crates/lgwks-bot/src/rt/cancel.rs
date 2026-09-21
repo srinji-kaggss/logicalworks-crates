@@ -1,22 +1,22 @@
 //! Cooperative cancellation.
 //!
-//! [`CancellationToken`] is the estate's own, written here rather than
-//! re-exported, because the engine does not ship one: tokio's lives in
-//! `tokio-util`, a separate crate. Admitting that crate would add a third-party
-//! edge to the storefront to carry a single type, so the primitive is built on
-//! `tokio::sync::watch`, which the `sync` feature already provides.
+//! [`CancellationToken`] is written here rather than re-exported, because the
+//! engine does not ship one: tokio's lives in `tokio-util`, a separate crate.
+//! Admitting that crate would add a third-party edge to the storefront to carry
+//! a single type, so the primitive is built on `tokio::sync::watch`, which the
+//! `sync` feature already provides.
 //!
-//! This is not a convenience. `AGENTS.md` requires that *"every background task
-//! must be tracked in a `JoinSet` or supervisor and listen to a
-//! `CancellationToken`"* — a standard the SDK could not satisfy while the token
-//! was absent, because a caller had no way to signal a spawned task to stop. The
-//! `JoinSet` half was already here; this is the other half.
+//! This is not a convenience. Every background task must be tracked in a
+//! `JoinSet` or supervisor and must listen to a `CancellationToken`, a standard
+//! the SDK could not satisfy while the token was absent, because a caller had no
+//! way to signal a spawned task to stop. The `JoinSet` half was already here;
+//! this is the other half.
 //!
 //! # Shape
 //!
 //! A token is cheap to clone and every clone observes the same state. A **child
 //! token** is cancelled when its parent is, but cancelling a child never touches
-//! the parent — the direction a supervisor needs, where one subtask being
+//! the parent, the direction a supervisor needs, where one subtask being
 //! abandoned must not tear down its siblings.
 //!
 //! # Why the link points up
@@ -40,7 +40,7 @@
 //! Because the parent holds no child list, cancellation is **pulled, not
 //! pushed**: [`is_cancelled`](CancellationToken::is_cancelled) walks up the
 //! chain, and [`cancelled`](CancellationToken::cancelled) races this node's own
-//! signal against its parent's — which recursively races the rest of the chain.
+//! signal against its parent's, which recursively races the rest of the chain.
 //!
 //! # Why `watch` and not `Notify`
 //!
@@ -55,7 +55,7 @@
 //! Construction, [`cancel`](CancellationToken::cancel),
 //! [`child_token`](CancellationToken::child_token), and
 //! [`is_cancelled`](CancellationToken::is_cancelled) are synchronous and need no
-//! reactor, so a token may be built anywhere — the same property
+//! reactor, so a token may be built anywhere: the same property
 //! [`crate::rt::time::sleep`] was wrapped to provide. Only awaiting
 //! [`cancelled`](CancellationToken::cancelled) requires a runtime, as any future
 //! does.
@@ -121,7 +121,7 @@ impl Inner {
             if node.cancelled.load(Ordering::SeqCst) {
                 return true;
             }
-            // `as_ref` rather than `&node.parent`: the estate forbids
+            // `as_ref` rather than `&node.parent`: this crate forbids
             // `clippy::pattern_type_mismatch`, which refuses a `Some(_)` pattern
             // matched against an `&Option<_>`.
             match node.parent.as_ref() {
@@ -136,7 +136,7 @@ impl Inner {
     /// Boxed because it recurses: every level races its own signal against its
     /// parent's future, so the return type has to be nameable. `Send` so that
     /// [`CancellationToken::cancelled_owned`] can move the result onto another
-    /// thread — the state behind it is an `AtomicBool` and a `watch` channel,
+    /// thread: the state behind it is an `AtomicBool` and a `watch` channel,
     /// both of which are already thread-safe.
     fn cancelled(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
@@ -172,7 +172,7 @@ impl Inner {
     /// reach sideways.
     fn cancel(&self) {
         // The store is the once-only gate for this node. `send_replace` is
-        // infallible — there is no error to discard and no `let _ =` — and it
+        // infallible, there is no error to discard and no `let _ =`, and it
         // writes the value even when every receiver has already dropped.
         self.cancelled.store(true, Ordering::SeqCst);
         self.signal.send_replace(true);
@@ -194,8 +194,8 @@ impl fmt::Debug for Inner {
     }
 }
 
-/// A signal that a task should stop, and the primitive the estate's
-/// no-untracked-task rule requires.
+/// A signal that a task should stop. Spawned work is expected to hold one of
+/// these so that it can be told to stop rather than being left running.
 ///
 /// Cloning is cheap and shares state: every clone is cancelled together. Use
 /// [`child_token`](Self::child_token) when a subtask must be cancellable without
@@ -265,7 +265,7 @@ impl CancellationToken {
     /// A `'static` future that resolves when this token is cancelled.
     ///
     /// Takes a clone, so it can be moved into
-    /// [`spawn`](crate::rt::task::spawn) without borrowing the original token —
+    /// [`spawn`](crate::rt::task::spawn) without borrowing the original token,
     /// which is required, since a spawned task must own everything it captures.
     /// Resolves immediately if already cancelled.
     //
@@ -344,7 +344,7 @@ async fn wait_for_signal(mut receiver: watch::Receiver<bool>) {
         }
     }
     // Exiting on `Err` is deliberate: the sender is gone, which cannot happen
-    // while a clone of the token is alive — and the token is borrowed for this
+    // while a clone of the token is alive, and the token is borrowed for this
     // future's lifetime, so one is. Returning rather than looping keeps the
     // future terminating even if that reasoning is invalidated by a later change
     // elsewhere. A cancellation wait that can hang is worse than one that can
@@ -353,8 +353,9 @@ async fn wait_for_signal(mut receiver: watch::Receiver<bool>) {
 
 /// Resolve as soon as either future does, biased to neither.
 ///
-/// Cancellation is level-triggered — both branches report the same terminal fact
-/// — so unlike a `select!` over work there is no outcome to lose by racing them.
+/// Cancellation is level-triggered: both branches report the same terminal
+/// fact, so unlike a `select!` over work there is no outcome to lose by racing
+/// them.
 ///
 /// Both type parameters are `?Sized` so the second branch can be a boxed `dyn
 /// Future`, which is what the recursive parent wait produces.
@@ -459,7 +460,7 @@ mod tests {
     fn a_descendant_survives_its_intermediate_parent_being_dropped() {
         // The failure this guards against: with a downward link, dropping the
         // middle token orphans the leaves and a held leaf becomes silently
-        // uncancellable — the one thing a cancellation token must never do.
+        // uncancellable, the one thing a cancellation token must never do.
         let root = CancellationToken::new();
         let leaves: Vec<CancellationToken> = {
             let branch = root.child_token();
@@ -550,7 +551,7 @@ mod tests {
     #[test]
     fn a_dropped_child_does_not_keep_its_parent_cancellable_state_alive() {
         // The parent accumulates nothing per child; this asserts the observable
-        // consequence — cancelling a parent that has no live children still
+        // consequence: cancelling a parent that has no live children still
         // cancels, and the child's memory is released rather than retained.
         let parent = CancellationToken::new();
         {

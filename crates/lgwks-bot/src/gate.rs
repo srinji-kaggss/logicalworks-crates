@@ -11,14 +11,14 @@ use super::error::BotError;
 #[derive(Debug, Clone)]
 pub struct GrantSet {
     /// The granted names. A `HashSet` because membership is the only question
-    /// asked of it — admission and proof minting are both `contains` — and a
+    /// asked of it (admission and proof minting are both `contains`), and a
     /// duplicate `grant` for the same capability must be idempotent rather than
     /// accumulate.
     granted: HashSet<Cap>,
 }
 
 impl GrantSet {
-    /// An empty grant — nothing is permitted.
+    /// An empty grant: nothing is permitted.
     #[must_use]
     pub fn empty() -> Self {
         Self {

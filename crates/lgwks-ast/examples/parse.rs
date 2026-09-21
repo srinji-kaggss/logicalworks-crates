@@ -10,8 +10,8 @@
 
 //! The output line is written through `std::io::Write` rather than `println!`
 //! because `clippy::print_stdout` is forbidden workspace-wide, with no
-//! test/example carve-out; the estate's PRINTS rule exempts `examples/`, but
-//! the lint is what is enforced, and an example that writes explicitly says the
+//! test/example carve-out; the lint is what is enforced, and an example that
+//! writes explicitly says the
 //! same thing fallibly.
 
 use std::io::Write;

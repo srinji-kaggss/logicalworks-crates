@@ -11,7 +11,7 @@
 //!
 //! | Verb | On this substrate |
 //! |---|---|
-//! | `GrantSet` | the `Grants` resource — one authority per world |
+//! | `GrantSet` | the `Grants` resource: one authority per world |
 //! | `Observe` | a `Chains` entry, polled by the `observe` system |
 //! | `Evaluate::check` | `Changed<Revision>` on the source entity |
 //! | `Execute::execute_action` | the `fire` system |
@@ -21,8 +21,8 @@
 //!
 //! [`Bot::tick`](crate::Bot::tick) evaluates a condition on **every** tick.
 //! `EcsBot::tick` evaluates it only on a tick where the observed value
-//! **moved**. For a condition that stays true — "status is 500" while the
-//! endpoint stays down — the first fires on every tick and the second fires
+//! **moved**. For a condition that stays true ("status is 500" while the
+//! endpoint stays down) the first fires on every tick and the second fires
 //! once, on the transition. That is the point of the substrate, and it is a
 //! behaviour change rather than a re-implementation: a bot that must act on a
 //! *held* state belongs on `Bot`, and a bot that acts on a *transition* belongs
@@ -30,25 +30,25 @@
 //!
 //! # What is measured, and what is deliberately not done
 //!
-//! Three findings from the spike behind this module (`bevy_ecs` 0.19.1,
+//! Three findings from the measurement behind this module (`bevy_ecs` 0.19.1,
 //! `default-features = false, features = ["std"]`), each with a control:
 //!
 //! - **`NonSend` is the only route for a verb.** `Component: Send + Sync +
 //!   'static` is unconditional in this version and there is no `non_send`
-//!   feature to relax it, so a `Box<dyn Any>` — which the verb erasure produces
-//!   and which is not `Send` — cannot be a component. The observers, the
+//!   feature to relax it, so a `Box<dyn Any>` (which the verb erasure produces
+//!   and which is not `Send`) cannot be a component. The observers, the
 //!   entries and the observed values all live in `NonSend` resources, reachable
 //!   only from an exclusive system. The crate's non-`Send` contract is
 //!   preserved rather than tightened.
 //! - **`Changed<T>` is visible to a second exclusive system in the same tick,
 //!   and it is precise.** Against an input that holds still the change filter
-//!   matched `[2, 0, 2, 0, 2]` — the ticks where the value actually moved
-//!   — which is the whole reason a `Revision` marker exists rather than a
+//!   matched `[2, 0, 2, 0, 2]` (the ticks where the value actually moved),
+//!   which is the whole reason a `Revision` marker exists rather than a
 //!   "this system ran" flag.
 //! - **Effects do not go through `Commands`.** `auto_insert_apply_deferred`
 //!   defaults to `true` but inserts the sync point only where some system is
 //!   ordered *after* the writer; a `Commands`-writing system with no successor
-//!   has its queue dropped under a manually stepped `Schedule::run` — measured
+//!   has its queue dropped under a manually stepped `Schedule::run`, measured
 //!   as 0 effects where 3 were expected. Adding a bare `ApplyDeferred` is not a
 //!   fix either: unordered relative to the writer it runs first and defers the
 //!   effect by a tick, giving 2 of 3. Both are silent. Here the effect is a
@@ -57,9 +57,9 @@
 //! # One path
 //!
 //! This is how a bot executes, not a candidate the caller may decline. There is
-//! no `ecs` feature: `Bot` *is* this, and the workspace gate compiles and tests
-//! it like any other code. A default-off flag would have left it unexercised
-//! and unowned.
+//! no `ecs` feature: `Bot` *is* this, and the project's build and test gate
+//! compiles and tests it like any other code. A default-off flag would have left
+//! it unexercised and unowned.
 //!
 //! # Build-time validation
 //!
@@ -68,14 +68,14 @@
 //! totally ordered is a refusal at build rather than a silent misordering at
 //! tick. An exclusive system cannot return an error, so a failure at *tick* time
 //! is recorded in the `TickError` resource and surfaced by
-//! `EcsBot::tick` — the same error ordering `Bot::tick` documents, where the
+//! `EcsBot::tick`: the same error ordering `Bot::tick` documents, where the
 //! first error in declaration order is returned.
 
 use std::any::Any;
 
 // `self` is load-bearing: the `Component` and `Resource` derives expand to
 // `bevy_ecs::…` paths, so the crate name has to be in scope at the use site even
-// though every edge in this crate is written through the storefront.
+// though every edge in this crate is written through the `lgwks_deps` facade.
 use lgwks_deps::bevy_ecs::{
     self,
     prelude::{Changed, Component, Entity, Resource, World},
@@ -116,7 +116,7 @@ impl SourceId {
 ///
 /// This is the component a condition filters on. It is one component for every
 /// domain rather than one per domain, because the *value* is heterogeneous and
-/// only the fact of its movement is shared — which keeps the archetype count
+/// only the fact of its movement is shared, which keeps the archetype count
 /// bounded, as `docs/bot-on-ecs.md` §4 requires.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct Revision(u64);
@@ -220,7 +220,7 @@ fn observe(world: &mut World) {
     // `spawn_blocking` thread, so polling them one at a time would make a tick
     // as slow as the sum of its sources rather than as slow as its slowest. The
     // wave cap is what keeps that from becoming unbounded blocking-thread
-    // fan-out. Determinism is unaffected — the results are collected in
+    // fan-out. Determinism is unaffected: the results are collected in
     // declaration order, and actions still run sequentially.
     let polled: Vec<Result<Box<dyn Any>, BotError>> = {
         let chains = world.non_send::<Chains>();
@@ -277,7 +277,7 @@ fn observe(world: &mut World) {
 
 /// Execute: run the entries of every source whose value moved this tick.
 ///
-/// The capability check is not repeated here — `poll_any` and `run_any` each
+/// The capability check is not repeated here: `poll_any` and `run_any` each
 /// mint a fresh `Auth` from the retained `GrantSet`, which is where the proof
 /// belongs. A grant revoked after build therefore cannot fire, exactly as on
 /// `Bot`.
@@ -374,7 +374,7 @@ fn validate(schedule: &mut Schedule, world: &mut World) -> Result<(), BotError> 
 
 /// A bot executing on a `bevy_ecs` world.
 ///
-/// Stepped by hand — [`EcsBot::tick`] is one `Schedule::run`. No framework owns
+/// Stepped by hand: [`EcsBot::tick`] is one `Schedule::run`. No framework owns
 /// a loop, and no `App::run` is ever called.
 pub struct EcsBot {
     /// The name the spec declared.
@@ -485,7 +485,7 @@ impl EcsBuilder {
         }
     }
 
-    /// Build with no observation chains — a bot that only serves direct
+    /// Build with no observation chains: a bot that only serves direct
     /// `Query` and `Execute` calls.
     pub fn build(self, grants: &GrantSet) -> Result<EcsBot, BotError> {
         EcsBot::assemble(self.name, self.chains, grants)
@@ -575,7 +575,7 @@ pub struct EcsObserveBuilder {
 
 impl EcsBot {
     /// Validate and assemble. Shared by both terminal builder calls so
-    /// admission cannot drift between them — the same rule
+    /// admission cannot drift between them, the same rule
     /// [`spec::assemble`](crate::spec) follows for `Bot`.
     fn assemble(name: String, chains: Vec<EcsChain>, grants: &GrantSet) -> Result<Self, BotError> {
         if name.is_empty() {
@@ -630,9 +630,9 @@ impl EcsBot {
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 //
-// These run under the ordinary workspace gate — there is no feature to turn on,
-// because a substrate whose tests only run when someone remembers a flag is a
-// substrate whose guarantees are claims.
+// These run under the ordinary workspace test run: there is no feature to turn
+// on, because a substrate whose tests only run when someone remembers a flag is
+// a substrate whose guarantees are claims.
 
 #[cfg(test)]
 mod tests {
@@ -743,7 +743,7 @@ mod tests {
 
     /// The sequence every test uses: two ticks of 200, two of 503, one of 200.
     /// It holds still for a tick at a time, which is what makes a change filter
-    /// falsifiable — a sequence that moved on every tick would make "changed"
+    /// falsifiable: a sequence that moved on every tick would make "changed"
     /// and "ran" indistinguishable.
     const SCRIPT: [u16; 5] = [200, 200, 503, 503, 200];
 
@@ -770,7 +770,7 @@ mod tests {
             "Revision must track value movement, not system execution"
         );
         // 503 is held for two ticks; the condition is true on both, and the
-        // effect runs once — on the transition.
+        // effect runs once, on the transition.
         assert_eq!(fired, vec![0, 0, 1, 0, 0]);
         assert_eq!(counter.get(), 1);
         Ok(())

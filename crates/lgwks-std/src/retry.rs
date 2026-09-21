@@ -2,7 +2,7 @@
 //!
 //! A [`RetryPolicy`](crate::retry::RetryPolicy) is a pure value: attempts,
 //! exponential backoff, and a total deadline. It performs no I/O, spawns no
-//! threads, and holds no clock — the caller sleeps (via
+//! threads, and holds no clock: the caller sleeps (via
 //! [`task`](crate::task) synchronously or `lgwks_bot::rt::time`
 //! asynchronously) and checks
 //! [`deadline_exceeded`](crate::retry::RetryPolicy::deadline_exceeded)

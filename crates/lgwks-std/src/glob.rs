@@ -1,13 +1,13 @@
 //! `glob` owns shell-style path pattern matching and enforces
 //! INV-GLOB-SEPARATOR: a single `*`, a `?`, and a character class never cross a
-//! `/`, and only `**` does — so a pattern cannot silently reach into a
+//! `/`, and only `**` does, so a pattern cannot silently reach into a
 //! subdirectory the author did not name.
 //!
 //! Retires the `glob` crate, declared in 2 manifests and reached from 3 call
-//! sites. The estate's use is pattern *matching*
-//! against paths it already has, not filesystem traversal, so directory walking
-//! is deliberately out of scope: matching is pure and testable, traversal is an
-//! I/O concern that belongs to the caller.
+//! sites. The intended use here is pattern *matching*
+//! against paths the caller already has, not filesystem traversal, so directory
+//! walking is deliberately out of scope: matching is pure and testable,
+//! traversal is an I/O concern that belongs to the caller.
 //!
 //! An unterminated `[` is treated as a literal bracket rather than an error.
 //! That is the POSIX `fnmatch` behaviour and the upstream crate's, and matching
@@ -26,18 +26,18 @@
 enum Token<'a> {
     /// A single byte that must equal the path byte at this position.
     Literal(u8),
-    /// `?` — exactly one path byte, never `/`.
+    /// `?` matches exactly one path byte, never `/`.
     Question,
-    /// `*` — zero or more path bytes, stopping at any `/`.
+    /// `*` matches zero or more path bytes, stopping at any `/`.
     Star,
-    /// `**` — zero or more path bytes, `/` included.
+    /// `**` matches zero or more path bytes, `/` included.
     DoubleStar,
-    /// `**/` — a leading `**` that also consumes the `/` after it, so the
+    /// `**/` is a leading `**` that also consumes the `/` after it, so the
     /// enclosing directory may be omitted entirely.
     DoubleStarSlash,
-    /// `/**` — a trailing `**` preceded by the `/` that introduces it.
+    /// `/**` is a trailing `**` preceded by the `/` that introduces it.
     SlashDoubleStar,
-    /// `/**/` — one or more path segments; the separators on both sides are
+    /// `/**/` matches one or more path segments; the separators on both sides are
     /// part of the token, which is what lets `a/**/b` match `a/b`.
     SlashDoubleStarSlash,
     /// A `[...]` class, or a literal `[` when the class is unterminated.
@@ -131,8 +131,8 @@ fn match_special_prefix<'a>(pattern: &'a [u8]) -> Option<(Token<'a>, usize)> {
 /// Lexes the single-character token at `pattern[0]`.
 ///
 /// `*` and `?` are one byte; `[` delegates to [`parse_class_token`] so a class
-/// is consumed whole; every other byte — including `/`, which is an ordinary
-/// literal here — becomes [`Token::Literal`].
+/// is consumed whole; every other byte (including `/`, which is an ordinary
+/// literal here) becomes [`Token::Literal`].
 ///
 /// # Panics
 ///
@@ -185,7 +185,7 @@ fn tokenize<'a>(mut pattern: &'a [u8]) -> Vec<Token<'a>> {
 ///
 /// `dp` is the previous row: `dp[n]` means "the first `n` path bytes matched the
 /// tokens consumed so far". A literal only extends a match whose next byte
-/// equals it exactly, and — because it is a literal — it may be a `/`.
+/// equals it exactly, and, because it is a literal, it may be a `/`.
 ///
 /// `next` must be at least as long as `dp` and indexed by the same offsets; it
 /// is only ever written, never read, so a caller may pass a fresh `false` row.
@@ -201,7 +201,7 @@ fn step_literal(literal: u8, path: &[u8], dp: &[bool], next: &mut [bool]) {
 
 /// Advances the DP row for one [`Token::Question`].
 ///
-/// `?` matches exactly one path byte, and never `/` — that refusal is what
+/// `?` matches exactly one path byte, and never `/`; that refusal is what
 /// INV-GLOB-SEPARATOR requires of a single wildcard, so a `?` cannot silently
 /// step into a subdirectory. See [`step_literal`] for the row convention.
 fn step_question(path: &[u8], dp: &[bool], next: &mut [bool]) {
@@ -235,7 +235,7 @@ fn step_class(body: &[u8], negated: bool, path: &[u8], dp: &[bool], next: &mut [
 /// `*` matches a run of zero or more bytes but stops at the first `/`, so from
 /// each reachable offset the star can carry the match forward only until the
 /// next separator. The inner loop breaks at that separator, leaving every byte
-/// beyond it unreachable — which is exactly the separator invariant.
+/// beyond it unreachable, which is exactly the separator invariant.
 ///
 /// `for reach in j + 1..=path.len()`: `j` is at most `path.len()`, so the start
 /// stays within the length-plus-one indexing range of `next` and cannot
@@ -275,7 +275,7 @@ fn step_double_star(path: &[u8], dp: &[bool], next: &mut [bool]) {
 /// The token owns the `/` that follows the `**`, so from each reachable offset
 /// it can resume at that offset (covering zero directories) or at any offset
 /// after a separator. Unlike [`Token::Star`] the inner scan does not break on
-/// `/` — `**/` is allowed to cross separators, which is what makes `**/b` match
+/// `/`; `**/` is allowed to cross separators, which is what makes `**/b` match
 /// `x/y/b`.
 ///
 /// `for reach in j + 1..=path.len()` is bounded by the path length, so it
@@ -393,7 +393,7 @@ pub fn matches(pattern: &str, path: &str) -> bool {
 /// `pattern[0]`.
 ///
 /// Skips the opening `[`, then an optional `!` or `^` negation marker, then a
-/// leading `]` — which POSIX treats as a literal member rather than the class
+/// leading `]`, which POSIX treats as a literal member rather than the class
 /// terminator. That last case is what makes `[]]` a class containing `]`.
 ///
 /// The increments are bounded by `pattern.len()`, so neither can overflow;

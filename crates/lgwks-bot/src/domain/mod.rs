@@ -11,5 +11,5 @@ pub mod net;
 pub mod notify;
 pub mod sys;
 
-/// Shipped evaluators — composable conditions for the `Evaluate` verb.
+/// Shipped evaluators: composable conditions for the `Evaluate` verb.
 pub mod eval;

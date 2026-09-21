@@ -1,7 +1,7 @@
 [package]
 name = "lgwks_std"
 description = "Everyday Rust primitives with no async runtime required: hex, base64, timestamps, UUIDs, hashing, glob matching, regex, JSON, RON, binary wire, blocking HTTP, and structured logging. One audited dependency stack per feature."
-version = "0.6.5"
+version = "0.6.6"
 edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"

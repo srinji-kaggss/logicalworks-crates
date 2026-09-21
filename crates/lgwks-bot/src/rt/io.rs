@@ -1,4 +1,4 @@
-//! Async byte streams — the reader and writer traits, their buffered adapters,
+//! Async byte streams: the reader and writer traits, their buffered adapters,
 //! and the copy helpers.
 //!
 //! This is what makes the rest of the async surface composable: [`net`],

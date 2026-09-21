@@ -82,7 +82,7 @@ fn read_sorted_entries(dir: &Path, sort_alphabetically: bool) -> io::Result<Vec<
 ///
 /// `read_link` returns the target exactly as stored, so a relative target is
 /// meaningful only against the link's own directory. `None` means the link
-/// could not be read, which is not an error the walk reports — an unreadable
+/// could not be read, which is not an error the walk reports; an unreadable
 /// link simply contributes nothing to the output.
 fn resolve_symlink_path(dir: &Path, path: &Path) -> Option<PathBuf> {
     let target = fs::read_link(path).ok()?;

@@ -1,21 +1,20 @@
 //! Structured, levelled logging (feature `trace`, default-on).
 //!
-//! This module exists because the estate's PRINTS rule names a facility the
-//! estate did not have. `AGENTS.md` forbids `println!`/`eprintln!` in library
-//! code and says to *"use `tracing`"* — but `tracing` was absent from every
-//! crate, so a library author following the rule had nothing to use, and one
-//! ignoring it had `println!`. The rule was enforceable against the wrong
-//! practice and unenforceable in favour of the right one.
+//! This module exists because this workspace forbids `println!`/`eprintln!` in
+//! library code and names `tracing` as the replacement, but `tracing` was
+//! absent from every crate. A library author following that rule had nothing to
+//! use, and one ignoring it had `println!`; the rule was enforceable against
+//! the wrong practice and unenforceable in favour of the right one.
 //!
-//! It is a re-export, like [`json`](crate::json): the estate names the
-//! capability, not the crate, so replacing the implementation is one change
-//! here rather than one per consumer.
+//! It is a re-export, like [`json`](crate::json): this crate names the
+//! capability rather than the crate, so replacing the implementation is one
+//! change here rather than one per consumer.
 //!
 //! # What is here, and what is not
 //!
 //! The **macros and core types** are here, which is what calling code needs.
-//! The `attributes` feature is deliberately not enabled — see the note in
-//! `Cargo.toml` — so `#[instrument]` is unavailable from this path; it would
+//! The `attributes` feature is deliberately not enabled (see the note in
+//! `Cargo.toml`), so `#[instrument]` is unavailable from this path; it would
 //! pull `syn` into the foundation crate.
 //!
 //! There is also **no subscriber**. `tracing` records; a separate crate
@@ -26,8 +25,8 @@
 //!
 //! # Levels
 //!
-//! `ERROR` — a broken contract. `WARN` — degraded but serving. `INFO` —
-//! lifecycle. `DEBUG` — developer diagnostics. `TRACE` — wire-level.
+//! `ERROR` for a broken contract, `WARN` for degraded but serving, `INFO` for
+//! lifecycle, `DEBUG` for developer diagnostics, `TRACE` for wire-level.
 //!
 //! # Example
 //!
@@ -43,7 +42,7 @@
 //!
 //! Structured fields, not interpolated strings: a subscriber can filter on
 //! `bytes` without parsing the message, which is the property `println!` cannot
-//! provide and the reason the estate bans it in library code.
+//! provide, and the reason `println!` is banned in library code.
 
 pub use tracing::{self, Level};
 

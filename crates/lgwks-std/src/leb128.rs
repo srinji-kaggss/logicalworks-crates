@@ -49,7 +49,7 @@ impl Error for DecodeError {}
 /// Every caller masks with `0x7f` first, so the argument is always in
 /// `0..=127` and the narrowing is lossless for `u8`, `u32`, `u64`, `i32` and
 /// `i64` alike. The `unwrap_or` arm therefore cannot be reached; it exists
-/// because the target type is narrower than every source type and the estate
+/// because the target type is narrower than every source type and this crate
 /// bans `as`, not because a truncation is expected.
 fn group_byte<T: TryInto<u8>>(group: T) -> u8 {
     group.try_into().ok().unwrap_or(0)
@@ -348,7 +348,7 @@ fn decode_i64_byte(
         let val = sign_extend_i64(*result, shift, byte);
         // `index` indexes the input and so stays below `isize::MAX`; the
         // saturating increment is exact here and only keeps the expression free
-        // of the bare `+` the estate forbids on integers.
+        // of the bare `+` this crate forbids on integers.
         Ok(Some((val, index.saturating_add(1))))
     } else {
         Ok(None)
@@ -470,7 +470,7 @@ fn decode_i32_byte(
         let val = sign_extend_i32(*result, shift, byte);
         // `index` indexes the input and so cannot reach a saturating offset;
         // saturating_add is used only to keep the expression free of the bare
-        // `+` the estate forbids on integers.
+        // `+` this crate forbids on integers.
         Ok(Some((val, index.saturating_add(1))))
     } else {
         Ok(None)

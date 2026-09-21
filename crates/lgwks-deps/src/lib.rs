@@ -3,15 +3,15 @@
 //! package names its semantic owner, capability, source, requirement, allowed
 //! consumers, and allowed dependency kinds.
 //!
-//! The Director's rule in one line: *if a library is not in `std` or `std+`,
-//! it is not an approved dependency, and the code does not compile until a
-//! human has registered it in the semantic contract.* Everything here exists to
+//! The rule in one line: *if a library is not in `core`, it is not an approved
+//! dependency, and the code does not compile until a human has registered it in
+//! the semantic contract.* Everything here exists to
 //! make the second half of that sentence mechanically true rather than a
 //! convention people remember.
 //!
 //! ## Enforcement boundary
 //!
-//! The same `lgwks-deps check` command is an explicit first lane in local and
+//! The same `lgwks-deps check` command is an explicit first job in local and
 //! remote CI. It reads `cargo metadata --no-deps`, not the transitive lockfile
 //! closure, because only metadata preserves the package that authored an edge.
 //! Embedders call [`check_dependencies`] for the identical verdict.
@@ -22,13 +22,13 @@
 //! all refusals. A gate that passes when it cannot find its own contract is a
 //! gate that reports success for the one condition it exists to catch. The only
 //! way to stand enforcement down is `enforce = false` under `[policy]` in the
-//! register itself — a reviewable diff carrying a human's name, never an
+//! register itself: a reviewable diff carrying a human's name, never an
 //! environment variable a build can set for itself.
 //!
 //! ## Storefront
 //!
-//! `lgwks_deps` is also the estate's install-and-select surface for
-//! third-party engines: enable `tokio` for the async runtime behind
+//! `lgwks_deps` is also the install-and-select surface for third-party
+//! engines: enable `tokio` for the async runtime behind
 //! `lgwks_bot::rt` (`use lgwks_deps::tokio::...` only when bypassing the bot
 //! facade) or `gpui` for the GPU desktop UI. Capability features are
 //! default-off; the `scan` gate-tool feature is the default-on exception for
@@ -38,7 +38,7 @@
 //!
 //! Do NOT `cargo add tokio` / `cargo add gpui` directly: the gate refuses any
 //! second edge, and the facade (`lgwks_bot::rt`, `lgwks_deps::tokio`) is the
-//! single entry the estate audits.
+//! single entry this workspace audits.
 
 // Lint contract (missing_docs deny, unsafe_code forbid, broken intra-doc
 // links deny) comes from the workspace root.
@@ -49,13 +49,13 @@ pub mod contract;
 pub mod lock;
 /// Cargo metadata edges: who authored which external dependency.
 pub mod metadata;
-/// Rust source scan: the keel zero-gate detectors behind `lgwks-deps scan` (feature `scan`).
+/// Rust source scan: the zero-gate detectors behind `lgwks-deps scan` (feature `scan`).
 #[cfg(feature = "scan")]
 pub mod scan;
 /// Vendor-tree coverage: binding the lockfile to the shared `vendor/` tree.
 pub mod vendor;
 
-/// The estate's one authored `tokio` edge, re-exported for the storefront.
+/// The one authored `tokio` edge, re-exported for the storefront.
 ///
 /// `lgwks_deps` owns this edge so no other crate declares `tokio` directly
 /// (`INV-DEP-EDGE-OWNED`). `lgwks_bot` enables the `tokio` storefront feature
@@ -97,7 +97,7 @@ pub use candle_nn;
 /// Reference transformer model implementations built on `candle-core`.
 ///
 /// Selecting this feature also compiles `hf-hub`, which is network-capable;
-/// the estate runtime reads a local checkpoint and does not call the hub.
+/// the runtime reads a local checkpoint and does not call the hub.
 #[cfg(feature = "ml-candle")]
 pub use candle_transformers;
 
@@ -285,7 +285,7 @@ impl Refusal {
 }
 
 /// Why the gate could not reach a verdict. Every variant is a refusal, not a
-/// pass — see the fail-closed note on this module.
+/// pass; see the fail-closed note on this module.
 ///
 /// `#[non_exhaustive]`: a new failure mode is a refusal that must be added, and
 /// adding it must not be a breaking change for embedders matching on this type.
@@ -383,7 +383,7 @@ fn allows_consumer(entry: &contract::Entry, consumer: &str) -> bool {
 ///
 /// All four axes must hold: the consumer is allowed, the requirement string is
 /// identical, the source class is identical, and the dependency kind is listed.
-/// A partial match is not a weak admission — it is a refusal with a named axis,
+/// A partial match is not a weak admission: it is a refusal with a named axis,
 /// which is why `audit_direct` re-tests each axis to report *which* one drifted.
 fn edge_matches(entry: &contract::Entry, edge: &DirectEdge) -> bool {
     allows_consumer(entry, &edge.consumer)
@@ -488,8 +488,8 @@ pub fn audit_direct(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
 
 /// Whether `name` is the gate itself or the substrate it is built on.
 ///
-/// The gate cannot be gated by itself — auditing `lgwks_deps` against a register
-/// it parses is circular — and `lgwks_std` is the facade this crate is compiled
+/// The gate cannot be gated by itself: auditing `lgwks_deps` against a register
+/// it parses is circular. `lgwks_std` is the facade this crate is compiled
 /// against, so an edge to it is the crate's own foundation rather than an
 /// admission decision. Everything else, including an unnamed path copy, is
 /// audited.
@@ -593,7 +593,7 @@ mod tests {
         "allowed_consumers = \"lgwks_std\"\n",
         "allowed_kinds = \"normal\"\n",
         "reason = \"Derive-based serialization needs compiler introspection std lacks.\"\n",
-        "approved_by = \"Director\"\n",
+        "approved_by = \"reviewer\"\n",
         "approved_on = \"2026-08-19\"\n",
         "review = \"docs/ADMISSION.md\"\n",
     );
@@ -703,7 +703,7 @@ mod tests {
             .parent()
             .ok_or("crates/ has no parent")?;
 
-        // The deps storefront may depend only on the estate facade it enforces,
+        // The deps storefront may depend only on the workspace facade it enforces,
         // plus the reviewed scan exception, plus optional storefront features
         // that the end user selects. The default build stays zero-dependency:
         // every third-party edge other than lgwks_std must be `optional = true`,
@@ -788,7 +788,7 @@ mod tests {
                 assert!(
                     APPROVED.contains(&name),
                     "lgwks-std declares unapproved dependency `{name}` — \
-                     add it to APPROVED in this test after Director review"
+                     add it to APPROVED in this test after review"
                 );
             }
         }

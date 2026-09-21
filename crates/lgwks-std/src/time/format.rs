@@ -118,9 +118,10 @@ pub fn from_unix_parts(secs: i64, nanos: u32) -> SystemTime {
 /// rather than passed to `Duration::new`, which would panic on it.
 #[must_use]
 pub fn try_from_unix_parts(secs: i64, nanos: u32) -> Option<SystemTime> {
-    // Fold any nanosecond overflow into whole seconds up front so `Duration::new`
-    // — which panics when `nanos >= 1_000_000_000` — never sees an out-of-range
-    // count. The divisor is a non-zero constant, so neither `checked_*` fails.
+    // Fold any nanosecond overflow into whole seconds up front, so
+    // `Duration::new`, which panics when `nanos >= 1_000_000_000`, never sees an
+    // out-of-range count. The divisor is a non-zero constant, so neither
+    // `checked_*` fails.
     let carry = nanos.checked_div(NANOS_PER_SECOND).unwrap_or(0);
     let fraction = nanos.checked_rem(NANOS_PER_SECOND).unwrap_or(0);
     // `carry` is `0..=4`, so this can only fail for `secs` already at `i64::MAX`.
@@ -199,9 +200,9 @@ fn write_fraction(out: &mut String, nanos: u32) {
 
 /// Appends `YYYY-MM-DD` for a proleptic Gregorian date.
 ///
-/// A year in `0..=9999` takes the fixed four-digit path. Any other year — only
-/// reachable from [`to_rfc3339`] for instants billions of years from the epoch
-/// — falls back to `format_args!("{year:04}")`, which prints the sign and pads
+/// A year in `0..=9999` takes the fixed four-digit path. Any other year (only
+/// reachable from [`to_rfc3339`] for instants billions of years from the epoch)
+/// falls back to `format_args!("{year:04}")`, which prints the sign and pads
 /// the magnitude, so a negative year renders as `-001`.
 fn write_civil(out: &mut String, year: i64, month: u32, day: u32) {
     if (0..=9999).contains(&year) {

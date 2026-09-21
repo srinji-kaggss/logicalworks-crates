@@ -1,7 +1,7 @@
 //! `wire` owns binary serialization and enforces INV-WIRE-DETERMINISTIC:
 //! the same value always produces the same byte sequence on the same
 //! architecture (little-endian, pointer-width-64). Built on rkyv for
-//! zero-copy deserialization — archived data is accessed directly from the
+//! zero-copy deserialization: archived data is accessed directly from the
 //! byte buffer without allocation.
 //!
 //! This is the internal binary wire format. For external JSON APIs, use

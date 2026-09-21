@@ -217,7 +217,7 @@ struct CargoPackage {
     /// Declared repository URL, when the manifest has one. Read only for
     /// workspace members, where it proves the member is ours.
     repository: Option<String>,
-    /// The dependency declarations this package authored — including optional
+    /// The dependency declarations this package authored, including optional
     /// edges that are inactive in the current feature selection, which is the
     /// reason metadata rather than the lockfile is the source of truth here.
     dependencies: Vec<CargoDependency>,

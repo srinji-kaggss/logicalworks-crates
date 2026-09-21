@@ -20,7 +20,7 @@ never built unless the end user selects it.**
 
 Cognitive load is `std` + `bot` + `deps`, plus the standalone `ast`:
 
-- `lgwks_std` — the std+ core.
+- `lgwks_std`: the core surface, depended on by the other three or used alone.
 - `lgwks_bot` — async, runners, actors.
 - `lgwks_deps` — the **storefront**: install it, select features, get deps.
 - `lgwks_ast` — standalone, grandfathered.

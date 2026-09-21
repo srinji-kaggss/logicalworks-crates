@@ -1,21 +1,23 @@
-//! `scan` owns the estate's zero-gate source detectors and enforces
-//! INV-SCAN-ZERO: a file the estate ships carries no silenced error, no
-//! unlogged error return, no lint allowance, no overlong try chain, and no
-//! paraphrase docstring.
+//! `scan` owns the zero-gate source detectors and enforces INV-SCAN-ZERO: a
+//! file this workspace ships carries no silenced error, no unlogged error
+//! return, no lint allowance, no overlong try chain, and no paraphrase
+//! docstring.
 //!
-//! Ported from keel's `keel-scan` detectors (`keel-core/src/hollowness.rs`,
+//! Ported from the reference zero-gate detector suite (`hollowness.rs`,
 //! `observability_gap.rs`, `allow_silence.rs`, `debuggability.rs`,
-//! `interpretability.rs`) so every estate repo runs the same verdicts from
-//! this one binary instead of depending on the keel gate fleet. Rule names,
-//! messages, thresholds, and exemptions match keel exactly; any intentional
-//! divergence is marked `DIVERGENCE` with its reason. The port reads syntax
-//! with `syn` — a Rust grammar is the only honest oracle for Rust source,
-//! which is why `syn` is this crate's one non-facade dependency.
+//! `interpretability.rs`) so every repository in this workspace runs the same
+//! verdicts from this one binary instead of depending on a separate gate
+//! fleet. Rule names, messages, thresholds, and exemptions match the reference
+//! implementation exactly; any intentional divergence is marked `DIVERGENCE`
+//! with its reason. The port reads syntax with `syn`: a Rust grammar is the
+//! only honest oracle for Rust source, which is why `syn` is this crate's one
+//! non-facade dependency.
 //!
-//! DIVERGENCE (cfg atom keys): keel keys SAT atoms by token-stream text via
-//! `quote::ToTokens`. This port keys them by structural rendering, which is
-//! canonical where token text is incidental (whitespace, trailing commas).
-//! Both sides of every comparison use the same function, so verdicts agree.
+//! DIVERGENCE (cfg atom keys): the reference implementation keys SAT atoms by
+//! token-stream text via `quote::ToTokens`. This port keys them by structural
+//! rendering, which is canonical where token text is incidental (whitespace,
+//! trailing commas). Both sides of every comparison use the same function, so
+//! verdicts agree.
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -46,7 +48,7 @@ pub struct Hit {
 }
 
 /// Why a file could not be scanned. Unparseable source is a refusal, not a
-/// pass — a gate that passes what it cannot read reports success for the one
+/// pass: a gate that passes what it cannot read reports success for the one
 /// condition it exists to catch.
 ///
 /// Non-exhaustive so a caller cannot treat a future failure mode as impossible
@@ -114,8 +116,8 @@ fn is_test_fn(attrs: &[syn::Attribute]) -> bool {
 /// (`test`, `test_case`, `rstest`) or a `cfg` that cannot hold outside `test`.
 ///
 /// The `cfg` arm parses its argument as a single `syn::Meta`; an attribute
-/// whose arguments are not a well-formed meta list — a bare `#[cfg]`, or one
-/// carrying token soup — is not a test marker and answers `false`.
+/// whose arguments are not a well-formed meta list (a bare `#[cfg]`, or one
+/// carrying token soup) is not a test marker and answers `false`.
 fn is_test_attribute(attr: &syn::Attribute) -> bool {
     let name = attr
         .path()
@@ -135,7 +137,7 @@ fn is_test_attribute(attr: &syn::Attribute) -> bool {
 }
 
 /// True when no assignment of the cfg atoms outside `test` can satisfy the
-/// expression — i.e. the item exists only under `cfg(test)`.
+/// expression, i.e. the item exists only under `cfg(test)`.
 fn cfg_requires_test(meta: &syn::Meta) -> bool {
     let mut atoms = HashSet::new();
     collect_cfg_atoms(meta, &mut atoms);
@@ -185,12 +187,13 @@ fn collect_cfg_atoms(meta: &syn::Meta, atoms: &mut HashSet<String>) {
     }
 }
 
-/// Structural rendering of a cfg atom. DIVERGENCE from keel (see module
-/// docs): canonical where token text is incidental; identity-consistent
-/// within each SAT problem, which is all the solver requires.
+/// Structural rendering of a cfg atom. DIVERGENCE from the reference
+/// implementation (see module docs): canonical where token text is
+/// incidental; identity-consistent within each SAT problem, which is all the
+/// solver requires.
 ///
 /// Two structurally different atoms never render the same string, and the same
-/// atom always renders the same string — that identity is what makes the
+/// atom always renders the same string: that identity is what makes the
 /// `HashMap` keyed by this text a faithful model of the cfg expression.
 fn atom_key(meta: &syn::Meta) -> String {
     match *meta {
@@ -242,7 +245,7 @@ fn atom_key_path(path: &syn::Path) -> String {
 trait TokenString {
     /// Renders this expression as the text a cfg atom key would carry.
     /// Non-literal expressions render as `..`, which merges every such
-    /// expression into one atom — a deliberate over-approximation that can
+    /// expression into one atom, a deliberate over-approximation that can
     /// only make an expression harder to satisfy than it really is.
     fn to_token_string(&self) -> String;
 }
@@ -285,7 +288,7 @@ fn cfg_children(
 /// A combinator whose arguments fail to parse folds to `false` via `is_some_and`
 /// on the `all` / `any` arms; `not` falls back to [`atom_value`]. Unknown
 /// paths evaluate through `values`, which defaults an unassigned atom to
-/// `true` — the conservative direction, since a `true` atom makes an
+/// `true`, the conservative direction, since a `true` atom makes an
 /// expression easier to satisfy and so less likely to be called test-only.
 fn eval_cfg(meta: &syn::Meta, test: bool, values: &HashMap<&str, bool>) -> bool {
     match *meta {
@@ -349,7 +352,7 @@ fn is_test_module(module: &syn::ItemMod) -> bool {
 }
 
 // ── Detector 1: ERROR-SWALLOW ───────────────────────────────────────────────
-// Ported from keel-core/src/hollowness.rs `detect_error_swallow`.
+// Ported from the reference `detect_error_swallow` detector.
 
 /// Result-typed expressions whose error is silently discarded: `.ok()` on a
 /// `Result`, `let _ = <fallible>`, `.unwrap_or_default()` on a `Result`, or
@@ -402,8 +405,8 @@ fn discarded_error_closure(node: &syn::ExprMethodCall) -> Option<&'static str> {
 /// A `|_|` parameter drops the cause outright. A named parameter the body
 /// never reads drops it just as completely.
 ///
-/// Any pattern that is neither a wildcard nor a single identifier — a tuple, a
-/// struct pattern, a slice — binds through a shape rather than a name; the
+/// Any pattern that is neither a wildcard nor a single identifier (a tuple, a
+/// struct pattern, a slice) binds through a shape rather than a name; the
 /// detector cannot tell a dropped binding from a used one there, so it refuses
 /// to accuse and answers `false`.
 fn error_binding_is_dropped(parameter: &syn::Pat, body: &syn::Expr) -> bool {
@@ -442,7 +445,7 @@ impl<'ast> Visit<'ast> for IdentReader<'_> {
     /// Macro bodies are matched as TEXT, not walked as syntax: an inline
     /// format capture spells the read inside a string literal, so
     /// `|err| panic!("...: {err}")` has no `err` ident in the AST. Text can
-    /// only ever say "read" where syntax says nothing — failing toward
+    /// only ever say "read" where syntax says nothing, failing toward
     /// silence, never toward a false accusation.
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
         if node.tokens.to_string().contains(&self.name.to_string()) {
@@ -453,13 +456,13 @@ impl<'ast> Visit<'ast> for IdentReader<'_> {
 }
 
 impl ErrorSwallowVisitor<'_> {
-    /// Records a statement of the form `expr.ok();` — the `Result` is
+    /// Records a statement of the form `expr.ok();`: the `Result` is
     /// converted to an `Option` and then dropped, so the error is gone with no
     /// caller ever reading it.
     ///
     /// Only a statement whose semicolon is present counts. A trailing
     /// `.ok()` expression (a tail value) is not discarded, and an `Option`
-    /// receiver is indistinguishable here — but `.ok()` on a `Result` is the
+    /// receiver is indistinguishable here, but `.ok()` on a `Result` is the
     /// shape this detector exists for, and the statement form is the one that
     /// provably throws the value away.
     fn record_discarded_ok(&mut self, statement: &syn::Stmt) {
@@ -549,8 +552,7 @@ impl<'ast> Visit<'ast> for ErrorSwallowVisitor<'_> {
 }
 
 // ── Detector 2: unlogged-err-return ─────────────────────────────────────────
-// Ported from keel-core/src/observability_gap.rs
-// `detect_unlogged_err_construction`.
+// Ported from the reference `detect_unlogged_err_construction` detector.
 
 /// Macro and path prefixes that count as a log emission.
 ///
@@ -809,7 +811,7 @@ impl ErrReturnWalker<'_> {
     }
 
     /// True when the innermost enclosing function is test-only. A return
-    /// outside any function — a `const` initializer, say — is not disabled,
+    /// outside any function (a `const` initializer, say) is not disabled,
     /// which is why an empty stack answers `false`.
     fn is_scope_disabled(&self) -> bool {
         *self.test_scope_stack.last().unwrap_or(&false)
@@ -821,7 +823,7 @@ impl ErrReturnWalker<'_> {
     ///
     /// Both checks run before the finding is pushed, so a return the block
     /// walker already accepted is never reported by the window check and vice
-    /// versa — the two are alternatives, not cumulative evidence.
+    /// versa: the two are alternatives, not cumulative evidence.
     fn check_return_expr(&mut self, node: &syn::ExprReturn) {
         if self.is_scope_disabled() {
             return;
@@ -862,9 +864,10 @@ impl<'ast> Visit<'ast> for ErrReturnWalker<'_> {
 }
 
 // ── Detector 3: ALLOW-SILENCE ───────────────────────────────────────────────
-// Ported from keel-core/src/allow_silence.rs: an `#[allow(clippy::*)]`
-// annotation silences a lint with a mechanical fix. rustc's own lints are
-// untouched by construction; `#[cfg_attr]` is out of scope (conditional).
+// Ported from the reference allow-silence detector: an
+// `#[allow(clippy::*)]` annotation silences a lint with a mechanical fix.
+// rustc's own lints are untouched by construction; `#[cfg_attr]` is out of
+// scope (conditional).
 
 /// Runs the ALLOW-SILENCE detector over a whole file, accumulating findings
 /// into the caller's `hits`.
@@ -943,11 +946,11 @@ fn clippy_lint_name(lint: syn::Meta) -> Option<String> {
 }
 
 // ── Detector 4: long-try-chain ──────────────────────────────────────────────
-// Ported from keel-core/src/debuggability.rs `detect_long_try_chain`: more
-// than three `?` operators in one non-`let` statement, outside test fns.
+// Ported from the reference `detect_long_try_chain` detector: more than three
+// `?` operators in one non-`let` statement, outside test fns.
 
 /// Above this many `?` operators in one non-`let` statement, the chain is a
-/// finding. Three is keel's threshold and is contractual: a chain of exactly
+/// finding. Three is the reference threshold and is contractual: a chain of exactly
 /// this length passes, one longer fails.
 const MAX_TRY_CHAIN: usize = 3;
 
@@ -1056,8 +1059,8 @@ impl TryChainWalker<'_> {
     /// Reports a finding when one statement carries more than
     /// [`MAX_TRY_CHAIN`] `?` operators.
     ///
-    /// Does nothing when no inspectable function encloses the statement — code
-    /// outside any function, or inside an exempt one — because the snippet
+    /// Does nothing when no inspectable function encloses the statement (code
+    /// outside any function, or inside an exempt one), because the snippet
     /// names the enclosing function's line and there is none to name.
     fn inspect_statement(&mut self, statement: &syn::Stmt) {
         let fn_line = match self.current_fn_line {
@@ -1112,9 +1115,9 @@ impl<'ast> Visit<'ast> for TryChainWalker<'_> {
 }
 
 // ── Detector 5: tautological-doc ────────────────────────────────────────────
-// Ported from keel-core/src/interpretability.rs: a public fn whose docstring
-// paraphrases its name (half or more of its ≤6 content tokens share stems
-// with the name tokens).
+// Ported from the reference tautological-doc detector: a public fn whose
+// docstring paraphrases its name (half or more of its ≤6 content tokens share
+// stems with the name tokens).
 
 /// Words ignored when deciding whether a docstring paraphrases its function
 /// name. Articles, prepositions, and copulas carry no behavior, so counting
@@ -1164,7 +1167,8 @@ fn split_words(doc: &str) -> Vec<String> {
 /// The relation is prefix-based in EITHER direction, so `creates` matches
 /// `create` and `user` matches `users`. It over-counts by design: the check
 /// only fires at a 0.5 ratio over at most six tokens, so a generous match makes
-/// the detector accuse more readily, which is the direction keel chose.
+/// the detector accuse more readily, which is the direction the reference
+/// implementation chose.
 fn shared_stem_count(doc_tokens: &[String], name_tokens: &[String]) -> usize {
     doc_tokens
         .iter()
@@ -1320,7 +1324,7 @@ mod tests {
         hits.iter().map(|hit| hit.rule).collect()
     }
 
-    // ERROR-SWALLOW — RED then GREEN per spelling.
+    // ERROR-SWALLOW: RED then GREEN per spelling.
 
     #[test]
     fn wildcard_map_err_is_swallow() -> TestResult {
@@ -1373,7 +1377,7 @@ mod tests {
         Ok(())
     }
 
-    // unlogged-err-return — RED then GREEN.
+    // unlogged-err-return: RED then GREEN.
 
     #[test]
     fn bare_err_return_without_log_is_flagged() -> TestResult {
@@ -1402,7 +1406,7 @@ mod tests {
         Ok(())
     }
 
-    // ALLOW-SILENCE — RED then GREEN.
+    // ALLOW-SILENCE: RED then GREEN.
 
     #[test]
     fn clippy_allow_is_silence() -> TestResult {
@@ -1417,7 +1421,7 @@ mod tests {
         Ok(())
     }
 
-    // long-try-chain — RED then GREEN.
+    // long-try-chain: RED then GREEN.
 
     #[test]
     fn four_try_in_one_statement_is_a_chain() -> TestResult {
@@ -1442,7 +1446,7 @@ mod tests {
         Ok(())
     }
 
-    // tautological-doc — RED then GREEN.
+    // tautological-doc: RED then GREEN.
 
     #[test]
     fn paraphrase_doc_is_tautological() -> TestResult {

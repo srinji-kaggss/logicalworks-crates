@@ -1,7 +1,7 @@
 //! `chat` owns the chat/messaging domain. Requires `bot.net`.
 //!
 //! Chat is an Observe source (incoming messages) and a Query surface (read
-//! history). It is NOT a separate verb — it is where triggers come from.
+//! history). It is NOT a separate verb; it is where triggers come from.
 
 use crate::cap::{Auth, Cap};
 use crate::error::BotError;
@@ -103,7 +103,7 @@ pub fn slack_message(channel: impl Into<String>) -> SlackChannel {
 pub struct HttpWebhook {
     /// The webhook path observed; echoed in the "binding required" diagnostic.
     path: String,
-    /// Forced to `[bot.net]` by the constructor — receiving from a webhook
+    /// Forced to `[bot.net]` by the constructor: receiving from a webhook
     /// still requires the network capability, so there is no ungated path.
     caps: Vec<Cap>,
 }

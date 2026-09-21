@@ -1,7 +1,7 @@
 //! Black-box acceptance for the async surface.
 //!
-//! These exercise the SDK the way a consumer does — through `lgwks_bot`, never
-//! `tokio` — and assert the invariants that justify the facade: bounded fan-out
+//! These exercise the SDK the way a consumer does, through `lgwks_bot` and never
+//! `tokio`, and assert the invariants that justify the facade: bounded fan-out
 //! never exceeds its limit and preserves input order, a panicking input is
 //! resumed on the awaiter (not converted to a `JoinError`), abort is
 //! cancellation, and dropping a handle detaches rather than cancels.
@@ -31,8 +31,8 @@ use lgwks_bot::{Builder, Runtime};
 
 /// What a test reports when its precondition did not hold.
 ///
-/// The tests here cross three error domains — `BotError`, the engine's
-/// `JoinError`, and `std::io` — so they return `Box<dyn Error>` and propagate
+/// The tests here cross three error domains (`BotError`, the engine's
+/// `JoinError`, and `std::io`), so they return `Box<dyn Error>` and propagate
 /// each with `?`. A mismatch is then a named failure carrying the reason,
 /// rather than an unwind that reports only that something unwound.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -42,7 +42,7 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 /// Two of these tests have blocking work as their subject rather than their
 /// setup: one measures that a *started* blocking task cannot be aborted by
 /// `shutdown_timeout`, the other that the pool bound is applied to it. That
-/// requires a real OS thread and a real wait — `rt::time::sleep` cannot be
+/// requires a real OS thread and a real wait, because `rt::time::sleep` cannot be
 /// awaited from inside a `spawn_blocking` closure, and the runtime this test
 /// shuts down has no timer driver left to await. `lgwks_std::task`'s own test
 /// module carries the same reasoned exception for the same reason.
@@ -58,8 +58,8 @@ fn block_pool_thread(duration: Duration) {
 /// Panic on the calling task, carrying `message` as the payload.
 ///
 /// `resume_unwind` and not `panic!`: the workspace forbids `panic` outright with
-/// no suppression path, and this is the estate's documented form for a
-/// deliberate panic — it reports on the task that observes it and never aborts
+/// no suppression path, and this is the documented form for a
+/// deliberate panic: it reports on the task that observes it and never aborts
 /// the process. Declared to return `()` rather than leaving its body to diverge,
 /// so a future that calls it keeps a concrete output type instead of inferring
 /// the never type into the handle it returns.
@@ -449,7 +449,7 @@ fn a_panicking_task_surfaces_as_a_join_error() -> TestResult {
 fn a_handle_spawns_from_a_non_runtime_thread() -> TestResult {
     let runtime = Runtime::new()?;
     let handle = runtime.handle();
-    // `std::thread::spawn` and not the estate's `spawn`: the claim is that a
+    // `std::thread::spawn` and not the runtime's `spawn`: the claim is that a
     // handle works from a thread the runtime does not own, so the thread must be
     // one the runtime did not make. What `clippy.toml` bans is an *unjoined* OS
     // thread — one whose panic is invisible and whose handle is leaked — and
@@ -467,10 +467,10 @@ fn a_handle_spawns_from_a_non_runtime_thread() -> TestResult {
     Ok(())
 }
 
-/// The estate's cancellation primitive, exercised the way a supervisor uses it.
+/// The cancellation primitive, exercised the way a supervisor uses it.
 ///
-/// `AGENTS.md` requires every background task to be tracked in a `JoinSet` and
-/// to listen to a `CancellationToken`. Before this test existed the second half
+/// Every background task in this crate is tracked in a `JoinSet` and listens to
+/// a `CancellationToken`. Before this test existed the second half
 /// of that rule had no implementation to point at, so the rule was unenforceable
 /// rather than merely unenforced.
 #[test]
@@ -629,7 +629,7 @@ fn a_token_cancelled_before_the_await_still_releases_the_task() -> TestResult {
 
 /// The crate's own thesis: its verbs are deliberately not `Send`, so a domain
 /// may hold thread-local state. Until `LocalSet` was exposed there was no way to
-/// spawn a future with that property — `spawn` requires `Send`, which every verb
+/// spawn a future with that property, because `spawn` requires `Send`, which every verb
 /// in this crate violates on purpose.
 #[test]
 fn a_local_set_runs_a_task_that_is_not_send() -> TestResult {

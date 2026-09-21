@@ -117,7 +117,7 @@ pub fn decode(input: impl AsRef<[u8]>) -> Result<Vec<u8>, DecodeError> {
     let input = input.as_ref();
     check_even_length(input.len())?;
     // `check_even_length` proved the length even, so the halving is exact.
-    // `checked_div` is used only because the estate forbids the `/` operator on
+    // `checked_div` is used only because this crate forbids the `/` operator on
     // integers; the `None` arm (a zero divisor) is unreachable for a constant 2.
     let pair_count = input.len().checked_div(2).unwrap_or(0);
     let mut out = Vec::with_capacity(pair_count);

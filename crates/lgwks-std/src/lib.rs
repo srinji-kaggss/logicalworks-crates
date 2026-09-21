@@ -1,13 +1,14 @@
 //! Zero-config primitives that replace a dozen crates.
 //!
-//! Every module is a single-import, single-call primitive — hex, base64,
-//! timestamps, UUIDs, hashing, glob matching, regex, JSON, async — backed by
+//! Every module is a single-import, single-call primitive (hex, base64,
+//! timestamps, UUIDs, hashing, glob matching, regex, JSON, async), backed by
 //! a vetted dependency stack that bottoms out at two leaves.
 //!
 //! Each optional feature unlocks one capability with one audited stack. The
-//! default build carries `core` **and `trace`**: the estate's PRINTS rule
-//! forbids `println!` in library code and names `tracing` as the replacement,
-//! and a rule that names an unavailable facility is not a rule. `--no-default-
+//! default build carries `core` **and `trace`**: this workspace forbids
+//! `println!` in library code and names `tracing` as the replacement, so a
+//! build without `trace` would leave that rule with nothing to point at.
+//! `--no-default-
 //! features --features core` restores a genuinely zero-dependency build.
 //!
 //! ## Feature map
@@ -28,7 +29,7 @@
 //! - `full` — all of the above.
 //!
 //! Lint contract: workspace `missing_docs` deny, `unsafe_code` forbid,
-//! `broken_intra_doc_links` deny — see the workspace root `Cargo.toml`.
+//! `broken_intra_doc_links` deny; see the workspace root `Cargo.toml`.
 ///
 /// Single-import encoding primitives: base64 and percent-encoding.
 pub mod encoding;

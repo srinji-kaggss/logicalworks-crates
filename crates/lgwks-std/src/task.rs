@@ -1,5 +1,5 @@
 //! `task` owns synchronous future execution and zero-dependency concurrency
-//! for CLI, DAG interpreters, bot ticks, and test runners, enforcing
+//! for CLI tools, DAG interpreters, polling loops, and test runners, enforcing
 //! INV-TASK-ZERO-RUNTIME: futures are driven to completion on the current
 //! thread using `std::task::Wake` and OS thread parking, with zero background
 //! reactors, zero persistent worker threadpools, and zero external
@@ -96,7 +96,7 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 /// waker. When any child wakes the group, every incomplete child is polled
 /// again, so one wake costs one scan of the incomplete set (`O(n)` for `n`
 /// futures). That is the right trade for the small fan-outs a CLI, DAG
-/// interpreter, or bot tick drives; it is not a work-stealing scheduler.
+/// interpreter, or polling loop drives; it is not a work-stealing scheduler.
 ///
 /// Completion order never affects the result: index `i` is the output of the
 /// `i`-th input whichever finishes first. A future is dropped as soon as it
@@ -118,8 +118,8 @@ pub async fn join_all<F: Future>(futures: impl IntoIterator<Item = F>) -> Vec<F:
 /// Same polling, ordering and cancellation semantics as [`join_all`]; the only
 /// difference is the allocation model. `join_all` boxes each input once
 /// (`n` boxes for `n` futures); this takes those boxes as given and adds none,
-/// so a caller that already holds `Pin<Box<_>>` — the bot tick path boxes at
-/// its type-erasure boundary — avoids a second box per future. The cost model
+/// so a caller that already holds `Pin<Box<_>>` (for instance at a type-erasure
+/// boundary) avoids a second box per future. The cost model
 /// is `n` heap allocations either way, not a measured throughput claim.
 pub async fn join_all_boxed<F: Future + ?Sized>(
     futures: impl IntoIterator<Item = Pin<Box<F>>>,
@@ -195,7 +195,7 @@ enum Job<T> {
 ///
 /// The worker writes `job`; the awaiting task reads it and writes `waker`. They
 /// are one struct under one lock so that a completion cannot land between the
-/// poll's read of `job` and its registration of `waker` — the interleaving that
+/// poll's read of `job` and its registration of `waker`, the interleaving that
 /// would lose a wakeup and hang the awaiter.
 struct Shared<T> {
     /// The job's lifecycle state. `Running` until the worker thread records an
@@ -220,7 +220,7 @@ struct Shared<T> {
 /// has no value to return, and the alternatives to failing loudly are a silent
 /// deadlock (`Pending` with nothing left to wake it) or a fabricated value.
 /// Both are worse than the panic the `Future` contract already permits, so the
-/// completed-but-polled state is resumed with `resume_unwind` — the same
+/// completed-but-polled state is resumed with `resume_unwind`, the same
 /// mechanism, and the same "fail on the awaiter, never abort the process" rule,
 /// that already carries a panicking closure's payload back to the caller.
 pub struct JoinHandle<T> {
@@ -320,9 +320,9 @@ where
 #[cfg(test)]
 // The workspace ban list (`clippy.toml`) forbids `std::thread::spawn` and
 // `std::thread::sleep`, because reaching for a raw OS thread instead of the
-// estate's surface is the anti-pattern. This module is the exception that
-// proves the rule: it tests `lgwks_std::task` itself, which is a *thread
-// parking* executor. Waking it requires a real second thread, and letting the
+// primitives this crate provides is the anti-pattern. This module is the
+// exception that proves the rule: it tests `lgwks_std::task` itself, which is a
+// *thread parking* executor. Waking it requires a real second thread, and letting the
 // driver park before that wake requires a real sleep. Both calls are the
 // subject under test, not a reach for one.
 #[expect(

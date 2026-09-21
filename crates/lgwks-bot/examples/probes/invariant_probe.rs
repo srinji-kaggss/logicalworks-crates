@@ -1,4 +1,4 @@
-//! Probe: are the estate's stated anti-slop invariants actually unrepresentable
+//! Probe: are the stated API invariants actually unrepresentable
 //! through the `lgwks_bot::rt` facade, or merely re-exported?
 //!
 //! # Disposition: archived, deliberately not a built target
@@ -10,7 +10,7 @@
 //!
 //! When this probe was written, `disallowed_methods` and `disallowed_types`
 //! were warn-by-default and no `-D` promoted them, so every block below
-//! *compiled* — and that compilation was the finding: the estate's API bans were
+//! *compiled*, and that compilation was the finding: the API bans were
 //! nowhere fatal, and ten violations across the workspace were passing CI.
 //! `Cargo.toml` now sets both to `deny` (2026-09-20), which is the remediation
 //! this probe was written to force.
@@ -20,13 +20,13 @@
 //! 1. `unbounded_channel()` **is** reachable: `rt::sync::mpsc` re-exports the
 //!    engine's whole module, so the ban lives in `clippy.toml`, not in the type.
 //!    Calling it is now a hard error, so the probe can no longer demonstrate the
-//!    call — the ban refuses it, which is the point.
+//!    call; the ban refuses it, which is the point.
 //! 2. Fire-and-forget **is** representable: a `JoinHandle` is droppable and
 //!    nothing records the task (now `rt::task::spawn`, the sanctioned path).
 //!    "Zero un-tracked background tasks" is a convention the caller keeps.
 //! 3. A std `Mutex` held across `.await` is **no longer** representable:
 //!    `await_holding_lock = "forbid"` refuses it, so the block that used to
-//!    demonstrate otherwise cannot be written at all — a stricter outcome than
+//!    demonstrate otherwise cannot be written at all, a stricter outcome than
 //!    the probe was built to detect.
 //!
 //! The body is kept verbatim as the audit record, minus the reasonless

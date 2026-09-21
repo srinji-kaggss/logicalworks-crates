@@ -4,7 +4,7 @@
 //!
 //! The API is blocking. From async code, run it on a blocking thread.
 //! HTTP error statuses (4xx/5xx) are returned as [`Response`](crate::http::Response),
-//! never as [`Error`](crate::http::Error) — only transport failure, timeout,
+//! never as [`Error`](crate::http::Error): only transport failure, timeout,
 //! and invalid URLs error.
 //!
 //! Each call builds and drops its own connection agent: there is no
@@ -12,7 +12,7 @@
 //! [`crate::retry::RetryPolicy`] budget and keep concurrency bounded
 //! (`lgwks_bot::rt::task::join_all_bounded`), not open unbounded parallel
 //! requests. Retries, backoff, and circuit-breaking are caller policy, not
-//! client behavior — the client makes exactly one attempt per call.
+//! client behavior: the client makes exactly one attempt per call.
 
 use std::fmt;
 use std::io::Read;
@@ -148,7 +148,7 @@ impl std::error::Error for Error {}
 /// Four shapes are refused, and all four return the same [`Error::InvalidUrl`]:
 /// a string that is not an absolute URI at all, a missing or non-http(s)
 /// scheme, a URL with no authority, and a URL whose host is empty. The
-/// rejection is silent — nothing is written to stderr — and the diagnostic
+/// rejection is silent (nothing is written to stderr), and the diagnostic
 /// names the failure class, never the raw URL: a caller-supplied URL can carry
 /// credentials or tokens in its userinfo or its query string. The caller already
 /// holds the URL it passed in, so the class is the whole of what it does not
@@ -163,7 +163,7 @@ pub fn validate_url(url: &str) -> Result<(), Error> {
     if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
         return Err(Error::InvalidUrl);
     }
-    // An absolute URI may be authority-less — `http:user:SECRET@host` parses —
+    // An absolute URI may be authority-less (`http:user:SECRET@host` parses),
     // but it is not a valid request target. ureq refuses such a URL with a
     // message that embeds the raw text, so reject it here, class-only, rather
     // than let a lower layer echo it.
@@ -210,7 +210,7 @@ fn agent(options: &Options) -> ureq::Agent {
 /// Header values are decoded lossily: a non-UTF-8 header must not fail the
 /// whole exchange, and the replacement character keeps the wire bytes
 /// distinguishable from a header that was genuinely invalid UTF-8. The body, by
-/// contrast, is read strictly — only the I/O read can fail here, and a partial
+/// contrast, is read strictly: only the I/O read can fail here, and a partial
 /// read is reported as [`Error::Transport`] rather than returned as a short
 /// body. Non-UTF-8 *bodies* are not an error at this layer: [`Response::text`]
 /// is where that is decided.
@@ -294,7 +294,7 @@ pub fn post_with(
     // Nothing about this request is written anywhere, and deliberately so: the
     // URL can carry credentials in its userinfo or a token in its query string,
     // and a library that prints on a request the caller itself authored tells
-    // the caller nothing it does not already hold — it has the URL, the content
+    // the caller nothing it does not already hold: it has the URL, the content
     // type, and the body length. A caller that wants a request trace owns that
     // decision, and owns redacting the URL when it does.
     let mut request = agent(options)
@@ -313,8 +313,8 @@ pub fn post_with(
 // Same exception as `task.rs`, for the same reason: these tests stand up a real
 // loopback server on a real thread and sleep to hold it open past the client's
 // read timeout. The ban targets production code that blocks or leaks a thread;
-// here the thread *is* the fixture, and there is no estate surface that serves
-// a socket from a test.
+// here the thread *is* the fixture, and this crate provides no surface that
+// serves a socket from a test.
 #[expect(
     clippy::disallowed_methods,
     reason = "loopback test servers need a real thread, and holding one open past a read timeout needs a real sleep"

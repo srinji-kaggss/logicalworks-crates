@@ -1,4 +1,4 @@
-//! `eval` owns shipped evaluators — composable conditions for the Evaluate verb.
+//! `eval` owns shipped evaluators: composable conditions for the Evaluate verb.
 
 use crate::error::BotError;
 use crate::verb::Evaluate;
@@ -9,7 +9,7 @@ pub struct Changed<T: Clone + PartialEq> {
     /// The value seen on the previous check, or `None` before the first one.
     /// Interior mutability because `Evaluate::check` takes `&self`: a condition
     /// keeps state between ticks without the bot holding it mutably. `RefCell`
-    /// rather than a lock — a bot is driven on one thread and a condition is
+    /// rather than a lock: a bot is driven on one thread and a condition is
     /// never shared across threads.
     last: std::cell::RefCell<Option<T>>,
 }
@@ -95,7 +95,7 @@ impl<T: PartialOrd + 'static> Evaluate<T> for Above<T> {
 
 /// True when a string field contains a pattern.
 pub struct Contains {
-    /// The substring searched for, literally — this is not a pattern language,
+    /// The substring searched for, literally: this is not a pattern language,
     /// so a value that looks like a regex is matched as its own bytes.
     pattern: String,
 }

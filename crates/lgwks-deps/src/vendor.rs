@@ -1,6 +1,6 @@
 //! `vendor` owns lockfile-to-tree coverage and enforces
 //! INV-VENDOR-SINGLE-TREE: every registry package a repo's `Cargo.lock`
-//! resolves must be present in the estate's single shared vendor tree with
+//! resolves must be present in the single shared vendor tree with
 //! the exact bytes the lock pins, or the offline build it feeds is a lie.
 //!
 //! The check binds on hashes, not names: a lock package carries the sha256 of
@@ -51,7 +51,7 @@ pub struct Report {
 // ── Errors ──────────────────────────────────────────────────────────────────
 
 /// Why coverage could not be verified. Every variant is a refusal, not a
-/// pass — a gate that passes when it cannot read its own inputs reports
+/// pass: a gate that passes when it cannot read its own inputs reports
 /// success for the one condition it exists to catch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -113,7 +113,7 @@ impl From<lock::LockError> for VendorError {
 
 // ── Tree location ───────────────────────────────────────────────────────────
 
-/// Reads the vendored-sources directory out of a cargo config — the same file
+/// Reads the vendored-sources directory out of a cargo config: the same file
 /// cargo itself uses for source replacement, so the check can never drift to
 /// a tree cargo is not resolving.
 fn tree_from_config(config: &Path) -> Result<Option<PathBuf>, VendorError> {
@@ -176,7 +176,7 @@ fn package_hash(checksum_file: &Path) -> Result<String, String> {
         std::fs::read_to_string(checksum_file).map_err(|cause| format!("unreadable: {cause}"))?;
     let key = "\"package\"";
     // Splitting on the key takes everything after its first occurrence, which
-    // is exactly the tail `find` plus `key.len()` would have addressed — with
+    // is exactly the tail `find` plus `key.len()` would have addressed, with
     // no index arithmetic to overflow.
     let (_, tail) = text
         .split_once(key)
@@ -234,7 +234,7 @@ struct Index {
     /// package is reported missing rather than covered.
     by_hash: std::collections::HashMap<String, PathBuf>,
     /// `(name, version)` from the vendored `Cargo.toml` to its directory.
-    /// Consulted only for lock packages that carry no checksum — git sources,
+    /// Consulted only for lock packages that carry no checksum: git sources,
     /// which Cargo pins by revision rather than by `.crate` hash.
     by_name_version: std::collections::HashMap<(String, String), PathBuf>,
 }

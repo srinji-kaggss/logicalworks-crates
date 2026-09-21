@@ -9,7 +9,7 @@
 //!
 //! Run from a checkout with `cargo run -p lgwks_deps --example check`.
 //! The example resolves the workspace root from `CARGO_MANIFEST_DIR`, so it
-//! only runs inside the source tree — installed consumers call
+//! only runs inside the source tree; installed consumers call
 //! [`lgwks_deps::check_dependencies`] against their own root instead.
 //!
 //! Output goes through an explicit stdout handle rather than `println!` so the

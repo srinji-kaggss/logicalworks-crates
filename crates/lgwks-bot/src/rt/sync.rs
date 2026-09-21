@@ -8,7 +8,7 @@
 pub use lgwks_deps::tokio::sync::{Barrier, Mutex, Notify, OnceCell, RwLock, Semaphore};
 pub use lgwks_deps::tokio::sync::{broadcast, mpsc, oneshot, watch};
 
-// The estate's own, not the engine's. `tokio_util::sync::CancellationToken` is
+// This crate's own, not the engine's. `tokio_util::sync::CancellationToken` is
 // the crate this could have come from, but that would add a third-party edge to
 // the storefront for a single type the engine's `watch` already expresses. It is
 // defined in `rt::cancel` and named only here, so `rt::sync::CancellationToken`

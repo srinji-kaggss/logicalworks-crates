@@ -1,4 +1,4 @@
-//! Supervision — background work that cannot leak and cannot run away.
+//! Supervision: background work that cannot leak and cannot run away.
 //!
 //! A caller writing a bot should be thinking about the bot. They should not be
 //! thinking about whether a task outlives its owner, whether a fan-out has a
@@ -38,7 +38,7 @@
 //! [`repeat`] is the only loop this module asks a caller to write, and it
 //! cannot be written without a [`Budget`]. Every iteration races the
 //! cancellation token, so a cancel always wins even against a body that is
-//! itself awaiting — the body is dropped, not waited on. [`Budget::Ongoing`] is
+//! itself awaiting: the body is dropped, not waited on. [`Budget::Ongoing`] is
 //! the unbounded case, and it is bounded in the way that matters: it is
 //! cancellation-terminated, not free-running.
 //!
@@ -80,7 +80,7 @@ use super::task::JoinSet;
 /// How long a repeated body may keep running.
 ///
 /// There is deliberately no free-running variant. `Ongoing` is the unbounded
-/// case and it is still terminated — by cancellation, which [`repeat`] always
+/// case and it is still terminated by cancellation, which [`repeat`] always
 /// races against the body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -95,7 +95,7 @@ pub enum Budget {
     For(Duration),
     /// Run the body until the token is cancelled.
     ///
-    /// The name is the contract. This is not "forever" — it is "for as long as
+    /// The name is the contract. This is not "forever"; it is "for as long as
     /// the supervisor that owns it is alive", and it ends the moment that stops
     /// being true.
     Ongoing,
@@ -221,7 +221,7 @@ impl Supervisor {
     /// A token that is cancelled when this supervisor is cancelled or dropped.
     ///
     /// This is the token a body should hold. It is a *child* of the
-    /// supervisor's, so cancelling it — or a supervisor shutting down — stops
+    /// supervisor's, so cancelling it (or a supervisor shutting down) stops
     /// the body, while the body stopping does not stop the supervisor.
     #[must_use]
     pub fn child_token(&self) -> CancellationToken {
@@ -272,7 +272,7 @@ impl Supervisor {
     /// reached.
     ///
     /// `body` is called **before** anything is spawned, so it does not itself
-    /// need to be `Send` or `'static` — only the future it returns does. That is
+    /// need to be `Send` or `'static`: only the future it returns does. That is
     /// what lets a call site capture borrowed state while the task it starts
     /// holds none.
     ///
@@ -350,7 +350,7 @@ impl Supervisor {
     ///
     /// A task built on [`Supervisor::spawn_repeating`] or [`repeat`] observes
     /// the token and returns from its loop. One that never observes its token
-    /// is aborted, so this always terminates — there is no argument or task
+    /// is aborted, so this always terminates: there is no argument or task
     /// shape that makes it hang.
     pub async fn shutdown(mut self) {
         self.token.cancel();
@@ -455,7 +455,7 @@ mod tests {
     /// It must be awaited on the runtime that spawned the tasks. [`block_on`]
     /// builds a current-thread runtime per call, so a task spawned in one call
     /// is aborted when that call's runtime is dropped and cannot be observed
-    /// from the next — which is why every test here wraps its whole body in a
+    /// from the next, which is why every test here wraps its whole body in a
     /// single `block_on` rather than reaching for one per step.
     async fn settle(supervisor: &mut Supervisor) -> bool {
         let mut spins: u32 = 0;

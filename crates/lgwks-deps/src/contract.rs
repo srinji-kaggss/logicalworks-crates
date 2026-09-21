@@ -6,7 +6,7 @@
 //!
 //! The register lives at `contract/APPROVED.toml` in the repo being gated. It
 //! is valid TOML so an editor or a human can read it, but it is parsed by a
-//! line-oriented reader in this module rather than by a TOML crate — taking a
+//! line-oriented reader in this module rather than by a TOML crate: taking a
 //! dependency in order to police dependencies would be self-refuting. The
 //! reader refuses any line it does not recognise instead of skipping it, so a
 //! typo cannot quietly become an unenforced entry.
@@ -26,7 +26,7 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Tier {
-    /// Out of scope for reimplementation — kept as a direct dependency.
+    /// Out of scope for reimplementation; kept as a direct dependency.
     Boundary,
     /// Kept as audited upstream source under `vendor/`, not as a registry edge.
     Vendor,
@@ -156,8 +156,8 @@ pub enum ContractError {
         value: String,
     },
     /// `reason` did not name what the standard library cannot do. A reason must
-    /// be a sentence — at least four words, at least 24 characters, ending in a
-    /// full stop — and must not merely restate the crate's name.
+    /// be a sentence (at least four words, at least 24 characters, ending in a
+    /// full stop) and must not merely restate the crate's name.
     ThinReason {
         /// The entry's crate name.
         krate: String,
@@ -295,7 +295,7 @@ struct Draft {
 
 impl Draft {
     /// Returns the last value written for `key`, or `None` if the block never
-    /// carried it. An empty string is returned as `Some("")` — presence and
+    /// carried it. An empty string is returned as `Some("")`: presence and
     /// non-emptiness are separate questions, and `check_field_present` is what
     /// rejects the blank case.
     fn get(&self, key: &str) -> Option<&str> {
@@ -328,7 +328,7 @@ enum Section {
     /// Inside `[policy]`.
     Policy,
     /// Inside an `[[approved]]` block, which the reader has already pushed a
-    /// `Draft` for — that is what makes `Section::Approved` imply a non-empty
+    /// `Draft` for; that is what makes `Section::Approved` imply a non-empty
     /// `drafts` vector.
     Approved,
 }
@@ -337,7 +337,7 @@ enum Section {
 ///
 /// Returns `Ok(true)` when the line was a header the reader consumed, `Ok(false)`
 /// when it is an ordinary key/value line, and `Malformed` for a bracketed line
-/// that names no known section — a typo like `[[aproved]]` must not silently
+/// that names no known section: a typo like `[[aproved]]` must not silently
 /// fall through and become an unenforced entry.
 fn handle_section_header(
     line: &str,
@@ -371,7 +371,7 @@ fn handle_section_header(
 /// including `True` and `1`, leaves enforcement on, so a malformed attempt to
 /// stand the gate down fails closed rather than disabling it. The quote wrapper
 /// is stripped from `repository` because the reader does not implement TOML
-/// escapes — an escaped quote inside the value is therefore not accepted.
+/// escapes, so an escaped quote inside the value is not accepted.
 fn apply_policy_pair(
     key: &str,
     value: &str,
@@ -419,7 +419,7 @@ fn apply_approved_pair(
 /// Dispatches a key/value pair according to the section the reader is inside.
 ///
 /// `drafts` is a slice rather than a `Vec` because this function never grows the
-/// list — only `handle_section_header` may push, and it runs first.
+/// list: only `handle_section_header` may push, and it runs first.
 fn process_pair(
     section: &Section,
     key: &str,
@@ -575,7 +575,7 @@ impl Contract {
 /// Requires a field to be present and non-blank.
 ///
 /// Whitespace only counts as blank, so `owner = "   "` is refused exactly as a
-/// missing `owner` would be — a placeholder is not evidence.
+/// missing `owner` would be: a placeholder is not evidence.
 fn check_field_present(
     draft: &Draft,
     krate: &str,
@@ -648,8 +648,8 @@ fn validate_reason(reason: &str, krate: &str) -> Result<(), ContractError> {
 
 /// Turns a fully-read draft into an `Entry`, validating every field rule.
 ///
-/// The checks run in a fixed order — required fields, then tier, then date,
-/// then reason — so a register with several defects always reports the same
+/// The checks run in a fixed order (required fields, then tier, then date,
+/// then reason), so a register with several defects always reports the same
 /// one. `crate` falls back to `<unnamed>` for diagnostics only; a block whose
 /// `crate` is absent still fails `validate_required_fields` immediately after.
 fn build(draft: &Draft) -> Result<Entry, ContractError> {
@@ -694,7 +694,7 @@ fn build(draft: &Draft) -> Result<Entry, ContractError> {
 ///
 /// Dropping empties is what lets `allowed_kinds = "normal,"` mean `["normal"]`
 /// rather than a list containing an unparseable blank. An entirely empty value
-/// therefore yields an empty list — which `check_field_present` has already
+/// therefore yields an empty list, which `check_field_present` has already
 /// refused, so no admitted entry can carry one.
 fn split_csv(value: &str) -> Vec<String> {
     value
@@ -710,8 +710,8 @@ fn split_csv(value: &str) -> Vec<String> {
 /// Tests whether `reason` is a sentence that says something.
 ///
 /// Three rules, all of which must hold: at least 24 characters after trimming,
-/// a trailing full stop, at least four whitespace-separated words, and — after
-/// stripping the full stop and normalising — the text must not simply repeat the
+/// a trailing full stop, at least four whitespace-separated words, and, after
+/// stripping the full stop and normalising, the text must not simply repeat the
 /// crate's name. The floor is deliberately low enough to pass any honest
 /// justification and high enough to fail `reason = "needed"` or
 /// `reason = "serde"`.
@@ -758,7 +758,7 @@ fn normalise(name: &str) -> String {
 /// Quote tracking is deliberately shallow: a backslash escapes the next byte
 /// only while inside quotes, so an odd number of quotes leaves the rest of the
 /// line quoted and the `#` is kept rather than truncated. Erring toward keeping
-/// the `#` is the safe direction — the value then fails validation visibly
+/// the `#` is the safe direction: the value then fails validation visibly
 /// instead of being silently cut short.
 fn strip_comment(line: &str) -> &str {
     let bytes = line.as_bytes();
@@ -783,7 +783,7 @@ fn strip_comment(line: &str) -> &str {
 ///
 /// The key must be non-empty and made only of ASCII alphanumerics and `_`, which
 /// is what makes a malformed line a refusal rather than a silently ignored key.
-/// Splitting is on the first `=`, so a value may itself contain `=` — a review
+/// Splitting is on the first `=`, so a value may itself contain `=`: a review
 /// URL or an extra constraint needs no escaping.
 fn split_pair(line: &str) -> Option<(&str, &str)> {
     let (key, value) = line.split_once('=')?;
@@ -836,7 +836,7 @@ mod tests {
                 "allowed_consumers = \"lgwks_std\"\n",
                 "allowed_kinds = \"normal\"\n",
                 "reason = \"Derive-based serialization needs compiler introspection std does not expose.\"\n",
-                "approved_by = \"Director\"\n",
+                "approved_by = \"reviewer\"\n",
                 "approved_on = \"2026-08-19\"\n",
                 "review = \"docs/ADMISSION.md\"\n",
                 "{}"
@@ -875,7 +875,7 @@ mod tests {
         assert_eq!(parsed.capability, "json.serialization");
         assert_eq!(parsed.allowed_consumers, ["lgwks_std"]);
         assert!(parsed.reason.ends_with('.'));
-        assert_eq!(parsed.approved_by, "Director");
+        assert_eq!(parsed.approved_by, "reviewer");
         assert_eq!(parsed.approved_on, "2026-08-19");
         assert_eq!(parsed.review, "docs/ADMISSION.md");
         Ok(())
@@ -904,7 +904,7 @@ mod tests {
             "tier = \"boundary\"\n",
             "version = \"1.0\"\n",
             "reason = \"Derive-based serialization needs compiler introspection std does not expose.\"\n",
-            "approved_by = \"Director\"\n",
+            "approved_by = \"reviewer\"\n",
             "approved_on = \"2026-08-19\"\n",
             "review = \"https://example.com/pr#123\"\n",
         );
@@ -944,7 +944,7 @@ mod tests {
             "crate = \"serde\"\n",
             "tier = \"boundary\"\n",
             "version = \"1.0\"\n",
-            "approved_by = \"Director\"\n",
+            "approved_by = \"reviewer\"\n",
             "approved_on = \"2026-08-19\"\n",
             "review = \"docs/ADMISSION.md\"\n",
         );
@@ -965,7 +965,7 @@ mod tests {
             "tier = \"eliminate\"\n",
             "version = \"0.4\"\n",
             "reason = \"Workspace stdlib replaces this; no external crate is admissible here.\"\n",
-            "approved_by = \"Director\"\n",
+            "approved_by = \"reviewer\"\n",
             "approved_on = \"2026-08-19\"\n",
             "review = \"docs/ADMISSION.md\"\n",
         );
@@ -986,7 +986,7 @@ mod tests {
             "tier = \"boundary\"\n",
             "version = \"1.0\"\n",
             "reason = \"Compiler introspection needed.\"\n",
-            "approved_by = \"Director\"\n",
+            "approved_by = \"reviewer\"\n",
             "approved_on = \"19-08-2026\"\n",
             "review = \"docs/ADMISSION.md\"\n",
         );
@@ -1007,7 +1007,7 @@ mod tests {
             "tier = \"boundary\"\n",
             "version = \"1.0\"\n",
             "reason = \"needed\"\n",
-            "approved_by = \"Director\"\n",
+            "approved_by = \"reviewer\"\n",
             "approved_on = \"2026-08-19\"\n",
             "review = \"docs/ADMISSION.md\"\n",
         );
@@ -1027,7 +1027,7 @@ mod tests {
             "tier = \"boundary\"\n",
             "version = \"1.0\"\n",
             "reason = \"serde.\"\n",
-            "approved_by = \"Director\"\n",
+            "approved_by = \"reviewer\"\n",
             "approved_on = \"2026-08-19\"\n",
             "review = \"docs/ADMISSION.md\"\n",
         );

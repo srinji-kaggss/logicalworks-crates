@@ -5,8 +5,8 @@
 //! sources to side effects. Authority is proof-carrying: every `poll`,
 //! `execute_action`, and `query` takes an `(Auth, input)` tuple, and only
 //! `GrantSet::issue` can mint the `Auth` half. Capabilities are validated at
-//! build time — a bot that requires `bot.net` without a grant fails before it
-//! runs — and proven again on every call, so a grant revoked after build cannot
+//! build time (a bot that requires `bot.net` without a grant fails before it
+//! runs) and proven again on every call, so a grant revoked after build cannot
 //! fire.
 //!
 //! `Evaluate` takes no proof: it is pure (boolean in, boolean out) with no
@@ -14,12 +14,13 @@
 //!
 //! # Async surface
 //!
-//! With the default `rt` feature, `lgwks_bot` is also the estate's async and
-//! runner surface: `Runtime`, `rt::task::join_all_bounded`, timers, channels,
-//! and the opt-in `net`/`process`/`fs`/`signal` drivers. The engine is sourced
-//! from the `lgwks_deps` storefront (`feature = "tokio"`), so no other crate
-//! authors a `tokio` edge. `--no-default-features` withdraws the async surface
-//! and leaves the synchronous `lgwks_std::task` executor as the only runtime.
+//! With the default `rt` feature, `lgwks_bot` is also the async and runner
+//! surface of this workspace: `Runtime`, `rt::task::join_all_bounded`, timers,
+//! channels, and the opt-in `net`/`process`/`fs`/`signal` drivers. The engine is
+//! sourced from the `lgwks_deps` dependency facade (`feature = "tokio"`), so no
+//! other crate authors a `tokio` edge. `--no-default-features` withdraws the
+//! async surface and leaves the synchronous `lgwks_std::task` executor as the
+//! only runtime.
 //!
 //! # Quick start
 //!
@@ -60,7 +61,7 @@
 /// for two commits after both had been replaced, and nothing failed, because a
 /// prose example is not compiled by anything. This makes it compiled.
 ///
-/// `#[cfg(doctest)]` so the item exists only under `cargo test --doc` — it is
+/// `#[cfg(doctest)]` so the item exists only under `cargo test --doc`: it is
 /// not part of the library, not built by a normal compile, and not exported.
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]
@@ -102,7 +103,7 @@ mod ecs;
 pub mod error;
 /// Grant sets: build-time admission and per-tick proof minting.
 pub mod gate;
-/// JSON through the estate facade (`lgwks_std::json`).
+/// JSON through the shared facade (`lgwks_std::json`).
 pub mod json;
 /// Async runtime surface (feature `rt`): owned `Runtime`, bounded fan-out,
 /// timers, channels, and opt-in drivers.
@@ -112,7 +113,7 @@ pub mod rt;
 ///
 /// `BotSpec` is validate-only: there is no `from_spec` materializer. A spec
 /// that validates still builds through `Bot::builder`, so capability grants
-/// stay explicit at the call site. The builder DSL is the DSL — there is
+/// stay explicit at the call site. The builder DSL is the DSL: there is
 /// deliberately no `bot!` proc-macro (it would drag `syn` into every consumer
 /// and hide the per-call `Auth::check` that auditors read).
 pub mod spec;
@@ -129,19 +130,19 @@ pub use verb::{Evaluate, Execute, Observe, Query};
 
 /// Wait for all of a set of futures, returning their outputs in input order.
 ///
-/// Re-exported from the storefront engine so callers never name `tokio`. For a
+/// Re-exported from the `lgwks_deps` engine so callers never name `tokio`. For a
 /// fan-out that must be bounded, prefer `rt::task::join_all_bounded`.
 #[cfg(all(feature = "rt", feature = "macros"))]
 pub use lgwks_deps::tokio::join;
 
 /// Race a set of futures, running the first branch that becomes ready.
 ///
-/// Re-exported from the storefront engine so callers never name `tokio`.
+/// Re-exported from the `lgwks_deps` engine so callers never name `tokio`.
 #[cfg(all(feature = "rt", feature = "macros"))]
 pub use lgwks_deps::tokio::select;
 
 /// Wait for all of a set of fallible futures, short-circuiting on the first
-/// error. Re-exported from the storefront engine so callers never name `tokio`.
+/// error. Re-exported from the `lgwks_deps` engine so callers never name `tokio`.
 #[cfg(all(feature = "rt", feature = "macros"))]
 pub use lgwks_deps::tokio::try_join;
 

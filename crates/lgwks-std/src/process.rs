@@ -12,8 +12,8 @@ use std::io;
 /// Send SIGKILL to every process in group `pgid`.
 ///
 /// `pgid` is a process-group id as reported by the OS (a positive integer;
-/// typically the leader's pid). An invalid id surfaces the OS error —
-/// never silent success. This kills unconditionally (SIGKILL cannot be
+/// typically the leader's pid). An invalid id surfaces the OS error rather than
+/// succeeding silently. This kills unconditionally (SIGKILL cannot be
 /// caught); callers that need graceful shutdown must signal SIGTERM
 /// themselves before falling back here.
 #[cfg(all(unix, feature = "process"))]

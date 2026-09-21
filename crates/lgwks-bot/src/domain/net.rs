@@ -40,8 +40,8 @@ pub struct Endpoint {
 #[derive(PartialEq, Debug, Clone)]
 #[non_exhaustive]
 pub struct NetState {
-    /// HTTP status code of the last probe. `0` means no response was received —
-    /// the endpoint was unreachable — which is distinct from any real status a
+    /// HTTP status code of the last probe. `0` means no response was received:
+    /// the endpoint was unreachable, which is distinct from any real status a
     /// server can return.
     pub status_code: u16,
     /// Whether the endpoint is reachable.
@@ -128,8 +128,8 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
-    /// Tests here mix three error domains — socket I/O, `BotError`, and the
-    /// executor — so the tests report `Box<dyn Error>` and propagate each with
+    /// Tests here mix three error domains (socket I/O, `BotError`, and the
+    /// executor), so the tests report `Box<dyn Error>` and propagate each with
     /// `?`, rather than reducing every failure to an unwind.
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -141,7 +141,7 @@ mod tests {
     ///
     /// `lgwks_std::task::spawn_blocking` rather than a raw `std::thread::spawn`:
     /// it starts the thread immediately, so the listener is accepting before
-    /// the client dials, and its handle is a future the caller must await —
+    /// the client dials, and its handle is a future the caller must await,
     /// which is the difference between a joined thread and a leaked one. The
     /// closure returns its I/O failure instead of unwrapping it so a refused
     /// connection surfaces as a test error rather than a background panic.

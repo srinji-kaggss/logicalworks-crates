@@ -95,7 +95,7 @@ pub fn pr_status(repo: impl Into<String>) -> PrStatus {
 pub struct CiRun {
     /// The `owner/repo` observed; echoed in the "binding required" diagnostic.
     repo: String,
-    /// Forced to `[bot.net]` by the constructor — reading a run's status is an
+    /// Forced to `[bot.net]` by the constructor: reading a run's status is an
     /// API call, so there is no ungated path to it.
     caps: Vec<Cap>,
 }

@@ -1,4 +1,4 @@
-//! `flow` owns composition domains — currently the pipeline. These are
+//! `flow` owns composition domains, currently the pipeline. These are
 //! Execute impls that chain other Execute actions. No new verb needed.
 
 use crate::cap::{Auth, Cap};
@@ -90,7 +90,7 @@ impl Default for Pipeline {
     }
 }
 
-/// Opaque pipeline output — wraps the final step's result.
+/// Opaque pipeline output: wraps the final step's result.
 ///
 /// `#[non_exhaustive]`: the payload is deliberately unnameable, so the only
 /// legitimate way to read it is to downcast the inner `Any` to the type the

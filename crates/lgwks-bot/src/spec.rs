@@ -10,7 +10,7 @@ use super::gate::GrantSet;
 
 // ── Serializable spec ──────────────────────────────────────────────────────
 
-/// The serializable bot contract — what an AI emits and what a manifest
+/// The serializable bot contract: what an AI emits and what a manifest
 /// contains. `from_json` validates its shape; capability validation happens at
 /// build time from a [`GrantSet`], not from a spec.
 ///
@@ -24,7 +24,7 @@ use super::gate::GrantSet;
 pub struct BotSpec {
     /// The bot's unique name. Must be non-empty: both builder entry points
     /// refuse an empty name with [`BotError::IncompleteSpec`]. `from_json`
-    /// accepts one because it validates shape only — the build-time check is
+    /// accepts one because it validates shape only; the build-time check is
     /// the one that binds.
     pub name: String,
     /// Observation chains in declaration order. [`Bot::tick`] polls and fires in
@@ -35,7 +35,7 @@ pub struct BotSpec {
 }
 
 impl BotSpec {
-    /// Assemble a spec from its parts. The arguments are taken verbatim — no
+    /// Assemble a spec from its parts. The arguments are taken verbatim; no
     /// shape validation runs here, because validation belongs to
     /// [`BotSpec::from_json`] and to the builder, not to construction.
     #[must_use]
@@ -111,7 +111,7 @@ impl ActionSpec {
 /// Build one `(condition, action)` tuple, erased for storage on a chain.
 ///
 /// Shared rather than duplicated: the `Auth` issue, the downcast and the
-/// type-mismatch error must not drift between call sites — and issuing the proof
+/// type-mismatch error must not drift between call sites, and issuing the proof
 /// *before* the downcast is the property that makes a type mismatch fail without
 /// a side effect.
 pub(crate) fn typed_entry<C, A, T>(condition: C, action: A) -> ChainEntry
@@ -185,7 +185,7 @@ where
 /// A built bot: name, admitted capabilities, and the `bevy_ecs` world its
 /// chains execute in.
 ///
-/// **One bot, one executor.** `Bot` *is* the ECS bot — `tick` runs one schedule
+/// **One bot, one executor.** `Bot` *is* the ECS bot: `tick` runs one schedule
 /// step, and a condition is `Changed<Revision>` on the source entity rather than
 /// a re-evaluation of a value that did not move. There is no second way to run a
 /// bot, and no feature flag that adds one.
@@ -332,7 +332,7 @@ mod tests {
     /// The failure a test reports when its precondition did not hold. Tests
     /// return `Result` and propagate with `?`, so a mismatch is reported as a
     /// named assertion failure with the cause attached rather than as a bare
-    /// unwind — and the cause names the invariant that was violated, not merely
+    /// unwind, and the cause names the invariant that was violated, not merely
     /// that something was.
     fn failed(cause: impl Into<String>) -> BotError {
         BotError::DomainError {
@@ -350,7 +350,7 @@ mod tests {
     /// a real thread is the only way to express it on this executor.
     ///
     /// The suppression is the narrow, test-scoped exception `Cargo.toml`
-    /// documents for the two `deny` API bans: no estate replacement exists for a
+    /// documents for the two `deny` API bans: no replacement exists for a
     /// blocking sleep on a pool thread under a thread-parking executor.
     #[expect(
         clippy::disallowed_methods,

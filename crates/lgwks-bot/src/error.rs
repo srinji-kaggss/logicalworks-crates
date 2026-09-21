@@ -24,7 +24,7 @@ pub enum BotError {
         /// The capability that was required but missing.
         required: Cap,
     },
-    /// The bot spec is incomplete — a required field is missing (currently the
+    /// The bot spec is incomplete: a required field is missing (currently the
     /// name; an empty chain list is allowed).
     IncompleteSpec {
         /// What is missing.
@@ -52,8 +52,8 @@ pub enum BotError {
         /// The underlying cause.
         cause: String,
     },
-    /// An evaluate condition failed structurally (not a false result — an error
-    /// in the condition itself).
+    /// An evaluate condition failed structurally: not a false result, but an
+    /// error in the condition itself.
     EvaluateError {
         /// What went wrong.
         cause: String,
@@ -94,7 +94,7 @@ impl std::error::Error for BotError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         // All causes are data (`Cap`, `&'static str`, escaped `String`), never
         // a wrapped error: there is no deeper source to forward. String
-        // causes are intentional here — see the module header — not a missing
+        // causes are intentional here (see the module header), not a missing
         // `#[from]` impl.
         None
     }

@@ -1,6 +1,6 @@
 //! `hash` owns content-addressable hashing and enforces INV-HASH-DETERMINISTIC:
 //! the same input bytes always produce the same digest, and the digest is the
-//! BLAKE3 algorithm — the sole content-identity hash in this crate.
+//! BLAKE3 algorithm, the sole content-identity hash in this crate.
 
 /// A 32-byte BLAKE3 digest.
 ///
@@ -112,7 +112,7 @@ pub fn blake3(data: &[u8]) -> Digest {
 
 /// Hash `data` with keyed BLAKE3 under `key` and return the 32-byte digest.
 ///
-/// This is the estate's message-authentication primitive: whoever holds `key`
+/// This is the message-authentication primitive: whoever holds `key`
 /// can recompute the tag, whoever does not cannot forge one. Use it where a
 /// checksum is not enough because the writer is adversarial (audit chains,
 /// sealed receipts). The key must come from outside the sealed artifact

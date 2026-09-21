@@ -1,19 +1,19 @@
-//! `lgwks_ast` owns the estate's one multi-language AST parser.
+//! `lgwks_ast` owns the single multi-language AST parser.
 //!
-//! Code tools in the estate — the safety detectors in `keel-core` and the
-//! graph extractor in `code-world-model` — need the same three things: decide
-//! a source file's language, select that language's tree-sitter grammar, and
-//! walk the resulting syntax tree safely. Before this crate each rebuilt its
-//! own language enum, extension table, grammar mapping, and parse loop; that
-//! is one concept implemented twice, so it lives here instead.
+//! Code tools that consume this crate, a safety linter and a graph extractor
+//! among them, need the same three things: decide a source file's language,
+//! select that language's tree-sitter grammar, and walk the resulting syntax
+//! tree safely. Before this crate each rebuilt its own language enum,
+//! extension table, grammar mapping, and parse loop; that is one concept
+//! implemented twice, so it lives here instead.
 //!
 //! Enforced invariant **INV-AST-ONE-PARSER**: a consumer identifies, selects,
 //! and parses through this crate and does not depend on `ast-grep` directly.
 //!
 //! ## Code observability
 //!
-//! This is the estate's code-observability lane: structural parsing here, and
-//! the shared typed-diagnostic derive in [`error`]. [`ParseError`] is built with
+//! Code observability here rests on two pieces: structural parsing, and the
+//! shared typed-diagnostic derive in [`error`]. [`ParseError`] is built with
 //! it, and downstream analysers derive `Display`/`source`/`#[from]` from the
 //! same stack instead of each declaring `thiserror`. The crate root re-exports
 //! the derive because `#[derive(Error)]` expands to absolute
@@ -25,8 +25,8 @@
 //!
 //! One cargo feature per grammar forwards to `ast-grep-language`. The default
 //! enables the seven languages the safety detectors parse; every remaining
-//! grammar ast-grep-language ships — C#, CSS, Dart, Elixir, Haskell, HCL,
-//! HTML, JSON, Lua, Markdown, Nix, PHP, Ruby, Solidity, YAML, and the rest —
+//! grammar ast-grep-language ships (C#, CSS, Dart, Elixir, Haskell, HCL,
+//! HTML, JSON, Lua, Markdown, Nix, PHP, Ruby, Solidity, YAML, and the rest)
 //! is its own opt-in `lang-*` feature, and `full` enables all 28. A language
 //! whose feature is off is not in [`Language::ALL`] and is never returned by
 //! [`Language::of_path`], so no consumer pays to compile a grammar it cannot
@@ -38,15 +38,15 @@
 //! point for anything else is a caller-registered parser. [`CustomLang`] is
 //! that registration: name the language, hand it a `tree-sitter` grammar, and
 //! parse it through [`try_parse_with`] under the same bounds and recovery
-//! refusal as a built-in. A grammar the estate needs should be contributed to
-//! `ast-grep-language` upstream and the local registration deleted once it
-//! ships — this crate never forks upstream's language tables.
+//! refusal as a built-in. A grammar a consumer here needs should be contributed
+//! to `ast-grep-language` upstream and the local registration deleted once it
+//! ships. This crate never forks upstream's language tables.
 //!
 //! ## Bounded parsing
 //!
 //! A recoverable tree-sitter tree is not proof of valid syntax: recovery emits
 //! `ERROR` and `MISSING` nodes. [`try_parse`] therefore refuses before any
-//! detector sees the tree — oversized bytes, a parser that cannot produce a
+//! detector sees the tree: oversized bytes, a parser that cannot produce a
 //! tree, a tree past [`MAX_AST_NODES`], or one carrying recovery nodes. The
 //! unchecked [`parse`] exists for diagnostics and tests that inspect
 //! malformed trees on purpose.
@@ -65,7 +65,7 @@
 // Lint contract (missing_docs deny, unsafe_code forbid, broken intra-doc
 // links deny) comes from the workspace root.
 
-/// Typed diagnostics: [`ParseError`] and the shared error derive lane.
+/// Typed diagnostics: [`ParseError`] and the shared error derive.
 pub mod error;
 
 /// Root re-export required by the `thiserror` derive's absolute expansion path.
@@ -114,8 +114,8 @@ pub const MAX_DETECT_BYTES: usize = 64 * 1024;
 /// for without the leading dot, and the `ast-grep-language` twin of the same
 /// variant.
 ///
-/// Everything a language owns is generated from that one row — the variant, its
-/// slot in `Language::ALL`, and its arm in each of the four lookup tables — so a
+/// Everything a language owns is generated from that one row (the variant, its
+/// slot in `Language::ALL`, and its arm in each of the four lookup tables), so a
 /// row cannot be added by halves. The feature gate is applied to all of them
 /// together, which is what makes `Language` exhaustive without a wildcard arm
 /// when a grammar is compiled out: a disabled language has no variant for a
@@ -185,7 +185,7 @@ macro_rules! define_languages {
 define_languages! {
     Bash, "Bash / POSIX shell.", "lang-bash", "bash", ["sh", "bash"], Bash;
     // `CLang`, not `C`. The workspace forbids `clippy::min_ident_chars`, and a
-    // `forbid` cannot be lowered from source — an `#[allow]` here is a hard
+    // `forbid` cannot be lowered from source: an `#[allow]` here is a hard
     // E0453 rather than a suppression, so the variant name itself has to change.
     // The lint fires on this macro's *input* token, which is why a
     // `#[doc(hidden)]` alias elsewhere would not have helped.
@@ -194,7 +194,7 @@ define_languages! {
     // variant reached through a path, and the lint does not visit path segments.
     // Only the leading token had to move. `Language::name()` still reports "c",
     // which is the stable identity callers match on, so nothing that reads a
-    // finding is affected — only Rust code naming the variant.
+    // finding is affected; only Rust code naming the variant.
     CLang, "C.", "lang-c", "c", ["c", "h"], C;
     Cpp, "C++.", "lang-cpp", "cpp", ["cpp", "hpp", "cc", "cxx", "hh", "hxx"], Cpp;
     CSharp, "C#.", "lang-csharp", "csharp", ["cs"], CSharp;
@@ -260,7 +260,7 @@ impl Language {
 /// language, hand it a `tree-sitter` grammar, and it is usable through
 /// [`try_parse_with`] and every bounded walker.
 ///
-/// A grammar the estate needs should be contributed upstream and the local
+/// A grammar a consumer here needs should be contributed upstream and the local
 /// registration deleted once `ast-grep-language` ships it; keeping it behind
 /// this type makes that a localized change, not a fork of upstream's tables.
 #[derive(Clone)]
@@ -417,7 +417,7 @@ impl AstMetrics {
     /// are kept monotone: `nodes` saturates instead of wrapping (unreachable at
     /// any real tree size, but the bound is stated rather than assumed),
     /// `max_depth` keeps the deepest branch seen, and `has_syntax_issues` is
-    /// sticky — once an `ERROR` or `MISSING` node is seen, no later clean node
+    /// sticky: once an `ERROR` or `MISSING` node is seen, no later clean node
     /// may clear it, because the walk has no way to unsee it.
     fn including<L: LanguageExt>(mut self, node: &AstNode<'_, L>, depth: usize) -> Self {
         self.nodes = self.nodes.saturating_add(1);
@@ -428,7 +428,7 @@ impl AstMetrics {
 }
 
 /// Identify a language by file extension. `None` means the name does not claim
-/// the file — report unscanned, never clean.
+/// the file, so report unscanned, never clean.
 ///
 /// Content sniffing is deliberately not part of this call: it costs one full
 /// parse per grammar. A caller that needs it opts in with
@@ -439,11 +439,11 @@ pub fn detect(path: &str) -> Option<Language> {
     Language::of_path(path)
 }
 
-/// Identify `source` by trial-parsing `candidates` — the opt-in content path.
+/// Identify `source` by trial-parsing `candidates`, the opt-in content path.
 ///
 /// Cost is `candidates.len()` full parses, so `source` is held to
-/// [`MAX_DETECT_BYTES`] rather than [`MAX_SOURCE_BYTES`], and the caller — not
-/// this crate — decides which grammars are plausible. Exactly one candidate
+/// [`MAX_DETECT_BYTES`] rather than [`MAX_SOURCE_BYTES`], and the caller, not
+/// this crate, decides which grammars are plausible. Exactly one candidate
 /// must parse cleanly; zero or several yield `None`, because reporting a guess
 /// or picking among equally valid readings would attach a rule set on no
 /// evidence.
@@ -458,7 +458,7 @@ pub fn try_detect_content(
 /// The one candidate that parses `source` cleanly, or `None` when zero or more
 /// than one do.
 ///
-/// `source` is assumed already size-checked by the caller — [`try_detect_content`]
+/// `source` is assumed already size-checked by the caller: [`try_detect_content`]
 /// is the only one, and it applies [`MAX_DETECT_BYTES`] before reaching here.
 /// "Several clean readings" is a refusal rather than a tie-break: picking among
 /// grammars that all accept the source would attach a rule set on no evidence,
@@ -613,9 +613,9 @@ pub fn child_text_with_kind<L: LanguageExt>(
 /// `name_kinds` names it.
 ///
 /// Retained with [`callee_name`] and [`child_text_with_kind`] as the
-/// name-resolution surface keel's `lang.rs` calls today; keel issue #556
-/// migrates it onto this crate, so removing these would turn that migration
-/// into a rewrite.
+/// name-resolution surface existing callers rely on; those callers are being
+/// migrated onto this crate, so removing these would turn that migration into
+/// a rewrite.
 #[must_use]
 pub fn definition_name<L: LanguageExt>(
     node: &AstNode<'_, L>,

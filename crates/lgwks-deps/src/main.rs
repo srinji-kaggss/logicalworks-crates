@@ -4,7 +4,7 @@
 //!
 //! This binary is a doctor, not an authority. `check` diagnoses, `request`
 //! prints a block for a human to fill in, and `init` writes a fail-closed
-//! starting register. None of them can approve anything — approval is a diff
+//! starting register. None of them can approve anything: approval is a diff
 //! with a name on it, which is the whole point of the contract.
 //!
 //! `vendor check` is the physical counterpart: the register says which edges
@@ -19,7 +19,7 @@
 //! reader means: `lgwks-deps check . | head -1` is ordinary usage, so a broken
 //! pipe is a clean exit, not a panic. `print!` cannot express that, and it also
 //! trips `clippy::print_stdout`, which the workspace forbids outright. The
-//! policy lives in one place — `settle` — instead of at each write site.
+//! policy lives in one place (`settle`) instead of at each write site.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -42,7 +42,7 @@ const EXIT_IO: u8 = 2;
 /// The command summary printed by `--help`, by an unknown command, and by a
 /// subcommand invoked with the wrong number of arguments.
 const USAGE: &str = "\
-lgwks-deps — dependency admission for the std+ estate
+lgwks-deps: dependency admission for the core surface
 
 USAGE
   lgwks-deps check [PATH]              audit the repo at PATH (default: cwd)
@@ -250,7 +250,7 @@ fn report_ok(root: &Path, count: usize, out: &mut impl io::Write) -> io::Result<
 /// Resolves the repository root, audits it, and reports the verdict.
 ///
 /// A failure to find a lock file or to read the register is a refusal with exit
-/// code 2, never a pass — the gate is fail-closed, so "could not check" and
+/// code 2, never a pass: the gate is fail-closed, so "could not check" and
 /// "checked and refused" are the same verdict.
 ///
 /// `json_output` changes the *rendering* only. The verdict, the exit code, and
@@ -355,10 +355,10 @@ fn report_check(
 /// Writes the verdict as one JSON object on `out`.
 ///
 /// Built through `lgwks_std::json` rather than by hand. This crate enforces the
-/// rule that JSON comes through the estate facade, and emitting its own JSON by
-/// string concatenation would make the checker the first thing that violates it
-/// — which is exactly how `print_freshness_json` came to escape only the double
-/// quote and produce invalid output for any string carrying a backslash.
+/// rule that JSON comes through the workspace facade, and emitting its own JSON
+/// by string concatenation would make the checker the first thing that violates
+/// it, which is exactly how `print_freshness_json` came to escape only the
+/// double quote and produce invalid output for any string carrying a backslash.
 ///
 /// The shape is contractual and every key is always present, so a consumer can
 /// read `refusals` without first testing for its existence. `error` is `null`
@@ -432,7 +432,7 @@ fn print_check_json(
 ///
 /// `serde_json::Number` is `i64`-backed unless the `arbitrary_precision` feature
 /// is on, which it is not. A register with more than `i64::MAX` entries cannot
-/// exist — the file would have to be exabytes long — so the conversion is total
+/// exist (the file would have to be exabytes long), so the conversion is total
 /// in practice, and the fallback keeps it total in the type system too rather
 /// than reaching for a cast the workspace forbids.
 fn serde_json_number(count: usize) -> lgwks_std::json::Number {
@@ -484,7 +484,7 @@ fn print_request_template(krate: &str, version: &str, out: &mut impl io::Write) 
 /// Prints an approval template, or the usage block when either argument is
 /// missing.
 ///
-/// Both arguments are required — a template with no crate name is not useful —
+/// Both arguments are required (a template with no crate name is not useful),
 /// so a partial invocation is a usage error on stderr with exit code 2.
 fn run_request(
     krate: Option<&String>,
@@ -671,8 +671,8 @@ struct FreshnessResult {
 ///
 /// Names are de-duplicated first: a lock file commonly resolves several
 /// versions of one package, and the registry answer is per name. The lookup
-/// shells out to `curl` rather than pulling an HTTP client — INV-GATE-ZERO-DEPS
-/// — with a ten-second cap so an unreachable registry cannot hang the command.
+/// shells out to `curl` rather than pulling an HTTP client (INV-GATE-ZERO-DEPS),
+/// with a ten-second cap so an unreachable registry cannot hang the command.
 fn query_crates_io(packages: &[&lgwks_deps::lock::Resolved]) -> Vec<FreshnessResult> {
     let mut seen = std::collections::HashSet::new();
     let mut results = Vec::new();
@@ -732,7 +732,7 @@ fn query_crates_io(packages: &[&lgwks_deps::lock::Resolved]) -> Vec<FreshnessRes
     results
 }
 
-/// INV-GATE-ZERO-DEPS: no JSON parser — extract fields by line scan.
+/// INV-GATE-ZERO-DEPS: no JSON parser; extract fields by line scan.
 fn parse_crate_response(body: &str) -> (String, String) {
     let newest = extract_json_string(body, "newest_version");
     let repo = extract_json_string(body, "repository");
@@ -745,7 +745,7 @@ fn parse_crate_response(body: &str) -> (String, String) {
 /// Both `"key":"value"` and `"key": "value"` spacing are accepted, and a key
 /// that is absent yields an empty string rather than an error: freshness is a
 /// best-effort advisory, and a missing field must not turn a successful HTTP
-/// lookup into a failure. This is deliberately not a JSON parser — see the
+/// lookup into a failure. This is deliberately not a JSON parser; see the
 /// zero-deps invariant above.
 fn extract_json_string(body: &str, key: &str) -> String {
     let needle = format!("\"{}\":\"", key);
@@ -821,13 +821,13 @@ fn print_freshness_table(results: &[FreshnessResult], out: &mut impl io::Write) 
 ///
 /// The shape is contractual: one object per checked package, in the order they
 /// were queried, with `error` present only when the lookup failed. A stale
-/// count is not emitted — consumers read `stale` per row and the process exit
+/// count is not emitted; consumers read `stale` per row and the process exit
 /// code carries the aggregate.
 ///
 /// Built through `lgwks_std::json`, like `check --json`. The previous version
 /// assembled JSON by concatenation and escaped only the double quote, so any
 /// `repository` or `error` string containing a backslash produced a payload no
-/// parser would accept — from the crate whose whole purpose is enforcing that
+/// parser would accept, from the crate whose whole purpose is enforcing that
 /// dependencies go through the facade.
 fn print_freshness_json(results: &[FreshnessResult], out: &mut impl io::Write) -> io::Result<()> {
     use lgwks_std::json::{Map, Value};
@@ -953,7 +953,7 @@ fn run_vendor_check(
 // ── scan ────────────────────────────────────────────────────────────────────
 
 /// Collects `.rs` files under a path, skipping build output, vendored
-/// sources, and virtualenv-style trees — the same external set the CI gate
+/// sources, and virtualenv-style trees, the same external set the CI gate
 /// excludes, so local and remote verdicts agree.
 #[cfg(feature = "scan")]
 fn collect_rs_files(root: &Path, out: &mut Vec<PathBuf>) {
@@ -992,7 +992,7 @@ fn collect_rs_files(root: &Path, out: &mut Vec<PathBuf>) {
 /// Runs the zero-gate detectors over every collected `.rs` file.
 ///
 /// Findings are printed one per line and the run exits 2 if there were any, so
-/// a CI lane can gate on the exit code alone. An unreadable file is reported as
+/// a CI job can gate on the exit code alone. An unreadable file is reported as
 /// a scan error rather than skipped: a detector that silently drops a file
 /// reports a clean tree it never looked at.
 #[cfg(feature = "scan")]
@@ -1077,10 +1077,10 @@ fn handle_scan(
 /// template.
 ///
 /// Read lowest rung first: each step up is an escalation that needs a stated
-/// reason, and only the last two rungs — `VENDOR` and `BOUNDARY` — produce a
+/// reason, and only the last two rungs (`VENDOR` and `BOUNDARY`) produce a
 /// register entry at all.
 const LADDER: &str = "\
-The std+ admission ladder (INV-DEP-EDGE-OWNED)
+The core admission ladder (INV-DEP-EDGE-OWNED)
 
 Every direct dependency authored in a workspace manifest must be accounted for.
 Transitive closure remains lockfile provenance, not package-level authority.
@@ -1091,7 +1091,7 @@ Lower rungs are preferred; each step up is an escalation that requires a reason.
 
   2. Workspace stdlib+ (`lgwks_std`)
      The common substrate: id (uuid v4), hex, time (RFC 3339), glob, fs, leb128, task.
-     The estate facade owns its audited external implementations behind one API.
+     The workspace facade owns its audited external implementations behind one API.
 
   3. ELIMINATE
      Crates whose functionality belongs in `lgwks_std` or std.

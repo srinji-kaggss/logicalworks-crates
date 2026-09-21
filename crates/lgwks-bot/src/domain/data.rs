@@ -24,7 +24,7 @@ pub struct JsonStore {
 pub struct DataState {
     /// Whether the store contents changed since last poll.
     pub changed: bool,
-    /// The raw JSON string, exactly as read. It is not parsed here — a store
+    /// The raw JSON string, exactly as read. It is not parsed here: a store
     /// whose contents are malformed JSON is reported, not rejected, so a
     /// condition can act on the malformed state.
     pub raw: String,

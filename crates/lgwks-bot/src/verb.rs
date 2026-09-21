@@ -63,7 +63,7 @@ where
 
 // ── Execute ────────────────────────────────────────────────────────────────
 
-/// Perform a side effect. Capability-gated. The callable surface — the
+/// Perform a side effect. Capability-gated. The callable surface, the
 /// `action` half of the `(condition, action)` tuple, invoked as
 /// [`Execute::execute_action`].
 ///

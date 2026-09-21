@@ -8,9 +8,9 @@
 //! # Send and non-`Send` tasks
 //!
 //! [`spawn`] requires `Send`, because it may place the task on any worker
-//! thread. Every verb in this crate is deliberately **not** `Send` — a domain
+//! thread. Every verb in this crate is deliberately **not** `Send` (a domain
 //! may hold thread-local state, which is the whole reason
-//! [`BoxFuture`](crate::BoxFuture) is unconstrained — so a bot's own futures
+//! [`BoxFuture`](crate::BoxFuture) is unconstrained), so a bot's own futures
 //! cannot go through it.
 //!
 //! [`LocalSet`] is the other half: it runs non-`Send` futures on the thread that
@@ -39,10 +39,10 @@ pub use lgwks_deps::tokio::task::spawn_local;
 
 /// Place a future on the current runtime without waiting for it.
 ///
-/// This is the estate's replacement for a bare `tokio::spawn` (`clippy.toml`),
+/// This is the crate's replacement for a bare `tokio::spawn` (`clippy.toml`),
 /// and it is a wrapper rather than a re-export for exactly that reason.
 /// `disallowed_methods` matches the *resolved* path, so re-exporting the
-/// engine's `spawn` gets flagged at every consumer call site — the config would
+/// engine's `spawn` gets flagged at every consumer call site; the config would
 /// name this function as the replacement and then refuse every call to it.
 /// The wrapper resolves to this crate's own path at the call site, so the ban
 /// keeps catching raw `tokio::spawn` while the sanctioned path stays usable. It
@@ -93,14 +93,14 @@ where
 /// The bound is enforced by replenishment: at most `limit` tasks are spawned
 /// and awaited at once, and each completion spawns the next pending input. The
 /// retained [`JoinSet`] therefore never exceeds `limit` entries, and only the
-/// output vector grows with input length — a caller fanning out over thousands
+/// output vector grows with input length, so a caller fanning out over thousands
 /// of inputs needs no manual chunking to keep task memory bounded.
 ///
 /// # Cancellation and failure
 ///
 /// Dropping the returned future drops the [`JoinSet`], which aborts every task
 /// that has not finished. A panicking input is resumed on the *awaiting* task,
-/// matching `join_all` — it is not converted into a [`JoinError`], and it does
+/// matching `join_all`: it is not converted into a [`JoinError`], and it does
 /// not abort the process. The remaining tasks are then aborted as the set
 /// drops. A completed input is never silently dropped from the result vector.
 #[cfg(feature = "sync")]
@@ -164,8 +164,8 @@ where
                 // Not reachable here: nothing aborts this set while it is
                 // awaited. A shrink would break the INV-RT-BOUNDED-FANOUT
                 // guarantee, so fail on the awaiter rather than fabricate a
-                // slot. `resume_unwind` rather than `panic!` — this is the
-                // estate's form for a documented, unavoidable panic
+                // slot. `resume_unwind` rather than `panic!`: this is the
+                // crate's form for a documented, unavoidable panic
                 // (`lgwks_std::task::JoinHandle` uses it for the same reason):
                 // it reports on the awaiting task and never aborts the process.
                 std::panic::resume_unwind(Box::new(
