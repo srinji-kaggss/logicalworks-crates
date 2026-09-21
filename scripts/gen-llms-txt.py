@@ -97,8 +97,17 @@ def main() -> int:
     problems: list[str] = []
 
     def blob(path: str) -> str:
-        # `HEAD` rather than a branch: the index should never point at a ref
-        # that a release can move out from under it.
+        # `HEAD`, and the comment that used to sit here said the opposite of what
+        # this does: it claimed HEAD was the ref a release could not move, when
+        # HEAD is precisely the ref that moves on every commit. A tag is the ref
+        # a release cannot move.
+        #
+        # HEAD is still the right target for *this* file. It is regenerated per
+        # commit and CI fails if it drifts, and a committed SHA cannot name its
+        # own commit without going stale the moment it lands. The cost is that
+        # every link below tracks `main` and none of them is a stable reference,
+        # so the index says so at the top rather than leaving a reader to infer
+        # it. A release-pinned index is a separate artifact and does not exist.
         return f"{repo}/blob/HEAD/{path}"
 
     crates: list[tuple[str, str, str]] = []
@@ -127,11 +136,23 @@ def main() -> int:
 
     # A document nobody indexed is invisible to every reader that arrives
     # through this file, which for an agent is every reader.
+    #
+    # Recursive, not `glob("*.md")`. The flat form only ever saw the top level,
+    # so the moment `docs/guides/` existed it would have passed by not looking.
+    # It would in fact have passed on the day those guides landed, but only
+    # because they happened to be added to the README table, which is luck
+    # rather than a rule. A check that cannot fail is not a check.
+    #
+    # A document deliberately kept out of the consumer index is named here with
+    # its reason, so the way to exempt one is to write down why rather than to
+    # move it somewhere the check does not reach.
+    NOT_INDEXED: dict[str, str] = {}
     indexed = {target for _, target, _ in documents}
-    for path in sorted((ROOT / "docs").glob("*.md")):
+    for path in sorted((ROOT / "docs").rglob("*.md")):
         relative = path.relative_to(ROOT).as_posix()
-        if relative not in indexed:
-            problems.append(f"{relative} exists but the README Documentation table omits it")
+        if relative in indexed or relative in NOT_INDEXED:
+            continue
+        problems.append(f"{relative} exists but the README Documentation table omits it")
 
     # A crate nobody indexed is invisible to every reader that arrives through
     # this file, which for an agent is every reader.
@@ -151,6 +172,12 @@ def main() -> int:
         f"> {first_paragraph(readme)}",
         "",
         f"Source: {repo}",
+        "",
+        "Development index. Every link below resolves against `main` as it stood "
+        "when this file was generated, and `main` moves. The crates.io links name "
+        "the latest published version and the docs.rs links describe it; the "
+        "documentation links describe unreleased source. For a released version, "
+        "use that release's tag rather than anything below.",
         "",
         "## Crates",
         "",
