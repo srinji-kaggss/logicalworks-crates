@@ -311,7 +311,49 @@ assert_eq!(results.len(), 16);
 # Ok::<(), std::io::Error>(())
 ```
 
-Invariants (enforced by `crates/lgwks-bot/tests/rt_async_tier.rs`):
+### Supervision
+
+`rt::supervise::Supervisor` is the way to run background work, and it exists so
+that a caller never has to reason about a leak or a runaway loop.
+
+A task cannot leak. `spawn` returns no handle — a `JoinHandle` a caller might
+drop is the leak, so there is nothing to drop. There is no unbounded
+constructor and no internal queue: the ceiling is taken at `new`, and the permit
+is acquired *before* the spawn, so waiting is real backpressure rather than
+buffering. `try_spawn` refuses instead of growing, and counts the refusal.
+Finished tasks are reaped at every entry point, which matters because a
+`JoinSet` retains a completed task's slot until it is joined. `Drop` cancels and
+aborts, so there is no `close()` to forget.
+
+A loop cannot run away. `repeat` cannot be written without a `Budget`, and every
+iteration *races* the token rather than checking it between iterations, so a
+cancel drops a body that is still awaiting rather than waiting for it to finish.
+`Budget::Ongoing` is the unbounded case, and it is cancellation-bounded rather
+than free-running.
+
+```rust
+use lgwks_bot::rt::supervise::{Budget, Supervisor};
+
+# let runtime = lgwks_bot::Runtime::new()?;
+# runtime.block_on(async {
+let mut supervisor = Supervisor::new(4); // at most 4 in flight, ever
+
+supervisor
+    .spawn_repeating(Budget::Ongoing, |tick| async move {
+        let _tick = tick;
+    })
+    .await;
+
+// Refuses rather than growing past the ceiling.
+assert!(supervisor.try_spawn(|_token| async {}).is_ok());
+
+supervisor.shutdown().await; // cancel, drain, join
+# });
+# Ok::<(), std::io::Error>(())
+```
+
+Invariants (enforced by `crates/lgwks-bot/tests/rt_async_tier.rs` and
+`rt::supervise`'s unit tests):
 
 - **INV-RT-SINGLE-ENTRY** — only `lgwks_deps` authors a `tokio` edge.
 - **INV-RT-BOUNDED-FANOUT** — `join_all_bounded` never exceeds its limit, still
@@ -322,6 +364,9 @@ Invariants (enforced by `crates/lgwks-bot/tests/rt_async_tier.rs`):
 - **INV-RT-DROP-DETACHES** — dropping a `JoinHandle` detaches the task; only
   `abort` cancels it.
 - **INV-RT-EXPLICIT-OWNER** — no hidden global reactor; the `Runtime` is owned.
+- **INV-RT-SUPERVISED** — a `Supervisor` retains at most its in-flight bound
+  however many times it is spawned into, refuses rather than growing, and stops
+  every task it owns when it is dropped or shut down.
 
 ## License
 
