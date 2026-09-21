@@ -176,6 +176,65 @@ needs layout", "this step needs content" — rather than a heuristic the engine
 applies. A heuristic here means two runs of the same flow can take different
 navigation paths, which is precisely what the determinism section forbids.
 
+### 3.5 Language understanding — **landed in this change**
+
+The described platform forces a model's output into a strict JSON grammar; it
+says nothing about understanding what a *person* typed, which is the harder
+half. A recorded flow asks questions, and the answer arrives as free text with
+whatever spelling, abbreviation and house vocabulary the person brought.
+
+`language.rs` is that layer, built the way classic autocomplete and
+command-and-control recognisers are built — a **tiered match over a lexicon**,
+not a model. Three ordered tiers: `Exact` (normalized equality, or a learned
+alias), `Phonetic` (Soundex equality), `Fuzzy` (a blend of `Jaccard` token
+overlap and bounded `EditDistance`). They are ordered rather than summed because
+an exact match must short-circuit, and a weighted sum cannot express that.
+
+The resolution reports **which tier won**, and that is not decoration: an
+`Exact` miss is a learned alias pointing at the wrong option, a `Phonetic` miss
+is Soundex's English bias, and a `Fuzzy` miss is a threshold. Three different
+repairs, and a bare `usize` names none of them.
+
+#### The linguistic-change question, answered in two parts
+
+"Linguistic change" is two unrelated problems and one mechanism cannot cover
+both:
+
+- **Spelling and sound** — typos, transliteration, regional spelling. A property
+  of the *letters*, handled statically by the phonetic tier, no learning needed.
+- **Vocabulary** — slang, house terms, abbreviations. `"the usual"` cannot be
+  derived from `"Repeat last order"` by any amount of string distance. A property
+  of the *group's usage*, handled by `LanguageResolver::learn`, which records an
+  alias when a resolution is confirmed.
+
+The second is deliberately a **readable table, not a fitted model**. Every alias
+is a row a reviewer can read and revoking one is deleting a row. A learned
+scorer would be as adaptive and would not be auditable, and the security case
+rests on the run being declarable.
+
+Two limits are stated rather than hidden in the code. The diacritic fold is a
+bounded table (Latin-1 Supplement and Latin Extended-A), because this crate may
+not take a Unicode dependency; a character outside it passes through and
+degrades to the fuzzy tier. And Soundex preserves the first letter verbatim, so
+`Smith`/`Smyth` collapse but `cat`/`kat` and `Catherine`/`Kathryn` do not — the
+conservative side of the trade, because in a resolver a false positive silently
+selects the wrong option while a false negative only re-asks.
+
+#### The resolver seam changed shape
+
+`Resolver::resolve` returned `Option<usize>`, which is the same two-way collapse
+§3.1 exists to remove: an answer that fits two options equally well is reported
+as *unrecognized*, so the session re-asks the full list and the identical answer
+resolves identically forever. It now returns `Resolution` — `Resolved` /
+`Ambiguous` / `Absent` — and `Session::answer` narrows an ambiguous re-ask to the
+options still in play, which is a strictly smaller question and therefore
+terminates.
+
+`KeywordResolver` is deleted rather than kept beside the new one: it is a strict
+subset (the same token tier, and nothing else), so keeping both would be two
+implementations of one job. That is a breaking public-API change for the next
+release, which the standing constraint reserves for a separate step.
+
 ## 4. What maps onto something that already exists
 
 | Described subsystem | This workspace | Note |
@@ -192,12 +251,35 @@ navigation paths, which is precisely what the determinism section forbids.
 | MCP stdio JSON-RPC server | an adapter over the four verbs | An adapter, not a fifth verb. The four-verb contract is `INV-BOT-FOUR-VERBS` and is not negotiable |
 | Autonomous agent: page analyzer, indexed handles, screenshot, strict JSON | `domain::chat` + `domain::eval` | See §5 for the two constraints that survive the fold |
 
-## 5. What is refused, and on what ground
+## 5. Reaching a page that does not want to be reached
 
-Each of these is refused as a **default**. None is refused as an idea; each is
-refused as something the bot does without a caller declaring it.
+> **Corrected after review.** The first version of this section refused "stealth"
+> as a single thing and refused it outright. That was wrong twice over: the
+> cluster is three unrelated mechanisms, and two of them are legitimate
+> configuration rather than evasion. The review position — *some stealth is
+> needed, or a way for it to crawl eventually* — is correct, and this section is
+> the corrected design. What survives is narrower and better founded: the
+> security-boundary flags stay refused, declared identity is the default, and
+> evasion becomes a **granted, recorded** capability rather than a default flag.
 
-### 5.1 The browser flag cluster
+The framing error is worth naming because it is easy to repeat. "Getting blocked"
+has several distinct causes, and each has a different remedy:
+
+| Cause | Remedy | Is it evasion? |
+|---|---|---|
+| Request rate | adaptive per-host delay and backoff | no |
+| Undeclared identity | a declared crawler identity and contact | no |
+| No session | persistent profile and cookie reuse | no |
+| `robots.txt` | obey it; negotiate access for the rest | no |
+| Recognised as automation | a granted, recorded spoof | **yes** |
+
+Four of the five remedies are not evasion at all, and they are the ones that
+actually work: most blocking is triggered by rate and by an undeclared identity,
+not by a fingerprint. A bot that declares itself, paces itself, and keeps a
+session gets through where a spoofing hammer gets banned. The fifth is real and
+is designed for below rather than denied.
+
+### 5.1 The browser flag cluster — still refused
 
 `--disable-web-security`, `--disable-site-isolation-trials`, `--no-sandbox`.
 
@@ -215,28 +297,99 @@ and rests it on the bot being readable and declared. Adopting these three flags
 would make that document false, and it would do so in the one place a reviewer
 looks first. They are refused.
 
-### 5.2 Stealth, and the reason is determinism before it is ethics
+These three are also **not stealth and not needed for crawling**. They disable
+the same-origin policy, process isolation, and container containment
+respectively; none of them changes how a page classifies the client. Keeping
+them out of the refusal is what makes the rest of this section possible: once
+they are separated out, the remaining question — *how does the bot get through?*
+— has honest answers.
+
+### 5.2 Declared identity — permitted, and the default
+
+A fixed user agent, declared Accept-Language and viewport, and a crawler
+identity with a contact URL. This is configuration, not evasion, and the
+distinction is not a technicality: a declared identity is one a site owner can
+recognise, contact, allowlist, or block deliberately. That is the behaviour
+`robots.txt` and the crawler ecosystem are built around, and it is what
+`User-Agent` is for.
+
+It is also deterministic, which the refusal above cared about: the identity is
+declared once per flow and recorded, so every run of that flow presents the same
+client. There is no conflict with `docs/bot-on-ecs.md` §5.
+
+**Adopted as the default.** The estate's automation browser presents a declared
+identity, and the flow document records which one.
+
+### 5.3 Politeness, and why it is the remedy that actually works
+
+Adaptive per-host delay, bounded per-host concurrency, and backoff that respects
+`Retry-After`. This is not a concession to the target; it is the dominant term in
+whether a crawl completes at all, because rate is the trigger for most blocking.
+It is also already the estate's committed design: `docs/bot-on-ecs.md` §8
+specifies Mercator's bounded per-host queue under a global host priority queue
+and Scrapy's `AutoThrottle`-style adaptation, and records the correction that
+Mercator's adaptive criteria live in US patent 6,263,364 rather than the paper.
+
+Politeness is a **scheduling policy**, so it belongs on the frontier and not in
+the browser. A delay implemented inside a page driver is one that a second
+driver bypasses.
+
+Two properties it must have to be worth having:
+
+- **The clock is `Time<Virtual>`**, so a test can run a ten-thousand-request
+  schedule without touching wall-clock (`docs/bot-on-ecs.md` §5).
+- **The admission decision is a three-way verdict** — `Permitted`,
+  `Throttled { retry_after }`, `Refused { reason }` — not a boolean and not a
+  sleep. `Refused` is where an explicit disallow lands, and it is terminal for
+  that host. This is the same shape as `Recognition` in §3.1 and for the same
+  reason: *wait* and *no* are different answers, and a `bool` cannot hold both.
+
+### 5.4 Per-execution randomization — the objection, and how it is answered
 
 `puppeteer-extra-plugin-stealth`, `--disable-blink-features=AutomationControlled`,
-dynamic user-agent and hardware randomization.
+per-request user-agent and hardware randomization.
 
-The first-order objection is engineering, not moral: a randomized user agent and
-randomized hardware parameters are **non-deterministic inputs to a run that must
-reproduce**. `docs/bot-on-ecs.md` §5 records determinism as this workspace's
-responsibility, and a run whose fingerprint varies per execution cannot be
-replayed, cannot be diffed against the previous run, and cannot be audited. It
-also contradicts the interface model itself: `ElementFacts` fingerprints an
-element, and a bot that randomizes what the page observes about *it* while
-scoring what it observes about the page is measuring two different worlds.
+The objection is determinism, and it is narrower than the first version of this
+document made it sound. It is not that a *declared* user agent is
+non-deterministic — §5.2 settles that. It is that a fingerprint **re-randomized
+per execution** is a non-deterministic input to a run that must reproduce:
+`docs/bot-on-ecs.md` §5 puts determinism on this workspace, and a run whose
+fingerprint varies cannot be replayed or diffed against its predecessor.
 
-The second-order objection is that detection evasion is the single fact a
-security reviewer leads with, and the workspace has just spent a document
-arguing the opposite posture. It is not built. If a legitimate authorized need
-ever appears, it arrives as a named capability gated by a grant like every other
-side effect — and under the one-path rule, a capability nobody exercises is one
-that does not exist yet.
+That is fixable rather than disqualifying, and the fix is the estate's existing
+habit: **seed it from the run, record the seed, replay the same draw.** A
+seeded draw is as reproducible as a constant, and it keeps the property a
+constant loses — that two flows do not present an identical client.
 
-### 5.3 Code injection — and the locus distinction that makes this coherent
+It also settles a real contradiction the first version missed: `ElementFacts`
+fingerprints an element, and a bot that randomizes what the page observes about
+*it* while scoring what it observes about the page is measuring two different
+worlds. A recorded seed makes both sides readable.
+
+### 5.5 Evasion — a granted, recorded capability
+
+Where a polite, declared, session-holding crawler is still refused access,
+evasion is the remaining remedy and it is **built**, under three conditions that
+make it compatible with the security case rather than fatal to it:
+
+1. **It is a capability, not a default.** `bot.evade` is granted through
+   `GrantSet` like every other side effect, so it is refused at build time for a
+   bot that was not given it, and re-proved on every call.
+2. **It is recorded in the run.** A grant *is* a declaration: the run states
+   that it evaded, so an auditor reads it from the same document that lists
+   every other authority the run held. That is what keeps
+   `docs/security-posture.md` true — the claim was never "the bot cannot evade",
+   it was "the run is declarable", and a recorded grant preserves exactly that.
+3. **It is never ambient and never silent.** A run that used it says so; a run
+   that did not, cannot have.
+
+The residual risk is honest and belongs in the record: an evasion capability is
+the one thing here that a reviewer will ask about, and it should be answered with
+the grant log rather than with an argument. What is refused outright is the
+version where evasion is unconditional, unrecorded, and indistinguishable in the
+artefact from an ordinary run — which is what a launch flag gives you.
+
+### 5.6 Code injection — and the locus distinction that makes this coherent
 
 `page.exposeFunction`, `addInitScript`, and in-page analyzer injection are
 **permitted**, and the reason is the distinction the security case already
@@ -250,7 +403,7 @@ estate's automation browser may not be the session that observes a consumer's
 page. Injection into the second is what the whole design exists to avoid — so
 the fold adds capability, not ambiguity, provided the locus stays explicit.
 
-### 5.4 Free-text model output controlling the browser
+### 5.7 Free-text model output controlling the browser
 
 The described platform already gets most of this right: it forces a strict JSON
 grammar and enumerates the actions (`click`, `type`, `press`, `select`, `scroll`,
@@ -270,19 +423,31 @@ Each step lands green and independently. Steps 1–2 are unblocked now.
 1. **The interface model.** ✅ Landed in this change: `interface.rs` —
    `ElementFacts`, the four recognition-vector components, `RecognitionVector`,
    `Recognition`.
-2. **The locator ladder.** `Anchor`, `Ladder`, and `recognize_with_ladder`, per
+2. **Language understanding.** ✅ Landed in this change: `language.rs`, the
+   tiered lexicon; `Resolver` reshaped to the three-way `Resolution`, and
+   `KeywordResolver` deleted rather than kept beside its superset (§3.5).
+3. **The locator ladder.** `Anchor`, `Ladder`, and `recognize_with_ladder`, per
    §3.2. Requires `ElementFacts` to carry the anchors a candidate offers.
-3. **The two missing typed outcomes.** `BotError` gains an indeterminate
+4. **The two missing typed outcomes.** `BotError` gains an indeterminate
    variant so a timed-out `Execute` is not retyped `Failed` and retried into a
    duplicate (the open defect named in §3.1); `TerminalOutcome` gains `Partial`
    so a run that produced some but not all of its output is distinguishable from
    one that produced none. This is also the described platform's
    `completed | partial | failed` triage, and it is the same invariant again.
-4. **The settlement policy.** `Time<Virtual>`-driven, declared per step, with
+5. **The politeness frontier.** Adaptive per-host delay, bounded per-host
+   concurrency, and the three-way admission verdict, all under `Time<Virtual>`
+   (§5.3). This is the piece that makes a crawl complete, and it is the highest
+   value item on this list after the two already landed. `docs/bot-on-ecs.md`
+   §8 already specifies it; what is missing is the implementation.
+6. **Declared identity**, wired as a flow property and recorded per run (§5.2).
+7. **The `bot.evade` capability**, with the seeded, recorded draw and the grant
+   log (§5.4, §5.5). Deliberately after 5 and 6, so the cheap remedies are the
+   ones in place before the expensive one is reachable.
+8. **The settlement policy.** `Time<Virtual>`-driven, declared per step, with
    non-settlement as a typed terminal outcome (§3.4).
-5. **The recorder and its visible-delta compiler** (§3.3), on the ECS substrate.
-6. **The agent domain**, closed-enum actions and `FlowBounds` budget (§5.4).
-7. **The MCP adapter**, over the four verbs.
+9. **The recorder and its visible-delta compiler** (§3.3), on the ECS substrate.
+10. **The agent domain**, closed-enum actions and `FlowBounds` budget (§5.7).
+11. **The MCP adapter**, over the four verbs.
 
 ## 7. What this document does not decide
 

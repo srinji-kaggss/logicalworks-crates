@@ -107,6 +107,8 @@ pub mod gate;
 pub mod interface;
 /// JSON through the shared facade (`lgwks_std::json`).
 pub mod json;
+/// Language understanding: the tiered lexicon behind the resolver seam.
+pub mod language;
 /// Async runtime surface (feature `rt`): owned `Runtime`, bounded fan-out,
 /// timers, channels, and opt-in drivers.
 #[cfg(feature = "rt")]
@@ -127,12 +129,14 @@ pub mod verb;
 pub use cap::{Auth, Cap};
 pub use error::BotError;
 pub use gate::GrantSet;
+pub use language::LanguageResolver;
 #[cfg(feature = "rt")]
 pub use rt::{Builder, Handle, Runtime, block_on};
 pub use session::{
-    ChoiceArm, FlowBounds, FlowEdge, FlowNodeKind, FlowSpec, Interpolate, Journal, KeywordResolver,
-    MemoryJournal, NodeId, NodeKind, Predicate, Resolver, Session, SessionId, TemplateInterpolator,
-    Terminal, TerminalOutcome, TranscriptEntry, Value, ValueExpr, VarScope, VarType,
+    ChoiceArm, FlowBounds, FlowEdge, FlowNodeKind, FlowSpec, Interpolate, Journal, MatchTier,
+    MemoryJournal, NodeId, NodeKind, Predicate, Resolution, Resolver, Session, SessionId,
+    TemplateInterpolator, Terminal, TerminalOutcome, TranscriptEntry, Value, ValueExpr, VarScope,
+    VarType,
 };
 pub use spec::{Bot, BotSpec};
 pub use verb::{Evaluate, Execute, Observe, Query};

@@ -1075,55 +1075,66 @@ impl Interpolate for TemplateInterpolator {
 
 /// Free-text option resolver seam.
 pub trait Resolver {
-    /// Return the selected option index, or `None` for an unrecognized answer.
-    fn resolve(&self, utterance: &str, options: &[String]) -> Option<usize>;
+    /// Resolves an utterance against the candidate options.
+    ///
+    /// Returns a [`Resolution`], never an `Option<usize>`. The two-way form
+    /// collapses *nothing matched* and *several matched equally well* into one
+    /// `None`, and the second is the dangerous one: an answer that fits two
+    /// options as well as each other is reported as unrecognized, so the
+    /// session re-asks the full list and the identical answer resolves the
+    /// identical way forever. A caller that cannot see the tie cannot narrow.
+    fn resolve(&self, utterance: &str, options: &[String]) -> Resolution;
 }
 
-/// Weighted keyword resolver used by the default session constructor.
-#[derive(Debug, Clone, Copy, Default)]
+/// Which match tier produced a resolution.
+///
+/// Reported rather than inferred, because it is what makes a wrong resolution
+/// explicable and therefore repairable. An `Exact` miss is a learned alias
+/// pointing at the wrong option; a `Phonetic` miss is the English bias of
+/// [`crate::language::phonetic_key`]; a `Fuzzy` miss is a threshold. Three
+/// different repairs, and a bare `usize` names none of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct KeywordResolver;
-
-impl KeywordResolver {
-    /// Construct a keyword resolver.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self
-    }
+pub enum MatchTier {
+    /// The utterance matched exactly, directly or through a learned alias.
+    Exact,
+    /// The utterance and the option reduce to the same sound-alike key.
+    Phonetic,
+    /// The utterance and the option are lexically close.
+    Fuzzy,
 }
 
-impl Resolver for KeywordResolver {
-    fn resolve(&self, utterance: &str, options: &[String]) -> Option<usize> {
-        let input_words = keywords(utterance);
-        let mut best: Option<(usize, usize)> = None;
-        for (index, option) in options.iter().enumerate() {
-            let option_words = keywords(option);
-            if option_words.is_empty() {
-                continue;
-            }
-            let matched = option_words
-                .iter()
-                .filter(|word| input_words.iter().any(|candidate| candidate == *word))
-                .count();
-            if matched == 0 {
-                continue;
-            }
-            let exact = option_words == input_words;
-            let score = matched.saturating_mul(2).saturating_add(usize::from(exact));
-            if best.is_none_or(|(_, best_score)| score > best_score) {
-                best = Some((index, score));
-            }
-        }
-        best.map(|(index, _)| index)
-    }
-}
-
-/// Tokenize free text into lowercase alphanumeric keywords.
-fn keywords(text: &str) -> Vec<String> {
-    text.split(|character: char| !character.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect()
+/// The outcome of resolving an utterance against the candidate options.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum Resolution {
+    /// One option matched and led the runner-up by the required margin.
+    Resolved {
+        /// Index of the selected option.
+        index: usize,
+        /// The tier that produced the match.
+        tier: MatchTier,
+        /// The match score.
+        score: f64,
+        /// The lead held over the runner-up.
+        lead: f64,
+    },
+    /// Options matched but none led by the required margin.
+    ///
+    /// The caller narrows its re-ask to [`Self::Ambiguous::tied`] rather than
+    /// repeating the full list. This is the state `Option<usize>` cannot
+    /// express, and the one that made a repeated ambiguous answer a loop.
+    Ambiguous {
+        /// Every option index still in play, lowest first.
+        tied: Vec<usize>,
+        /// The highest score observed.
+        score: f64,
+    },
+    /// No option matched.
+    Absent {
+        /// The highest score observed.
+        best_score: f64,
+    },
 }
 
 /// Journal seam for session path records.
@@ -1271,9 +1282,14 @@ pub struct Session {
 }
 
 impl Session {
-    /// Start a session with the default keyword resolver and memory journal.
+    /// Start a session with the default language resolver and memory journal.
     pub fn new(id: impl Into<SessionId>, flow: FlowSpec) -> Result<Self, BotError> {
-        Self::with_components(id, flow, KeywordResolver::new(), MemoryJournal::new())
+        Self::with_components(
+            id,
+            flow,
+            crate::language::LanguageResolver::new(),
+            MemoryJournal::new(),
+        )
     }
 
     /// Start a session with a custom resolver and the default memory journal.
@@ -1384,11 +1400,31 @@ impl Session {
             return Err(BotError::SessionNotAwaitingAnswer);
         };
         self.charge_step()?;
-        let choice = self.resolver.resolve(utterance, &options);
-        let Some(index) = choice else {
-            self.record(&node_id, "user", utterance);
-            self.record_prompt(&node_id, &options);
-            return Ok(());
+        let index = match self.resolver.resolve(utterance, &options) {
+            Resolution::Resolved { index, .. } => index,
+            Resolution::Ambiguous { tied, .. } => {
+                // Narrow the re-ask to the options still in play. Repeating the
+                // full list is what a two-way verdict forced, and it is why an
+                // ambiguous answer could loop: the same utterance resolves the
+                // same way every time it is asked, so the session never leaves
+                // the node. A re-ask that is strictly smaller terminates.
+                let narrowed: Vec<String> = tied
+                    .iter()
+                    .filter_map(|candidate| options.get(*candidate).cloned())
+                    .collect();
+                self.record(&node_id, "user", utterance);
+                if narrowed.len() >= 2 {
+                    self.record_prompt(&node_id, &narrowed);
+                } else {
+                    self.record_prompt(&node_id, &options);
+                }
+                return Ok(());
+            }
+            Resolution::Absent { .. } => {
+                self.record(&node_id, "user", utterance);
+                self.record_prompt(&node_id, &options);
+                return Ok(());
+            }
         };
         let Some(option) = options.get(index) else {
             return Err(BotError::ResolverReturnedInvalidOption { node: node_id });
@@ -1587,10 +1623,25 @@ mod tests {
     }
 
     #[test]
-    fn keyword_resolver_has_an_explicit_unrecognized_case() {
+    fn the_default_resolver_has_an_explicit_unrecognized_case() {
         let options = vec![String::from("yes"), String::from("no")];
-        assert_eq!(KeywordResolver::new().resolve("maybe", &options), None);
-        assert_eq!(KeywordResolver::new().resolve("yes", &options), Some(0));
+        let resolver = crate::language::LanguageResolver::new();
+        assert!(
+            matches!(
+                resolver.resolve("maybe", &options),
+                Resolution::Absent { .. }
+            ),
+            "an unrecognized answer is Absent, which is not the same as Ambiguous"
+        );
+        assert_eq!(
+            resolver.resolve("yes", &options),
+            Resolution::Resolved {
+                index: 0,
+                tier: MatchTier::Exact,
+                score: 1.0,
+                lead: 1.0,
+            }
+        );
     }
 
     #[test]
