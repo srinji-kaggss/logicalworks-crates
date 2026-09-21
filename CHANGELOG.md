@@ -38,20 +38,25 @@ explicitly under that crate.
   condition-evaluation counts. That second axis is load-bearing: gating on
   effects alone let a baseline that returned `entries` as an integer instead of
   looping over them report a 2937x ratio where the counted-work gate measures
-  88.83x at the same scenario. The rig is its own Cargo workspace root so the
+  72.38x at the same scenario. The rig is its own Cargo workspace root so the
   dependency contract never sees it — `lgwks-deps check .` still reports the four
   crates.
-- **The measured result is that the bot is 89x–230x slower than the loop, and
+- **The measured result is that the bot is 72x–256x slower than the loop, and
   ~98% of a tick is the poll and change-detection phase before any decision is
-  made** (poll-only 7548.5 ns/tick against steady 7720.1 ns/tick at 64 chains).
-  Source cost is linear; change detection pays 1.95x, not an order of magnitude,
-  because the poll happens either way.
-- **The rig found a defect, and it was not fixed in that change.**
+  made** (poll-only 2540.0 ns/tick against steady 2582.1 ns/tick at 64 chains).
+  Source cost is linear; change detection now pays 4.23x, because both changes
+  below made a quiet tick cheaper without making a churning one cheaper, so a
+  workload that never goes quiet pays about four times what a quiet one does.
+- **The rig found a defect, and the fix it was measured against has landed.**
   `Auth::check` grew 3794x for a 128x increase in required capabilities, reaching
-  12.92 µs per call at 128 capabilities, because coverage was a linear scan of
-  granted names per required name. A separate change replaces the scan with a
-  sorted-and-deduplicated proof and a binary search. The bench directory measures
-  and does not touch crate code; the numbers here are the "before".
+  12.9 µs per call at 128 capabilities, because coverage was a linear scan of
+  granted names per required name. The sorted-and-deduplicated proof with a
+  binary search replaced it, and the same rig measures growth of 750.5x and
+  3.64 µs at 128. The bench directory measures and does not touch crate code.
+- **These are the figures for the tip of this release, and every one is paired
+  within a run.** `bench/README.md` carries the method, the drift control and the
+  attribution between the two changes; `bench/results.json` is the committed run
+  they come from.
 
 ### Decision
 
