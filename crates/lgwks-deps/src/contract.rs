@@ -278,14 +278,14 @@ const REQUIRED: [&str; 12] = [
     "review",
 ];
 
-/// One `[[approved]]` block as it is being read, before validation.
+/// One repeated register block as it is being read, before validation.
 ///
 /// Fields are kept in the order they appeared rather than in a map, because a
 /// repeated key is deliberately allowed to overwrite its earlier value and the
 /// parser must stay allocation-light: this module may not take a dependency on
 /// a TOML or map crate.
 #[derive(Default)]
-struct Draft {
+pub(crate) struct RawEntry {
     /// One-based line where the `[[approved]]` header opened. Diagnostics for
     /// the whole block point here, since individual fields carry no lines.
     line: usize,
@@ -293,12 +293,12 @@ struct Draft {
     fields: Vec<(&'static str, String)>,
 }
 
-impl Draft {
+impl RawEntry {
     /// Returns the last value written for `key`, or `None` if the block never
     /// carried it. An empty string is returned as `Some("")`: presence and
     /// non-emptiness are separate questions, and `check_field_present` is what
     /// rejects the blank case.
-    fn get(&self, key: &str) -> Option<&str> {
+    pub(crate) fn get(&self, key: &str) -> Option<&str> {
         self.fields
             .iter()
             .find(|field| field.0 == key)
@@ -311,11 +311,16 @@ impl Draft {
     /// The absent branch is unreachable from `build`, which validates first;
     /// the method exists so the invariant is carried by the return type rather
     /// than by an `expect` that would abort the process on a parser bug.
-    fn require(&self, key: &'static str, krate: &str) -> Result<&str, ContractError> {
+    pub(crate) fn require(&self, key: &'static str, krate: &str) -> Result<&str, ContractError> {
         self.get(key).ok_or_else(|| ContractError::MissingField {
             krate: krate.to_owned(),
             field: key,
         })
+    }
+
+    /// One-based line where this entry opened.
+    pub(crate) const fn line(&self) -> usize {
+        self.line
     }
 }
 
@@ -327,13 +332,28 @@ enum Section {
     None,
     /// Inside `[policy]`.
     Policy,
-    /// Inside an `[[approved]]` block, which the reader has already pushed a
-    /// `Draft` for; that is what makes `Section::Approved` imply a non-empty
-    /// `drafts` vector.
-    Approved,
+    /// Inside the register's repeated entry block, which the reader has
+    /// already pushed a [`RawEntry`] for.
+    Entry,
 }
 
-/// Recognises a section header, opening a new draft for `[[approved]]`.
+/// Mutable state for one pass through either register schema.
+struct Reader<'a> {
+    /// Repeated table header accepted by this register.
+    entry_header: &'a str,
+    /// Entry keys accepted by this register.
+    allowed_keys: &'a [&'static str],
+    /// Current section.
+    section: Section,
+    /// Policy enforcement flag, defaulting to true.
+    enforce: bool,
+    /// Optional repository authority.
+    repository: Option<String>,
+    /// Raw entries in source order.
+    entries: Vec<RawEntry>,
+}
+
+/// Recognises a section header, opening a new raw entry for `entry_header`.
 ///
 /// Returns `Ok(true)` when the line was a header the reader consumed, `Ok(false)`
 /// when it is an ordinary key/value line, and `Malformed` for a bracketed line
@@ -342,15 +362,16 @@ enum Section {
 fn handle_section_header(
     line: &str,
     line_no: usize,
+    entry_header: &str,
     section: &mut Section,
-    drafts: &mut Vec<Draft>,
+    drafts: &mut Vec<RawEntry>,
 ) -> Result<bool, ContractError> {
     if line == "[policy]" {
         *section = Section::Policy;
         Ok(true)
-    } else if line == "[[approved]]" {
-        *section = Section::Approved;
-        drafts.push(Draft {
+    } else if line == entry_header {
+        *section = Section::Entry;
+        drafts.push(RawEntry {
             line: line_no,
             fields: Vec::new(),
         });
@@ -393,19 +414,20 @@ fn apply_policy_pair(
     }
 }
 
-/// Applies one key/value pair to the approval block currently being read.
+/// Applies one key/value pair to the repeated entry currently being read.
 ///
 /// Only keys listed in `REQUIRED` are accepted, so a misspelled field is a hard
 /// refusal and cannot become an unenforced entry. A repeated key overwrites its
 /// earlier value rather than erroring: the last write wins, which keeps the
 /// parser's behaviour identical to the TOML reader a human might expect.
-fn apply_approved_pair(
+fn apply_entry_pair(
     key: &str,
     value: &str,
     line_no: usize,
-    draft: &mut Draft,
+    draft: &mut RawEntry,
+    allowed_keys: &[&'static str],
 ) -> Result<(), ContractError> {
-    let known = REQUIRED
+    let known = allowed_keys
         .iter()
         .find(|candidate| **candidate == key)
         .ok_or_else(|| ContractError::UnknownKey {
@@ -421,33 +443,39 @@ fn apply_approved_pair(
 /// `drafts` is a slice rather than a `Vec` because this function never grows the
 /// list: only `handle_section_header` may push, and it runs first.
 fn process_pair(
-    section: &Section,
+    reader: &mut Reader<'_>,
     key: &str,
     value: &str,
     line_no: usize,
-    enforce: &mut bool,
-    repository: &mut Option<String>,
-    drafts: &mut [Draft],
 ) -> Result<(), ContractError> {
     // `Section` is a fieldless enum, so matching the dereferenced value copies
     // nothing and needs no `ref` bindings.
-    match *section {
+    match reader.section {
         Section::None => Err(ContractError::OrphanKey {
             line: line_no,
             key: key.to_owned(),
         }),
-        Section::Policy => apply_policy_pair(key, value, line_no, enforce, repository),
-        Section::Approved => {
-            // `Section::Approved` is only ever entered by `handle_section_header`
+        Section::Policy => apply_policy_pair(
+            key,
+            value,
+            line_no,
+            &mut reader.enforce,
+            &mut reader.repository,
+        ),
+        Section::Entry => {
+            // `Section::Entry` is only ever entered by `handle_section_header`
             // pushing a draft, and a draft is never popped, so this is a failure
             // the type system cannot express away. Resolving it as an orphan key
             // rather than asserting keeps the reader fail-closed on a parser bug
             // instead of aborting the process mid-register.
-            let draft = drafts.last_mut().ok_or_else(|| ContractError::OrphanKey {
-                line: line_no,
-                key: key.to_owned(),
-            })?;
-            apply_approved_pair(key, value, line_no, draft)
+            let draft = reader
+                .entries
+                .last_mut()
+                .ok_or_else(|| ContractError::OrphanKey {
+                    line: line_no,
+                    key: key.to_owned(),
+                })?;
+            apply_entry_pair(key, value, line_no, draft, reader.allowed_keys)
         }
     }
 }
@@ -462,10 +490,7 @@ fn process_pair(
 fn process_contract_line(
     raw: &str,
     index: usize,
-    section: &mut Section,
-    enforce: &mut bool,
-    repository: &mut Option<String>,
-    drafts: &mut Vec<Draft>,
+    reader: &mut Reader<'_>,
 ) -> Result<(), ContractError> {
     // Diagnostics are one-based. `index` comes from `enumerate` over a string's
     // lines, so it is strictly less than the input length and cannot be
@@ -476,14 +501,64 @@ fn process_contract_line(
     if line.is_empty() {
         return Ok(());
     }
-    if handle_section_header(line, line_no, section, drafts)? {
+    if handle_section_header(
+        line,
+        line_no,
+        reader.entry_header,
+        &mut reader.section,
+        &mut reader.entries,
+    )? {
         return Ok(());
     }
     let (key, value) = split_pair(line).ok_or_else(|| ContractError::Malformed {
         line: line_no,
         text: line.to_owned(),
     })?;
-    process_pair(section, key, value, line_no, enforce, repository, drafts)
+    process_pair(reader, key, value, line_no)
+}
+
+/// The syntax-only result shared by the dependency and invariant registers.
+///
+/// The line reader owns TOML's small common subset; each register then applies
+/// its own schema and repository-aware semantic checks to these raw entries.
+pub(crate) struct RawRegister {
+    /// Whether the register asks the caller to make refusals fatal.
+    pub(crate) enforce: bool,
+    /// Optional repository authority carried by the dependency register.
+    pub(crate) repository: Option<String>,
+    /// Repeated blocks in source order.
+    pub(crate) entries: Vec<RawEntry>,
+}
+
+/// Parses the shared register shape without applying an entry schema.
+///
+/// `entry_header` selects the repeated TOML table and `allowed_keys` is the
+/// register-specific schema. Keeping both parameters here means the invariant
+/// register cannot silently grow a second line parser while the dependency
+/// register retains its existing fail-closed behaviour.
+pub(crate) fn parse_register(
+    text: &str,
+    entry_header: &str,
+    allowed_keys: &[&'static str],
+) -> Result<RawRegister, ContractError> {
+    let mut reader = Reader {
+        entry_header,
+        allowed_keys,
+        section: Section::None,
+        enforce: true,
+        repository: None,
+        entries: Vec::new(),
+    };
+
+    for (index, raw) in text.lines().enumerate() {
+        process_contract_line(raw, index, &mut reader)?;
+    }
+
+    Ok(RawRegister {
+        enforce: reader.enforce,
+        repository: reader.repository,
+        entries: reader.entries,
+    })
 }
 
 /// Refuses a second approval for the same `(crate, owner, capability)` triple.
@@ -516,31 +591,16 @@ impl Contract {
     /// Parses a register. Fail-closed: an unrecognised line is an error, not a
     /// line to skip.
     pub fn parse(text: &str) -> Result<Self, ContractError> {
-        let mut enforce = true;
-        let mut repository = None;
-        let mut drafts: Vec<Draft> = Vec::new();
-        let mut section = Section::None;
-
-        for (index, raw) in text.lines().enumerate() {
-            process_contract_line(
-                raw,
-                index,
-                &mut section,
-                &mut enforce,
-                &mut repository,
-                &mut drafts,
-            )?;
-        }
-
+        let raw = parse_register(text, "[[approved]]", &REQUIRED)?;
         let mut entries: Vec<Entry> = Vec::new();
-        for draft in &drafts {
+        for draft in &raw.entries {
             let entry = build(draft)?;
             check_duplicate_entry(&entries, &entry, draft.line)?;
             entries.push(entry);
         }
         Ok(Self {
-            enforce,
-            repository,
+            enforce: raw.enforce,
+            repository: raw.repository,
             entries,
         })
     }
@@ -576,8 +636,8 @@ impl Contract {
 ///
 /// Whitespace only counts as blank, so `owner = "   "` is refused exactly as a
 /// missing `owner` would be: a placeholder is not evidence.
-fn check_field_present(
-    draft: &Draft,
+pub(crate) fn check_field_present(
+    draft: &RawEntry,
     krate: &str,
     field: &'static str,
 ) -> Result<(), ContractError> {
@@ -596,7 +656,7 @@ fn check_field_present(
 
 /// Rejects the first required field that is absent or blank, in `REQUIRED`
 /// order. `krate` is only used to name the offending block in the message.
-fn validate_required_fields(draft: &Draft, krate: &str) -> Result<(), ContractError> {
+fn validate_required_fields(draft: &RawEntry, krate: &str) -> Result<(), ContractError> {
     for field in REQUIRED {
         check_field_present(draft, krate, field)?;
     }
@@ -609,7 +669,7 @@ fn validate_required_fields(draft: &Draft, krate: &str) -> Result<(), ContractEr
 /// reported as `MissingField` before it can reach `Tier::parse`; the absent
 /// branch here is typed rather than asserted so a reordering bug surfaces as a
 /// refusal instead of a panic.
-fn validate_tier(draft: &Draft, krate: &str) -> Result<Tier, ContractError> {
+fn validate_tier(draft: &RawEntry, krate: &str) -> Result<Tier, ContractError> {
     let tier_text = draft.require("tier", krate)?;
     Tier::parse(tier_text).ok_or_else(|| ContractError::BadTier {
         line: draft.line,
@@ -652,7 +712,7 @@ fn validate_reason(reason: &str, krate: &str) -> Result<(), ContractError> {
 /// then reason), so a register with several defects always reports the same
 /// one. `crate` falls back to `<unnamed>` for diagnostics only; a block whose
 /// `crate` is absent still fails `validate_required_fields` immediately after.
-fn build(draft: &Draft) -> Result<Entry, ContractError> {
+fn build(draft: &RawEntry) -> Result<Entry, ContractError> {
     let krate = draft.get("crate").unwrap_or("<unnamed>").to_owned();
     validate_required_fields(draft, &krate)?;
     let tier = validate_tier(draft, &krate)?;
@@ -732,7 +792,7 @@ fn is_a_sentence(reason: &str, krate: &str) -> bool {
 /// panic; only the separator positions and digits are examined, and no calendar
 /// validation is attempted. The parameter is named `value` because the same
 /// check is applied to whatever `approved_on` held.
-fn is_iso_date(value: &str) -> bool {
+pub(crate) fn is_iso_date(value: &str) -> bool {
     let date_bytes = value.as_bytes();
     date_bytes.len() == 10
         && date_bytes[4] == b'-'

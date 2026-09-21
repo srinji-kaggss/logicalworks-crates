@@ -45,6 +45,8 @@
 
 /// The approval register: parsing and lookup for `contract/APPROVED.toml`.
 pub mod contract;
+/// The optional authored invariant register and its repository-aware validator.
+pub mod invariants;
 /// The register: parsing and approval lookup for `contract/APPROVED.toml`.
 pub mod lock;
 /// Cargo metadata edges: who authored which external dependency.
@@ -311,6 +313,8 @@ pub enum GateError {
     },
     /// The register is not a valid contract.
     Contract(contract::ContractError),
+    /// The optional invariant register could not be read or parsed.
+    Invariant(invariants::InvariantError),
     /// The lock file could not be read.
     Lock(lock::LockError),
     /// Cargo's authored direct dependency graph could not be obtained.
@@ -336,6 +340,9 @@ impl fmt::Display for GateError {
                 write!(formatter, "cannot read {}: {cause}", path.display())
             }
             Self::Contract(ref error) => write!(formatter, "{CONTRACT_PATH}: {error}"),
+            Self::Invariant(ref error) => {
+                write!(formatter, "{}: {error}", invariants::INVARIANTS_PATH)
+            }
             Self::Lock(ref error) => write!(formatter, "Cargo.lock: {error}"),
             Self::Metadata(ref error) => write!(formatter, "Cargo metadata: {error}"),
         }
@@ -347,6 +354,7 @@ impl Error for GateError {
         match *self {
             Self::Unreadable { ref cause, .. } => Some(cause),
             Self::Contract(ref error) => Some(error),
+            Self::Invariant(ref error) => Some(error),
             Self::Lock(ref error) => Some(error),
             Self::Metadata(ref error) => Some(error),
             _ => None,
@@ -553,6 +561,16 @@ pub fn check_dependencies_against(
     let edges = metadata::read(root).map_err(GateError::Metadata)?;
     let refusals = audit_direct(&edges, &register);
     Ok((register, refusals))
+}
+
+/// Audits the optional invariant register beside `root`.
+///
+/// `Ok(None)` is the compatibility path for a repository that has not authored
+/// `contract/INVARIANTS.toml`; its dependency-register verdict is unchanged.
+pub fn check_invariants(
+    root: &Path,
+) -> Result<Option<(invariants::Register, Vec<invariants::Refusal>)>, GateError> {
+    invariants::check(root).map_err(GateError::Invariant)
 }
 
 /// Reads a file to a `String`, naming the path in the failure.

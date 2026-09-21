@@ -1,0 +1,38 @@
+# Authored invariant register. Each entry names its scope, owner, and concrete
+# enforcement boundary; a claim without that boundary is refused by the gate.
+
+[policy]
+enforce = true
+
+[[invariant]]
+id = "INV-DEP-EDGE-OWNED"
+statement = "Every authored external dependency edge names an admitted semantic owner."
+scope = "lgwks_deps"
+owner = "lgwks_deps"
+enforcement = "static-check"
+enforced_by = "crates/lgwks-deps/src/lib.rs"
+approved_by = "maintainer"
+approved_on = "2026-09-20"
+review = "crates/lgwks-deps/src/lib.rs"
+
+[[invariant]]
+id = "INV-BOT-FOUR-VERBS"
+statement = "The bot exposes exactly four fixed verb capabilities through its verb traits."
+scope = "lgwks_bot"
+owner = "lgwks_bot"
+enforcement = "static-check"
+enforced_by = "crates/lgwks-bot/src/verb.rs"
+approved_by = "maintainer"
+approved_on = "2026-09-20"
+review = "crates/lgwks-bot/src/verb.rs"
+
+[[invariant]]
+id = "INV-AST-ONE-PARSER"
+statement = "AST consumers use the one shared parser surface."
+scope = "lgwks_ast"
+owner = "lgwks_ast"
+enforcement = "static-check"
+enforced_by = "crates/lgwks-ast/src/lib.rs"
+approved_by = "maintainer"
+approved_on = "2026-09-20"
+review = "crates/lgwks-ast/src/lib.rs"
