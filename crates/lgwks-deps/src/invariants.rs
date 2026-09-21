@@ -21,7 +21,7 @@
 //!    resolve to a source file some `mod` item actually reaches.
 //! 3. **Execution** — did the named mechanism run and fail on a broken tree?
 //!    *This module never answers this.* It executes nothing: no authored
-//!    command string is run, and no lint is invoked. [`Scope`] states exactly
+//!    command string is run, and no lint is invoked. [`SCOPE`] states exactly
 //!    that limit wherever a verdict is printed, because a doctor that reports
 //!    more than it did is the defect this module exists to repair.
 //! 4. **Verified outcome** — was a run recorded against the reviewed revision?
@@ -31,6 +31,13 @@
 //! Human approval is a fifth thing again, and it stays a string: a reviewer's
 //! name is a trust decision recorded in a diff, and this module does not
 //! pretend that a name is a measurement.
+//!
+//! [`Register::parse`]: crate::invariants::Register::parse
+//! [`audit`]: crate::invariants::audit
+//! [`Evidence`]: crate::invariants::Evidence
+//! [`Status::Attested`]: crate::invariants::Status::Attested
+//! [`Status::Resolved`]: crate::invariants::Status::Resolved
+//! [`SCOPE`]: crate::invariants::SCOPE
 
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -345,7 +352,7 @@ fn valid_lint_name(name: &str) -> bool {
 
 /// A recorded run, bound to a revision, an invocation, and a result.
 ///
-/// Constructed only by [`build_evidence`], which refuses an incomplete triple,
+/// Constructed only by `build_evidence`, which refuses an incomplete triple,
 /// a revision that is not a Git-style object name, a result that is not
 /// `pass`, or an invocation that does not name the entry's own enforcer. What
 /// is stored is therefore already bound to the reviewed revision and the exact
