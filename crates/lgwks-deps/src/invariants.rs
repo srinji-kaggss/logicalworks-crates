@@ -286,6 +286,27 @@ pub enum ErrorKind {
         /// Why the statement cannot be admitted.
         reason: String,
     },
+    /// A `[policy]` value was outside its closed grammar.
+    BadPolicyValue {
+        /// One-based line number.
+        line: usize,
+        /// The offending key.
+        key: String,
+        /// The offending value, verbatim, quotes included.
+        value: String,
+    },
+    /// The same `[policy]` key was written more than once.
+    DuplicatePolicyKey {
+        /// One-based line number.
+        line: usize,
+        /// The repeated key.
+        key: String,
+    },
+    /// `[policy]` was declared more than once.
+    DuplicatePolicySection {
+        /// One-based line number of the second declaration.
+        line: usize,
+    },
 }
 
 impl fmt::Display for ErrorKind {
@@ -314,6 +335,23 @@ impl fmt::Display for ErrorKind {
             Self::NonMonitorable { ref id, ref reason } => {
                 write!(formatter, "invariant {id:?} is not monitorable: {reason}")
             }
+            Self::BadPolicyValue {
+                line,
+                ref key,
+                ref value,
+            } => write!(
+                formatter,
+                "line {line}: [policy] {key} = {value:?} is not a Boolean; write exactly true or false"
+            ),
+            Self::DuplicatePolicyKey { line, ref key } => write!(
+                formatter,
+                "line {line}: [policy] {key} is written more than once; keep one assignment"
+            ),
+            Self::DuplicatePolicySection { line } => write!(
+                formatter,
+                "line {line}: [policy] is declared more than once; a second declaration would \
+                 silently override the first"
+            ),
         }
     }
 }
@@ -432,6 +470,15 @@ fn map_contract_error(error: contract::ContractError) -> ErrorKind {
             line,
             text: format!("duplicate dependency approval {krate:?}"),
         },
+        contract::ContractError::BadPolicyValue { line, key, value } => {
+            ErrorKind::BadPolicyValue { line, key, value }
+        }
+        contract::ContractError::DuplicatePolicyKey { line, key } => {
+            ErrorKind::DuplicatePolicyKey { line, key }
+        }
+        contract::ContractError::DuplicatePolicySection { line } => {
+            ErrorKind::DuplicatePolicySection { line }
+        }
     }
 }
 
