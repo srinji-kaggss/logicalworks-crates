@@ -279,8 +279,13 @@ fn observe(world: &mut World) {
 ///
 /// The capability check is not repeated here: `poll_any` and `run_any` each
 /// mint a fresh `Auth` from the retained `GrantSet`, which is where the proof
-/// belongs. A grant revoked after build therefore cannot fire, exactly as on
-/// `Bot`.
+/// belongs.
+///
+/// The load-bearing word is *retained*. `assemble` clones the set into the world
+/// as `Grants(grants.clone())` and nothing revokes it, so this substrate offers
+/// exactly the snapshot boundary `Bot` documents and not a live lease: changing
+/// or dropping the caller's `GrantSet` after build cannot narrow a bot that is
+/// already running. An earlier version of this comment claimed the opposite.
 fn fire(world: &mut World) {
     if parked(world) {
         return;
