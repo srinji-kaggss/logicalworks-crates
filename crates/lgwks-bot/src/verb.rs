@@ -113,3 +113,87 @@ pub trait Query {
     /// The identifier the query reports in findings (e.g. `"gh::pr_status"`).
     fn domain_id(&self) -> &str;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The four verbs INV-BOT-FOUR-VERBS fixes, as the module declares them.
+    const VERBS: [&str; 4] = ["Observe", "Evaluate", "Execute", "Query"];
+
+    /// Collects every `pub trait NAME` this source declares, in file order.
+    ///
+    /// The scan is deliberately textual: the invariant is about the *set of
+    /// verbs*, and a test that asserted it through trait objects would fail to
+    /// notice a fifth trait nobody has bound yet.
+    fn declared_traits(source: &str) -> Vec<&str> {
+        let mut names = Vec::new();
+        for line in source.lines() {
+            let Some(rest) = line.trim().strip_prefix("pub trait ") else {
+                continue;
+            };
+            let name: &str = rest
+                .split(|character: char| !(character.is_alphanumeric() || character == '_'))
+                .next()
+                .unwrap_or("");
+            if !name.is_empty() {
+                names.push(name);
+            }
+        }
+        names
+    }
+
+    /// Collects the names re-exported from `verb` by the crate root.
+    ///
+    /// A fifth verb reaches consumers through this list, so the list is where
+    /// "without a crate-level change" is either kept or broken.
+    fn reexported_from_crate_root(lib: &str) -> Vec<&str> {
+        let Some((_, after)) = lib.split_once("pub use verb::{") else {
+            return Vec::new();
+        };
+        let Some((names, _)) = after.split_once('}') else {
+            return Vec::new();
+        };
+        names
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn the_module_declares_exactly_the_four_reviewed_verbs() {
+        let declared = declared_traits(include_str!("verb.rs"));
+        assert_eq!(
+            declared, VERBS,
+            "INV-BOT-FOUR-VERBS fixes this set; a fifth verb is a crate-level change"
+        );
+    }
+
+    #[test]
+    fn the_crate_root_reexports_exactly_those_four_verbs() {
+        let mut reexported = reexported_from_crate_root(include_str!("lib.rs"));
+        reexported.sort_unstable();
+        let mut expected = VERBS;
+        expected.sort_unstable();
+        assert_eq!(
+            reexported, expected,
+            "the crate root is the surface a fifth verb would arrive through"
+        );
+    }
+
+    #[test]
+    fn a_closure_is_still_an_evaluator() {
+        let above_one = |value: &u8| *value > 1;
+        let verdict = above_one.check(&2);
+        assert!(
+            matches!(verdict, Ok(true)),
+            "the blanket impl is what binds a bot spec to a condition: {verdict:?}"
+        );
+        assert_eq!(
+            above_one.condition_id(),
+            "<closure>",
+            "findings render this identifier, so it is part of the surface"
+        );
+    }
+}

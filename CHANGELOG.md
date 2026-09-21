@@ -106,6 +106,31 @@ explicitly under that crate.
   repairs differ — nothing is down, one of the vectors is degenerate. Both enums
   are `#[non_exhaustive]`, so these variants are additive.
 
+### Fixed
+
+- **The invariant audit reported "enforced" for states it never examined**
+  (`lgwks_deps`). A register entry naming a lint no manifest declares, a file
+  that exists but declares no test, or a lint declared at `allow` all produced a
+  clean verdict, so the gate could not fail. The register now answers four
+  questions separately — registration validity, reference resolution, execution,
+  and verified outcome — and `check` prints `resolve`/`resolved`/`attested`,
+  never `enforced`. Every verdict carries a `SCOPE` line stating that no enforcer
+  was executed, so a resolved reference is not read as proof the invariant holds.
+  A reference that walks out of the repository (`..`) is refused at load, before
+  the filesystem is consulted.
+- **A malformed `policy.enforce` silently disabled both gates** (`lgwks_deps`).
+  The token was read as `value == "true"`, so `True`, `"true"`, `1`, `yes`, and
+  the empty string all became `false` with no diagnostic, standing the gate down.
+  A closed Boolean grammar now accepts exactly `true` and `false` and otherwise
+  refuses with a typed error naming the line and the value; the key set is
+  closed, and a repeated key or `[policy]` section is refused rather than
+  last-write-wins.
+- **The self-exemption trusted a package name** (`lgwks_deps`). Any edge whose
+  *name* was `lgwks_std` or `lgwks_deps` was exempt, including an external path
+  or Git package wearing that name, so an unapproved source could be admitted by
+  being called the right thing. The name list is gone; the only exemption is
+  Cargo's own `workspace_members` list.
+
 ## [lgwks_deps 0.1.12] - 2026-09-20
 
 Documentation release. No API change, no behaviour change, and no command-line
