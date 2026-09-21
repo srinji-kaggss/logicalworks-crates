@@ -41,6 +41,13 @@
 //! rather than computed here because only the code that loaded the weights can
 //! know them.
 //!
+//! The identity travels out on the verdict itself, as
+//! [`Provenance::model`](crate::session::Provenance::model), and not only into
+//! this resolver's own accessor. `resolve` calls `identity()` once per decision
+//! and the caller holds the result: a caller that resolved through a trait
+//! object has no way back to `embedder_identity`, and `embedder_identity` is a
+//! property of *this* resolver rather than of the decision it just made.
+//!
 //! # Failure is a verdict, and the record is the journal
 //!
 //! An embedder can fail, and a failed embedder must not be reported as *nothing
@@ -49,13 +56,20 @@
 //! returns [`Resolution::Degraded`], and a caller that does not distinguish it
 //! still re-asks, which is the safe direction.
 //!
+//! A degraded verdict still names its model, deliberately. The model is what was
+//! expected to answer and did not, so a record of the failure that omits it
+//! cannot be reproduced — and `Degraded` is precisely the verdict a reader will
+//! later want to attribute.
+//!
 //! This module does not log. It reports. The cause travels to the caller in the
-//! verdict and is written into the session transcript, which is the run's
-//! declared record; a log line would be a second, unmanaged copy of the same
-//! fact, and this crate has no logging edge to write one through. An
-//! [`Embedder`] that fails is expected to describe its own failure — it owns its
-//! error type and the context around it — while the resolver's job is the closed
-//! verdict the flow can route on.
+//! verdict, and the verdict reaches the run's declared record — the
+//! [`DecisionReceipt`](crate::session::DecisionReceipt) written to the
+//! [`Journal`](crate::session::Journal) — rather than a session transcript,
+//! which is a rendering of what was said and not of what was decided. A log line
+//! would be a second, unmanaged copy of the same fact, and this crate has no
+//! logging edge to write one through. An [`Embedder`] that fails is expected to
+//! describe its own failure — it owns its error type and the context around it —
+//! while the resolver's job is the closed verdict the flow can route on.
 //!
 //! # What this module does not do
 //!
@@ -69,10 +83,13 @@
 
 use std::fmt;
 
+use lgwks_std::json::{Deserialize, Serialize};
 use lgwks_std::similarity::{Cosine, CosineError};
 
 use crate::language::{LanguageResolver, decide};
-use crate::session::{DegradedReason, MatchTier, Resolution, Resolver};
+use crate::session::{
+    DegradedReason, MatchTier, PolicyVersion, Provenance, Resolution, Resolver, Verdict,
+};
 
 /// A source of dense vector representations for text, and its own identity.
 ///
@@ -121,7 +138,12 @@ pub trait Embedder {
 /// tells them apart. `dimension` is what makes the scores comparable to each
 /// other, and a comparison across dimensions is meaningless rather than merely
 /// inaccurate.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The three fields are serializable because they are carried in a decision
+/// receipt: a receipt is exported from a run and read in another process, and a
+/// provenance field that does not survive that trip is not a record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde", deny_unknown_fields)]
 #[non_exhaustive]
 pub struct EmbedderIdentity {
     /// The model's name, as a person would say it.
@@ -273,6 +295,16 @@ impl std::error::Error for SemanticError {}
 /// option at `0.9` is an embedder that distinguishes nothing, and only the
 /// margin rejects it.
 ///
+/// Names the tier whose parameters a [`PolicyVersion`] digests.
+///
+/// Distinct from [`crate::language`]'s label: the two tiers are independently
+/// versioned, and a receipt naming `semantic` is a claim about the cosine
+/// threshold rather than about the lexicon's blend.
+const SEMANTIC_LABEL: &str = "semantic";
+
+/// The acceptance policy for the semantic tier: the cosine at or above which an
+/// option is a candidate, and the lead it must hold.
+///
 /// Separate from [`crate::language`]'s constants and not shared with them: a
 /// cosine between two short phrases and a blended lexical score are different
 /// quantities on different scales, and one threshold over both would be a
@@ -394,6 +426,20 @@ impl<E: Embedder> SemanticResolver<E> {
         self.policy
     }
 
+    /// Returns the content identity of the acceptance policy in force.
+    ///
+    /// Derived from the policy's own numbers, not written down beside them, so
+    /// that retuning the threshold in a later release changes every receipt the
+    /// semantic tier produces. A hand-kept revision string is a claim that can
+    /// drift; a digest of the parameters is the parameters.
+    #[must_use]
+    pub fn policy_version(&self) -> PolicyVersion {
+        PolicyVersion::new(
+            SEMANTIC_LABEL,
+            &[self.policy.threshold(), self.policy.margin()],
+        )
+    }
+
     /// Records a confirmed alias on the deterministic tier.
     ///
     /// Delegated rather than reimplemented: an alias is a lexicon fact, and a
@@ -484,17 +530,25 @@ impl<E: Embedder> SemanticResolver<E> {
 }
 
 impl<E: Embedder> Resolver for SemanticResolver<E> {
-    fn resolve(&self, utterance: &str, options: &[String]) -> Resolution {
+    fn resolve(&self, utterance: &str, options: &[String]) -> Verdict {
         let deterministic = self.lexicon.decide_for(utterance, options);
         if !matches!(deterministic, Resolution::Absent { .. }) {
-            return deterministic;
+            // The lexicon answered, so the lexicon's policy is what decided and
+            // no model was consulted. Naming this resolver's model here would
+            // attribute a reproducible verdict to a model that never ran.
+            return Verdict::new(
+                deterministic,
+                Provenance::without_model(self.lexicon.policy_version()),
+            );
         }
         // The lexicon considered every option and none fit. This is the only
         // path on which a model is consulted, so no verdict the lexicon reached
         // can be changed by enabling this tier.
+        let provenance =
+            Provenance::with_model(self.policy_version(), self.embedder.identity().clone());
         match self.score_semantically(utterance, options) {
-            Ok(scored) => decide(&scored, self.policy.margin()),
-            Err(reason) => Resolution::Degraded { reason },
+            Ok(scored) => Verdict::new(decide(&scored, self.policy.margin()), provenance),
+            Err(reason) => Verdict::new(Resolution::Degraded { reason }, provenance),
         }
     }
 }
@@ -620,7 +674,9 @@ mod tests {
         let (embedder, calls) = stub(paraphrase_vectors(), vec![0.0, 1.0], false)?;
         let resolver = SemanticResolver::new(embedder);
 
-        let resolution = resolver.resolve("yes", &options(&["yes", "no"]));
+        let resolution = resolver
+            .resolve("yes", &options(&["yes", "no"]))
+            .into_resolution();
 
         assert_eq!(
             resolution,
@@ -649,7 +705,9 @@ mod tests {
         let (embedder, calls) = stub(paraphrase_vectors(), vec![0.0, 1.0], false)?;
         let resolver = SemanticResolver::new(embedder);
 
-        let resolution = resolver.resolve("order", &options(&["order", "order"]));
+        let resolution = resolver
+            .resolve("order", &options(&["order", "order"]))
+            .into_resolution();
 
         assert!(
             matches!(resolution, Resolution::Ambiguous { .. }),
@@ -674,13 +732,13 @@ mod tests {
         let lexicon = crate::language::LanguageResolver::new();
         assert!(
             matches!(
-                lexicon.resolve("the usual", &options),
+                lexicon.resolve("the usual", &options).into_resolution(),
                 Resolution::Absent { .. }
             ),
             "\"the usual\" must not be reachable by letters alone, or this test proves nothing"
         );
 
-        let resolution = resolver.resolve("the usual", &options);
+        let resolution = resolver.resolve("the usual", &options).into_resolution();
 
         assert!(
             matches!(
@@ -709,10 +767,12 @@ mod tests {
         // Both options are the same vector, so no margin can separate them. The
         // tier must report the tie rather than let index order decide, which is
         // the whole reason the verdict is three-way.
-        let resolution = resolver.resolve(
-            "the usual",
-            &options(&["Repeat last order", "Repeat last order"]),
-        );
+        let resolution = resolver
+            .resolve(
+                "the usual",
+                &options(&["Repeat last order", "Repeat last order"]),
+            )
+            .into_resolution();
 
         assert!(
             matches!(&resolution, Resolution::Ambiguous { tied, .. } if *tied == vec![0, 1]),
@@ -729,7 +789,9 @@ mod tests {
 
         // Both options are orthogonal or opposed to the utterance, so the tier
         // has nothing to say and must say nothing rather than pick the least bad.
-        let resolution = resolver.resolve("the usual", &options(&["Cancel", "Later"]));
+        let resolution = resolver
+            .resolve("the usual", &options(&["Cancel", "Later"]))
+            .into_resolution();
 
         assert!(
             matches!(resolution, Resolution::Absent { .. }),
@@ -745,7 +807,9 @@ mod tests {
         let (embedder, _calls) = stub(paraphrase_vectors(), vec![0.0, 1.0], true)?;
         let resolver = SemanticResolver::new(embedder);
 
-        let resolution = resolver.resolve("the usual", &options(&["Repeat last order", "Cancel"]));
+        let resolution = resolver
+            .resolve("the usual", &options(&["Repeat last order", "Cancel"]))
+            .into_resolution();
 
         assert_eq!(
             resolution,
@@ -770,7 +834,9 @@ mod tests {
         )?;
         let resolver = SemanticResolver::new(embedder);
 
-        let resolution = resolver.resolve("the usual", &options(&["Repeat last order", "Cancel"]));
+        let resolution = resolver
+            .resolve("the usual", &options(&["Repeat last order", "Cancel"]))
+            .into_resolution();
 
         assert_eq!(
             resolution,
@@ -794,7 +860,7 @@ mod tests {
             "the first binding for a phrase has no predecessor"
         );
 
-        let resolution = resolver.resolve("the usual", &options);
+        let resolution = resolver.resolve("the usual", &options).into_resolution();
         assert_eq!(
             resolution,
             Resolution::Resolved {

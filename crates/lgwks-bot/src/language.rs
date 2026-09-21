@@ -55,7 +55,7 @@ use std::collections::BTreeMap;
 
 use lgwks_std::similarity::{EditDistance, Jaccard, Similarity};
 
-use crate::session::{MatchTier, Resolution};
+use crate::session::{MatchTier, PolicyVersion, Provenance, Resolution, Verdict};
 
 /// The longest normalized input the shipped resolver will compare.
 pub const MAX_UTTERANCE_CHARS: usize = 512;
@@ -71,6 +71,9 @@ pub const MATCH_THRESHOLD: f64 = 0.55;
 
 /// The lead the best candidate must hold over the runner-up.
 pub const MATCH_MARGIN: f64 = 0.08;
+
+/// The tier label this module's policy version is declared under.
+const POLICY_LABEL: &str = "lexicon";
 
 /// Folds text to a comparable form: lower case, ASCII, single-spaced.
 ///
@@ -389,6 +392,33 @@ impl LanguageResolver {
             MATCH_MARGIN,
         )
     }
+
+    /// Returns the version of the lexicon policy in force.
+    ///
+    /// Everything that can change which candidate wins is in the digest: the
+    /// two tier weights, the acceptance threshold, the required lead, and the
+    /// input length past which the distance metric stops scoring at all. A
+    /// parameter left out here would be a change no receipt could see, which is
+    /// the same omission at a smaller scale as the one this field exists to
+    /// remove.
+    #[must_use]
+    pub fn policy_version(&self) -> PolicyVersion {
+        // The input bound is a `usize`, converted with `try_from` rather than a
+        // truncating `as` because this workspace forbids the cast; the length
+        // is a compile-time 512, so the fallback is unreachable and exists only
+        // so the conversion has no panic path.
+        let input_bound = f64::from(u32::try_from(MAX_UTTERANCE_CHARS).unwrap_or(u32::MAX));
+        PolicyVersion::new(
+            POLICY_LABEL,
+            &[
+                MATCH_THRESHOLD,
+                MATCH_MARGIN,
+                TOKEN_WEIGHT,
+                DISTANCE_WEIGHT,
+                input_bound,
+            ],
+        )
+    }
 }
 
 impl Default for LanguageResolver {
@@ -398,8 +428,11 @@ impl Default for LanguageResolver {
 }
 
 impl crate::session::Resolver for LanguageResolver {
-    fn resolve(&self, utterance: &str, options: &[String]) -> Resolution {
-        self.decide_for(utterance, options)
+    fn resolve(&self, utterance: &str, options: &[String]) -> Verdict {
+        Verdict::new(
+            self.decide_for(utterance, options),
+            Provenance::without_model(self.policy_version()),
+        )
     }
 }
 
@@ -478,7 +511,9 @@ mod tests {
 
     #[test]
     fn an_exact_normalized_match_resolves_at_the_exact_tier() {
-        let resolution = LanguageResolver::new().resolve("  yes, CONTINUE ", &options());
+        let resolution = LanguageResolver::new()
+            .resolve("  yes, CONTINUE ", &options())
+            .into_resolution();
         assert_eq!(
             resolution,
             Resolution::Resolved {
@@ -493,7 +528,9 @@ mod tests {
     #[test]
     fn a_spelling_variation_resolves_at_the_phonetic_tier() {
         let choices = vec![String::from("Smyth"), String::from("Marcus")];
-        let resolution = LanguageResolver::new().resolve("Smith", &choices);
+        let resolution = LanguageResolver::new()
+            .resolve("Smith", &choices)
+            .into_resolution();
         assert_eq!(
             resolution,
             Resolution::Resolved {
@@ -507,7 +544,9 @@ mod tests {
 
     #[test]
     fn an_unrecognized_answer_is_absent() {
-        let resolution = LanguageResolver::new().resolve("maybe later", &options());
+        let resolution = LanguageResolver::new()
+            .resolve("maybe later", &options())
+            .into_resolution();
         assert!(
             matches!(resolution, Resolution::Absent { .. }),
             "expected Absent, got {resolution:?}"
@@ -520,7 +559,9 @@ mod tests {
             String::from("Accept the offer"),
             String::from("Accept the order"),
         ];
-        let resolution = LanguageResolver::new().resolve("accept the", &choices);
+        let resolution = LanguageResolver::new()
+            .resolve("accept the", &choices)
+            .into_resolution();
         match resolution {
             Resolution::Ambiguous { tied, .. } => {
                 assert_eq!(tied, vec![0, 1], "both options must stay in play");
@@ -540,7 +581,7 @@ mod tests {
         assert_eq!(resolver.learned(), 1);
 
         assert_eq!(
-            resolver.resolve("The usual!", &options()),
+            resolver.resolve("The usual!", &options()).into_resolution(),
             Resolution::Resolved {
                 index: 2,
                 tier: MatchTier::Exact,
@@ -570,7 +611,7 @@ mod tests {
     fn a_shipped_alias_table_is_normalized_on_load() {
         let resolver = LanguageResolver::with_aliases(vec![(String::from("  The Usual "), 2)]);
         assert_eq!(
-            resolver.resolve("the usual", &options()),
+            resolver.resolve("the usual", &options()).into_resolution(),
             Resolution::Resolved {
                 index: 2,
                 tier: MatchTier::Exact,
@@ -591,7 +632,9 @@ mod tests {
         // `EditDistance` refuses an over-limit input and scores it 0.0 rather
         // than allocating a quadratic table, so a hostile input degrades to the
         // token tier instead of hanging. The bound is the contract.
-        let resolution = LanguageResolver::new().resolve(&long, &options());
+        let resolution = LanguageResolver::new()
+            .resolve(&long, &options())
+            .into_resolution();
         assert!(
             matches!(
                 resolution,
@@ -604,7 +647,9 @@ mod tests {
     #[test]
     fn an_empty_option_list_is_absent_not_a_panic() {
         assert_eq!(
-            LanguageResolver::new().resolve("yes", &[]),
+            LanguageResolver::new()
+                .resolve("yes", &[])
+                .into_resolution(),
             Resolution::Absent { best_score: 0.0 }
         );
     }
