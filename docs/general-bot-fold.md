@@ -267,7 +267,7 @@ code that loaded the weights can know them. A verdict a model produced is only
 declarable if the model is named.
 
 **It reports rather than guesses.** A failed embedder, or one that contradicts
-its own declared width, produces `Resolution::Degraded` (§6 item 4) and not
+its own declared width, produces `Resolution::Degraded` (§6 item 5) and not
 `Absent`. Re-asking is the right response to both, but the record distinguishes
 them, so an operator can tell an unclear person from a dependency that is down.
 
