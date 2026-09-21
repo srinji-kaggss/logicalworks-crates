@@ -144,10 +144,11 @@ is what lets them drive the verbs' deliberately non-`Send` futures directly.
 - **`observe`** polls every source in bounded concurrent waves (32 in flight),
   compares each result with the remembered one, and bumps that source's
   `Revision(u64)` marker component *only when the value moved*.
-- **`fire`** walks the sources in declaration order, selects those matching
-  `Changed<Revision>`, evaluates each chain's condition, and runs the actions
-  whose conditions hold, also in declaration order, so side effects stay
-  deterministic.
+- **`fire`** walks the *eligible work* recorded in a ledger, keyed by
+  `(chain, entry)`, and evaluates each chain's condition and runs the actions
+  whose conditions hold, in declaration order, so side effects stay
+  deterministic. `Changed<Revision>` is consulted only to open a transition; a
+  chain with work outstanding is walked on every tick until that work is settled.
 
 Two consequences worth knowing before you rely on `tick`:
 
@@ -183,10 +184,15 @@ rolled back. `Err` here means "this run did not finish", not "nothing happened".
 
 Two consequences follow, and neither is fixed by retrying blindly:
 
-- **The unattempted work is lost, not queued.** Revisions are committed in the
-  observe phase, before any action runs, so the next tick sees an unchanged
-  source and does not re-fire the chain. The actions after the failure are
-  simply not attempted again.
+- **The unattempted work is queued, not lost.** Work that is eligible stays
+  recorded: an entry that has not been attempted, or one whose attempt failed
+  under a budget that is not yet spent, is attempted on a later tick even if the
+  source never moves again, and the entries after it are not skipped to reach
+  anything. `tick` returns `Err(BotError::PendingTransition)` while work is held,
+  so a clean tick is never "the transition was handled" when it was not, and
+  `Bot::pending()` lists every entry that is not finished — including any entry
+  the attempt budget gave up on, with its reason. `RetryPolicy` sets the budget
+  (three attempts by default, `RetryPolicy::ONE_ATTEMPT` for none).
 - **A retry may duplicate.** An action that failed after its request was sent
   fails as `BotError::EffectIndeterminate`, which says the effect may be live.
   That variant exists precisely so this is readable from the type rather than
@@ -195,10 +201,16 @@ Two consequences follow, and neither is fixed by retrying blindly:
   possible duplicate — a second merge, message, or process launch. Consumers
   that retry should match on the variant and treat these two differently.
 
-Delivering exactly-once across an external effect needs durable intent and an
-outcome-unknown record, which this crate does not yet provide. Until it does,
-treat a failed tick as a partial run to be reconciled rather than a no-op to be
-retried.
+An effect that may already have happened is never re-attempted on its own: the
+entry is held and reported, and `Bot::resolve_effect(work, evidence)` is how a
+caller says what happened — `EffectEvidence::Applied` records it without
+replaying it, `NotApplied` makes the entry eligible for an attempt again.
+
+Delivering exactly-once across an external effect still needs durable intent
+outside this process: the ledger is in memory, so it reports an unsettled effect
+to the caller that owns it rather than surviving a crash. A panic that unwinds
+out of an action takes the chain's live transition with it; see the limits
+section in `src/ecs.rs`.
 
 ## Capability system
 
