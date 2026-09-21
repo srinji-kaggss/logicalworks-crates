@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 
 use lgwks_bot::Resolver;
 use lgwks_bot::session::{
-    FlowBounds, FlowSpec, MatchTier, NodeKind, Resolution, Session, VarType,
+    FlowBounds, FlowSpec, MatchTier, NodeKind, Question, Resolution, Session, VarType,
 };
 
 /// A two-option ask: `size` routes to `small_end` or `large_end`.
@@ -83,10 +83,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // A resolver reports *which* tier matched, which is what makes a wrong
     // resolution repairable. The default resolver is the lexicon, not a model.
+    // It is handed the question, not just the options: the ask node's id scopes
+    // any learned alias, and the domain says how the answers are read.
     let resolver = lgwks_bot::language::LanguageResolver::new();
     let options = vec![String::from("small"), String::from("large")];
+    let question = Question::new("ask_size", &options);
     assert_eq!(
-        resolver.resolve("small", &options),
+        resolver.resolve("small", &question),
         Resolution::Resolved {
             index: 0,
             tier: MatchTier::Exact,
@@ -94,7 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             lead: 1.0,
         }
     );
-    match resolver.resolve("no idea", &options) {
+    match resolver.resolve("no idea", &question) {
         Resolution::Absent { .. } => {}
         other => return Err(format!("expected Absent, got {other:?}").into()),
     }
@@ -108,7 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `FlowSpec` is the document. It owns variable declarations, an entry node, a node
 map, explicit continuations, terminal overrides, and `FlowBounds`. `FlowSpec::new`
 validates on construction and `FlowSpec::from_json` validates on parse
-(`crates/lgwks-bot/src/session.rs:1013`). `MAX_FLOW_BYTES` is 2,097,152, and input
+(`crates/lgwks-bot/src/session.rs:1079`). `MAX_FLOW_BYTES` is 2,097,152, and input
 past it is refused with `BotError::FlowTooLarge` before parsing runs.
 
 `NodeKind` is a closed set: `Say`, `Ask`, `Branch`, `Handoff`, `Refer`, `Route`,
@@ -122,7 +125,7 @@ store: it returns `BotError::InvalidVariableValue` when the answer cannot be
 converted.
 
 The same decoder runs at load, over every candidate of every ask
-(`crates/lgwks-bot/src/session.rs:1339`). An ask whose options include one the
+(`crates/lgwks-bot/src/session.rs:1585`). An ask whose options include one the
 declared variable cannot hold is refused by `FlowSpec::validate` with
 `BotError::AskOptionNotAssignable` — naming the node, the variable, the option,
 the expected type and the cause — so a flow that loads is a flow every one of
@@ -147,7 +150,7 @@ option.
 `FlowBounds::new(budget)` caps runtime steps including answer attempts, and
 `FlowSpec::validate` refuses a node count that exceeds the declared budget
 (`BotError::FlowBudgetExceeded`). The runner charges each step against the same
-budget (`crates/lgwks-bot/src/session.rs:2544`) and returns
+budget (`crates/lgwks-bot/src/session.rs:2998`) and returns
 `BotError::SessionBudgetExceeded`, so a flow whose graph lets the cursor loop
 still terminates.
 
@@ -203,18 +206,18 @@ declared outcome is a genuine override there — that is how a flow refuses
 already names its target, so the only declaration it accepts is the one that
 repeats that outcome; one that contradicts it, whether a different target or a
 refusal, is refused at load with `BotError::ConflictingTerminalDeclaration`
-(`crates/lgwks-bot/src/session.rs:1283`). A document that says a handoff is not
+(`crates/lgwks-bot/src/session.rs:1515`). A document that says a handoff is not
 authorized therefore never runs as a handoff, which is what a consumer
 dispatching on the returned disposition depends on.
 
-`Terminal::outcome(EffectLedger) -> Outcome` (`crates/lgwks-bot/src/session.rs:882`)
+`Terminal::outcome(EffectLedger) -> Outcome` (`crates/lgwks-bot/src/session.rs:948`)
 carries two independent facts through unchanged, and that is the whole of the
 method:
 
 - the `Disposition`, one of `Completed`, `Referred`, `HandedOff`, `Refused`
-  (`crates/lgwks-bot/src/session.rs:703`);
+  (`crates/lgwks-bot/src/session.rs:769`);
 - the `EffectLedger`, a `confirmed` count and an `unsettled` count
-  (`crates/lgwks-bot/src/session.rs:730`).
+  (`crates/lgwks-bot/src/session.rs:796`).
 
 It does not classify, and the reason is in the source: an earlier version
 returned a single enum and had to choose, for a refused run that also left an

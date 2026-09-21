@@ -6,11 +6,11 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use lgwks_bot::{
-    AnswerRejection, BotError, DegradedReason, Disposition, EffectLedger, Embedder,
+    Alias, AnswerRejection, BotError, DegradedReason, Disposition, EffectLedger, Embedder,
     EmbedderIdentity, FlowBounds, FlowEdge, FlowSpec, Journal, LanguageResolver, MAX_RECORD_BYTES,
     MAX_SESSION_BYTES, MAX_UTTERANCE_BYTES, MAX_VALUE_BYTES, MatchTier, NodeKind, Predicate,
-    Resolution, Resolver, ResourceAxis, ResourceLimits, SemanticResolver, Session, Terminal,
-    TranscriptEntry, Value, ValueExpr, VarType,
+    Question, Resolution, Resolver, ResourceAxis, ResourceLimits, SemanticResolver, Session,
+    Terminal, TranscriptEntry, Value, ValueExpr, VarType,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -533,7 +533,7 @@ fn validation_rejects_an_unknown_node_kind() -> TestResult {
 struct FixedResolver(Resolution);
 
 impl Resolver for FixedResolver {
-    fn resolve(&self, _utterance: &str, _options: &[String]) -> Resolution {
+    fn resolve(&self, _utterance: &str, _question: &Question<'_>) -> Resolution {
         self.0.clone()
     }
 }
@@ -891,6 +891,381 @@ fn a_degraded_verdict_is_distinguishable_from_an_absent_one() -> TestResult {
     Ok(())
 }
 
+/// Routes every option to one target, which is all a routing test needs.
+fn routes_to(options: &[String], target: &str) -> BTreeMap<String, String> {
+    options
+        .iter()
+        .map(|option| (option.clone(), String::from(target)))
+        .collect()
+}
+
+/// Two ask nodes with different vocabularies, the second reachable only by
+/// answering the first.
+///
+/// The shape the multi-ask tests need: a phrase confirmed at `ask_one` has a
+/// *different* candidate set at `ask_two`, and the person's answer at the first
+/// question is what makes the second observable.
+fn two_question_flow(first: &[&str], second: &[&str]) -> Result<FlowSpec, BotError> {
+    let first_options: Vec<String> = first.iter().map(|name| (*name).to_owned()).collect();
+    let second_options: Vec<String> = second.iter().map(|name| (*name).to_owned()).collect();
+    FlowSpec::new(
+        BTreeMap::from([
+            (
+                String::from("first"),
+                VarType::Choice(first_options.clone()),
+            ),
+            (
+                String::from("second"),
+                VarType::Choice(second_options.clone()),
+            ),
+        ]),
+        "ask_one",
+        BTreeMap::from([
+            (
+                String::from("ask_one"),
+                NodeKind::Ask {
+                    var: String::from("first"),
+                    options: first_options.clone(),
+                    routes: routes_to(&first_options, "ask_two"),
+                },
+            ),
+            (
+                String::from("ask_two"),
+                NodeKind::Ask {
+                    var: String::from("second"),
+                    options: second_options.clone(),
+                    routes: routes_to(&second_options, "done"),
+                },
+            ),
+            (String::from("done"), NodeKind::End),
+        ]),
+        Vec::new(),
+        BTreeMap::new(),
+        FlowBounds::new(8),
+    )
+}
+
+/// Reads the single transcript record written under `role`, or an empty string.
+fn recorded_under(session: &Session, role: &str) -> String {
+    session
+        .transcript()
+        .iter()
+        .find(|entry| entry.role() == role)
+        .map(TranscriptEntry::text)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// The filed counterexample for #25, at session level: one resolver, two
+/// questions. Before the fix, the same phrase selected index 0 at *both*, which
+/// at the second question meant `Delete account` — an action nobody confirmed.
+#[test]
+fn an_alias_confirmed_at_one_ask_cannot_answer_another() -> TestResult {
+    let resolver = LanguageResolver::with_aliases(vec![Alias::new(
+        "ask_one",
+        "the usual",
+        "Repeat last order",
+    )]);
+    let mut session = Session::with_resolver(
+        "scope",
+        two_question_flow(
+            &["Repeat last order", "Cancel"],
+            &["Delete account", "Keep account"],
+        )?,
+        resolver,
+    )?;
+
+    session.answer("the usual")?;
+    assert_eq!(
+        session.scope().get("first"),
+        Some(&Value::Choice(String::from("Repeat last order"))),
+        "the confirmation is honoured at the question it was made in"
+    );
+    assert_eq!(session.current(), Some("ask_two"));
+
+    session.answer("the usual")?;
+    assert_eq!(
+        session.current(),
+        Some("ask_two"),
+        "the second question must not consume the first question's confirmation"
+    );
+    assert_eq!(
+        session.scope().get("second"),
+        None,
+        "and must certainly not select the option sitting at its old index"
+    );
+    Ok(())
+}
+
+/// The filed counterexample for #25, second half: the bound option is removed
+/// and its successor is the dangerous one. Teaching row 0 and then replacing row
+/// 0's text must not transfer the confirmation to whatever moved in.
+#[test]
+fn a_confirmation_whose_option_was_removed_reasks_instead_of_selecting_its_successor() -> TestResult
+{
+    let resolver = LanguageResolver::with_aliases(vec![Alias::new(
+        "ask_one",
+        "the usual",
+        "Repeat last order",
+    )]);
+    // Version two of the same question: `Repeat last order` is gone and
+    // `Delete account` now sits where it was.
+    let mut session = Session::with_resolver(
+        "stale",
+        two_question_flow(&["Delete account", "Cancel"], &["Yes", "No"])?,
+        resolver,
+    )?;
+
+    session.answer("the usual")?;
+
+    assert_eq!(
+        session.current(),
+        Some("ask_one"),
+        "a withdrawn confirmation re-asks rather than advancing"
+    );
+    assert_eq!(
+        session.scope().get("first"),
+        None,
+        "no value is stored for an answer the resolver refused to read"
+    );
+    assert_eq!(
+        recorded_under(&session, "resolver-stale-alias"),
+        "Superseded alias: question ask_one no longer offers \"Repeat last order\"",
+        "the record names both halves of the broken binding, because either \
+         alone is unactionable"
+    );
+
+    // The person can still answer: the withdrawal is not a trap, it is a
+    // withdrawal. Typing without the withdrawn phrase resolves normally.
+    session.answer("Cancel")?;
+    assert_eq!(
+        session.scope().get("first"),
+        Some(&Value::Choice(String::from("Cancel")))
+    );
+    Ok(())
+}
+
+/// An ask/route flow whose every option routes to a `Refer` terminal named
+/// after the option itself.
+///
+/// The option text is the route identity on purpose: "the session went where
+/// the value says" then reads as one equality against the option, and a test
+/// never has to know a node id to assert a route.
+fn option_routed_flow(
+    var: &str,
+    declared: VarType,
+    options: &[&str],
+) -> Result<FlowSpec, BotError> {
+    let offered: Vec<String> = options.iter().map(|option| (*option).to_owned()).collect();
+    let mut routes = BTreeMap::new();
+    let mut nodes = BTreeMap::new();
+    let mut terminals = BTreeMap::new();
+    for (position, option) in offered.iter().enumerate() {
+        let target = format!("routed_{position}");
+        routes.insert(option.clone(), target.clone());
+        nodes.insert(
+            target.clone(),
+            NodeKind::Refer {
+                target: option.clone(),
+                text: String::from("Noted"),
+            },
+        );
+        terminals.insert(
+            target,
+            Terminal::Referred {
+                target: option.clone(),
+            },
+        );
+    }
+    nodes.insert(
+        String::from("ask"),
+        NodeKind::Ask {
+            var: String::from(var),
+            options: offered,
+            routes,
+        },
+    );
+    FlowSpec::new(
+        BTreeMap::from([(String::from(var), declared)]),
+        "ask",
+        nodes,
+        Vec::new(),
+        terminals,
+        FlowBounds::new(16),
+    )
+}
+
+/// Reads the route a session took as the option text it named.
+fn routed_to(session: &Session) -> Option<String> {
+    session.terminal().and_then(|terminal| match *terminal {
+        Terminal::Referred { ref target } => Some(target.clone()),
+        _ => None,
+    })
+}
+
+/// The filed counterexample for #38, at session level: `-5` is not one of the
+/// two numbers this question offers.
+///
+/// Before the fix, normalization folded the sign away, `-5` matched `"5"` at
+/// the Exact tier, and the session stored `Value::Integer(5)` and advanced down
+/// the positive route — an answer the person never gave, reported at maximum
+/// confidence.
+#[test]
+fn a_negative_answer_is_not_folded_into_the_positive_option() -> TestResult {
+    let mut session = Session::new(
+        "sign",
+        option_routed_flow("amount", VarType::Integer, &["5", "10"])?,
+    )?;
+
+    session.answer("-5")?;
+
+    assert_eq!(
+        session.scope().get("amount"),
+        None,
+        "a number the question does not offer must not be stored as one it does"
+    );
+    assert_eq!(
+        session.current(),
+        Some("ask"),
+        "the question is re-asked rather than answered by a different number"
+    );
+    assert_eq!(
+        session.terminal(),
+        None,
+        "and no route is taken, so nothing downstream acts on the invented value"
+    );
+    Ok(())
+}
+
+/// The value, not the spelling, decides: every reading of one number lands on
+/// that number's option, and both signed choices stay distinguishable.
+#[test]
+fn an_integer_answer_stores_its_value_and_takes_its_own_route() -> TestResult {
+    for (utterance, expected_value, expected_option) in [
+        ("-5", -5_i64, "-5"),
+        ("5", 5, "5"),
+        ("+5", 5, "5"),
+        (" 5 ", 5, "5"),
+        ("0", 0, "0"),
+        ("10", 10, "10"),
+    ] {
+        let mut session = Session::new(
+            "values",
+            option_routed_flow("amount", VarType::Integer, &["-5", "5", "0", "10"])?,
+        )?;
+        session.answer(utterance)?;
+        assert_eq!(
+            session.scope().get("amount"),
+            Some(&Value::Integer(expected_value)),
+            "{utterance:?} must store the parsed value, not the option's spelling"
+        );
+        assert_eq!(
+            routed_to(&session).as_deref(),
+            Some(expected_option),
+            "{utterance:?} must take the route of the option holding that value"
+        );
+    }
+    Ok(())
+}
+
+/// The ends of the range are values like any other, and one past them is not a
+/// value at all.
+#[test]
+fn the_integer_boundaries_round_trip_and_overflow_is_refused() -> TestResult {
+    let low = i64::MIN.to_string();
+    let high = i64::MAX.to_string();
+    for (utterance, expected) in [(low.as_str(), i64::MIN), (high.as_str(), i64::MAX)] {
+        let mut session = Session::new(
+            "bounds",
+            option_routed_flow("amount", VarType::Integer, &[low.as_str(), high.as_str()])?,
+        )?;
+        session.answer(utterance)?;
+        assert_eq!(
+            session.scope().get("amount"),
+            Some(&Value::Integer(expected)),
+            "{utterance:?} is representable and must be stored exactly"
+        );
+        assert_eq!(
+            routed_to(&session).as_deref(),
+            Some(utterance),
+            "{utterance:?} must take the route of the option holding that value"
+        );
+    }
+
+    // One past each end parses as nothing, so it matches nothing: the failure
+    // is a re-ask, never a wrapped or clamped value.
+    for utterance in ["9223372036854775808", "-9223372036854775809"] {
+        let mut session = Session::new(
+            "overflow",
+            option_routed_flow("amount", VarType::Integer, &["5", "10"])?,
+        )?;
+        session.answer(utterance)?;
+        assert_eq!(
+            session.scope().get("amount"),
+            None,
+            "{utterance:?} is out of range and must not be stored"
+        );
+        assert_eq!(
+            session.current(),
+            Some("ask"),
+            "{utterance:?} must re-ask rather than wrap into a nearby value"
+        );
+    }
+    Ok(())
+}
+
+/// The control for #38: folding punctuation away is still what a *label*
+/// question wants, and the fix must not have withdrawn it.
+#[test]
+fn punctuation_tolerant_matching_still_answers_a_label_question() -> TestResult {
+    let mut session = Session::new(
+        "labels",
+        option_routed_flow("answer", VarType::Boolean, &["yes", "no"])?,
+    )?;
+
+    session.answer("yes!")?;
+
+    assert_eq!(
+        session.scope().get("answer"),
+        Some(&Value::Boolean(true)),
+        "an ordinary word answer keeps the tolerant reading it has always had"
+    );
+    assert_eq!(
+        routed_to(&session).as_deref(),
+        Some("yes"),
+        "and still takes the route of the option it matched"
+    );
+    Ok(())
+}
+
+/// The policy is what decides, so the same authored strings are one answer or
+/// two depending on the declared type: `-5` and `5` are two values and one
+/// label, and `5` and `05` are two spellings of one value.
+#[test]
+fn option_collisions_are_judged_under_the_declared_policy() -> TestResult {
+    let as_values = option_routed_flow("amount", VarType::Integer, &["-5", "5"])?;
+    assert_eq!(
+        as_values.nodes().len(),
+        3,
+        "a signed question offering both signs is accepted: two values"
+    );
+
+    let as_labels = option_routed_flow("answer", VarType::String, &["-5", "5"]);
+    assert!(
+        matches!(as_labels, Err(BotError::MalformedFlow { .. })),
+        "the same two strings are one label once the sign folds, and a flow that \
+         offers them that way can never tell the person's answer apart: {as_labels:?}"
+    );
+
+    let duplicate_values = option_routed_flow("amount", VarType::Integer, &["5", "05"]);
+    assert!(
+        matches!(duplicate_values, Err(BotError::MalformedFlow { .. })),
+        "two options holding one value are the numeric form of the same \
+         collision: {duplicate_values:?}"
+    );
+    Ok(())
+}
+
 #[test]
 fn the_boolean_ask_from_the_report_is_refused_by_from_json() -> TestResult {
     // The document is the one in the defect report, verbatim. It used to
@@ -1028,6 +1403,12 @@ fn every_option_of_every_accepted_ask_is_storable() -> TestResult {
     // purpose (`SMALL` against `small`, `007` against a plain integer), because
     // those are exactly the candidates a stricter check would refuse and a
     // person would still expect to work.
+    //
+    // The three integer candidates name three *different* values, and they have
+    // to: two options naming one value are refused at load
+    // (`option_collisions_are_judged_under_the_declared_policy`), because the
+    // resolver can only ever report the tie and the person cannot answer the
+    // question. So the zero-padded spelling here is a pad of no other candidate.
     let asks = [
         (
             String::from("words"),
@@ -1038,7 +1419,7 @@ fn every_option_of_every_accepted_ask_is_storable() -> TestResult {
             String::from("count"),
             VarType::Integer,
             vec![
-                String::from("7"),
+                String::from("8"),
                 String::from(" -12 "),
                 String::from("007"),
             ],
@@ -1179,6 +1560,7 @@ fn exact_ambiguous_and_absent_answers_behave_as_before() -> TestResult {
         one_question_flow()?,
         FixedResolver(Resolution::Ambiguous {
             tied: vec![0, 1],
+            tier: MatchTier::Fuzzy,
             score: 0.8,
         }),
     )?;

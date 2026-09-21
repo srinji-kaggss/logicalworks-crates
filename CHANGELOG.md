@@ -191,6 +191,32 @@ explicitly under that crate.
 
 ### Fixed
 
+- **Punctuation normalization turned a negative integer into a positive match**
+  (`lgwks_bot`). The fold maps `-5` and `5` to the same normalized form, so an
+  answer of `-5` resolved at the `Exact` tier to the option `5` — the sign was
+  discarded before anything compared it. Answers now carry a declared domain
+  (`AnswerDomain::{Label, Integer}`, derived from the variable's type), and an
+  integer question is resolved by decoding the utterance and comparing *values*.
+  No lexical, phonetic, fuzzy, alias or semantic tier runs on an integer answer,
+  because each of them compares folded text or a similarity judgement and each
+  re-enters the sign loss. A number no option holds is now `Absent` rather than
+  a nearby option.
+- **A fuzzy competitor could veto an exact answer** (`lgwks_bot`). Each option
+  was tagged with its tier and the mixture was sorted by raw score, so a fuzzy
+  candidate at `0.97` outranked a phonetic one and a single margin over the
+  mixture reported `Ambiguous` for an answer typed in full. Precedence is now
+  resolved over the whole candidate set first: the best tier present wins,
+  everything below it is dropped, and the margin applies only inside that tier.
+  `Resolution::Ambiguous` carries the tier it tied in, because two exact
+  candidates folding to one form, two phonetic candidates sharing a key, and two
+  fuzzy candidates inside the margin are three different ties.
+- **A learned alias bound to an option's position** (`lgwks_bot`). The table
+  stored `normalized utterance -> usize` and spent that index against whatever
+  option list arrived next, so a phrase confirmed at one question silently
+  selected a different answer at another. An alias is now keyed by question and
+  stores the option's own text verbatim, resolved into the current candidate set
+  at use time. `Resolution::StaleAlias` reports a binding whose option is gone;
+  the session records it and re-asks rather than resolving to a position.
 - **An HTTP body was read into memory before any ceiling applied**
   (`lgwks_std`, `lgwks_bot`). A remote server chose the process's memory
   footprint, and the bot's preview limit was a post-hoc trim of an arbitrary
@@ -214,6 +240,14 @@ explicitly under that crate.
   target was additionally resolved against two different working directories
   because `--manifest-path` is resolved by cargo against cargo's own cwd; it is
   now made absolute before the child sees it.
+
+### Changed
+
+- `Resolver` takes a `Question` — id, options and answer domain — instead of an
+  option slice, because resolving a tier needs the question's identity.
+  `Resolution::Ambiguous` gained a `tier` field; the enum is `#[non_exhaustive]`,
+  so that part is additive. These are development APIs and are not in any
+  published version.
 
 ## [lgwks_deps 0.1.12] - 2026-09-20
 
