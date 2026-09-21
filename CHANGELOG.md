@@ -29,6 +29,32 @@ explicitly under that crate.
   licence agreement must be in place before a non-trivial `lgwks_bot`
   contribution is merged.
 
+### Fixed
+
+- **An HTTP body was read into memory before any ceiling applied**
+  (`lgwks_std`, `lgwks_bot`). A remote server chose the process's memory
+  footprint, and the bot's preview limit was a post-hoc trim of an arbitrary
+  allocation. The read is now bounded *while* reading: each window is clamped to
+  what remains of a declared ceiling, so no buffer exceeds it. The overflow
+  policy is a typed choice — `BodyPolicy::Whole` refuses past the limit with
+  `Error::BodyTooLarge`, `BodyPolicy::Preview` keeps the prefix and reports
+  `Truncation::{Complete, Cut}`. The bot selects `Preview` because a body larger
+  than a preview is the normal case for a live endpoint, and its ceiling is
+  derived from the preview size so the two numbers cannot drift.
+- **A comment naming a log macro suppressed an unlogged-error finding**
+  (`lgwks_deps`). The scan matched evidence over a window of physical lines, so
+  a marker inside a comment satisfied the check for a return that discards its
+  error. Evidence is now a statement rather than prose: the physical-line window
+  is gone.
+- **`--contract FILE` also became the audit target** (`lgwks_deps`). An
+  invocation naming a register could audit the wrong tree and return a success
+  verdict for it. `check` now parses its own arguments in one consuming pass,
+  refusing a missing value, an option used as a value, a repeated override, a
+  surplus positional and an unknown flag — with nothing audited. A *relative*
+  target was additionally resolved against two different working directories
+  because `--manifest-path` is resolved by cargo against cargo's own cwd; it is
+  now made absolute before the child sees it.
+
 ## [lgwks_deps 0.1.12] - 2026-09-20
 
 Documentation release. No API change, no behaviour change, and no command-line
