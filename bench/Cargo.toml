@@ -1,0 +1,38 @@
+[package]
+name = "lgwks-bench"
+description = "Measurement instrument for lgwks_bot against baselines and competitor engines. Not part of the workspace; not published."
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# This rig is its own workspace ROOT. That is load-bearing, not tidiness.
+#
+# The estate's dependency contract (`contract/APPROVED.toml`, enforced by
+# `lgwks-deps check`) governs the four published crates. A benchmark that
+# compares against a competitor engine must depend on that engine, and no
+# competitor engine belongs in the shipped dependency graph. `lgwks-deps`
+# discovers packages through Cargo's own `workspace_members`, so a separate
+# workspace root is invisible to the gate -- the comparison crates cannot leak
+# into the estate's contract because the gate never sees them.
+#
+# The alternative -- adding benchmark-only crates to the root workspace -- would
+# require an APPROVED.toml entry per competitor, which is the wrong answer:
+# those edges are not the estate's, they are this instrument's.
+[workspace]
+
+[dependencies]
+# No default features: `rt` is withdrawn so no tokio edge is compiled. The bot's
+# `Bot::tick` adapter refuses inside an async runtime by design, and the
+# synchronous adapter is the one this rig measures. Withdrawing `rt` makes the
+# measured path exactly the ECS schedule plus the four verbs.
+lgwks_bot = { path = "../crates/lgwks-bot", default-features = false }
+
+[[bin]]
+name = "lgwks-bench"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+debug = true
