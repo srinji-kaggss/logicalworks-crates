@@ -28,7 +28,7 @@
 //! the one the process watchdog catches.
 #![cfg(all(feature = "rt", feature = "time", feature = "sync", feature = "macros"))]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -41,6 +41,7 @@ use std::time::Duration;
 use lgwks_bot::rt::sync::{Mutex, mpsc};
 use lgwks_bot::rt::task::spawn;
 use lgwks_bot::rt::time::{sleep, timeout};
+use lgwks_bot::spec::{EffectEvidence, TransitionHold};
 use lgwks_bot::{Auth, Bot, BotError, Builder, Cap, Execute, GrantSet, Observe, block_on};
 
 /// What a test reports when its precondition did not hold.
@@ -994,4 +995,312 @@ fn runtime_independent_verbs_run_on_the_synchronous_adapter() -> TestResult {
 #[cfg(all(feature = "io", feature = "net"))]
 fn a_loopback_socket_source_completes_on_the_shipped_current_thread_runtime() -> TestResult {
     guarded(SOCKET, socket_source_on_the_shipped_runtime)
+}
+
+// ── The ledger's repairs: generation, barrier, and binding ─────────────────
+//
+// The tests below are not `guarded`, and the reason is the watchdog's subject
+// rather than a shortcut: `guarded` exists for a body that may *never return* —
+// a tick parked on a driver its own poll is blocking — so it re-executes the
+// binary as a child and reads a marker. Every body here drives immediate verbs
+// on the synchronous adapter and cannot park, so a watchdog would add a process
+// spawn and, worse, replace an assertion's own diff with "the guarded child
+// failed on its own". The failure this file's tests are read for is the
+// assertion, so the assertion is what has to survive.
+
+/// A source whose value the test moves by hand.
+///
+/// The three repairs are about what the substrate does *between* polls — which
+/// generation a settlement belongs to, whether an abandoned entry is a barrier,
+/// and which value an open transition is bound to — so the source has to be the
+/// one part with no timing in it. A value the test sets makes "the source moved"
+/// a fact the test states rather than one it waits for, which is what lets each
+/// counterexample be written down exactly as the review states it.
+struct Dial {
+    /// The value the next poll yields.
+    value: Rc<Cell<u32>>,
+}
+
+impl Observe for Dial {
+    type Output = u32;
+
+    fn required_caps(&self) -> &[Cap] {
+        &[]
+    }
+
+    async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+        call.0.check(Observe::required_caps(self))?;
+        Ok(self.value.get())
+    }
+
+    fn domain_id(&self) -> &str {
+        "test::dial"
+    }
+}
+
+/// An action whose outcome the test chooses, recording the value it ran with.
+///
+/// `uncertain` is the state the ledger exists for: an attempt that returns
+/// [`BotError::EffectIndeterminate`] may already be live, so the entry is held
+/// rather than retried. Flipping it back is how a test produces a *settled*
+/// generation and then a fresh one at the same slot, which is the shape every
+/// generation counterexample needs.
+struct Doubtful {
+    /// Whether the next attempt is indeterminate instead of succeeding.
+    uncertain: Rc<Cell<bool>>,
+    /// The value each attempt actually ran with, in the order it ran.
+    seen: Rc<RefCell<Vec<u32>>>,
+}
+
+impl Execute for Doubtful {
+    type Input = u32;
+    type Output = ();
+
+    fn required_caps(&self) -> &[Cap] {
+        &[]
+    }
+
+    async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
+        call.0.check(Execute::required_caps(self))?;
+        self.seen.borrow_mut().push(*call.1);
+        if self.uncertain.get() {
+            return Err(BotError::EffectIndeterminate {
+                domain: "test::doubtful".to_owned(),
+                cause: "the acknowledgment never arrived".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn domain_id(&self) -> &str {
+        "test::doubtful"
+    }
+}
+
+/// The revision and hold of the first entry the bot is still holding, as one
+/// value, so an assertion can say *which generation* is held rather than only
+/// that something is.
+fn held(bot: &Bot) -> Option<(usize, usize, u64, TransitionHold)> {
+    bot.pending().first().map(|work| {
+        (
+            work.id().chain(),
+            work.id().entry(),
+            work.revision(),
+            work.hold().clone(),
+        )
+    })
+}
+
+/// A settlement is accepted only for the generation it names.
+///
+/// The counterexample this closes, stated as the review states it: the entry at
+/// `(0, 0)` is indeterminate at revision 1, and the caller reads `pending()`.
+/// Its report is delayed. The entry is settled, the transition resolves, the
+/// source moves, and the same slot is held again — at revision 2. The delayed
+/// report for revision 1 then arrives.
+///
+/// Before the repair it was accepted, because `resolve_effect` named only
+/// `(chain, entry)` and the ledger only ever holds one transition per chain, so
+/// a slot is reused by every generation over it and identity alone cannot tell
+/// them apart. `Applied` acknowledged an effect at a generation nobody asked
+/// about; `NotApplied`, worse, made an attempt the caller never saw eligible for
+/// a retry. The revision is the part of the identity that survives the reuse,
+/// and it is what this binds.
+///
+/// Three more things are asserted here, because they are the same invariant read
+/// from the other side: a settlement repeated for its own generation is a no-op
+/// that succeeds, a settlement *contradicting* its own generation's is refused,
+/// and neither refusal is `NoSuchWork` — that variant has to keep meaning "there
+/// is no held effect here", or a caller reading it for a stale report is being
+/// told the wrong thing about work that is still held.
+#[test]
+fn a_settlement_names_the_generation_it_settles_and_no_other() -> TestResult {
+    let value = Rc::new(Cell::new(1));
+    let uncertain = Rc::new(Cell::new(true));
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let mut bot = Bot::builder("generations")
+        .observe(Dial {
+            value: Rc::clone(&value),
+        })
+        .on(
+            |_observed: &u32| true,
+            Doubtful {
+                uncertain: Rc::clone(&uncertain),
+                seen: Rc::clone(&seen),
+            },
+        )
+        .build(&GrantSet::empty())?;
+
+    // Revision 1, held: the attempt may be live, so nothing settles it on its
+    // own and the tick says so rather than guessing.
+    match bot.tick() {
+        Ok(fired) => {
+            return Err(format!("an indeterminate effect was reported as {fired} fired").into());
+        }
+        Err(error) => assert!(
+            matches!(error, BotError::EffectIndeterminate { .. }),
+            "expected the action's own error, got {error:?}"
+        ),
+    }
+    let first = bot
+        .pending()
+        .first()
+        .cloned()
+        .ok_or("the held entry is reported")?;
+    assert_eq!(first.revision(), 1, "the transition opened at revision 1");
+    assert!(
+        matches!(
+            first.hold(),
+            TransitionHold::OutcomeUnknown { attempts: 1, .. }
+        ),
+        "held as an unknown outcome, not as a decision: {:?}",
+        first.hold()
+    );
+
+    // The caller's own settlement for revision 1, naming revision 1. Accepted,
+    // and the generation it settles is now decided, so the transition has
+    // nothing open and is dropped by the next tick.
+    bot.resolve_effect(first.id(), first.revision(), EffectEvidence::Applied)?;
+    assert_eq!(bot.tick()?, 0, "an acknowledged effect is not replayed");
+    assert!(
+        bot.pending().is_empty(),
+        "the acknowledged generation is resolved: {:?}",
+        bot.pending()
+    );
+
+    // The source moves and the same slot is held again — at revision 2. The
+    // `WorkId` is identical to the one above; only the revision differs, which
+    // is the whole point.
+    uncertain.set(true);
+    value.set(2);
+    match bot.tick() {
+        Ok(fired) => {
+            return Err(format!("an indeterminate effect was reported as {fired} fired").into());
+        }
+        Err(error) => assert!(
+            matches!(error, BotError::EffectIndeterminate { .. }),
+            "expected the action's own error, got {error:?}"
+        ),
+    }
+    let second = bot
+        .pending()
+        .first()
+        .cloned()
+        .ok_or("the held entry is reported again")?;
+    assert_eq!(second.id(), first.id(), "the slot is the same one");
+    assert_eq!(
+        second.revision(),
+        2,
+        "the generation it belongs to is not, which is the fact identity loses"
+    );
+    assert_eq!(
+        *seen.borrow(),
+        vec![1, 2],
+        "each attempt ran against the value its own transition was opened under"
+    );
+
+    // The delayed report for revision 1 arrives now. It is the same report the
+    // caller read above, held across a tick and a movement — a move rather than
+    // a clone, because that is what the caller has: the one report it was given.
+    //
+    // The refusal is asserted as the exact variant and not merely as "not
+    // `NoSuchWork`". `EvidenceSuperseded` naming both generations is the
+    // invariant: the caller has to be able to tell that its report was about a
+    // generation that is gone, which generation it named, and which one stands
+    // there now — a generic refusal would leave it guessing whether to retry the
+    // report or re-read the work.
+    let delayed = first;
+    match bot.resolve_effect(delayed.id(), delayed.revision(), EffectEvidence::Applied) {
+        Ok(()) => {
+            return Err(
+                "a settlement computed against revision 1 was accepted against revision 2".into(),
+            );
+        }
+        Err(error) => assert!(
+            matches!(
+                error,
+                BotError::EvidenceSuperseded { work, named: 1, current: 2 }
+                    if work == delayed.id()
+            ),
+            "expected the named generation and the live one to be reported, got {error:?}"
+        ),
+    }
+    assert_eq!(
+        held(&bot).map(|(chain, entry, revision, _)| (chain, entry, revision)),
+        Some((0, 0, 2)),
+        "the refusal left the held generation exactly as it was: {:?}",
+        bot.pending()
+    );
+
+    // `NotApplied` is the sharper half: accepting it would make an attempt the
+    // caller was never asked about eligible to run again. It is refused by the
+    // same variant — the reason is the generation, not the evidence.
+    match bot.resolve_effect(delayed.id(), delayed.revision(), EffectEvidence::NotApplied) {
+        Ok(()) => {
+            return Err(
+                "NotApplied for revision 1 was accepted against revision 2, authorising a \
+                 retry of an attempt the caller was never shown"
+                    .into(),
+            );
+        }
+        Err(error) => assert!(
+            matches!(
+                error,
+                BotError::EvidenceSuperseded { work, named: 1, current: 2 }
+                    if work == delayed.id()
+            ),
+            "a stale generation is a generation complaint, not a contradiction and not \
+             'no such work': {error:?}"
+        ),
+    }
+    assert_eq!(
+        held(&bot).map(|(chain, entry, revision, _)| (chain, entry, revision)),
+        Some((0, 0, 2)),
+        "the entry is still held and still refused, not restarted: {:?}",
+        bot.pending()
+    );
+
+    // The current generation, settled with the evidence that is actually about
+    // it: accepted.
+    bot.resolve_effect(second.id(), second.revision(), EffectEvidence::Applied)?;
+
+    // The same identity and the same evidence again is a duplicate report, not
+    // a contradiction and not an error: a caller whose first delivery was
+    // ambiguous has to be able to repeat it.
+    bot.resolve_effect(second.id(), second.revision(), EffectEvidence::Applied)?;
+
+    // Evidence contradicting what this generation was settled with is refused,
+    // and the settlement it contradicts stands. The refusal names both pieces of
+    // evidence, because "your report was refused" without saying which way round
+    // leaves the caller unable to tell whether it misread its own observation.
+    match bot.resolve_effect(second.id(), second.revision(), EffectEvidence::NotApplied) {
+        Ok(()) => {
+            return Err(
+                "evidence contradicting the generation's own settlement was accepted".into(),
+            );
+        }
+        Err(error) => assert!(
+            matches!(
+                error,
+                BotError::EvidenceContradicted {
+                    settled: EffectEvidence::Applied,
+                    submitted: EffectEvidence::NotApplied,
+                    ..
+                }
+            ),
+            "expected the recorded and the refused evidence to be reported, got {error:?}"
+        ),
+    }
+    assert!(
+        bot.pending().is_empty(),
+        "the acknowledged generation is still acknowledged: {:?}",
+        bot.pending()
+    );
+    assert_eq!(
+        bot.tick()?,
+        0,
+        "an acknowledged effect is never replayed, whatever was said about it afterwards"
+    );
+    assert_eq!(*seen.borrow(), vec![1, 2], "and no attempt was run for it");
+    Ok(())
 }

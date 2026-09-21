@@ -210,13 +210,32 @@ own. The entry is held — reported through `Bot::pending()` as
 whatever the budget says — until the caller says what happened:
 
 ```rust,ignore
-bot.resolve_effect(work, EffectEvidence::Applied)?;   // it happened: recorded, not replayed
-bot.resolve_effect(work, EffectEvidence::NotApplied)?; // it did not: eligible again
+// `work` and `revision` come from the `PendingWork` that `pending()` reported.
+bot.resolve_effect(work, revision, EffectEvidence::Applied)?;   // it happened: recorded, not replayed
+bot.resolve_effect(work, revision, EffectEvidence::NotApplied)?; // it did not: eligible again
 ```
 
-`resolve_effect` refuses with `BotError::NoSuchWork` when the entry is not held,
-because accepting evidence for an entry that has an answer would let a caller
-believe an effect was acknowledged when nothing was.
+The `revision` is the generation the evidence is about, and it is required rather
+than inferred. One chain holds one transition at a time, and a slot is reused by
+every generation over it, so `(chain, entry)` alone cannot distinguish a report
+about the attempt the caller was shown from one about the attempt that replaced
+it. A delayed report is what makes that dangerous rather than pedantic:
+`NotApplied` against the wrong generation makes an attempt nobody has accounted
+for eligible to run again.
+
+`resolve_effect` therefore distinguishes three refusals, and only the first of
+them means what it always meant:
+
+- `BotError::NoSuchWork` — there is no held effect at this address: it ran, its
+  condition was false, or it has not been reached. Accepting evidence for an
+  entry that has an answer would let a caller believe an effect was acknowledged
+  when nothing was.
+- `BotError::EvidenceSuperseded` — the chain holds a transition at a different
+  revision, so the work this evidence is about is gone. Nothing changed; re-read
+  `pending()` and report against the generation there now.
+- `BotError::EvidenceContradicted` — this generation's entry is already settled
+  and the new evidence says the opposite. Nothing changed. Repeating the *same*
+  evidence is not this: it succeeds idempotently.
 
 The ledger is in memory, so this is a report to the caller that owns the run, not
 durability: an effect left in doubt is owed an answer by whoever holds the bot,

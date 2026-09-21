@@ -544,6 +544,26 @@ pub enum EffectEvidence {
     NotApplied,
 }
 
+/// Renders the fact the caller established, not the enum arm, because these
+/// appear in refusal messages a person reads to decide whether their own
+/// observation was wrong: `applied` and `not applied` are what they were asked
+/// for, and `Applied`/`NotApplied` would make them translate.
+///
+/// Lives here rather than in `error.rs` for the same reason
+/// [`PendingWork`]'s does — the type owns its rendering, so a later variant
+/// cannot be interpolated anywhere unhandled.
+impl fmt::Display for EffectEvidence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Matched through a dereference rather than through the reference: the
+        // type is `Copy`, and `clippy::pattern_type_mismatch` is forbidden in
+        // this workspace.
+        f.write_str(match *self {
+            Self::Applied => "applied",
+            Self::NotApplied => "not applied",
+        })
+    }
+}
+
 /// How many times an entry whose effect definitely did not happen is attempted.
 ///
 /// A policy rather than a constant, because the right number is a property of
@@ -681,6 +701,22 @@ struct Transition {
     revision: u64,
     /// One state per entry of the chain, in declaration order.
     entries: Vec<EntryState>,
+    /// What evidence settled each entry, for the generation [`Self::revision`]
+    /// names, indexed as [`Self::entries`] is.
+    ///
+    /// The record is what makes a settlement idempotent and what makes a
+    /// contradicting one refusable, and neither is answerable from
+    /// [`EntryState`] alone: `Applied` and an attempt that returned `Ok` both
+    /// land on [`EntryState::Succeeded`], and `NotApplied` and an entry that
+    /// has not been reached both land on [`EntryState::NotStarted`]. Without
+    /// this, a caller whose first delivery was ambiguous cannot safely repeat
+    /// it — the repeat would read as evidence about an entry that was never
+    /// settled at all.
+    ///
+    /// Per generation, not per entry: it is cleared when a transition is opened
+    /// or resumed, because a settlement is a statement about one attempt and it
+    /// does not carry into the next.
+    settled: Vec<Option<EffectEvidence>>,
 }
 
 impl Transition {
@@ -689,6 +725,7 @@ impl Transition {
         Self {
             revision,
             entries: vec![EntryState::NotStarted; entries],
+            settled: vec![None; entries],
         }
     }
 
@@ -712,6 +749,7 @@ impl Transition {
                     _ => EntryState::NotStarted,
                 })
                 .collect(),
+            settled: vec![None; previous.entries.len()],
         }
     }
 
@@ -727,6 +765,45 @@ impl Transition {
             .iter()
             .any(|state| state.is_open() || state.is_abandoned())
     }
+}
+
+/// What a settlement did to the ledger.
+///
+/// Four answers, because a caller's next move differs for each: [`Decided`] and
+/// [`Duplicate`] are both success, and the other three are three distinct
+/// refusals that must not be collapsed into one. Only [`NoSuchWork`] means
+/// "there is no held effect at this address"; a caller told that about an
+/// address it has a `PendingWork` for is being told its evidence is stale or
+/// contradictory, which is a different repair.
+///
+/// [`Decided`]: Settled::Decided
+/// [`Duplicate`]: Settled::Duplicate
+/// [`NoSuchWork`]: Settled::NoSuchWork
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Settled {
+    /// The named generation's entry was outstanding, and this evidence is now
+    /// its outcome.
+    Decided,
+    /// The named generation was already given exactly this evidence for this
+    /// entry. A caller that could not tell whether its first delivery landed
+    /// repeats it and must not be punished for the repetition, nor may the
+    /// repeat move the entry a second time.
+    Duplicate,
+    /// The named generation is not the one in the slot now: the work the caller
+    /// is reporting on was superseded, and the live transition is about a
+    /// different attempt with a different revision.
+    Superseded {
+        /// The revision the slot holds now.
+        current: u64,
+    },
+    /// The named generation's entry is settled, and this evidence says the
+    /// opposite of what settled it.
+    Contradicted {
+        /// The evidence already recorded for this generation.
+        settled: EffectEvidence,
+    },
+    /// No transition at this chain, or no such entry in the one that is there.
+    NoSuchWork,
 }
 
 /// The eligible work of the bot, keyed by chain.
@@ -840,34 +917,75 @@ impl Ledger {
     }
 
     /// Settle an entry whose effect may or may not have happened.
-    fn settle(&mut self, id: WorkId, evidence: EffectEvidence) -> bool {
+    ///
+    /// The caller names the generation the evidence is about — the revision the
+    /// [`PendingWork`] they read carried — and nothing is read or written until
+    /// it matches the transition's own. This is not a formality. A chain has one
+    /// transition at a time and a slot is reused by every generation over it, so
+    /// a `(chain, entry)` that matches says only that the *address* is the same;
+    /// it says nothing about which attempt the caller is reporting on. A report
+    /// computed against revision N and delivered after the slot was re-opened at
+    /// revision N+1 would otherwise be accepted against work the caller has
+    /// never seen: `Applied` would acknowledge an effect at a generation that
+    /// never happened, and `NotApplied` — worse, because it authorises a retry —
+    /// would make an unknown attempt eligible to run again.
+    ///
+    /// Returns a decision about the named generation, not a bool, because the
+    /// four answers lead a caller to four different next actions and two of them
+    /// are not errors.
+    fn settle(&mut self, id: WorkId, revision: u64, evidence: EffectEvidence) -> Settled {
         let Some(transition) = self
             .transitions
             .get_mut(id.chain())
             .and_then(Option::as_mut)
         else {
-            return false;
+            return Settled::NoSuchWork;
         };
-        let Some(state) = transition.entries.get_mut(id.entry()) else {
-            return false;
-        };
-        match *state {
-            // Indeterminate: evidence is exactly what this needs.
-            EntryState::Unrecorded | EntryState::OutcomeUnknown { .. } => {}
-            // Given up on: evidence revives it, which is the caller's way to
-            // take back an abandonment they have since disproved.
-            EntryState::Abandoned { .. } => {}
+        // The generation first, before the entry is even looked up: an entry
+        // that matches inside a transition that does not is exactly the case
+        // this exists to refuse.
+        if transition.revision != revision {
+            return Settled::Superseded {
+                current: transition.revision,
+            };
+        }
+        let recorded = transition.settled.get(id.entry()).copied().flatten();
+        let settleable = matches!(
+            transition.entries.get(id.entry()),
+            Some(
+                EntryState::Unrecorded
+                    | EntryState::OutcomeUnknown { .. }
+                    | EntryState::Abandoned { .. }
+            )
+        );
+        if !settleable {
             // Decided: an entry that ran, one whose condition was false, one
             // that has not been attempted yet, and one with a live budget all
             // have an answer, and evidence supplied after the fact cannot
             // contradict an attempt whose outcome was recorded.
-            _ => return false,
+            //
+            // But an answer this *generation* was already given is not a
+            // contradiction, it is the same answer twice, and a caller whose
+            // first delivery it never saw an outcome for has to be able to
+            // repeat it. Only the record distinguishes that from a fresh claim
+            // about an entry that was never settled.
+            return match recorded {
+                Some(previous) if previous == evidence => Settled::Duplicate,
+                Some(previous) => Settled::Contradicted { settled: previous },
+                None => Settled::NoSuchWork,
+            };
         }
-        *state = match evidence {
+        let next = match evidence {
             EffectEvidence::Applied => EntryState::Succeeded,
             EffectEvidence::NotApplied => EntryState::NotStarted,
         };
-        true
+        if let Some(state) = transition.entries.get_mut(id.entry()) {
+            *state = next;
+        }
+        if let Some(slot) = transition.settled.get_mut(id.entry()) {
+            *slot = Some(evidence);
+        }
+        Settled::Decided
     }
 
     /// The first entry that is open, in `(chain, entry)` order.
@@ -1706,6 +1824,17 @@ impl EcsBot {
     /// An entry that was given up on accepts evidence too, which is how a
     /// caller revives work the attempt budget abandoned.
     ///
+    /// `revision` names the generation the evidence is about: the
+    /// [`PendingWork::revision`] of the [`pending`](Self::pending) entry the
+    /// caller read. It is required, and compared before anything is read or
+    /// written, because a chain reuses one slot for every generation over it. A
+    /// delayed report about revision N delivered after the slot re-opened at
+    /// revision N+1 would otherwise land on an attempt the caller has never
+    /// seen — `Applied` acknowledging an effect at a generation that never
+    /// happened, `NotApplied` making an unknown attempt eligible to run again.
+    /// Passing the revision that came with the work is what makes the delivery
+    /// safe to retry.
+    ///
     /// # Errors
     ///
     /// [`BotError::NoSuchWork`] when the entry is not held: it ran, its
@@ -1713,15 +1842,46 @@ impl EcsBot {
     /// transition at all. Evidence cannot contradict an attempt whose outcome
     /// was recorded, and accepting it silently would let a caller believe an
     /// effect was acknowledged when nothing was.
+    ///
+    /// [`BotError::EvidenceSuperseded`] when the chain holds a transition whose
+    /// revision is not `revision` — the work the caller is reporting on was
+    /// superseded, and nothing was changed. Re-read
+    /// [`pending`](Self::pending) and report against the generation that is
+    /// there now.
+    ///
+    /// [`BotError::EvidenceContradicted`] when this generation's entry was
+    /// already settled with the opposite evidence. Nothing was changed:
+    /// [`Applied`](EffectEvidence::Applied) does not become
+    /// [`NotApplied`](EffectEvidence::NotApplied), or the reverse, after the
+    /// fact. Repeating the *same* evidence is not a contradiction and succeeds
+    /// idempotently, so a caller that never saw its first delivery through can
+    /// safely send it again.
     pub fn resolve_effect(
         &mut self,
         work: WorkId,
+        revision: u64,
         evidence: EffectEvidence,
     ) -> Result<(), BotError> {
-        if self.world.resource_mut::<Ledger>().settle(work, evidence) {
-            Ok(())
-        } else {
-            Err(BotError::NoSuchWork { work })
+        match self
+            .world
+            .resource_mut::<Ledger>()
+            .settle(work, revision, evidence)
+        {
+            // Both are success, and deliberately one arm: to the caller, a
+            // repeat that landed a second time is the same fact as one that
+            // landed the first.
+            Settled::Decided | Settled::Duplicate => Ok(()),
+            Settled::Superseded { current } => Err(BotError::EvidenceSuperseded {
+                work,
+                named: revision,
+                current,
+            }),
+            Settled::Contradicted { settled } => Err(BotError::EvidenceContradicted {
+                work,
+                settled,
+                submitted: evidence,
+            }),
+            Settled::NoSuchWork => Err(BotError::NoSuchWork { work }),
         }
     }
 }
@@ -2736,13 +2896,15 @@ mod tests {
         );
 
         // Evidence that it did not happen: the entry becomes eligible again and
-        // the attempt finally lands.
+        // the attempt finally lands. The revision the report carries is passed
+        // back with the identity, which is what makes this delivery sound: the
+        // evidence is about the generation the caller was shown.
         let held = bot
             .pending()
-            .first()
-            .map(PendingWork::id)
+            .into_iter()
+            .next()
             .ok_or("the held entry disappeared from the report")?;
-        bot.resolve_effect(held, EffectEvidence::NotApplied)?;
+        bot.resolve_effect(held.id(), held.revision(), EffectEvidence::NotApplied)?;
         assert_eq!(bot.tick()?, 1, "the entry runs once evidence authorises it");
         assert_eq!(*log.borrow(), vec![200], "the effect happened, once");
         assert!(
@@ -2785,10 +2947,10 @@ mod tests {
 
         let held = bot
             .pending()
-            .first()
-            .map(PendingWork::id)
+            .into_iter()
+            .next()
             .ok_or("the held entry is not reported")?;
-        bot.resolve_effect(held, EffectEvidence::Applied)?;
+        bot.resolve_effect(held.id(), held.revision(), EffectEvidence::Applied)?;
         assert_eq!(
             bot.tick()?,
             0,
@@ -2807,13 +2969,18 @@ mod tests {
 
         // Evidence about an entry that is not held is refused rather than
         // silently accepted: a caller that thinks it acknowledged something
-        // needs to find out that it did not.
-        match bot.resolve_effect(held, EffectEvidence::Applied) {
+        // needs to find out that it did not. The generation is still named
+        // here, and the refusal is still `NoSuchWork` rather than a generation
+        // complaint — the tick above resolved the transition and dropped its
+        // slot, so there is genuinely no held effect at this address. That
+        // distinction is the whole reason the two new refusals exist.
+        match bot.resolve_effect(held.id(), held.revision(), EffectEvidence::Applied) {
             Ok(()) => Err("evidence was accepted for an entry that is not held".into()),
             Err(error) => {
                 assert!(
-                    matches!(error, BotError::NoSuchWork { work } if work == held),
-                    "expected NoSuchWork for {held:?}, got {error:?}"
+                    matches!(error, BotError::NoSuchWork { work } if work == held.id()),
+                    "expected NoSuchWork for {:?}, got {error:?}",
+                    held.id()
                 );
                 Ok(())
             }
@@ -2948,13 +3115,14 @@ mod tests {
             "the action was not run a second time: the first attempt may have taken effect"
         );
 
-        // Evidence that it did not take effect is what unlocks the retry.
+        // Evidence that it did not take effect is what unlocks the retry, and
+        // it is evidence about the generation the caller was shown.
         let held = bot
             .pending()
-            .first()
-            .map(PendingWork::id)
+            .into_iter()
+            .next()
             .ok_or("the held entry is not reported")?;
-        bot.resolve_effect(held, EffectEvidence::NotApplied)?;
+        bot.resolve_effect(held.id(), held.revision(), EffectEvidence::NotApplied)?;
         assert_eq!(bot.tick()?, 1, "and then it runs");
         assert_eq!(*log.borrow(), vec![200, 200], "exactly once more");
         Ok(())

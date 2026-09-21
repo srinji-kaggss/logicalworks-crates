@@ -25,7 +25,7 @@
 use std::fmt;
 
 use super::cap::Deficit;
-use super::ecs::{PendingWork, WorkId};
+use super::ecs::{EffectEvidence, PendingWork, WorkId};
 use super::session::{ResourceAxis, Terminal};
 
 /// Error from bot construction, admission, or execution.
@@ -413,9 +413,50 @@ pub enum BotError {
     /// Not a no-op: a caller that believes it acknowledged an effect that
     /// nothing was holding has a wrong model of the world, and the error is
     /// where they find that out.
+    ///
+    /// Deliberately narrower than "your evidence was refused". A settlement can
+    /// be refused because it names a generation that is no longer there, or
+    /// because it contradicts one that is; those are
+    /// [`EvidenceSuperseded`](Self::EvidenceSuperseded) and
+    /// [`EvidenceContradicted`](Self::EvidenceContradicted). Keeping this
+    /// variant meaning only "there is no held effect at this address" is what
+    /// lets a caller tell a wrong address from stale or contradictory evidence,
+    /// which are three different repairs.
     NoSuchWork {
         /// The identity that matched no held entry.
         work: WorkId,
+    },
+    /// `resolve_effect` named a generation that is not the one in the slot.
+    ///
+    /// The chain has been re-opened since the caller read
+    /// [`PendingWork`], so the attempt the evidence is about is gone and a
+    /// different one stands in its place. Accepting the report would apply it
+    /// to work the caller never observed: `NotApplied` in particular would make
+    /// an attempt nobody can account for eligible to run again. Nothing was
+    /// changed, and re-reading the pending work gives the generation to report
+    /// against.
+    EvidenceSuperseded {
+        /// The identity the evidence was submitted for.
+        work: WorkId,
+        /// The generation the caller named.
+        named: u64,
+        /// The generation the chain holds now.
+        current: u64,
+    },
+    /// `resolve_effect` was given evidence opposite to what already settled the
+    /// entry for this generation.
+    ///
+    /// Repeating the *same* evidence is not this error: it succeeds
+    /// idempotently, so a caller whose first delivery was ambiguous can send it
+    /// again without having to know whether it landed. This is the case where
+    /// the entry's outcome is recorded and the new report says the other thing.
+    EvidenceContradicted {
+        /// The identity the evidence was submitted for.
+        work: WorkId,
+        /// The evidence already recorded for this generation.
+        settled: EffectEvidence,
+        /// The evidence that was refused.
+        submitted: EffectEvidence,
     },
 }
 
@@ -782,6 +823,35 @@ impl fmt::Display for BotError {
                 f,
                 "no held effect at chain {} entry {}: only an entry whose outcome is \
                  indeterminate, or one that was given up on, can be settled with evidence",
+                work.chain(),
+                work.entry()
+            ),
+            // The generation the caller named is rendered first and the one in
+            // the slot second, in the order the mistake happened: a reader
+            // checking this against their own ledger wants to see their number
+            // where they left it, next to the one that replaced it.
+            Self::EvidenceSuperseded {
+                work,
+                named,
+                current,
+            } => write!(
+                f,
+                "evidence names generation {named} of chain {} entry {}, which has \
+                 been superseded by generation {current}: nothing was changed, re-read \
+                 pending() and report against the generation that is there now",
+                work.chain(),
+                work.entry()
+            ),
+            Self::EvidenceContradicted {
+                work,
+                settled,
+                submitted,
+            } => write!(
+                f,
+                "evidence {} contradicts {settled} already recorded for chain {} entry \
+                 {}: nothing was changed, and repeating the same evidence would have \
+                 succeeded",
+                submitted,
                 work.chain(),
                 work.entry()
             ),

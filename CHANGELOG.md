@@ -100,6 +100,27 @@ explicitly under that crate.
 
 ### lgwks_bot Fixed
 
+- **A settlement now names the generation it settles, and one naming any other
+  is refused.** A chain holds one transition at a time and reuses its slot for
+  every generation over it, so `(chain, entry)` alone could not distinguish a
+  report about the attempt the caller was shown from one about the attempt that
+  replaced it. `Bot::resolve_effect` read a delayed report for revision N against
+  revision N+1: `Applied` acknowledged an effect at a generation nobody had
+  asked about, and `NotApplied` — the sharper half — made an attempt the caller
+  was never shown eligible to run again, which is a duplicate merge, message or
+  launch. `resolve_effect` now takes the `revision` that `Bot::pending()` reports
+  with the work, compares it before reading or writing anything, and refuses a
+  superseded generation with `BotError::EvidenceSuperseded`, carrying both the
+  named and the live revision so the caller can re-read and report again. This
+  is a breaking signature change; the revision is not inferable, which is why it
+  is required rather than defaulted.
+- `BotError::EvidenceContradicted` is the second new refusal: evidence saying the
+  opposite of what already settled *this* generation's entry. Repeating the same
+  evidence is not that — it succeeds idempotently, so a caller whose first
+  delivery was ambiguous can send it again without having to know whether it
+  landed. Neither new variant is `NoSuchWork`, which keeps meaning exactly "there
+  is no held effect at this address"; collapsing the three would leave a caller
+  reading a stale-report refusal as a wrong address, which is a different repair.
 - **A tick can no longer be run from inside an async runtime through the
   synchronous adapter.** `Bot::tick` drives the tick with a thread-parking
   executor. Called from a thread that an async runtime is driving — a
