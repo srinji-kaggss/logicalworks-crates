@@ -277,14 +277,24 @@ impl FlowEdge {
     }
 }
 
-/// Reference-compatible terminal class for flow consumers that need a binary
-/// success/failure classification.
+/// The terminal class of a completed session: `completed | partial | failed`.
+///
+/// Three arms, not two, and the third is load-bearing: a run that produced some
+/// of its output and a run that produced none are different reports, and a
+/// two-valued class renders them identically. The *detail* stays in
+/// [`Terminal`], which names what ended the flow; this is the triage class a
+/// consumer routes on. [`Terminal::outcome`] is where the two compose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(crate = "lgwks_std::json::serde", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum TerminalOutcome {
-    /// Successful completion.
+    /// Successful completion, with every effect the run attempted settled.
     Success,
+    /// Completion that left at least one effect whose occurrence could not be
+    /// determined. Neither a success nor a failure: part of the output is not
+    /// known to exist, and part of it is known to. Retrying is a possible
+    /// duplicate rather than a repair.
+    Partial,
     /// Refused or failed completion.
     Failure,
 }
@@ -349,6 +359,37 @@ pub enum Terminal {
         /// Human-readable refusal reason.
         reason: String,
     },
+}
+
+impl Terminal {
+    /// Classify this terminal given how many effects the run left unsettled.
+    ///
+    /// `unsettled` counts the effects the run attempted whose occurrence could
+    /// not be determined — the ones a domain reported as
+    /// [`BotError::EffectIndeterminate`]. A run with any of them classifies as
+    /// [`TerminalOutcome::Partial`]: it is
+    /// not a success, because part of its output is not known to exist, and it
+    /// is not a failure, because part of it is.
+    ///
+    /// [`Terminal::Refused`] is the one exception and stays
+    /// [`TerminalOutcome::Failure`] however many effects were left unsettled,
+    /// because a refusal is a *decided* outcome rather than an unknown one.
+    /// Reporting it as partial would let a declared refusal hide behind the
+    /// same class as an unsettled duplicate, and a consumer that must act on a
+    /// refusal has to be able to see it.
+    #[must_use]
+    pub fn outcome(&self, unsettled: usize) -> TerminalOutcome {
+        match *self {
+            Self::Refused { .. } => TerminalOutcome::Failure,
+            Self::Completed | Self::Referred { .. } | Self::HandedOff { .. } => {
+                if unsettled > 0 {
+                    TerminalOutcome::Partial
+                } else {
+                    TerminalOutcome::Success
+                }
+            }
+        }
+    }
 }
 
 /// Bounds applied to a flow and every session executing it.
@@ -1712,5 +1753,97 @@ mod tests {
         assert_eq!(session.current(), None);
         assert_eq!(session.terminal(), Some(&Terminal::Completed));
         Ok(())
+    }
+
+    #[test]
+    fn a_settled_run_classifies_by_its_terminal() {
+        assert_eq!(
+            Terminal::Completed.outcome(0),
+            TerminalOutcome::Success,
+            "a completed run with every effect settled is a success"
+        );
+        assert_eq!(
+            Terminal::Referred {
+                target: String::from("tier-2")
+            }
+            .outcome(0),
+            TerminalOutcome::Success,
+            "a referral completes this flow's part of the work"
+        );
+        assert_eq!(
+            Terminal::HandedOff {
+                target: String::from("agent")
+            }
+            .outcome(0),
+            TerminalOutcome::Success
+        );
+        assert_eq!(
+            Terminal::Refused {
+                reason: String::from("out of scope")
+            }
+            .outcome(0),
+            TerminalOutcome::Failure
+        );
+    }
+
+    #[test]
+    fn an_unsettled_effect_makes_a_completed_run_partial() {
+        // The second half of the invariant the two-valued class could not
+        // carry: "some of the output exists" is not "all of it does", and a
+        // consumer told only success-or-failure reports the first as the
+        // second. The count is what a run journal holds, and one unsettled
+        // effect is already enough to make the report wrong.
+        assert_eq!(
+            Terminal::Completed.outcome(1),
+            TerminalOutcome::Partial,
+            "one indeterminate effect is enough: the run is neither a success nor a failure"
+        );
+        assert_eq!(
+            Terminal::HandedOff {
+                target: String::from("agent")
+            }
+            .outcome(3),
+            TerminalOutcome::Partial,
+            "the count does not change the class, only what a report can say about it"
+        );
+    }
+
+    #[test]
+    fn a_refusal_outranks_an_unsettled_effect() {
+        // A refusal is decided, an unsettled effect is unknown. Folding the
+        // decided outcome into `Partial` would let a declared refusal hide in
+        // the same class as a possible duplicate, and a consumer acting on a
+        // refusal has to be able to see it.
+        assert_eq!(
+            Terminal::Refused {
+                reason: String::from("out of scope")
+            }
+            .outcome(2),
+            TerminalOutcome::Failure,
+            "a decided refusal stays a failure however many effects were left unsettled"
+        );
+    }
+
+    #[test]
+    fn an_indeterminate_effect_is_what_makes_a_run_partial() {
+        // The law tying the two halves of this change together: the error says
+        // an effect may have happened, and that is exactly what makes the run's
+        // class partial. Neither half is reachable in practice without the
+        // other, which is why they landed in one step.
+        let unsettled = [BotError::EffectIndeterminate {
+            domain: String::from("gh::merge"),
+            cause: String::from("request timed out"),
+        }];
+        let count = unsettled
+            .iter()
+            .filter(|error| matches!(**error, BotError::EffectIndeterminate { .. }))
+            .count();
+
+        assert_eq!(count, 1, "the run left one effect unsettled");
+        assert_eq!(
+            Terminal::Completed.outcome(count),
+            TerminalOutcome::Partial,
+            "an indeterminate effect is what moves a completed run out of Success"
+        );
     }
 }
