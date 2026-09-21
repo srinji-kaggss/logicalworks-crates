@@ -60,6 +60,28 @@ pub enum BotError {
         /// so an untrusted field name cannot forge a log line.
         cause: String,
     },
+    /// The synchronous adapter, [`Bot::tick`](crate::Bot::tick), was called on a
+    /// thread an async runtime is already driving.
+    ///
+    /// This is a refusal rather than a failure of the work: the adapter parks
+    /// the calling thread until its verb futures resolve, and the thread it was
+    /// handed may be the one that owns the runtime's driver. Parked, that
+    /// driver cannot advance a timer, report a socket ready, or run the sibling
+    /// task a verb is waiting on, so the tick would never return. The repair is
+    /// at the call site and there are two of them: await the tick from inside
+    /// the runtime ([`Bot::tick_async`](crate::Bot::tick_async)), or move the
+    /// call out of the runtime.
+    ///
+    /// Reported even when the runtime has several worker threads, where parking
+    /// one of them may happen to work: which thread the caller was handed is
+    /// not knowable from the adapter, and a deadlock that only appears on a
+    /// current-thread runtime is exactly what this refuses to have.
+    ///
+    /// Reachable with the default `rt` feature. Without it there is no engine
+    /// runtime in the build (`--no-default-features` withdraws tokio entirely)
+    /// and nothing for the adapter to detect, so this variant is documented
+    /// rather than constructed.
+    TickInsideRuntime,
     /// A domain action failed at runtime.
     DomainError {
         /// The domain that failed (e.g. `"gh::pr_status"`).
@@ -259,6 +281,10 @@ impl fmt::Display for BotError {
             Self::MalformedSpec { ref cause } => {
                 write!(f, "malformed bot spec: {}", Escaped(cause))
             }
+            Self::TickInsideRuntime => f.write_str(
+                "tick: the synchronous adapter cannot park a thread an async runtime is driving; \
+                 await `tick_async` on that runtime, or call the tick outside it",
+            ),
             Self::DomainError {
                 ref domain,
                 ref cause,

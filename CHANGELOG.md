@@ -28,6 +28,45 @@ explicitly under that crate.
   in every contribution, so `CONTRIBUTING.md` now states that a contributor
   licence agreement must be in place before a non-trivial `lgwks_bot`
   contribution is merged.
+### lgwks_bot Fixed
+
+- **A tick can no longer be run from inside an async runtime through the
+  synchronous adapter.** `Bot::tick` drives the tick with a thread-parking
+  executor. Called from a thread that an async runtime is driving — a
+  current-thread runtime above all — parking that thread stops the reactor dead,
+  so a tick with a timer, a socket, or a sibling task never returned: it was a
+  deadlock, not a slow tick. `tick` now returns `BotError::TickInsideRuntime`
+  when a runtime already owns the calling thread. It refuses on a multi-worker
+  runtime too, where parking the caller may happen to work, because which thread
+  the caller was handed is not knowable from inside the tick.
+- `Bot::tick_async` is the async adapter: the same four phases, awaited on the
+  caller's executor, returning the same `Result`. It is the entry point inside a
+  runtime, and the one to reach for when a verb needs this crate's timer or a
+  driver.
+- The tick is now decidable before it is doable. The decision system
+  (`fire_plan`) records the effect program as an ordered list of steps before any
+  effect runs, and the driver then awaits those steps (`EcsBot::run_steps`).
+  That is what makes a condition failure's position well defined: the steps the
+  walk cleared before the failing condition still run, and the tick reports the
+  failure.
+- `rt::task::repeat` no longer starves cancellation. It raced each iteration
+  against the token but never handed the executor back, so a body whose future
+  was ready on its first poll made the whole loop one uninterruptible poll: a
+  cancel was delivered only after the budget was spent, and on a current-thread
+  runtime the cancelling task could not be scheduled at all. `repeat` now
+  completes a bounded number of iterations per poll and then yields.
+- Cancellation trees no longer poll or drop recursively. `Inner::cancelled`
+  built a `race_two` nesting with one stack frame per ancestor link, and the
+  derived `Drop` for `parent: Option<Arc<Inner>>` recursed once per link, so a
+  deep chain exhausted the stack without polling or a runtime. Both walk the
+  chain once and iteratively now, and `Inner` detaches each parent link as it is
+  dropped.
+
+### lgwks_bot Documentation
+
+- The README, the crate docs, and the `lgwks-bot` guides described the tick as
+  one synchronous pass. They now document both adapters, the four phases, the
+  refusal, and what a cancelled tick leaves behind.
 
 ### Fixed
 

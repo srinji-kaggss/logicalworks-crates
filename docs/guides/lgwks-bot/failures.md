@@ -1,8 +1,12 @@
 # What a failed tick means
 
-`Bot::tick` returns `Result<usize, BotError>` (`crates/lgwks-bot/src/ecs.rs:452`).
-Three different things can produce the `Err`, and they mean different things for
-your data. The distinction is the difference between a retry and a duplicate.
+Both entry points return `Result<usize, BotError>`: `Bot::tick` is the
+synchronous adapter (`crates/lgwks-bot/src/ecs.rs:630`) and `Bot::tick_async` is
+the one to `await` from inside a runtime (`crates/lgwks-bot/src/ecs.rs:561`).
+Four different things can produce an `Err`. Three are failures that mean
+different things for your data — the distinction is the difference between a
+retry and a duplicate — and the fourth is the adapter refusing to run a tick at
+all.
 
 The three cases below are exercised in
 `crates/lgwks-bot/src/ecs.rs` tests and in
@@ -10,8 +14,8 @@ The three cases below are exercised in
 
 ## Case one: a poll failed
 
-Nothing ran. `observe` returns before committing anything
-(`crates/lgwks-bot/src/ecs.rs:241`):
+Nothing ran. The `observe_fold` system returns before committing anything
+(`crates/lgwks-bot/src/ecs.rs:292`):
 
 ```rust,ignore
 let values = match polled.into_iter().collect::<Result<Vec<_>, _>>() {
@@ -33,16 +37,19 @@ previous revision. No condition is evaluated, so no action runs.
 
 ## Case two: an action failed
 
-Actions run in declaration order inside the `fire` system
-(`crates/lgwks-bot/src/ecs.rs:289`). The loop breaks on the first failure and
-parks it, and there is no rollback:
+Actions run in declaration order, but deciding and doing are two systems. The
+`fire_plan` system walks the chains whose revisions moved and records one
+ordered `Step` per condition that held (`crates/lgwks-bot/src/ecs.rs:349`); the
+`run_steps` pass then awaits those steps on the caller's executor in exactly
+that order (`crates/lgwks-bot/src/ecs.rs:679`). It breaks on the first failure
+and records it, and there is no rollback:
 
 ```rust,ignore
-match lgwks_std::task::block_on(entry.action.run_any(&grants.0, value.as_ref())) {
+match entry.action.run_any(&grants.0, value.as_ref()).await {
     Ok(_) => fired = fired.saturating_add(1),
     Err(error) => {
         failure = Some(error);
-        break 'chains;
+        break;
     }
 }
 ```
@@ -50,8 +57,9 @@ match lgwks_std::task::block_on(entry.action.run_any(&grants.0, value.as_ref()))
 Every action before the failure already ran, and its effect is live. `Err` here
 means "this run did not finish", not "nothing happened".
 
-One consequence is easy to miss. `observe` committed the new values and bumped
-the revisions *before* `fire` ran (`crates/lgwks-bot/src/ecs.rs:265`), so the
+One consequence is easy to miss. `observe_fold` committed the new values and
+bumped the revisions *before* `fire_plan` decided
+(`crates/lgwks-bot/src/ecs.rs:316`), so the
 next tick polls the source, finds it unchanged, and does not re-fire the chain.
 The actions after the failure are not attempted again until the source moves.
 The work is lost, not queued.
@@ -151,7 +159,7 @@ happened" as two variants, not one variant with a flag
 
 `EffectIndeterminate` is documented as the case you reach "when a request timed
 out, or a connection dropped, *after* the request was sent"
-(`crates/lgwks-bot/src/error.rs:80`). Its `Display` renders the domain, the
+(`crates/lgwks-bot/src/error.rs:102`). Its `Display` renders the domain, the
 cause, and the words "may have taken effect", so an operator reading a log line
 sees the indeterminacy rather than having to infer it.
 
@@ -171,14 +179,30 @@ Delivering exactly-once across an external effect needs durable intent and an
 outcome-unknown record. Neither exists in the inspected source. Until they do,
 treat a failed tick as a partial run to be reconciled.
 
+## Not a failure: the adapter refused
+
+`BotError::TickInsideRuntime` is an `Err` from `tick`, and it is not a failed
+tick. Nothing was observed, no condition was evaluated and no effect ran,
+because the synchronous adapter refused to park the thread before it started.
+It is returned whenever `tick` is called while an async runtime is running on
+that thread, on a current-thread runtime and on a multi-worker one alike: a
+parked thread starves the reactor the bot's own verbs need, so the deadlock it
+would otherwise cause is not something the adapter can wait out. Await
+`bot.tick_async()` instead, or drive the tick from outside the runtime. The
+README's "Running a tick from async code" section has both forms.
+
 ## Confusion inside a chain
 
 Two failures come from the wiring rather than from a domain, and both are typed
 so they cannot be mistaken for a condition that simply did not fire.
 
 - A condition whose `Evaluate<T>` implementation returns `Err` stops the chain
-  with that error (`crates/lgwks-bot/src/ecs.rs:323`). A structural failure in a
-  condition is `BotError::EvaluateError`, not `false`.
+  with that error (`crates/lgwks-bot/src/ecs.rs:388`). A structural failure in a
+  condition is `BotError::EvaluateError`, not `false`. The stop is ordered
+  rather than absolute: the steps `fire_plan` recorded before the failing
+  condition are still run, so an effect the walk had already cleared does take
+  effect. `a_condition_failure_stops_the_walk_after_the_effects_it_cleared`
+  pins both halves of that.
 - The erased chain wrappers downcast the observed value back to the type the
   condition was registered with. A mismatch in the condition is
   `EvaluateError`; a mismatch in the action's input is
@@ -191,7 +215,7 @@ so they cannot be mistaken for a condition that simply did not fire.
 
 Systems stop at the first error and the driver reports that one. `TickError` is
 a resource because an exclusive system returns `()` and cannot propagate
-(`crates/lgwks-bot/src/ecs.rs:142`), and `tick` takes it after the schedule runs.
+(`crates/lgwks-bot/src/ecs.rs:163`), and `tick` takes it after the schedule runs.
 For polls, "first" means first in declaration order: all sources are polled
 before any `Revision` is written, so a failing poll cannot leave one source
 updated and another not.
