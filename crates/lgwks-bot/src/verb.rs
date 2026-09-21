@@ -25,7 +25,61 @@ pub trait Observe {
     /// Async: the returned future is local to the driving thread (not `Send`),
     /// because `lgwks_std::task` drives bots on one thread and a domain may hold
     /// thread-local state. `Bot::tick` polls every source concurrently.
+    ///
+    /// On a source that implements [`fingerprint`](Observe::fingerprint), this
+    /// is called only on the ticks the fingerprint moved. A tick where it did
+    /// not is a tick this method never runs on — see that method for what the
+    /// source is promising when it answers one.
     async fn poll(&self, call: (Auth, ())) -> Result<Self::Output, BotError>;
+
+    /// A cheap digest of what `poll` would return, or `None` to say there is
+    /// no cheaper answer than polling.
+    ///
+    /// # What this is for
+    ///
+    /// Change detection is an *equality* question. The substrate reduces every
+    /// observation to one bit — "is this the same as what I hold?" — and
+    /// discards the value. Making the source produce that value in order to ask
+    /// the bit is the eager part of the loop: on a source that is holding still,
+    /// the tick builds, erases, boxes and drops a value whose only surviving
+    /// property was that it compared equal.
+    ///
+    /// A source that can answer the equality question directly — an `ETag`, an
+    /// `mtime`, a row version, a sequence number, a mutation counter, a hash of
+    /// a framebuffer — answers it here instead, and the tick never calls `poll`
+    /// and never constructs the value at all.
+    ///
+    /// # The contract, and it is exact
+    ///
+    /// **Equal fingerprints must imply equal values.** If this returns the same
+    /// digest it returned when the chain last admitted a value, the tick
+    /// concludes the source has not moved and evaluates nothing. A fingerprint
+    /// that collides across two genuinely different values makes the substrate
+    /// miss a movement, which is the one failure this must not have: it is a
+    /// silent no-op, not a wrong effect. Widening the digest lowers the risk;
+    /// so does never returning a digest for a source whose cheap key is not a
+    /// faithful function of its value.
+    ///
+    /// A source that is unsure returns `None`. `None` is not a failure and is
+    /// not slower than today — it is today, exactly.
+    ///
+    /// # Two more things it promises
+    ///
+    /// *Cheap.* This is called once per chain per tick, unconditionally, on the
+    /// hot path. Work proportional to the value defeats the purpose.
+    ///
+    /// *Pure with respect to the value.* Calling it must not change what `poll`
+    /// returns, and it takes no [`Auth`] for the same reason
+    /// [`Evaluate::check`] takes none: it is a read of state the source already
+    /// holds, not an act on the world. A source that has to *contact* something
+    /// to produce a digest has not found a cheaper answer and should return
+    /// `None` — the point is to avoid the round trip, not to move it here.
+    ///
+    /// The default is `None`, so every source written before this method
+    /// existed keeps behaving exactly as it did.
+    fn fingerprint(&self) -> Option<u128> {
+        None
+    }
 
     /// The domain identifier (e.g. `"gh::pr_status"`).
     fn domain_id(&self) -> &str;

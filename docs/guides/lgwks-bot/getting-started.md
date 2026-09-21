@@ -145,7 +145,7 @@ it a `condition_id`.
 
 `Execute::execute_action` takes `(Auth, &Self::Input)`. The tick awaits each one
 before starting the next, in declaration order
-(`crates/lgwks-bot/src/ecs.rs:1899`), so the effects fire in the order you wrote
+(`crates/lgwks-bot/src/ecs.rs:2212`), so the effects fire in the order you wrote
 the `.on` calls.
 
 `build(&grants)` returns `Result<Bot, BotError>`. Two things make it fail:

@@ -299,6 +299,32 @@ struct Polled(Vec<Result<Option<Erased>, BotError>>);
 #[derive(Default)]
 struct Moved(Vec<bool>);
 
+/// The digest each source last reported when the tick actually polled it, one
+/// slot per chain.
+///
+/// This is the whole of what the substrate remembers about a quiet source. It
+/// is `Copy`, it is 16 bytes, and it is the answer to the only question change
+/// detection ever asks — "is this the same as what I hold?" — which means a
+/// chain whose source offers a fingerprint needs nothing else stored to be
+/// watched. No value, no box, no `dyn`, no drop.
+///
+/// A slot is `None` for a source that does not implement
+/// [`Observe::fingerprint`](crate::verb::Observe::fingerprint), for one whose
+/// last poll failed, and for one that has never been polled. All three mean the
+/// same thing to the tick: it has no cheap answer and must poll.
+#[derive(Default)]
+struct Fingerprints(Vec<Option<u128>>);
+
+/// Which chains this tick must actually poll, one flag per chain.
+///
+/// The third piece of per-tick scratch, and a resource for the same reason as
+/// the other two: the observation phase reads it twice — once to decide which
+/// futures to build, once to pair the results back — and a decision recomputed
+/// between those two points could differ from the one the futures were built
+/// from.
+#[derive(Default)]
+struct Polling(Vec<bool>);
+
 /// What the decision phase decided for one entry it reached.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Decision {
@@ -1902,9 +1928,14 @@ impl EcsBot {
         // because `poll_sources` borrows the world immutably across its awaits
         // and a mutable borrow of a resource cannot be held across them.
         let mut polled = std::mem::take(&mut self.world.non_send_mut::<Polled>().0);
+        let mut prints = std::mem::take(&mut self.world.non_send_mut::<Fingerprints>().0);
+        let mut polling = std::mem::take(&mut self.world.non_send_mut::<Polling>().0);
         polled.clear();
-        self.poll_sources(&mut polled).await;
+        self.poll_sources(&mut polled, &mut prints, &mut polling)
+            .await;
         self.world.non_send_mut::<Polled>().0 = polled;
+        self.world.non_send_mut::<Fingerprints>().0 = prints;
+        self.world.non_send_mut::<Polling>().0 = polling;
 
         self.schedule.run(&mut self.world);
 
@@ -2041,29 +2072,121 @@ impl EcsBot {
     /// that owns it — so the source itself can answer "did I move?" against a
     /// concrete value, before anything is boxed. A source that returned
     /// `Ok(None)` did not move, and nothing is allocated for it.
-    async fn poll_sources(&self, polled: &mut Vec<Result<Option<Erased>, BotError>>) {
+    /// # The lazy seam
+    ///
+    /// A chain is polled only when its source says there is something to poll
+    /// for. Where a source offers a [`fingerprint`](crate::verb::Observe::fingerprint)
+    /// equal to the one on record, the tick records the chain as unchanged and
+    /// **never calls `poll`** — so no value is produced, nothing is boxed, and
+    /// no future is built.
+    ///
+    /// The order matters and is the whole point: the decision is taken *before*
+    /// the future exists, not inside it. A check inside the future would still
+    /// have allocated the box that carries the future, which on a quiet tick is
+    /// the only thing there was to allocate. So the skip is a `filter` on the
+    /// iterator feeding `join_all_boxed`, and a skipped chain contributes no
+    /// allocation of any kind.
+    ///
+    /// `fingerprint` is therefore called twice for a chain that is polled: once
+    /// to decide, once to pair the results back to their chains. That is sound
+    /// because the method is required to be pure with respect to the value and
+    /// cheap — see its contract. A skipped chain is asked once.
+    async fn poll_sources(
+        &self,
+        polled: &mut Vec<Result<Option<Erased>, BotError>>,
+        prints: &mut [Option<u128>],
+        polling: &mut Vec<bool>,
+    ) {
         let chains = self.world.non_send::<Chains>();
         let grants = self.world.resource::<Grants>();
         let seen = self.world.non_send::<Observed>();
         let ledger = self.world.non_send::<Ledger>();
+
+        let count = chains.0.len();
+        // Every chain starts out "unchanged". A chain that is polled overwrites
+        // its slot; one that is skipped keeps it, which is precisely the answer
+        // its source gave. Sizing here rather than pushing means a skipped
+        // chain costs one write and nothing else — no value, no box, no future.
+        polled.clear();
+        polled.resize_with(count, || Ok(None));
+
+        // The decision, taken once and before any future exists. `polling` is
+        // scratch like the rest: it is read by two passes that must agree, so it
+        // is computed once rather than asked twice.
+        //
+        // The digest is read here and **kept**, rather than read again after the
+        // poll. Reading it twice was the seam's whole overhead on a workload
+        // where nothing is ever skipped: `churn-64x1` moves every source every
+        // tick, so no chain is ever quiet and every chain paid a second virtual
+        // call for an answer it had already been given.
+        //
+        // Keeping the earlier digest is also the safe direction. It describes
+        // the source at or before the moment the value was taken, so a source
+        // that moved in between leaves a digest that no longer matches, and the
+        // next tick polls again instead of skipping. The error is one redundant
+        // poll, never a missed movement.
+        polling.clear();
+        polling.resize(count, true);
+        for (index, chain) in chains.0.iter().enumerate() {
+            let now = chain.source.fingerprint();
+            let quiet = matches!(
+                (now, prints.get(index).copied().flatten()),
+                (Some(now), Some(then)) if now == then
+            );
+            if let Some(slot) = prints.get_mut(index) {
+                *slot = now;
+            }
+            if let Some(flag) = polling.get_mut(index) {
+                *flag = !quiet;
+            }
+        }
+
         for (wave_index, wave) in chains.0.chunks(MAX_IN_FLIGHT_POLLS).enumerate() {
-            let batch =
-                lgwks_std::task::join_all_boxed(wave.iter().enumerate().map(|(offset, chain)| {
-                    // `chunks` gives no index, so the chain's position is the
-                    // wave's start plus the offset within it. This is the same
-                    // index `Observed` and `Ledger` are keyed by, which is what
-                    // makes the baseline below the right one to hand over.
-                    let index = wave_index
-                        .saturating_mul(MAX_IN_FLIGHT_POLLS)
-                        .saturating_add(offset);
-                    let baseline = seen
-                        .0
-                        .get(index)
-                        .and_then(|slot| slot.as_ref())
-                        .or_else(|| ledger.bound(index));
-                    chain.source.poll_any(&grants.0, baseline)
-                }));
-            polled.extend(batch.await);
+            let base = wave_index.saturating_mul(MAX_IN_FLIGHT_POLLS);
+            let index_of = |offset: usize| base.saturating_add(offset);
+            let wanted = |offset: usize| polling.get(index_of(offset)).copied().unwrap_or(true);
+
+            let batch = lgwks_std::task::join_all_boxed(
+                wave.iter()
+                    .enumerate()
+                    .filter(|&(offset, _)| wanted(offset))
+                    .map(|(offset, chain)| {
+                        // `chunks` gives no index, so the chain's position is
+                        // the wave's start plus the offset within it. This is
+                        // the same index `Observed` and `Ledger` are keyed by,
+                        // which is what makes the baseline below the right one
+                        // to hand over.
+                        let index = index_of(offset);
+                        let baseline = seen
+                            .0
+                            .get(index)
+                            .and_then(|slot| slot.as_ref())
+                            .or_else(|| ledger.bound(index));
+                        chain.source.poll_any(&grants.0, baseline)
+                    }),
+            );
+            let results = batch.await;
+
+            for ((offset, _), result) in wave
+                .iter()
+                .enumerate()
+                .filter(|&(offset, _)| wanted(offset))
+                .zip(results)
+            {
+                let index = index_of(offset);
+                // A poll that failed clears the digest, which is what makes the
+                // next tick ask again rather than skip the chain and swallow the
+                // failure. A source that errors therefore reports it every tick,
+                // exactly as it did before fingerprints existed.
+                if result.is_err()
+                    && let Some(slot) = prints.get_mut(index)
+                {
+                    *slot = None;
+                }
+                if let Some(slot) = polled.get_mut(index) {
+                    *slot = result;
+                }
+            }
         }
     }
 
@@ -2578,6 +2701,11 @@ impl EcsBot {
         // the same allocations. Nothing else writes them.
         world.insert_non_send(Moving::default());
         world.insert_non_send(Moved::default());
+        // One slot per chain, so the first tick has somewhere to record the
+        // digest each source reports. `None` throughout, which reads as "never
+        // polled" and sends every chain down the ordinary poll path.
+        world.insert_non_send(Fingerprints(vec![None; count]));
+        world.insert_non_send(Polling(Vec::new()));
         world.insert_non_send(Plan::default());
 
         let mut schedule = schedule();
@@ -2683,6 +2811,51 @@ mod tests {
 
         fn domain_id(&self) -> &str {
             "test::holds"
+        }
+    }
+
+    /// A source that counts how often it is asked for a value, and can answer
+    /// "has anything moved?" without being asked at all.
+    ///
+    /// The counter is the point. `Holds` proves *what* a settled chain does;
+    /// this proves *how much it costs* — specifically that a quiet tick does
+    /// not call `poll`, which is the difference between the tick paying for a
+    /// value and the tick paying for a `u128`.
+    struct Counted {
+        value: Rc<Cell<u16>>,
+        polls: Rc<Cell<usize>>,
+        caps: Vec<Cap>,
+    }
+
+    impl Counted {
+        fn new(value: u16, polls: Rc<Cell<usize>>) -> Self {
+            Self {
+                value: Rc::new(Cell::new(value)),
+                polls,
+                caps: vec![Cap::net()],
+            }
+        }
+    }
+
+    impl Observe for Counted {
+        type Output = u16;
+
+        fn required_caps(&self) -> &[Cap] {
+            &self.caps
+        }
+
+        async fn poll(&self, call: (Auth, ())) -> Result<u16, BotError> {
+            call.0.check(&self.caps)?;
+            self.polls.set(self.polls.get().saturating_add(1));
+            Ok(self.value.get())
+        }
+
+        fn fingerprint(&self) -> Option<u128> {
+            Some(u128::from(self.value.get()))
+        }
+
+        fn domain_id(&self) -> &str {
+            "test::counted"
         }
     }
 
@@ -3020,6 +3193,110 @@ mod tests {
             bot.revisions().first().copied().unwrap_or_default(),
             1,
             "Revision counts movements, so a settled chain's is still 1"
+        );
+        Ok(())
+    }
+
+    /// A source that offers a digest is not polled while the digest holds.
+    ///
+    /// This is the lazy seam, and the assertion is on the *poll count* rather
+    /// than on the effect count, because the effect count is already zero on a
+    /// quiet tick either way. What changed is that the tick no longer builds,
+    /// erases, boxes and drops a value in order to discover that nothing moved:
+    /// the source answers the equality question from a `u128` it already holds,
+    /// and `poll` — the only thing that produces a value — is never called.
+    #[test]
+    fn a_source_that_reports_a_digest_is_not_polled_while_it_holds_still() -> TestResult {
+        let polls = Rc::new(Cell::new(0));
+        let counter = Rc::new(Cell::new(0));
+        let mut bot = EcsBot::builder("lazy")
+            .observe(Counted::new(200, Rc::clone(&polls)))
+            .on(|value: &u16| *value >= 200, Count(Rc::clone(&counter)))
+            .build(&net_grants())?;
+
+        assert_eq!(
+            bot.tick()?,
+            1,
+            "the first tick has no digest to compare, so it polls"
+        );
+        assert_eq!(polls.get(), 1, "and polls exactly once");
+
+        for tick in 0_u32..20 {
+            assert_eq!(
+                bot.tick()?,
+                0,
+                "tick {}: nothing moved",
+                tick.saturating_add(2)
+            );
+        }
+        assert_eq!(
+            polls.get(),
+            1,
+            "twenty quiet ticks must not produce a single value"
+        );
+        assert_eq!(counter.get(), 1, "and must not fire the effect again");
+        Ok(())
+    }
+
+    /// A digest that moves is a movement the tick must not miss.
+    ///
+    /// The failure mode a fingerprint can introduce is the silent one: a source
+    /// that reports a stale digest makes the substrate skip a real change, and
+    /// nothing downstream ever notices, because the whole point of the skip is
+    /// that nothing downstream ran. So the seam is only as good as this test —
+    /// the digest moves, and the chain must fire on the tick it moves and poll
+    /// on every tick after it.
+    #[test]
+    fn a_digest_that_moves_is_polled_again_and_fires() -> TestResult {
+        let polls = Rc::new(Cell::new(0));
+        let counter = Rc::new(Cell::new(0));
+        let source = Counted::new(200, Rc::clone(&polls));
+        let value = Rc::clone(&source.value);
+        let mut bot = EcsBot::builder("lazy-moving")
+            .observe(source)
+            .on(|value: &u16| *value >= 200, Count(Rc::clone(&counter)))
+            .build(&net_grants())?;
+
+        assert_eq!(bot.tick()?, 1, "the first value fires");
+        assert_eq!(bot.tick()?, 0, "and holds");
+        assert_eq!(polls.get(), 1, "so the second tick does not poll");
+
+        value.set(503);
+        assert_eq!(bot.tick()?, 1, "the movement is seen, not skipped");
+        assert_eq!(polls.get(), 2, "and the tick paid for a value to see it");
+
+        assert_eq!(bot.tick()?, 0, "and settles again");
+        assert_eq!(polls.get(), 2, "without polling");
+        assert_eq!(counter.get(), 2, "two movements, two effects");
+        Ok(())
+    }
+
+    /// A source with no digest is polled on every tick, exactly as before.
+    ///
+    /// The default is `None`, so this is not a special case in the code — it is
+    /// what every source written before the seam existed does. It is asserted
+    /// because "the old path is unchanged" is a claim the seam makes, and the
+    /// cost of the claim being false is every existing domain silently losing
+    /// its observations.
+    #[test]
+    fn a_source_without_a_digest_is_polled_every_tick() -> TestResult {
+        let counter = Rc::new(Cell::new(0));
+        let mut bot = EcsBot::builder("unguarded")
+            .observe(Holds::new(200))
+            .on(|value: &u16| *value >= 200, Count(Rc::clone(&counter)))
+            .build(&net_grants())?;
+
+        assert_eq!(bot.tick()?, 1);
+        for _ in 0..5 {
+            assert_eq!(bot.tick()?, 0);
+        }
+        // `Holds` has no fingerprint, so every tick polls it — the effect still
+        // fires once, because the *value* is what decides the chain, and the
+        // value never moved.
+        assert_eq!(
+            counter.get(),
+            1,
+            "the value decides the chain, not the digest"
         );
         Ok(())
     }
