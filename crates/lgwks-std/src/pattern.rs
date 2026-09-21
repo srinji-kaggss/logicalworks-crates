@@ -120,7 +120,7 @@ impl Regex {
     ///
     /// The separators are removed and the borrowed pieces are the text between
     /// them; a pattern that can match empty splits between every character. The
-    /// pieces are produced one at a time, matching [`pattern::Regex::find_all`]
+    /// pieces are produced one at a time, matching [`Regex::find_all`]
     /// and the underlying engine's own `split`, so a caller that stops early
     /// does not pay for the remainder of the haystack.
     ///
