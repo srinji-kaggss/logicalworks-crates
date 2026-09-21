@@ -1,0 +1,19 @@
+# The repository under audit in the `check --contract` tests.
+#
+# It authors exactly one edge — a path dependency on the sibling `helper`
+# package, which sits outside this workspace — and no register in this tree
+# approves it. Auditing this repository therefore has exactly one correct
+# verdict: refused, naming `helper`.
+#
+# A gate that audits `clean` instead, because `--contract`'s value was read as
+# the positional target, reports success here. That is the defect the tests in
+# `check_cli.rs` pin.
+[package]
+name = "subject"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+helper = { path = "../helper" }
+
+[workspace]

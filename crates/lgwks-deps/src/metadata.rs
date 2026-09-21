@@ -155,6 +155,8 @@ pub struct DirectEdge {
 pub enum MetadataError {
     /// Cargo could not be started.
     Spawn(std::io::Error),
+    /// The manifest path could not be resolved against the working directory.
+    Resolve(std::io::Error),
     /// Cargo returned a non-zero status.
     Cargo(String),
     /// Cargo returned JSON outside the supported format-1 subset.
@@ -170,6 +172,10 @@ impl fmt::Display for MetadataError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::Spawn(ref error) => write!(f, "cannot run cargo metadata: {error}"),
+            Self::Resolve(ref error) => write!(
+                f,
+                "cannot resolve the manifest path against the working directory: {error}"
+            ),
             Self::Cargo(ref error) => write!(f, "cargo metadata refused: {error}"),
             Self::Json(ref error) => write!(f, "cargo metadata JSON: {error}"),
             Self::Schema(ref error) => write!(f, "cargo metadata schema: {error}"),
@@ -178,11 +184,11 @@ impl fmt::Display for MetadataError {
 }
 
 impl std::error::Error for MetadataError {
-    /// Chains the two variants that wrap a cause; `Cargo` and `Schema` carry
+    /// Chains the variants that wrap a cause; `Cargo` and `Schema` carry
     /// Cargo's own prose as a `String` and have nothing further to chain.
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match *self {
-            Self::Spawn(ref error) => Some(error),
+            Self::Spawn(ref error) | Self::Resolve(ref error) => Some(error),
             Self::Json(ref error) => Some(error),
             Self::Cargo(_) | Self::Schema(_) => None,
         }
@@ -332,6 +338,7 @@ fn direct_edges(metadata: CargoMetadata) -> Result<Vec<DirectEdge>, MetadataErro
 
 /// Runs locked Cargo metadata and decodes the supported response shape.
 fn read_metadata(root: &Path) -> Result<CargoMetadata, MetadataError> {
+    let manifest = manifest_path(root)?;
     let output = Command::new("cargo")
         .args([
             "metadata",
@@ -341,7 +348,7 @@ fn read_metadata(root: &Path) -> Result<CargoMetadata, MetadataError> {
             "1",
             "--manifest-path",
         ])
-        .arg(root.join("Cargo.toml"))
+        .arg(manifest)
         .current_dir(root)
         .output()
         .map_err(MetadataError::Spawn)?;
@@ -351,6 +358,20 @@ fn read_metadata(root: &Path) -> Result<CargoMetadata, MetadataError> {
         ));
     }
     lgwks_std::json::from_slice(&output.stdout).map_err(MetadataError::Json)
+}
+
+/// The manifest Cargo must read, resolved before the child can reinterpret it.
+///
+/// Cargo resolves `--manifest-path` against *its own* working directory, which
+/// the call above sets to `root`. A path built from a relative `root` therefore
+/// has its components applied twice — once here, once in the child — and names
+/// a manifest that does not exist: a repository the operator named is reported
+/// as missing, and any fallback that guessed instead would audit a tree nobody
+/// named. Resolving the path once, here, against this process's working
+/// directory leaves the child nothing to reinterpret, and keeps the refusal
+/// message naming the manifest Cargo was actually given.
+fn manifest_path(root: &Path) -> Result<std::path::PathBuf, MetadataError> {
+    std::path::absolute(root.join("Cargo.toml")).map_err(MetadataError::Resolve)
 }
 
 /// Runs locked Cargo metadata and returns every direct workspace edge.
@@ -388,6 +409,38 @@ mod tests {
     /// forbidden workspace-wide, and a failing edge extraction should surface
     /// as the error it is, not as a panic with no variant attached.
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// The manifest path must be absolute before it reaches the child.
+    ///
+    /// `read_metadata` spawns Cargo with its working directory set to the
+    /// repository root, and Cargo resolves `--manifest-path` against *that*
+    /// directory. A relative manifest path is therefore applied twice — once
+    /// against this process's working directory and once against the child's —
+    /// and names a manifest that does not exist, so the gate reports a
+    /// repository the operator named as missing. The check is lexical: it holds
+    /// whatever the working directory happens to be, and for the same reason a
+    /// root that is already absolute must reach Cargo unchanged.
+    #[test]
+    fn a_manifest_path_is_resolved_before_cargo_can_reinterpret_it() -> TestResult {
+        let relative = manifest_path(Path::new("crates/lgwks-deps"))?;
+        assert!(
+            relative.is_absolute(),
+            "a relative root must be resolved here: {}",
+            relative.display()
+        );
+        assert!(
+            relative.ends_with("crates/lgwks-deps/Cargo.toml"),
+            "the resolved path is the root's own manifest: {}",
+            relative.display()
+        );
+        let root = std::env::current_dir()?.join("crates/lgwks-deps");
+        assert_eq!(
+            manifest_path(&root)?,
+            root.join("Cargo.toml"),
+            "an absolute root must reach Cargo as the same manifest"
+        );
+        Ok(())
+    }
 
     #[test]
     fn includes_inactive_optional_and_dev_edges() -> TestResult {
