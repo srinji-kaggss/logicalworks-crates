@@ -182,7 +182,9 @@ call; it follows from what the crate exposes.
 - `gpui` 0.2.2 is on crates.io and is **already admitted**: `contract/APPROVED.toml`
   records `crate = "gpui"`, `tier = "boundary"`, `owner = "lgwks_deps"`,
   `capability = "ui.gpu-desktop"`, wired as the storefront feature `gpui`.
-- But the capability name is accurate. Layout is **taffy** (CPU, pinned `=0.13.0`),
+- But the capability name is accurate. Layout is **taffy** (CPU, pinned `=0.9.0`
+  by gpui 0.2.2 — `SECURITY.md` records the `grid` advisory reached through it,
+  and why it is unreachable),
   text shaping is **cosmic-text** (CPU), element diffing is CPU, and the GPU
   surface is a `Scene` of paint primitives submitted through `blade-graphics`.
   **There is no exposed compute, buffer, or shader-dispatch API.**
