@@ -145,6 +145,43 @@ jobs:
           --manifest-path crates/lgwks-bot/Cargo.toml --no-default-features &&
           RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
           --manifest-path crates/lgwks-ast/Cargo.toml --no-default-features
+      - name: Root README quickstart matches its compiled example
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+
+          # README.md at the repository root is not a crate README, so nothing
+          # type-checks its code blocks; only crates/lgwks-bot/README.md is
+          # compiled, via include_str! in lib.rs. The quickstart is mirrored in
+          # an example that `cargo test --all-targets` does compile, and this
+          # keeps the two identical, so an API change breaks the build instead
+          # of silently invalidating the first code a new user copies.
+          readme = Path("README.md").read_text(encoding="utf-8")
+          section = readme.split("## Quickstart", 1)[1].split("\n## ", 1)[0]
+          blocks = re.findall(r"```rust\n(.*?)```", section, re.S)
+          if len(blocks) != 1:
+              raise SystemExit(
+                  f"expected one rust block under Quickstart, found {len(blocks)}"
+              )
+          readme_block = blocks[0].strip()
+
+          example = Path(
+              "crates/lgwks-bot/examples/quickstart.rs"
+          ).read_text(encoding="utf-8")
+          body = "\n".join(
+              line for line in example.split("\n") if not line.startswith("//!")
+          ).strip()
+
+          if readme_block != body:
+              raise SystemExit(
+                  "README quickstart drifted from "
+                  "crates/lgwks-bot/examples/quickstart.rs:\n"
+                  f"--- README.md ---\n{readme_block}\n"
+                  f"--- quickstart.rs ---\n{body}"
+              )
+          print("README quickstart matches the compiled example")
+          PY
 
   feature-matrix:
     name: lgwks-std feature matrix
@@ -312,6 +349,14 @@ jobs:
                   major, minor, *_ = version.split(".")
                   for m in _re.finditer(
                       rf"{crate}\s*=\s*(?:\{{\s*version\s*=\s*)?\"(\d+)\.(\d+)(?:\.(\d+))?\"",
+                      text,
+                  ):
+                      if (m.group(1), m.group(2)) != (major, minor):
+                          bad.append(f"{md}: {m.group(0)} (manifest is {version})")
+                  # Markdown table rows, as in the root README crate table:
+                  # | `lgwks_std` | 0.6.4 | [docs.rs](...) | ...
+                  for m in _re.finditer(
+                      rf"\|\s*`{crate}`\s*\|\s*(\d+)\.(\d+)(?:\.(\d+))?\s*\|",
                       text,
                   ):
                       if (m.group(1), m.group(2)) != (major, minor):

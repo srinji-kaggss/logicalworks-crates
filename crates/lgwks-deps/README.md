@@ -1,84 +1,85 @@
-# lgwks_deps — third-party storefront + admission gate
+# lgwks_deps
 
-## Storefront: install it, select features, get deps
+A third-party dependency storefront, with an admission gate that audits what the
+storefront is for.
 
-Every other third-party capability is an optional feature you select:
+The storefront packages each third-party stack as an optional cargo feature, so
+a consumer selects a capability rather than a crate. The gate then checks that
+every external dependency authored by a workspace package names its semantic
+owner, capability, source, requirement, allowed consumers, and allowed
+dependency kinds. Code that needs a library outside `std` and `lgwks_std` does
+not pass the gate until a human registers it in `contract/APPROVED.toml`.
 
-```toml
-[dependencies]
-# Engine without the bot facade:
-lgwks_deps = { version = "0.1.8", default-features = false, features = ["tokio"] }
-# GPU desktop UI:
-lgwks_deps = { version = "0.1.8", default-features = false, features = ["gpui"] }
-# Native terminal UI:
-lgwks_deps = { version = "0.1.8", default-features = false, features = ["appcui"] }
-# ML inference: tensor compute, transformer models, and the matching tokenizer:
-lgwks_deps = { version = "0.1.8", default-features = false, features = ["ml-candle", "ml-tokenizers"] }
-```
+## Install
 
-```rust
-// use lgwks_deps::tokio::...   — only when bypassing the lgwks_bot::rt facade
-// use lgwks_deps::gpui::...    — Zed's GPU desktop UI framework
-```
-
-Do NOT `cargo add tokio` / `cargo add gpui` directly — `lgwks-deps check`
-refuses the second edge. Async callers should prefer `lgwks_bot::rt`
-(timers safe to build early, bounded fan-out, curated features); reach for
-`lgwks_deps::tokio` only when bypassing the bot.
-
-`default-features = false` matters: the default build carries the `scan`
-gate-tool feature (`syn` + `proc-macro2` for `cargo install` CLI use). Library
-consumers disable defaults so a runtime edge never pulls a parser along.
-
-The `gpui` feature re-exports `lgwks_deps::gpui` and retains GPUI's normal
-platform renderer. macOS builds require a usable Xcode Metal Toolchain
-(`metal` and `metallib`); Linux builds require the platform development stack
-selected by GPUI. The feature is not compiled by the default `scan` build.
-
-The `ml-candle` feature re-exports `lgwks_deps::{candle_core, candle_nn,
-candle_transformers}` and `ml-candle-metal` additionally selects Candle's macOS
-Metal backend; `ml-tokenizers` re-exports `lgwks_deps::tokenizers`. They are
-default-off, so the default `scan` build compiles none of Candle's closure.
-Selecting `ml-candle` does pull `hf-hub` transitively through
-`candle-transformers` — the compiled tree is network-capable even though the
-estate runtime loads a local checkpoint and does not call the hub. See
-`docs/candle-admission.md` for authority, transitive-surface limits, and
-verification.
-
-## Gate: admission, audit, freshness, vendor coverage, source scan
-
-Version 0.1.8 adds the default-off `appcui` feature, re-exporting
-`lgwks_deps::appcui`. It is not present in published 0.1.7. Downstream code
-uses `use lgwks_deps::appcui; use appcui::prelude::*;` so upstream macros can
-resolve their crate alias without a direct dependency. Native terminal support
-does not imply a full editor, backend execution, or measured platform parity.
-See `docs/appcui-admission.md` in the repository for authority and verification.
-
-CLI first (`cargo install lgwks_deps` keeps working with no flags — the
-default `scan` build is the gate tool); library second (see the storefront
-above for `default-features = false`):
-
-`lgwks_deps` owns INV-DEP-EDGE-OWNED: every external dependency authored by a
-workspace package names its semantic owner, capability, source, requirement,
-allowed consumers, and allowed dependency kinds. Code that needs a library
-outside `std` / `lgwks_std` does not compile until a human registers it in
-`contract/APPROVED.toml`.
+The binary is the gate; the library is the storefront.
 
 ```sh
-lgwks-deps check .              # audit this repo (first CI lane)
+cargo install lgwks_deps                        # the `lgwks-deps` binary
+cargo add lgwks_deps --no-default-features      # the storefront library
+```
+
+`default-features = false` matters for library consumers. The default build
+carries the `scan` gate-tool feature, which pulls `syn` and `proc-macro2` for
+the CLI's source detectors. Disabling defaults keeps a parser out of a runtime
+dependency graph.
+
+## Storefront
+
+Each feature re-exports the upstream crate, so a consumer never declares it
+directly. Do not run `cargo add tokio` or `cargo add gpui`; `lgwks-deps check`
+refuses the second edge.
+
+| Feature | Re-exports | Notes |
+|---|---|---|
+| `tokio` | `lgwks_deps::tokio` | The bypass path. Prefer `lgwks_bot::rt` unless you are deliberately working below the bot facade. |
+| `gpui` | `lgwks_deps::gpui` | Zed's GPU desktop UI framework, retaining its normal platform renderer. macOS builds require a usable Xcode Metal toolchain (`metal` and `metallib`); Linux builds require the platform development stack GPUI selects. |
+| `appcui` | `lgwks_deps::appcui` | Native terminal UI. Downstream code uses `use lgwks_deps::appcui; use appcui::prelude::*;` so upstream macros resolve their crate alias without a direct dependency. |
+| `ml-candle` | `candle_core`, `candle_nn`, `candle_transformers` | ML inference: tensor compute and transformer models. |
+| `ml-candle-metal` | as `ml-candle`, plus Candle's macOS Metal backend | |
+| `ml-tokenizers` | `lgwks_deps::tokenizers` | The matching tokenizer stack. |
+| `scan` (default) | — | The gate's Rust source detectors. The one reviewed default-on feature. |
+
+The ML features are default-off, so the default `scan` build compiles none of
+Candle's closure. Selecting `ml-candle` pulls `hf-hub` transitively through
+`candle-transformers`, which makes the compiled tree network-capable even though
+the runtime here loads a local checkpoint and does not call the hub. Authority,
+transitive-surface limits, and verification are recorded in
+[`docs/candle-admission.md`](../../docs/candle-admission.md).
+
+The `gpui` feature is not compiled by the default `scan` build either. Its
+authority and verification are recorded in
+[`docs/bevy-admission.md`](../../docs/bevy-admission.md); AppCUI's in
+[`docs/appcui-admission.md`](../../docs/appcui-admission.md). Native terminal
+support does not imply a full editor, backend execution, or measured platform
+parity.
+
+## Gate
+
+```sh
+lgwks-deps check .              # audit this repository
 lgwks-deps tiers                # the admission ladder, lowest rung first
 lgwks-deps request <crate> <v>  # print an approval block to fill in
 lgwks-deps init [PATH]          # fail-closed starting register
-lgwks-deps freshness [PATH]     # resolved vs latest on crates.io
+lgwks-deps freshness [PATH]     # resolved versus latest on crates.io
 lgwks-deps vendor check [PATH]  # prove the lockfile is covered by the shared vendor tree
-lgwks-deps scan [PATH]...       # keel zero-gate detectors (swallow/unlogged/allow/chain/doc), one verdict binary
+lgwks-deps scan [PATH]...       # source detectors, one verdict binary
 ```
 
-`vendor check` is the physical counterpart of the register: the register says
-which edges are owned, the tree in `vendor/` says which bytes the offline
-build resolves, and the subcommand binds them by hash. The tree lives at the
-workspace root so every estate repo resolves one physical copy; it is outside
-all package directories, so `cargo package` never ships it.
+`check` runs as the first CI lane. The binary diagnoses; it never approves.
+Approval is a committed diff with a human's name on it, and the register format
+is documented in `contract/APPROVED.toml`.
 
-The binary diagnoses; it never approves. Approval is a committed diff with a
-human's name on it. See `contract/APPROVED.toml` for the register format.
+`vendor check` is the physical counterpart of the register. The register states
+which edges are owned, the tree in `vendor/` states which bytes the offline
+build resolves, and the subcommand binds the two by hash. The tree sits at the
+workspace root so every repository here resolves one physical copy. It is
+outside all package directories, so `cargo package` never ships it.
+
+An approval with no authored Cargo edge is refused as stale authority. An
+authored edge with no approval is refused as unregistered. Both directions are
+enforced.
+
+## License
+
+Apache-2.0 — Copyright 2026 Logical Works Incorporated

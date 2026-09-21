@@ -1,8 +1,10 @@
-# lgwks_bot — capability-gated automation bots
+# lgwks_bot
 
-A bot framework built on four fixed verbs — **Observe**, **Evaluate**,
-**Execute**, **Query** — that run as systems on a [Bevy ECS](https://bevy.org)
-schedule. Three properties distinguish it from a task runner:
+Capability-gated automation bots.
+
+A bot framework built on four fixed verbs (Observe, Evaluate, Execute, Query)
+that run as systems on a [Bevy ECS](https://bevy.org) schedule. Three properties
+distinguish it from a task runner:
 
 - **Authority is proof-carrying.** Every effect takes an `(Auth, input)` tuple,
   and only `GrantSet::issue` mints the `Auth` half. Capabilities are checked at
@@ -88,9 +90,9 @@ assert_eq!(fired, 1);
 `bot.tick()` returns the number of actions fired. A built bot is `mut`
 because a tick advances its world.
 
-## Why this and not just tokio
+## Relationship to tokio
 
-**It is not an alternative to tokio — it runs on it.** The async engine is
+It runs on tokio rather than replacing it. The async engine is
 sourced from the `lgwks_deps` storefront, and `lgwks_bot` exports it as
 `rt::*` so a consumer never names `tokio` directly. If what you want is
 futures, timers, sockets, and channels, `rt::` gives you exactly that.
@@ -118,7 +120,7 @@ capability-gated execution model with a serializable spec, in Rust.
 
 | Verb | Trait | Purpose |
 |------|-------|---------|
-| **Observe** | `verb::Observe` | Watch a source — poll, listen, stream. Async; produces a value each tick. |
+| **Observe** | `verb::Observe` | Watch a source: poll, listen, stream. Async; produces a value each tick. |
 | **Evaluate** | `verb::Evaluate<T>` | Gate on a condition. Boolean over observed state. Synchronous and pure. Closures implement this automatically. |
 | **Execute** | `verb::Execute` | Perform a side effect. Async and capability-gated. The action half of the chain. |
 | **Query** | `verb::Query` | Read without side effects. Async, direct call, no chain required. |
@@ -136,7 +138,7 @@ is what lets them drive the verbs' deliberately non-`Send` futures directly.
   `Revision(u64)` marker component *only when the value moved*.
 - **`fire`** walks the sources in declaration order, selects those matching
   `Changed<Revision>`, evaluates each chain's condition, and runs the actions
-  whose conditions hold — also in declaration order, so side effects stay
+  whose conditions hold, also in declaration order, so side effects stay
   deterministic.
 
 Two consequences worth knowing before you rely on `tick`:
@@ -156,22 +158,22 @@ need to spawn such a future.
 ## Capability system
 
 Every domain declares the capabilities it requires. The builder validates
-`required ⊆ granted` before construction — a bot asking for `bot.net` without a
+`required ⊆ granted` before construction. A bot asking for `bot.net` without a
 grant fails at build time, not at runtime.
 
 Authority stays proof-carrying past build: every `poll`, `execute_action`, and
 `query` takes an `(Auth, input)` tuple, and only `GrantSet::issue` can mint the
 `Auth` half. The framework issues a fresh proof per domain on every tick, and
 each callee checks coverage before acting, so a narrower proof presented to a
-broader domain is denied (no confused deputies). `Evaluate` takes no proof — it
-is pure boolean logic with no side effect to gate.
+broader domain is denied (no confused deputies). `Evaluate` takes no proof,
+because it is pure boolean logic with no side effect to gate.
 
 | Capability | Constant | Description |
 |------------|----------|-------------|
-| `bot.net` | `Cap::NET` | Network access — HTTP, WebSocket, API calls |
-| `bot.fs` | `Cap::FS` | Filesystem access — read, write, watch paths |
-| `bot.sys` | `Cap::SYS` | System access — process control, environment |
-| `bot.notify` | `Cap::NOTIFY` | Notification delivery — Slack, email, webhooks |
+| `bot.net` | `Cap::NET` | Network access: HTTP, WebSocket, API calls |
+| `bot.fs` | `Cap::FS` | Filesystem access: read, write, watch paths |
+| `bot.sys` | `Cap::SYS` | System access: process control, environment |
+| `bot.notify` | `Cap::NOTIFY` | Notification delivery: Slack, email, webhooks |
 
 Custom capabilities use `Cap::new("your.domain.cap")`.
 
@@ -193,7 +195,7 @@ Nine domains ship with the crate, each implementing one or more verbs:
 
 ## Serializable specs
 
-`BotSpec` is the serializable contract — what an AI emits, what a manifest
+`BotSpec` is the serializable contract: what an AI emits, what a manifest
 contains. It round-trips through JSON:
 
 ```rust
@@ -223,15 +225,15 @@ let json = spec.to_json()?;
 
 `BotSpec` is validate-only: there is no `from_spec` materializer. A spec that
 validates still builds through `Bot::builder`, so capability grants stay
-explicit at the call site. The builder chain is the DSL — there is deliberately
-no `bot!` proc-macro: it would drag `syn` into every consumer (the estate bans
-`syn` outside the `lgwks_deps` gate tool) and hide the per-call `Auth::check`
-that auditors read.
+explicit at the call site. The builder chain is the DSL. There is deliberately
+no `bot!` proc-macro: it would drag `syn` into every consumer (the dependency
+policy restricts `syn` to the `lgwks_deps` gate tool) and hide the per-call
+`Auth::check` that auditors read.
 
 ## Async runtime surface
 
-`lgwks_bot` is also the estate's async and runner surface (default feature
-`rt`). It is gate-enforced: `tokio` appears in `contract/APPROVED.toml` with
+`lgwks_bot` also provides the asynchronous runtime surface (default feature
+`rt`). The `tokio` edge appears in `contract/APPROVED.toml` with
 `owner = "lgwks_deps"`, and `lgwks-deps check` refuses any other workspace crate
 that declares `tokio` directly (`INV-DEP-EDGE-OWNED`). `--no-default-features`
 compiles the crate with no tokio at all.
@@ -259,15 +261,14 @@ deliberately **no attribute macro**: a re-exported proc-macro expands to
 
 ### Cancellation
 
-`rt::sync::CancellationToken` is the estate's own, built on `tokio::sync::watch`
-rather than admitted from `tokio-util`. A child token is cancelled when its
+`rt::sync::CancellationToken` is provided by this crate, built on
+`tokio::sync::watch` rather than re-exported from `tokio-util`. A child token is cancelled when its
 parent is; cancelling a child never touches the parent. The parent link points
 *up*, so a token you hold can always be cancelled even if an intermediate token
 in its chain has been dropped.
 
-This is the other half of a rule the crate already enforced: `AGENTS.md`
-requires every background task to be tracked in a `JoinSet` **and** to listen to
-a `CancellationToken`.
+This completes the background-work contract the crate already enforced: every
+task is tracked in a `JoinSet` and observes a `CancellationToken`.
 
 ```rust
 use lgwks_bot::rt::sync::CancellationToken;
@@ -316,8 +317,8 @@ assert_eq!(results.len(), 16);
 `rt::supervise::Supervisor` is the way to run background work, and it exists so
 that a caller never has to reason about a leak or a runaway loop.
 
-A task cannot leak. `spawn` returns no handle — a `JoinHandle` a caller might
-drop is the leak, so there is nothing to drop. There is no unbounded
+A task cannot leak. `spawn` returns no handle, so there is nothing for a caller
+to drop. There is no unbounded
 constructor and no internal queue: the ceiling is taken at `new`, and the permit
 is acquired *before* the spawn, so waiting is real backpressure rather than
 buffering. `try_spawn` refuses instead of growing, and counts the refusal.

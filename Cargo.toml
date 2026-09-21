@@ -10,21 +10,21 @@ resolver = "2"
 # ─────────────────────────────────────────────────────────────────────────────
 # logicalworks-crates workspace dependencies.
 #
-# Source of truth for `lgwks_std` (estate std+ surface), `lgwks_bot`
+# Source of truth for `lgwks_std` (the core surface), `lgwks_bot`
 # (capability-gated automation verbs and the async runner surface), `lgwks_ast`
-# (the estate's one multi-language AST parser), and `lgwks_deps` (dependency
+# (the multi-language AST parser), and `lgwks_deps` (dependency
 # admission, audit, freshness, and the third-party storefront). This repo is now
 # the source of truth: versions bump here and the tagged commit publishes to
 # crates.io.
 # ─────────────────────────────────────────────────────────────────────────────
 [workspace.dependencies]
-lgwks_std = { version = "0.6.4", path = "crates/lgwks-std" }
-lgwks_bot = { version = "0.4.0", path = "crates/lgwks-bot" }
-lgwks_ast = { version = "0.2.0", path = "crates/lgwks-ast" }
+lgwks_std = { version = "0.6.5", path = "crates/lgwks-std" }
+lgwks_bot = { version = "0.4.1", path = "crates/lgwks-bot" }
+lgwks_ast = { version = "0.2.1", path = "crates/lgwks-ast" }
 # Dependents reach the storefront without its `scan` default (the gate tool's
 # Rust parser is not a runtime dependency); they opt into storefront features
 # such as `tokio` explicitly.
-lgwks_deps = { version = "0.1.9", path = "crates/lgwks-deps", default-features = false }
+lgwks_deps = { version = "0.1.10", path = "crates/lgwks-deps", default-features = false }
 
 [profile.release]
 opt-level = 3
@@ -46,8 +46,8 @@ improper_ctypes_definitions = "forbid"
 # Anti-pattern contract.
 #
 # Every lint below is `forbid`, not `deny`. A `deny` is defeated by any single
-# `#[allow]` anywhere in the crate — including one smuggled in by a macro the
-# estate does not own (verified: a macro-internal allow silenced a crate-level
+# `#[allow]` anywhere in the crate, including one smuggled in by a macro this
+# workspace does not own (verified: a macro-internal allow silenced a crate-level
 # deny with zero diagnostics). `forbid` cannot be lowered from source; a
 # conflicting allow is a hard E0453. That property is the entire reason this
 # file can be binding without a human in the loop.

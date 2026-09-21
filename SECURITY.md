@@ -1,4 +1,4 @@
-# Security policy — logicalworks-crates
+# Security policy
 
 ## Attack surface in scope
 
@@ -21,11 +21,11 @@ private CA handling, key lifecycle, tracing/metrics facades, consensus.
 ## Transitive advisories assessed and not actioned
 
 An advisory is a claim about a crate, not about the call paths a consumer
-reaches. Where the flagged code is unreachable from this estate's graph, that is
-recorded here with its evidence, so it is a checked position rather than a
-silent one. Each entry names what would reopen it.
+reaches. Where the flagged code is unreachable from this workspace's dependency
+graph, it is recorded here with its evidence, so the position is checked rather
+than silent. Each entry names what would reopen it.
 
-### `grid` — GHSA-38c5-483c-4qqp, integer overflow in `Grid::expand_rows`
+### `grid`: GHSA-38c5-483c-4qqp, integer overflow in `Grid::expand_rows`
 
 Reached only by enabling the `gpui` storefront feature of `lgwks_deps`
 (default-off): `lgwks_deps` → `gpui 0.2.2` → `taffy 0.9.0` → `grid 0.18.0`.
@@ -36,7 +36,7 @@ Unreachable, on three checks:
    is `Grid::new`, `Grid::from_vec`, `Grid::get`, and `Grid::get_mut`
    (`src/compute/grid/types/cell_occupancy.rs`); the strings `expand_rows` and
    `expand_cols` do not appear anywhere in its source.
-3. The two constructors it does call already use checked arithmetic in 0.18.0 —
+3. The two constructors it does call already use checked arithmetic in 0.18.0:
    `new_with_order` uses `rows.checked_mul(cols)`, `from_vec_with_order` uses
    `checked_div` behind an assert. The 1.0.1 hardening covers `expand_*`,
    `push_*`, `insert_*`, and `prepend_*`; taffy reaches none of them.
@@ -44,14 +44,14 @@ Unreachable, on three checks:
 There is no version bump that resolves it: `gpui 0.2.2` is the newest gpui and
 pins `taffy = "=0.9.0"`, while `taffy 0.9.0` requires `grid = "^0.18.0"` and the
 fix ships only in `grid 1.0.1`. A `[patch.crates-io]` is not a fix here even in
-principle — a patch is workspace-local and is not published, so it would clean
+principle. A patch is workspace-local and is not published, so it would clean
 this repository's lockfile while every consumer still resolved the vulnerable
 version. Dependabot alert #1 is dismissed as
 `vulnerable_code_not_in_execution_path` on this evidence.
 
 **Reopen if** `gpui` moves to a `taffy` that calls any `expand_*`, `push_*`,
 `insert_*`, or `prepend_*` method, or if a newer `grid 0.18.x` or `taffy 0.9.x`
-appears — either would make the version bump available and this entry obsolete.
+appears. Either would make the version bump available and this entry obsolete.
 
 ## Reporting
 

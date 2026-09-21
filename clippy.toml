@@ -6,14 +6,14 @@
 # the FATAL.
 #
 # Every entry here names an API whose existence is the anti-pattern. Where a
-# wrapper is correct, the ban is on the raw API: lgwks_bot::rt::* is how the
-# estate reaches async, tokio is not.
+# wrapper is correct, the ban is on the raw API: async is reached through
+# lgwks_bot::rt::*, not by naming tokio.
 
 disallowed-methods = [
   # RUST-AP-022 Unbounded task spawning / RUST-AP-067 fire-and-forget dropping.
   # An unbounded channel has no overflow policy; memory grows until OOM.
   { path = "tokio::sync::mpsc::unbounded_channel", reason = "unbounded memory growth; use mpsc::channel(NonZeroUsize) — see INV-RT-BOUNDED", replacement = "lgwks_bot::rt::sync::mpsc::channel" },
-  { path = "std::sync::mpsc::channel", reason = "std::mpsc has no bounded form and no async receiver; use the estate channel", replacement = "lgwks_bot::rt::sync::mpsc::channel" },
+  { path = "std::sync::mpsc::channel", reason = "std::mpsc has no bounded form and no async receiver; use the bounded channel", replacement = "lgwks_bot::rt::sync::mpsc::channel" },
   # RUST-AP-067: a bare spawn is dropped on the floor unless tracked in a JoinSet.
   { path = "tokio::spawn", reason = "untracked background task; spawn inside a tracked scope so Drop cancels it", replacement = "lgwks_bot::rt::task::spawn" },
   { path = "std::thread::spawn", reason = "unjoined OS thread; a panic is invisible and the handle is usually leaked" },
@@ -31,6 +31,6 @@ disallowed-methods = [
 
 disallowed-types = [
   # RUST-AP-034/035: stringly-typed and anyhow errors in library API.
-  { path = "std::sync::mpsc::Sender", reason = "unbounded; use the estate bounded channel" },
-  { path = "std::sync::mpsc::Receiver", reason = "unbounded; use the estate bounded channel" },
+  { path = "std::sync::mpsc::Sender", reason = "unbounded; use the bounded channel" },
+  { path = "std::sync::mpsc::Receiver", reason = "unbounded; use the bounded channel" },
 ]

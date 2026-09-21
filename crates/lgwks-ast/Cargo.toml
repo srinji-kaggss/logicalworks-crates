@@ -1,7 +1,7 @@
 [package]
 name = "lgwks_ast"
-description = "One multi-language AST parser: language identification from path or shebang, tree-sitter grammar selection, and bounded traversal. Plus a typed-diagnostic derive."
-version = "0.2.0"
+description = "One multi-language AST parser: language identification from path or shebang, tree-sitter grammar selection by cargo feature, and bounded traversal. Includes a typed-diagnostic derive."
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"
@@ -12,18 +12,18 @@ homepage = "https://github.com/srinji-kaggss/logicalworks-crates/tree/main/crate
 categories = ["development-tools", "parser-implementations"]
 keywords = ["parser", "ast", "tree-sitter", "static-analysis", "code-analysis"]
 
-# INV-AST-ONE-PARSER: this crate is the estate's only multi-language AST
+# INV-AST-ONE-PARSER: this crate is the only multi-language AST
 # parser. Code tools identify a language, select a grammar, and parse through
 # it; they do not each depend on ast-grep and rebuild the language/extension
 # tables. The only external edges are ast-grep-core and ast-grep-language.
 #
-# Observability lane: the crate also owns the estate's one typed-diagnostic
+# The crate also owns the shared typed-diagnostic
 # derive (`thiserror`), used by `ParseError` and re-exported so downstream
 # analysers derive `Display`/`source` here instead of each declaring the crate.
-# It lives in this lane, not `lgwks_std`, to keep the std+ stack minimal.
+# It lives here rather than in `lgwks_std` to keep the core stack minimal.
 #
 # Grammar selection is per-language and opt-in. The default enables the seven
-# languages the safety engine parses; every remaining grammar ast-grep-language
+# languages the default set parses; every remaining grammar ast-grep-language
 # ships is available as its own `lang-*` feature, and `full` enables all 28.
 # An extension with no compiled grammar is not recognised, so a consumer never
 # pays to compile a grammar it cannot select.

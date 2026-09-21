@@ -1,15 +1,18 @@
-# Bot semantics on an ECS substrate — the mapping, and what it costs
+# Bot semantics on an ECS substrate
 
-Read this after `docs/async-sdk-shape.md`. That document says what a consumer of
-the async surface is allowed to think about. This one answers a different
-question: **what substrate executes a `BotSpec`, and does the four-verb model
-extend onto it naturally?**
+This document describes the mapping of the four-verb bot model onto an ECS
+substrate, and the cost of that mapping. It assumes the async surface defined in
+`docs/async-sdk-shape.md`, which states what a consumer of that surface is
+required to reason about.
+
+The question addressed here is different: **what substrate executes a `BotSpec`,
+and does the four-verb model extend onto it naturally?**
 
 Status: **implemented, and it is the only path.** Steps 0, 2 and 3 of §10 have
-landed; `Bot` *is* the ECS bot — there is one bot, one builder and one executor,
-with no feature flag and no parallel implementation. `bevy_ecs` is admitted
-(`docs/bevy-admission.md`). The scheduler decision — §9, step 1 — remains open,
-and is a Director call rather than an agent's.
+landed; `Bot` *is* the ECS bot: one bot, one builder and one executor, with no
+feature flag and no parallel implementation. `bevy_ecs` is admitted
+(`docs/bevy-admission.md`). The scheduler decision (§9, step 1) remains open and
+requires project-owner sign-off; it is not a change to be taken unilaterally.
 
 ## 1. Why an ECS at all
 
@@ -18,16 +21,16 @@ things:
 
 | Current type | ECS role | What it buys |
 |---|---|---|
-| `Cap` / `Auth` | `Resource` — the capability proof | One authority per world; no ambient singleton |
+| `Cap` / `Auth` | `Resource`: the capability proof | One authority per world; no ambient singleton |
 | `Observe` impls (`Endpoint`, …) | `Component` + a system that writes it | Heterogeneous sources without `Box<dyn>` |
 | `Evaluate::check` | **change detection** (`Changed<T>`) | The condition is a tick comparison, not a re-derivation |
 | `Execute::execute_action` | a system that writes the effect | Effects are data, not callbacks |
 | `BotSpec`, `ChainSpec` | a `Schedule` built from deserialized data | The spec *is* the ordering declaration |
 | `Bot::tick()` | `Schedule::run(&mut World)` | One tick is one step, manually driven |
 
-The last row is the one that matters for the DUM-E property: `Bot::tick()` is
+The last row is the one that matters for manual stepping: `Bot::tick()` is
 already a manual step, and `Schedule::run(&mut World)` is the same shape. There
-is no framework-owned main loop to surrender control to — `App::update()` is
+is no framework-owned main loop to surrender control to: `App::update()` is
 available and `App::run()` is never called.
 
 ## 2. What the spike measured
@@ -51,7 +54,7 @@ determinism                 : identical across rebuilds
 - `Changed<T>` is a precise condition primitive: it matched on exactly the ticks
   where the observed value actually moved (ticks 2 and 4), not on every tick.
 - The capability gate as a `Resource` correctly produced **zero** effects in a
-  world without the grant — the equivalent of `Auth::check` denying.
+  world without the grant, the equivalent of `Auth::check` denying.
 - A flat upstream produced zero effects: a tick where nothing changed reports
   nothing changed. That is the property a naive "re-run every condition" loop
   does not have.
@@ -65,7 +68,7 @@ Deleting the single line `schedule.add_systems(ApplyDeferred)` takes `total
 effects` from 2 to **0**, and *nothing else in the output changes*: the system
 still ran, `Changed<T>` still matched, `spawn requests/tick` still reported
 `[0,0,2,0,0]`. The effect simply never materialized. No panic, no error, no
-diagnostic — a bot whose Execute verb silently does nothing.
+diagnostic: a bot whose Execute verb silently does nothing.
 
 The reason is sharper than "the sync point was missing", and a second spike
 measured it as a four-way control, because the first phrasing points at the wrong
@@ -76,14 +79,14 @@ so a correct run records 3:
 
 | Schedule | Effects |
 |---|---|
-| writer is the last system, no sync point | **0** — the queue is dropped at the end of `Schedule::run` |
+| writer is the last system, no sync point | **0**: the queue is dropped at the end of `Schedule::run` |
 | writer, then an unrelated successor (auto-insert) | 3 |
-| writer, then `add_systems(ApplyDeferred)` — unordered | **2** |
-| `(writer, ApplyDeferred).chain()` — ordered | 3 |
+| writer, then `add_systems(ApplyDeferred)`: unordered | **2** |
+| `(writer, ApplyDeferred).chain()`: ordered | 3 |
 
 Row 3 is the one worth staring at: adding `ApplyDeferred` *is* the remedy the
 failure message suggests, and it still loses an effect, because an unordered sync
-point can run before the writer and defer the effect by a tick — which on a
+point can run before the writer and defer the effect by a tick, which on a
 fixed-length run drops the last turn entirely. The hazard is not "the sync point
 is absent"; it is **"a deferred effect lands at a time decided by the schedule
 graph rather than by the caller"**, and the only fix that holds is to not defer.
@@ -102,8 +105,8 @@ Two consequences, and they are both requirements rather than observations:
    ScheduleBuildError>` and `ScheduleBuildSettings { ambiguity_detection:
    LogLevel::Error }` must both be run at `Bot::build()` time. An ambiguous
    schedule is currently a silent ordering bug; at `LogLevel::Error` it becomes a
-   refusal. This is the ECS form of the estate's existing habit of failing at
-   `build()` rather than at `tick()`.
+   refusal. This is the ECS form of an existing habit in this workspace: failing
+   at `build()` rather than at `tick()`.
 
 Third finding, minor but worth recording: `World::entities().len()` is **not** a
 live-entity count. `World::new()` alone reports 4, every `insert_resource` grows
@@ -124,20 +127,20 @@ condition primitive.
 This generalizes into a rule for every domain in `lgwks_bot/src/domain/`:
 **a component is either identity or observed value, never both.** The corollary
 is the Bevy guidance that variation belongs in an *enum payload* component, not
-in a bespoke component set per bot — archetype count stays bounded and queries
+in a bespoke component set per bot: archetype count stays bounded and queries
 stay linear.
 
 **Amendment, measured while implementing step 2.** The observed value cannot be
 the component the spike used. That spike's `Status` was a `Copy` `u16`; a real
 observer produces `Box<dyn Any>` from the verb erasure, and `bevy_ecs` 0.19.1
-declares `Component: Send + Sync + 'static` unconditionally — there is no
+declares `Component: Send + Sync + 'static` unconditionally: there is no
 `non_send` feature to relax it (`NonSend` survives for **resources** only, which
 is why `World::insert_non_send` exists).
 
 So the value lives in a `NonSend` resource and the component is a `Revision(u64)`
 marker the observe system bumps **only when the value actually differs**. That
-keeps §4's property — the condition is still a tick comparison, not a
-re-derivation — while keeping `lgwks_bot`'s non-`Send` contract intact rather
+keeps §4's property (the condition is still a tick comparison, not a
+re-derivation) while keeping `lgwks_bot`'s non-`Send` contract intact rather
 than tightening it to fit the substrate.
 
 The cost is a `PartialEq` bound on an observer's `Output` in `Bot::builder`. It
@@ -169,12 +172,13 @@ about which is which.
   as missing.
 - **Not supplied, and must not be assumed:** there is no first-party
   `bevy_replay` or `bevy_determinism`. Entity-ID and archetype-ID allocation are
-  history-dependent, and `bevy_platform`'s `HashMap` has a fixed hasher —
+  history-dependent, and `bevy_platform`'s `HashMap` has a fixed hasher:
   reproducible *hashing*, documented **arbitrary iteration order**. Sort
   deterministically before emitting or comparing anything. Determinism remains
-  the estate's responsibility, exactly as `docs/async-sdk-shape.md` §4 says.
+  the responsibility of this workspace, exactly as `docs/async-sdk-shape.md` §4
+  states.
 
-## 6. gpui — the honest verdict
+## 6. The gpui assessment
 
 **gpui is not an acceleration layer for non-UI work.** This is not a judgement
 call; it follows from what the crate exposes.
@@ -183,7 +187,7 @@ call; it follows from what the crate exposes.
   records `crate = "gpui"`, `tier = "boundary"`, `owner = "lgwks_deps"`,
   `capability = "ui.gpu-desktop"`, wired as the storefront feature `gpui`.
 - But the capability name is accurate. Layout is **taffy** (CPU, pinned `=0.9.0`
-  by gpui 0.2.2 — `SECURITY.md` records the `grid` advisory reached through it,
+  by gpui 0.2.2: `SECURITY.md` records the `grid` advisory reached through it,
   and why it is unreachable),
   text shaping is **cosmic-text** (CPU), element diffing is CPU, and the GPU
   surface is a `Scene` of paint primitives submitted through `blade-graphics`.
@@ -192,34 +196,35 @@ call; it follows from what the crate exposes.
   `test-support` enables wayland+x11. Adopting it headless drags in
   wayland/x11/blade/objc2/font-kit for zero speedup.
 
-So: gpui is the right dependency for *a bot console* — a real dashboard over a
-running bot — and the wrong one for making the bot faster. Saying otherwise would
-be selling a UI toolkit as a compute layer.
+So: gpui is the right dependency for *a bot console* (a real dashboard over a
+running bot) and the wrong one for making the bot faster. It is a UI toolkit,
+not a compute layer.
 
-**The salvageable part is the scheduler, not the GPU.** GPUI's `TestDispatcher`
-is the best determinism idea in the landscape: `TestSchedulerConfig { seed,
+**The reusable part is the scheduler, not the GPU.** GPUI's `TestDispatcher` is
+the strongest determinism design available in the ecosystem:
+`TestSchedulerConfig { seed,
 randomize_order: true, allow_parking: false }`, a virtual clock
 (`advance_clock`, `advance_clock_to_next_timer`, `run_until_parked`), and seeded
 interleaving so seeds *sweep* real schedules and replay failures exactly. That is
 strictly stronger than "single-threaded".
 
 **And it is not reachable as a dependency.** The `scheduler` crate is not
-published on crates.io — the crate of that name there is an unrelated 2016 Linux
-affinity binding — so zed's is available only as a path or git dependency on the
+published on crates.io (the crate of that name there is an unrelated 2016 Linux
+affinity binding), so zed's is available only as a path or git dependency on the
 monorepo.
 
 That leaves the scheduler decision in §9.
 
-## 7. The control plane — bors, and why Zuul is the better reference
+## 7. The control plane: bors and Zuul
 
 bors is worth studying because it is the canonical **dumb obedient bot**: a tiny
 legible state machine, a narrow command grammar, and no cleverness. Its lessons
 transfer directly, and they are all about durability rather than concurrency.
 
-**Adopt as invariants:**
+**Adopted as invariants:**
 
 1. **Derive queue membership; never store it.** bors's `Patch` has no "queued"
-   flag — "queued" is a *query* (`open AND no active-batch link`). A stored enum
+   flag: "queued" is a *query* (`open AND no active-batch link`). A stored enum
    is a second source of truth that drifts on crash. In `lgwks_bot` terms: a
    chain's readiness is a predicate over observed facts, not a field.
 2. **One idempotent reconciler; events only wake it.** The webhook and the timer
@@ -232,10 +237,10 @@ transfer directly, and they are all about durability rather than concurrency.
    GitHub rather than trusting local rows. Local state caches *intent*, never
    *truth*.
 5. **Retry is replay of recorded intent.** `bors retry` re-runs the stored
-   `(actor, command)` pair — it re-executes a recorded authorization rather than
+   `(actor, command)` pair: it re-executes a recorded authorization rather than
    re-deriving one. This is the same property `docs/async-sdk-shape.md` §4 calls
    journaling, arrived at from a different direction.
-6. **Authorize at the parse boundary, over the whole command list** — parse
+6. **Authorize at the parse boundary, over the whole command list**: parse
    first, reduce to one required level, authorize once, all-or-nothing. bors
    reduces `[:try, {:activate_by, ..}]` to a single `:reviewer` level before any
    effect. This is `Auth`/`GrantSet`, and the ordering (parse → reduce →
@@ -247,22 +252,22 @@ transfer directly, and they are all about durability rather than concurrency.
 **And one structural correction:** bors is a *degenerate case of Zuul*. Zuul adds
 declared pipelines with named managers (`independent` / `dependent` / `serial`),
 **windows as speculative rate limiting** with TCP-style auto-tuning, enumerated
-reporting outcomes, and cross-project `Depends-On`. If the estate ever grows past
-one queue, Zuul's pipeline model is the reference, not bors's single queue.
+reporting outcomes, and cross-project `Depends-On`. If this workspace ever grows
+past one queue, Zuul's pipeline model is the reference, not bors's single queue.
 
-**Do not copy:** batching. bors amortizes CI by testing several changes at once
+**Not copied: batching.** bors amortizes CI by testing several changes at once
 and pays for it with bisection on failure. A bot whose tick is cheap does not
 need that trade, and every batch is a place where a failure cannot be attributed.
 
-## 8. The data plane — the frontier
+## 8. The data plane: the frontier
 
 A bot's canonical workload is an observe→evaluate→execute loop over a set of
 sources, which is a crawler with an action attached. Four reference
 implementations were studied (spider-rs, Scrapy, Heritrix, Nutch) plus Mercator's
 1999 architecture, which is still the canonical shape.
 
-**Frontier structure.** Mercator's design — per-host queues under a global
-priority queue over hosts — is right, and for a reason worth stating: politeness
+**Frontier structure.** Mercator's design (per-host queues under a global
+priority queue over hosts) is right, and for a reason worth stating: politeness
 is a per-host property and priority is a global one, so one flat queue cannot
 express both. A bounded per-host queue under a global host priority queue also
 gives backpressure for free: a host whose queue is full stops being selected
@@ -272,10 +277,10 @@ rather than growing without limit.
 and Mercator both adapt; Mercator specifically uses priority decay plus
 weighted-random selection rather than a fixed re-crawl interval. Note a
 correction to the common summary of that paper: Mercator has **no
-interval-adaptation rule** — the adaptive criteria live in US patent 6,263,364,
+interval-adaptation rule**: the adaptive criteria live in US patent 6,263,364,
 not the paper. Do not cite the paper for behaviour it does not describe.
 
-**Determinism primitives worth stealing, none of which come from a crawler:**
+**Determinism primitives worth adopting, none of which come from a crawler:**
 
 - **Heritrix's comparator rule, stated plainly in `WorkQueue::compareTo`: *"at
   this point, the ordering is arbitrary, but still must be consistent/stable
@@ -283,10 +288,10 @@ not the paper. Do not cite the paper for behaviour it does not describe.
   cannot. This is the same rule as `docs/async-sdk-shape.md` §4's "deterministic
   event ordering at every collection that is iterated", arrived at independently.
 - **FoundationDB splits three RNG streams** — `deterministicRandom()`,
-  `nondeterministicRandom()`, and `debugRandom()` — so that a debug draw cannot
+  `nondeterministicRandom()`, and `debugRandom()`, so that a debug draw cannot
   shift the main stream. It uses `boost::mt19937_64` rather than `std::`
   distributions specifically because those differ between libstdc++ and libc++,
-  i.e. for cross-toolchain reproducibility of the stream. For this estate: a
+  i.e. for cross-toolchain reproducibility of the stream. For this workspace: a
   log line, a metric, or a `HashMap` iteration must never perturb the scheduling
   stream.
 - **Kafka's `read_committed` LSO** is the right shape for a replayed frontier: a
@@ -315,14 +320,14 @@ This is not matching a reference implementation. It is exceeding all four:
 
 | Crawler | Durability before fetch |
 |---|---|
-| Heritrix | `checkpointIntervalMinutes = -1` — **checkpointing is off by default**. The recovery journal writes through a 32 KiB `BufferedOutputStream` whose `writeLine` never flushes, so a hard kill loses the tail. `importRecoverFormat` catches `EOFException` with the comment *"expected in some uncleanly-closed recovery logs; ignore."* |
+| Heritrix | `checkpointIntervalMinutes = -1`: **checkpointing is off by default**. The recovery journal writes through a 32 KiB `BufferedOutputStream` whose `writeLine` never flushes, so a hard kill loses the tail. `importRecoverFormat` catches `EOFException` with the comment *"expected in some uncleanly-closed recovery logs; ignore."* |
 | Scrapy | `requests.seen` has **no `flush()` and no `fsync` anywhere**; `close()` only closes the handle. The OS page cache is the entire durability story. |
-| Nutch | `generate.update.crawldb` is `false` by default, so nothing is marked at generate time. Worse, on `fetcher.timelimit` expiry `Fetcher::emptyQueues()` **drops the remaining queue without writing it** — not even as failed statuses. |
+| Nutch | `generate.update.crawldb` is `false` by default, so nothing is marked at generate time. Worse, on `fetcher.timelimit` expiry `Fetcher::emptyQueues()` **drops the remaining queue without writing it**, not even as failed statuses. |
 | Mercator | Paper-level; no durable-frontier claim to evaluate. |
 
 Also worth copying from Heritrix: `Checkpoint.VALIDITY_STAMP_FILENAME = "valid"`.
 A validity stamp is what makes a **torn checkpoint detectable** rather than
-silently half-loaded — the failure mode `Bot::tick` would otherwise inherit.
+silently half-loaded, the failure mode `Bot::tick` would otherwise inherit.
 
 ### 8.2 Reconciling bors and the frontier
 
@@ -331,40 +336,40 @@ silently half-loaded — the failure mode `Bot::tick` would otherwise inherit.
 where the durable log lives.
 
 bors can write after the effect because its durable log **is the external
-system** — the merge and push to GitHub are themselves the record, so there is
+system**: the merge and push to GitHub are themselves the record, so there is
 nothing to write first. A crawler has no such external log; the frontier is the
 only record, so the intent must be durable before the effect.
 
 The unifying rule: **where an external system is the durable log, checkpoint
 after the effect and re-read truth from it. Where the local record is the only
-log, it needs a state machine — `Pending` then `Done` — and recovery re-drives
+log, it needs a state machine (`Pending` then `Done`) and recovery re-drives
 the ambiguous middle.** The failure to avoid is identical in both cases: a record
 that cannot distinguish "done" from "never started".
 
 ## 9. The open decision
 
-The ECS admission is **made** — `bevy_ecs`, `bevy_app`, `bevy_time`, and
+The ECS admission is **made**: `bevy_ecs`, `bevy_app`, `bevy_time`, and
 `bevy_state` are registered in `contract/APPROVED.toml` and `lgwks-deps check .`
 accepts them (`docs/bevy-admission.md`). Measured in this working tree rather
 than estimated: **60 packages** for `bevy-ecs`, 63 for `bevy-app`, 64 for
 `bevy-time`, 62 for `bevy-state`, with `bevy_reflect` **absent** from the
 compiled tree. Pinned `^0.19`; 0.20 is an RC and is not taken.
 
-**The scheduler remains open.** Two honest options, and the standing
-instruction — *if OSS code naturally does it, modify and improve it, don't
-rebuild* — favours the first:
+**The scheduler remains open.** Two options are available, and the standing
+instruction to modify and improve existing open-source code rather than rebuild
+it favours the first:
 
 - **VENDOR (ladder rung 7).** Take zed's `scheduler` crate as audited source into
-  `vendor/` and extend it for the estate's clock and RNG. The `vendor/` tree
+  `vendor/` and extend it for the clock and RNG needs of this workspace. The `vendor/` tree
   already exists (294 crates) and `lgwks-deps vendor` is the rung-7 tool. This
   gets the seeded-interleaving scheduler without taking gpui's UI closure.
 - **ELIMINATE, against the instruction.** Write the seeded scheduler as an
   `lgwks_std` module. Cheaper at the boundary, but it is rebuilding something
   that already exists and works.
 
-This is the one place where the "don't rebuild" instruction and the dependency
-doctrine point at different rungs, so it is a Director call rather than an
-agent's.
+This is the one place where the instruction to reuse existing open-source code
+and the dependency doctrine point at different rungs, so it requires
+project-owner sign-off.
 
 ## 10. Migration order
 
@@ -374,28 +379,28 @@ Each step must leave `cargo test --workspace --all-targets` green.
    --all-targets --locked` → 208 passed, 0 failed; clippy `-D warnings` clean;
    `cargo fmt --all -- --check` exit 0; `lgwks-deps check .` exit 0 with 27
    approvals; `lgwks-std-package-smoke.sh` passed.
-1. **The scheduler decision** from §9 — vendored zed `scheduler`, or an
-   `lgwks_std` module. **Still open, and deliberately not taken here.** It is a
-   Director call because the doctrine and the "don't rebuild" instruction point
-   at different rungs.
+1. **The scheduler decision** from §9: vendored zed `scheduler`, or an
+   `lgwks_std` module. **Still open, and deliberately not taken here.** It
+   requires project-owner sign-off because the doctrine and the instruction to
+   reuse existing open-source code point at different rungs.
 2. **A `Spec -> Schedule` executor.** ✅ Landed, and it *replaced* the old one
    rather than sitting beside it. `Bot` is the ECS bot: `SourceId`/`Revision`
    components, `Grants`/`Fired`/`TickError` resources, non-`Send` chain and value
    storage, the `observe` and `fire` exclusive systems, and bounded concurrent
-   polling retained from the previous executor. The interim state — two bots, one
-   behind a default-off `ecs` feature — was rejected as a candidate architecture
+   polling retained from the previous executor. The interim state (two bots, one
+   behind a default-off `ecs` feature) was rejected as a candidate architecture
    that nothing would exercise; see §12.
 
    **What is not done, stated plainly: the `from_spec` gap is still open.** The
    builder takes *verbs*, not a [`BotSpec`]. Materializing a `World` from wire
-   data needs a `domain_id -> constructor` registry — `"gh::pr_status"` has to
-   become a concrete `Observe` — and no such registry exists anywhere in the
-   estate. `experience/invariants/sdk.yaml`'s *"a validated BotSpec cannot be
+   data needs a `domain_id -> constructor` registry (`"gh::pr_status"` has to
+   become a concrete `Observe`) and no such registry exists anywhere in this
+   workspace. `experience/invariants/sdk.yaml`'s *"a validated BotSpec cannot be
    materialized into a runnable Bot through this SDK alone"* is therefore still
    true, on both substrates. Closing it is a separate piece of work, and it is
    the same missing registry the `Lambda`/`Workers` comparison arrived at from
    the other direction.
-3. **Build-time schedule validation** — ✅ landed with step 2, since it has
+3. **Build-time schedule validation**: ✅ landed with step 2, since it has
    nowhere else to live: `Schedule::initialize()` plus `ambiguity_detection:
    LogLevel::Error`, surfaced as `BotError` from `build()`, with a control test
    that the same two systems *ordered* do validate.
@@ -403,16 +408,16 @@ Each step must leave `cargo test --workspace --all-targets` green.
    virtual implementations.
 5. **Effects move to exclusive systems**, and the deferred path is removed so
    §3's silent-no-op failure cannot recur.
-6. **bors invariants land on the control plane** — derived readiness, one
+6. **bors invariants land on the control plane**: derived readiness, one
    reconciler, checkpoint-after-effect, replay of recorded intent.
 
 Steps 2–5 are additive; the current `lgwks_std::task` executor and `Bot::tick()`
-stay working throughout. Parallel seams, not demolition.
+stay working throughout. Each step is a seam rather than a replacement.
 
 ## 11. Running the substrate's tests
 
-`ecs` is default-off, so the workspace gate does not compile the module — a
-substrate whose tests never run is a substrate whose guarantees are claims:
+A substrate whose tests never run is a substrate whose guarantees are claims, so
+the tests run under the ordinary workspace gate:
 
 ```sh
 cargo test  --workspace --all-targets --locked
@@ -420,22 +425,22 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
 There is no feature flag. The substrate is how `Bot` executes, so the ordinary
-workspace gate compiles and runs its tests — four of them, one per guarantee.
+workspace gate compiles and runs its tests: four of them, one per guarantee.
 A default-off flag was tried first and rejected: it would have left the
 substrate unexercised, unowned, and free to rot.
 
-## 12. One path (Director, 2026-09-20)
+## 12. One path (Decision, 2026-09-20)
 
 The first landing made the substrate a **default-off feature**: `EcsBot` beside
 `Bot`, compiled only when a caller asked. That was corrected. A default-off
-parallel path is how work fails to carry forward — nothing exercises it, the gate
+parallel path is how work fails to carry forward: nothing exercises it, the gate
 never compiles it, and it rots into a second opinion nobody chose.
 
 What changed:
 
 - **The `ecs` feature is gone.** `lgwks_bot` depends on the storefront's
-  `bevy-ecs` unconditionally. The storefront keeps its features default-off — that
-  is its stated purpose — but a *consumer* states its opinion, and this crate's
+  `bevy-ecs` unconditionally. The storefront keeps its features default-off (that
+  is its stated purpose), but a *consumer* states its opinion, and this crate's
   opinion is that the ECS substrate is how a bot executes.
 - **The second builder is gone.** `EcsBot`, `EcsBuilder` and `EcsObserveBuilder`
   are now `Bot`, `BotBuilder` and `ObserveBuilder`, re-exported from a private
@@ -450,7 +455,7 @@ What changed:
     domain that models it, not on change detection.
 - **Bounded concurrent polling was restored, not dropped.** The first ECS
   `observe` polled sources one at a time, and `tick_polls_sources_concurrently`
-  caught it — a real regression the collapse introduced. Polls run in bounded
+  caught it, a real regression the collapse introduced. Polls run in bounded
   waves of `MAX_IN_FLIGHT_POLLS`, exactly as before; results are still collected
   in declaration order, so determinism is unaffected.
 

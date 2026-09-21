@@ -1,20 +1,20 @@
 # Async runtime parity
 
-What `lgwks_bot::rt` offers against the three Rust runtimes a consumer would
-otherwise reach for, measured against their current surfaces rather than
-against a feature list either of them advertises.
+This document compares the surface of `lgwks_bot::rt` against the third-party
+runtime crates a consumer would otherwise reach for, measured against their
+current exported surfaces rather than against advertised feature lists.
 
 Status: audited 2026-09-20 for the 0.4.0 release. Three gaps were found and
-closed; four remain open and are named in §3.
+closed; four remain open and are named in §4.
 
 ## 1. Method
 
 `lgwks_bot::rt` is a **facade over tokio**, so "parity with tokio" is the wrong
-frame — the engine *is* tokio, reached through the `lgwks_deps` storefront so
-that no other crate authors a `tokio` edge (`INV-DEP-EDGE-OWNED`). The question
-worth asking is which parts of tokio's surface the facade **exposes**, because a
-capability the facade does not re-export is one a consumer cannot use without
-breaking the single-entry rule.
+frame: the engine *is* tokio, reached through the `lgwks_deps` storefront so
+that no other crate authors a `tokio` edge. The question worth asking is which
+parts of tokio's surface the facade **exposes**, because a capability the facade
+does not re-export is one a consumer cannot use without breaking the
+single-entry rule.
 
 The audit therefore compared the exported surface, not the engines. `async-std`
 and `smol` are listed for shape: both are alternatives a consumer might pick
@@ -53,13 +53,13 @@ reason to leave.
 
 ## 3. The three that were closed, and why each mattered
 
-### Non-`Send` spawning — the crate's own thesis was unusable
+### Non-`Send` spawning: the crate's own thesis was unusable
 
 Every verb in `lgwks_bot` is deliberately **not** `Send`, so a domain may hold
 thread-local state. That is why `BoxFuture` is unconstrained and why the crate
 carries its one `#[allow(async_fn_in_trait)]`. But `rt::task::spawn` requires
 `F: Future + Send`, so there was no way to spawn a future with the property the
-crate is built around — the thesis held for `tick` and evaporated the moment a
+crate is built around. The thesis held for `tick` and evaporated the moment a
 consumer spawned anything.
 
 `LocalSet` and `spawn_local` are now exported, and
@@ -68,12 +68,12 @@ genuinely `!Send` future (`Rc<Cell<u8>>`) through it. Asserting the bound exists
 would not have proved anything; the test compiles only because the future is
 not `Send`.
 
-### `CancellationToken` — the estate's rule named a type that did not exist
+### `CancellationToken`: the supervision rule named a type that did not exist
 
-`AGENTS.md`: *"Every background task must be tracked in a `JoinSet` or
-supervisor and listen to a `CancellationToken`."* The `JoinSet` half shipped.
-The token was absent from the estate entirely, so the rule told a reader to use
-something they could not obtain — enforceable against the wrong practice,
+The supervision rule requires that every background task be tracked in a
+`JoinSet` or supervisor and listen to a `CancellationToken`. The `JoinSet` half
+shipped; the token was absent from the workspace entirely. A rule that names a
+type the caller cannot obtain is enforceable against the wrong practice and
 unenforceable in favour of the right one.
 
 It is written in-crate on `tokio::sync::watch` rather than admitted from
@@ -86,10 +86,10 @@ there is no window.
 The parent link points **up**. The first implementation linked down with `Weak`
 children, and `a_descendant_survives_its_intermediate_parent_being_dropped`
 caught it: dropping a mid-chain token orphaned its descendants, so a leaf held
-by a spawned task silently became uncancellable — the one failure a cancellation
+by a spawned task silently became uncancellable, the one failure a cancellation
 primitive must not have.
 
-### `rt::io` — the drivers could not be read from
+### `rt::io`: the drivers could not be read from
 
 Absent entirely: no `AsyncRead`/`AsyncWrite`, no `BufReader`, no `copy`. A
 consumer could open a socket or a pipe and still not read from it without naming
@@ -99,22 +99,23 @@ networking stack: `tokio-io` is now its own rung and `tokio-net` builds on it.
 
 ## 4. The four that remain open
 
-Stated rather than implied, because an agent that assumes one of these exists
-will spend a day looking for it.
+These are stated rather than left implied, because a capability assumed to
+exist costs a search that cannot succeed.
 
 1. **Virtual time.** `tokio::time::pause`/`advance` let a test drive timers
    without wall-clock waits. `rt::time` does not expose them, so a test of a
-   timed bot waits in real time. This is the one gap with a known estate path:
+   timed bot waits in real time. This is the one gap with a known path in this
+   workspace:
    `docs/bevy-admission.md` §5 already adopted `bevy_time` for exactly this, and
-   `Time<Virtual>` is the intended clock root — `docs/bot-on-ecs.md` §10 step 4.
+   `Time<Virtual>` is the intended clock root (`docs/bot-on-ecs.md` §10 step 4).
    Until then the gap is real.
 2. **`block_in_place`.** For CPU-bound work inside an async task on a
    multi-thread runtime. `spawn_blocking` covers the common case; this covers
    the case where the future cannot be `'static`.
 3. **`shutdown_background`.** `shutdown_timeout` exists; the non-waiting form
    does not.
-4. **Task introspection** (`task::id`, per-task metrics). Nothing in the estate
-   needs it yet.
+4. **Task introspection** (`task::id`, per-task metrics). No crate in this
+   workspace needs it yet.
 
 ## 5. Three deliberate divergences
 
@@ -124,7 +125,7 @@ will spend a day looking for it.
   Entry is `Runtime::block_on`.
 - **`rt::time::sleep` defers construction to first poll.** tokio's own `sleep`
   captures the reactor at construction and panics with *"there is no reactor
-  running"* when built outside a runtime — the most common footgun in the
+  running"* when built outside a runtime, the most common footgun in the
   library. The wrapper makes `sleep(d)` constructible anywhere, which is a
   divergence in behaviour and a strict improvement in ergonomics. `interval` is
   the exception, because it is a value rather than a future and must still be
@@ -134,16 +135,17 @@ will spend a day looking for it.
   `TaskTracker` tracks tasks and lets a caller wait for them, but it does not
   bound how many run at once, does not refuse when full, and carries no loop
   budget. Requiring a `Budget` before a loop can be written is a tighter
-  contract than any runtime here imposes, and that is the point: the estate's
-  rule is that no background task is untracked and no loop is unbounded, so the
+  contract than any runtime here imposes, and that is the point: the rule in
+  this workspace is that no background task is untracked and no loop is
+  unbounded, so the
   shipped API is one that cannot express either. A consumer who wants the looser
   model still has `rt::task::spawn` and a bare `JoinSet`.
 
 ## 6. What parity is not claimed
 
-Parity with tokio's *engine* is not the claim and would be meaningless — the
+Parity with tokio's *engine* is not the claim and would be meaningless. The
 engine is tokio. Parity with its *surface* is claimed for the matrix in §2 and
 only there. The facade is narrower on purpose: `rt::fs` runs on the blocking
 pool rather than a true async file API, and `rt::net` reaches the network
-directly rather than through the estate's HTTP egress policy. Both are stated in
-the module docs where a consumer will read them, not only here.
+directly rather than through the workspace's HTTP egress policy. Both are stated
+in the module docs, where a consumer will read them, and not only here.

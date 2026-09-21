@@ -1,15 +1,14 @@
-# lgwks_ast — the estate's code-observability lane
+# lgwks_ast
 
-Code tools across the estate need the same three things: decide a source
-file's language, select that language's tree-sitter grammar, and walk the
-resulting syntax tree safely. `keel-core`'s safety detectors and
-`code-world-model`'s graph extractor each built their own language enum,
-extension table, grammar mapping, and parse loop. That is one concept
-implemented twice; this crate owns it once.
+A multi-language AST front end for tools that read source code.
 
-The lane also owns the estate's shared typed-diagnostic derive, so a parser and
-its consumers report refusals through one `Display`/`source` implementation
-instead of each declaring `thiserror`.
+A code tool needs the same three things: identify a source file's language,
+select that language's tree-sitter grammar, and walk the resulting syntax tree
+safely. This crate provides all three, once, under explicit bounds.
+
+It also provides the shared typed-diagnostic derive, so a parser and its
+consumers report failures through one `Display`/`source` implementation rather
+than each declaring `thiserror`.
 
 ## Usage
 
@@ -35,8 +34,8 @@ Consumers do not depend on `ast-grep` directly; the grammar types
 
 ## Typed diagnostics
 
-`ParseError` is built with the estate's one `std::error::Error` derive, and an
-analyser derives its own diagnostics from the same stack:
+`ParseError` is built with this crate's diagnostic derive, and an analyser
+derives its own diagnostics from the same stack:
 
 ```rust
 extern crate lgwks_ast as thiserror;
@@ -58,21 +57,22 @@ needs.
 ## Grammar selection
 
 One cargo feature per grammar forwards to `ast-grep-language`. The default
-enables the seven languages the safety detectors parse; every other grammar
-ast-grep-language ships is its own opt-in feature, and `full` enables all 28:
+enables seven languages; every other grammar ast-grep-language ships is its own
+opt-in feature, and `full` enables all 28:
 
 ```toml
 [dependencies]
-lgwks_ast = { version = "0.2.0", features = ["lang-c", "lang-cpp", "lang-scala", "lang-kotlin", "lang-tsx"] }
+lgwks_ast = { version = "0.2.1", features = ["lang-c", "lang-cpp", "lang-scala", "lang-kotlin", "lang-tsx"] }
 # or everything: features = ["full"]
 ```
 
-**0.2.0 breaks one name.** `Language::C` is renamed `Language::CLang`. The
-workspace forbids `clippy::min_ident_chars` and `forbid` cannot be lowered from
-source, so an `#[allow]` on that variant is a hard E0453 rather than a
-suppression — the variant itself had to change. `Language::name()` still reports
-`"c"`, which is the stable identity findings match on, and the `lang-c` *feature*
-is unchanged, so only Rust code that names the variant is affected.
+**0.2.0 renames one variant.** `Language::C` is now `Language::CLang`. The
+workspace lint contract forbids single-character identifiers, and that lint is
+`forbid` rather than `deny`, so it cannot be lowered from source by an
+`#[allow]` on the variant. The variant itself had to change. `Language::name()`
+still reports `"c"`, which is the stable identity findings match on, and the
+`lang-c` *feature* is unchanged, so only Rust code that names the variant is
+affected.
 
 | Feature | Language | Extensions | Default |
 |---------|----------|------------|---------|
@@ -128,26 +128,27 @@ let parsed = try_parse_with("SELECT 1", &sql, sql.name()).expect("valid SQL");
 `TSLanguage` is re-exported, so a consumer adds only the grammar crate, never
 `ast-grep-core` directly. A grammar crate is a third-party edge like any
 other: register it in `contract/APPROVED.toml` (owner, capability, reason)
-before depending on it — `lgwks-deps check` refuses it otherwise.
+before depending on it; `lgwks-deps check` refuses it otherwise.
 
-A grammar the estate needs belongs in `ast-grep-language` upstream, following
-its [add-a-language guide](https://ast-grep.github.io/contributing/add-lang.html):
+A grammar that belongs upstream should be contributed to `ast-grep-language`
+itself, following its
+[add-a-language guide](https://ast-grep.github.io/contributing/add-lang.html):
 it must be popular (TIOBE / GitHub Octoverse), use a maintained grammar
 published on crates.io, and stay inside the budget that keeps ast-grep's zipped
 binary under 10 MB. Until it ships there, register it here with `CustomLang`;
-when it does, delete the registration and select the built-in. This crate never
-forks upstream's `SupportLang` tables — that is what keeps every addition
-liftable into a pull request.
+when it does, delete the registration and select the built-in. This crate does
+not fork upstream's `SupportLang` tables, so every addition remains submittable
+upstream as a pull request.
 
 ## Bounds
 
-- `MAX_SOURCE_BYTES` — 2 MiB per checked parse. This bounds the bytes handed
+- `MAX_SOURCE_BYTES`: 2 MiB per checked parse. This bounds the bytes handed
   to tree-sitter and keeps parse work linear in input.
-- `MAX_AST_NODES` — 2,000,000 nodes; the boundary walk is capped and stops
+- `MAX_AST_NODES`: 2,000,000 nodes; the boundary walk is capped and stops
   within one node of the limit, so refusal does not itself walk an unbounded
   tree. It is measured on the tree *after* tree-sitter builds it, so it bounds
   the validation walk, not the parser's own allocation.
-- `MAX_DETECT_BYTES` — 64 KiB per content-detection probe. `try_detect_content`
+- `MAX_DETECT_BYTES`: 64 KiB per content-detection probe. `try_detect_content`
   tries each caller-named candidate in full, so the probe is bounded well below
   `MAX_SOURCE_BYTES`; `detect` never parses at all.
 - `try_parse` refuses an `ERROR`/`MISSING` recovery node: a recoverable tree
