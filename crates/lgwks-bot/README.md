@@ -466,6 +466,14 @@ cancel drops a body that is still awaiting rather than waiting for it to finish.
 `Budget::Ongoing` is the unbounded case, and it is cancellation-bounded rather
 than free-running.
 
+A caller can tell how a task ended. Every task produces exactly one
+`TaskOutcome`, carrying the `TaskId` the supervisor assigned in spawn order, and
+`Stats` counts the four outcomes separately: `succeeded`, `cancelled`, `aborted`,
+`panicked`. `Stats::completed` is their sum — a resource count, not a success
+count — so a task that panicked before producing its result can never be read as
+one that finished. The report buffer is capped at the in-flight ceiling, and
+`Stats::reports_dropped` counts what a caller that never drains it missed.
+
 ```rust
 use lgwks_bot::rt::supervise::{Budget, Supervisor};
 
@@ -482,7 +490,12 @@ supervisor
 // Refuses rather than growing past the ceiling.
 assert!(supervisor.try_spawn(|_token| async {}).is_ok());
 
-supervisor.shutdown().await; // cancel, drain, join
+// Cancel, drain, join — and hand back the evidence.
+let report = supervisor.shutdown().await;
+assert_eq!(report.stats().spawned, 2);
+assert_eq!(report.stats().completed, 2);
+// One terminal outcome per task, each naming the task it is about.
+assert_eq!(report.outcomes().len(), 2);
 # });
 # Ok::<(), std::io::Error>(())
 ```

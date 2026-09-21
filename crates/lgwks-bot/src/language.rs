@@ -67,7 +67,10 @@ use std::collections::BTreeMap;
 
 use lgwks_std::similarity::{EditDistance, Jaccard, Similarity};
 
-use crate::session::{AnswerDomain, MatchTier, Question, Resolution, decode_integer};
+use crate::session::{
+    AnswerDomain, MatchTier, PolicyVersion, Provenance, Question, Resolution, Verdict,
+    decode_integer,
+};
 
 /// The longest normalized input the shipped resolver will compare.
 pub const MAX_UTTERANCE_CHARS: usize = 512;
@@ -83,6 +86,9 @@ pub const MATCH_THRESHOLD: f64 = 0.55;
 
 /// The lead the best candidate must hold over the runner-up *in its own tier*.
 pub const MATCH_MARGIN: f64 = 0.08;
+
+/// The tier label this module's policy version is declared under.
+const POLICY_LABEL: &str = "lexicon";
 
 /// Folds text to a comparable form: lower case, ASCII, single-spaced.
 ///
@@ -605,8 +611,8 @@ impl LanguageResolver {
     /// Forgets one question's binding for a phrase, returning the row removed.
     ///
     /// Returns the removed [`Alias`] rather than a `bool` so a caller that
-    /// revokes a confirmation can record what was revoked; `None` means there
-    /// was nothing to revoke.
+    /// revokes a confirmation — deleting a row from the alias table — can
+    /// record what was revoked; `None` means there was nothing to revoke.
     pub fn forget(&mut self, question: &str, utterance: &str) -> Option<Alias> {
         let spoken = normalize(utterance);
         let removed = self
@@ -696,6 +702,33 @@ impl LanguageResolver {
             None => verdict,
         }
     }
+
+    /// Returns the version of the lexicon policy in force.
+    ///
+    /// Everything that can change which candidate wins is in the digest: the
+    /// two tier weights, the acceptance threshold, the required lead, and the
+    /// input length past which the distance metric stops scoring at all. A
+    /// parameter left out here would be a change no receipt could see, which is
+    /// the same omission at a smaller scale as the one this field exists to
+    /// remove.
+    #[must_use]
+    pub fn policy_version(&self) -> PolicyVersion {
+        // The input bound is a `usize`, converted with `try_from` rather than a
+        // truncating `as` because this workspace forbids the cast; the length
+        // is a compile-time 512, so the fallback is unreachable and exists only
+        // so the conversion has no panic path.
+        let input_bound = f64::from(u32::try_from(MAX_UTTERANCE_CHARS).unwrap_or(u32::MAX));
+        PolicyVersion::new(
+            POLICY_LABEL,
+            &[
+                MATCH_THRESHOLD,
+                MATCH_MARGIN,
+                TOKEN_WEIGHT,
+                DISTANCE_WEIGHT,
+                input_bound,
+            ],
+        )
+    }
 }
 
 impl Default for LanguageResolver {
@@ -705,8 +738,11 @@ impl Default for LanguageResolver {
 }
 
 impl crate::session::Resolver for LanguageResolver {
-    fn resolve(&self, utterance: &str, question: &Question<'_>) -> Resolution {
-        self.decide_for(utterance, question)
+    fn resolve(&self, utterance: &str, question: &Question<'_>) -> Verdict {
+        Verdict::new(
+            self.decide_for(utterance, question),
+            Provenance::without_model(self.policy_version()),
+        )
     }
 }
 
@@ -744,16 +780,16 @@ mod tests {
     /// Returns the option and tier a verdict selected, or `None` for any other
     /// verdict — so a test can assert identity and tier in one comparison
     /// without a `panic!`, which this workspace forbids.
-    fn selected(verdict: &Resolution) -> Option<(usize, MatchTier)> {
-        match *verdict {
+    fn selected(verdict: &Verdict) -> Option<(usize, MatchTier)> {
+        match *verdict.resolution() {
             Resolution::Resolved { index, tier, .. } => Some((index, tier)),
             _ => None,
         }
     }
 
     /// Returns the tied options and the tier they tied in, or `None`.
-    fn tied(verdict: &Resolution) -> Option<(Vec<usize>, MatchTier)> {
-        match *verdict {
+    fn tied(verdict: &Verdict) -> Option<(Vec<usize>, MatchTier)> {
+        match *verdict.resolution() {
             Resolution::Ambiguous { ref tied, tier, .. } => Some((tied.clone(), tier)),
             _ => None,
         }
@@ -834,7 +870,9 @@ mod tests {
 
     #[test]
     fn an_exact_normalized_match_resolves_at_the_exact_tier() {
-        let resolution = LanguageResolver::new().resolve("  yes, CONTINUE ", &ask(&options()));
+        let resolution = LanguageResolver::new()
+            .resolve("  yes, CONTINUE ", &ask(&options()))
+            .into_resolution();
         // The other two options only ever reach the fuzzy tier, and `score_all`
         // reduces the field to the winning tier before `decide` measures
         // anything, so the rival field this winner is measured against is empty
@@ -863,7 +901,9 @@ mod tests {
     #[test]
     fn a_spelling_variation_resolves_at_the_phonetic_tier() {
         let choices = vec![String::from("Smyth"), String::from("Marcus")];
-        let resolution = LanguageResolver::new().resolve("Smith", &ask(&choices));
+        let resolution = LanguageResolver::new()
+            .resolve("Smith", &ask(&choices))
+            .into_resolution();
         assert_eq!(
             resolution,
             Resolution::Resolved {
@@ -877,7 +917,9 @@ mod tests {
 
     #[test]
     fn an_unrecognized_answer_is_absent() {
-        let resolution = LanguageResolver::new().resolve("maybe later", &ask(&options()));
+        let resolution = LanguageResolver::new()
+            .resolve("maybe later", &ask(&options()))
+            .into_resolution();
         assert!(
             matches!(resolution, Resolution::Absent { .. }),
             "expected Absent, got {resolution:?}"
@@ -892,11 +934,11 @@ mod tests {
             String::from("Accept the offer"),
             String::from("Accept the order"),
         ];
-        let resolution = LanguageResolver::new().resolve("accept the", &ask(&choices));
+        let verdict = LanguageResolver::new().resolve("accept the", &ask(&choices));
         assert_eq!(
-            tied(&resolution),
+            tied(&verdict),
             Some((vec![0, 1], MatchTier::Phonetic)),
-            "both options must stay in play, and the tie names its tier: {resolution:?}"
+            "both options must stay in play, and the tie names its tier: {verdict:?}"
         );
     }
 
@@ -929,7 +971,9 @@ mod tests {
         assert_eq!(resolver.learned(), 1);
 
         assert_eq!(
-            resolver.resolve("The usual!", &ask(&options())),
+            resolver
+                .resolve("The usual!", &ask(&options()))
+                .into_resolution(),
             Resolution::Resolved {
                 index: 2,
                 tier: MatchTier::Exact,
@@ -952,12 +996,12 @@ mod tests {
                 .as_ref()
                 .map(Alias::option),
             Some("No, go back"),
-            "forgetting returns the row it revoked"
+            "forgetting a learned alias returns the row it revoked"
         );
         assert_eq!(
             resolver.forget("ask", "the usual"),
             None,
-            "forgetting twice revokes nothing"
+            "forgetting a learned alias twice revokes nothing"
         );
         assert_eq!(resolver.learned(), 0);
     }
@@ -970,7 +1014,9 @@ mod tests {
             "Speak to a person",
         )]);
         assert_eq!(
-            resolver.resolve("the usual", &ask(&options())),
+            resolver
+                .resolve("the usual", &ask(&options()))
+                .into_resolution(),
             Resolution::Resolved {
                 index: 2,
                 tier: MatchTier::Exact,
@@ -1033,9 +1079,9 @@ mod tests {
         );
         assert!(
             matches!(
-                elsewhere,
+                elsewhere.resolution(),
                 Resolution::Absent { best_score }
-                    if best_score > 0.0 && best_score < MATCH_THRESHOLD
+                    if *best_score > 0.0 && *best_score < MATCH_THRESHOLD
             ),
             "the phrase is simply unrecognized there — measured, and nowhere near \
              the threshold — not quietly bound to row 0: {elsewhere:?}"
@@ -1054,15 +1100,15 @@ mod tests {
         let choices = vec![String::from("Delete account"), String::from("Keep account")];
         let verdict = resolver.resolve("the usual", &ask(&choices));
         assert_eq!(
-            verdict,
-            Resolution::StaleAlias {
+            verdict.resolution(),
+            &Resolution::StaleAlias {
                 question: String::from("ask"),
                 option: String::from("Repeat last order"),
             },
             "the binding names the option that went away, not the one at its old index"
         );
         assert!(
-            !matches!(verdict, Resolution::Resolved { .. }),
+            !matches!(verdict.resolution(), Resolution::Resolved { .. }),
             "a withdrawn confirmation must never select an option"
         );
     }
@@ -1172,7 +1218,9 @@ mod tests {
         // `EditDistance` refuses an over-limit input and scores it 0.0 rather
         // than allocating a quadratic table, so a hostile input degrades to the
         // token tier instead of hanging. The bound is the contract.
-        let resolution = LanguageResolver::new().resolve(&long, &ask(&options()));
+        let resolution = LanguageResolver::new()
+            .resolve(&long, &ask(&options()))
+            .into_resolution();
         assert!(
             matches!(
                 resolution,
@@ -1185,7 +1233,9 @@ mod tests {
     #[test]
     fn an_empty_option_list_is_absent_not_a_panic() {
         assert_eq!(
-            LanguageResolver::new().resolve("yes", &ask(&[])),
+            LanguageResolver::new()
+                .resolve("yes", &ask(&[]))
+                .into_resolution(),
             Resolution::Absent { best_score: 0.0 }
         );
     }
@@ -1200,12 +1250,12 @@ mod tests {
         let verdict = LanguageResolver::new().resolve(IDENTICAL, &ask(&alone));
         assert!(
             matches!(
-                verdict,
+                verdict.resolution(),
                 Resolution::Resolved {
                     tier: MatchTier::Fuzzy,
                     score,
                     ..
-                } if score > 0.9
+                } if *score > 0.9
             ),
             "the fuzzy competitor must score above the phonetic tier's 0.9: {verdict:?}"
         );
@@ -1409,7 +1459,7 @@ mod tests {
 
         for utterance in ["-5", "five", "5.0", "9223372036854775808", ""] {
             assert_eq!(
-                resolver.resolve(utterance, &question),
+                resolver.resolve(utterance, &question).into_resolution(),
                 Resolution::Absent { best_score: 0.0 },
                 "{utterance:?} is not one of the offered values and no lexical, \
                  phonetic or fuzzy tier may turn it into one that is"
@@ -1443,7 +1493,7 @@ mod tests {
         );
         let options = amounts(&["5", "10"]);
         assert_eq!(
-            resolver.resolve("-5", &numeric(&options)),
+            resolver.resolve("-5", &numeric(&options)).into_resolution(),
             Resolution::Absent { best_score: 0.0 },
             "the taught phrase must not reach a question read as values"
         );
@@ -1653,9 +1703,9 @@ mod tests {
         let resolution = LanguageResolver::new().resolve("yes", &ask(&choices));
         assert!(
             matches!(
-                resolution,
+                resolution.resolution(),
                 Resolution::Absent { best_score }
-                    if best_score > 0.0 && best_score < MATCH_THRESHOLD
+                    if *best_score > 0.0 && *best_score < MATCH_THRESHOLD
             ),
             "expected Absent at the best measured score below the threshold, got {resolution:?}"
         );
