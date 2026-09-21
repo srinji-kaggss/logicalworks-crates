@@ -41,11 +41,12 @@ terms. `lgwks_bot` is offered under two licences, including a commercial one,
 and offering a work under two licences requires the licensor to hold sufficient
 rights in every contribution to it.
 
-So before a non-trivial contribution to `lgwks_bot` is merged, a signed
-contributor licence agreement must be in place. Until one exists, such
-contributions are not merged — the reason is in
-[`LICENSING.md`](LICENSING.md), not a judgement about the patch. Contributions to
-the other three crates are unaffected.
+**`lgwks_bot` is therefore closed to outside contributions.** A signed
+contributor licence agreement would have to be in place before one could be
+merged, none has been selected, and choosing one is deferred — so a patch sent
+today has no path to merge and is refused on arrival rather than parked. The
+reason is in [`LICENSING.md`](LICENSING.md), not a judgement about the patch.
+Contributions to the other three crates are unaffected and welcome.
 
 ## Standards
 
