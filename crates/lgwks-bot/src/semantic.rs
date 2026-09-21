@@ -112,7 +112,12 @@ pub trait Embedder {
     /// detail where it can be found.
     type Error: std::error::Error + 'static;
 
-    /// Returns the identity recorded with every decision this embedder informs.
+    /// Returns the identity that travels with every decision this embedder
+    /// informs.
+    ///
+    /// Called once per decision by [`SemanticResolver::resolve`], which puts the
+    /// result on the [`Verdict`] it returns, so the identity reaches the caller
+    /// and the decision receipt without the caller holding this embedder.
     fn identity(&self) -> &EmbedderIdentity;
 
     /// Embeds one text.
@@ -414,7 +419,14 @@ impl<E: Embedder> SemanticResolver<E> {
         }
     }
 
-    /// Returns the identity recorded with every decision this resolver informs.
+    /// Returns the identity of the model this resolver was built around.
+    ///
+    /// A property of the resolver, not a record of anything it decided: the
+    /// identity of the model behind a *particular* decision is on that
+    /// decision's [`Verdict`], because only the verdict is reachable from a
+    /// caller that holds a `Box<dyn Resolver>`. Use this to inspect what a
+    /// resolver was constructed with; use the verdict — or the decision receipt
+    /// it reaches — to attribute a decision.
     #[must_use]
     pub fn embedder_identity(&self) -> &EmbedderIdentity {
         self.embedder.identity()

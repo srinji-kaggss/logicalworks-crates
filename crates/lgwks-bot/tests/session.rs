@@ -1375,3 +1375,106 @@ fn a_receipt_is_self_describing_when_exported() -> TestResult {
     );
     Ok(())
 }
+
+/// Runs `one_question_flow` for one scripted verdict and returns the session
+/// plus the receipt it recorded.
+fn receipt_for_verdict(
+    resolution: Resolution,
+) -> Result<(Session, DecisionReceipt), Box<dyn std::error::Error>> {
+    let journal = TestJournal::accepting(ReceiptAcceptance::InMemory);
+    let mut session = Session::with_components(
+        "outcomes",
+        one_question_flow()?,
+        FixedResolver(resolution),
+        journal,
+    )?;
+    session.answer("yes")?;
+    let receipt = session
+        .decisions()
+        .first()
+        .map(|entry| entry.receipt().clone())
+        .ok_or_else(|| String::from("the decision recorded no receipt"))?;
+    Ok((session, receipt))
+}
+
+#[test]
+fn the_four_verdicts_are_four_distinguishable_receipts() -> TestResult {
+    let (resolved_session, resolved) = receipt_for_verdict(Resolution::Resolved {
+        index: 0,
+        tier: MatchTier::Fuzzy,
+        score: 0.81,
+        lead: 0.22,
+    })?;
+    let (_, ambiguous) = receipt_for_verdict(Resolution::Ambiguous {
+        tied: vec![0, 1],
+        score: 0.6,
+    })?;
+    let (_, absent) = receipt_for_verdict(Resolution::Absent { best_score: 0.1 })?;
+    let (_, degraded) = receipt_for_verdict(Resolution::Degraded {
+        reason: DegradedReason::EmbedderUnavailable,
+    })?;
+
+    // The verdict is carried verbatim: the tier, the score and the lead survive,
+    // not only the index the session needed.
+    assert_eq!(
+        resolved.resolution(),
+        &Resolution::Resolved {
+            index: 0,
+            tier: MatchTier::Fuzzy,
+            score: 0.81,
+            lead: 0.22,
+        },
+        "a record holding the index alone cannot say what produced it"
+    );
+    assert_eq!(
+        absent.resolution(),
+        &Resolution::Absent { best_score: 0.1 },
+        "the best score observed is kept"
+    );
+    assert_eq!(
+        degraded.resolution(),
+        &Resolution::Degraded {
+            reason: DegradedReason::EmbedderUnavailable,
+        },
+        "and a degraded verdict carries no score at all"
+    );
+
+    // Four verdicts, four different records. "Nothing was close" and "nothing
+    // was compared" are the two a two-valued verdict renders identically, and
+    // they need different repairs.
+    assert_ne!(
+        absent.resolution(),
+        degraded.resolution(),
+        "incomplete matching and an unavailable dependency are different records"
+    );
+    assert_ne!(resolved.resolution(), ambiguous.resolution());
+    assert_ne!(ambiguous.resolution(), absent.resolution());
+
+    // Only the resolved verdict selected a route, and what the receipt says it
+    // selected is what the session actually stored.
+    assert_eq!(resolved.selected(), Some("yes"), "the chosen option's text");
+    assert_eq!(resolved.route(), Some("done"), "the node it routed to");
+    assert_eq!(
+        resolved_session.scope().get("choice"),
+        Some(&Value::Choice(String::from("yes"))),
+        "the receipt's selection agrees with the value the session stored"
+    );
+    assert_eq!(
+        resolved_session.terminal(),
+        Some(&Terminal::Completed),
+        "and with where the session ended up"
+    );
+    for (label, receipt) in [
+        ("ambiguous", &ambiguous),
+        ("absent", &absent),
+        ("degraded", &degraded),
+    ] {
+        assert_eq!(
+            receipt.selected(),
+            None,
+            "a {label} verdict selected nothing, and says so by absence"
+        );
+        assert_eq!(receipt.route(), None, "and routed nowhere");
+    }
+    Ok(())
+}
