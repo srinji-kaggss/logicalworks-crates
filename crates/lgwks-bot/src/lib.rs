@@ -101,6 +101,14 @@ pub mod domain {
 mod ecs;
 /// Typed bot errors.
 pub mod error;
+/// Politeness and admission: whether a host may be contacted now, and if not,
+/// what the scheduler does instead.
+///
+/// A verdict, not a delay. The gate reports one of three physical actions, and
+/// the reasons behind them are typed state machines rather than more arms — see
+/// the module documentation for why that is the difference between a schedule
+/// that replays and an execution token that became an audit log.
+pub mod frontier;
 /// Grant sets: build-time admission and per-tick proof minting.
 pub mod gate;
 /// The interface model: recognizing the element a step names.

@@ -464,7 +464,7 @@ exhausting it is a typed terminal outcome, not a silent stop.
 
 ## 6. Sequence
 
-Each step lands green and independently. Steps 1–3 have landed, as has the
+Each step lands green and independently. Steps 1–3 and 6 have landed, as has the
 first half of step 5; step 4 is unblocked now.
 
 1. **The interface model.** ✅ Landed in this change: `interface.rs` —
@@ -490,11 +490,49 @@ first half of step 5; step 4 is unblocked now.
    run that produced some but not all of its output is distinguishable from one
    that produced none. That last is also the described platform's
    `completed | partial | failed` triage, and it is the same invariant again.
-6. **The politeness frontier.** Adaptive per-host delay, bounded per-host
-   concurrency, and the three-way admission verdict, all under `Time<Virtual>`
-   (§5.3). This is the piece that makes a crawl complete, and it is the highest
-   value item on this list that has not landed. `docs/bot-on-ecs.md` §8 already
-   specifies it; what is missing is the implementation.
+6. **The politeness frontier.** ✅ Landed in this change: `frontier.rs` —
+   `ConstraintKey`, `Resolved`, `RulesState`, the three-armed `Admission`, a
+   validated `PolitenessPolicy`, and the `Frontier` that admits against every
+   constraint a request shares. Three of this document's own commitments were
+   revised while implementing it, and each revision is a finding rather than a
+   preference:
+
+   - **The verdict is three-armed, not four, and §5.3's three are right.** The
+     first draft promoted each cause to its own arm. That is wrong for a reason
+     the cause-list makes obvious once written out: upstream failure mechanics
+     are unbounded — a DNS `SERVFAIL`, a TLS timeout, and a redirect loop on
+     `/robots.txt` are all *we could not look*, and none changes what the
+     scheduler does. The epistemics belongs in `RulesState` and `Resolved`,
+     which are explicit state machines, and the verdict reports only the
+     operational result. The property that makes that safe, and the bug it
+     avoids: **nothing provisional may be spelled `Reject`**. A terminal drop and
+     a re-queue are different actions, and a consumer that must inspect a payload
+     to learn which one it holds has no verdict.
+   - **RFC 9309 supplies a third arrival of the invariant, and RFC 8020 a
+     fourth.** *No rules were retrieved* has two opposite answers decided by
+     why: §2.3.1.3's 4xx means unavailable and "the crawler MAY access any
+     resources", while §2.3.1.4's 5xx means unreachable and the crawler "MUST
+     assume complete disallow" — and only *until a fresh, valid file is
+     obtained*, which is why `Unreachable` carries an instant and expires.
+     Resolution splits the same way: `NXDOMAIN` is authoritative and rejects
+     (RFC 8020), while `SERVFAIL` and timeouts are not and defer.
+   - **Politeness is keyed on infrastructure, not hostnames, and the delay was
+     the wrong control variable.** A per-host limit is blind to what a host is:
+     two hundred Cloudflare-fronted domains are two hundred "independent" polite
+     queues that are one reverse proxy seeing two hundred requests a second from
+     one egress — a Layer 7 flood with a polite-looking config. So a request is
+     admitted only when every constraint it shares admits. And the controlled
+     quantity is an **integer concurrency window**, not a delay derived from
+     latency: Scrapy's `AutoThrottle` makes `target_concurrency` a divisor rather
+     than a bound, holds instead of backing off on a non-200, never reads
+     `Retry-After`, and reads latency as load when a CDN edge cache answering
+     fast makes it *speed up* under origin strain.
+
+   Not yet here, and named rather than implied: the *drivers* that fetch rules
+   and resolve names — this module models both states and records the
+   observations, but nothing performs them — and §8.1's durable `Pending`/`Done`
+   frontier, whose two-phase mark matters as soon as a run can be killed
+   mid-flight.
 7. **Declared identity**, wired as a flow property and recorded per run (§5.2).
 8. **The `bot.evade` capability**, with the seeded, recorded draw and the grant
    log (§5.4, §5.5). Deliberately after 6 and 7, so the cheap remedies are the
