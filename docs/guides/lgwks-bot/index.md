@@ -26,7 +26,7 @@ each tick and runs the action on the ticks where the polled value moved. A
 condition that stays true does not re-fire, which is the difference between this
 and a timer that re-evaluates a predicate every interval.
 
-`Bot` is not a separate type with a separate implementation. `spec.rs:192`
+`Bot` is not a separate type with a separate implementation. `spec.rs:200`
 re-exports the ECS bot under the shorter name:
 
 ```rust
@@ -40,10 +40,10 @@ There is one execution path. `crates/lgwks-bot/Cargo.toml` states that
 "would mean nothing exercises it, the workspace gate never compiles it, and it
 rots into a second opinion nobody chose."
 
-`Bot::tick` is the synchronous adapter (`crates/lgwks-bot/src/ecs.rs:630`): it
+`Bot::tick` is the synchronous adapter (`crates/lgwks-bot/src/ecs.rs:1490`): it
 drives the non-`Send` verb futures on a thread-parking executor, so there is
 nothing to await. `Bot::tick_async` is the same tick awaited on the caller's
-executor (`crates/lgwks-bot/src/ecs.rs:561`), and it is the one to call from
+executor (`crates/lgwks-bot/src/ecs.rs:1408`), and it is the one to call from
 inside a runtime — `tick` refuses there with `BotError::TickInsideRuntime`
 rather than park the thread that owns the reactor. Do not write
 `bot.tick().await`; that is `tick` returning `usize`, then a `usize` that is not
@@ -100,7 +100,7 @@ you to discover.
 - **No revocable authority.** `GrantSet` has no `revoke`, and a built bot holds
   a clone of the set it was admitted with. See [authority](authority.md).
 - **No spec materializer.** `BotSpec` validates a JSON document. There is no
-  `Bot::from_spec`; you build through the builder chain, and `spec.rs:311`
+  `Bot::from_spec`; you build through the builder chain, and `spec.rs:320`
   validates shape only.
 - **No `#[tokio::main]` equivalent.** Entry to the async surface is
   `Runtime::block_on`.

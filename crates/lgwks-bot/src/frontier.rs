@@ -14,7 +14,7 @@
 //!
 //! | arm | the scheduler's action |
 //! |---|---|
-//! | [`Admission::Admit`] | dispatch now |
+//! | [`Admission::Admit`] | dispatch now, holding the permit that reserved the slots |
 //! | [`Admission::Defer`] | keep the item alive, re-poll at `resume_at` |
 //! | [`Admission::Reject`] | drop the item permanently |
 //!
@@ -42,6 +42,40 @@
 //! and a consumer that has to inspect a payload to learn which one it is
 //! holding has no verdict at all.
 //!
+//! # The admission carries its reservation, and the permit is the only key
+//!
+//! An admission used to be a bare unit, and the caller released it by naming the
+//! host: `release("a.example")`. That is a name, not a reservation. Resolution
+//! is an observation that arrives *during* a run — that is what keeps an open
+//! crawl open — so by the time a request finished, `a.example` could point at
+//! different infrastructure than it did when the request was admitted. Releasing
+//! by name then recomputed the host's constraints from the *new* topology: it
+//! returned a slot against an origin this request never used and leaked the one
+//! it did, and the leak is invisible because saturating subtraction of zero
+//! looks exactly like a correct release.
+//!
+//! So [`Admission::Admit`] carries an [`InFlightPermit`]: an opaque, non-
+//! clonable record of the exact constraint keys reserved, the host as spelled
+//! at admission time, and the origin that host belonged to *then*.
+//! [`Frontier::complete`] consumes it, and [`Frontier::observe_retry_after`]
+//! borrows it, so a response can only be attributed to the request that earned
+//! it. A permit that is dropped without completion leaves its slots held, which
+//! is deliberate: the handle going out of scope is not evidence that the network
+//! request stopped, so the conservative direction is to keep holding.
+//!
+//! # One decision, two callers
+//!
+//! [`Frontier::next_admissible`] and [`Frontier::admit`] are two questions about
+//! the same state — *who is next* and *may I dispatch this one* — and they must
+//! not be able to disagree. They are one function here:
+//! `Frontier::decide`, which takes `&self` and returns a `Verdict` with no
+//! side effect at all. Selection returns a host only when that function says
+//! `Verdict::Admit`; reservation reserves only when it says the same, and
+//! re-derives the keys itself. The alternative that shipped — a selector that
+//! reimplemented the predicate by hand — omitted the rules check, so a
+//! permanently disallowed lexicographically-first host was selected on every
+//! turn of the loop and starved every permitted host behind it.
+//!
 //! # Three arrivals of one invariant
 //!
 //! RFC 9309 gives the same observable — "no rules were retrieved" — two
@@ -60,6 +94,14 @@
 //! And [`RulesState::NotFetched`] is a third: *we have not tried* is not *we
 //! tried and failed*, which is why the failure arms carry an instant and this
 //! one does not.
+//!
+//! That section's expiry is time-driven, and a time-driven transition is the
+//! easiest place for two predicates to drift. It is computed in exactly one
+//! place — `RulesState::effective` — and *recorded* in exactly one place —
+//! `Frontier::promote_rules`, when a reservation acts on the verdict that
+//! computed it. The selector reads the same computation, so a host whose grace
+//! has expired is selectable at the same instant the gate would admit it, with
+//! no independently maintained approximation on either side.
 //!
 //! # Politeness is keyed on infrastructure, not on hostnames
 //!
@@ -127,6 +169,7 @@
 //! [`Resolved::Failed`]: crate::frontier::Resolved::Failed
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// A key that a politeness limit is enforced against.
@@ -233,6 +276,24 @@ pub enum RulesState {
     },
 }
 
+impl RulesState {
+    /// This state as it stands at `at`, with RFC 9309 §2.3.1.4's expiry applied.
+    ///
+    /// Side-effect free, and the single definition of the time-driven part of
+    /// the rules state machine: `Frontier::decide` reads it to form a verdict
+    /// and `Frontier::promote_rules` writes it down when a reservation acts on
+    /// that verdict. Two copies of this rule — one for the selector and one for
+    /// the gate — is how a host becomes selectable some finite time before it
+    /// becomes admissible.
+    #[must_use]
+    fn effective(&self, at: Duration, grace: Duration) -> Self {
+        match *self {
+            Self::Unreachable { since } if at.saturating_sub(since) >= grace => Self::NoRules,
+            ref unchanged => unchanged.clone(),
+        }
+    }
+}
+
 /// Why a request was held rather than dispatched or dropped.
 ///
 /// A closed enum rather than a string, so a caller branches on a cause the
@@ -259,6 +320,26 @@ pub enum DeferralKind {
     ResolutionFailed,
 }
 
+impl DeferralKind {
+    /// Whether this deferral is work the run can do rather than a wait.
+    ///
+    /// The distinction is the scheduler's: a prerequisite is scheduled now — a
+    /// name to resolve, a rules file to fetch — while a wait is a permission to
+    /// touch nothing until something else finishes. Kept here rather than left
+    /// to the caller so that adding a deferral kind is a compile error at one
+    /// exhaustive match instead of a silently-misclassified host.
+    #[must_use]
+    pub const fn needs_prerequisite(&self) -> bool {
+        match *self {
+            Self::OriginUnmapped
+            | Self::ResolutionFailed
+            | Self::RulesNotFetched
+            | Self::OriginPolicyUnreachable => true,
+            Self::RetryAfter | Self::RateLimited => false,
+        }
+    }
+}
+
 /// Why a request was dropped for good.
 ///
 /// Terminal by construction: every arm means the item is dead. Nothing
@@ -274,17 +355,32 @@ pub enum RejectKind {
     },
     /// The name does not exist. RFC 8020 makes `NXDOMAIN` authoritative.
     DoesNotExist,
+    /// The frontier can no longer mint a permit identity, so nothing further can
+    /// be admitted.
+    ///
+    /// Unreachable in any real run: an identity is a `u64` and a frontier would
+    /// have to take 2^64 reservations — one per nanosecond for 584 years — to
+    /// arrive here. It is modelled rather than saturated because a reused
+    /// identity would release a slot belonging to a different request, which is
+    /// the class of mistake this module's permit ledger exists to make
+    /// unrepresentable.
+    Exhausted,
 }
 
 /// What the scheduler should do with a request.
 ///
 /// Three arms, each a distinct physical action, and no fourth. See the module
 /// documentation for why the reasons are typed payloads rather than arms.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Admission {
-    /// Dispatch now.
-    Admit,
+    /// Dispatch now, and complete the permit exactly once when the request
+    /// leaves flight.
+    ///
+    /// The payload is not decoration. It is the only thing
+    /// [`Frontier::complete`] accepts, which is what stops a release from being
+    /// attributed to whatever the host's name resolves to later.
+    Admit(InFlightPermit),
     /// Keep the item and re-poll at `resume_at`.
     ///
     /// `resume_at` equal to the instant passed in means *no instant is
@@ -310,6 +406,69 @@ pub enum Admission {
         kind: RejectKind,
     },
 }
+
+/// What a completed request produced.
+///
+/// Three arms rather than a `cache_hit` boolean beside a success flag, because
+/// the third is not a variety of the second: an edge cache answering fast says
+/// nothing about the origin's capacity, and treating it as evidence is how a
+/// latency-driven controller speeds up while the origin is saturated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Outcome {
+    /// The origin answered and the request succeeded. Counts toward the growth
+    /// signal.
+    Success,
+    /// The request succeeded and was served by an edge cache. Its slots are
+    /// returned like any other completion, and it is excluded from the growth
+    /// signal.
+    CacheHit,
+    /// The request failed with an explicit failure signal: the windows it
+    /// belonged to shrink, so the next host behind the same origin inherits the
+    /// caution.
+    Failure,
+}
+
+/// Why a completion was refused.
+///
+/// A typed refusal rather than saturating subtraction. Releasing a slot is only
+/// correct for the reservation that took it, and a frontier that cannot find
+/// the reservation must say so: subtracting from zero looks identical to a
+/// correct release, so the mistake surfaces as a slot that is occupied forever
+/// and a run that is quietly slower than its policy says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CompletionError {
+    /// The permit was not minted by this frontier.
+    ///
+    /// A permit is evidence only against the accounting that issued it. Every
+    /// frontier keeps its own ledger, so presenting another frontier's permit
+    /// here means the caller has confused two runs, and neither ledger can
+    /// settle it.
+    ForeignPermit,
+    /// The permit names a reservation this frontier does not hold.
+    ///
+    /// Two ways to reach it, and they are the same observation: the request was
+    /// already completed, or it was never admitted here. Neither is a reason to
+    /// decrement somebody else's slot.
+    UnknownPermit,
+}
+
+impl std::fmt::Display for CompletionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::ForeignPermit => formatter.write_str(
+                "the permit was minted by a different frontier, so no reservation here matches it",
+            ),
+            Self::UnknownPermit => formatter.write_str(
+                "no live reservation matches the permit: it was already completed, or never \
+                 admitted here",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CompletionError {}
 
 /// Why a policy was refused.
 ///
@@ -524,6 +683,164 @@ impl Default for PolitenessPolicy {
     }
 }
 
+/// Identity of one frontier's reservation ledger.
+///
+/// Compared by allocation identity, never by value, so a permit minted by one
+/// frontier is refused by another with the same ordinal in its ledger. This is
+/// why `Frontier` is not `Clone`: copying the ledger would produce two
+/// accountants for one set of reservations, and a permit — which exists only
+/// once — would settle one copy while the other held its slots forever.
+#[derive(Debug)]
+struct Issuer;
+
+/// A reserved admission, and the only key that releases it.
+///
+/// Minted by [`Frontier::admit`], consumed by [`Frontier::complete`], and
+/// borrowed by [`Frontier::observe_retry_after`]. It names the host as spelled
+/// when the request was admitted, the origin that host belonged to *then*, and
+/// the egress — the exact keys whose slots this reservation holds.
+///
+/// # Why it is not `Clone`, and why `Drop` does not release
+///
+/// One reservation means one slot set, so one handle releases it. A second
+/// handle would either double-decrement or be a lie about which request owns
+/// which slot, and the type makes both unrepresentable.
+///
+/// Dropping a permit leaves its slots held. That is the conservative direction
+/// and it is deliberate: the handle going out of scope says the *caller* has
+/// stopped looking, not that the request stopped. A frontier that assumed
+/// otherwise would over-admit against hosts that are still being contacted, and
+/// `docs/bot-on-ecs.md` §8.2's rule — *the intent must be durable before the
+/// effect* — is the same asymmetry.
+#[derive(Debug)]
+#[must_use = "a permit dropped without `Frontier::complete` keeps its slots reserved; dropping \
+              the handle is not evidence that the request left flight"]
+pub struct InFlightPermit {
+    /// The ledger this permit settles against.
+    issuer: Arc<Issuer>,
+    /// This reservation's ordinal within the issuing frontier. Unique among
+    /// live reservations, which is what makes the ledger check meaningful.
+    ordinal: u64,
+    /// The host, as spelled when the request was admitted.
+    host: String,
+    /// The origin the host belonged to at admission time, if it had one. Not
+    /// re-read from the topology when the request completes.
+    origin: Option<ConstraintKey>,
+    /// The egress this frontier admits over.
+    egress: ConstraintKey,
+}
+
+impl InFlightPermit {
+    /// The host this request was admitted for, as spelled at admission time.
+    #[must_use]
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// Whether this reservation holds a slot against `key`.
+    ///
+    /// Reported so a test or a diagnostic can assert on what was reserved
+    /// rather than re-deriving it from the topology, which is the mistake the
+    /// permit exists to prevent.
+    #[must_use]
+    pub fn holds(&self, key: &ConstraintKey) -> bool {
+        self.keys().iter().any(|held| held == key)
+    }
+
+    /// Every constraint this reservation holds a slot against.
+    ///
+    /// The host, the origin it belonged to at admission time, and the egress —
+    /// built from the recorded fields, never from the frontier's current maps.
+    fn keys(&self) -> Vec<ConstraintKey> {
+        let mut keys = Vec::with_capacity(3);
+        keys.push(ConstraintKey::host(self.host.clone()));
+        keys.extend(self.origin.clone());
+        keys.push(self.egress.clone());
+        keys
+    }
+
+    /// The constraints an observation *about the server* is evidence for: the
+    /// host and the origin, without the egress.
+    ///
+    /// The egress is excluded deliberately. It is the operator's own interface,
+    /// and one server asking for a pause — or rate-limiting one tenant behind a
+    /// shared proxy — is not evidence about the capacity of our network.
+    /// Binding the egress here would let a single target halt every unrelated
+    /// host in the run, which is the failure this distinction exists to prevent.
+    fn server_keys(&self) -> Vec<ConstraintKey> {
+        let mut keys = Vec::with_capacity(2);
+        keys.push(ConstraintKey::host(self.host.clone()));
+        keys.extend(self.origin.clone());
+        keys
+    }
+}
+
+/// Two permits are equal when they name the same reservation ordinal.
+///
+/// The issuer is deliberately not part of equality. It is an allocation
+/// identity, and folding it in would make two identical schedules run against
+/// two fresh frontiers produce unequal verdicts — which is the determinism
+/// [`Frontier`]'s virtual clock exists to provide. Identity is enforced where it
+/// belongs instead: in [`Frontier::complete`], which refuses a permit its ledger
+/// does not hold.
+impl PartialEq for InFlightPermit {
+    fn eq(&self, other: &Self) -> bool {
+        self.ordinal == other.ordinal
+    }
+}
+
+impl Eq for InFlightPermit {}
+
+/// The side-effect-free half of [`Admission`].
+///
+/// The same three arms, with `Admit` carrying nothing because nothing has been
+/// reserved yet. Selection cannot mint a permit — it must not take a slot — and
+/// reservation must not be able to act on a decision the selector would not
+/// have made, so both read this one function and each maps it to what it is
+/// allowed to do with it.
+#[derive(Debug)]
+enum Verdict {
+    /// Every constraint admits, so the caller may reserve.
+    Admit,
+    /// Held, with the instant and the binding constraint.
+    Defer {
+        /// Elapsed virtual time at which the item becomes admissible.
+        resume_at: Duration,
+        /// Why it was held.
+        kind: DeferralKind,
+        /// Which constraint bound.
+        constraint: ConstraintKey,
+    },
+    /// Dropped for good.
+    Reject {
+        /// Why it is dead.
+        kind: RejectKind,
+    },
+}
+
+impl Verdict {
+    /// This verdict as a refusal, or `None` when it admitted.
+    ///
+    /// `Admit` carries no refusal, so it is not representable in the output:
+    /// the caller that gets `None` knows it holds a permission and not a
+    /// verdict shaped like one.
+    fn refusal(self) -> Option<Admission> {
+        match self {
+            Self::Admit => None,
+            Self::Defer {
+                resume_at,
+                kind,
+                constraint,
+            } => Some(Admission::Defer {
+                resume_at,
+                kind,
+                constraint,
+            }),
+            Self::Reject { kind } => Some(Admission::Reject { kind }),
+        }
+    }
+}
+
 /// The adaptive state of one constraint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct KeyState {
@@ -545,7 +862,7 @@ struct KeyState {
 /// of the state map while accumulating. The comparison is a total order over
 /// `(instant, kind, key)`, which is Heritrix's comparator rule applied: the
 /// choice between two equally-late deferrals must not depend on iteration order.
-fn later(current: Option<Admission>, candidate: Admission) -> Admission {
+fn later(current: Option<Verdict>, candidate: Verdict) -> Verdict {
     let Some(current) = current else {
         return candidate;
     };
@@ -557,17 +874,17 @@ fn later(current: Option<Admission>, candidate: Admission) -> Admission {
     if take_candidate { candidate } else { current }
 }
 
-/// The sort key for a deferral. `None` for an admission that is not a deferral,
+/// The sort key for a deferral. `None` for a verdict that is not a deferral,
 /// which never reaches [`later`]'s comparison in practice but is modelled
 /// rather than papered over with a sentinel key.
-fn deferral_order(admission: &Admission) -> Option<(Duration, DeferralKind, &ConstraintKey)> {
-    match *admission {
-        Admission::Defer {
+fn deferral_order(verdict: &Verdict) -> Option<(Duration, DeferralKind, &ConstraintKey)> {
+    match *verdict {
+        Verdict::Defer {
             resume_at,
             kind,
             ref constraint,
         } => Some((resume_at, kind, constraint)),
-        Admission::Admit | Admission::Reject { .. } => None,
+        Verdict::Admit | Verdict::Reject { .. } => None,
     }
 }
 
@@ -577,7 +894,10 @@ fn deferral_order(admission: &Admission) -> Option<(Duration, DeferralKind, &Con
 /// Holds no clock. Every method that needs the time is given it, which is what
 /// lets a test drive ten thousand requests through a virtual schedule without
 /// touching wall-clock and get an identical result on every run.
-#[derive(Debug, Clone)]
+///
+/// Not `Clone`: the reservation ledger is a single accounting, and a copy would
+/// be a second one that no permit can settle. See `Issuer`.
+#[derive(Debug)]
 pub struct Frontier {
     /// The policy in force.
     policy: PolitenessPolicy,
@@ -591,6 +911,12 @@ pub struct Frontier {
     state: BTreeMap<ConstraintKey, KeyState>,
     /// Hosts abandoned for the rest of the run.
     abandons: BTreeSet<String>,
+    /// This frontier's ledger identity, carried by every permit it mints.
+    issuer: Arc<Issuer>,
+    /// Ordinals of the reservations currently held.
+    reservations: BTreeSet<u64>,
+    /// The next ordinal to mint.
+    next_ordinal: u64,
 }
 
 impl Frontier {
@@ -605,6 +931,13 @@ impl Frontier {
             constraints: BTreeMap::new(),
             state: BTreeMap::new(),
             abandons: BTreeSet::new(),
+            issuer: Arc::new(Issuer),
+            reservations: BTreeSet::new(),
+            // One, not zero: an ordinal of zero would be indistinguishable from
+            // a default-constructed sentinel, and the first reservation of a run
+            // reading as "no reservation" is the kind of quiet ambiguity this
+            // module's ledger is here to remove.
+            next_ordinal: 1,
         };
         let key = frontier.egress.clone();
         let width = policy.egress_window();
@@ -624,6 +957,16 @@ impl Frontier {
         self.state.get(key).map_or(0, |entry| entry.in_flight)
     }
 
+    /// How many reservations this frontier is holding.
+    ///
+    /// The ledger's own count, for a test or an operator that wants to assert
+    /// conservation: every admission raises it by one and every completion
+    /// lowers it by one, whatever the topology did in between.
+    #[must_use]
+    pub fn outstanding(&self) -> usize {
+        self.reservations.len()
+    }
+
     /// The current window for `key`, or the policy minimum if never used.
     #[must_use]
     pub fn window(&self, key: &ConstraintKey) -> u32 {
@@ -633,6 +976,11 @@ impl Frontier {
     }
 
     /// The rules state recorded for `key`.
+    ///
+    /// The state as *recorded*, not as it stands at some instant: an
+    /// unreachability whose grace has expired still reads as
+    /// [`RulesState::Unreachable`] until something acts on it. Pass the instant
+    /// to `Self::decide` to get the verdict that expiry implies.
     #[must_use]
     pub fn rules(&self, key: &ConstraintKey) -> RulesState {
         self.state
@@ -669,6 +1017,10 @@ impl Frontier {
     /// only ever describe a closed set of seeds, which is not a crawler.
     /// Recording each resolution as it happens keeps the graph open and the
     /// replay exact.
+    ///
+    /// A request already in flight is unaffected: its permit holds the origin it
+    /// was admitted against, so re-resolving the name moves which origin the
+    /// *next* admission shares without moving any current one.
     pub fn observe_resolution(&mut self, host: &str, resolved: Resolved) {
         match resolved {
             Resolved::Origin(ref origin) => {
@@ -689,73 +1041,103 @@ impl Frontier {
 
     /// Records an explicit back-off the target asked for, via `Retry-After`.
     ///
-    /// Applied to the host *and* to every constraint it shares, because a server
-    /// asking for a pause is asking a client to pause, not one name that happens
-    /// to point at it.
-    pub fn observe_retry_after(&mut self, host: &str, at: Duration, delay: Duration) {
+    /// Bound to the permit rather than to a hostname, because the pause is
+    /// evidence from one response: attributing it to whatever `host` resolves to
+    /// now is how a pause earned against one origin lands on another. Applied to
+    /// the permit's host and its admission-time origin — a server asking for a
+    /// pause is asking a client to pause, not one name that happens to point at
+    /// it — and never to the egress.
+    ///
+    /// Must be called before [`Self::complete`], which consumes the permit. The
+    /// borrow makes any other order unwritable.
+    pub fn observe_retry_after(
+        &mut self,
+        permit: &InFlightPermit,
+        at: Duration,
+        delay: Duration,
+    ) -> Result<(), CompletionError> {
+        self.verify(permit)?;
         let until = at.saturating_add(delay);
-        for key in self.server_keys_for(host) {
+        for key in permit.server_keys() {
             let entry = self.entry(&key);
             if entry.blocked_until < until {
                 entry.blocked_until = until;
             }
         }
+        Ok(())
     }
 
-    /// Every constraint a request to `host` is subject to.
+    /// Every constraint a request to `host` is subject to, as the topology
+    /// stands now. Used to reserve a *new* admission; never to settle an old
+    /// one, which reads its keys from the permit.
     fn keys_for(&self, host: &str) -> Vec<ConstraintKey> {
-        let mut keys = vec![ConstraintKey::host(host), self.egress.clone()];
-        if let Some(origin) = self.constraints.get(host) {
-            keys.push(origin.clone());
-        }
+        let mut keys = Vec::with_capacity(3);
+        keys.push(ConstraintKey::host(host));
+        keys.extend(self.constraints.get(host).cloned());
+        keys.push(self.egress.clone());
         keys
     }
 
-    /// The constraints an observation *about a server* is evidence for.
+    /// The rules for `key` as they effectively stand at `at`.
     ///
-    /// The server-side keys only: the host, and the origin it shares. The egress
-    /// is excluded deliberately. It is the operator's own interface, and one
-    /// server asking for a pause — or rate-limiting one tenant behind a shared
-    /// proxy — is not evidence about the capacity of our network. Binding the
-    /// egress here would let a single target halt every unrelated host in the
-    /// run, which is the failure this distinction exists to prevent.
-    fn server_keys_for(&self, host: &str) -> Vec<ConstraintKey> {
-        let mut keys = vec![ConstraintKey::host(host)];
-        if let Some(origin) = self.constraints.get(host) {
-            keys.push(origin.clone());
-        }
-        keys
+    /// The stored state with RFC 9309 §2.3.1.4's expiry applied. The selector
+    /// reads this, so a grace expiry is visible to selection at the same instant
+    /// the gate would act on it.
+    fn effective_rules(&self, key: &ConstraintKey, at: Duration) -> RulesState {
+        let grace = self.policy.unreachable_grace();
+        self.state.get(key).map_or(RulesState::NotFetched, |entry| {
+            entry.rules.effective(at, grace)
+        })
     }
 
-    /// Decides what to do with a request to `host` at `at`.
+    /// Writes down the expiry [`Self::effective_rules`] computes, for a
+    /// reservation that acted on it.
     ///
-    /// Admits only when every constraint admits, and reports the one that bound
-    /// when it does not. On [`Admission::Admit`] the caller owes a matching
-    /// [`Self::release`] once the request leaves flight.
-    pub fn admit(&mut self, host: &str, at: Duration) -> Admission {
+    /// The one place a time-driven rules transition is *recorded*. It changes
+    /// nothing about what the next verdict will be — `effective` is a fixed
+    /// point once the grace has elapsed — so this cannot make the stored state
+    /// disagree with the decision that was just taken.
+    fn promote_rules(&mut self, key: &ConstraintKey, at: Duration) {
+        let grace = self.policy.unreachable_grace();
+        let entry = self.entry(key);
+        let promoted = entry.rules.effective(at, grace);
+        if promoted != entry.rules {
+            entry.rules = promoted;
+        }
+    }
+
+    /// Decides what to do with a request to `host` at `at`, without changing
+    /// anything.
+    ///
+    /// The single admission predicate. [`Self::admit`] reserves only when this
+    /// says `Verdict::Admit`, [`Self::next_admissible`] returns a host only
+    /// when this says the same, and [`Self::next_prerequisite`] reports the
+    /// deferrals that are work rather than waits. Every arm is a physical
+    /// action; there is no fourth.
+    fn decide(&self, host: &str, at: Duration) -> Verdict {
         if self.abandons.contains(host) {
-            return Admission::Reject {
+            return Verdict::Reject {
                 kind: RejectKind::DoesNotExist,
             };
         }
 
         match self.resolutions.get(host) {
             None => {
-                return Admission::Defer {
+                return Verdict::Defer {
                     resume_at: at,
                     kind: DeferralKind::OriginUnmapped,
                     constraint: ConstraintKey::host(host),
                 };
             }
             Some(&Resolved::Failed) => {
-                return Admission::Defer {
+                return Verdict::Defer {
                     resume_at: at.saturating_add(self.policy.retry_after_failure()),
                     kind: DeferralKind::ResolutionFailed,
                     constraint: ConstraintKey::host(host),
                 };
             }
             Some(&Resolved::DoesNotExist) => {
-                return Admission::Reject {
+                return Verdict::Reject {
                     kind: RejectKind::DoesNotExist,
                 };
             }
@@ -765,122 +1147,191 @@ impl Frontier {
         // A site's published rules are per-host, so only the host key is
         // consulted; the origin keys carry a window, not a ruleset.
         let host_key = ConstraintKey::host(host);
-        if let Err(admission) = self.rules_for(&host_key, at) {
-            return admission;
-        }
-
-        let mut binding: Option<Admission> = None;
-        for key in self.keys_for(host) {
-            let entry = self.entry(&key);
-            if entry.blocked_until > at {
-                let wait = Admission::Defer {
-                    resume_at: entry.blocked_until,
-                    kind: DeferralKind::RateLimited,
-                    constraint: key,
+        match self.effective_rules(&host_key, at) {
+            RulesState::Allowed | RulesState::NoRules => {}
+            RulesState::Disallowed { rule } => {
+                return Verdict::Reject {
+                    kind: RejectKind::Disallowed { rule },
                 };
-                binding = Some(later(binding, wait));
-            } else if entry.in_flight >= entry.window {
-                let wait = Admission::Defer {
+            }
+            RulesState::NotFetched => {
+                return Verdict::Defer {
                     resume_at: at,
-                    kind: DeferralKind::RateLimited,
-                    constraint: key,
+                    kind: DeferralKind::RulesNotFetched,
+                    constraint: host_key,
                 };
+            }
+            RulesState::Unreachable { .. } => {
+                // §2.3.1.4's complete disallow, with that section's own expiry:
+                // after a reasonably long period the crawler MAY treat the file
+                // as unavailable, which is §2.3.1.3's allow. The expiry is
+                // already applied by `effective_rules`, so a state that is
+                // still `Unreachable` here is inside its grace.
+                return Verdict::Defer {
+                    resume_at: at.saturating_add(self.policy.retry_after_failure()),
+                    kind: DeferralKind::OriginPolicyUnreachable,
+                    constraint: host_key,
+                };
+            }
+        }
+
+        let mut binding: Option<Verdict> = None;
+        for key in self.keys_for(host) {
+            if let Some(wait) = self.saturated(&key, at) {
                 binding = Some(later(binding, wait));
             }
         }
 
-        match binding {
-            Some(deferral) => deferral,
-            None => {
-                for key in self.keys_for(host) {
-                    let entry = self.entry(&key);
-                    entry.in_flight = entry.in_flight.saturating_add(1);
-                }
-                Admission::Admit
-            }
-        }
+        binding.unwrap_or(Verdict::Admit)
     }
 
-    /// Evaluates the rules for one key, returning `Err` with the verdict when
-    /// they decide the request.
-    fn rules_for(&mut self, key: &ConstraintKey, at: Duration) -> Result<(), Admission> {
-        let grace = self.policy.unreachable_grace();
-        let retry = self.policy.retry_after_failure();
-        let entry = self.entry(key);
-        match entry.rules.clone() {
-            RulesState::Allowed | RulesState::NoRules => Ok(()),
-            RulesState::Disallowed { rule } => Err(Admission::Reject {
-                kind: RejectKind::Disallowed { rule },
-            }),
-            RulesState::NotFetched => Err(Admission::Defer {
-                resume_at: at,
-                kind: DeferralKind::RulesNotFetched,
+    /// The deferral for `key` at `at`, or `None` when it has room.
+    ///
+    /// Reads `&self` and creates nothing: a constraint nobody has exercised is
+    /// not yet owed a record, and `Self::decide` must stay free of the side
+    /// effects that would make the selector and the gate two implementations.
+    fn saturated(&self, key: &ConstraintKey, at: Duration) -> Option<Verdict> {
+        let entry = self.state.get(key)?;
+        if entry.blocked_until > at {
+            Some(Verdict::Defer {
+                resume_at: entry.blocked_until,
+                kind: DeferralKind::RateLimited,
                 constraint: key.clone(),
-            }),
-            RulesState::Unreachable { since } => {
-                // RFC 9309 §2.3.1.4's complete disallow, with that section's own
-                // expiry: after a reasonably long period the crawler MAY treat
-                // the file as unavailable, which is §2.3.1.3's allow.
-                if at.saturating_sub(since) >= grace {
-                    entry.rules = RulesState::NoRules;
-                    Ok(())
-                } else {
-                    Err(Admission::Defer {
-                        resume_at: at.saturating_add(retry),
-                        kind: DeferralKind::OriginPolicyUnreachable,
-                        constraint: key.clone(),
-                    })
-                }
-            }
+            })
+        } else if entry.in_flight >= entry.window {
+            Some(Verdict::Defer {
+                resume_at: at,
+                kind: DeferralKind::RateLimited,
+                constraint: key.clone(),
+            })
+        } else {
+            None
         }
     }
 
-    /// Returns one in-flight slot against every constraint `host` belongs to.
-    pub fn release(&mut self, host: &str) {
-        for key in self.keys_for(host) {
+    /// Decides what to do with a request to `host` at `at`.
+    ///
+    /// Admits only when every constraint admits, and reports the one that bound
+    /// when it does not. On [`Admission::Admit`] the caller owes exactly one
+    /// [`Self::complete`] of the permit it was handed, once the request leaves
+    /// flight.
+    ///
+    /// The decision is `Self::decide`'s, not a second evaluation of the same
+    /// question: a caller that has already asked [`Self::next_admissible`] gets
+    /// the same answer here on unchanged state, which is what lets a scheduler
+    /// select and dispatch without maintaining a shadow predicate of its own.
+    pub fn admit(&mut self, host: &str, at: Duration) -> Admission {
+        match self.decide(host, at).refusal() {
+            Some(refused) => refused,
+            None => self.reserve(host, at),
+        }
+    }
+
+    /// Takes the slots `decide` found free and mints the permit for them.
+    ///
+    /// Reached only from [`Self::admit`], immediately after that same call
+    /// returned `Verdict::Admit` — there is no second predicate here to
+    /// disagree with it. What this adds is the record: the exact keys reserved,
+    /// the origin as it stood at this instant, and an identity the ledger
+    /// recognises when the request completes.
+    fn reserve(&mut self, host: &str, at: Duration) -> Admission {
+        let ordinal = self.next_ordinal;
+        let Some(next) = ordinal.checked_add(1) else {
+            return Admission::Reject {
+                kind: RejectKind::Exhausted,
+            };
+        };
+
+        // The verdict that admitted this request may have rested on RFC 9309
+        // §2.3.1.4's expiry. Recording it is the other half of computing it in
+        // one place: the state catches up with the decision that acted on it,
+        // and `effective_rules` stays the only definition of the rule.
+        let host_key = ConstraintKey::host(host);
+        self.promote_rules(&host_key, at);
+
+        let keys = self.keys_for(host);
+        for key in &keys {
+            let entry = self.entry(key);
+            entry.in_flight = entry.in_flight.saturating_add(1);
+        }
+
+        self.next_ordinal = next;
+        self.reservations.insert(ordinal);
+        Admission::Admit(InFlightPermit {
+            issuer: Arc::clone(&self.issuer),
+            ordinal,
+            host: host.to_owned(),
+            origin: self.constraints.get(host).cloned(),
+            egress: self.egress.clone(),
+        })
+    }
+
+    /// Consumes `permit` exactly once, returns its slots, and folds the
+    /// outcome into the windows it belongs to.
+    ///
+    /// The keys come from the permit — the host as spelled and the origin it
+    /// belonged to when the request was admitted — so a resolution observed
+    /// while the request was in flight cannot move the release onto an origin
+    /// this request never touched. That is the whole repair: a release by name
+    /// recomputed the keys from the *current* topology.
+    ///
+    /// Refuses a permit this frontier's ledger does not hold, rather than
+    /// subtracting from zero: the two look identical in the counters, and only
+    /// one of them is a correct release.
+    pub fn complete(
+        &mut self,
+        permit: InFlightPermit,
+        outcome: Outcome,
+    ) -> Result<(), CompletionError> {
+        self.verify(&permit)?;
+        self.reservations.remove(&permit.ordinal);
+
+        for key in permit.keys() {
             let entry = self.entry(&key);
+            // Saturating, but not *hiding* anything: the ledger check above is
+            // what makes a zero here mean "this reservation held no slot", and
+            // a reservation that holds no slot was never minted.
             entry.in_flight = entry.in_flight.saturating_sub(1);
         }
-    }
 
-    /// Records that a request to `host` completed without an explicit failure
-    /// signal, and grows the window once enough have in a row.
-    ///
-    /// `cache_hit` excludes the observation from the growth signal. A response
-    /// served by an edge cache says nothing about the origin's capacity, and
-    /// counting it is how a latency-driven controller ends up speeding up while
-    /// the origin is saturated.
-    pub fn record_success(&mut self, host: &str, cache_hit: bool) {
-        if cache_hit {
-            return;
-        }
-        // Copied out before the loop: `PolitenessPolicy` is `Copy`, and reading
-        // it through `self` while `entry` holds a mutable borrow of `self` is
-        // the borrow conflict this avoids.
         let policy = self.policy;
-        for key in self.server_keys_for(host) {
+        for key in permit.server_keys() {
             let entry = self.entry(&key);
-            entry.successes = entry.successes.saturating_add(1);
-            if entry.successes >= policy.increase_after() {
-                entry.successes = 0;
-                entry.window = policy.increase(entry.window);
+            match outcome {
+                Outcome::Success => {
+                    entry.successes = entry.successes.saturating_add(1);
+                    if entry.successes >= policy.increase_after() {
+                        entry.successes = 0;
+                        entry.window = policy.increase(entry.window);
+                    }
+                }
+                // An edge cache answering fast says nothing about origin
+                // capacity, and counting it is how a latency controller speeds
+                // up while the origin is saturated.
+                Outcome::CacheHit => {}
+                Outcome::Failure => {
+                    entry.successes = 0;
+                    entry.window = policy.decrease(entry.window);
+                }
             }
         }
+        Ok(())
     }
 
-    /// Records an explicit failure signal, shrinking every window `host`
-    /// belongs to.
+    /// Whether `permit` names a live reservation in this frontier's ledger.
     ///
-    /// Shrinking the *shared* keys is the whole point: the failure is evidence
-    /// about the infrastructure, so the next host behind the same origin
-    /// inherits the caution.
-    pub fn record_failure(&mut self, host: &str) {
-        let policy = self.policy;
-        for key in self.server_keys_for(host) {
-            let entry = self.entry(&key);
-            entry.successes = 0;
-            entry.window = policy.decrease(entry.window);
+    /// The check that turns "the caller confused two requests" into a typed
+    /// refusal. Both refusals are reachable only through misuse, which is the
+    /// point: the ledger exists so that misuse is loud rather than a slot that
+    /// silently stays occupied for the rest of the run.
+    fn verify(&self, permit: &InFlightPermit) -> Result<(), CompletionError> {
+        if !Arc::ptr_eq(&permit.issuer, &self.issuer) {
+            return Err(CompletionError::ForeignPermit);
         }
+        if !self.reservations.contains(&permit.ordinal) {
+            return Err(CompletionError::UnknownPermit);
+        }
+        Ok(())
     }
 
     /// Abandons `host` for the rest of the run.
@@ -893,18 +1344,44 @@ impl Frontier {
     /// The order is the sorted order of the candidate hostnames, which is
     /// stable across runs and machines. It is arbitrary in the sense Heritrix's
     /// comparator rule allows, and consistent in the sense that rule requires.
+    ///
+    /// Selection is the same predicate as admission: a host is returned only
+    /// when [`Self::admit`] would return [`Admission::Admit`] for it on
+    /// unchanged state. A host the gate will refuse or defer — disallowed,
+    /// unfetched rules, unresolved, saturated — is skipped rather than returned
+    /// and re-skipped forever, which is what let a permanently disallowed
+    /// lexicographically-first host starve every host behind it.
     #[must_use]
     pub fn next_admissible(&self, at: Duration) -> Option<String> {
-        self.resolutions.iter().find_map(|(host, resolved)| {
-            let ready = !self.abandons.contains(host)
-                && matches!(*resolved, Resolved::Origin(_))
-                && self.keys_for(host).iter().all(|key| {
-                    self.state.get(key).is_none_or(|entry| {
-                        entry.blocked_until <= at && entry.in_flight < entry.window
-                    })
-                });
-            if ready { Some(host.clone()) } else { None }
-        })
+        self.resolutions
+            .keys()
+            .find(|host| matches!(self.decide(host, at), Verdict::Admit))
+            .cloned()
+    }
+
+    /// The next host whose held-up work is a prerequisite rather than a wait.
+    ///
+    /// [`Self::next_admissible`] answering `None` says nothing about *why* the
+    /// backlog is stuck, and the two answers schedule differently: a host that
+    /// needs its name resolved or its rules fetched is work the run can do now,
+    /// while a host deferred by capacity is work nothing can advance. A
+    /// scheduler that treats both as "nothing to do" deadlocks on the first kind
+    /// and idles correctly on the second.
+    ///
+    /// Returns the host and the deferral that held it, so the caller dispatches
+    /// the fetch the kind names rather than guessing at it. Derives the same
+    /// `Self::decide` verdict as selection and admission; it is a view of one
+    /// predicate, not a third one.
+    #[must_use]
+    pub fn next_prerequisite(&self, at: Duration) -> Option<(String, DeferralKind)> {
+        self.resolutions
+            .keys()
+            .find_map(|host| match self.decide(host, at) {
+                Verdict::Defer { kind, .. } if kind.needs_prerequisite() => {
+                    Some((host.clone(), kind))
+                }
+                Verdict::Admit | Verdict::Defer { .. } | Verdict::Reject { .. } => None,
+            })
     }
 }
 
@@ -914,6 +1391,10 @@ mod tests {
 
     const HOUR: Duration = Duration::from_secs(3_600);
     const THIRTY_ONE_DAYS: Duration = Duration::from_secs(2_678_400);
+
+    /// A test that cannot fail silently: every helper below returns a value or a
+    /// message, and `?` carries either out to the harness.
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     fn frontier() -> Frontier {
         Frontier::new(PolitenessPolicy::DEFAULT, "eth0")
@@ -934,8 +1415,37 @@ mod tests {
                 kind,
                 ref constraint,
             } => Some((resume_at, kind, constraint.clone())),
-            Admission::Admit | Admission::Reject { .. } => None,
+            Admission::Admit(_) | Admission::Reject { .. } => None,
         }
+    }
+
+    /// Admits `host`, asserting that the frontier took the reservation, and
+    /// returns the permit that releases it.
+    ///
+    /// A refusal comes back as an error naming what arrived instead, so a test
+    /// that expected an admission fails with the verdict rather than with a
+    /// panic that says nothing about which arm it got.
+    fn admitted(
+        frontier: &mut Frontier,
+        host: &str,
+        at: Duration,
+    ) -> Result<InFlightPermit, Box<dyn std::error::Error>> {
+        match frontier.admit(host, at) {
+            Admission::Admit(permit) => Ok(permit),
+            other => Err(format!("expected an admission for {host}, got {other:?}").into()),
+        }
+    }
+
+    /// Admits `host` and completes it with `outcome`, asserting both halves of
+    /// the exchange. The one-line form of "a request went out and came back".
+    fn completed(
+        frontier: &mut Frontier,
+        host: &str,
+        outcome: Outcome,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let permit = admitted(frontier, host, Duration::ZERO)?;
+        frontier.complete(permit, outcome)?;
+        Ok(())
     }
 
     #[test]
@@ -979,7 +1489,7 @@ mod tests {
     }
 
     #[test]
-    fn rules_states_follow_rfc_9309() {
+    fn rules_states_follow_rfc_9309() -> TestResult {
         let mut frontier = frontier();
         ready(&mut frontier, "a.example", "origin-a");
         let key = ConstraintKey::host("a.example");
@@ -993,8 +1503,8 @@ mod tests {
 
         // 4xx: unavailable, MAY access any resources.
         frontier.observe_rules(&key, RulesState::NoRules);
-        assert_eq!(frontier.admit("a.example", HOUR), Admission::Admit);
-        frontier.release("a.example");
+        let permit = admitted(&mut frontier, "a.example", HOUR)?;
+        frontier.complete(permit, Outcome::Success)?;
 
         // 5xx: unreachable, MUST assume complete disallow.
         frontier.observe_rules(
@@ -1010,12 +1520,19 @@ mod tests {
         );
 
         // ...but only until a fresh file is obtained, which that section bounds.
-        assert_eq!(
-            frontier.admit("a.example", THIRTY_ONE_DAYS),
-            Admission::Admit,
+        assert!(
+            matches!(
+                frontier.admit("a.example", THIRTY_ONE_DAYS),
+                Admission::Admit(_)
+            ),
             "RFC 9309 2.3.1.4 lets a long-unreachable file be treated as unavailable"
         );
-        assert_eq!(frontier.rules(&key), RulesState::NoRules);
+        assert_eq!(
+            frontier.rules(&key),
+            RulesState::NoRules,
+            "taking the admission is what records the expiry the verdict rested on"
+        );
+        Ok(())
     }
 
     #[test]
@@ -1068,7 +1585,10 @@ mod tests {
 
         let mut admitted = 0_u32;
         for index in 0..8_u32 {
-            if frontier.admit(&format!("shop{index}.example"), Duration::ZERO) == Admission::Admit {
+            if matches!(
+                frontier.admit(&format!("shop{index}.example"), Duration::ZERO),
+                Admission::Admit(_)
+            ) {
                 admitted = admitted.saturating_add(1);
             }
         }
@@ -1095,7 +1615,10 @@ mod tests {
 
         let mut admitted = 0_u32;
         for index in 0..4_u32 {
-            if frontier.admit(&format!("h{index}.example"), Duration::ZERO) == Admission::Admit {
+            if matches!(
+                frontier.admit(&format!("h{index}.example"), Duration::ZERO),
+                Admission::Admit(_)
+            ) {
                 admitted = admitted.saturating_add(1);
             }
         }
@@ -1116,9 +1639,12 @@ mod tests {
         let mut frontier = frontier();
         ready(&mut frontier, "a.example", "origin-a");
 
-        assert_eq!(
-            frontier.admit("a.example", Duration::ZERO),
-            Admission::Admit
+        assert!(
+            matches!(
+                frontier.admit("a.example", Duration::ZERO),
+                Admission::Admit(_)
+            ),
+            "a resolved, permitted host on a free origin and egress admits"
         );
         assert_eq!(
             deferral(&frontier.admit("a.example", Duration::ZERO)).map(|parts| parts.1),
@@ -1128,12 +1654,14 @@ mod tests {
     }
 
     #[test]
-    fn retry_after_binds_the_origin_not_just_the_host() {
+    fn retry_after_binds_the_origin_not_just_the_host() -> TestResult {
         let mut frontier = frontier();
         ready(&mut frontier, "a.example", "origin-a");
         ready(&mut frontier, "b.example", "origin-a");
 
-        frontier.observe_retry_after("a.example", Duration::ZERO, Duration::from_secs(30));
+        let permit = admitted(&mut frontier, "a.example", Duration::ZERO)?;
+        frontier.observe_retry_after(&permit, Duration::ZERO, Duration::from_secs(30))?;
+        frontier.complete(permit, Outcome::Success)?;
 
         assert_eq!(
             deferral(&frontier.admit("b.example", Duration::from_secs(1))),
@@ -1144,23 +1672,30 @@ mod tests {
             )),
             "a pause asked of the client binds its sibling on the same origin"
         );
-        assert_eq!(
-            frontier.admit("b.example", Duration::from_secs(31)),
-            Admission::Admit
+        assert!(
+            matches!(
+                frontier.admit("b.example", Duration::from_secs(31)),
+                Admission::Admit(_)
+            ),
+            "and it lifts when the instant it named arrives"
         );
+        Ok(())
     }
 
     #[test]
-    fn a_retry_after_does_not_bind_the_egress() {
+    fn a_retry_after_does_not_bind_the_egress() -> TestResult {
         let mut frontier = frontier();
         ready(&mut frontier, "a.example", "origin-a");
         ready(&mut frontier, "unrelated.example", "origin-z");
 
-        frontier.observe_retry_after("a.example", Duration::ZERO, Duration::from_secs(30));
+        let permit = admitted(&mut frontier, "a.example", Duration::ZERO)?;
+        frontier.observe_retry_after(&permit, Duration::ZERO, Duration::from_secs(30))?;
 
-        assert_eq!(
-            frontier.admit("unrelated.example", Duration::from_secs(1)),
-            Admission::Admit,
+        assert!(
+            matches!(
+                frontier.admit("unrelated.example", Duration::from_secs(1)),
+                Admission::Admit(_)
+            ),
             "one server asking for a pause is not evidence about our network's \
              capacity; binding the egress would let a single target halt every \
              unrelated host in the run"
@@ -1170,16 +1705,17 @@ mod tests {
             Some(ConstraintKey::origin("origin-a")),
             "but it does bind the server-side keys the target actually shares"
         );
+        Ok(())
     }
 
     #[test]
-    fn the_window_shrinks_on_failure_and_grows_on_success() {
+    fn the_window_shrinks_on_failure_and_grows_on_success() -> TestResult {
         let mut frontier = frontier();
         ready(&mut frontier, "a.example", "origin-a");
         let key = ConstraintKey::origin("origin-a");
 
         for _ in 0..PolitenessPolicy::DEFAULT.increase_after() {
-            frontier.record_success("a.example", false);
+            completed(&mut frontier, "a.example", Outcome::Success)?;
         }
         assert_eq!(
             frontier.window(&key),
@@ -1187,27 +1723,28 @@ mod tests {
             "eight successes add one to a window of one"
         );
 
-        frontier.record_failure("a.example");
+        completed(&mut frontier, "a.example", Outcome::Failure)?;
         assert_eq!(frontier.window(&key), 1, "2 x 70% floors at min_window");
 
         for _ in 0..5 {
-            frontier.record_failure("a.example");
+            completed(&mut frontier, "a.example", Outcome::Failure)?;
         }
         assert_eq!(
             frontier.window(&key),
             PolitenessPolicy::DEFAULT.min_window(),
             "a window of zero would admit nothing forever"
         );
+        Ok(())
     }
 
     #[test]
-    fn a_cache_hit_does_not_grow_the_window() {
+    fn a_cache_hit_does_not_grow_the_window() -> TestResult {
         let mut frontier = frontier();
         ready(&mut frontier, "a.example", "origin-a");
         let key = ConstraintKey::origin("origin-a");
 
         for _ in 0..PolitenessPolicy::DEFAULT.increase_after() {
-            frontier.record_success("a.example", true);
+            completed(&mut frontier, "a.example", Outcome::CacheHit)?;
         }
         assert_eq!(
             frontier.window(&key),
@@ -1215,31 +1752,621 @@ mod tests {
             "an edge cache answering fast says nothing about origin capacity, and \
              counting it is how a latency controller speeds up under load"
         );
+        assert_eq!(
+            frontier.in_flight(&key),
+            0,
+            "a cache hit still returns the slots it held; only the growth signal \
+             is excluded"
+        );
+        Ok(())
+    }
+
+    // ── The reservation is bound to the admission, not to the name ─────────
+
+    #[test]
+    fn releasing_after_reresolution_preserves_other_requests() -> TestResult {
+        // The filed counterexample. One-request origin window, four-request
+        // egress window: A and B are admitted against two origins, A's name is
+        // then re-resolved onto B's origin while A's request is still running,
+        // and A completes.
+        let mut frontier = frontier();
+        for (host, origin) in [
+            ("a.example", "old"),
+            ("b.example", "new"),
+            ("c.example", "new"),
+        ] {
+            frontier.observe_resolution(host, Resolved::Origin(origin.to_owned()));
+            frontier.observe_rules(&ConstraintKey::host(host), RulesState::Allowed);
+        }
+        let permit = admitted(&mut frontier, "a.example", Duration::ZERO)?;
+        assert!(
+            matches!(
+                frontier.admit("b.example", Duration::ZERO),
+                Admission::Admit(_)
+            ),
+            "two hosts on two origins are bounded by the egress, not by each other"
+        );
+
+        frontier.observe_resolution("a.example", Resolved::Origin("new".to_owned()));
+        frontier.complete(permit, Outcome::Success)?;
+
+        // Physical ownership invariants, not implementation counters.
+        assert_eq!(
+            frontier.in_flight(&ConstraintKey::origin("old")),
+            0,
+            "A's request was admitted against the old origin, so completing it \
+             must return that origin's slot — not one derived from the name's \
+             new topology"
+        );
+        assert_eq!(
+            frontier.in_flight(&ConstraintKey::origin("new")),
+            1,
+            "B is still physically running against the new origin and still owns \
+             its only slot"
+        );
+        assert!(
+            matches!(
+                frontier.admit("c.example", Duration::ZERO),
+                Admission::Defer { .. }
+            ),
+            "the default origin window of one must never admit C while B owns it"
+        );
+        assert_eq!(
+            frontier.outstanding(),
+            1,
+            "one request is still in flight, so the ledger holds exactly one \
+             reservation"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_resolution_failure_during_flight_returns_the_original_slots() -> TestResult {
+        // A transient SERVFAIL while A is running removes the host from the
+        // topology map. The permit still names the origin the request was
+        // admitted against, so the release lands where the slots were taken.
+        let mut frontier = frontier();
+        ready(&mut frontier, "a.example", "old");
+        let permit = admitted(&mut frontier, "a.example", Duration::ZERO)?;
+        assert_eq!(frontier.in_flight(&ConstraintKey::origin("old")), 1);
+
+        frontier.observe_resolution("a.example", Resolved::Failed);
+        frontier.complete(permit, Outcome::Failure)?;
+
+        assert_eq!(
+            frontier.in_flight(&ConstraintKey::origin("old")),
+            0,
+            "a resolution failure is an observation about the name, not evidence \
+             that the request stopped holding its origin's slot"
+        );
+        assert_eq!(
+            frontier.in_flight(&ConstraintKey::egress("eth0")),
+            0,
+            "and the egress slot comes back with it"
+        );
+        assert_eq!(frontier.outstanding(), 0, "the ledger is empty again");
+        Ok(())
+    }
+
+    #[test]
+    fn several_in_flight_across_topology_generations_conserve_every_slot() -> TestResult {
+        // Three requests admitted, the first host's name re-resolved twice while
+        // all three are still running, and the completions issued out of order.
+        // Every slot taken is returned exactly once, against the origin it was
+        // taken from.
+        let mut frontier = frontier();
+        for (host, origin) in [
+            ("a.example", "origin-a"),
+            ("b.example", "origin-b"),
+            ("c.example", "origin-c"),
+        ] {
+            ready(&mut frontier, host, origin);
+        }
+        let first = admitted(&mut frontier, "a.example", Duration::ZERO)?;
+        let second = admitted(&mut frontier, "b.example", Duration::ZERO)?;
+        let third = admitted(&mut frontier, "c.example", Duration::ZERO)?;
+        assert_eq!(
+            frontier.in_flight(&ConstraintKey::egress("eth0")),
+            3,
+            "three requests are physically running"
+        );
+
+        // a.example moves twice: an edge cache, a failover, a second failover.
+        frontier.observe_resolution("a.example", Resolved::Origin("gen2".to_owned()));
+        frontier.observe_resolution("a.example", Resolved::Origin("gen3".to_owned()));
+        assert_eq!(
+            frontier.in_flight(&ConstraintKey::origin("origin-a")),
+            1,
+            "the request holds the origin it was admitted against however many \
+             times its name has moved since"
+        );
+
+        // Out of order, and against a topology the names have left behind.
+        frontier.complete(second, Outcome::Success)?;
+        frontier.complete(third, Outcome::Failure)?;
+        frontier.complete(first, Outcome::Success)?;
+
+        for origin in ["origin-a", "origin-b", "origin-c", "gen2", "gen3"] {
+            assert_eq!(
+                frontier.in_flight(&ConstraintKey::origin(origin)),
+                0,
+                "every origin's occupancy returns to zero once its requests have \
+                 completed"
+            );
+        }
+        assert_eq!(frontier.in_flight(&ConstraintKey::egress("eth0")), 0);
+        assert_eq!(frontier.outstanding(), 0, "and no reservation is left over");
+
+        // The other half of the same rule: a *new* request for the same name
+        // keys on where that name points now, so re-resolution still moves the
+        // origin the run shares — it just cannot move one that is in flight.
+        let moved = admitted(&mut frontier, "a.example", Duration::ZERO)?;
+        assert!(
+            moved.holds(&ConstraintKey::origin("gen3")),
+            "a new admission keys on the current topology"
+        );
+        assert!(
+            !moved.holds(&ConstraintKey::origin("origin-a")),
+            "and not on the one an earlier request for the same name used"
+        );
+        frontier.complete(moved, Outcome::Success)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_permit_holds_its_admission_time_keys() -> TestResult {
+        let mut frontier = frontier();
+        ready(&mut frontier, "a.example", "old");
+        let permit = admitted(&mut frontier, "a.example", Duration::ZERO)?;
+
+        assert!(
+            permit.holds(&ConstraintKey::host("a.example")),
+            "the permit holds the host it was admitted for"
+        );
+        assert!(
+            permit.holds(&ConstraintKey::origin("old")),
+            "and the origin the name resolved to at that instant"
+        );
+        assert!(
+            permit.holds(&ConstraintKey::egress("eth0")),
+            "and the egress every request in the run shares"
+        );
+        assert_eq!(permit.host(), "a.example");
+
+        frontier.observe_resolution("a.example", Resolved::Origin("new".to_owned()));
+        assert!(
+            !permit.holds(&ConstraintKey::origin("new")),
+            "a resolution observed while the request was in flight does not \
+             change what the reservation holds"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn response_attribution_follows_the_admission_not_the_current_name() -> TestResult {
+        // The response's failure signal is evidence about the infrastructure the
+        // request actually reached. After a remap it must still shrink that
+        // origin's window, and must not touch the origin the name now names.
+        let mut frontier = frontier();
+        ready(&mut frontier, "a.example", "old");
+        ready(&mut frontier, "b.example", "new");
+        let permit = admitted(&mut frontier, "a.example", Duration::ZERO)?;
+        frontier.observe_resolution("a.example", Resolved::Origin("new".to_owned()));
+
+        for _ in 0..PolitenessPolicy::DEFAULT.increase_after() {
+            completed(&mut frontier, "b.example", Outcome::Success)?;
+        }
+        let new_before = frontier.window(&ConstraintKey::origin("new"));
+        let old_before = frontier.window(&ConstraintKey::origin("old"));
+
+        frontier.complete(permit, Outcome::Failure)?;
+
+        assert_eq!(
+            frontier.window(&ConstraintKey::origin("old")),
+            PolitenessPolicy::DEFAULT.decrease(old_before),
+            "the failure shrank the origin the request was admitted against"
+        );
+        assert_eq!(
+            frontier.window(&ConstraintKey::origin("new")),
+            new_before,
+            "and left the origin the name moved to untouched"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_permit_from_another_frontier_is_refused() -> TestResult {
+        let mut issuer = frontier();
+        let mut stranger = frontier();
+        ready(&mut issuer, "a.example", "origin-a");
+        let permit = admitted(&mut issuer, "a.example", Duration::ZERO)?;
+
+        assert_eq!(
+            stranger.complete(permit, Outcome::Success),
+            Err(CompletionError::ForeignPermit),
+            "a permit is evidence only against the accounting that minted it, \
+             and a second frontier holds a different ledger"
+        );
+        assert_eq!(
+            issuer.outstanding(),
+            1,
+            "the refusal changed nothing: the issuer still holds the slot the \
+             request occupies"
+        );
+        assert_eq!(
+            issuer.in_flight(&ConstraintKey::origin("origin-a")),
+            1,
+            "and a foreign completion must not decrement it"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_permit_with_no_live_reservation_is_refused() -> TestResult {
+        // The same ledger, after the reservation it named has been retired by
+        // the completion that consumed it. Nothing in the current public API can
+        // hand back a spent permit — `complete` consumes it — so this drives the
+        // ledger directly, which is the point: the check is enforced rather than
+        // assumed, and the arm a future path would hit is the one a saturating
+        // subtraction would have swallowed.
+        let mut frontier = frontier();
+        ready(&mut frontier, "a.example", "origin-a");
+        let permit = admitted(&mut frontier, "a.example", Duration::ZERO)?;
+
+        let ordinal = permit.ordinal;
+        frontier.reservations.remove(&ordinal);
+        assert_eq!(
+            frontier.verify(&permit),
+            Err(CompletionError::UnknownPermit),
+            "a permit this ledger does not hold is a typed refusal, not a \
+             subtraction that quietly does nothing"
+        );
+        assert_eq!(
+            frontier.complete(permit, Outcome::Success),
+            Err(CompletionError::UnknownPermit),
+            "and completing it is refused before any window is touched"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn selection_skips_hosts_the_gate_will_not_admit() {
+        // The filed counterexample. Rules are per-host state that selection
+        // never consulted, and because selection takes the first key in a
+        // `BTreeMap`, a permanently disallowed lexicographically-first host was
+        // returned on every turn and starved the ready host behind it.
+        let mut frontier = frontier();
+        for host in ["a.example", "b.example"] {
+            frontier.observe_resolution(host, Resolved::Origin(host.to_owned()));
+        }
+        frontier.observe_rules(
+            &ConstraintKey::host("a.example"),
+            RulesState::Disallowed {
+                rule: "Disallow: /".to_owned(),
+            },
+        );
+        frontier.observe_rules(&ConstraintKey::host("b.example"), RulesState::Allowed);
+
+        assert!(
+            matches!(
+                frontier.admit("a.example", Duration::ZERO),
+                Admission::Reject { .. }
+            ),
+            "the gate refuses the disallowed host"
+        );
+        assert_eq!(
+            frontier.next_admissible(Duration::ZERO).as_deref(),
+            Some("b.example"),
+            "so selection must not return it: rejection does not remove the \
+             host, and a selector with its own predicate returns it forever"
+        );
+    }
+
+    #[test]
+    fn selection_agrees_with_admission_on_every_rules_state() -> TestResult {
+        // One mixed backlog, ordered so the first host of each kind is the one a
+        // divergent selector would have returned.
+        let mut frontier = frontier();
+        let hosts = ["a.example", "b.example", "c.example", "d.example"];
+        for host in hosts {
+            frontier.observe_resolution(host, Resolved::Origin(format!("origin-{host}")));
+        }
+        frontier.observe_rules(
+            &ConstraintKey::host("a.example"),
+            RulesState::Disallowed {
+                rule: "Disallow: /".to_owned(),
+            },
+        );
+        frontier.observe_rules(&ConstraintKey::host("b.example"), RulesState::NotFetched);
+        frontier.observe_rules(
+            &ConstraintKey::host("c.example"),
+            RulesState::Unreachable {
+                since: Duration::ZERO,
+            },
+        );
+        frontier.observe_rules(&ConstraintKey::host("d.example"), RulesState::Allowed);
+
+        let next = frontier.next_admissible(Duration::ZERO);
+        assert_eq!(
+            next.as_deref(),
+            Some("d.example"),
+            "disallowed, unfetched and unexpired-unreachable are all states the \
+             gate will not admit, so none of them is selectable"
+        );
+
+        // The property the acceptance criteria state: for every host selection
+        // returns, the gate admits it on unchanged state.
+        let selected = next.unwrap_or_default();
+        let permit = match frontier.admit(&selected, Duration::ZERO) {
+            Admission::Admit(permit) => permit,
+            other => {
+                return Err(format!(
+                    "selection returned {selected}, which the gate answered with {other:?}"
+                )
+                .into());
+            }
+        };
+        assert!(permit.holds(&ConstraintKey::host("d.example")));
+        Ok(())
+    }
+
+    #[test]
+    fn a_lone_unpermitted_host_is_not_selected() {
+        let mut frontier = frontier();
+        frontier.observe_resolution("only.example", Resolved::Origin("origin".to_owned()));
+        frontier.observe_rules(&ConstraintKey::host("only.example"), RulesState::NotFetched);
+
+        assert_eq!(
+            frontier.next_admissible(Duration::ZERO),
+            None,
+            "a host whose rules have not been fetched is a prerequisite, not an \
+             admission, and returning it as admissible deadlocks the scheduler \
+             that trusts the answer"
+        );
+        assert_eq!(
+            frontier.next_prerequisite(Duration::ZERO),
+            Some(("only.example".to_owned(), DeferralKind::RulesNotFetched)),
+            "the same predicate reports the work that would unblock it"
+        );
+    }
+
+    #[test]
+    fn selection_agrees_with_admission_across_cooldowns_and_saturation() -> TestResult {
+        let mut frontier = frontier();
+        ready(&mut frontier, "a.example", "origin-a");
+        ready(&mut frontier, "b.example", "origin-b");
+        ready(&mut frontier, "c.example", "origin-c");
+
+        // a is inside a Retry-After the target asked for.
+        let permit = admitted(&mut frontier, "a.example", Duration::ZERO)?;
+        frontier.observe_retry_after(&permit, Duration::ZERO, Duration::from_secs(30))?;
+
+        // b is saturated: admitted, not completed.
+        let held = admitted(&mut frontier, "b.example", Duration::ZERO)?;
+
+        assert_eq!(
+            frontier.next_admissible(Duration::from_secs(1)).as_deref(),
+            Some("c.example"),
+            "a host on cooldown and a host at its window are both held, so \
+             selection moves past them to one the gate will take"
+        );
+        assert!(
+            matches!(
+                frontier.admit("c.example", Duration::from_secs(1)),
+                Admission::Admit(_)
+            ),
+            "and the host selection returned is one the gate admits"
+        );
+
+        // c takes the last egress slot; nothing is admissible any more.
+        frontier.complete(permit, Outcome::Success)?;
+        assert_eq!(
+            frontier.next_admissible(Duration::from_secs(1)),
+            None,
+            "with the egress saturated, nothing is admissible"
+        );
+        assert_eq!(
+            frontier.next_prerequisite(Duration::from_secs(1)),
+            None,
+            "and nothing is waiting on a prerequisite either: these are waits, \
+             not work the run can do"
+        );
+
+        frontier.complete(held, Outcome::Success)?;
+        assert_eq!(
+            frontier.next_admissible(Duration::from_secs(31)).as_deref(),
+            Some("a.example"),
+            "once the egress frees and the cooldown expires, the backlog is \
+             selectable again — no caller-maintained shadow filtering"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_grace_expiry_is_visible_to_selection_before_anything_acts_on_it() {
+        // The rules expiry is time-driven, and a selector that maintained its
+        // own approximation would flip at a different instant than the gate.
+        let mut frontier = frontier();
+        frontier.observe_resolution("a.example", Resolved::Origin("origin-a".to_owned()));
+        frontier.observe_rules(
+            &ConstraintKey::host("a.example"),
+            RulesState::Unreachable {
+                since: Duration::ZERO,
+            },
+        );
+
+        let inside_grace = PolitenessPolicy::DEFAULT
+            .unreachable_grace()
+            .saturating_sub(Duration::from_secs(1));
+        assert_eq!(
+            frontier.next_admissible(inside_grace),
+            None,
+            "inside the grace the complete disallow still holds"
+        );
+        assert_eq!(
+            frontier
+                .next_admissible(PolitenessPolicy::DEFAULT.unreachable_grace())
+                .as_deref(),
+            Some("a.example"),
+            "and at the boundary it lifts for selection, exactly where the gate \
+             would stop deferring"
+        );
+        assert_eq!(
+            frontier.rules(&ConstraintKey::host("a.example")),
+            RulesState::Unreachable {
+                since: Duration::ZERO
+            },
+            "selection is side-effect free: it reports the expiry without \
+             writing it down"
+        );
+        assert!(
+            matches!(
+                frontier.admit("a.example", PolitenessPolicy::DEFAULT.unreachable_grace()),
+                Admission::Admit(_)
+            ),
+            "and the two agree once the grant is acted on"
+        );
+    }
+
+    #[test]
+    fn selection_makes_progress_through_a_disallowed_prefix() -> TestResult {
+        // A selection/admission cycle over a backlog whose first keys can never
+        // be admitted. Each cycle must dispatch the next real host and never
+        // hand back one the gate will refuse.
+        let mut frontier = frontier();
+        for host in ["a.example", "b.example", "c.example", "d.example"] {
+            frontier.observe_resolution(host, Resolved::Origin(format!("origin-{host}")));
+            frontier.observe_rules(
+                &ConstraintKey::host(host),
+                if host == "a.example" {
+                    RulesState::Disallowed {
+                        rule: "Disallow: /".to_owned(),
+                    }
+                } else {
+                    RulesState::Allowed
+                },
+            );
+        }
+
+        let mut dispatched = Vec::new();
+        let mut held = Vec::new();
+        for _ in 0..3 {
+            let Some(host) = frontier.next_admissible(Duration::ZERO) else {
+                break;
+            };
+            match frontier.admit(&host, Duration::ZERO) {
+                // Held, not completed: each dispatch keeps its origin's single
+                // slot, so the next cycle has to move on to another host rather
+                // than returning the same one.
+                Admission::Admit(permit) => {
+                    dispatched.push(host);
+                    held.push(permit);
+                }
+                other => {
+                    return Err(format!(
+                        "selection returned {host}, which the gate answered with {other:?}"
+                    )
+                    .into());
+                }
+            }
+        }
+
+        assert_eq!(
+            dispatched,
+            vec!["b.example", "c.example", "d.example"],
+            "three cycles dispatch three distinct ready hosts behind a host that \
+             can never be dispatched"
+        );
+        assert_eq!(held.len(), 3, "each dispatch is still in flight");
+        Ok(())
     }
 
     #[test]
     fn ten_thousand_requests_replay_identically() {
-        fn run(mut frontier: Frontier) -> (Vec<Admission>, Vec<u32>) {
+        /// A verdict without the permit it may carry.
+        ///
+        /// A permit's identity is per-frontier — that is what makes a foreign
+        /// one refusable — so two runs are compared on the verdicts they
+        /// produced, one per step, and permits are settled inside the run rather
+        /// than recorded.
+        #[derive(Debug, PartialEq, Eq)]
+        enum Shape {
+            /// The frontier took the reservation.
+            Admit,
+            /// Held, with the instant, the cause and the binding constraint.
+            Defer(Duration, DeferralKind, ConstraintKey),
+            /// Dropped for good.
+            Reject(RejectKind),
+        }
+
+        /// What one run produced: the verdict per step, sampled windows, and the
+        /// count of completions the ledger refused — zero, or the run is not
+        /// evidence about anything.
+        struct Replay {
+            /// The verdict of each of the ten thousand steps.
+            verdicts: Vec<Shape>,
+            /// The egress window, sampled every five hundred steps.
+            windows: Vec<u32>,
+            /// Completions the frontier refused.
+            refusals: usize,
+        }
+
+        fn run(mut frontier: Frontier) -> Replay {
+            use std::collections::VecDeque;
+
             let hosts: Vec<String> = (0..20_u32)
                 .map(|index| format!("h{index}.example"))
                 .collect();
-            let mut verdicts = Vec::new();
-            let mut windows = Vec::new();
+            let mut replay = Replay {
+                verdicts: Vec::new(),
+                windows: Vec::new(),
+                refusals: 0,
+            };
+            // Up to three requests in flight at once, oldest retired first. A
+            // run that completed every request before asking for the next one
+            // would never saturate anything, and a replay of two runs that never
+            // back off is two identical silences.
+            let mut parked: VecDeque<InFlightPermit> = VecDeque::new();
             let mut at = Duration::ZERO;
             let mut index = 0_usize;
 
             for step in 0..10_000_usize {
                 let host = &hosts[index];
-                verdicts.push(frontier.admit(host, at));
-                if step.checked_rem(7) == Some(0) {
-                    frontier.record_failure(host);
+                let outcome = if step.checked_rem(7) == Some(0) {
+                    Outcome::Failure
+                } else if step.checked_rem(3) == Some(0) {
+                    Outcome::CacheHit
                 } else {
-                    frontier.record_success(host, step.checked_rem(3) == Some(0));
+                    Outcome::Success
+                };
+                if parked.len() >= 3 {
+                    let oldest = parked.pop_front();
+                    let refused =
+                        oldest.is_some_and(|permit| frontier.complete(permit, outcome).is_err());
+                    if refused {
+                        replay.refusals = replay.refusals.saturating_add(1);
+                    }
                 }
-                frontier.release(host);
+                // A refusal has no reservation to settle, so only an admission
+                // is parked — which is the exchange the API enforces.
+                let shape = match frontier.admit(host, at) {
+                    Admission::Admit(permit) => {
+                        parked.push_back(permit);
+                        Shape::Admit
+                    }
+                    Admission::Defer {
+                        resume_at,
+                        kind,
+                        constraint,
+                    } => Shape::Defer(resume_at, kind, constraint),
+                    Admission::Reject { kind } => Shape::Reject(kind),
+                };
+                replay.verdicts.push(shape);
                 at = at.saturating_add(Duration::from_millis(5));
                 if step.checked_rem(500) == Some(0) {
-                    windows.push(frontier.window(&ConstraintKey::egress("eth0")));
+                    replay
+                        .windows
+                        .push(frontier.window(&ConstraintKey::egress("eth0")));
                 }
                 index = if index.saturating_add(1) >= hosts.len() {
                     0
@@ -1247,29 +2374,64 @@ mod tests {
                     index.saturating_add(1)
                 };
             }
-            (verdicts, windows)
+            replay
         }
 
         fn build() -> Frontier {
             let mut frontier = frontier();
             for index in 0..20_u32 {
                 let host = format!("h{index}.example");
-                // Five hosts per origin: the shared-infrastructure case at size.
-                let origin = format!("origin-{}", index.checked_rem(5).unwrap_or(0));
+                // Three hosts per origin: the shared-infrastructure case at size.
+                let origin = format!("origin-{}", index.checked_rem(3).unwrap_or(0));
                 ready(&mut frontier, &host, &origin);
             }
             frontier
         }
 
-        let (first, first_windows) = run(build());
-        let (second, second_windows) = run(build());
+        let first = run(build());
+        let second = run(build());
 
-        assert_eq!(first.len(), 10_000);
+        assert_eq!(first.verdicts.len(), 10_000);
         assert_eq!(
-            first, second,
+            first.refusals, 0,
+            "every admission in the run was released by the ledger that minted \
+             it, so the refusal counter is the run's own consistency check"
+        );
+        assert!(
+            first
+                .verdicts
+                .iter()
+                .any(|shape| matches!(*shape, Shape::Admit))
+                && first
+                    .verdicts
+                    .iter()
+                    .any(|shape| matches!(*shape, Shape::Defer(..))),
+            "the schedule exercised both dispatch and back-off, so the replay \
+             comparison is not two identical silences"
+        );
+        assert_eq!(
+            first.verdicts, second.verdicts,
             "the same schedule on the same policy must produce identical verdicts"
         );
-        assert_eq!(first_windows, second_windows);
+        assert_eq!(first.windows, second.windows);
+    }
+
+    #[test]
+    fn permits_from_identically_driven_frontiers_compare_equal() -> TestResult {
+        // The determinism the virtual clock exists for, stated on the permit
+        // itself: two frontiers driven through the same script mint the same
+        // reservations in the same order, so their verdicts are comparable.
+        let mut first = frontier();
+        let mut second = frontier();
+        ready(&mut first, "a.example", "origin-a");
+        ready(&mut second, "a.example", "origin-a");
+
+        assert_eq!(
+            admitted(&mut first, "a.example", Duration::ZERO)?,
+            admitted(&mut second, "a.example", Duration::ZERO)?,
+            "identical schedules produce identical reservations"
+        );
+        Ok(())
     }
 
     #[test]
@@ -1294,23 +2456,22 @@ mod tests {
     }
 
     #[test]
-    fn releasing_returns_every_shared_slot() {
+    fn releasing_returns_every_shared_slot() -> TestResult {
         let mut frontier = frontier();
         ready(&mut frontier, "a.example", "origin-a");
         ready(&mut frontier, "b.example", "origin-a");
 
-        assert_eq!(
-            frontier.admit("a.example", Duration::ZERO),
-            Admission::Admit
-        );
+        let permit = admitted(&mut frontier, "a.example", Duration::ZERO)?;
         // b is behind the same origin, so the shared window is what blocks it.
         assert_eq!(
             deferral(&frontier.admit("b.example", Duration::ZERO)).map(|parts| parts.1),
             Some(DeferralKind::RateLimited)
         );
 
-        frontier.release("a.example");
+        frontier.complete(permit, Outcome::Success)?;
         assert_eq!(frontier.in_flight(&ConstraintKey::origin("origin-a")), 0);
         assert_eq!(frontier.in_flight(&ConstraintKey::egress("eth0")), 0);
+        assert_eq!(frontier.outstanding(), 0);
+        Ok(())
     }
 }

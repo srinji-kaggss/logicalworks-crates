@@ -165,8 +165,8 @@ pub mod verb;
 pub use cap::{Auth, Cap};
 pub use error::BotError;
 pub use frontier::{
-    Admission, ConstraintKey, DeferralKind, Frontier, PolitenessError, PolitenessPolicy,
-    RejectKind, Resolved, RulesState,
+    Admission, CompletionError, ConstraintKey, DeferralKind, Frontier, InFlightPermit,
+    PolitenessError, PolitenessPolicy, RejectKind, Resolved, RulesState,
 };
 pub use gate::GrantSet;
 pub use language::{Alias, LanguageResolver};
