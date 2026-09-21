@@ -25,6 +25,7 @@
 use std::fmt;
 
 use super::cap::Cap;
+use super::session::Terminal;
 
 /// Error from bot construction, admission, or execution.
 ///
@@ -206,6 +207,25 @@ pub enum BotError {
         /// Why the candidate cannot be stored.
         cause: String,
     },
+    /// A terminal declaration on a `handoff` or `refer` node contradicts the
+    /// outcome that node's kind already carries.
+    ///
+    /// A load-time verdict, and a refusal rather than an override. The node
+    /// names the target it hands to or refers to; a declared outcome naming a
+    /// different target, or a refusal, is a second statement in the same
+    /// document that cannot both be true. Accepting it and executing the node
+    /// anyway is how a document that says "this handoff is not authorized"
+    /// produces a permissive handoff classification, so the conflict is
+    /// refused where it was authored. A declaration that *repeats* the node's
+    /// outcome is accepted and is what the session executes.
+    ConflictingTerminalDeclaration {
+        /// The node carrying both outcomes.
+        node: String,
+        /// The outcome the node's kind implies.
+        intrinsic: Terminal,
+        /// The outcome the document declared for it.
+        declared: Terminal,
+    },
     /// A predicate could not compare values of different types.
     PredicateTypeMismatch,
     /// A predicate or interpolation needs a variable that has no value yet.
@@ -277,6 +297,29 @@ impl fmt::Display for Escaped<'_> {
             }
         }
         Ok(())
+    }
+}
+
+/// Render one terminal outcome inside a diagnostic.
+///
+/// The two payload-bearing variants carry untrusted text — a handoff target and
+/// a refusal reason can both come from the document — so both go through
+/// `Debug`, which is Rust's own escaping formatter and therefore refuses to
+/// emit a live control character. `Escaped` is not reusable here for the same
+/// reason the `Debug` sites above do not use it: the wrapper would have to be
+/// re-applied around each field separately, and one forgotten wrapper is a
+/// forged log line.
+fn write_terminal(formatter: &mut fmt::Formatter<'_>, terminal: &Terminal) -> fmt::Result {
+    // No wildcard arm: `Terminal` is `#[non_exhaustive]` for *downstream*
+    // consumers, and inside this crate the compiler knows the full set, so a
+    // new variant is a compile error here — which is the prompt wanted, since
+    // a diagnostic that cannot name an outcome should not be written by
+    // accident.
+    match *terminal {
+        Terminal::Completed => formatter.write_str("completed"),
+        Terminal::Referred { ref target } => write!(formatter, "referred to {target:?}"),
+        Terminal::HandedOff { ref target } => write!(formatter, "handed off to {target:?}"),
+        Terminal::Refused { ref reason } => write!(formatter, "refused because {reason:?}"),
     }
 }
 
@@ -406,6 +449,19 @@ impl fmt::Display for BotError {
                 Escaped(variable),
                 Escaped(cause)
             ),
+            // Both outcomes render through `write_terminal`, which escapes the
+            // two untrusted fields a `Terminal` can carry.
+            Self::ConflictingTerminalDeclaration {
+                ref node,
+                ref intrinsic,
+                ref declared,
+            } => {
+                write!(f, "terminal declaration on node {} ", Escaped(node))?;
+                f.write_str("contradicts the outcome its kind carries: ")?;
+                write_terminal(f, intrinsic)?;
+                f.write_str(" declared as ")?;
+                write_terminal(f, declared)
+            }
             Self::PredicateTypeMismatch => f.write_str("predicate values have incompatible types"),
             Self::VariableUnset { ref name } => {
                 write!(f, "variable {} has no value", Escaped(name))
@@ -451,7 +507,7 @@ impl std::error::Error for BotError {
 
 #[cfg(test)]
 mod tests {
-    use super::{BotError, Cap, Escaped};
+    use super::{BotError, Cap, Escaped, Terminal};
 
     /// The retry classifier a consumer writes, and the entire reason the two
     /// variants exist: it reads the *variant*, never the cause string.
@@ -574,6 +630,18 @@ mod tests {
             },
             BotError::VariableTypeMismatch {
                 name: payload.clone(),
+            },
+            // One row covers both terminal payloads: `HandedOff` carries the
+            // node's target and `Refused` the declared reason, and both reach
+            // the rendering site.
+            BotError::ConflictingTerminalDeclaration {
+                node: payload.clone(),
+                intrinsic: Terminal::HandedOff {
+                    target: payload.clone(),
+                },
+                declared: Terminal::Refused {
+                    reason: payload.clone(),
+                },
             },
             BotError::AskOptionNotAssignable {
                 node: payload.clone(),

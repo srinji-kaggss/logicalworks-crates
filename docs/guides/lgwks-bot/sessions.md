@@ -159,6 +159,18 @@ your own bound.
 `Terminal` records how the run ended: `Completed`, `Referred { target }`,
 `HandedOff { target }`, or `Refused { reason }`.
 
+Which one a node produces is computed in exactly one place,
+`FlowSpec::effective_terminal`, and validation and execution both read it. An
+`End` node completes unless the terminal map declares something else, and every
+declared outcome is a genuine override there — that is how a flow refuses
+(`Terminal::Refused`) rather than ending quietly. A `Handoff` or `Refer` node
+already names its target, so the only declaration it accepts is the one that
+repeats that outcome; one that contradicts it, whether a different target or a
+refusal, is refused at load with `BotError::ConflictingTerminalDeclaration`
+(`crates/lgwks-bot/src/session.rs:907`). A document that says a handoff is not
+authorized therefore never runs as a handoff, which is what a consumer
+dispatching on the returned disposition depends on.
+
 `Terminal::outcome(EffectLedger) -> Outcome` (`crates/lgwks-bot/src/session.rs:472`)
 carries two independent facts through unchanged, and that is the whole of the
 method:

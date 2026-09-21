@@ -752,6 +752,57 @@ impl FlowSpec {
         self.nodes.get(id)
     }
 
+    /// The outcome one node ends a session with, after the terminal map is
+    /// consulted.
+    ///
+    /// The one calculation of "what does this document say happens here",
+    /// shared by validation and execution. `None` means the node is not a
+    /// terminal node — an `End`, `Handoff`, or `Refer` — and no outcome is
+    /// defined for it.
+    ///
+    /// A declared terminal is authoritative for every terminal node, which is
+    /// what makes an `End` node's refusal override work. On a `Handoff` or
+    /// `Refer` node that same authority would silently discard the target the
+    /// node was written to hand to, so a declaration that *contradicts* the
+    /// node's own outcome is refused at load
+    /// ([`BotError::ConflictingTerminalDeclaration`]) rather than accepted and
+    /// ignored: a document that says a referral is refused is either corrected
+    /// or rejected, never run as a permissive referral. A declaration that
+    /// repeats the node's own outcome is accepted and is what this method
+    /// returns, so the declaration is read rather than merely tolerated.
+    #[must_use]
+    pub fn effective_terminal(&self, node_id: &str) -> Option<Terminal> {
+        // A `?` here is the non-terminal case, and it is why the declared
+        // lookup cannot be written first: an `End`-only declaration on a `Say`
+        // node is refused by validation and has no effective outcome.
+        let intrinsic = self.intrinsic_terminal(node_id)?;
+        match self.terminals.get(node_id) {
+            Some(declared) => Some(declared.clone()),
+            None => Some(intrinsic),
+        }
+    }
+
+    /// The outcome a terminal node carries before the terminal map is
+    /// consulted: `End` completes, `Handoff` names its target, and `Refer`
+    /// names its target.
+    ///
+    /// Private because it is the half of [`Self::effective_terminal`] that is
+    /// only meaningful inside the crate: a caller that wants the document's
+    /// outcome wants the declared one, and getting the intrinsic half would be
+    /// getting the answer this method exists to be corrected from.
+    fn intrinsic_terminal(&self, node_id: &str) -> Option<Terminal> {
+        match *self.nodes.get(node_id)? {
+            NodeKind::End => Some(Terminal::Completed),
+            NodeKind::Handoff { ref target } => Some(Terminal::HandedOff {
+                target: target.clone(),
+            }),
+            NodeKind::Refer { ref target, .. } => Some(Terminal::Referred {
+                target: target.clone(),
+            }),
+            _ => None,
+        }
+    }
+
     /// Return all explicit edge destinations from one node.
     fn edge_targets(&self, from: &str) -> Vec<NodeId> {
         self.edges
@@ -842,8 +893,19 @@ fn validate_declarations(vars: &BTreeMap<String, VarType>) -> Result<(), BotErro
 }
 
 /// Validate one terminal declaration and its node kind.
+///
+/// Two invariants, and the second is the one that was missing: a declaration
+/// must name a terminal node, and on a node whose kind already fixes the
+/// outcome it must not contradict it. `End` completes with nothing said about
+/// where the person goes, so every declared outcome is a genuine override and
+/// is accepted. A `Handoff` or `Refer` node already names its target, so a
+/// declaration of a different outcome — or of the same kind aimed somewhere
+/// else — is an authoring contradiction between two statements in one
+/// document, and refusing it is the only reading that cannot be wrong. A
+/// declaration that repeats the node's own outcome is accepted; it is then
+/// read by [`FlowSpec::effective_terminal`] rather than ignored.
 fn validate_terminals(spec: &FlowSpec) -> Result<(), BotError> {
-    for node_id in spec.terminals.keys() {
+    for (node_id, declared) in &spec.terminals {
         let Some(kind) = spec.nodes.get(node_id) else {
             return Err(BotError::InvalidTransitionTarget {
                 from: "<terminal>".into(),
@@ -856,6 +918,29 @@ fn validate_terminals(spec: &FlowSpec) -> Result<(), BotError> {
         ) {
             return Err(BotError::MalformedFlow {
                 cause: format!("terminal declaration {node_id:?} names a non-terminal node"),
+            });
+        }
+        // `End` has an intrinsic outcome too, but it is `Completed` — the
+        // absence of a destination rather than a claim about one — so a
+        // declaration replaces it instead of conflicting with it. Only the two
+        // node kinds that name a target can be contradicted.
+        if matches!(*kind, NodeKind::End) {
+            continue;
+        }
+        let Some(intrinsic) = spec.intrinsic_terminal(node_id) else {
+            // Unreachable on a validated document: the kind was just checked to
+            // be one of the three terminal kinds, and every one of them has an
+            // intrinsic outcome. Reported rather than skipped so a future node
+            // kind added to the check above cannot silently lose the rule.
+            return Err(BotError::MalformedFlow {
+                cause: format!("terminal declaration {node_id:?} has no intrinsic outcome"),
+            });
+        };
+        if intrinsic != *declared {
+            return Err(BotError::ConflictingTerminalDeclaration {
+                node: node_id.clone(),
+                intrinsic,
+                declared: declared.clone(),
             });
         }
     }
@@ -1819,15 +1904,20 @@ impl Session {
                         otherwise
                     });
                 }
-                NodeKind::Handoff { target } => {
-                    self.terminal = Some(Terminal::HandedOff { target });
-                    self.current = None;
-                }
-                NodeKind::Refer { target, text } => {
+                // The two terminal kinds that emit nothing before they end.
+                // Both read the outcome from the document rather than
+                // constructing it from the node, so a declared outcome is
+                // executed here and not only checked at load.
+                NodeKind::Handoff { .. } | NodeKind::End => self.finish(&node_id)?,
+                NodeKind::Refer { text, .. } => {
+                    // The text is emitted before the outcome is set, and the
+                    // only declared outcome a `refer` node can carry is the
+                    // referral itself — validation refuses anything else — so
+                    // this text is never spoken for an outcome that
+                    // contradicts it.
                     let rendered = TemplateInterpolator::new().interpolate(&text, &self.scope)?;
                     self.record(&node_id, "assistant", &rendered);
-                    self.terminal = Some(Terminal::Referred { target });
-                    self.current = None;
+                    self.finish(&node_id)?;
                 }
                 NodeKind::Route { dispatch, fallback } => {
                     self.current = Some(if self.last_utterance.is_some() {
@@ -1836,18 +1926,27 @@ impl Session {
                         fallback
                     });
                 }
-                NodeKind::End => {
-                    self.terminal = Some(
-                        self.flow
-                            .terminals
-                            .get(&node_id)
-                            .cloned()
-                            .unwrap_or(Terminal::Completed),
-                    );
-                    self.current = None;
-                }
             }
         }
+    }
+
+    /// End the session with the outcome the document gives one terminal node.
+    ///
+    /// The one place a session reads a terminal outcome. `drive` reaches this
+    /// for every terminal node kind, so the outcome validation checked and the
+    /// outcome execution returns are the same value from the same calculation
+    /// ([`FlowSpec::effective_terminal`]) and cannot drift: an earlier runner
+    /// consulted the terminal map for `End` alone, and a refusal declared on a
+    /// `handoff` node was accepted by validation and ignored here.
+    fn finish(&mut self, node_id: &str) -> Result<(), BotError> {
+        let Some(outcome) = self.flow.effective_terminal(node_id) else {
+            return Err(BotError::MalformedFlow {
+                cause: format!("node {node_id:?} reached with no terminal outcome"),
+            });
+        };
+        self.terminal = Some(outcome);
+        self.current = None;
+        Ok(())
     }
 
     /// Append one transcript record and forward it to the journal seam.
