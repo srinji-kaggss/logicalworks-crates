@@ -1,6 +1,124 @@
 //! `spec` owns the bot builder and serializable spec, enforcing
 //! INV-BOT-SPEC-SERIALIZABLE: every `BotSpec` round-trips through JSON and
 //! INV-BOT-TUPLE-WIRE: causal chains are `(condition, action)` tuples.
+//!
+//! # Chains are typed against their source
+//!
+//! [`ObserveBuilder::on`] takes a condition that reads the source's output and
+//! an action that takes exactly it, so a chain that cannot work does not build:
+//!
+//! ```rust
+//! use lgwks_bot::eval::Above;
+//! use lgwks_bot::{Auth, Bot, BotError, Cap, Evaluate, Execute, GrantSet, Observe};
+//!
+//! /// A source that reports a count.
+//! struct Clock;
+//! impl Observe for Clock {
+//!     type Output = u16;
+//!     fn required_caps(&self) -> &[Cap] { &[] }
+//!     async fn poll(&self, call: (Auth, ())) -> Result<u16, BotError> {
+//!         call.0.check(&[])?;
+//!         Ok(3)
+//!     }
+//!     fn domain_id(&self) -> &str { "doc::clock" }
+//! }
+//!
+//! /// An action whose input is a count.
+//! struct Ring;
+//! impl Execute for Ring {
+//!     type Input = u16;
+//!     type Output = ();
+//!     fn required_caps(&self) -> &[Cap] { &[] }
+//!     async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
+//!         call.0.check(&[])?;
+//!         Ok(())
+//!     }
+//!     fn domain_id(&self) -> &str { "doc::ring" }
+//! }
+//!
+//! // The bound `on` is stated against, independently of the builder: any
+//! // triple that satisfies it is a chain this crate accepts. Instantiated
+//! // with a shipped condition, so the bound is proven satisfiable by
+//! // something other than the closure below.
+//! fn assert_chain<S: Observe, C: Evaluate<S::Output>, A: Execute<Input = S::Output>>() {}
+//! assert_chain::<Clock, Above<u16>, Ring>();
+//!
+//! let bot = Bot::builder("doc")
+//!     .observe(Clock)
+//!     .on(|ticks: &u16| *ticks >= 3, Ring)
+//!     .build(&GrantSet::empty())?;
+//! # let _ = bot;
+//! # Ok::<(), BotError>(())
+//! ```
+//!
+//! An action that takes something else is a compile error — `E0271`, `type
+//! mismatch resolving <Courier as Execute>::Input == u16` — rather than a
+//! downcast miss discovered on a tick:
+//!
+//! ```compile_fail,E0271
+//! # use lgwks_bot::{Auth, Bot, BotError, Cap, Execute, GrantSet, Observe};
+//! #
+//! # struct Clock;
+//! # impl Observe for Clock {
+//! #     type Output = u16;
+//! #     fn required_caps(&self) -> &[Cap] { &[] }
+//! #     async fn poll(&self, call: (Auth, ())) -> Result<u16, BotError> {
+//! #         call.0.check(&[])?;
+//! #         Ok(3)
+//! #     }
+//! #     fn domain_id(&self) -> &str { "doc::clock" }
+//! # }
+//! #
+//! /// An action that takes a `u32` — not what `Clock` produces.
+//! struct Courier;
+//! impl Execute for Courier {
+//!     type Input = u32;
+//!     type Output = ();
+//!     fn required_caps(&self) -> &[Cap] { &[] }
+//!     async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
+//!         call.0.check(&[])?;
+//!         Ok(())
+//!     }
+//!     fn domain_id(&self) -> &str { "doc::courier" }
+//! }
+//!
+//! let bot = Bot::builder("doc")
+//!     .observe(Clock)
+//!     .on(|ticks: &u16| *ticks >= 3, Courier)
+//!     .build(&GrantSet::empty())?;
+//! ```
+//!
+//! The condition is checked the same way, against the same `S::Output`.
+//!
+//! ## What this refuses
+//!
+//! A deliberate tightening, and it rejects chains that used to compile and then
+//! fail on a tick. `EcsObserveBuilder` is generic over its source and
+//! `on` has no free type parameter; before, it had one (`on<C, A, T>`) tied to
+//! nothing at all, so a condition reading one type could sit in front of an
+//! action expecting another. The failure was a downcast miss at tick time,
+//! reported as a domain error — so it read as "the domain failed" and, before
+//! certainty was carried, spent a whole retry budget on a defect no attempt
+//! could repair. Two chains that previously compiled now do not:
+//!
+//! - a condition whose `Evaluate<T>` is not `Evaluate<S::Output>`;
+//! - an action whose `Execute::Input` is not `S::Output`.
+//!
+//! Both are defects, not features, and neither had a working tick-time story to
+//! preserve. Chains that were correct are unaffected.
+//!
+//! ## The rule a future verb has to keep
+//!
+//! One type across the chain is sound because every verb so far consumes its
+//! input and produces a caller-visible one — [`Evaluate::check`] returns a
+//! `bool`, a pure predicate with no derived output. **No stage may introduce a
+//! caller-selected type parameter disconnected from its input.** A stage that
+//! transforms the value must carry the transformation as an associated type
+//! (`Transform<I>::Output`), so the next stage's input follows from the previous
+//! stage's output instead of being chosen by the caller. A free parameter at
+//! this seam is how the chain became unprovable the first time.
+//!
+//! [`ObserveBuilder::on`]: crate::spec::ObserveBuilder::on
 
 use lgwks_std::json::{Deserialize, Serialize};
 use std::any::{Any, TypeId, type_name};

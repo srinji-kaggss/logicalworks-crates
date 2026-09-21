@@ -2149,22 +2149,20 @@ impl EcsBuilder {
 
     /// Bind a source to observe.
     ///
-    /// The `PartialEq` bound is the substrate's one extra requirement, and it
-    /// is semantic rather than incidental: the condition on this substrate *is*
-    /// change detection, and a value that cannot be compared cannot be detected
-    /// as changed. [`Bot::builder`](crate::Bot::builder) carries no such bound
-    /// because its condition is re-evaluated every tick and needs no equality.
-    pub fn observe<S>(self, source: S) -> EcsObserveBuilder
+    /// The source is *not* erased here. It stays a concrete `S` inside the
+    /// returned builder for as long as the chain is being declared, so `on` can
+    /// type its condition and its action against `S::Output`; the erasure
+    /// happens in [`EcsObserveBuilder::observe`] and
+    /// [`EcsObserveBuilder::build`], which are the two points where the chain
+    /// stops being a declaration and becomes a chain.
+    pub fn observe<S>(self, source: S) -> EcsObserveBuilder<S>
     where
-        S: Observe + 'static,
-        S::Output: PartialEq + 'static,
+        S: Observe,
     {
         EcsObserveBuilder {
             name: self.name,
             prior: self.chains,
-            source: Box::new(source),
-            same: same_output::<S>,
-            witness: Witness::of::<S::Output>(),
+            source,
             entries: Vec::new(),
             policy: self.policy,
         }
@@ -2177,95 +2175,138 @@ impl EcsBuilder {
     }
 }
 
-impl EcsObserveBuilder {
+impl<S: Observe> EcsObserveBuilder<S> {
     /// Add a `(condition, action)` tuple to this chain.
+    ///
+    /// Both halves are typed against the source this chain is observing: the
+    /// condition reads `S::Output`, and the action takes exactly it. There is no
+    /// third type parameter, and that is the point — the shape this replaced had
+    /// one (`on<C, A, T>`) which was tied to nothing at all, so a chain whose
+    /// condition read one type and whose action expected another compiled, built,
+    /// and failed at tick time with a downcast miss. A wiring defect that
+    /// compiles is a defect that ships.
     ///
     /// The tuple's erasure is shared with the `Bot` executor rather than
     /// re-implemented, so the `Auth` issue, the downcast and the type-mismatch
     /// error cannot drift between the two substrates.
-    pub fn on<C, A, T>(mut self, condition: C, action: A) -> Self
+    ///
+    /// # The rule this relies on
+    ///
+    /// Equal types across the chain is sound only because every verb so far
+    /// consumes its input and produces a caller-visible one: [`Evaluate::check`]
+    /// returns a `bool`, a pure predicate with no derived output, so
+    /// `Source::Output == Condition::Input == Action::Input` is already the real
+    /// semantics rather than a simplification of it.
+    ///
+    /// **No stage may introduce a caller-selected type parameter disconnected
+    /// from its input.** A stage that transforms the value must carry the
+    /// transformation as an associated type — `Transform<I>::Output` — so the
+    /// next stage's input is a consequence of the previous one's output. A free
+    /// parameter here is how this defect happened once, and it will happen again
+    /// the first time a verb takes a type the chain does not determine.
+    pub fn on<C, A>(mut self, condition: C, action: A) -> Self
     where
-        T: 'static,
-        C: Evaluate<T> + 'static,
-        A: Execute + 'static,
-        A::Input: 'static,
+        S::Output: 'static,
+        C: Evaluate<S::Output> + 'static,
+        A: Execute<Input = S::Output> + 'static,
         A::Output: 'static,
     {
-        self.entries.push(typed_entry(condition, action));
+        self.entries
+            .push(typed_entry::<C, A, S::Output>(condition, action));
         self
     }
 
     /// Finish this chain and start another.
-    pub fn observe<S>(self, source: S) -> EcsObserveBuilder
+    ///
+    /// The erasure boundary for the chain being closed: `S` stops being a type
+    /// parameter here, and the witness is taken in the same breath, while
+    /// `S::Output` can still be named.
+    ///
+    /// The `PartialEq` bound is the substrate's one extra requirement, and it is
+    /// semantic rather than incidental: the condition on this substrate *is*
+    /// change detection, and a value that cannot be compared cannot be detected
+    /// as changed. [`Bot::builder`](crate::Bot::builder) carries no such bound
+    /// because its condition is re-evaluated every tick and needs no equality.
+    pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
     where
-        S: Observe + 'static,
+        S: 'static,
         S::Output: PartialEq + 'static,
+        U: Observe,
     {
         // Destructured rather than moved field by field: taking `prior` by
         // `mem::take` and then moving `source` out leaves `self` partially
         // moved, and the borrow checker will not let a method call finish the
         // chain in between.
-        let EcsObserveBuilder {
+        let Self {
             name,
             mut prior,
             source: previous,
-            same,
-            witness,
             entries,
             policy,
         } = self;
         prior.push(EcsChain {
-            source: previous,
-            same,
+            source: Box::new(previous),
+            same: same_output::<S>,
+            witness: Witness::of::<S::Output>(),
             entries,
-            witness,
         });
         EcsObserveBuilder {
             name,
             prior,
-            source: Box::new(source),
-            same: same_output::<S>,
-            witness: Witness::of::<S::Output>(),
+            source,
             entries: Vec::new(),
             policy,
         }
     }
 
     /// Assemble the bot, admitting every capability and validating the schedule.
-    pub fn build(self, grants: &GrantSet) -> Result<EcsBot, BotError> {
-        let EcsObserveBuilder {
+    ///
+    /// The erasure boundary for the last chain, for the same reason as
+    /// [`observe`](Self::observe), and the one call that turns a declaration into
+    /// a running bot.
+    pub fn build(self, grants: &GrantSet) -> Result<EcsBot, BotError>
+    where
+        S: 'static,
+        S::Output: PartialEq + 'static,
+    {
+        let Self {
             name,
             mut prior,
             source,
-            same,
-            witness,
             entries,
             policy,
         } = self;
         prior.push(EcsChain {
-            source,
-            same,
+            source: Box::new(source),
+            same: same_output::<S>,
+            witness: Witness::of::<S::Output>(),
             entries,
-            witness,
         });
         EcsBot::assemble(name, prior, grants, policy)
     }
 }
 
-/// A chain being assembled.
-pub struct EcsObserveBuilder {
+/// A chain being assembled, holding its source as the concrete type it is.
+///
+/// Generic over the source so that [`on`](Self::on) can type a condition and an
+/// action against `S::Output`. The type parameter is the chain's one claim about
+/// its own wiring, and it is checked by the compiler rather than by a downcast:
+/// a `(condition, action)` tuple attached here has both halves typed against the
+/// source, so a chain that cannot work does not build.
+///
+/// `S` is erased at [`observe`](Self::observe) and [`build`](Self::build), which
+/// are the only two points where the chain is finished. There is no third state
+/// between "declaring a chain" and "a chain": the builder cannot be stored,
+/// serialized, or passed to anything that expects an `EcsChain`, because it is
+/// not one until the erasure runs.
+pub struct EcsObserveBuilder<S> {
     /// Carried from [`EcsBuilder`]; the chain being built does not consume it.
     name: String,
     /// Chains finished by an earlier `observe` call, in order.
     prior: Vec<EcsChain>,
-    /// The source being bound.
-    source: Box<dyn ObserveAny>,
-    /// Equality for `source`'s output.
-    same: fn(&dyn Any, &dyn Any) -> bool,
-    /// What type `source` produces, taken from `S::Output` while it is still a
-    /// type parameter. Moves onto the [`EcsChain`] when the chain is finished.
-    witness: Witness,
-    /// Tuples attached so far.
+    /// The source being bound, still concrete.
+    source: S,
+    /// Tuples attached so far, each already erased for storage.
     entries: Vec<ChainEntry>,
     /// Carried from [`EcsBuilder`] alongside `name`.
     policy: RetryPolicy,
@@ -3506,15 +3547,26 @@ mod tests {
         // it is not run ahead of a question that has no answer — the failure
         // the old substrate turned into "this chain is done".
         //
-        // The mismatch is buildable because the builder ties a condition to the
-        // action's erased input, not to the source's output type: the downcast
-        // happens at check time, which is where this reports.
+        // The mismatched condition is built *behind* the builder now, because
+        // the typed `on` refuses it: a `u16` source cannot carry a condition
+        // that reads a `String`. That refusal is the front half of this fix, and
+        // the back half is still needed, because erasure is not the only way to
+        // reach a mis-paired chain — anything holding this world can insert an
+        // entry. `typed_entry` is the erasure helper and keeps its free `T`, so
+        // it can still express the defect; this test is the one place that does,
+        // on purpose, to pin what happens when it is reached.
         let log = Rc::new(RefCell::new(Vec::new()));
         let mut bot = EcsBot::builder("mismatched")
             .observe(Script::new(vec![200, 200]))
-            .on(|value: &String| value.len() >= 3, Record(Rc::clone(&log)))
             .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
             .build(&net_grants())?;
+        bot.world.non_send_mut::<Chains>().0[0].entries.insert(
+            0,
+            typed_entry::<_, _, String>(
+                |value: &String| value.len() >= 3,
+                Record(Rc::clone(&log)),
+            ),
+        );
 
         match bot.tick() {
             Ok(fired) => {
@@ -3701,7 +3753,7 @@ mod tests {
         let ran = Rc::new(Cell::new(0));
         let mut bot = EcsBot::builder("mispairing")
             .observe(Script::new(vec![200]))
-            .on(|value: &u16| *value >= 200, CountsU32(Rc::clone(&ran)))
+            .on(|value: &u16| *value >= 200, Refuses(Rc::clone(&ran)))
             .build(&net_grants())?;
 
         bot.world.non_send_mut::<Polled>().0 = vec![Ok(Erased::new(300u32))];
@@ -3753,11 +3805,18 @@ mod tests {
         // action, because the action must never be reached: the downcast is
         // checked before the proof is issued, so a mismatch costs no side
         // effect. `ran` is that second half.
+        // Built behind the builder for the same reason as the condition
+        // mismatch above: `on` no longer admits `CountsU32` on a `u16` source,
+        // which is the fix, and the downcast arm is still what reports the
+        // mis-pairing that reaches the erasure boundary anyway.
         let ran = Rc::new(Cell::new(0));
+        let log = Rc::new(RefCell::new(Vec::new()));
         let mut bot = EcsBot::builder("mismatched")
             .observe(Script::new(vec![200, 200, 200, 200]))
-            .on::<_, _, u16>(|value: &u16| *value >= 200, CountsU32(Rc::clone(&ran)))
+            .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
             .build(&net_grants())?;
+        bot.world.non_send_mut::<Chains>().0[0].entries[0] =
+            typed_entry::<_, _, u16>(|value: &u16| *value >= 200, CountsU32(Rc::clone(&ran)));
 
         match bot.tick() {
             Ok(fired) => {
