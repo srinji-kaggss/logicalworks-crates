@@ -3,9 +3,9 @@
 use std::collections::BTreeMap;
 
 use lgwks_bot::{
-    BotError, DegradedReason, Embedder, EmbedderIdentity, FlowBounds, FlowEdge, FlowSpec, NodeKind,
-    Predicate, Resolution, Resolver, SemanticResolver, Session, Terminal, TranscriptEntry, Value,
-    ValueExpr, VarType,
+    AnswerRejection, BotError, DegradedReason, Embedder, EmbedderIdentity, FlowBounds, FlowEdge,
+    FlowSpec, NodeKind, Predicate, Resolution, Resolver, SemanticResolver, Session, Terminal,
+    TranscriptEntry, Value, ValueExpr, VarType,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -564,6 +564,70 @@ fn one_question_flow() -> Result<FlowSpec, BotError> {
     )
 }
 
+/// One `Ask` node over a single variable, routing every option to an `End`.
+fn single_ask_flow(declared: VarType, options: Vec<String>) -> Result<FlowSpec, BotError> {
+    let routes = options
+        .iter()
+        .map(|option| (option.clone(), String::from("done")))
+        .collect();
+    FlowSpec::new(
+        BTreeMap::from([(String::from("answer"), declared)]),
+        "ask",
+        BTreeMap::from([
+            (
+                String::from("ask"),
+                NodeKind::Ask {
+                    var: String::from("answer"),
+                    options,
+                    routes,
+                },
+            ),
+            (String::from("done"), NodeKind::End),
+        ]),
+        Vec::new(),
+        BTreeMap::new(),
+        FlowBounds::new(8),
+    )
+}
+
+/// The declared-type label of one stored value.
+///
+/// Written out here rather than read from [`VarType::label`] so the assertion
+/// is about the value that was actually stored: comparing a stored value to the
+/// declaration through one function would agree with itself whatever it stored.
+fn value_kind(value: &Value) -> &'static str {
+    match *value {
+        Value::String(_) => "string",
+        Value::Integer(_) => "integer",
+        Value::Boolean(_) => "boolean",
+        Value::Choice(_) => "choice",
+        // `Value` is `#[non_exhaustive]`. A variant added later must be named
+        // above before this can claim to know what the variable stored; until
+        // then it reports a string no declared type matches, so the assertion
+        // that reads it fails rather than passing by accident.
+        _ => "unrecognised",
+    }
+}
+
+/// The five facts an ask-candidate refusal must carry, or a description of why
+/// the flow was not refused that way.
+fn ask_refusal(result: Result<FlowSpec, BotError>) -> Result<[String; 5], String> {
+    match result {
+        Err(BotError::AskOptionNotAssignable {
+            node,
+            variable,
+            option,
+            expected,
+            cause,
+        }) => Ok([node, variable, option, String::from(expected), cause]),
+        Err(other) => Err(format!("refused for the wrong reason: {other}")),
+        Ok(spec) => Err(format!(
+            "accepted a flow that offers options it cannot store ({} nodes)",
+            spec.nodes().len()
+        )),
+    }
+}
+
 /// One `Ask` node whose options are ordinary English, so a phrase that shares no
 /// letter with either of them is the only way to reach the semantic tier.
 fn order_flow() -> Result<FlowSpec, BotError> {
@@ -819,5 +883,332 @@ fn a_degraded_verdict_is_distinguishable_from_an_absent_one() -> TestResult {
     assert!(!absent_roles.contains(&"resolver-degraded"));
     assert!(degraded_roles.contains(&"resolver-degraded"));
     assert_ne!(absent_roles, degraded_roles);
+    Ok(())
+}
+
+#[test]
+fn the_boolean_ask_from_the_report_is_refused_by_from_json() -> TestResult {
+    // The document is the one in the defect report, verbatim. It used to
+    // validate, construct a session, reach the ask, and then fail *every*
+    // answer: `Continue` and `Cancel` are exact resolver matches that a boolean
+    // variable cannot store, and answering `true` cannot repair the flow
+    // because the session stores the selected option, not the raw utterance.
+    let document = r#"
+    {
+      "vars": {"decision": {"kind": "boolean"}},
+      "entry": "ask",
+      "nodes": {
+        "ask": {
+          "kind": "ask",
+          "var": "decision",
+          "options": ["Continue", "Cancel"],
+          "routes": {"Continue": "done", "Cancel": "done"}
+        },
+        "done": {"kind": "end"}
+      }
+    }
+    "#;
+
+    // `from_json` is the whole proof: the refusal is a load-time verdict, so no
+    // session is constructed and no journal entry is written.
+    let [node, variable, option, expected, cause] = ask_refusal(FlowSpec::from_json(document))?;
+    assert_eq!(
+        node, "ask",
+        "the refusal names the node carrying the candidate"
+    );
+    assert_eq!(
+        variable, "decision",
+        "the refusal names the variable the ask writes"
+    );
+    assert_eq!(
+        option, "Continue",
+        "the refusal names the candidate it could not store"
+    );
+    assert_eq!(expected, "boolean", "the refusal names the declared type");
+    assert_eq!(
+        cause,
+        AnswerRejection::NotABoolean.to_string(),
+        "the cause is the decoder's own verdict rather than a second opinion about it"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_candidate_after_a_storable_one_is_still_refused() -> TestResult {
+    // A check that stopped at the first option would accept this document and
+    // leave `Cancel` unanswerable: the same defect, one option later.
+    let facts = ask_refusal(single_ask_flow(
+        VarType::Boolean,
+        vec![String::from("yes"), String::from("Cancel")],
+    ))?;
+    let [_, _, option, _, _] = facts;
+    assert_eq!(
+        option, "Cancel",
+        "every candidate is checked, not only the first"
+    );
+    Ok(())
+}
+
+#[test]
+fn every_declared_type_refuses_a_candidate_it_cannot_store() -> TestResult {
+    // `String` has no refusal case to pin: it stores any candidate, which is
+    // the free-form declaration doing its job. The other three each have a
+    // candidate that a person could reasonably author and that the variable
+    // cannot hold, plus the two integer range edges.
+    let choice = VarType::Choice(vec![String::from("yes"), String::from("no")]);
+    let cases: Vec<(VarType, Vec<String>, &str, AnswerRejection)> = vec![
+        (
+            VarType::Boolean,
+            vec![String::from("Continue"), String::from("Cancel")],
+            "Continue",
+            AnswerRejection::NotABoolean,
+        ),
+        (
+            VarType::Integer,
+            vec![String::from("7.5")],
+            "7.5",
+            AnswerRejection::NotAnInteger,
+        ),
+        (
+            VarType::Integer,
+            vec![String::from("9223372036854775808")],
+            "9223372036854775808",
+            AnswerRejection::IntegerOutOfRange,
+        ),
+        (
+            VarType::Integer,
+            vec![String::from("-9223372036854775809")],
+            "-9223372036854775809",
+            AnswerRejection::IntegerOutOfRange,
+        ),
+        (
+            choice,
+            vec![String::from("approve"), String::from("deny")],
+            "approve",
+            AnswerRejection::NotADeclaredChoice,
+        ),
+    ];
+
+    for (declared, options, expected_option, rejection) in cases {
+        let expected_label = declared.label();
+        let [node, variable, option, expected, cause] =
+            ask_refusal(single_ask_flow(declared, options))?;
+        assert_eq!(node, "ask", "the refusal names the ask node");
+        assert_eq!(
+            variable, "answer",
+            "the refusal names the variable the ask writes"
+        );
+        assert_eq!(
+            option, expected_option,
+            "the refusal names the candidate it cannot store"
+        );
+        assert_eq!(
+            expected, expected_label,
+            "the refusal names the declared type"
+        );
+        assert_eq!(
+            cause,
+            rejection.to_string(),
+            "the cause is the decoder's own verdict"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn every_option_of_every_accepted_ask_is_storable() -> TestResult {
+    // Four asks, one per declared type, chained so every node is reachable:
+    // each ask routes all of its options to the next ask, and the last one to
+    // the end. The candidates disagree with the declaration in spelling on
+    // purpose (`SMALL` against `small`, `007` against a plain integer), because
+    // those are exactly the candidates a stricter check would refuse and a
+    // person would still expect to work.
+    let asks = [
+        (
+            String::from("words"),
+            VarType::String,
+            vec![String::from("Continue"), String::from("Cancel")],
+        ),
+        (
+            String::from("count"),
+            VarType::Integer,
+            vec![
+                String::from("7"),
+                String::from(" -12 "),
+                String::from("007"),
+            ],
+        ),
+        (
+            String::from("confirmed"),
+            VarType::Boolean,
+            vec![
+                String::from("yes"),
+                String::from("FALSE"),
+                String::from("No"),
+            ],
+        ),
+        (
+            String::from("size"),
+            VarType::Choice(vec![String::from("small"), String::from("large")]),
+            vec![String::from("SMALL"), String::from("Large")],
+        ),
+    ];
+
+    let ids: Vec<String> = asks.iter().map(|ask| format!("ask_{}", ask.0)).collect();
+    let mut vars = BTreeMap::new();
+    let mut nodes = BTreeMap::new();
+    for (position, ask) in asks.iter().enumerate() {
+        let (variable, declared, options) = (&ask.0, &ask.1, &ask.2);
+        vars.insert(variable.clone(), declared.clone());
+        let target = ids
+            .get(position + 1)
+            .cloned()
+            .unwrap_or_else(|| String::from("end"));
+        let routes = options
+            .iter()
+            .map(|option| (option.clone(), target.clone()))
+            .collect();
+        nodes.insert(
+            format!("ask_{variable}"),
+            NodeKind::Ask {
+                var: variable.clone(),
+                options: options.clone(),
+                routes,
+            },
+        );
+    }
+    nodes.insert(String::from("end"), NodeKind::End);
+    let spec = FlowSpec::from_nodes(vars, "ask_words", nodes, FlowBounds::new(64))?;
+
+    // The enumeration is over the *spec*, not over the `asks` array, so it
+    // proves the property of the document that was accepted rather than of the
+    // table the document was built from.
+    let mut enumerated = 0_usize;
+    for node_id in spec.nodes().keys() {
+        let Some(NodeKind::Ask { var, options, .. }) = spec.node(node_id).cloned() else {
+            continue;
+        };
+        let Some(declared) = spec.vars().get(&var) else {
+            return Err(format!("ask node {node_id} writes undeclared variable {var}").into());
+        };
+        for option in &options {
+            let decoded = declared.decode_answer(option).map_err(|rejection| {
+                format!(
+                    "accepted ask {node_id} offers {option:?} for a {} variable, \
+                     which cannot store it: {rejection}",
+                    declared.label()
+                )
+            })?;
+            assert_eq!(
+                value_kind(&decoded),
+                declared.label(),
+                "ask {node_id} option {option:?} stores a {} value",
+                value_kind(&decoded)
+            );
+            enumerated = enumerated.saturating_add(1);
+        }
+    }
+    assert_eq!(
+        enumerated, 10,
+        "the fixture's four accepted asks offer ten candidates in total"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_display_label_stores_the_value_the_declared_type_names() -> TestResult {
+    // A candidate is a label the resolver matches *and* a value the variable
+    // stores, and the two are not always the same string. Each case pins one
+    // mapping a person reading the document would expect: the label is routed
+    // on as written, and what lands in the variable is the declared type's
+    // value.
+    let cases: Vec<(VarType, &str, Value)> = vec![
+        (VarType::Boolean, "yes", Value::Boolean(true)),
+        (VarType::Boolean, "No", Value::Boolean(false)),
+        (VarType::Integer, "007", Value::Integer(7)),
+        (VarType::Integer, " -12 ", Value::Integer(-12)),
+        (
+            VarType::Choice(vec![String::from("small")]),
+            "SMALL",
+            Value::Choice(String::from("small")),
+        ),
+        (
+            VarType::String,
+            "  padded  ",
+            Value::String(String::from("  padded  ")),
+        ),
+    ];
+
+    for (declared, option, expected) in cases {
+        let label = declared.label();
+        let spec = single_ask_flow(declared, vec![String::from(option)])?;
+        let mut session = Session::new("mapping", spec)?;
+        session.answer(option)?;
+        assert_eq!(
+            session.scope().get("answer"),
+            Some(&expected),
+            "answering {option:?} for a {label} variable stores {expected:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn exact_ambiguous_and_absent_answers_behave_as_before() -> TestResult {
+    // The load-time check must not change what happens to an answer at runtime.
+    let mut exact = Session::new("exact", one_question_flow()?)?;
+    exact.answer("yes")?;
+    assert_eq!(
+        exact.terminal(),
+        Some(&Terminal::Completed),
+        "an exact match still routes on a validated ask"
+    );
+    assert_eq!(
+        exact.scope().get("choice"),
+        Some(&Value::Choice(String::from("yes"))),
+        "the exact match stores the option the route was keyed by"
+    );
+
+    let mut ambiguous = Session::with_resolver(
+        "ambiguous",
+        one_question_flow()?,
+        FixedResolver(Resolution::Ambiguous {
+            tied: vec![0, 1],
+            score: 0.8,
+        }),
+    )?;
+    ambiguous.answer("maybe")?;
+    assert_eq!(
+        ambiguous.current(),
+        Some("ask"),
+        "an ambiguous answer leaves the cursor on the ask"
+    );
+    assert_eq!(
+        ambiguous.scope().get("choice"),
+        None,
+        "an ambiguous answer stores no value"
+    );
+    assert_eq!(
+        ambiguous.transcript().last().map(TranscriptEntry::text),
+        Some("Choose one: yes, no"),
+        "the re-ask repeats the options still in play"
+    );
+
+    let mut absent = Session::with_resolver(
+        "absent",
+        one_question_flow()?,
+        FixedResolver(Resolution::Absent { best_score: 0.0 }),
+    )?;
+    absent.answer("maybe")?;
+    assert_eq!(
+        absent.current(),
+        Some("ask"),
+        "an unrecognized answer leaves the cursor on the ask"
+    );
+    assert_eq!(
+        absent.scope().get("choice"),
+        None,
+        "an unrecognized answer stores no value"
+    );
     Ok(())
 }

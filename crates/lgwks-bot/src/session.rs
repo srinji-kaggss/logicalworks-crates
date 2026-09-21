@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
+use std::num::IntErrorKind;
 
 use lgwks_std::json::Value as JsonValue;
 use lgwks_std::json::{Deserialize, Serialize};
@@ -69,6 +70,116 @@ pub enum VarType {
     Boolean,
     /// A finite set of allowed answer values.
     Choice(Vec<String>),
+}
+
+impl VarType {
+    /// The stable label naming this declared type.
+    ///
+    /// Stable prose for diagnostics and nothing else: it is not the serde
+    /// discriminator, which is `rename_all = "snake_case"` on the variants and
+    /// should be read from the document instead of from here.
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        match *self {
+            Self::String => "string",
+            Self::Integer => "integer",
+            Self::Boolean => "boolean",
+            Self::Choice(_) => "choice",
+        }
+    }
+
+    /// Decode one answer string into a value of this declared type.
+    ///
+    /// The single decoder. Flow validation runs it over every `ask` candidate
+    /// when the document is loaded, and runtime assignment runs it over the
+    /// option the resolver selected; one implementation means the two cannot
+    /// disagree about which candidates are storable, and a flow that loads is
+    /// a flow every one of whose options can be stored.
+    ///
+    /// A display label is therefore a *value* of the declared type rather than
+    /// a free string: `"yes"` offered for a boolean variable stores
+    /// [`Value::Boolean`]`(true)`, and a choice candidate that differs from the
+    /// declared spelling only in case stores the declared spelling. The route
+    /// is keyed by the label the resolver matched; the variable receives what
+    /// this returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`AnswerRejection`] naming why the answer cannot be stored.
+    pub fn decode_answer(&self, answer: &str) -> Result<Value, AnswerRejection> {
+        let trimmed = answer.trim();
+        match *self {
+            // A free-form string accepts anything, including the untrimmed
+            // bytes: trimming a person's answer for them is a decision the
+            // flow author makes downstream, not one this decoder makes.
+            Self::String => Ok(Value::String(answer.to_owned())),
+            Self::Integer => match trimmed.parse::<i64>() {
+                Ok(value) => Ok(Value::Integer(value)),
+                Err(error) => Err(match *error.kind() {
+                    IntErrorKind::PosOverflow | IntErrorKind::NegOverflow => {
+                        AnswerRejection::IntegerOutOfRange
+                    }
+                    _ => AnswerRejection::NotAnInteger,
+                }),
+            },
+            Self::Boolean => {
+                if trimmed.eq_ignore_ascii_case("true") || trimmed.eq_ignore_ascii_case("yes") {
+                    Ok(Value::Boolean(true))
+                } else if trimmed.eq_ignore_ascii_case("false")
+                    || trimmed.eq_ignore_ascii_case("no")
+                {
+                    Ok(Value::Boolean(false))
+                } else {
+                    Err(AnswerRejection::NotABoolean)
+                }
+            }
+            Self::Choice(ref options) => {
+                let Some(option) = options
+                    .iter()
+                    .find(|option| option.eq_ignore_ascii_case(trimmed))
+                else {
+                    return Err(AnswerRejection::NotADeclaredChoice);
+                };
+                Ok(Value::Choice(option.clone()))
+            }
+        }
+    }
+}
+
+/// Why one answer string cannot be stored in a variable.
+///
+/// A closed verdict rather than a message, so a caller branches on the cause
+/// instead of parsing prose, and so the set of ways an answer can be unusable
+/// is stated where a reviewer reads it. It is what
+/// [`VarType::decode_answer`] returns, and therefore what flow validation
+/// reports through [`BotError::AskOptionNotAssignable`] when a candidate is
+/// unusable at load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AnswerRejection {
+    /// The answer is not a decimal integer.
+    NotAnInteger,
+    /// The answer is a decimal integer outside the signed 64-bit range.
+    IntegerOutOfRange,
+    /// The answer is not `true`/`false` or `yes`/`no`.
+    NotABoolean,
+    /// The answer is not one of the variable's declared choice values.
+    NotADeclaredChoice,
+}
+
+impl fmt::Display for AnswerRejection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::NotAnInteger => formatter.write_str("it is not a decimal integer"),
+            Self::IntegerOutOfRange => {
+                formatter.write_str("it is outside the signed 64-bit integer range")
+            }
+            Self::NotABoolean => formatter.write_str("it is not true/false or yes/no"),
+            Self::NotADeclaredChoice => {
+                formatter.write_str("it is not one of the declared choice values")
+            }
+        }
+    }
 }
 
 /// A variable reference or literal used by a branch predicate.
@@ -777,7 +888,7 @@ fn validate_node(
             ref options,
             ref routes,
         } => {
-            validate_variable_reference(spec, node_id, var)?;
+            let declared = declared_variable(spec, var)?;
             writers.insert(var.clone());
             if options.is_empty() || has_duplicate_strings(options) {
                 return Err(BotError::MalformedFlow {
@@ -792,6 +903,19 @@ fn validate_node(
                     });
                 };
                 check_target(&spec.nodes, node_id, target)?;
+                // Every candidate is decoded with the same decoder the runtime
+                // assigns with, so "the flow asks a question the variable
+                // cannot hold an answer to" is a load-time refusal rather than
+                // a conversation the person cannot complete.
+                if let Err(rejection) = declared.decode_answer(option) {
+                    return Err(BotError::AskOptionNotAssignable {
+                        node: node_id.to_owned(),
+                        variable: var.clone(),
+                        option: option.clone(),
+                        expected: declared.label(),
+                        cause: rejection.to_string(),
+                    });
+                }
             }
             for (option, target) in routes {
                 if !options.iter().any(|candidate| candidate == option) {
@@ -839,6 +963,15 @@ fn validate_variable_reference(spec: &FlowSpec, node_id: &str, name: &str) -> Re
             name: name.to_owned(),
         })
     }
+}
+
+/// Resolve a variable's declared type, refusing an undeclared name.
+fn declared_variable<'a>(spec: &'a FlowSpec, name: &str) -> Result<&'a VarType, BotError> {
+    spec.vars
+        .get(name)
+        .ok_or_else(|| BotError::UndeclaredVariable {
+            name: name.to_owned(),
+        })
 }
 
 /// Validate a predicate's variable references and non-empty boolean lists.
@@ -1089,46 +1222,24 @@ impl VarScope {
     }
 
     /// Parse and assign an answer according to the variable declaration.
+    ///
+    /// Runs [`VarType::decode_answer`], the same decoder flow validation runs
+    /// over every ask candidate. For a validated flow the decode cannot fail:
+    /// the candidate that reaches here is one validation already accepted. It
+    /// stays a `Result` because this method is public and a caller may hold a
+    /// scope that no `FlowSpec` validated.
     pub fn set_from_answer(&mut self, name: &str, answer: &str) -> Result<(), BotError> {
         let Some(declared) = self.declarations.get(name) else {
             return Err(BotError::UndeclaredVariable {
                 name: name.to_owned(),
             });
         };
-        let value = match *declared {
-            VarType::String => Value::String(answer.to_owned()),
-            VarType::Integer => match answer.trim().parse::<i64>() {
-                Ok(value) => Value::Integer(value),
-                Err(_) => {
-                    return Err(BotError::InvalidVariableValue {
-                        variable: name.to_owned(),
-                        value: answer.to_owned(),
-                    });
-                }
-            },
-            VarType::Boolean => match answer.trim().to_ascii_lowercase().as_str() {
-                "true" | "yes" => Value::Boolean(true),
-                "false" | "no" => Value::Boolean(false),
-                _ => {
-                    return Err(BotError::InvalidVariableValue {
-                        variable: name.to_owned(),
-                        value: answer.to_owned(),
-                    });
-                }
-            },
-            VarType::Choice(ref options) => {
-                let Some(option) = options
-                    .iter()
-                    .find(|option| option.eq_ignore_ascii_case(answer.trim()))
-                else {
-                    return Err(BotError::InvalidVariableValue {
-                        variable: name.to_owned(),
-                        value: answer.to_owned(),
-                    });
-                };
-                Value::Choice(option.clone())
+        let value = declared.decode_answer(answer).map_err(|_rejection| {
+            BotError::InvalidVariableValue {
+                variable: name.to_owned(),
+                value: answer.to_owned(),
             }
-        };
+        })?;
         self.set(name, value)
     }
 
@@ -1838,6 +1949,246 @@ mod tests {
         scope.set_from_answer("name", "Ada")?;
         let rendered = scope.interpolate("Hello ${name}")?;
         assert_eq!(rendered, "Hello Ada");
+        Ok(())
+    }
+
+    /// One declared type paired with candidate answer strings and the value
+    /// each must decode to.
+    fn decode_cases() -> Vec<(VarType, &'static str, Result<Value, AnswerRejection>)> {
+        let choice = || VarType::Choice(vec![String::from("yes"), String::from("no")]);
+        vec![
+            // A string variable accepts anything, untrimmed: the declared type
+            // is what decides, not a literal spelling.
+            (
+                VarType::String,
+                "Continue",
+                Ok(Value::String(String::from("Continue"))),
+            ),
+            (
+                VarType::String,
+                "  padded  ",
+                Ok(Value::String(String::from("  padded  "))),
+            ),
+            (VarType::Integer, "7", Ok(Value::Integer(7))),
+            (VarType::Integer, " -12 ", Ok(Value::Integer(-12))),
+            (VarType::Integer, "007", Ok(Value::Integer(7))),
+            (VarType::Integer, "7.5", Err(AnswerRejection::NotAnInteger)),
+            (VarType::Integer, "", Err(AnswerRejection::NotAnInteger)),
+            (
+                VarType::Integer,
+                "99999999999999999999",
+                Err(AnswerRejection::IntegerOutOfRange),
+            ),
+            (VarType::Boolean, "yes", Ok(Value::Boolean(true))),
+            (VarType::Boolean, " TRUE ", Ok(Value::Boolean(true))),
+            (VarType::Boolean, "No", Ok(Value::Boolean(false))),
+            (
+                VarType::Boolean,
+                "Continue",
+                Err(AnswerRejection::NotABoolean),
+            ),
+            (choice(), "yes", Ok(Value::Choice(String::from("yes")))),
+            (choice(), " No ", Ok(Value::Choice(String::from("no")))),
+            (
+                choice(),
+                "approve",
+                Err(AnswerRejection::NotADeclaredChoice),
+            ),
+        ]
+    }
+
+    #[test]
+    fn the_answer_decoder_is_one_function_for_validation_and_assignment() {
+        // The decode table is the whole statement of what "this candidate can
+        // be stored" means, and both the load-time check and the runtime
+        // assignment read it. Every branch of every declared type is here,
+        // including the two integer failures, which are distinct verdicts: a
+        // typo and a value too large to store need different repairs.
+        for (declared, answer, expected) in decode_cases() {
+            assert_eq!(
+                declared.decode_answer(answer),
+                expected,
+                "decoding {answer:?} as {} disagreed with the table",
+                declared.label()
+            );
+        }
+    }
+
+    #[test]
+    fn assignment_uses_the_same_decoder_validation_does() -> Result<(), BotError> {
+        // The property that makes the load-time check worth anything: for every
+        // case the decoder accepts, assigning supplies the answer to a scope
+        // and stores exactly the value the decoder named. A second, separately
+        // written assignment path is what let a flow load and then be
+        // unanswerable.
+        for (declared, answer, expected) in decode_cases() {
+            let mut declarations = BTreeMap::new();
+            declarations.insert(String::from("slot"), declared.clone());
+            let mut scope = VarScope::new(declarations)?;
+
+            let assigned = scope.set_from_answer("slot", answer);
+            match expected {
+                Ok(value) => {
+                    assigned?;
+                    assert_eq!(
+                        scope.get("slot"),
+                        Some(&value),
+                        "assigning {answer:?} as {} stored the wrong value",
+                        declared.label()
+                    );
+                }
+                Err(rejection) => {
+                    assert!(
+                        matches!(assigned, Err(BotError::InvalidVariableValue { .. })),
+                        "assigning {answer:?} as {} must refuse with the typed value error, got \
+                         {assigned:?} ({rejection})",
+                        declared.label()
+                    );
+                    assert!(
+                        scope.get("slot").is_none(),
+                        "a refused assignment must not write the variable"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn every_rejection_renders_a_cause_a_reader_can_act_on() {
+        let rejections = [
+            AnswerRejection::NotAnInteger,
+            AnswerRejection::IntegerOutOfRange,
+            AnswerRejection::NotABoolean,
+            AnswerRejection::NotADeclaredChoice,
+        ];
+        for rejection in rejections {
+            let rendered = rejection.to_string();
+            assert!(
+                !rendered.is_empty() && rendered.chars().any(char::is_alphabetic),
+                "a rejection is rendered into a diagnostic, so it cannot be empty: {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ask_whose_variable_cannot_hold_its_options_is_refused_at_load() -> Result<(), BotError> {
+        // The counterexample the review filed: a boolean variable and a
+        // question offering "Continue"/"Cancel". Every candidate is decodable
+        // at load time, and neither one is storable, so the document is refused
+        // rather than accepted and then unanswerable.
+        let outcome = FlowSpec::new(
+            BTreeMap::from([(String::from("decision"), VarType::Boolean)]),
+            "ask",
+            BTreeMap::from([
+                (
+                    String::from("ask"),
+                    NodeKind::Ask {
+                        var: String::from("decision"),
+                        options: vec![String::from("Continue"), String::from("Cancel")],
+                        routes: BTreeMap::from([
+                            (String::from("Continue"), String::from("done")),
+                            (String::from("Cancel"), String::from("done")),
+                        ]),
+                    },
+                ),
+                (String::from("done"), NodeKind::End),
+            ]),
+            Vec::new(),
+            BTreeMap::new(),
+            FlowBounds::new(8),
+        );
+        let BotError::AskOptionNotAssignable {
+            node,
+            variable,
+            option,
+            expected,
+            cause,
+        } = (match outcome {
+            Err(error) => error,
+            Ok(spec) => {
+                return Err(BotError::MalformedFlow {
+                    cause: format!("accepted a flow with {} nodes", spec.nodes().len()),
+                });
+            }
+        })
+        else {
+            return Err(BotError::MalformedFlow {
+                cause: String::from("refused for the wrong reason"),
+            });
+        };
+
+        // The five facts the diagnostic has to carry: where, which variable,
+        // which candidate, what type was expected, and why.
+        assert_eq!(node, "ask", "the refusal names the ask node");
+        assert_eq!(variable, "decision", "the refusal names the variable");
+        assert_eq!(
+            option, "Continue",
+            "the refusal names the candidate, not just the node"
+        );
+        assert_eq!(expected, "boolean", "the refusal names the expected type");
+        assert_eq!(
+            cause,
+            AnswerRejection::NotABoolean.to_string(),
+            "the refusal carries the decoder's own reason"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_ask_the_variable_can_hold_is_still_accepted() -> Result<(), BotError> {
+        // The other half of the rule, so the check above cannot be satisfied by
+        // refusing everything: a boolean variable offered boolean literals, a
+        // choice variable offered its own declared values, and an integer
+        // variable offered integers all load.
+        let accepted = [
+            (
+                VarType::Boolean,
+                vec![String::from("yes"), String::from("no")],
+            ),
+            (
+                VarType::Integer,
+                vec![String::from("0"), String::from("-1")],
+            ),
+            (
+                VarType::Choice(vec![String::from("yes"), String::from("no")]),
+                vec![String::from("Yes"), String::from("NO")],
+            ),
+            (
+                VarType::String,
+                vec![String::from("anything"), String::from("")],
+            ),
+        ];
+        for (declared, options) in accepted {
+            let routes = options
+                .iter()
+                .map(|option| (option.clone(), String::from("done")))
+                .collect();
+            let spec = FlowSpec::new(
+                BTreeMap::from([(String::from("slot"), declared.clone())]),
+                "ask",
+                BTreeMap::from([
+                    (
+                        String::from("ask"),
+                        NodeKind::Ask {
+                            var: String::from("slot"),
+                            options,
+                            routes,
+                        },
+                    ),
+                    (String::from("done"), NodeKind::End),
+                ]),
+                Vec::new(),
+                BTreeMap::new(),
+                FlowBounds::new(8),
+            )?;
+            assert_eq!(
+                spec.nodes().len(),
+                2,
+                "a {} ask over storable candidates must load",
+                declared.label()
+            );
+        }
         Ok(())
     }
 

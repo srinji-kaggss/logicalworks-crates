@@ -116,9 +116,20 @@ past it is refused with `BotError::FlowTooLarge` before parsing runs.
 strings handed to the resolver, and a route map from option string to node id.
 
 `VarScope` holds the typed variables. `VarType` is `String`, `Integer`,
-`Boolean`, or `Choice(Vec<String>)`. `set_from_answer` converts an accepted
-option into the declared type and returns `BotError::InvalidVariableValue` when it
-cannot.
+`Boolean`, or `Choice(Vec<String>)`. `VarType::decode_answer` converts one answer
+string into the declared type, and `set_from_answer` is that decoder plus the
+store: it returns `BotError::InvalidVariableValue` when the answer cannot be
+converted.
+
+The same decoder runs at load, over every candidate of every ask
+(`crates/lgwks-bot/src/session.rs:109`). An ask whose options include one the
+declared variable cannot hold is refused by `FlowSpec::validate` with
+`BotError::AskOptionNotAssignable` — naming the node, the variable, the option,
+the expected type and the cause — so a flow that loads is a flow every one of
+whose options can be answered. A candidate is a *label* the resolver matches and
+a *value* the variable stores, and they need not be the same string: `yes`
+offered for a boolean variable stores `Value::Boolean(true)`, and a candidate
+differing from a declared choice only in case stores the declared spelling.
 
 `Session::new` installs the default language resolver and an in-memory journal.
 `Session::with_components` replaces both, which is the seam: `Resolver` and

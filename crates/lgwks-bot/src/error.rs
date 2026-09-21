@@ -186,6 +186,26 @@ pub enum BotError {
         /// The variable name.
         name: String,
     },
+    /// An ask node offers a candidate that the variable it writes cannot hold.
+    ///
+    /// A load-time verdict, not a runtime one. Every candidate and the
+    /// variable's declared type are known once the document is parsed, so a
+    /// flow whose only answers the variable cannot store is refused when the
+    /// document is loaded: there is no answer the person could give that would
+    /// repair it, and asking them is charging a conversation step for an
+    /// authoring error.
+    AskOptionNotAssignable {
+        /// The ask node carrying the candidate.
+        node: String,
+        /// The variable the ask writes.
+        variable: String,
+        /// The candidate option string.
+        option: String,
+        /// Stable label of the declared type the variable holds.
+        expected: &'static str,
+        /// Why the candidate cannot be stored.
+        cause: String,
+    },
     /// A predicate could not compare values of different types.
     PredicateTypeMismatch,
     /// A predicate or interpolation needs a variable that has no value yet.
@@ -369,6 +389,23 @@ impl fmt::Display for BotError {
             Self::VariableTypeMismatch { ref name } => {
                 write!(f, "value for variable {} has the wrong type", Escaped(name))
             }
+            // `option` renders through `Debug`, which escapes control characters
+            // itself; the identifiers are wrapped, and `expected` is a
+            // crate-controlled label rather than a payload.
+            Self::AskOptionNotAssignable {
+                ref node,
+                ref variable,
+                ref option,
+                expected,
+                ref cause,
+            } => write!(
+                f,
+                "ask node {} offers option {option:?} for {expected} variable {}, \
+                 which cannot store it: {}",
+                Escaped(node),
+                Escaped(variable),
+                Escaped(cause)
+            ),
             Self::PredicateTypeMismatch => f.write_str("predicate values have incompatible types"),
             Self::VariableUnset { ref name } => {
                 write!(f, "variable {} has no value", Escaped(name))
@@ -537,6 +574,13 @@ mod tests {
             },
             BotError::VariableTypeMismatch {
                 name: payload.clone(),
+            },
+            BotError::AskOptionNotAssignable {
+                node: payload.clone(),
+                variable: payload.clone(),
+                option: payload.clone(),
+                expected: "boolean",
+                cause: payload.clone(),
             },
             BotError::VariableUnset {
                 name: payload.clone(),
