@@ -1,11 +1,13 @@
 //! `error` owns the bot error vocabulary and enforces INV-BOT-ERROR-TYPED:
 //! every failure is a distinct typed variant carrying the capability, field,
 //! domain, or condition that caused it. Variants that surface untrusted
-//! runtime text (`MalformedSpec`, `DomainError`, `EffectIndeterminate`,
-//! `EvaluateError`) carry it as a `String` cause by design: the boundary is
-//! typed (which domain failed is always known), while the foreign payload is
-//! escaped at the `Display` boundary so it cannot forge a log line. There is
-//! no bare-string failure with no typed envelope.
+//! runtime text carry it as a `String` by design: the boundary is typed (which
+//! domain failed is always known), while the foreign payload stays a `String`
+//! so a structured consumer still has the original bytes. It is escaped where
+//! it is *rendered*, by the `Escaped` adapter below, so a payload cannot forge
+//! a log line or carry a live terminal control into whatever reads the file.
+//! There is no bare-string failure with no typed envelope, and no arm that
+//! interpolates a payload without that adapter.
 //!
 //! The vocabulary draws one distinction that a single failure variant cannot:
 //! **whether the effect happened**. [`BotError::DomainError`] means the action
@@ -194,6 +196,48 @@ pub enum BotError {
     },
 }
 
+/// Render untrusted text so it cannot forge a log record.
+///
+/// Control characters are the whole of the problem: a newline ends the record,
+/// and an ESC sequence executes in whatever terminal later reads it. Both are
+/// rendered as escapes, so the payload is still complete and still readable,
+/// but it cannot add a physical line or reach the terminal.
+///
+/// Backslash is deliberately *not* escaped, for two reasons. It cannot forge
+/// anything on its own, and leaving it alone makes this pass idempotent with
+/// the constructor-level escaping that `MalformedSpec` and `MalformedFlow`
+/// already perform: that escaping turns a real newline into the two characters
+/// `\` and `n`, which this pass then leaves exactly as it found them. Escaping
+/// backslash would render them `\\n`, and each additional pass would add
+/// another. The cost is a presentational ambiguity — a payload holding a
+/// literal backslash-then-n reads the same as an escaped newline — and that is
+/// a triage nuisance rather than a forgery, which makes it the cheaper of the
+/// two prices.
+///
+/// Applied at the rendering site rather than in the enum, so the structured
+/// payload a consumer matches on keeps the original bytes.
+struct Escaped<'a>(&'a str);
+
+impl fmt::Display for Escaped<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for glyph in self.0.chars() {
+            match glyph {
+                '\n' => f.write_str("\\n")?,
+                '\r' => f.write_str("\\r")?,
+                '\t' => f.write_str("\\t")?,
+                control if control.is_control() => {
+                    write!(f, "\\u{{{:x}}}", u32::from(control))?;
+                }
+                plain => {
+                    let mut buffer = [0_u8; 4];
+                    f.write_str(plain.encode_utf8(&mut buffer))?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 impl fmt::Display for BotError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // The scrutinee is `*self` so each pattern's type is the enum's own
@@ -201,8 +245,10 @@ impl fmt::Display for BotError {
         // by `ref`. `field` is `&'static str` and the two lengths are `usize`,
         // so those bind by copy from behind the deref.
         match *self {
+            // `Cap` accepts any dotted name, so its text is untrusted here too
+            // even though the shipped four are constants.
             Self::CapabilityDenied { ref required } => {
-                write!(f, "capability denied: {required}")
+                write!(f, "capability denied: {}", Escaped(required.as_str()))
             }
             Self::IncompleteSpec { field } => {
                 write!(f, "incomplete bot spec: missing {field}")
@@ -210,12 +256,14 @@ impl fmt::Display for BotError {
             Self::SpecTooLarge { bytes, limit } => {
                 write!(f, "bot spec is {bytes} bytes, over the {limit}-byte limit")
             }
-            Self::MalformedSpec { ref cause } => write!(f, "malformed bot spec: {cause}"),
+            Self::MalformedSpec { ref cause } => {
+                write!(f, "malformed bot spec: {}", Escaped(cause))
+            }
             Self::DomainError {
                 ref domain,
                 ref cause,
             } => {
-                write!(f, "{domain}: {cause}")
+                write!(f, "{}: {}", Escaped(domain), Escaped(cause))
             }
             Self::EffectIndeterminate {
                 ref domain,
@@ -224,33 +272,49 @@ impl fmt::Display for BotError {
                 // Names the indeterminacy, not just the domain: an operator
                 // reading this line has to know the effect may be live, because
                 // that is what makes the retry unsafe.
-                write!(f, "{domain}: may have taken effect — {cause}")
+                write!(
+                    f,
+                    "{}: may have taken effect — {}",
+                    Escaped(domain),
+                    Escaped(cause)
+                )
             }
             Self::EvaluateError { ref cause } => {
-                write!(f, "evaluate: {cause}")
+                write!(f, "evaluate: {}", Escaped(cause))
             }
             Self::FlowTooLarge { bytes, limit } => {
                 write!(f, "flow is {bytes} bytes, over the {limit}-byte limit")
             }
-            Self::MalformedFlow { ref cause } => write!(f, "malformed flow: {cause}"),
+            Self::MalformedFlow { ref cause } => {
+                write!(f, "malformed flow: {}", Escaped(cause))
+            }
             Self::InvalidTransitionTarget {
                 ref from,
                 ref target,
             } => write!(
                 f,
-                "flow transition from {from} targets missing node {target}"
+                "flow transition from {} targets missing node {}",
+                Escaped(from),
+                Escaped(target)
             ),
             Self::MissingAskRoute {
                 ref node,
                 ref option,
-            } => write!(f, "ask node {node} has no route for option {option}"),
+            } => write!(
+                f,
+                "ask node {} has no route for option {}",
+                Escaped(node),
+                Escaped(option)
+            ),
             Self::VariableNeverWritten { ref name } => {
-                write!(f, "declared variable {name} is never written")
+                write!(f, "declared variable {} is never written", Escaped(name))
             }
             Self::UndeclaredVariable { ref name } => {
-                write!(f, "flow reads undeclared variable {name}")
+                write!(f, "flow reads undeclared variable {}", Escaped(name))
             }
-            Self::UnreachableNode { ref node } => write!(f, "flow node {node} is unreachable"),
+            Self::UnreachableNode { ref node } => {
+                write!(f, "flow node {} is unreachable", Escaped(node))
+            }
             Self::FlowBudgetExceeded { steps, budget } => {
                 write!(
                     f,
@@ -258,30 +322,49 @@ impl fmt::Display for BotError {
                 )
             }
             Self::UnknownNodeKind { ref node, ref kind } => {
-                write!(f, "flow node {node} has unknown kind {kind}")
+                write!(
+                    f,
+                    "flow node {} has unknown kind {}",
+                    Escaped(node),
+                    Escaped(kind)
+                )
             }
             Self::MissingTransition { ref node } => {
-                write!(f, "flow node {node} has no continuation")
+                write!(f, "flow node {} has no continuation", Escaped(node))
             }
+            // `field` is `&'static str` from this crate, so it is not a payload.
             Self::MalformedTemplate { ref node, field } => {
-                write!(f, "flow node {node} has malformed {field} template")
+                write!(
+                    f,
+                    "flow node {} has malformed {field} template",
+                    Escaped(node)
+                )
             }
             Self::VariableTypeMismatch { ref name } => {
-                write!(f, "value for variable {name} has the wrong type")
+                write!(f, "value for variable {} has the wrong type", Escaped(name))
             }
             Self::PredicateTypeMismatch => f.write_str("predicate values have incompatible types"),
-            Self::VariableUnset { ref name } => write!(f, "variable {name} has no value"),
+            Self::VariableUnset { ref name } => {
+                write!(f, "variable {} has no value", Escaped(name))
+            }
+            // `value` renders through `Debug`, which escapes control characters
+            // itself; the variable name does not, so only that one is wrapped.
             Self::InvalidVariableValue {
                 ref variable,
                 ref value,
             } => write!(
                 f,
-                "value {value:?} cannot be assigned to variable {variable}"
+                "value {value:?} cannot be assigned to variable {}",
+                Escaped(variable)
             ),
             Self::SessionTerminated => f.write_str("session has already terminated"),
             Self::SessionNotAwaitingAnswer => f.write_str("session is not awaiting an answer"),
             Self::ResolverReturnedInvalidOption { ref node } => {
-                write!(f, "resolver returned an invalid option for node {node}")
+                write!(
+                    f,
+                    "resolver returned an invalid option for node {}",
+                    Escaped(node)
+                )
             }
             Self::SessionBudgetExceeded { steps, budget } => {
                 write!(
@@ -305,7 +388,7 @@ impl std::error::Error for BotError {
 
 #[cfg(test)]
 mod tests {
-    use super::BotError;
+    use super::{BotError, Cap, Escaped};
 
     /// The retry classifier a consumer writes, and the entire reason the two
     /// variants exist: it reads the *variant*, never the cause string.
@@ -364,6 +447,160 @@ mod tests {
             rendered.contains("may have taken effect"),
             "the failure alone is not enough — the line has to say the effect may be \
              live, because that is what makes a retry unsafe: {rendered}"
+        );
+    }
+
+    /// One payload carrying every class the rendering contract has to handle:
+    /// LF, CR, tab, ESC, a quote, a backslash, and ordinary Unicode.
+    const HOSTILE: &str = "a\nb\rc\td\u{1b}[2J e\"f\\g ünïcode 日本";
+
+    /// Every variant that interpolates a `String` payload.
+    ///
+    /// One row per arm, so an arm added later without `Escaped` fails here
+    /// rather than in whatever log sink first meets a hostile domain name.
+    fn hostile_arms() -> Vec<BotError> {
+        let payload = String::from(HOSTILE);
+        vec![
+            BotError::CapabilityDenied {
+                required: Cap::new(payload.clone()),
+            },
+            BotError::MalformedSpec {
+                cause: payload.clone(),
+            },
+            BotError::DomainError {
+                domain: payload.clone(),
+                cause: payload.clone(),
+            },
+            BotError::EffectIndeterminate {
+                domain: payload.clone(),
+                cause: payload.clone(),
+            },
+            BotError::EvaluateError {
+                cause: payload.clone(),
+            },
+            BotError::MalformedFlow {
+                cause: payload.clone(),
+            },
+            BotError::InvalidTransitionTarget {
+                from: payload.clone(),
+                target: payload.clone(),
+            },
+            BotError::MissingAskRoute {
+                node: payload.clone(),
+                option: payload.clone(),
+            },
+            BotError::VariableNeverWritten {
+                name: payload.clone(),
+            },
+            BotError::UndeclaredVariable {
+                name: payload.clone(),
+            },
+            BotError::UnreachableNode {
+                node: payload.clone(),
+            },
+            BotError::UnknownNodeKind {
+                node: payload.clone(),
+                kind: payload.clone(),
+            },
+            BotError::MissingTransition {
+                node: payload.clone(),
+            },
+            BotError::MalformedTemplate {
+                node: payload.clone(),
+                field: "label",
+            },
+            BotError::VariableTypeMismatch {
+                name: payload.clone(),
+            },
+            BotError::VariableUnset {
+                name: payload.clone(),
+            },
+            BotError::InvalidVariableValue {
+                variable: payload.clone(),
+                value: payload.clone(),
+            },
+            BotError::ResolverReturnedInvalidOption { node: payload },
+        ]
+    }
+
+    #[test]
+    fn a_rendered_payload_cannot_forge_a_log_record() {
+        // The contract the module header states, and the one `Display` did not
+        // implement: it interpolated the payload directly, so a domain name
+        // containing a newline produced a second physical log line and an ESC
+        // reached whatever terminal later read the file.
+        let error = BotError::EffectIndeterminate {
+            domain: String::from(HOSTILE),
+            cause: String::from(HOSTILE),
+        };
+        let rendered = error.to_string();
+
+        assert!(
+            !rendered.contains('\n') && !rendered.contains('\r'),
+            "a payload must not add a physical log record: {rendered:?}"
+        );
+        assert!(
+            !rendered.chars().any(char::is_control),
+            "a payload must not carry a live terminal control: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("\\n") && rendered.contains("\\u{1b}"),
+            "the escapes must be visible rather than stripped, because the payload \
+             is the diagnostic: {rendered}"
+        );
+    }
+
+    #[test]
+    fn every_untrusted_field_is_escaped() {
+        for error in hostile_arms() {
+            let rendered = error.to_string();
+            assert!(
+                !rendered.chars().any(char::is_control),
+                "a variant rendered a live control character: {rendered:?}"
+            );
+            assert!(
+                !rendered.contains('\n'),
+                "a variant rendered a second physical line: {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_diagnostics_keep_their_meaning() {
+        // The other half of the contract, and the reason backslash is left
+        // alone: escaping must not cost the diagnostic its content. Ordinary
+        // Unicode and punctuation pass through byte for byte.
+        let error = BotError::DomainError {
+            domain: String::from("gh::merge"),
+            cause: String::from("PR #7 — \"timeout\" after 30s, ünïcode 日本 ok"),
+        };
+        let rendered = error.to_string();
+
+        assert!(
+            rendered.contains("PR #7 — \"timeout\" after 30s, ünïcode 日本 ok"),
+            "an ordinary message must survive unaltered: {rendered}"
+        );
+        assert!(
+            rendered.starts_with("gh::merge: "),
+            "the typed boundary stays readable: {rendered}"
+        );
+    }
+
+    #[test]
+    fn escaping_is_idempotent_with_constructor_level_escaping() {
+        // `MalformedSpec` and `MalformedFlow` escape their payload where they
+        // build it, and this pass runs again at render time over the same text.
+        // If this escaped backslash the diagnostic would grow one on every hop.
+        let already_escaped = Escaped("line one\\nline two").to_string();
+        assert_eq!(
+            already_escaped, "line one\\nline two",
+            "text that is already escaped must pass through untouched"
+        );
+
+        let raw = Escaped("line one\nline two").to_string();
+        assert_eq!(
+            raw, "line one\\nline two",
+            "and the escape it produces must be the same shape, so the two agree"
         );
     }
 }
