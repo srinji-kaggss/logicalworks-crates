@@ -155,6 +155,21 @@ upstream as a pull request.
   is not proof of valid syntax. `parse` is the unchecked escape hatch for
   diagnostics and tests that inspect malformed trees on purpose.
 
+## The other crates
+
+Four crates ship from this repository. They share a release process, not a
+dependency graph: `lgwks_bot` and `lgwks_deps` depend on `lgwks_std`, and
+`lgwks_ast` stands alone.
+
+| Crate | What it gives you |
+|---|---|
+| [`lgwks_std`](https://docs.rs/lgwks_std) | Everyday primitives with no async runtime required: codecs, a blocking HTTP client, retry, structured logging, time, hashing, ids |
+| [`lgwks_bot`](https://docs.rs/lgwks_bot) | A runtime for bots that run for weeks: four verbs, capability-gated authority, change-triggered execution, supervised background work |
+| [`lgwks_deps`](https://docs.rs/lgwks_deps) | The audited storefront for third-party stacks, plus `lgwks-deps check` to prove no unreviewed dependency entered a build |
+
+The [repository README](https://github.com/srinji-kaggss/logicalworks-crates#readme)
+indexes the design documents.
+
 ## License
 
 Apache-2.0 — Copyright 2026 Logical Works Incorporated

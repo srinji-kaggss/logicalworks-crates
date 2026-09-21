@@ -147,6 +147,21 @@ capability, one stack, no surprises.
 Rust **1.98.0**. The MSRV moves forward only when code or dependency
 requirements demand it.
 
+## The other crates
+
+Four crates ship from this repository. They share a release process, not a
+dependency graph: `lgwks_bot` and `lgwks_deps` depend on `lgwks_std`, and
+`lgwks_ast` stands alone.
+
+| Crate | What it gives you |
+|---|---|
+| [`lgwks_bot`](https://docs.rs/lgwks_bot) | A runtime for bots that run for weeks: four verbs, capability-gated authority, change-triggered execution, supervised background work |
+| [`lgwks_ast`](https://docs.rs/lgwks_ast) | Parse many languages into one AST type, with bounded traversal and typed diagnostics |
+| [`lgwks_deps`](https://docs.rs/lgwks_deps) | The audited storefront for third-party stacks, plus `lgwks-deps check` to prove no unreviewed dependency entered a build |
+
+The [repository README](https://github.com/srinji-kaggss/logicalworks-crates#readme)
+indexes the design documents.
+
 ## License
 
 Apache-2.0 — Copyright 2026 Logical Works Incorporated
