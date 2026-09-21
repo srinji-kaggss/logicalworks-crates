@@ -26,8 +26,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use lgwks_deps::{
-    CONTRACT_PATH, Refusal, check_dependencies, check_dependencies_against, contract::Contract,
-    repository_root,
+    CONTRACT_PATH, Refusal, check_dependencies, check_dependencies_against, check_invariants,
+    contract::Contract, invariants::Refusal as InvariantRefusal,
+    invariants::Register as InvariantRegister, repository_root,
 };
 
 /// Exit code for a write that failed for a reason other than the reader going
@@ -53,6 +54,7 @@ USAGE
              [--json]                  emit one JSON object on stdout and
                                        nothing on stderr; the exit code still
                                        carries the verdict
+  lgwks-deps invariants [PATH]         audit the optional invariant register
   lgwks-deps request <CRATE> <VERSION> print an approval block to fill in
   lgwks-deps init [PATH]               write a fail-closed starting register
    lgwks-deps tiers                     print the admission ladder
@@ -131,6 +133,73 @@ fn handle_tiers(out: &mut impl io::Write) -> io::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Audits the optional invariant register without changing dependency-gate
+/// behaviour for repositories that have not authored one.
+fn handle_invariants(
+    args: &[String],
+    out: &mut impl io::Write,
+    err: &mut impl io::Write,
+) -> io::Result<ExitCode> {
+    let target = args
+        .iter()
+        .find(|argument| !argument.starts_with("--"))
+        .map_or_else(|| PathBuf::from("."), PathBuf::from);
+    let root = match repository_root(&target) {
+        Ok(root) => root,
+        Err(error) => return refuse(&error.to_string(), err),
+    };
+    match audit_invariant_root(&root) {
+        Ok(None) => {
+            writeln!(
+                out,
+                "OK  {} — no invariant register (optional)",
+                root.display()
+            )?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Ok(Some((register, refusals))) => {
+            report_invariant_audit(&root, &register, &refusals, out, err)
+        }
+        Err(error) => refuse(&error, err),
+    }
+}
+
+/// Prints an invariant-register verdict. Any refusal is non-zero for this
+/// explicit audit command, even while a register is in adoption mode.
+fn report_invariant_audit(
+    root: &Path,
+    register: &InvariantRegister,
+    refusals: &[InvariantRefusal],
+    out: &mut impl io::Write,
+    err: &mut impl io::Write,
+) -> io::Result<ExitCode> {
+    if refusals.is_empty() {
+        writeln!(
+            out,
+            "OK  {} — {} invariants are registered and enforced",
+            root.display(),
+            register.entries.len()
+        )?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    writeln!(
+        err,
+        "REFUSED  {} — {} invariant violations\n",
+        root.display(),
+        refusals.len()
+    )?;
+    for refusal in refusals {
+        writeln!(err, "  invariant register: {refusal}")?;
+    }
+    if !register.enforce {
+        writeln!(
+            err,
+            "\nNOTE  [policy] enforce = false applies to the combined check; the explicit invariants audit still fails."
+        )?;
+    }
+    Ok(ExitCode::from(2))
+}
+
 /// Reports an unrecognised command on stderr with the usage block.
 ///
 /// Exits 2: an unknown command is a failure of the invocation, not a refused
@@ -151,6 +220,7 @@ fn dispatch(
 ) -> io::Result<ExitCode> {
     match command {
         "check" => handle_check(&args[1..], out, err),
+        "invariants" => handle_invariants(&args[1..], out, err),
         "request" => run_request(args.get(1), args.get(2), out, err),
         "init" => run_init(args.get(1).map(PathBuf::from), out, err),
         "tiers" => handle_tiers(out),
@@ -194,6 +264,14 @@ fn audit_root(
         None => check_dependencies(root),
     };
     outcome.map_err(|error| error.to_string())
+}
+
+/// Reads the optional invariant register, flattening its structured error for
+/// the human-facing command while retaining the structured library API.
+fn audit_invariant_root(
+    root: &Path,
+) -> Result<Option<(InvariantRegister, Vec<InvariantRefusal>)>, String> {
+    check_invariants(root).map_err(|error| error.to_string())
 }
 
 /// Prints every refusal and returns the verdict's exit code.
@@ -278,22 +356,244 @@ fn run_check(
             );
         }
     };
-    let (register, refusals) = match audit_root(&root, &contract_override) {
-        Ok(outcome) => outcome,
-        Err(err_msg) => {
-            return report_check(None, None, &[], Some(&err_msg), json_output, out, err);
-        }
-    };
+    let dependency = audit_root(&root, &contract_override);
+    match audit_invariant_root(&root) {
+        Ok(None) => match dependency {
+            Ok((register, refusals)) => report_check(
+                Some(&root),
+                Some(&register),
+                &refusals,
+                None,
+                json_output,
+                out,
+                err,
+            ),
+            Err(err_msg) => report_check(None, None, &[], Some(&err_msg), json_output, out, err),
+        },
+        Ok(Some((invariant_register, invariant_refusals))) => report_check_with_invariants(
+            &root,
+            dependency,
+            &invariant_register,
+            &invariant_refusals,
+            json_output,
+            out,
+            err,
+        ),
+        Err(invariant_error) => report_check_with_invariant_error(
+            &root,
+            dependency,
+            &invariant_error,
+            json_output,
+            out,
+            err,
+        ),
+    }
+}
 
-    report_check(
-        Some(&root),
-        Some(&register),
-        &refusals,
-        None,
-        json_output,
-        out,
+/// Optional invariant data added to the existing machine-readable check shape.
+struct InvariantJson<'a> {
+    /// Parsed register, when the optional file was readable.
+    register: Option<&'a InvariantRegister>,
+    /// Semantic invariant refusals.
+    refusals: &'a [InvariantRefusal],
+    /// Register error, when parsing or workspace scope discovery failed.
+    error: Option<&'a str>,
+}
+
+/// Reports one check verdict after both registers have been audited.
+fn report_check_with_invariants(
+    root: &Path,
+    dependency: Result<(Contract, Vec<Refusal>), String>,
+    invariant_register: &InvariantRegister,
+    invariant_refusals: &[InvariantRefusal],
+    json_output: bool,
+    out: &mut impl io::Write,
+    err: &mut impl io::Write,
+) -> io::Result<ExitCode> {
+    match dependency {
+        Ok((register, refusals)) => {
+            if json_output {
+                print_check_json(
+                    Some(root),
+                    Some(&register),
+                    &refusals,
+                    None,
+                    Some(InvariantJson {
+                        register: Some(invariant_register),
+                        refusals: invariant_refusals,
+                        error: None,
+                    }),
+                    out,
+                )?;
+                let dependencies_pass = refusals.is_empty() || !register.enforce;
+                let invariants_pass = invariant_refusals.is_empty() || !invariant_register.enforce;
+                return Ok(if dependencies_pass && invariants_pass {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::from(2)
+                });
+            }
+            if refusals.is_empty() && invariant_refusals.is_empty() {
+                writeln!(
+                    out,
+                    "OK  {} — {} semantic approvals and {} invariants are enforced",
+                    root.display(),
+                    register.entries.len(),
+                    invariant_register.entries.len()
+                )?;
+                return Ok(ExitCode::SUCCESS);
+            }
+            writeln!(
+                err,
+                "REFUSED  {} — {} dependency-edge violations, {} invariant violations\n",
+                root.display(),
+                refusals.len(),
+                invariant_refusals.len()
+            )?;
+            for refusal in &refusals {
+                writeln!(err, "  dependency register: {refusal}")?;
+            }
+            if refusals.is_empty() {
+                writeln!(err, "  dependency register: 0 refusals")?;
+            }
+            for refusal in invariant_refusals {
+                writeln!(err, "  invariant register: {refusal}")?;
+            }
+            if invariant_refusals.is_empty() {
+                writeln!(err, "  invariant register: 0 refusals")?;
+            }
+            writeln!(
+                err,
+                "\nBoth registers are reviewed contracts; repair each named refusal before delivery."
+            )?;
+            let dependencies_pass = refusals.is_empty() || !register.enforce;
+            let invariants_pass = invariant_refusals.is_empty() || !invariant_register.enforce;
+            Ok(if dependencies_pass && invariants_pass {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(2)
+            })
+        }
+        Err(dependency_error) => report_check_with_dependency_error(
+            root,
+            &dependency_error,
+            invariant_register,
+            invariant_refusals,
+            json_output,
+            out,
+            err,
+        ),
+    }
+}
+
+/// Reports a dependency-register error while preserving invariant findings.
+fn report_check_with_dependency_error(
+    root: &Path,
+    dependency_error: &str,
+    invariant_register: &InvariantRegister,
+    invariant_refusals: &[InvariantRefusal],
+    json_output: bool,
+    out: &mut impl io::Write,
+    err: &mut impl io::Write,
+) -> io::Result<ExitCode> {
+    if json_output {
+        print_check_json(
+            Some(root),
+            None,
+            &[],
+            Some(dependency_error),
+            Some(InvariantJson {
+                register: Some(invariant_register),
+                refusals: invariant_refusals,
+                error: None,
+            }),
+            out,
+        )?;
+        return Ok(ExitCode::from(2));
+    }
+    writeln!(
         err,
-    )
+        "REFUSED  {} — dependency register error, {} invariant violations\n",
+        root.display(),
+        invariant_refusals.len()
+    )?;
+    writeln!(err, "  dependency register: {dependency_error}")?;
+    for refusal in invariant_refusals {
+        writeln!(err, "  invariant register: {refusal}")?;
+    }
+    if invariant_refusals.is_empty() {
+        writeln!(err, "  invariant register: 0 refusals")?;
+    }
+    Ok(ExitCode::from(2))
+}
+
+/// Reports an invariant-register error while preserving any dependency result.
+fn report_check_with_invariant_error(
+    root: &Path,
+    dependency: Result<(Contract, Vec<Refusal>), String>,
+    invariant_error: &str,
+    json_output: bool,
+    out: &mut impl io::Write,
+    err: &mut impl io::Write,
+) -> io::Result<ExitCode> {
+    match dependency {
+        Ok((register, refusals)) => {
+            if json_output {
+                print_check_json(
+                    Some(root),
+                    Some(&register),
+                    &refusals,
+                    None,
+                    Some(InvariantJson {
+                        register: None,
+                        refusals: &[],
+                        error: Some(invariant_error),
+                    }),
+                    out,
+                )?;
+                return Ok(ExitCode::from(2));
+            }
+            writeln!(
+                err,
+                "REFUSED  {} — {} dependency-edge violations, invariant register error\n",
+                root.display(),
+                refusals.len()
+            )?;
+            for refusal in &refusals {
+                writeln!(err, "  dependency register: {refusal}")?;
+            }
+            if refusals.is_empty() {
+                writeln!(err, "  dependency register: 0 refusals")?;
+            }
+            writeln!(err, "  invariant register: {invariant_error}")?;
+            Ok(ExitCode::from(2))
+        }
+        Err(dependency_error) => {
+            if json_output {
+                print_check_json(
+                    Some(root),
+                    None,
+                    &[],
+                    Some(&dependency_error),
+                    Some(InvariantJson {
+                        register: None,
+                        refusals: &[],
+                        error: Some(invariant_error),
+                    }),
+                    out,
+                )?;
+                return Ok(ExitCode::from(2));
+            }
+            writeln!(
+                err,
+                "REFUSED  {} — both registers could not be audited",
+                root.display()
+            )?;
+            writeln!(err, "  dependency register: {dependency_error}")?;
+            writeln!(err, "  invariant register: {invariant_error}")?;
+            Ok(ExitCode::from(2))
+        }
+    }
 }
 
 /// Renders the verdict in the requested mode and returns the exit code.
@@ -312,7 +612,7 @@ fn report_check(
     err: &mut impl io::Write,
 ) -> io::Result<ExitCode> {
     if json_output {
-        print_check_json(root, register, refusals, error, out)?;
+        print_check_json(root, register, refusals, error, None, out)?;
         // A gate that could not reach a verdict is a refusal, and exits 2.
         // This arm is first because the code below would otherwise *pass*: with
         // no register, `enforce` defaults to true and `refusals` is empty, so
@@ -368,6 +668,7 @@ fn print_check_json(
     register: Option<&Contract>,
     refusals: &[Refusal],
     error: Option<&str>,
+    invariant: Option<InvariantJson<'_>>,
     out: &mut impl io::Write,
 ) -> io::Result<()> {
     use lgwks_std::json::{Map, Value};
@@ -398,6 +699,12 @@ fn print_check_json(
             None => Value::Null,
         },
     );
+    let dependency_admitted = error.is_none() && refusals.is_empty();
+    let invariant_admitted = invariant.as_ref().is_none_or(|audit| {
+        audit.error.is_none()
+            && (audit.refusals.is_empty()
+                || audit.register.is_none_or(|register| !register.enforce))
+    });
     // `admitted` is the same predicate the exit code carries: a tree the gate
     // could not read is not admitted, so `error.is_some()` must make this false
     // even though there are no refusals to list. Otherwise a consumer reading
@@ -405,7 +712,7 @@ fn print_check_json(
     // error, which is the fail-open reading this field must never support.
     payload.insert(
         "admitted".to_owned(),
-        Value::Bool(error.is_none() && refusals.is_empty()),
+        Value::Bool(dependency_admitted && invariant_admitted),
     );
     payload.insert(
         "approvals".to_owned(),
@@ -422,6 +729,38 @@ fn print_check_json(
             None => Value::Null,
         },
     );
+    if let Some(audit) = invariant {
+        let mut invariant_rows = Vec::with_capacity(audit.refusals.len());
+        for refusal in audit.refusals {
+            let mut row = Map::new();
+            row.insert("id".to_owned(), Value::String(refusal.id().to_owned()));
+            row.insert("detail".to_owned(), Value::String(refusal.to_string()));
+            invariant_rows.push(Value::Object(row));
+        }
+        let mut invariant_payload = Map::new();
+        invariant_payload.insert(
+            "enforce".to_owned(),
+            match audit.register {
+                Some(register) => Value::Bool(register.enforce),
+                None => Value::Null,
+            },
+        );
+        invariant_payload.insert(
+            "registered".to_owned(),
+            Value::Number(serde_json_number(
+                audit.register.map_or(0, |register| register.entries.len()),
+            )),
+        );
+        invariant_payload.insert("refusals".to_owned(), Value::Array(invariant_rows));
+        invariant_payload.insert(
+            "error".to_owned(),
+            match audit.error {
+                Some(message) => Value::String(message.to_owned()),
+                None => Value::Null,
+            },
+        );
+        payload.insert("invariants".to_owned(), Value::Object(invariant_payload));
+    }
 
     let rendered =
         lgwks_std::json::to_string_pretty(&Value::Object(payload)).map_err(io::Error::other)?;

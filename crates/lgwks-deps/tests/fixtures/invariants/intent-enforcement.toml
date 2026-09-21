@@ -1,0 +1,13 @@
+[policy]
+enforce = true
+
+[[invariant]]
+id = "INV-BOT-INTENT-ONLY"
+statement = "This claim is intentionally not executable."
+scope = "lgwks_bot"
+owner = "lgwks_bot"
+enforcement = "intent"
+enforced_by = "crates/lgwks-deps/src/invariants.rs"
+approved_by = "maintainer"
+approved_on = "2026-09-20"
+review = "crates/lgwks-deps/src/invariants.rs"
