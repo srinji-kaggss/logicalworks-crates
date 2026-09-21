@@ -357,11 +357,15 @@ let json = spec.to_json()?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-`BotSpec` is validate-only: there is no `from_spec` materializer. A spec that
-validates still builds through `Bot::builder`, so capability grants stay
-explicit at the call site. The builder chain is the DSL. There is deliberately
-no `bot!` proc-macro: it would drag `syn` into every consumer (the dependency
-policy restricts `syn` to the `lgwks_deps` gate tool) and hide the per-call
+`BotSpec` is validate-only today: there is no `from_spec` materializer, so a spec
+that validates still has to be built through `Bot::builder`. Materializing a bot
+from a spec needs a `domain_id -> constructor` registry, and none exists; that
+absence is recorded as open work in `experience/invariants/sdk.yaml`, not as a
+design position. Whenever it lands, grants keep coming from a `GrantSet` the
+caller holds and never from the spec, so wire data cannot choose what a bot
+reaches. The builder chain is the DSL. There is deliberately no `bot!`
+proc-macro: it would drag `syn` into every consumer (the dependency policy
+restricts `syn` to the `lgwks_deps` gate tool) and hide the per-call
 `Auth::check` that auditors read.
 
 ## Async runtime surface

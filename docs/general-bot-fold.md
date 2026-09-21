@@ -657,6 +657,7 @@ collapse step 5 exists to prevent.
 - Whether the durable queue is a storefront feature or stays out of the
   workspace entirely. It needs the dependency doctrine's ruling, not this
   document's.
-- The scheduler decision in `docs/bot-on-ecs.md` §9, which still requires
-  project-owner sign-off.
+- The scheduler decision in `docs/bot-on-ecs.md` §9. It required project-owner
+  sign-off and no longer does: taken on 2026-09-21 as a first-party `lgwks_std`
+  module, with the finding it was taken against recorded in §9.
 - Anything about the described platform's licence. Nothing was copied.

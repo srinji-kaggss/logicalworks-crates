@@ -40,10 +40,10 @@ There is one execution path. `crates/lgwks-bot/Cargo.toml` states that
 "would mean nothing exercises it, the workspace gate never compiles it, and it
 rots into a second opinion nobody chose."
 
-`Bot::tick` is the synchronous adapter (`crates/lgwks-bot/src/ecs.rs:1490`): it
+`Bot::tick` is the synchronous adapter (`crates/lgwks-bot/src/ecs.rs:1496`): it
 drives the non-`Send` verb futures on a thread-parking executor, so there is
 nothing to await. `Bot::tick_async` is the same tick awaited on the caller's
-executor (`crates/lgwks-bot/src/ecs.rs:1408`), and it is the one to call from
+executor (`crates/lgwks-bot/src/ecs.rs:1411`), and it is the one to call from
 inside a runtime — `tick` refuses there with `BotError::TickInsideRuntime`
 rather than park the thread that owns the reactor. Do not write
 `bot.tick().await`; that is `tick` returning `usize`, then a `usize` that is not
@@ -99,9 +99,12 @@ you to discover.
   directly" (`crates/lgwks-bot/src/cap.rs:15`). See [authority](authority.md).
 - **No revocable authority.** `GrantSet` has no `revoke`, and a built bot holds
   a clone of the set it was admitted with. See [authority](authority.md).
-- **No spec materializer.** `BotSpec` validates a JSON document. There is no
-  `Bot::from_spec`; you build through the builder chain, and `crates/lgwks-bot/src/spec.rs:320`
-  validates shape only.
+- **No spec materializer yet.** `BotSpec` validates a JSON document. There is no
+  `Bot::from_spec`; you build through the builder chain, and
+  `crates/lgwks-bot/src/spec.rs:320` validates shape only. Unlike the entries
+  around it, this one is scheduled work rather than a permanent limit: it is
+  recorded as open in `experience/invariants/sdk.yaml`, and closing it means
+  building a `domain_id -> constructor` registry.
 - **No `#[tokio::main]` equivalent.** Entry to the async surface is
   `Runtime::block_on`.
 - **No exactly-once delivery.** An action that may have taken effect after its
