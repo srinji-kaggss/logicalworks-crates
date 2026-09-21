@@ -6,8 +6,16 @@
 //! `execute_action`, and `query` takes an `(Auth, input)` tuple, and only
 //! `GrantSet::issue` can mint the `Auth` half. Capabilities are validated at
 //! build time (a bot that requires `bot.net` without a grant fails before it
-//! runs) and proven again on every call, so a grant revoked after build cannot
-//! fire.
+//! runs) and proven again on every call.
+//!
+//! That authority is a **snapshot**, not a live lease. `build` clones the grant
+//! set into the bot and `GrantSet` has no revoke operation, so changing or
+//! dropping the caller's set afterwards does not narrow a bot already built. An
+//! `Auth` in hand is likewise a capability-membership proof over the caps it was
+//! issued with: not a signature, not an identity, and not isolation. Narrowing
+//! a running bot's authority needs a mechanism this crate does not have yet,
+//! and the boundary is spelled out under "Authority is a snapshot" in the crate
+//! `README.md`.
 //!
 //! `Evaluate` takes no proof: it is pure (boolean in, boolean out) with no
 //! side effect to gate.
@@ -19,8 +27,20 @@
 //! channels, and the opt-in `net`/`process`/`fs`/`signal` drivers. The engine is
 //! sourced from the `lgwks_deps` dependency facade (`feature = "tokio"`), so no
 //! other crate authors a `tokio` edge. `--no-default-features` withdraws the
-//! async surface and leaves the synchronous `lgwks_std::task` executor as the
-//! only runtime.
+//! async surface — no `tokio` at all — and drives the four verbs on
+//! `lgwks_std::task`'s executor instead. It is not a dependency-light build:
+//! the `bevy_ecs` substrate and the `lgwks_deps` facade are unconditional, so a
+//! no-default bot still runs on the ECS schedule. The two axes — the async
+//! surface and the ECS substrate — are independent.
+//!
+//! # Release boundary
+//!
+//! The `session`, `language`, `semantic`, `interface`, and `frontier` modules
+//! are **development APIs**: they exist on `main` and are not in the published
+//! `lgwks_bot-v0.4.2` tag. Documentation on this page describes the `main` tree
+//! and must not be read as a statement about a version installed from a
+//! registry. Check the changelog for the release that carries a given symbol
+//! before relying on it.
 //!
 //! # Quick start
 //!

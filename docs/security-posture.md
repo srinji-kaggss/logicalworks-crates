@@ -190,16 +190,20 @@ Collected in one place so it cannot be mistaken for an omission.
 
 ## The evidence packet
 
-Ranked by evidence value over cost. "Implied" marks artifacts the engineering
-already implies and only needs an emitter.
+**None of these twelve artifacts ship today.** They are the packet this project
+would have to be able to produce, ranked by evidence value over cost, and the
+table is here so the gap is legible rather than implied. "Implied" marks the
+ones whose substrate already exists and which therefore need an emitter rather
+than a new mechanism — read that column as distance, not as availability. A
+reviewer asking for any row is asking for work, not for a file.
 
 | # | Artifact | Proves | Does not prove | Cost | Implied? |
 |---|---|---|---|---|---|
 | 1 | **OpenVEX document** over the advisory position already written in prose in `SECURITY.md` | A named CVE in a named component is `not_affected` here, with justification and reopen condition | That the reasoning is correct | Hours — the argument exists, only the format is missing | **Yes** |
 | 2 | **SBOM per release** (SPDX 3.0.1 or CycloneDX 1.6), from the `Cargo.lock` CI already verifies, targeting the 2026 minimum elements incl. SBOM Generation Context and Component Hash Algorithm | Component inventory by hash | Nothing about vulnerabilities or completeness | One release-job step | **Yes** |
 | 3 | **Build provenance, SLSA Build L2** | Which commit, workflow and builder produced these bytes | Anything about behaviour; not L3 | Two workflow lines, no key management | Partly |
-| 4 | **Signed execution transcript + journal export with replay** | No vendor code entered the consumer's browser; the exact DOM state acted upon; an independently reproducible outcome | What any given consumer's browser received; that the resolver chose a benign target | A verb plus a versioned export format | **Yes** — bounded journal and replay-from-journal-alone are existing properties |
-| 5 | **Authority grant and revocation receipt** | The exact authority held, for how long, and that it was revoked | That it was well-scoped or well-granted | A serializable signed manifest | **Yes** — `cap`/`gate::GrantSet` |
+| 4 | **Signed execution transcript + journal export with replay** | No vendor code entered the consumer's browser; the exact DOM state acted upon; an independently reproducible outcome | What any given consumer's browser received; that the resolver chose a benign target | A verb plus a versioned export format | Partly — the bounded `session` journal and replay-from-journal exist; signing and a versioned export format do not |
+| 5 | **Authority grant and revocation receipt** | The exact authority held, for how long, and that it was revoked | That it was well-scoped or well-granted | A serializable signed manifest | **No** — and the name is wrong for what exists. `cap`/`gate::GrantSet` hold an in-process capability *snapshot* with no revoke operation, so there is nothing to emit a revocation receipt for. See the snapshot boundary in `crates/lgwks-bot/README.md` |
 | 6 | **in-toto/DSSE envelopes over 4 and 5**, with estate-owned predicate types | That receipt and artifact are bound together and signed by one identity | Predicate truth — the envelope enforces nothing | Build-time only | No |
 | 7 | **Sigstore bundles, persisted** | Which OIDC identity signed, and that the entry is in a public append-only log | Anything else | Low-medium; the discipline is persisting bundles | No |
 | 8 | **Script inventory with per-script written justification**, one row per observed script | The literal 6.4.3 third element, on its face | That any listed script is benign or the list complete | Derived from 4 | No |

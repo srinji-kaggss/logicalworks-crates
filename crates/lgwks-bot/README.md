@@ -8,8 +8,8 @@ distinguish it from a task runner:
 
 - **Authority is proof-carrying.** Every effect takes an `(Auth, input)` tuple,
   and only `GrantSet::issue` mints the `Auth` half. Capabilities are checked at
-  build time *and* on every call, so a grant revoked after construction cannot
-  fire.
+  build time *and* on every call. The grants are a **snapshot**, not a live
+  lease — see [Authority is a snapshot](#authority-is-a-snapshot).
 - **A condition is change detection, not re-evaluation.** A chain fires on the
   tick its source value *moves*. A source that holds still fires nothing, and
   the framework tells you which sources moved (`bot.revisions()`).
@@ -20,6 +20,14 @@ distinguish it from a task runner:
 ```sh
 cargo add lgwks_bot
 ```
+
+**Version boundary.** `crates/lgwks-bot/Cargo.toml` reads `0.4.2`, but the
+`session`, `language`, `semantic`, `interface`, and `frontier` modules are on
+`main` and are **not** in the published `lgwks_bot-v0.4.2` tag — that tag's
+`lib.rs` exports `cap`, `domain`, `error`, `gate`, `json`, `rt`, `spec`, and
+`verb`, and nothing else. This README, like the rustdoc beside it, describes
+`main`. Check `CHANGELOG.md` for the release that carries a symbol before
+depending on it, and do not assume an installed `0.4.2` has these.
 
 ## Quick start
 
@@ -143,8 +151,12 @@ is what lets them drive the verbs' deliberately non-`Send` futures directly.
 
 Two consequences worth knowing before you rely on `tick`:
 
-- **A tick is all-or-nothing.** Every source is polled before any effect runs,
-  so a poll that fails fires *nothing* and returns the first error.
+- **A failing poll fires nothing; a failing action does not undo anything.**
+  Every source is polled before any effect runs, so a poll that fails fires
+  *nothing* for that tick and returns the first error. Actions then run in
+  sequence, so an action that fails returns the first error *after* the actions
+  before it have already taken effect. There is no rollback. See
+  [Failure](#failure).
 - **Values live in a `NonSend` resource; entities carry only a revision.** Bevy
   requires `Component: Send + Sync + 'static` with no opt-out, and this crate's
   futures are not `Send` on purpose, so a polled value cannot be a component.
@@ -155,6 +167,39 @@ Futures are **local** (not `Send`): a bot is driven on the calling thread and
 domains may hold thread-local state. `rt::task::LocalSet` is available when you
 need to spawn such a future.
 
+### Failure
+
+`tick` returns `Err(BotError)` in two situations, and they mean different things.
+
+**A poll failed.** No `Revision` was written, so no condition was evaluated and
+no action ran. The tick had no effect, and the source values are exactly as they
+were. This is the strong case, and it is the one an all-or-nothing reading is
+tempted to generalise from — it does not generalise.
+
+**An action failed.** Actions run in declaration order, so the actions *before*
+the failure already ran and their effects are live. `tick` reports the first
+error and does not roll anything back, because an external effect cannot be
+rolled back. `Err` here means "this run did not finish", not "nothing happened".
+
+Two consequences follow, and neither is fixed by retrying blindly:
+
+- **The unattempted work is lost, not queued.** Revisions are committed in the
+  observe phase, before any action runs, so the next tick sees an unchanged
+  source and does not re-fire the chain. The actions after the failure are
+  simply not attempted again.
+- **A retry may duplicate.** An action that failed after its request was sent
+  fails as `BotError::EffectIndeterminate`, which says the effect may be live.
+  That variant exists precisely so this is readable from the type rather than
+  inferred from a cause string: `BotError::DomainError` means the effect did not
+  happen and a retry is a retry, while `EffectIndeterminate` means a retry is a
+  possible duplicate — a second merge, message, or process launch. Consumers
+  that retry should match on the variant and treat these two differently.
+
+Delivering exactly-once across an external effect needs durable intent and an
+outcome-unknown record, which this crate does not yet provide. Until it does,
+treat a failed tick as a partial run to be reconciled rather than a no-op to be
+retried.
+
 ## Capability system
 
 Every domain declares the capabilities it requires. The builder validates
@@ -163,10 +208,29 @@ grant fails at build time, not at runtime.
 
 Authority stays proof-carrying past build: every `poll`, `execute_action`, and
 `query` takes an `(Auth, input)` tuple, and only `GrantSet::issue` can mint the
-`Auth` half. The framework issues a fresh proof per domain on every tick, and
-each callee checks coverage before acting, so a narrower proof presented to a
-broader domain is denied (no confused deputies). `Evaluate` takes no proof,
-because it is pure boolean logic with no side effect to gate.
+`Auth` half. The framework mints a fresh proof for each call, from the grant set
+it retained at build, and each callee checks coverage before acting, so a
+narrower proof presented to a broader domain is denied (no confused deputies).
+`Evaluate` takes no proof, because it is pure boolean logic with no side effect
+to gate.
+
+### Authority is a snapshot
+
+A built bot owns a *clone* of the grant set it was built with. `GrantSet` has no
+`revoke`, and an `Auth` holds the capabilities it was issued with, so:
+
+- Changing or dropping the `GrantSet` you passed to `build` does not narrow the
+  bot. It keeps the authority it was admitted with for its whole life.
+- An `Auth` in hand stays valid for the capabilities it covers. It is a
+  capability-membership proof inside this process — not a signature, not an
+  identity, and not a lease with an expiry.
+- Narrowing a running bot is therefore a decision made *outside* this API: build
+  it from a narrower set, or stop calling `tick`. There is no in-process
+  revocation, and nothing here should be described as one.
+
+This is a real limitation and it is stated as one. Live revocation needs a
+linearization point, a token generation, and a defined answer for effects
+already in flight; none of those exist here yet.
 
 | Capability | Constant | Description |
 |------------|----------|-------------|

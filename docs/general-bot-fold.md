@@ -22,8 +22,16 @@ second authority model — arriving one subsystem at a time.
 The fold is at the design level. No code is copied from the described platform
 or from any of the projects whose published architecture it shares. If code is
 ever taken, it goes through the rung-7 vendor path in `docs/dependency-doctrine.md`
-and its licence is checked first — which is not a formality: this crate is
-mid-relicence to MPL-2.0 (see `LICENSING.md`).
+and its licence is checked first.
+
+The licence governing any given revision is the one in that crate's `Cargo.toml`
+and its sibling `LICENSE` file: `Apache-2.0` for all four crates as of this
+writing, and the root `README.md` indexes them. A move to a dual MPL-2.0 plus
+commercial licence is **drafted and not landed** — there is no `LICENSING.md` in
+this tree, and an earlier revision of this document cited one as though it
+existed. Nothing here relicensed a published version, and a consumer should take
+the manifest at their pinned revision as authoritative rather than this design
+record.
 
 ## 2. The finding: the IR is already here
 
