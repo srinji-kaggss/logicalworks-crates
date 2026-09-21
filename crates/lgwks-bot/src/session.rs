@@ -1826,7 +1826,7 @@ pub struct CompiledTemplate<'a> {
 impl<'a> CompiledTemplate<'a> {
     /// Compile `${name}` markers into parts.
     ///
-    /// The one template parser: [`validate_template`] uses it to check that
+    /// The one template parser: the loader's template check uses it to confirm
     /// every marker names a declared variable, and the interpolator uses it to
     /// size and render. A second scanner would be a second grammar.
     ///
