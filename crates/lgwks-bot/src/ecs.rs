@@ -28,6 +28,53 @@
 //! *held* state belongs on `Bot`, and a bot that acts on a *transition* belongs
 //! here.
 //!
+//! # Work outlives the change filter
+//!
+//! `Changed<Revision>` says a chain is *eligible*; it is not a record of what
+//! still has to happen. Committing the revision and then failing halfway marks
+//! the source handled, so the entries the failure skipped are never reached on
+//! an unchanged source, and a failure in the first chain stops every later
+//! chain as well, because the loop that stops is outside the per-chain one.
+//!
+//! Eligible work therefore lives in its own structure — the ledger — keyed by
+//! `(chain, entry)` and by the revision that made it due, and `fire` walks
+//! *that* rather than the change set. The filter is consulted only to open a
+//! transition; a chain with work outstanding is walked on every tick until the
+//! work is settled, whether or not its source moves. One transition per chain
+//! at a time: a source that moves again while its work is outstanding joins the
+//! transition in progress, because the observed value is the only one the
+//! substrate keeps (`Box<dyn Any>` is compared, not cloned) and a second
+//! transition would replay effects the first already acknowledged.
+//!
+//! An entry is never skipped to reach a later one. The walk resumes at the
+//! first entry that is not resolved and stops at the first it cannot settle, so
+//! an effect that already happened is never replayed to get past a successor —
+//! the failure mode where retrying a refused second entry duplicates the first
+//! entry's merge. An entry that *may* have happened
+//! ([`BotError::EffectIndeterminate`]) is held outright: it is attempted again
+//! only when the caller supplies evidence, through `EcsBot::resolve_effect`.
+//!
+//! A tick is clean only when nothing is left holding a transition. When
+//! something is, `EcsBot::tick` reports it — the entry, what is holding it, how
+//! many entries are outstanding — so a clean subsequent tick cannot be read as
+//! "the transition was handled". An error a source or an action produced keeps
+//! precedence over that report, because it carries the typed variant a retry
+//! classifier reads; the abandonment it caused is named by `EcsBot::pending`,
+//! which lists every entry that is not finished, given-up entries included, with
+//! the reason and the source revision. A tick that gives up on work is never
+//! clean, and an entry it gave up on is never silently dropped.
+//!
+//! # Limits
+//!
+//! A panic that unwinds out of an action's future unwinds out of `fire` and out
+//! of `tick` with it. The walk holds the chain's transition while it runs, so
+//! that unwind loses the transition for the chain in flight — the entries it had
+//! already resolved with it. Nothing in this module catches an unwind, and the
+//! in-flight record it writes before an attempt (`EntryState::Unrecorded`) is
+//! therefore durable for a tick that returns, not for a thread that panics. A
+//! caller that catches an unwind around `tick` must treat that chain's work as
+//! unknown rather than as handled.
+//!
 //! # What is measured, and what is deliberately not done
 //!
 //! Three findings from the measurement behind this module (`bevy_ecs` 0.19.1,
@@ -72,6 +119,8 @@
 //! first error in declaration order is returned.
 
 use std::any::Any;
+use std::fmt;
+use std::num::NonZeroU32;
 
 // `self` is load-bearing: the `Component` and `Resource` derives expand to
 // `bevy_ecs::…` paths, so the crate name has to be in scope at the use site even
@@ -84,7 +133,7 @@ use lgwks_deps::bevy_ecs::{
     },
 };
 
-use super::error::BotError;
+use super::error::{BotError, Escaped};
 use super::gate::GrantSet;
 use super::spec::{ChainEntry, ObserveAny, typed_entry};
 use super::verb::{Evaluate, Execute, Observe};
@@ -145,6 +194,10 @@ struct TickError(Option<BotError>);
 #[derive(Resource, Debug, Default)]
 struct Order(Vec<Entity>);
 
+/// The retry policy in force: one authority per world, like `Grants`.
+#[derive(Resource, Debug)]
+struct Policy(RetryPolicy);
+
 // ── Non-send state: the verbs and the values ───────────────────────────────
 
 /// One observation chain, holding the same erased halves a
@@ -201,6 +254,655 @@ fn parked(world: &World) -> bool {
     world
         .get_resource::<TickError>()
         .is_some_and(|error| error.0.is_some())
+}
+
+// ── The work ledger: eligible work, separate from change detection ─────────
+
+/// The identity of one `(chain, entry)` tuple.
+///
+/// Identity, not position: the ledger is keyed by it, `resolve_effect` takes
+/// it, and it means the same thing on every tick. It is deliberately not
+/// constructible outside this crate — a caller that could mint one could
+/// settle work that does not exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct WorkId {
+    /// The chain's index, in declaration order.
+    chain: usize,
+    /// The entry's index within its chain.
+    entry: usize,
+}
+
+impl WorkId {
+    /// The chain's index, in declaration order.
+    #[must_use]
+    pub const fn chain(self) -> usize {
+        self.chain
+    }
+
+    /// The entry's index within its chain.
+    #[must_use]
+    pub const fn entry(self) -> usize {
+        self.entry
+    }
+}
+
+/// Why an entry was given up on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AbandonReason {
+    /// The attempt budget for this entry is spent. The effect definitely did
+    /// not happen on any of the attempts made; nothing further is attempted
+    /// without evidence, which `EcsBot::resolve_effect` supplies.
+    AttemptsExhausted {
+        /// How many attempts were made.
+        attempts: u32,
+    },
+    /// The failure is one no retry can fix: a refused capability, a type
+    /// mismatch behind an erased verb, a malformed action input. Retrying would
+    /// spend an attempt to learn the same answer.
+    Terminal,
+}
+
+/// What is holding one entry of a transition back.
+///
+/// The `Running` state the ledger tracks is called [`Self::Unrecorded`] here:
+/// at rest — which is the only time a caller can observe it — "an attempt is
+/// in flight" and "an attempt began and no outcome was ever recorded" are the
+/// same fact, and the second is the one that decides what happens next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TransitionHold {
+    /// Never attempted. An entry ahead of it is unresolved, and the chain's
+    /// declared order is part of what it means.
+    NotStarted,
+    /// An attempt began and no outcome was recorded — the tick that started it
+    /// ended without one. Held exactly as an unknown outcome is: the effect may
+    /// be live, so it is never attempted again without evidence.
+    Unrecorded,
+    /// The effect definitely did not happen, and the attempt budget remains.
+    Failed {
+        /// Attempts made so far, including the failed one.
+        attempts: u32,
+        /// The budget this entry is allowed.
+        budget: u32,
+        /// The failure the attempt produced.
+        cause: String,
+    },
+    /// The effect may or may not have happened. Never attempted again without
+    /// evidence.
+    OutcomeUnknown {
+        /// Attempts made so far, including the indeterminate one.
+        attempts: u32,
+        /// Why the outcome could not be settled.
+        cause: String,
+    },
+    /// Given up on, and reported rather than dropped.
+    Abandoned {
+        /// Why it was given up on.
+        reason: AbandonReason,
+        /// The failure that ended it.
+        cause: String,
+    },
+}
+
+impl fmt::Display for TransitionHold {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The scrutinee is `*self`, so each pattern's type is the enum's own
+        // type rather than a reference to it, and the causes are bound by
+        // `ref`. They are rendered through `Escaped`, which is what keeps a
+        // foreign payload from forging a log record; the pass is idempotent
+        // (see `error::Escaped`), so a cause that arrived already escaped is
+        // rendered exactly once.
+        match *self {
+            Self::NotStarted => f.write_str("not attempted: an entry ahead of it is unresolved"),
+            Self::Unrecorded => {
+                f.write_str("an attempt began and no outcome was recorded: the effect may be live")
+            }
+            Self::Failed {
+                attempts,
+                budget,
+                ref cause,
+            } => write!(
+                f,
+                "did not happen: attempt {attempts} of {budget} failed with {}",
+                Escaped(cause)
+            ),
+            Self::OutcomeUnknown {
+                attempts,
+                ref cause,
+            } => write!(
+                f,
+                "may have happened: attempt {attempts} was indeterminate ({})",
+                Escaped(cause)
+            ),
+            Self::Abandoned { reason, ref cause } => match reason {
+                AbandonReason::AttemptsExhausted { attempts } => write!(
+                    f,
+                    "given up on after {attempts} attempts: {}",
+                    Escaped(cause)
+                ),
+                AbandonReason::Terminal => {
+                    write!(f, "given up on, no retry can fix: {}", Escaped(cause))
+                }
+            },
+        }
+    }
+}
+
+/// One entry of a transition that is not finished.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingWork {
+    /// Which entry this is.
+    id: WorkId,
+    /// The revision that opened the transition it belongs to.
+    revision: u64,
+    /// What is holding it.
+    hold: TransitionHold,
+}
+
+impl PendingWork {
+    /// Which entry this is.
+    #[must_use]
+    pub const fn id(&self) -> WorkId {
+        self.id
+    }
+
+    /// The revision that opened the transition this entry belongs to.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// What is holding it back.
+    #[must_use]
+    pub const fn hold(&self) -> &TransitionHold {
+        &self.hold
+    }
+}
+
+impl fmt::Display for PendingWork {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "chain {} entry {} (revision {}): {}",
+            self.id.chain(),
+            self.id.entry(),
+            self.revision,
+            self.hold
+        )
+    }
+}
+
+/// What a caller knows about an effect the substrate could not settle.
+///
+/// Two arms, because there are two facts a caller can establish, and the
+/// decision that matters — attempt it again or not — follows from which one
+/// they are. "Unknown and staying unknown" is not evidence and has no arm: an
+/// entry in that state stays reported, which is the honest outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EffectEvidence {
+    /// The effect happened. The entry is acknowledged and never attempted
+    /// again.
+    Applied,
+    /// The effect did not happen. This is the evidence a retry requires: the
+    /// entry becomes eligible for an attempt again, with a fresh budget,
+    /// because a new fact is not a repeat of the attempt that failed.
+    NotApplied,
+}
+
+/// How many times an entry whose effect definitely did not happen is attempted.
+///
+/// A policy rather than a constant, because the right number is a property of
+/// the action: a merge that transiently refuses wants several attempts, a
+/// process launch wants one. There is no measured basis for a default, so
+/// [`Self::DEFAULT`] is a declared guess and is named as one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryPolicy {
+    /// Attempts per entry, the first included. Non-zero: an entry that may
+    /// never be attempted is not a policy, it is pre-abandoned work.
+    max_attempts: NonZeroU32,
+}
+
+impl RetryPolicy {
+    /// One attempt per entry: the first definite failure abandons it.
+    pub const ONE_ATTEMPT: Self = Self {
+        max_attempts: NonZeroU32::MIN,
+    };
+
+    /// The declared default: three attempts per entry, counting the first.
+    pub const DEFAULT: Self = Self {
+        // Total rather than panicking: a `const` has no error channel and
+        // `unwrap` is refused crate-wide. The `None` arm is unreachable, since
+        // three is not zero.
+        max_attempts: match NonZeroU32::new(3) {
+            Some(three) => three,
+            None => NonZeroU32::MIN,
+        },
+    };
+
+    /// A policy allowing `max_attempts` attempts per entry.
+    #[must_use]
+    pub const fn new(max_attempts: NonZeroU32) -> Self {
+        Self { max_attempts }
+    }
+
+    /// Attempts allowed per entry.
+    #[must_use]
+    pub const fn max_attempts(self) -> u32 {
+        self.max_attempts.get()
+    }
+}
+
+/// The state of one entry within a transition.
+#[derive(Debug, Clone)]
+enum EntryState {
+    /// Never attempted. An entry ahead of it may be holding it back.
+    NotStarted,
+    /// An attempt is under way, or was begun and its outcome never recorded.
+    /// This is the issue's `Running`, named for the fact that survives the
+    /// call.
+    Unrecorded,
+    /// The action ran and returned.
+    Succeeded,
+    /// The condition was false when it was evaluated against the value.
+    Skipped,
+    /// The effect definitely did not happen ([`BotError::DomainError`]), and
+    /// attempts remain in the budget.
+    DefinitelyFailed {
+        /// Attempts made so far.
+        attempts: u32,
+        /// The failure.
+        cause: String,
+    },
+    /// The effect may or may not have happened
+    /// ([`BotError::EffectIndeterminate`]).
+    OutcomeUnknown {
+        /// Attempts made so far.
+        attempts: u32,
+        /// Why the outcome could not be settled.
+        cause: String,
+    },
+    /// Given up on, and reported.
+    Abandoned {
+        /// Why.
+        reason: AbandonReason,
+        /// The failure that ended it.
+        cause: String,
+    },
+}
+
+impl EntryState {
+    /// Whether the entry still needs something: an attempt, evidence, or the
+    /// entry ahead of it to be resolved.
+    fn is_open(&self) -> bool {
+        matches!(
+            self,
+            Self::NotStarted
+                | Self::Unrecorded
+                | Self::DefinitelyFailed { .. }
+                | Self::OutcomeUnknown { .. }
+        )
+    }
+
+    /// Whether the entry was given up on: terminal for this transition, and
+    /// reported rather than dropped.
+    fn is_abandoned(&self) -> bool {
+        matches!(self, Self::Abandoned { .. })
+    }
+
+    /// How this entry reads to a caller, `None` when it is resolved and has
+    /// nothing to report.
+    fn hold(&self, budget: u32) -> Option<TransitionHold> {
+        match *self {
+            Self::Succeeded | Self::Skipped => None,
+            Self::NotStarted => Some(TransitionHold::NotStarted),
+            Self::Unrecorded => Some(TransitionHold::Unrecorded),
+            Self::DefinitelyFailed {
+                attempts,
+                ref cause,
+            } => Some(TransitionHold::Failed {
+                attempts,
+                budget,
+                cause: cause.clone(),
+            }),
+            Self::OutcomeUnknown {
+                attempts,
+                ref cause,
+            } => Some(TransitionHold::OutcomeUnknown {
+                attempts,
+                cause: cause.clone(),
+            }),
+            Self::Abandoned { reason, ref cause } => Some(TransitionHold::Abandoned {
+                reason,
+                cause: cause.clone(),
+            }),
+        }
+    }
+}
+
+/// The work of one source transition: one state per entry of its chain.
+#[derive(Debug, Clone)]
+struct Transition {
+    /// The revision that opened it.
+    revision: u64,
+    /// One state per entry of the chain, in declaration order.
+    entries: Vec<EntryState>,
+}
+
+impl Transition {
+    /// A transition with every entry outstanding.
+    fn opened(revision: u64, entries: usize) -> Self {
+        Self {
+            revision,
+            entries: vec![EntryState::NotStarted; entries],
+        }
+    }
+
+    /// Continue into a new revision, from a transition with nothing open.
+    ///
+    /// Every entry is outstanding again for the new value, *except* the ones
+    /// given up on: those are terminal until evidence revives them, and
+    /// carrying their record forward is what keeps a lost effect reported
+    /// instead of silently dropped the moment the source moves.
+    fn resumed(revision: u64, previous: &Self) -> Self {
+        Self {
+            revision,
+            entries: previous
+                .entries
+                .iter()
+                .map(|state| match *state {
+                    EntryState::Abandoned { reason, ref cause } => EntryState::Abandoned {
+                        reason,
+                        cause: cause.clone(),
+                    },
+                    _ => EntryState::NotStarted,
+                })
+                .collect(),
+        }
+    }
+
+    /// Whether any entry is still unresolved.
+    fn has_open(&self) -> bool {
+        self.entries.iter().any(EntryState::is_open)
+    }
+
+    /// Whether the ledger must keep this transition: it has work to do, or a
+    /// fact to report.
+    fn is_retained(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|state| state.is_open() || state.is_abandoned())
+    }
+}
+
+/// The eligible work of the bot, keyed by chain.
+///
+/// One transition per chain, and never one per revision: an entry's work cannot
+/// be re-derived from the change filter, and two transitions for one chain
+/// would replay an acknowledged effect on the older one to reach an entry the
+/// newer one skipped. Bounded by construction — at most one state per entry of
+/// the spec, so the ledger cannot grow with the number of ticks.
+#[derive(Resource, Debug, Default)]
+struct Ledger {
+    /// One live transition per chain, in declaration order.
+    transitions: Vec<Option<Transition>>,
+}
+
+impl Ledger {
+    /// A ledger with one idle slot per chain.
+    fn with_chains(chains: usize) -> Self {
+        Self {
+            transitions: (0..chains).map(|_| None).collect(),
+        }
+    }
+
+    /// Take a chain's transition out, leaving its slot empty. The walk needs it
+    /// owned: the ledger is mutated while the chains, the observed values and
+    /// the granted authority are borrowed from the same world.
+    fn take(&mut self, chain: usize) -> Option<Transition> {
+        self.transitions.get_mut(chain).and_then(Option::take)
+    }
+
+    /// Put a chain's transition back, `None` when nothing is retained.
+    fn put(&mut self, chain: usize, transition: Option<Transition>) {
+        if let Some(slot) = self.transitions.get_mut(chain) {
+            *slot = transition;
+        }
+    }
+
+    /// Settle an entry whose effect may or may not have happened.
+    fn settle(&mut self, id: WorkId, evidence: EffectEvidence) -> bool {
+        let Some(transition) = self
+            .transitions
+            .get_mut(id.chain())
+            .and_then(Option::as_mut)
+        else {
+            return false;
+        };
+        let Some(state) = transition.entries.get_mut(id.entry()) else {
+            return false;
+        };
+        match *state {
+            // Indeterminate: evidence is exactly what this needs.
+            EntryState::Unrecorded | EntryState::OutcomeUnknown { .. } => {}
+            // Given up on: evidence revives it, which is the caller's way to
+            // take back an abandonment they have since disproved.
+            EntryState::Abandoned { .. } => {}
+            // Decided: an entry that ran, one whose condition was false, one
+            // that has not been attempted yet, and one with a live budget all
+            // have an answer, and evidence supplied after the fact cannot
+            // contradict an attempt whose outcome was recorded.
+            _ => return false,
+        }
+        *state = match evidence {
+            EffectEvidence::Applied => EntryState::Succeeded,
+            EffectEvidence::NotApplied => EntryState::NotStarted,
+        };
+        true
+    }
+
+    /// The first entry that is open, in `(chain, entry)` order.
+    fn first_open(&self, budget: u32) -> Option<PendingWork> {
+        for (chain, transition) in self.transitions.iter().enumerate() {
+            let Some(transition) = transition.as_ref() else {
+                continue;
+            };
+            for (entry, state) in transition.entries.iter().enumerate() {
+                if !state.is_open() {
+                    continue;
+                }
+                // Unreachable in practice: an open state always renders a hold.
+                let Some(hold) = state.hold(budget) else {
+                    continue;
+                };
+                return Some(PendingWork {
+                    id: WorkId { chain, entry },
+                    revision: transition.revision,
+                    hold,
+                });
+            }
+        }
+        None
+    }
+
+    /// Every entry that is not finished, in `(chain, entry)` order: open, or
+    /// given up on and still reported.
+    fn pending(&self, budget: u32) -> Vec<PendingWork> {
+        let mut pending = Vec::new();
+        for (chain, transition) in self.transitions.iter().enumerate() {
+            let Some(transition) = transition.as_ref() else {
+                continue;
+            };
+            for (entry, state) in transition.entries.iter().enumerate() {
+                if let Some(hold) = state.hold(budget) {
+                    pending.push(PendingWork {
+                        id: WorkId { chain, entry },
+                        revision: transition.revision,
+                        hold,
+                    });
+                }
+            }
+        }
+        pending
+    }
+
+    /// How many entries are still open, across every chain.
+    fn open_count(&self) -> usize {
+        self.transitions
+            .iter()
+            .flatten()
+            .flat_map(|transition| transition.entries.iter())
+            .filter(|state| state.is_open())
+            .count()
+    }
+}
+
+/// The transition a chain should be walking this tick, if any.
+///
+/// Three ways one exists: work is outstanding (walked whether or not the source
+/// moved — that is the whole point), the transition is kept only for an
+/// abandonment record and the source held still, or the source moved and a
+/// transition is opened or resumed.
+fn resume(
+    world: &World,
+    chain: usize,
+    moving: bool,
+    held: Option<Transition>,
+) -> Option<Transition> {
+    let revision = || {
+        world
+            .resource::<Order>()
+            .0
+            .get(chain)
+            .and_then(|entity| world.get::<Revision>(*entity))
+            .map_or(0, |revision| revision.0)
+    };
+    match held {
+        Some(transition) if transition.has_open() => Some(transition),
+        Some(transition) if !moving => Some(transition),
+        Some(transition) => Some(Transition::resumed(revision(), &transition)),
+        None if moving => Some(Transition::opened(
+            revision(),
+            world
+                .non_send::<Chains>()
+                .0
+                .get(chain)
+                .map_or(0, |chain| chain.entries.len()),
+        )),
+        None => None,
+    }
+}
+
+/// What one chain's walk produced.
+#[derive(Debug, Default)]
+struct Advance {
+    /// Actions that ran.
+    fired: usize,
+    /// The first failure, in declaration order within the chain.
+    failure: Option<BotError>,
+}
+
+/// Advance one chain's transition as far as this tick can take it.
+///
+/// Entries are walked in declaration order, resuming at the first that is not
+/// resolved, and the walk stops at the first entry it cannot settle: the
+/// successors of an unresolved attempt stay untouched rather than running out
+/// of order, which is what keeps an acknowledged effect from being replayed to
+/// reach an entry a failure skipped.
+fn advance(
+    chain: &EcsChain,
+    transition: &mut Transition,
+    value: &dyn Any,
+    grants: &GrantSet,
+    budget: u32,
+) -> Advance {
+    let mut result = Advance::default();
+
+    for (entry_index, entry) in chain.entries.iter().enumerate() {
+        let Some(state) = transition.entries.get_mut(entry_index) else {
+            continue;
+        };
+        // `*state` so the patterns are the enum's own type; the causes are
+        // `ref`, and each is cloned out before `*state` is written, so the
+        // borrow ends where the assignment begins.
+        match *state {
+            // Decided. An entry that ran, one whose condition was false, and
+            // one given up on are all behind us, so the chain continues past
+            // them.
+            EntryState::Succeeded | EntryState::Skipped | EntryState::Abandoned { .. } => continue,
+            // Held: the effect may be live and only evidence settles that. A
+            // later entry is not run ahead of it.
+            EntryState::Unrecorded | EntryState::OutcomeUnknown { .. } => break,
+            EntryState::NotStarted | EntryState::DefinitelyFailed { .. } => {}
+        }
+
+        // The condition reads the value as it stands *now*, which is why an
+        // outstanding transition is walked on a tick where the source held
+        // still: the value it has not been evaluated against is the one from
+        // the movement that joined the transition.
+        match entry.condition.check_any(value) {
+            Ok(true) => {}
+            Ok(false) => {
+                *state = EntryState::Skipped;
+                continue;
+            }
+            Err(error) => {
+                // A condition that cannot be evaluated has decided nothing
+                // about the effect: the entry stays where it is, the chain
+                // stops, and the tick reports the error. Nothing is abandoned,
+                // because nothing was attempted.
+                result.failure = Some(error);
+                break;
+            }
+        }
+
+        let attempts = match *state {
+            EntryState::DefinitelyFailed { attempts, .. } => attempts.saturating_add(1),
+            _ => 1,
+        };
+        // Written *before* the attempt, not after: the walk stops at an entry it
+        // cannot settle, so a record that says "begun, outcome unknown" is what
+        // makes the next tick hold the effect instead of replaying it. The
+        // record reaches the ledger when this tick returns; a panic unwinding
+        // out of the action is a limit this substrate does not close, and it is
+        // stated in the module documentation.
+        *state = EntryState::Unrecorded;
+        match lgwks_std::task::block_on(entry.action.run_any(grants, value)) {
+            Ok(_) => {
+                *state = EntryState::Succeeded;
+                result.fired = result.fired.saturating_add(1);
+            }
+            Err(error) => {
+                let cause = error.to_string();
+                *state = match error {
+                    // The effect definitely did not happen: a retry is a retry,
+                    // and the budget bounds it.
+                    BotError::DomainError { .. } if attempts < budget => {
+                        EntryState::DefinitelyFailed { attempts, cause }
+                    }
+                    BotError::DomainError { .. } => EntryState::Abandoned {
+                        reason: AbandonReason::AttemptsExhausted { attempts },
+                        cause,
+                    },
+                    // It may have happened. Never attempted again without
+                    // evidence, whatever the budget says.
+                    BotError::EffectIndeterminate { .. } => {
+                        EntryState::OutcomeUnknown { attempts, cause }
+                    }
+                    // No retry fixes a refused capability or a type mismatch.
+                    _ => EntryState::Abandoned {
+                        reason: AbandonReason::Terminal,
+                        cause,
+                    },
+                };
+                result.failure = Some(error);
+                break;
+            }
+        }
+    }
+
+    result
 }
 
 // ── Systems ────────────────────────────────────────────────────────────────
@@ -275,7 +977,8 @@ fn observe(world: &mut World) {
     }
 }
 
-/// Execute: run the entries of every source whose value moved this tick.
+/// Execute: advance the ledger of every chain that has work, in declaration
+/// order.
 ///
 /// The capability check is not repeated here: `poll_any` and `run_any` each
 /// mint a fresh `Auth` from the retained `GrantSet`, which is where the proof
@@ -286,6 +989,10 @@ fn observe(world: &mut World) {
 /// exactly the snapshot boundary `Bot` documents and not a live lease: changing
 /// or dropping the caller's `GrantSet` after build cannot narrow a bot that is
 /// already running. An earlier version of this comment claimed the opposite.
+///
+/// The change filter decides only which chains *open* a transition. A chain
+/// whose ledger entry is outstanding is walked whether or not it moved, and a
+/// failure stops its own chain rather than every chain after it.
 fn fire(world: &mut World) {
     if parked(world) {
         return;
@@ -296,44 +1003,73 @@ fn fire(world: &mut World) {
         query.iter(world).map(|id| id.chain).collect()
     };
 
+    let count = world.non_send::<Chains>().0.len();
+    let budget = world.resource::<Policy>().0.max_attempts();
+
+    // A flag per chain rather than a search of `moved`: the walk below is in
+    // declaration order, and membership has to be answerable in constant time
+    // for that order to be the one that decides what runs.
+    let mut moving = vec![false; count];
+    for index in moved {
+        if let Some(flag) = moving.get_mut(index) {
+            *flag = true;
+        }
+    }
+
     let mut fired: usize = 0;
     let mut failure: Option<BotError> = None;
-    {
-        let chains = world.non_send::<Chains>();
-        let observed = world.non_send::<Observed>();
-        let grants = world.resource::<Grants>();
 
-        'chains: for index in moved {
-            // Two steps, not `Some(Some(value))`: the pattern would be matched
-            // against `Option<&Option<_>>`, which `pattern_type_mismatch`
-            // refuses.
-            let Some(slot) = observed.0.get(index) else {
-                continue;
-            };
-            let Some(value) = slot.as_ref() else {
-                continue;
-            };
-            let Some(chain) = chains.0.get(index) else {
-                continue;
-            };
-            for entry in &chain.entries {
-                match entry.condition.check_any(value.as_ref()) {
-                    Ok(true) => {}
-                    Ok(false) => continue,
-                    Err(error) => {
-                        failure = Some(error);
-                        break 'chains;
-                    }
-                }
-                match lgwks_std::task::block_on(entry.action.run_any(&grants.0, value.as_ref())) {
-                    Ok(_) => fired = fired.saturating_add(1),
-                    Err(error) => {
-                        failure = Some(error);
-                        break 'chains;
-                    }
-                }
+    for index in 0..count {
+        let held = world.resource_mut::<Ledger>().take(index);
+        let Some(mut transition) = resume(
+            world,
+            index,
+            moving.get(index).copied().unwrap_or(false),
+            held,
+        ) else {
+            continue;
+        };
+
+        // The borrow of the world for the walk is scoped: `Ledger::take` above
+        // and `Ledger::put` below each need it mutably, and the walk needs the
+        // chains, the observed value and the grant set immutably.
+        let walked = {
+            let chains = world.non_send::<Chains>();
+            let observed = world.non_send::<Observed>();
+            let grants = world.resource::<Grants>();
+            match (
+                chains.0.get(index),
+                observed.0.get(index).and_then(Option::as_ref),
+            ) {
+                (Some(chain), Some(value)) => Some(advance(
+                    chain,
+                    &mut transition,
+                    value.as_ref(),
+                    &grants.0,
+                    budget,
+                )),
+                // No chain, or a source that has never answered: the work is
+                // kept, not discarded. A transition exists only for a source
+                // that was polled, so this is a world that was mutated behind
+                // the schedule's back.
+                _ => None,
+            }
+        };
+
+        if let Some(result) = walked {
+            fired = fired.saturating_add(result.fired);
+            // Chain order, so "the first error in declaration order" is the one
+            // a caller gets, exactly as before — except that the chains after
+            // it still ran.
+            if failure.is_none() {
+                failure = result.failure;
             }
         }
+
+        let retained = transition.is_retained();
+        world
+            .resource_mut::<Ledger>()
+            .put(index, if retained { Some(transition) } else { None });
     }
 
     world.resource_mut::<Fired>().0 = fired;
@@ -397,6 +1133,7 @@ impl EcsBot {
         EcsBuilder {
             name: name.into(),
             chains: Vec::new(),
+            policy: RetryPolicy::DEFAULT,
         }
     }
 
@@ -449,13 +1186,82 @@ impl EcsBot {
     ///
     /// Synchronous: the systems drive the non-`Send` verb futures on this
     /// thread, so there is nothing for a caller to await.
+    ///
+    /// `Ok` means every entry of every transition is resolved — it ran or its
+    /// condition was false. `Err` is the failure a source or an action produced,
+    /// or [`BotError::PendingTransition`] when work is still held and nothing
+    /// failed. A caller that reads a clean tick as "the transition was handled"
+    /// is reading a fact, because a tick with anything left to report is not
+    /// clean.
+    ///
+    /// The failure keeps precedence over the pending report when a tick has
+    /// both, because it carries the typed variant a retry classifier reads: an
+    /// [`BotError::EffectIndeterminate`] written into a string would stop being
+    /// the distinction the whole error type exists to draw. So the tick that
+    /// gives up on an entry reports the error that caused it, and the
+    /// abandonment — never a silent drop — is reported by [`Self::pending`],
+    /// which names every abandoned entry, its reason, and its source revision
+    /// for as long as it stands.
     pub fn tick(&mut self) -> Result<usize, BotError> {
         self.world.resource_mut::<TickError>().0 = None;
         self.world.resource_mut::<Fired>().0 = 0;
         self.schedule.run(&mut self.world);
-        match self.world.resource_mut::<TickError>().0.take() {
-            Some(error) => Err(error),
+
+        if let Some(error) = self.world.resource_mut::<TickError>().0.take() {
+            return Err(error);
+        }
+
+        let budget = self.world.resource::<Policy>().0.max_attempts();
+        let ledger = self.world.resource::<Ledger>();
+        match ledger.first_open(budget) {
+            Some(work) => Err(BotError::PendingTransition {
+                work,
+                outstanding: ledger.open_count(),
+            }),
             None => Ok(self.world.resource::<Fired>().0),
+        }
+    }
+
+    /// Every entry that is not finished, in `(chain, entry)` order.
+    ///
+    /// Two kinds are reported and [`TransitionHold`] distinguishes them: an
+    /// entry still being held — waiting for an attempt or for evidence — and
+    /// one given up on, which stays listed so lost work has a name after the
+    /// tick that lost it. An empty result means the last transition is fully
+    /// handled.
+    #[must_use]
+    pub fn pending(&self) -> Vec<PendingWork> {
+        let budget = self.world.resource::<Policy>().0.max_attempts();
+        self.world.resource::<Ledger>().pending(budget)
+    }
+
+    /// Settle an entry whose effect may or may not have happened.
+    ///
+    /// A held entry is one the substrate cannot decide about on its own, and
+    /// retrying it blind is how a bot duplicates a merge, a message, or a
+    /// launch. Supply what you know — [`EffectEvidence::Applied`] acknowledges
+    /// the effect, [`EffectEvidence::NotApplied`] makes the entry eligible for
+    /// an attempt again — and the entry moves.
+    ///
+    /// An entry that was given up on accepts evidence too, which is how a
+    /// caller revives work the attempt budget abandoned.
+    ///
+    /// # Errors
+    ///
+    /// [`BotError::NoSuchWork`] when the entry is not held: it ran, its
+    /// condition was false, it has not been reached yet, or its chain holds no
+    /// transition at all. Evidence cannot contradict an attempt whose outcome
+    /// was recorded, and accepting it silently would let a caller believe an
+    /// effect was acknowledged when nothing was.
+    pub fn resolve_effect(
+        &mut self,
+        work: WorkId,
+        evidence: EffectEvidence,
+    ) -> Result<(), BotError> {
+        if self.world.resource_mut::<Ledger>().settle(work, evidence) {
+            Ok(())
+        } else {
+            Err(BotError::NoSuchWork { work })
         }
     }
 }
@@ -466,9 +1272,24 @@ pub struct EcsBuilder {
     name: String,
     /// Chains finished so far.
     chains: Vec<EcsChain>,
+    /// The retry policy every entry will run under.
+    policy: RetryPolicy,
 }
 
 impl EcsBuilder {
+    /// Set the retry budget for entries whose effect definitely did not happen.
+    ///
+    /// Additive and defaulted: a caller that never calls this gets
+    /// [`RetryPolicy::DEFAULT`], which is what makes the budget a policy rather
+    /// than a constant. Without it, "the work was given up on" would be a fact
+    /// the caller could not influence, and a bot whose actions are idempotent
+    /// would abandon work it could perfectly well retry.
+    #[must_use]
+    pub fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
     /// Bind a source to observe.
     ///
     /// The `PartialEq` bound is the substrate's one extra requirement, and it
@@ -487,13 +1308,14 @@ impl EcsBuilder {
             source: Box::new(source),
             same: same_output::<S>,
             entries: Vec::new(),
+            policy: self.policy,
         }
     }
 
     /// Build with no observation chains: a bot that only serves direct
     /// `Query` and `Execute` calls.
     pub fn build(self, grants: &GrantSet) -> Result<EcsBot, BotError> {
-        EcsBot::assemble(self.name, self.chains, grants)
+        EcsBot::assemble(self.name, self.chains, grants, self.policy)
     }
 }
 
@@ -531,6 +1353,7 @@ impl EcsObserveBuilder {
             source: previous,
             same,
             entries,
+            policy,
         } = self;
         prior.push(EcsChain {
             source: previous,
@@ -543,6 +1366,7 @@ impl EcsObserveBuilder {
             source: Box::new(source),
             same: same_output::<S>,
             entries: Vec::new(),
+            policy,
         }
     }
 
@@ -554,13 +1378,14 @@ impl EcsObserveBuilder {
             source,
             same,
             entries,
+            policy,
         } = self;
         prior.push(EcsChain {
             source,
             same,
             entries,
         });
-        EcsBot::assemble(name, prior, grants)
+        EcsBot::assemble(name, prior, grants, policy)
     }
 }
 
@@ -576,13 +1401,20 @@ pub struct EcsObserveBuilder {
     same: fn(&dyn Any, &dyn Any) -> bool,
     /// Tuples attached so far.
     entries: Vec<ChainEntry>,
+    /// Carried from [`EcsBuilder`] alongside `name`.
+    policy: RetryPolicy,
 }
 
 impl EcsBot {
     /// Validate and assemble. Shared by both terminal builder calls so
     /// admission cannot drift between them, the same rule
     /// [`spec::assemble`](crate::spec) follows for `Bot`.
-    fn assemble(name: String, chains: Vec<EcsChain>, grants: &GrantSet) -> Result<Self, BotError> {
+    fn assemble(
+        name: String,
+        chains: Vec<EcsChain>,
+        grants: &GrantSet,
+        policy: RetryPolicy,
+    ) -> Result<Self, BotError> {
         if name.is_empty() {
             return Err(BotError::IncompleteSpec { field: "name" });
         }
@@ -599,6 +1431,7 @@ impl EcsBot {
         world.insert_resource(Grants(grants.clone()));
         world.insert_resource(Fired::default());
         world.insert_resource(TickError::default());
+        world.insert_resource(Policy(policy));
 
         let mut order = Vec::with_capacity(chains.len());
         for (index, chain) in chains.iter().enumerate() {
@@ -621,6 +1454,7 @@ impl EcsBot {
         // Not `vec![None; count]`: `Box<dyn Any>` is not `Clone`, so the
         // repeat-form macro cannot build this.
         world.insert_non_send(Observed((0..count).map(|_| None).collect()));
+        world.insert_resource(Ledger::with_chains(count));
 
         let mut schedule = schedule();
         validate(&mut schedule, &mut world)?;
@@ -765,11 +1599,25 @@ mod tests {
         }
     }
 
-    /// An action that is always refused: the second half of a chain whose first
-    /// half already took effect.
-    struct Fails;
+    /// An action that fails a fixed number of times and then records: the
+    /// retry half of a chain, with a persistent effect to assert on.
+    struct Flaky {
+        remaining: Rc<Cell<usize>>,
+        log: Rc<RefCell<Vec<u16>>>,
+        kind: FlakyKind,
+    }
 
-    impl Execute for Fails {
+    /// Which failure the action reports, because the two are not the same
+    /// question and the substrate must treat them differently.
+    #[derive(Clone, Copy)]
+    enum FlakyKind {
+        /// The effect definitely did not happen.
+        Refused,
+        /// The effect may or may not have happened.
+        Indeterminate,
+    }
+
+    impl Execute for Flaky {
         type Input = u16;
         type Output = ();
 
@@ -779,14 +1627,66 @@ mod tests {
 
         async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
             call.0.check(&[])?;
-            Err(BotError::DomainError {
-                domain: "test::fails".into(),
-                cause: "refused after the first action ran".into(),
+            let left = self.remaining.get();
+            if left == 0 {
+                self.log.borrow_mut().push(*call.1);
+                return Ok(());
+            }
+            self.remaining.set(left.saturating_sub(1));
+            Err(match self.kind {
+                FlakyKind::Refused => BotError::DomainError {
+                    domain: "test::flaky".into(),
+                    cause: "refused, and the effect did not happen".into(),
+                },
+                FlakyKind::Indeterminate => BotError::EffectIndeterminate {
+                    domain: "test::flaky".into(),
+                    cause: "the acknowledgment never arrived".into(),
+                },
             })
         }
 
         fn domain_id(&self) -> &str {
-            "test::fails"
+            "test::flaky"
+        }
+    }
+
+    /// The `(chain, entry)` identity of a pending report.
+    fn identity(work: &PendingWork) -> (usize, usize) {
+        (work.id().chain(), work.id().entry())
+    }
+
+    /// The identities of every pending report, in order.
+    fn identities(bot: &EcsBot) -> Vec<(usize, usize)> {
+        bot.pending().iter().map(identity).collect()
+    }
+
+    /// What is holding the first pending report, if anything is pending.
+    fn first_hold(bot: &EcsBot) -> Option<TransitionHold> {
+        bot.pending().first().map(|work| work.hold().clone())
+    }
+
+    /// An action that always refuses, counting the attempts it received.
+    struct Refuses(Rc<Cell<usize>>);
+
+    impl Execute for Refuses {
+        type Input = u16;
+        type Output = ();
+
+        fn required_caps(&self) -> &[Cap] {
+            &[]
+        }
+
+        async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
+            call.0.check(&[])?;
+            self.0.set(self.0.get().saturating_add(1));
+            Err(BotError::DomainError {
+                domain: "test::refuses".into(),
+                cause: "refused".into(),
+            })
+        }
+
+        fn domain_id(&self) -> &str {
+            "test::refuses"
         }
     }
 
@@ -890,22 +1790,241 @@ mod tests {
     }
 
     #[test]
-    fn an_action_failure_leaves_earlier_effects_and_returns_err() -> TestResult {
-        // The counterexample to "a tick is all-or-nothing", kept as a
-        // regression because the README claimed it for long enough to be
-        // retrieved as fact. Two actions on one chain: the first records an
-        // effect, the second is refused. `tick` returns Err *and* the first
-        // effect is live, so a caller reading Err as "nothing happened" retries
-        // into a duplicate.
+    fn a_failure_mid_chain_leaves_the_untouched_entries_pending() -> TestResult {
+        // The counterexample to "a tick is all-or-nothing", and the regression
+        // for the repair. Three entries: the first records an effect, the
+        // second is refused once, the third is never reached on the failing
+        // tick.
+        //
+        // Before the repair this test asserted the *loss*: the revision was
+        // committed before any action ran, so the unchanged second tick fired
+        // nothing, the refused entry was never retried, and the third entry's
+        // effect was absent forever with no record of it. That assertion
+        // encoded the defect as correct and has been replaced.
         //
         // The script holds still at 200 so the second tick has an unchanged
-        // source, which is what makes the "not retried" half falsifiable: a
-        // moving source would fire again for reasons unrelated to the failure.
-        let log = Rc::new(RefCell::new(Vec::new()));
+        // source, which is what makes both halves falsifiable: a moving source
+        // would fire again for reasons unrelated to the failure.
+        let first = Rc::new(RefCell::new(Vec::new()));
+        let second = Rc::new(RefCell::new(Vec::new()));
+        let third = Rc::new(RefCell::new(Vec::new()));
         let mut bot = EcsBot::builder("partial")
             .observe(Script::new(vec![200, 200]))
+            .on(|value: &u16| *value >= 200, Record(Rc::clone(&first)))
+            .on(
+                |value: &u16| *value >= 200,
+                Flaky {
+                    remaining: Rc::new(Cell::new(1)),
+                    log: Rc::clone(&second),
+                    kind: FlakyKind::Refused,
+                },
+            )
+            .on(|value: &u16| *value >= 200, Record(Rc::clone(&third)))
+            .build(&net_grants())?;
+
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(format!("a refused action was reported as {fired} fired").into());
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::DomainError { .. }),
+                "expected the action's own error, got {error:?}"
+            ),
+        }
+        assert_eq!(
+            *first.borrow(),
+            vec![200],
+            "the action before the failure ran and its effect is not rolled back"
+        );
+        assert!(
+            second.borrow().is_empty(),
+            "the refused action recorded nothing"
+        );
+        assert!(
+            third.borrow().is_empty(),
+            "the entry after the failure was not attempted on the failing tick"
+        );
+        assert_eq!(
+            identities(&bot),
+            vec![(0, 1), (0, 2)],
+            "the refused entry and the entry behind it are both still outstanding"
+        );
+        assert!(
+            matches!(
+                first_hold(&bot),
+                Some(TransitionHold::Failed {
+                    attempts: 1,
+                    budget: 3,
+                    ..
+                })
+            ),
+            "the refused entry is held as a definite failure with the attempt counted: {:?}",
+            first_hold(&bot)
+        );
+
+        // The source has not moved. The retry and the untouched third entry run
+        // anyway, because eligible work is retained rather than re-derived from
+        // the change filter.
+        assert_eq!(
+            bot.tick()?,
+            2,
+            "the refused entry is retried and the entry behind it runs, on a still source"
+        );
+        assert_eq!(
+            *first.borrow(),
+            vec![200],
+            "the acknowledged first effect is not replayed to reach the third entry"
+        );
+        assert_eq!(
+            *second.borrow(),
+            vec![200],
+            "the retried action ran exactly once, on the second tick"
+        );
+        assert_eq!(
+            *third.borrow(),
+            vec![200],
+            "the effect the old code lost ran once the entry ahead of it settled"
+        );
+        assert!(
+            bot.pending().is_empty(),
+            "a clean tick means nothing is left holding the transition: {:?}",
+            bot.pending()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_failure_before_the_first_effect_still_runs_it_once() -> TestResult {
+        // The narrowest version of the defect: nothing has happened yet, the
+        // first entry never stops failing, and the entry behind it must still
+        // run — after the attempt budget is spent and the entry is abandoned,
+        // which is reported rather than silent.
+        let attempts = Rc::new(Cell::new(0));
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut bot = EcsBot::builder("refusing")
+            .observe(Script::new(vec![200, 200, 200, 200]))
+            .on(|value: &u16| *value >= 200, Refuses(Rc::clone(&attempts)))
             .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
-            .on(|value: &u16| *value >= 200, Fails)
+            .build(&net_grants())?;
+
+        for round in 1..=2 {
+            match bot.tick() {
+                Ok(fired) => return Err(format!("round {round} reported {fired} fired").into()),
+                Err(error) => assert!(
+                    matches!(error, BotError::DomainError { .. }),
+                    "round {round}: expected the action's own error, got {error:?}"
+                ),
+            }
+        }
+        assert_eq!(attempts.get(), 2, "two ticks, two attempts");
+        assert!(
+            log.borrow().is_empty(),
+            "the second entry is not run ahead of the entry holding it back"
+        );
+        assert_eq!(
+            identities(&bot),
+            vec![(0, 0), (0, 1)],
+            "both entries are outstanding while the first keeps failing"
+        );
+
+        // Third attempt: the budget is spent and the entry is given up on
+        // rather than retried forever. The tick reports the action's own typed
+        // error, not a summary of it: a caller classifies a retry by matching
+        // the variant, and rendering it into a string would throw that away.
+        match bot.tick() {
+            Ok(fired) => return Err(format!("a spent budget was reported as {fired} fired").into()),
+            Err(error) => assert!(
+                matches!(error, BotError::DomainError { .. }),
+                "the abandonment does not replace the error that caused it: {error:?}"
+            ),
+        }
+        assert_eq!(attempts.get(), 3, "exactly the declared budget was spent");
+
+        // Giving up is reported, never silent: the entry is named with the
+        // reason and the cause, and stays named.
+        assert_eq!(
+            first_hold(&bot),
+            Some(TransitionHold::Abandoned {
+                reason: AbandonReason::AttemptsExhausted { attempts: 3 },
+                cause: "test::refuses: refused".into(),
+            }),
+            "the given-up-on entry is named after the tick that gave up on it"
+        );
+
+        // And the work it was holding back is not lost with it. The walk stops
+        // at the attempt that spent the budget, so the successor runs on the
+        // next tick, which reports it rather than leaving it to an unchanged
+        // source that would never come.
+        assert!(
+            log.borrow().is_empty(),
+            "the successor is not run ahead of the entry that was just decided"
+        );
+        assert_eq!(
+            bot.tick()?,
+            1,
+            "the unattempted work runs as soon as the entry ahead of it is decided"
+        );
+        assert_eq!(*log.borrow(), vec![200], "and that effect happens once");
+
+        // Terminal, and the rest of the chain is resolved, so the transition is
+        // clean from here — except that the abandoned entry stays listed.
+        assert_eq!(bot.tick()?, 0, "the resolved transition fires nothing");
+        assert!(
+            identities(&bot) == vec![(0, 0)],
+            "the abandoned entry is all that is left to report: {:?}",
+            bot.pending()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn one_attempt_is_a_policy_a_caller_can_declare() -> TestResult {
+        // The budget is a policy, not a constant: with one attempt the same
+        // chain abandons on the first refusal instead of the third.
+        let attempts = Rc::new(Cell::new(0));
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut bot = EcsBot::builder("impatient")
+            .with_retry_policy(RetryPolicy::ONE_ATTEMPT)
+            .observe(Script::new(vec![200, 200, 200]))
+            .on(|value: &u16| *value >= 200, Refuses(Rc::clone(&attempts)))
+            .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
+            .build(&net_grants())?;
+
+        match bot.tick() {
+            Ok(fired) => return Err(format!("a refusal was reported as {fired} fired").into()),
+            Err(error) => assert!(
+                matches!(error, BotError::DomainError { .. }),
+                "expected the action's own error, got {error:?}"
+            ),
+        }
+        assert_eq!(attempts.get(), 1, "the declared budget is one attempt");
+        assert!(
+            log.borrow().is_empty(),
+            "the entry behind the abandoned one is not run in the tick that abandoned it"
+        );
+
+        assert_eq!(
+            bot.tick()?,
+            1,
+            "the next tick runs the work the abandoned entry was holding back"
+        );
+        assert_eq!(*log.borrow(), vec![200], "that effect happened once");
+        assert_eq!(attempts.get(), 1, "the abandoned entry is not retried");
+        Ok(())
+    }
+
+    #[test]
+    fn a_failure_does_not_stop_a_later_chain() -> TestResult {
+        // The second half of the defect: the old loop broke out of *every*
+        // chain on the first error, so an independent chain behind a broken one
+        // never ran, and never would.
+        let attempts = Rc::new(Cell::new(0));
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut bot = EcsBot::builder("two-chains")
+            .observe(Script::new(vec![200, 200]))
+            .on(|value: &u16| *value >= 200, Refuses(Rc::clone(&attempts)))
+            .observe(Script::new(vec![200, 200]))
+            .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
             .build(&net_grants())?;
 
         match bot.tick() {
@@ -920,29 +2039,361 @@ mod tests {
         assert_eq!(
             *log.borrow(),
             vec![200],
-            "the action before the failure ran and its effect is not rolled back"
+            "the chain after the failure ran: a failure is contained to its own chain"
+        );
+        assert_eq!(
+            identities(&bot),
+            vec![(0, 0)],
+            "only the refusing chain has work outstanding: {:?}",
+            bot.pending()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_indeterminate_effect_is_held_until_evidence_says_what_happened() -> TestResult {
+        // The effect may have happened, so a retry is a possible duplicate. The
+        // substrate refuses to guess: it holds the entry, reports it every
+        // tick, and waits for evidence.
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut bot = EcsBot::builder("indeterminate")
+            .observe(Script::new(vec![200, 200, 200]))
+            .on(
+                |value: &u16| *value >= 200,
+                Flaky {
+                    remaining: Rc::new(Cell::new(1)),
+                    log: Rc::clone(&log),
+                    kind: FlakyKind::Indeterminate,
+                },
+            )
+            .build(&net_grants())?;
+
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(
+                    format!("an indeterminate effect was reported as {fired} fired").into(),
+                );
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::EffectIndeterminate { .. }),
+                "expected the action's own error, got {error:?}"
+            ),
+        }
+        assert!(
+            log.borrow().is_empty(),
+            "an indeterminate effect is not an effect: nothing was recorded"
         );
 
-        // The unattempted work is not queued for the next tick: revisions are
-        // committed in the observe phase, before any action runs, so an
-        // unchanged source does not re-fire the chain. This is a limitation,
-        // not a repair — it is what "partial run" means here.
-        let revisions = bot.revisions();
+        // The source has not moved, and the entry is not re-attempted: a blind
+        // retry is exactly the duplicate this state exists to prevent.
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(format!("a held effect was reported as {fired} fired").into());
+            }
+            Err(error) => {
+                let BotError::PendingTransition { work, outstanding } = error else {
+                    return Err(format!("expected PendingTransition, got {error:?}").into());
+                };
+                assert_eq!(identity(&work), (0, 0), "the held entry is named");
+                assert!(
+                    matches!(
+                        work.hold(),
+                        TransitionHold::OutcomeUnknown { attempts: 1, .. }
+                    ),
+                    "the hold carries the attempt that could not be settled: {:?}",
+                    work.hold()
+                );
+                assert_eq!(outstanding, 1, "one entry is still open");
+                assert!(
+                    bot.pending()
+                        .iter()
+                        .all(|work| !matches!(work.hold(), TransitionHold::Abandoned { .. })),
+                    "nothing was given up on: {:?}",
+                    bot.pending()
+                );
+            }
+        }
+        assert!(
+            log.borrow().is_empty(),
+            "a held effect is not attempted again without evidence"
+        );
+
+        // Evidence that it did not happen: the entry becomes eligible again and
+        // the attempt finally lands.
+        let held = bot
+            .pending()
+            .first()
+            .map(PendingWork::id)
+            .ok_or("the held entry disappeared from the report")?;
+        bot.resolve_effect(held, EffectEvidence::NotApplied)?;
+        assert_eq!(bot.tick()?, 1, "the entry runs once evidence authorises it");
+        assert_eq!(*log.borrow(), vec![200], "the effect happened, once");
+        assert!(
+            bot.pending().is_empty(),
+            "and nothing is left holding the transition: {:?}",
+            bot.pending()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn evidence_that_the_effect_happened_records_it_without_replaying_it() -> TestResult {
+        // The other half of the evidence question, and the one that saves the
+        // duplicate: the caller knows the effect is live, so it is acknowledged
+        // and never attempted again.
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut bot = EcsBot::builder("acknowledged")
+            .observe(Script::new(vec![200, 200, 200]))
+            .on(
+                |value: &u16| *value >= 200,
+                Flaky {
+                    remaining: Rc::new(Cell::new(1)),
+                    log: Rc::clone(&log),
+                    kind: FlakyKind::Indeterminate,
+                },
+            )
+            .build(&net_grants())?;
+
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(
+                    format!("an indeterminate effect was reported as {fired} fired").into(),
+                );
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::EffectIndeterminate { .. }),
+                "expected the action's own error, got {error:?}"
+            ),
+        }
+
+        let held = bot
+            .pending()
+            .first()
+            .map(PendingWork::id)
+            .ok_or("the held entry is not reported")?;
+        bot.resolve_effect(held, EffectEvidence::Applied)?;
         assert_eq!(
             bot.tick()?,
             0,
-            "the chain must not re-fire on a still source"
+            "an acknowledged effect is never attempted again"
+        );
+        assert!(
+            log.borrow().is_empty(),
+            "the action that may already have run was not run a second time"
+        );
+        assert_eq!(bot.revisions(), vec![1], "and the transition is resolved");
+        assert!(
+            bot.pending().is_empty(),
+            "nothing is left pending: {:?}",
+            bot.pending()
+        );
+
+        // Evidence about an entry that is not held is refused rather than
+        // silently accepted: a caller that thinks it acknowledged something
+        // needs to find out that it did not.
+        match bot.resolve_effect(held, EffectEvidence::Applied) {
+            Ok(()) => Err("evidence was accepted for an entry that is not held".into()),
+            Err(error) => {
+                assert!(
+                    matches!(error, BotError::NoSuchWork { work } if work == held),
+                    "expected NoSuchWork for {held:?}, got {error:?}"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn a_source_that_moves_while_work_is_outstanding_neither_loses_nor_duplicates_it() -> TestResult
+    {
+        // Two movements while work is outstanding, and then a movement after it
+        // resolves. The value the entries read is the newest one; the effect
+        // that already happened is not replayed; and the chain is not wedged
+        // afterwards — the next movement is a new transition over every entry.
+        let first = Rc::new(RefCell::new(Vec::new()));
+        let second = Rc::new(RefCell::new(Vec::new()));
+        let mut bot = EcsBot::builder("moving")
+            .observe(Script::new(vec![200, 503, 200, 200]))
+            .on(|value: &u16| *value >= 200, Record(Rc::clone(&first)))
+            .on(
+                |value: &u16| *value >= 200,
+                Flaky {
+                    remaining: Rc::new(Cell::new(1)),
+                    log: Rc::clone(&second),
+                    kind: FlakyKind::Refused,
+                },
+            )
+            .build(&net_grants())?;
+
+        match bot.tick() {
+            Ok(fired) => return Err(format!("a refusal was reported as {fired} fired").into()),
+            Err(error) => assert!(
+                matches!(error, BotError::DomainError { .. }),
+                "expected the action's own error, got {error:?}"
+            ),
+        }
+        assert_eq!(*first.borrow(), vec![200], "the first entry ran once");
+        assert!(second.borrow().is_empty(), "the second entry refused");
+
+        // 503 arrives while the second entry is still outstanding. The
+        // acknowledged first entry is not replayed to reach it, and the retry
+        // reads the value as it stands now.
+        assert_eq!(bot.tick()?, 1, "only the outstanding entry runs");
+        assert_eq!(
+            *first.borrow(),
+            vec![200],
+            "an effect the transition already acknowledged is not replayed for a later movement"
+        );
+        assert_eq!(
+            *second.borrow(),
+            vec![503],
+            "the outstanding entry reads the newest value, not the one it failed on"
+        );
+        assert!(
+            bot.pending().is_empty(),
+            "the transition is fully resolved: {:?}",
+            bot.pending()
+        );
+
+        // A movement with nothing outstanding is a new transition over every
+        // entry, so the chain is not wedged by the coalescing above.
+        assert_eq!(bot.tick()?, 2, "a new movement re-evaluates both entries");
+        assert_eq!(
+            *first.borrow(),
+            vec![200, 200],
+            "the first entry runs again for the new value"
+        );
+        assert_eq!(*second.borrow(), vec![503, 200], "and so does the second");
+        // A movement that did not move is still nothing at all.
+        assert_eq!(
+            bot.tick()?,
+            0,
+            "a still source with no outstanding work fires nothing"
         );
         assert_eq!(
             bot.revisions(),
-            revisions,
-            "the source did not move, so no new Revision was committed"
+            vec![3],
+            "three polls moved the value: 200, 503, 200"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_attempt_whose_outcome_was_never_recorded_is_held_not_replayed() -> TestResult {
+        // The state a tick leaves behind when an attempt was begun and no
+        // outcome was recorded. The effect may be live, so the next tick holds
+        // it — replaying it is the duplicate this state exists to prevent.
+        //
+        // Constructed directly rather than by killing a tick: the ledger is the
+        // record of what happened, and this is what that record looks like when
+        // a tick's walk found the entry unrecorded. Nothing in the substrate
+        // produces the state and returns — the write sits immediately before the
+        // attempt and is overwritten by the outcome — which is why the record is
+        // exercised here rather than through an action.
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut bot = EcsBot::builder("interrupted")
+            .observe(Script::new(vec![200, 200, 200]))
+            .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
+            .build(&net_grants())?;
+
+        assert_eq!(bot.tick()?, 1, "the first tick runs the action");
+        {
+            let revision = *bot.revisions().first().ok_or("the source has a revision")?;
+            let mut transition = Transition::opened(revision, 1);
+            *transition
+                .entries
+                .first_mut()
+                .ok_or("the chain declares no entries")? = EntryState::Unrecorded;
+            bot.world.resource_mut::<Ledger>().put(0, Some(transition));
+        }
+
+        assert!(
+            matches!(first_hold(&bot), Some(TransitionHold::Unrecorded)),
+            "the interrupted attempt is reported as unrecorded: {:?}",
+            first_hold(&bot)
+        );
+        match bot.tick() {
+            Ok(fired) => return Err(format!("an unrecorded attempt fired {fired}").into()),
+            Err(error) => {
+                let BotError::PendingTransition { work, .. } = error else {
+                    return Err(format!("expected PendingTransition, got {error:?}").into());
+                };
+                assert!(
+                    matches!(work.hold(), TransitionHold::Unrecorded),
+                    "the tick reports it as held, not as handled: {:?}",
+                    work.hold()
+                );
+            }
+        }
+        assert_eq!(
+            *log.borrow(),
+            vec![200],
+            "the action was not run a second time: the first attempt may have taken effect"
+        );
+
+        // Evidence that it did not take effect is what unlocks the retry.
+        let held = bot
+            .pending()
+            .first()
+            .map(PendingWork::id)
+            .ok_or("the held entry is not reported")?;
+        bot.resolve_effect(held, EffectEvidence::NotApplied)?;
+        assert_eq!(bot.tick()?, 1, "and then it runs");
+        assert_eq!(*log.borrow(), vec![200, 200], "exactly once more");
+        Ok(())
+    }
+
+    #[test]
+    fn a_condition_that_cannot_be_evaluated_holds_the_chain_without_claiming_anything() -> TestResult
+    {
+        // A condition failure decides nothing about the effect. The entry has
+        // not been attempted, nothing about it is claimed, and the entry behind
+        // it is not run ahead of a question that has no answer — the failure
+        // the old substrate turned into "this chain is done".
+        //
+        // The mismatch is buildable because the builder ties a condition to the
+        // action's erased input, not to the source's output type: the downcast
+        // happens at check time, which is where this reports.
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut bot = EcsBot::builder("mismatched")
+            .observe(Script::new(vec![200, 200]))
+            .on(|value: &String| value.len() >= 3, Record(Rc::clone(&log)))
+            .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
+            .build(&net_grants())?;
+
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(format!("an evaluate error was reported as {fired} fired").into());
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::EvaluateError { .. }),
+                "expected the condition's own error, got {error:?}"
+            ),
+        }
+        assert!(log.borrow().is_empty(), "nothing was attempted");
+        assert_eq!(
+            identities(&bot),
+            vec![(0, 0), (0, 1)],
+            "the entry whose condition failed is still outstanding, and so is the entry \
+             behind it: {:?}",
+            bot.pending()
         );
         assert_eq!(
-            log.borrow().len(),
-            1,
-            "the refused action's predecessor ran exactly once in total"
+            first_hold(&bot),
+            Some(TransitionHold::NotStarted),
+            "a condition that cannot be evaluated is not an attempt, so nothing is abandoned"
         );
+
+        // And it stays that way rather than decaying into an abandonment: the
+        // report is the truth, not a stage on the way to losing the work.
+        match bot.tick() {
+            Ok(fired) => return Err(format!("the second tick reported {fired} fired").into()),
+            Err(error) => assert!(
+                matches!(error, BotError::EvaluateError { .. }),
+                "the condition is evaluated again, not silently given up on: {error:?}"
+            ),
+        }
+        assert!(log.borrow().is_empty(), "and still nothing was attempted");
         Ok(())
     }
 

@@ -189,8 +189,17 @@ where
 /// step, and a condition is `Changed<Revision>` on the source entity rather than
 /// a re-evaluation of a value that did not move. There is no second way to run a
 /// bot, and no feature flag that adds one.
+///
+/// The rest of this re-export is the vocabulary of the substrate's ledger —
+/// which work is outstanding, what is holding it, and how a caller settles an
+/// effect that may or may not have happened. It is re-exported here, next to
+/// `Bot`, because a caller reading [`Bot::pending`] or matching on
+/// [`BotError::PendingTransition`](crate::BotError::PendingTransition) has to be
+/// able to name what those return; `ecs` itself stays private, because it is the
+/// implementation rather than a second way to run a bot.
 pub use crate::ecs::{
-    EcsBot as Bot, EcsBuilder as BotBuilder, EcsObserveBuilder as ObserveBuilder,
+    AbandonReason, EcsBot as Bot, EcsBuilder as BotBuilder, EcsObserveBuilder as ObserveBuilder,
+    EffectEvidence, PendingWork, RetryPolicy, TransitionHold, WorkId,
 };
 
 /// One `(condition, action)` tuple in a chain.
