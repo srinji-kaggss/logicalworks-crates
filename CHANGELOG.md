@@ -46,6 +46,27 @@ explicitly under that crate.
   rather than transcribed. This is the shape the owner asked for explicitly:
   isolate what is missing at the point of the attempt, hand back the missing
   pieces, and continue — not a build loop that refuses one word at a time.
+- **A run-time capability hold was designed, built, and then removed as
+  unreachable.** The step after a total refusal is the natural one: deny an
+  action at run time, hold the entry, let the caller supply the capability, and
+  continue from that point rather than restarting the chain. It cannot be
+  reached, and the reason is structural rather than incidental. `assemble` admits
+  every declared requirement before the world exists, and every per-call proof is
+  minted from **the same list** — `run_any` issues
+  `grants.issue(self.0.required_caps())` and the action checks
+  `call.0.check(self.required_caps())` — so the declaration and the check cannot
+  disagree, and nothing narrows `Grants` after `assemble`. `Auth::check` cannot
+  fail inside a running bot. The hold was removed rather than shipped behind a
+  contrived test, and the finding is recorded in
+  `docs/guides/lgwks-bot/authority.md` with its line citations.
+- **The gap the hold was reaching for is the opposite one, and it is real: an
+  action that declares `&[]` and performs a side effect passes the gate
+  silently.** The gate checks the declared set and `&[]` is trivially covered, so
+  "this action needs nothing" and "this action's author never said" are the same
+  value and the crate cannot distinguish them. Every guarantee about authority is
+  a guarantee about capabilities a domain *declares*. Closing that, or making a
+  run-time hold meaningful, is a design change rather than a repair, and neither
+  is made here.
 - **Four `lgwks_bot` questions were put to the project owner on 2026-09-21 and
   decided.** They are recorded here because each was previously stated in a
   first-party document as *open*, and those documents now say what was decided.
