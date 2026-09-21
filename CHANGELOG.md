@@ -231,6 +231,41 @@ modules above it, and it ships in the same release.
 
 ### lgwks_bot Added
 
+- **`effect`, the durable effect identity the ledger was missing: a settlement
+  now names *which attempt* it is about.** The ECS ledger already settles an
+  entry and already refuses a contradicting settlement. What it never carried is
+  identity: `EntryState::DefinitelyFailed` holds `attempts: u32`, so two
+  deliveries that both arrive as "attempt 3" are indistinguishable, and a repeat
+  of an old settlement looks exactly like a statement about a new one at the
+  moment the ledger decides whether to accept it. `EffectKey` binds the seven
+  fields a settlement must name (run, action, attempt, flow revision, action
+  digest, environment, environment epoch), so "is this the same settlement?" is
+  a comparison rather than a judgement about a counter.
+  - **It reuses the estate's one content hash rather than minting a second.**
+    `FlowRevision` and `ActionDigest` are newtypes over
+    `lgwks_std::hash::Digest`, not replacements for it. They have different
+    domains: one binds the validated flow document, the other binds operation,
+    target, preconditions, postcondition and exact input. A newtype each is what
+    stops a call site passing one where the other is required.
+  - **`AttemptId` and `EnvironmentEpoch` refuse to wrap.** `checked_next()`
+    returns `None` at `u64::MAX` instead of restarting at 1. A wrapped counter
+    hands out an identity it has already issued for this sequence, and the ledger
+    would then refuse a genuine settlement as a duplicate. Running out is
+    recoverable; silently reusing an identity is not.
+  - **The schema admits two digest algorithms; this crate accepts one.**
+    `sha256` parses and is then refused as `UnsupportedAlgorithm` rather than
+    rejected as malformed, because it is well-formed on the wire and the error a
+    caller sees should say the algorithm is unsupported rather than that their
+    JSON was wrong. A settlement is accepted because the receiver recomputed the
+    digest, and a tag naming an algorithm it cannot recompute is an unverifiable
+    claim dressed as identity.
+  - **Ids are strict on parse**: 32 lowercase hex characters, big-endian, with
+    uppercase rejected rather than folded and the all-zero id refused. Zero is
+    the schema's own exclusion and also what a zeroed or truncated buffer
+    produces, so refusing it turns a class of uninitialised-identity bugs into a
+    parse error.
+  - 19 tests. Nothing is wired to the ledger yet: this is the identity layer, and
+    the settlement call site is the next change.
 - **`Observe::fingerprint`, and with it the lazy seam: a source that holds still
   is no longer polled.** Change detection is an *equality* question — the
   substrate reduces every observation to one bit and discards the value — so

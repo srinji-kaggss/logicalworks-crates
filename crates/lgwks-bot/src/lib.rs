@@ -125,6 +125,14 @@ pub mod domain {
 /// The `bevy_ecs` substrate the verbs execute on. Private: it is the
 /// implementation, not a second way to run a bot.
 mod ecs;
+/// Durable effect identity: the exact key a settlement is a statement about.
+///
+/// The ledger already refuses a contradicting settlement; this supplies the
+/// identity that makes "contradicting" decidable. An attempt count cannot: two
+/// deliveries both arriving as "attempt 3" are indistinguishable, so a repeat
+/// of an old settlement and a statement about a new one look the same at the
+/// moment the ledger accepts one. See [`EffectKey`](effect::EffectKey).
+pub mod effect;
 /// Typed bot errors.
 pub mod error;
 /// Politeness and admission: whether a host may be contacted now, and if not,
