@@ -138,6 +138,15 @@ Delivered:
   `KeywordResolver`, with an explicit unrecognized case that re-asks the same
   node rather than advancing. A model-backed resolver is the intended future
   `impl`.
+
+  **Superseded, 2026-09-21.** `Option<usize>` was the defect the brittleness
+  sweep predicted: it reports an answer that fits two options equally well as
+  *unrecognized*, so the session re-asks the full list and the identical answer
+  resolves identically forever. The delivered seam returns `Resolution` —
+  `Resolved` / `Ambiguous` / `Absent` — and an ambiguous re-ask is narrowed to
+  the options still in play. `KeywordResolver` was deleted rather than kept
+  beside its replacement, which is a strict superset. See
+  `docs/general-bot-fold.md` §3.5.
 - `trait Journal`: receives `(path_node, role, text)` records. The shipped
   implementation is an in-memory `Vec`. A durable, sealed implementation is the
   intended future `impl`.
