@@ -28,6 +28,9 @@
 //! report which tier it came from.
 //!
 //! [`Weighted`]: lgwks_std::similarity::Weighted
+//! [`phonetic_key`]: crate::language::phonetic_key
+//! [`Jaccard`]: lgwks_std::similarity::Jaccard
+//! [`EditDistance`]: lgwks_std::similarity::EditDistance
 //!
 //! # Two axes of "linguistic change", and they need different mechanisms
 //!
