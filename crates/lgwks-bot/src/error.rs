@@ -1,11 +1,24 @@
 //! `error` owns the bot error vocabulary and enforces INV-BOT-ERROR-TYPED:
 //! every failure is a distinct typed variant carrying the capability, field,
 //! domain, or condition that caused it. Variants that surface untrusted
-//! runtime text (`MalformedSpec`, `DomainError`, `EvaluateError`) carry it as
-//! a `String` cause by design: the boundary is typed (which domain failed is
-//! always known), while the foreign payload is escaped at the `Display`
-//! boundary so it cannot forge a log line. There is no bare-string failure
-//! with no typed envelope.
+//! runtime text (`MalformedSpec`, `DomainError`, `EffectIndeterminate`,
+//! `EvaluateError`) carry it as a `String` cause by design: the boundary is
+//! typed (which domain failed is always known), while the foreign payload is
+//! escaped at the `Display` boundary so it cannot forge a log line. There is
+//! no bare-string failure with no typed envelope.
+//!
+//! The vocabulary draws one distinction that a single failure variant cannot:
+//! **whether the effect happened**. [`BotError::DomainError`] means the action
+//! did not take effect, so a retry is a retry. [`BotError::EffectIndeterminate`]
+//! means it may have, so a retry is a possible duplicate. They are separate
+//! variants rather than one variant carrying a flag because a consumer's retry
+//! decision has to be readable from the type: a caller that must parse a cause
+//! string to learn whether it may retry will eventually get it wrong, and the
+//! price of getting it wrong is a duplicated merge, message, or process launch.
+//!
+//! The links above resolve at the crate root, where `BotError` is re-exported,
+//! rather than in this module — see `frontier.rs` for the module whose items
+//! are *not* all re-exported and which therefore needs reference definitions.
 
 use std::fmt;
 
@@ -50,6 +63,25 @@ pub enum BotError {
         /// The domain that failed (e.g. `"gh::pr_status"`).
         domain: String,
         /// The underlying cause.
+        cause: String,
+    },
+    /// A domain action failed *after* it may already have taken effect, so
+    /// whether the effect occurred cannot be determined from the failure.
+    ///
+    /// The sibling of [`BotError::DomainError`], and the difference is the
+    /// whole point: `DomainError` means the effect did not happen, so a retry
+    /// is a retry; this means it may have happened, so a retry is a possible
+    /// duplicate. A consumer that retries every error it is handed will
+    /// duplicate a merge, a message, or a process launch here, and it can only
+    /// avoid that if the two are distinguishable without reading the cause.
+    ///
+    /// Reached when a request timed out, or a connection dropped, *after* the
+    /// request was sent. [`crate::verb::Execute`] is the only verb with an
+    /// effect, so the variant names no verb: it is an effect by construction.
+    EffectIndeterminate {
+        /// The domain whose action may or may not have taken effect.
+        domain: String,
+        /// Why the outcome could not be settled.
         cause: String,
     },
     /// An evaluate condition failed structurally: not a false result, but an
@@ -185,6 +217,15 @@ impl fmt::Display for BotError {
             } => {
                 write!(f, "{domain}: {cause}")
             }
+            Self::EffectIndeterminate {
+                ref domain,
+                ref cause,
+            } => {
+                // Names the indeterminacy, not just the domain: an operator
+                // reading this line has to know the effect may be live, because
+                // that is what makes the retry unsafe.
+                write!(f, "{domain}: may have taken effect — {cause}")
+            }
             Self::EvaluateError { ref cause } => {
                 write!(f, "evaluate: {cause}")
             }
@@ -259,5 +300,70 @@ impl std::error::Error for BotError {
         // causes are intentional here (see the module header), not a missing
         // `#[from]` impl.
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BotError;
+
+    /// The retry classifier a consumer writes, and the entire reason the two
+    /// variants exist: it reads the *variant*, never the cause string.
+    fn may_have_taken_effect(error: &BotError) -> bool {
+        matches!(*error, BotError::EffectIndeterminate { .. })
+    }
+
+    #[test]
+    fn an_indeterminate_effect_is_distinguishable_from_a_domain_error() {
+        // Same domain and byte-identical cause text: the variant is the whole
+        // difference. That is the defect this closes — before it, a consumer
+        // had to infer "may have happened" from an untrusted string, so the
+        // only safe reading was the pessimistic one, and the pessimistic
+        // reading of "did not happen" is a retry that duplicates.
+        let refused = BotError::DomainError {
+            domain: String::from("gh::merge"),
+            cause: String::from("connection closed"),
+        };
+        let unknown = BotError::EffectIndeterminate {
+            domain: String::from("gh::merge"),
+            cause: String::from("connection closed"),
+        };
+
+        assert!(
+            !may_have_taken_effect(&refused),
+            "a domain error is a retry, not a possible duplicate: {refused}"
+        );
+        assert!(
+            may_have_taken_effect(&unknown),
+            "an indeterminate effect must not be blind-retried: {unknown}"
+        );
+        assert_ne!(
+            refused.to_string(),
+            unknown.to_string(),
+            "an operator triages from these lines, so they cannot render alike"
+        );
+    }
+
+    #[test]
+    fn an_indeterminate_effect_names_its_domain_and_the_indeterminacy() {
+        let error = BotError::EffectIndeterminate {
+            domain: String::from("notify::slack"),
+            cause: String::from("request timed out"),
+        };
+        let rendered = error.to_string();
+
+        assert!(
+            rendered.contains("notify::slack"),
+            "the line must name the domain that failed: {rendered}"
+        );
+        assert!(
+            rendered.contains("request timed out"),
+            "the line must carry the cause: {rendered}"
+        );
+        assert!(
+            rendered.contains("may have taken effect"),
+            "the failure alone is not enough — the line has to say the effect may be \
+             live, because that is what makes a retry unsafe: {rendered}"
+        );
     }
 }

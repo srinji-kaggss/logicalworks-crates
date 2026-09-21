@@ -92,11 +92,12 @@ This is the same invariant the workspace has now reached three times:
 | Arrival | Statement |
 |---|---|
 | `docs/bot-on-ecs.md` §8.1 | a single-bit seen-set cannot distinguish "done" from "never started" |
-| `BotError` (open defect) | no variant distinguishes "the effect did not happen" from "it may have happened" |
+| `BotError` | no variant distinguishes "the effect did not happen" from "it may have happened" |
 | this module | no two-way verdict distinguishes "nothing matched" from "several matched" |
 
-One invariant, three arrivals. The third is now closed; the second is not, and
-§6 sequences it.
+One invariant, three arrivals. The first and third landed here; the second
+landed in §6 step 5, and the two halves it turned out to have are one law rather
+than two patches.
 
 ### 3.2 The locator ladder and selector synthesis
 
@@ -464,8 +465,8 @@ exhausting it is a typed terminal outcome, not a silent stop.
 
 ## 6. Sequence
 
-Each step lands green and independently. Steps 1–3 and 6 have landed, as has the
-first half of step 5; step 4 is unblocked now.
+Each step lands green and independently. Steps 1–3, 5 and 6 have landed; step 4
+is unblocked now.
 
 1. **The interface model.** ✅ Landed in this change: `interface.rs` —
    `ElementFacts`, the four recognition-vector components, `RecognitionVector`,
@@ -484,12 +485,44 @@ first half of step 5; step 4 is unblocked now.
    `Resolution::Degraded` (§3.6), the verdict a resolver returns when a
    dependency it needs is unavailable — without it, *nothing matched* and *we
    could not look* render identically and asking the person again is the wrong
-   repair for the second. Still open: `BotError` gains an indeterminate variant
-   so a timed-out `Execute` is not retyped `Failed` and retried into a duplicate
-   (the open defect named in §3.1), and `TerminalOutcome` gains `Partial` so a
+   repair for the second. And the two halves of the §3.1 defect:
+   `BotError::EffectIndeterminate` so a timed-out `Execute` is not retyped
+   `Failed` and retried into a duplicate, and `TerminalOutcome::Partial` so a
    run that produced some but not all of its output is distinguishable from one
-   that produced none. That last is also the described platform's
-   `completed | partial | failed` triage, and it is the same invariant again.
+   that produced none — the described platform's `completed | partial | failed`
+   triage.
+
+   **They are one law, not two patches.** The error says an effect *may* have
+   happened; the class says the run is therefore neither a success nor a
+   failure. `Terminal::outcome(unsettled)` is where they meet, and it is why
+   they landed in one step: `Partial` has no reachable producer without
+   `EffectIndeterminate`, and `EffectIndeterminate` changes no consumer's
+   behaviour until something classifies the run it occurred in. Two findings
+   came out of writing it:
+
+   - **The variant, not the cause, has to carry the retry decision.** A consumer
+     that parses a cause string to learn whether it may retry will eventually
+     get it wrong, and the price is a duplicated merge, message, or process
+     launch. So `EffectIndeterminate` is a sibling of `DomainError` rather than
+     one variant with a flag: two errors with identical domain *and* identical
+     cause text are still distinguishable, which is the property that makes the
+     state representable rather than inferred. The regression test asserts
+     exactly that pair.
+   - **A refusal outranks an unsettled effect.** `Terminal::Refused` stays
+     `Failure` however many effects were left unsettled. Folding a decided
+     refusal into `Partial` would let it hide in the same class as a possible
+     duplicate, and a consumer that must act on a refusal has to see it. This is
+     the frontier's rule again — a provisional or decided outcome may not be
+     spelled as the other — arriving in the outcome vocabulary.
+
+   **Named honestly, because the step is smaller than it sounds:** there is no
+   live producer yet. All three `Execute` domains in this workspace
+   (`notify::Slack`, `gh::Merge`, `sys::Process`) are unbound stubs that always
+   return `DomainError { cause: "binding required" }`, so nothing today times
+   out mid-effect. What landed is the vocabulary and the law; the first domain
+   to bind a real request is the one that has to report `EffectIndeterminate`
+   rather than `DomainError` on a timeout, and until it does, this closes the
+   *type* defect without changing a runtime path.
 6. **The politeness frontier.** ✅ Landed in this change: `frontier.rs` —
    `ConstraintKey`, `Resolved`, `RulesState`, the three-armed `Admission`, a
    validated `PolitenessPolicy`, and the `Frontier` that admits against every
