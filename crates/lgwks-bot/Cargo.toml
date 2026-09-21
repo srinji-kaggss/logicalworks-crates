@@ -4,7 +4,12 @@ description = "Capability-gated automation bots on a change-detecting ECS schedu
 version = "0.4.2"
 edition = "2024"
 rust-version = "1.98"
-license = "Apache-2.0"
+# Deliberately not the workspace's Apache-2.0: the bot is the artefact the whole
+# estate embeds, so it carries file-level copyleft while its three siblings stay
+# permissive. A proprietary consumer is still permitted — MPL-2.0 §3.3 — and
+# only modification of the MPL-covered files carries an obligation. See
+# `LICENSING.md` at the repository root for the dual-licence model.
+license = "MPL-2.0"
 repository = "https://github.com/srinji-kaggss/logicalworks-crates"
 documentation = "https://docs.rs/lgwks_bot"
 homepage = "https://github.com/srinji-kaggss/logicalworks-crates/tree/main/crates/lgwks-bot"

@@ -450,4 +450,10 @@ indexes the design documents.
 
 ## License
 
-Apache-2.0 — Copyright 2026 Logical Works Incorporated
+MPL-2.0 — Copyright 2026 Logical Works Incorporated
+
+Deliberately not the workspace's Apache-2.0. The bot is the artefact the rest of
+the estate embeds, so it carries file-level copyleft while its three siblings
+stay permissive. A proprietary consumer is still permitted — MPL-2.0 §3.3 — and
+only modification of the MPL-covered files carries an obligation. See
+[`LICENSING.md`](../../LICENSING.md).

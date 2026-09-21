@@ -34,6 +34,19 @@ cargo run -p lgwks_deps -- check .
 ./scripts/lgwks-std-package-smoke.sh
 ```
 
+## Contributions and copyright
+
+Three of the four crates are Apache-2.0 and take contributions on ordinary
+terms. `lgwks_bot` is offered under two licences, including a commercial one,
+and offering a work under two licences requires the licensor to hold sufficient
+rights in every contribution to it.
+
+So before a non-trivial contribution to `lgwks_bot` is merged, a signed
+contributor licence agreement must be in place. Until one exists, such
+contributions are not merged — the reason is in
+[`LICENSING.md`](LICENSING.md), not a judgement about the patch. Contributions to
+the other three crates are unaffected.
+
 ## Standards
 
 - `#![forbid(unsafe_code)]` everywhere; no `unwrap` outside tests; typed errors
