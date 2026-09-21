@@ -145,12 +145,12 @@ it a `condition_id`.
 
 `Execute::execute_action` takes `(Auth, &Self::Input)`. The tick awaits each one
 before starting the next, in declaration order
-(`crates/lgwks-bot/src/ecs.rs:1849`), so the effects fire in the order you wrote
+(`crates/lgwks-bot/src/ecs.rs:1899`), so the effects fire in the order you wrote
 the `.on` calls.
 
 `build(&grants)` returns `Result<Bot, BotError>`. Two things make it fail:
 `GrantSet::admit` rejects a source or action whose `required_caps` the set does
-not cover (`crates/lgwks-bot/src/ecs.rs:2234`), and `Schedule::initialize` with
+not cover (`crates/lgwks-bot/src/ecs.rs:2335`), and `Schedule::initialize` with
 `ambiguity_detection: LogLevel::Error` rejects a schedule whose systems cannot be
 totally ordered (`crates/lgwks-bot/src/ecs.rs:1533`).
 

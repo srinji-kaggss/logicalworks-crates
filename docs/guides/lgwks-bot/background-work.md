@@ -9,7 +9,7 @@ for a blocking call. The units differ, and so do the guarantees.
 `rt::supervise::Supervisor` (feature `sync`) owns a set of background tasks and
 stops them when it goes away. `Supervisor::new(max_in_flight)` takes the ceiling,
 clamps it into `1..=Semaphore::MAX_PERMITS`, and offers no argument that produces
-an unbounded supervisor (`crates/lgwks-bot/src/rt/supervise.rs:693`).
+an unbounded supervisor (`crates/lgwks-bot/src/rt/supervise.rs:694`).
 `Supervisor::default()` is the constructor for the caller who has no opinion: it
 discovers the ceiling from `std::thread::available_parallelism`, so the safe
 default is the *first* thing that resolves rather than something to remember to
@@ -163,7 +163,7 @@ runs, with no pooled thread between calls. The doc says the quiet part out loud:
 
 The tick does exactly that, on both adapters, because the wave loop lives in the
 `observe_fold` system rather than in either entry point. `MAX_IN_FLIGHT_POLLS`
-is 32 (`crates/lgwks-bot/src/ecs.rs:323`), and `observe_fold` polls sources in
+is 32 (`crates/lgwks-bot/src/ecs.rs:336`), and `observe_fold` polls sources in
 waves of that size, because a source poll may occupy one `spawn_blocking` thread.
 Chains beyond 32 are polled in additional waves, so the cap holds regardless of
 how many chains a spec declares.
@@ -172,7 +172,7 @@ how many chains a spec declares.
 
 These are the places the bounds stop applying.
 
-**A bound on tasks is not a bound on time.** `crates/lgwks-bot/src/rt/mod.rs:72`
+**A bound on tasks is not a bound on time.** `crates/lgwks-bot/src/rt/mod.rs:75`
 states it: this is not a scheduler with realtime guarantees, and future
 completion order across worker threads is not deterministic. Only the result
 order of `join_all_bounded` is. The same applies to a child process: the
@@ -181,7 +181,7 @@ not how quickly the OS tears the group down.
 
 **Cancellation drops a future. That is not the same as stopping a thread.** The
 implementation races each iteration with `token.run_until_cancelled(body(...))`
-(`crates/lgwks-bot/src/rt/supervise.rs:1405`), which drops the body's future. A
+(`crates/lgwks-bot/src/rt/supervise.rs:1406`), which drops the body's future. A
 body that is awaiting returns promptly. What happens to work a body handed to
 another thread is not established by the inspected source: `spawn_blocking`
 spawns an OS thread and offers no abort, and its documented bound is a thread per

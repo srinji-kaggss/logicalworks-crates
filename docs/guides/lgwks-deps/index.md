@@ -27,7 +27,7 @@ a runtime library has no use for it.
 | Embedding `check_dependencies`, leaner | `cargo add lgwks_deps --no-default-features` | no |
 | Choosing a third-party stack | `cargo add lgwks_deps --no-default-features --features tokio` | no |
 
-`scan` gates one module (`crates/lgwks-deps/src/lib.rs:55`) and the CLI's source
+`scan` gates one module (`crates/lgwks-deps/src/lib.rs:73`) and the CLI's source
 detectors, and nothing else. `check_dependencies` is not behind it: the embed
 example further down runs against a `default-features = false` build. If you are
 here for the storefront, disable defaults and select the engine you want.

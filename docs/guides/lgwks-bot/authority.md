@@ -7,7 +7,7 @@ boundary is worth reading before you design around it.
 ## Admission happens at build, and reports the whole shortfall
 
 `EcsBot::assemble` walks every source and every action before the world is built
-(`crates/lgwks-bot/src/ecs.rs:2212`):
+(`crates/lgwks-bot/src/ecs.rs:2312`):
 
 ```rust
 let mut shortages: Vec<Shortage> = Vec::new();
@@ -67,7 +67,7 @@ true.
 
 `GrantSet::issue` (`crates/lgwks-bot/src/gate.rs:88`) is the only path that
 constructs an `Auth`. Its constructor is crate-private
-(`crates/lgwks-bot/src/cap.rs:369`), and `Auth` is not `Serialize`, so authority
+(`crates/lgwks-bot/src/cap.rs:365`), and `Auth` is not `Serialize`, so authority
 cannot round-trip through JSON.
 
 Each verb takes an `(Auth, input)` tuple. `poll`, `execute_action`, and `query`
@@ -76,7 +76,7 @@ does not, because it takes no `Auth` at all: it is a boolean over already-observ
 state with no side effect to gate.
 
 Coverage is exact set membership, not subsumption
-(`crates/lgwks-bot/src/cap.rs:418`). A proof scoped to `bot.fs` presented to a
+(`crates/lgwks-bot/src/cap.rs:414`). A proof scoped to `bot.fs` presented to a
 source requiring `bot.net` is denied. A proof covering nothing authorizes
 nothing. Both cases have tests in `crates/lgwks-bot/src/spec.rs`
 (`wrong_scope_proof_is_denied_confused_deputy`, `call_with_empty_proof_is_denied_at_the_callee`).
@@ -87,7 +87,7 @@ never thread an `Auth` through your own call sites for the chained path.
 ## The grant set is a snapshot
 
 This is the part that surprises people. `EcsBot::assemble` clones the set into
-the world (`crates/lgwks-bot/src/ecs.rs:2251`):
+the world (`crates/lgwks-bot/src/ecs.rs:2351`):
 
 ```rust
 world.insert_resource(Grants(grants.clone()));
@@ -136,17 +136,17 @@ from there — is **not implemented, and the reason is not effort. An action
 cannot be denied for want of a capability at run time.** Two facts make that so:
 
 - `EcsBot::assemble` admits every declared requirement before the world is built
-  (`crates/lgwks-bot/src/ecs.rs:2212`), so a bot whose declared requirements are
+  (`crates/lgwks-bot/src/ecs.rs:2312`), so a bot whose declared requirements are
   not granted does not exist to run.
 - Every per-call proof is minted from **the same list**. `run_any` calls
-  `grants.issue(self.0.required_caps())` (`crates/lgwks-bot/src/spec.rs:164`),
+  `grants.issue(self.0.required_caps())` (`crates/lgwks-bot/src/spec.rs:287`),
   and the action then checks `call.0.check(self.required_caps())`. The two cannot
   disagree, and nothing narrows `Grants` after `assemble` — the only writer is
   `assemble` itself.
 
 So `Auth::check` cannot fail inside a running bot.
 `BotError::CapabilityDenied` is a build-time failure, and the `failure_state` arm
-that folds it into an abandoned entry (`crates/lgwks-bot/src/ecs.rs:1239`) is
+that folds it into an abandoned entry (`crates/lgwks-bot/src/ecs.rs:1260`) is
 defensive rather than live. A hold was built on top of that arm and then removed,
 because machinery whose only caller is a contrived test is not a feature.
 
