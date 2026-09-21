@@ -5,6 +5,8 @@
 //! can replace one scorer without changing the code that combines or consumes
 //! scores. The algorithms use `core` and `alloc` only, and all returned scores
 //! are clamped to the contract's closed interval `[0.0, 1.0]`.
+//!
+//! [`Similarity`]: crate::similarity::Similarity
 
 extern crate alloc;
 
