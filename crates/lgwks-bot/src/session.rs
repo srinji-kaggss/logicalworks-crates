@@ -1350,6 +1350,28 @@ pub enum Resolution {
         /// The highest score observed.
         best_score: f64,
     },
+    /// The person used a phrase whose confirmed meaning has been withdrawn.
+    ///
+    /// Distinct from [`Self::Absent`] in the same way [`Self::Degraded`] is, and
+    /// for the same reason: the two render identically in a transcript and need
+    /// different repairs. `Absent` says the person's words did not fit the
+    /// options and a rephrase may help. `StaleAlias` says the words *did* have a
+    /// confirmed meaning, at this question, and the option it was bound to is no
+    /// longer offered — so the answer is not a rephrase but a conversation, and
+    /// the operator reading the record is the one who can have it.
+    ///
+    /// Returning this rather than a fuzzy reading is the whole point: the
+    /// binding is authority a person granted, and re-spending it on whatever now
+    /// occupies the old option's position would be using a confirmation the
+    /// person never gave. The persona's own reading of the phrase still stands
+    /// when the current list produces one; this verdict appears where the
+    /// superseded binding is the only thing that would have matched.
+    StaleAlias {
+        /// The question whose vocabulary the confirmation was made in.
+        question: String,
+        /// The option text the confirmation bound, which is no longer offered.
+        option: String,
+    },
     /// The resolver could not reach a verdict at all.
     ///
     /// This is [`Self::Absent`]'s neighbour and not a spelling of it. `Absent`
@@ -1659,6 +1681,21 @@ impl Session {
                 self.record_prompt(&node_id, &options);
                 return Ok(());
             }
+            Resolution::StaleAlias {
+                question: bound_question,
+                option,
+            } => {
+                // Re-ask, as for `Absent`, but record what was withdrawn under
+                // its own role. The resolver is not asked to forget the binding:
+                // the seam is read-only by design, and a session that silently
+                // rewrote its resolver's learned vocabulary would be editing the
+                // audit record it is supposed to be producing. The record names
+                // the binding and the question; retiring it is the owner's call.
+                self.record(&node_id, "user", utterance);
+                self.record_stale_alias(&node_id, &bound_question, &option);
+                self.record_prompt(&node_id, &options);
+                return Ok(());
+            }
             Resolution::Degraded { reason } => {
                 // Re-ask, as for `Absent`, but record the cause under its own
                 // role: a transcript that renders a degraded re-ask exactly as
@@ -1800,6 +1837,18 @@ impl Session {
     fn record_degraded(&mut self, node_id: &str, reason: DegradedReason) {
         let text = format!("Resolver unavailable: {reason}");
         self.record(node_id, "resolver-degraded", &text);
+    }
+
+    /// Records that a confirmed phrase's option is no longer offered.
+    ///
+    /// A distinct role for the reason the degraded case has one: this record is
+    /// read by whoever maintains the vocabulary, and it has to name both halves
+    /// of the broken binding — the question it was confirmed in and the option
+    /// that went away — because either one alone is unactionable. "A stale alias
+    /// was ignored" tells that reader nothing they can repair.
+    fn record_stale_alias(&mut self, node_id: &str, question: &str, option: &str) {
+        let text = format!("Superseded alias: question {question} no longer offers \"{option}\"");
+        self.record(node_id, "resolver-stale-alias", &text);
     }
 }
 

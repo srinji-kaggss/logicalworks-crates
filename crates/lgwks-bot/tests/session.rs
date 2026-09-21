@@ -3,9 +3,9 @@
 use std::collections::BTreeMap;
 
 use lgwks_bot::{
-    BotError, DegradedReason, Embedder, EmbedderIdentity, FlowBounds, FlowEdge, FlowSpec, NodeKind,
-    Predicate, Question, Resolution, Resolver, SemanticResolver, Session, Terminal,
-    TranscriptEntry, Value, ValueExpr, VarType,
+    Alias, BotError, DegradedReason, Embedder, EmbedderIdentity, FlowBounds, FlowEdge, FlowSpec,
+    LanguageResolver, NodeKind, Predicate, Question, Resolution, Resolver, SemanticResolver,
+    Session, Terminal, TranscriptEntry, Value, ValueExpr, VarType,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -733,5 +733,159 @@ fn a_degraded_verdict_is_distinguishable_from_an_absent_one() -> TestResult {
     assert!(!absent_roles.contains(&"resolver-degraded"));
     assert!(degraded_roles.contains(&"resolver-degraded"));
     assert_ne!(absent_roles, degraded_roles);
+    Ok(())
+}
+
+/// Routes every option to one target, which is all a routing test needs.
+fn routes_to(options: &[String], target: &str) -> BTreeMap<String, String> {
+    options
+        .iter()
+        .map(|option| (option.clone(), String::from(target)))
+        .collect()
+}
+
+/// Two ask nodes with different vocabularies, the second reachable only by
+/// answering the first.
+///
+/// The shape the multi-ask tests need: a phrase confirmed at `ask_one` has a
+/// *different* candidate set at `ask_two`, and the person's answer at the first
+/// question is what makes the second observable.
+fn two_question_flow(first: &[&str], second: &[&str]) -> Result<FlowSpec, BotError> {
+    let first_options: Vec<String> = first.iter().map(|name| (*name).to_owned()).collect();
+    let second_options: Vec<String> = second.iter().map(|name| (*name).to_owned()).collect();
+    FlowSpec::new(
+        BTreeMap::from([
+            (
+                String::from("first"),
+                VarType::Choice(first_options.clone()),
+            ),
+            (
+                String::from("second"),
+                VarType::Choice(second_options.clone()),
+            ),
+        ]),
+        "ask_one",
+        BTreeMap::from([
+            (
+                String::from("ask_one"),
+                NodeKind::Ask {
+                    var: String::from("first"),
+                    options: first_options.clone(),
+                    routes: routes_to(&first_options, "ask_two"),
+                },
+            ),
+            (
+                String::from("ask_two"),
+                NodeKind::Ask {
+                    var: String::from("second"),
+                    options: second_options.clone(),
+                    routes: routes_to(&second_options, "done"),
+                },
+            ),
+            (String::from("done"), NodeKind::End),
+        ]),
+        Vec::new(),
+        BTreeMap::new(),
+        FlowBounds::new(8),
+    )
+}
+
+/// Reads the single transcript record written under `role`, or an empty string.
+fn recorded_under(session: &Session, role: &str) -> String {
+    session
+        .transcript()
+        .iter()
+        .find(|entry| entry.role() == role)
+        .map(TranscriptEntry::text)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// The filed counterexample for #25, at session level: one resolver, two
+/// questions. Before the fix, the same phrase selected index 0 at *both*, which
+/// at the second question meant `Delete account` — an action nobody confirmed.
+#[test]
+fn an_alias_confirmed_at_one_ask_cannot_answer_another() -> TestResult {
+    let resolver = LanguageResolver::with_aliases(vec![Alias::new(
+        "ask_one",
+        "the usual",
+        "Repeat last order",
+    )]);
+    let mut session = Session::with_resolver(
+        "scope",
+        two_question_flow(
+            &["Repeat last order", "Cancel"],
+            &["Delete account", "Keep account"],
+        )?,
+        resolver,
+    )?;
+
+    session.answer("the usual")?;
+    assert_eq!(
+        session.scope().get("first"),
+        Some(&Value::Choice(String::from("Repeat last order"))),
+        "the confirmation is honoured at the question it was made in"
+    );
+    assert_eq!(session.current(), Some("ask_two"));
+
+    session.answer("the usual")?;
+    assert_eq!(
+        session.current(),
+        Some("ask_two"),
+        "the second question must not consume the first question's confirmation"
+    );
+    assert_eq!(
+        session.scope().get("second"),
+        None,
+        "and must certainly not select the option sitting at its old index"
+    );
+    Ok(())
+}
+
+/// The filed counterexample for #25, second half: the bound option is removed
+/// and its successor is the dangerous one. Teaching row 0 and then replacing row
+/// 0's text must not transfer the confirmation to whatever moved in.
+#[test]
+fn a_confirmation_whose_option_was_removed_reasks_instead_of_selecting_its_successor() -> TestResult
+{
+    let resolver = LanguageResolver::with_aliases(vec![Alias::new(
+        "ask_one",
+        "the usual",
+        "Repeat last order",
+    )]);
+    // Version two of the same question: `Repeat last order` is gone and
+    // `Delete account` now sits where it was.
+    let mut session = Session::with_resolver(
+        "stale",
+        two_question_flow(&["Delete account", "Cancel"], &["Yes", "No"])?,
+        resolver,
+    )?;
+
+    session.answer("the usual")?;
+
+    assert_eq!(
+        session.current(),
+        Some("ask_one"),
+        "a withdrawn confirmation re-asks rather than advancing"
+    );
+    assert_eq!(
+        session.scope().get("first"),
+        None,
+        "no value is stored for an answer the resolver refused to read"
+    );
+    assert_eq!(
+        recorded_under(&session, "resolver-stale-alias"),
+        "Superseded alias: question ask_one no longer offers \"Repeat last order\"",
+        "the record names both halves of the broken binding, because either \
+         alone is unactionable"
+    );
+
+    // The person can still answer: the withdrawal is not a trap, it is a
+    // withdrawal. Typing without the withdrawn phrase resolves normally.
+    session.answer("Cancel")?;
+    assert_eq!(
+        session.scope().get("first"),
+        Some(&Value::Choice(String::from("Cancel")))
+    );
     Ok(())
 }

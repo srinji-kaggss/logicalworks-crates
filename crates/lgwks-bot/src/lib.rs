@@ -163,7 +163,7 @@ pub use frontier::{
     RejectKind, Resolved, RulesState,
 };
 pub use gate::GrantSet;
-pub use language::LanguageResolver;
+pub use language::{Alias, LanguageResolver};
 #[cfg(feature = "rt")]
 pub use rt::{Builder, Handle, Runtime, block_on};
 pub use semantic::{Embedder, EmbedderIdentity, SemanticError, SemanticPolicy, SemanticResolver};

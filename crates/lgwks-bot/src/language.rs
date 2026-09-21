@@ -291,7 +291,7 @@ fn winning_tier(mut scored: Vec<(usize, MatchTier, f64)>) -> Vec<(usize, MatchTi
 fn score_all(
     utterance: &str,
     question: &Question<'_>,
-    aliases: &BTreeMap<String, usize>,
+    aliases: &BTreeMap<String, BTreeMap<String, Alias>>,
     distance: &EditDistance,
 ) -> Vec<(usize, MatchTier, f64)> {
     let options = question.options();
@@ -299,11 +299,19 @@ fn score_all(
     let spoken_key = phonetic_key(utterance);
     let spoken_tokens = tokens(utterance);
     let overlap = Jaccard::<String>::new();
+    // The confirmed option this phrase names *in this question*, if any. An
+    // index is never consulted: the binding is resolved to a position in the
+    // list in front of the person right now, and a binding whose option is no
+    // longer here contributes nothing rather than degrading into a re-binding.
+    let bound = aliases
+        .get(question.id())
+        .and_then(|table| table.get(&spoken))
+        .map(Alias::option);
 
     let mut scored: Vec<(usize, MatchTier, f64)> = Vec::with_capacity(options.len());
     for (index, option) in options.iter().enumerate() {
         let canonical = normalize(option);
-        let tier_and_score = if aliases.get(&spoken).copied() == Some(index) {
+        let tier_and_score = if bound == Some(option.as_str()) {
             // A learned alias is an exact match: a person confirmed it.
             Some((MatchTier::Exact, 1.0))
         } else if spoken == canonical {
@@ -335,6 +343,73 @@ fn score_all(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     scored
+}
+
+/// One confirmed binding: *in this question, this phrase means this option*.
+///
+/// The three fields are the three things a confirmation actually asserts, and
+/// leaving any of them out is how the confirmation becomes a lie:
+///
+/// - `question` is the vocabulary scope. `"the usual"` means `"Repeat last
+///   order"` *at the ask that offered it*; the same phrase at a later question
+///   means nothing in particular, and must not be spent there.
+/// - `utterance` is the phrase, normalized once at construction so the table has
+///   exactly one spelling of it.
+/// - `option` is the **stable option identity**: the option's own text, verbatim.
+///   Not an index, because an index is a position and positions are reused —
+///   teaching row 0 and then replacing row 0's text would silently transfer the
+///   confirmation to whatever moved in. Not a normalized form either, because
+///   normalization is lossy in exactly the way that matters here (`-5` folds to
+///   `5`; see #38), and an identity that aliases two distinct options is not an
+///   identity.
+///
+/// The identity is resolved into the current option list at use time, so an
+/// option that moves to another position keeps its confirmation and one that is
+/// removed does not pass it to its successor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Alias {
+    /// The question whose vocabulary the confirmation was made in.
+    question: String,
+    /// The confirmed phrase, normalized.
+    utterance: String,
+    /// The option's own text, verbatim: the stable identity.
+    option: String,
+}
+
+impl Alias {
+    /// Binds `utterance` to `option` within `question`'s vocabulary.
+    ///
+    /// The utterance is normalized here rather than at insertion so that every
+    /// `Alias` in existence is already in the form the resolver compares, which
+    /// is what makes an exported table (`LanguageResolver::aliases`) readable
+    /// and reloadable without a second normalization pass.
+    #[must_use]
+    pub fn new(question: &str, utterance: &str, option: &str) -> Self {
+        Self {
+            question: question.to_owned(),
+            utterance: normalize(utterance),
+            option: option.to_owned(),
+        }
+    }
+
+    /// Returns the question this binding is scoped to.
+    #[must_use]
+    pub fn question(&self) -> &str {
+        &self.question
+    }
+
+    /// Returns the confirmed phrase, normalized.
+    #[must_use]
+    pub fn utterance(&self) -> &str {
+        &self.utterance
+    }
+
+    /// Returns the bound option text.
+    #[must_use]
+    pub fn option(&self) -> &str {
+        &self.option
+    }
 }
 
 /// Decides a [`Resolution`] from scored candidates, best-first.
@@ -384,8 +459,13 @@ pub(crate) fn decide(scored: &[(usize, MatchTier, f64)], margin: f64) -> Resolut
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct LanguageResolver {
-    /// Learned utterance-to-option aliases, keyed by normalized utterance.
-    aliases: BTreeMap<String, usize>,
+    /// Learned aliases: question id, then normalized utterance.
+    ///
+    /// Two levels rather than one flat key because the question is a *scope*,
+    /// not part of a compound name: resolving asks "what does this phrase mean
+    /// here", which is one lookup in the inner table, and exporting a question's
+    /// whole vocabulary is one iteration of it.
+    aliases: BTreeMap<String, BTreeMap<String, Alias>>,
     /// The bounded lexical metric used by the fuzzy tier.
     distance: EditDistance,
 }
@@ -403,45 +483,126 @@ impl LanguageResolver {
     /// Creates a resolver pre-loaded with learned aliases.
     ///
     /// The aliases are supplied rather than fitted so an estate can ship a
-    /// house vocabulary as data, and a reviewer can read the whole of it.
+    /// house vocabulary as data, and a reviewer can read the whole of it. Each
+    /// row carries its own question scope, so a migrated table keeps its
+    /// bindings to the questions they were confirmed in rather than being
+    /// flattened onto whatever question is asked first.
     #[must_use]
-    pub fn with_aliases(aliases: Vec<(String, usize)>) -> Self {
+    pub fn with_aliases(aliases: Vec<Alias>) -> Self {
         let mut resolver = Self::new();
-        for (utterance, index) in aliases {
-            resolver.aliases.insert(normalize(&utterance), index);
+        for alias in aliases {
+            let table = resolver.aliases.entry(alias.question.clone()).or_default();
+            table.insert(alias.utterance.clone(), alias);
         }
         resolver
     }
 
-    /// Records that `utterance` means the option at `index`.
+    /// Records that `utterance` means `option` *in `question`*.
     ///
     /// This is the vocabulary axis of linguistic change: the caller calls it
     /// when a resolution was confirmed, so next time the phrase is exact rather
     /// than a fuzzy guess. A row is readable and revocable, which a fitted
-    /// weight is not. Returns the previous binding, if the phrase was already
-    /// learned — so re-teaching a phrase is a visible change, not a silent one.
-    pub fn learn(&mut self, utterance: &str, index: usize) -> Option<usize> {
-        self.aliases.insert(normalize(utterance), index)
+    /// weight is not.
+    ///
+    /// Returns the binding this one replaced, if the phrase was already learned
+    /// in this question — so re-teaching a phrase is a visible change to a
+    /// confirmation, not a silent one. That returned row is the provenance: the
+    /// caller can see it was taught `Cancel` before it was taught `Repeat last
+    /// order`, which is the difference between a correction and a first lesson.
+    /// Re-teaching a phrase in a *different* question returns `None` and does
+    /// not disturb the first question's row.
+    pub fn learn(&mut self, question: &str, utterance: &str, option: &str) -> Option<Alias> {
+        let alias = Alias::new(question, utterance, option);
+        self.aliases
+            .entry(alias.question.clone())
+            .or_default()
+            .insert(alias.utterance.clone(), alias)
     }
 
-    /// Forgets a learned alias, returning whether one was present.
-    pub fn forget(&mut self, utterance: &str) -> bool {
-        self.aliases.remove(&normalize(utterance)).is_some()
+    /// Forgets one question's binding for a phrase, returning the row removed.
+    ///
+    /// Returns the removed [`Alias`] rather than a `bool` so a caller that
+    /// revokes a confirmation can record what was revoked; `None` means there
+    /// was nothing to revoke.
+    pub fn forget(&mut self, question: &str, utterance: &str) -> Option<Alias> {
+        let spoken = normalize(utterance);
+        let removed = self
+            .aliases
+            .get_mut(question)
+            .and_then(|table| table.remove(&spoken));
+        if self.aliases.get(question).is_some_and(BTreeMap::is_empty) {
+            self.aliases.remove(question);
+        }
+        removed
     }
 
-    /// Returns the number of learned aliases.
+    /// Returns the number of learned aliases across every question.
     #[must_use]
     pub fn learned(&self) -> usize {
-        self.aliases.len()
+        self.aliases.values().map(BTreeMap::len).sum()
     }
 
-    /// Resolves `utterance` against `question` as a three-way verdict.
+    /// Returns every learned alias, question by question.
+    ///
+    /// The table as data, so the vocabulary a resolver has learned can be
+    /// reviewed or migrated into another resolver — `with_aliases` accepts
+    /// exactly what this yields, which is what makes a shipped house vocabulary
+    /// and a learned one the same kind of thing.
+    #[must_use]
+    pub fn aliases(&self) -> Vec<Alias> {
+        self.aliases
+            .values()
+            .flat_map(BTreeMap::values)
+            .cloned()
+            .collect()
+    }
+
+    /// Returns the binding for `utterance` in this question, when the option it
+    /// names is **no longer offered**.
+    ///
+    /// The superseded case, isolated from scoring so it can be reported instead
+    /// of scored. A binding whose option is gone has nothing to say about the
+    /// current list: it must not be spent on the option that took its index, and
+    /// it must not be quietly dropped either, because the person is still using
+    /// a phrase whose meaning was confirmed and has now been withdrawn without
+    /// anyone telling them.
+    fn superseded<'a>(&'a self, question: &Question<'_>, utterance: &str) -> Option<&'a Alias> {
+        let spoken = normalize(utterance);
+        let alias = self.aliases.get(question.id())?.get(&spoken)?;
+        if question
+            .options()
+            .iter()
+            .any(|option| option == alias.option())
+        {
+            return None;
+        }
+        Some(alias)
+    }
+
+    /// Resolves `utterance` against `question` as a four-way verdict.
     #[must_use]
     pub fn decide_for(&self, utterance: &str, question: &Question<'_>) -> Resolution {
-        decide(
+        let verdict = decide(
             &score_all(utterance, question, &self.aliases, &self.distance),
             MATCH_MARGIN,
-        )
+        );
+        // Staleness is reported only where it would otherwise decide the
+        // outcome. A superseded alias leaves the scorer with nothing to say, so
+        // `Absent` is the verdict it produces; that is the case where naming the
+        // cause is strictly more useful than reporting an unclear answer. If the
+        // current list *did* produce a reading — the phrase is literally on
+        // screen — that reading stands, because withdrawing a correct answer to
+        // report a fact about the alias table would be the tail wagging the dog.
+        if !matches!(verdict, Resolution::Absent { .. }) {
+            return verdict;
+        }
+        match self.superseded(question, utterance) {
+            Some(alias) => Resolution::StaleAlias {
+                question: alias.question().to_owned(),
+                option: alias.option().to_owned(),
+            },
+            None => verdict,
+        }
     }
 }
 
@@ -640,7 +801,11 @@ mod tests {
     fn a_learned_alias_resolves_exactly_and_is_revocable() {
         let mut resolver = LanguageResolver::new();
         assert_eq!(resolver.learned(), 0);
-        assert_eq!(resolver.learn("the usual", 2), None, "a fresh alias");
+        assert_eq!(
+            resolver.learn("ask", "the usual", "Speak to a person"),
+            None,
+            "a fresh alias"
+        );
         assert_eq!(resolver.learned(), 1);
 
         assert_eq!(
@@ -654,25 +819,36 @@ mod tests {
             "an alias is a confirmed exact match, not a fuzzy guess"
         );
 
+        let replaced = resolver.learn("ask", "the usual", "No, go back");
         assert_eq!(
-            resolver.learn("the usual", 1),
-            Some(2),
-            "re-teaching is visible"
+            replaced.as_ref().map(Alias::option),
+            Some("Speak to a person"),
+            "re-teaching returns the binding it replaced, so a correction is \
+             distinguishable from a first lesson"
         );
-        assert!(
-            resolver.forget("the usual"),
-            "forgetting reports the removal"
+        assert_eq!(
+            resolver
+                .forget("ask", "the usual")
+                .as_ref()
+                .map(Alias::option),
+            Some("No, go back"),
+            "forgetting returns the row it revoked"
         );
-        assert!(
-            !resolver.forget("the usual"),
-            "forgetting twice reports nothing"
+        assert_eq!(
+            resolver.forget("ask", "the usual"),
+            None,
+            "forgetting twice revokes nothing"
         );
         assert_eq!(resolver.learned(), 0);
     }
 
     #[test]
     fn a_shipped_alias_table_is_normalized_on_load() {
-        let resolver = LanguageResolver::with_aliases(vec![(String::from("  The Usual "), 2)]);
+        let resolver = LanguageResolver::with_aliases(vec![Alias::new(
+            "ask",
+            "  The Usual ",
+            "Speak to a person",
+        )]);
         assert_eq!(
             resolver.resolve("the usual", &ask(&options())),
             Resolution::Resolved {
@@ -682,6 +858,183 @@ mod tests {
                 lead: 1.0,
             }
         );
+    }
+
+    /// The filed counterexample for #25, first half: the confirmation was made
+    /// about an option, not about row 0, so it follows the option when the flow
+    /// reorders its choices.
+    #[test]
+    fn an_alias_follows_its_option_to_a_new_position() {
+        let resolver = LanguageResolver::with_aliases(vec![Alias::new(
+            "ask",
+            "the usual",
+            "Repeat last order",
+        )]);
+        for (choices, expected) in [
+            (vec!["Repeat last order", "Cancel"], 0_usize),
+            (vec!["Cancel", "Repeat last order"], 1),
+        ] {
+            let options = choices
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>();
+            let verdict = resolver.resolve("the usual", &ask(&options));
+            assert_eq!(
+                selected(&verdict),
+                Some((expected, MatchTier::Exact)),
+                "the confirmation must travel with its option, not its index: \
+                 {choices:?} gave {verdict:?}"
+            );
+        }
+    }
+
+    /// The filed counterexample for #25, second half: a binding made in one
+    /// question's vocabulary is not spent in another's — even when the other
+    /// question offers the identical option list. Without the scope this is
+    /// `Resolved` at index 0 with score 1.0, which is how `"the usual"` became
+    /// `"Delete account"`.
+    #[test]
+    fn an_alias_is_not_visible_from_another_question() {
+        let resolver = LanguageResolver::with_aliases(vec![Alias::new(
+            "ask",
+            "the usual",
+            "Repeat last order",
+        )]);
+        let choices = vec![
+            String::from("Repeat last order"),
+            String::from("Cancel"),
+            String::from("Delete account"),
+        ];
+        let elsewhere = resolver.resolve("the usual", &Question::new("some_other_ask", &choices));
+        assert_eq!(
+            selected(&elsewhere),
+            None,
+            "another question must not consume this question's confirmation: {elsewhere:?}"
+        );
+        assert_eq!(
+            elsewhere,
+            Resolution::Absent { best_score: 0.0 },
+            "the phrase is simply unrecognized there, not quietly bound to row 0"
+        );
+    }
+
+    /// An option that is removed does not hand its confirmation to the option
+    /// that replaces it, and the withdrawal is reported rather than swallowed.
+    #[test]
+    fn a_superseded_alias_is_reported_rather_than_spent_on_the_new_option() {
+        let resolver = LanguageResolver::with_aliases(vec![Alias::new(
+            "ask",
+            "the usual",
+            "Repeat last order",
+        )]);
+        let choices = vec![String::from("Delete account"), String::from("Keep account")];
+        let verdict = resolver.resolve("the usual", &ask(&choices));
+        assert_eq!(
+            verdict,
+            Resolution::StaleAlias {
+                question: String::from("ask"),
+                option: String::from("Repeat last order"),
+            },
+            "the binding names the option that went away, not the one at its old index"
+        );
+        assert!(
+            !matches!(verdict, Resolution::Resolved { .. }),
+            "a withdrawn confirmation must never select an option"
+        );
+    }
+
+    /// Staleness is reported where it would decide the outcome, not ahead of an
+    /// answer the current list genuinely supports.
+    #[test]
+    fn a_visible_option_outranks_a_superseded_alias() {
+        let resolver =
+            LanguageResolver::with_aliases(vec![Alias::new("ask", "yes", "No, go back")]);
+        let choices = vec![String::from("Yes")];
+        let verdict = resolver.resolve("yes", &ask(&choices));
+        assert_eq!(
+            selected(&verdict),
+            Some((0, MatchTier::Exact)),
+            "the phrase is on screen and the reading does not come from the \
+             alias at all; refusing an answer the person can see to report a \
+             fact about the alias table would be the tail wagging the dog: \
+             {verdict:?}"
+        );
+    }
+
+    /// The same phrase, the same option list, two questions: the meaning is a
+    /// property of the question, which is what the scope makes expressible.
+    #[test]
+    fn one_phrase_can_mean_two_things_in_two_questions() {
+        let mut resolver = LanguageResolver::new();
+        resolver.learn("ask_one", "the usual", "Repeat last order");
+        assert_eq!(
+            resolver.learn("ask_two", "the usual", "Cancel"),
+            None,
+            "a second question's first lesson has no predecessor in *that* question"
+        );
+        assert_eq!(resolver.learned(), 2, "both questions kept their own row");
+
+        let choices = vec![String::from("Repeat last order"), String::from("Cancel")];
+        assert_eq!(
+            selected(&resolver.resolve("the usual", &Question::new("ask_one", &choices))),
+            Some((0, MatchTier::Exact)),
+            "in the first question the phrase means the first option"
+        );
+        assert_eq!(
+            selected(&resolver.resolve("the usual", &Question::new("ask_two", &choices))),
+            Some((1, MatchTier::Exact)),
+            "in the second question it means the second"
+        );
+    }
+
+    /// Two spellings that fold to one form are one row, and the row it replaced
+    /// is returned rather than dropped.
+    #[test]
+    fn a_normalized_collision_rebinds_one_row_and_returns_the_replaced_one() {
+        let mut resolver = LanguageResolver::new();
+        resolver.learn("ask", "The Usual", "Speak to a person");
+        let replaced = resolver.learn("ask", "the usual!", "No, go back");
+        assert_eq!(
+            replaced.as_ref().map(Alias::option),
+            Some("Speak to a person"),
+            "the collision is a rebinding of one phrase, and it is visible"
+        );
+        assert_eq!(resolver.learned(), 1, "one phrase is one row");
+        assert_eq!(
+            selected(&resolver.resolve("the usual", &ask(&options()))),
+            Some((1, MatchTier::Exact)),
+            "the later binding is the live one"
+        );
+    }
+
+    /// The learned vocabulary is data, so it can be reviewed and moved. A table
+    /// that survives the round trip is the difference between a house vocabulary
+    /// an estate can ship and one trapped inside a running process.
+    #[test]
+    fn an_exported_table_reloads_unchanged() {
+        let mut resolver = LanguageResolver::new();
+        resolver.learn("ask", "the usual", "Repeat last order");
+        resolver.learn("ask", "nah", "Cancel");
+
+        let table = resolver.aliases();
+        assert_eq!(table.len(), 2, "both rows export");
+        assert!(
+            table.iter().any(|alias| alias.question() == "ask"
+                && alias.utterance() == "the usual"
+                && alias.option() == "Repeat last order"),
+            "a row is readable without knowing how it was stored: {table:?}"
+        );
+
+        let reloaded = LanguageResolver::with_aliases(table);
+        assert_eq!(reloaded.learned(), resolver.learned());
+        let choices = vec![String::from("Repeat last order"), String::from("Cancel")];
+        for utterance in ["the usual", "nah"] {
+            assert_eq!(
+                reloaded.resolve(utterance, &ask(&choices)),
+                resolver.resolve(utterance, &ask(&choices)),
+                "a migrated table resolves exactly as the one it came from"
+            );
+        }
     }
 
     #[test]
@@ -791,7 +1144,7 @@ mod tests {
         // conflict rather than letting the alias table silently outrank the
         // option text.
         let mut resolver = LanguageResolver::new();
-        resolver.learn("yes", 1);
+        resolver.learn("ask", "yes", "No");
         let choices = vec![String::from("Yes"), String::from("No")];
         let verdict = resolver.resolve("yes", &ask(&choices));
         assert_eq!(

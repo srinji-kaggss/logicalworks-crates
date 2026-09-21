@@ -71,7 +71,7 @@ use std::fmt;
 
 use lgwks_std::similarity::{Cosine, CosineError};
 
-use crate::language::{LanguageResolver, decide};
+use crate::language::{Alias, LanguageResolver, decide};
 use crate::session::{DegradedReason, MatchTier, Question, Resolution, Resolver};
 
 /// A source of dense vector representations for text, and its own identity.
@@ -401,13 +401,17 @@ impl<E: Embedder> SemanticResolver<E> {
     /// something it will answer from without a model. That is the direction of
     /// travel this module wants — a confirmed correction should move a phrase
     /// *out* of the semantic tier and into the reproducible one.
-    pub fn learn(&mut self, utterance: &str, index: usize) -> Option<usize> {
-        self.lexicon.learn(utterance, index)
+    ///
+    /// Takes the question scope for the reason [`crate::language::Alias`] exists:
+    /// a confirmation is a fact about one question's vocabulary, and the model
+    /// below is not a licence to carry it to another.
+    pub fn learn(&mut self, question: &str, utterance: &str, option: &str) -> Option<Alias> {
+        self.lexicon.learn(question, utterance, option)
     }
 
-    /// Removes a learned alias, returning whether one was present.
-    pub fn forget(&mut self, utterance: &str) -> bool {
-        self.lexicon.forget(utterance)
+    /// Removes one question's learned alias, returning the row removed.
+    pub fn forget(&mut self, question: &str, utterance: &str) -> Option<Alias> {
+        self.lexicon.forget(question, utterance)
     }
 
     /// Returns the number of learned aliases.
@@ -501,7 +505,9 @@ impl<E: Embedder> Resolver for SemanticResolver<E> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Embedder, EmbedderIdentity, SemanticError, SemanticPolicy, SemanticResolver};
+    use super::{
+        Alias, Embedder, EmbedderIdentity, SemanticError, SemanticPolicy, SemanticResolver,
+    };
     use crate::session::{DegradedReason, MatchTier, Question, Resolution, Resolver};
     use std::cell::Cell;
     use std::collections::BTreeMap;
@@ -800,7 +806,7 @@ mod tests {
         let options = options(&["Repeat last order", "Cancel"]);
 
         assert_eq!(
-            resolver.learn("the usual", 0),
+            resolver.learn("ask", "the usual", "Repeat last order"),
             None,
             "the first binding for a phrase has no predecessor"
         );
@@ -822,8 +828,49 @@ mod tests {
             "and a confirmed correction leaves the model out of it entirely"
         );
         assert_eq!(resolver.learned(), 1);
-        assert!(resolver.forget("the usual"));
+        assert_eq!(
+            resolver
+                .forget("ask", "the usual")
+                .as_ref()
+                .map(Alias::option),
+            Some("Repeat last order")
+        );
         assert_eq!(resolver.learned(), 0);
+        Ok(())
+    }
+
+    /// A withdrawn confirmation is a verdict, and the model is not asked to
+    /// overturn it. The embedder here is loaded with exactly the geometry that
+    /// would rescue the stale phrase — it places `"the usual"` next to
+    /// `"Repeat last order"` — and the assertion is that it is never consulted,
+    /// because a model that could rehabilitate a superseded binding would be a
+    /// second, unreviewable way for a withdrawn confirmation to select an
+    /// option.
+    #[test]
+    fn a_superseded_alias_is_not_handed_to_the_model() -> Result<(), Box<dyn std::error::Error>> {
+        let (embedder, calls) = stub(paraphrase_vectors(), vec![0.0, 1.0], false)?;
+        let mut resolver = SemanticResolver::new(embedder);
+        assert_eq!(
+            resolver.learn("ask", "the usual", "Repeat last order"),
+            None
+        );
+
+        // The same question, after the option the person confirmed is gone.
+        let edited = options(&["Delete account", "Keep account"]);
+        let resolution = resolver.resolve("the usual", &ask(&edited));
+        assert_eq!(
+            resolution,
+            Resolution::StaleAlias {
+                question: String::from("ask"),
+                option: String::from("Repeat last order"),
+            },
+            "the semantic tier must return a stale verdict verbatim"
+        );
+        assert_eq!(
+            calls.get(),
+            0,
+            "and must not spend the model trying to legitimate it"
+        );
         Ok(())
     }
 
