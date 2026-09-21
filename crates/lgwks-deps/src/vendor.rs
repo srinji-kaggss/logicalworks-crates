@@ -371,17 +371,29 @@ source = "git+https://example.com/org/git-crate#abc123"
         /// Creates a throwaway tree holding one hash-matched crate and one
         /// hashless git crate, plus a `.cargo-checksum.json` for each.
         ///
-        /// The root is unique per call via pid and nanosecond timestamp so
-        /// concurrent test binaries cannot share a directory. The `Drop` impl
-        /// removes it, so a failing assertion cannot leak temp state.
+        /// The root is unique per *call*, not per process or per instant, so
+        /// two tests may hold a fixture at once. The `Drop` impl removes it, so
+        /// a failing assertion cannot leak temp state.
+        ///
+        /// The counter is load-bearing rather than belt-and-braces. A pid plus
+        /// a `subsec_nanos` timestamp does **not** distinguish two calls: the
+        /// system clock's granularity is coarser than a nanosecond, so two
+        /// tests on different threads of the same binary routinely read the
+        /// same value. They then share a root, and one fixture's `Drop` removes
+        /// the directory the other is still filling — which surfaces as an
+        /// unrelated `EINVAL` from `create_dir_all`, in whichever test lost the
+        /// race. An earlier version of this comment claimed the timestamp was
+        /// sufficient; it is not.
         fn create() -> Result<Fixture, Box<dyn std::error::Error>> {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let root = std::env::temp_dir().join(format!(
-                "lgwks-deps-vendor-test-{}-{}",
+                "lgwks-deps-vendor-test-{}-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|elapsed| elapsed.subsec_nanos())
-                    .unwrap_or(0)
+                    .unwrap_or(0),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
             std::fs::create_dir_all(root.join("tree/covered-crate"))?;
             std::fs::write(
