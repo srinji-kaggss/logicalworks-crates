@@ -32,6 +32,8 @@
 //! real control, so a candidate whose piercing path differs from the target's is
 //! excluded before it is scored. Similarity is for choosing within a document;
 //! identity of document is not a similarity question.
+//!
+//! [`Recognition`]: crate::interface::Recognition
 
 use std::fmt;
 
