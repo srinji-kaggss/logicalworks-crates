@@ -50,6 +50,9 @@ USAGE
                                        PATH/contract/APPROVED.toml. Diagnosis
                                        only — a build always reads the register
                                        committed beside the code it builds.
+             [--json]                  emit one JSON object on stdout and
+                                       nothing on stderr; the exit code still
+                                       carries the verdict
   lgwks-deps request <CRATE> <VERSION> print an approval block to fill in
   lgwks-deps init [PATH]               write a fail-closed starting register
    lgwks-deps tiers                     print the admission ladder
@@ -88,7 +91,10 @@ fn settle(result: io::Result<ExitCode>) -> ExitCode {
 /// the override. Anything else is ignored rather than rejected, so an
 /// unrecognised flag is a no-op instead of a hard failure on a path that is
 /// already diagnosed by `check` itself.
-fn parse_check_args(args: &[String]) -> (Option<PathBuf>, Option<PathBuf>) {
+fn parse_check_args(args: &[String]) -> (Option<PathBuf>, Option<PathBuf>, bool) {
+    // `--json` is a mode, not a value: it is read the same way here as in
+    // `freshness`, so the two commands cannot disagree about what it means.
+    let json_output = args.iter().any(|arg| arg == "--json");
     let positional: Vec<&String> = args.iter().filter(|arg| !arg.starts_with("--")).collect();
     let override_path = args
         .iter()
@@ -100,7 +106,7 @@ fn parse_check_args(args: &[String]) -> (Option<PathBuf>, Option<PathBuf>) {
     let target_path = positional
         .first()
         .map(|candidate| PathBuf::from(candidate.as_str()));
-    (target_path, override_path)
+    (target_path, override_path, json_output)
 }
 
 /// Runs `check`, keeping the argument parsing out of the audit path.
@@ -109,8 +115,8 @@ fn handle_check(
     out: &mut impl io::Write,
     err: &mut impl io::Write,
 ) -> io::Result<ExitCode> {
-    let (target_path, override_path) = parse_check_args(args);
-    run_check(target_path, override_path, out, err)
+    let (target_path, override_path, json_output) = parse_check_args(args);
+    run_check(target_path, override_path, json_output, out, err)
 }
 
 /// Prints the usage block and reports success.
@@ -246,26 +252,193 @@ fn report_ok(root: &Path, count: usize, out: &mut impl io::Write) -> io::Result<
 /// A failure to find a lock file or to read the register is a refusal with exit
 /// code 2, never a pass — the gate is fail-closed, so "could not check" and
 /// "checked and refused" are the same verdict.
+///
+/// `json_output` changes the *rendering* only. The verdict, the exit code, and
+/// the fail-closed behaviour are identical in both modes, so a consumer that
+/// switches to `--json` cannot accidentally get a laxer gate.
 fn run_check(
     path: Option<PathBuf>,
     contract_override: Option<PathBuf>,
+    json_output: bool,
     out: &mut impl io::Write,
     err: &mut impl io::Write,
 ) -> io::Result<ExitCode> {
     let start = path.unwrap_or_else(|| PathBuf::from("."));
     let root = match repository_root(&start) {
         Ok(root) => root,
-        Err(error) => return refuse(&error.to_string(), err),
+        Err(error) => {
+            return report_check(
+                None,
+                None,
+                &[],
+                Some(&error.to_string()),
+                json_output,
+                out,
+                err,
+            );
+        }
     };
     let (register, refusals) = match audit_root(&root, &contract_override) {
         Ok(outcome) => outcome,
-        Err(err_msg) => return refuse(&err_msg, err),
+        Err(err_msg) => {
+            return report_check(None, None, &[], Some(&err_msg), json_output, out, err);
+        }
     };
 
+    report_check(
+        Some(&root),
+        Some(&register),
+        &refusals,
+        None,
+        json_output,
+        out,
+        err,
+    )
+}
+
+/// Renders the verdict in the requested mode and returns the exit code.
+///
+/// One function rather than a branch at each call site: the human and machine
+/// renderings differ in bytes and must not differ in *verdict*, and the only way
+/// to guarantee that is for a single place to compute it. Both modes exit 0 for
+/// an admitted tree, 0 for refusals under `enforce = false`, and 2 otherwise.
+fn report_check(
+    root: Option<&Path>,
+    register: Option<&Contract>,
+    refusals: &[Refusal],
+    error: Option<&str>,
+    json_output: bool,
+    out: &mut impl io::Write,
+    err: &mut impl io::Write,
+) -> io::Result<ExitCode> {
+    if json_output {
+        print_check_json(root, register, refusals, error, out)?;
+        // A gate that could not reach a verdict is a refusal, and exits 2.
+        // This arm is first because the code below would otherwise *pass*: with
+        // no register, `enforce` defaults to true and `refusals` is empty, so
+        // `refusals.is_empty() || !enforced` is satisfied and the gate would
+        // report success for a tree it never read. That is the one failure this
+        // crate's fail-closed rule exists to prevent, and it was reachable only
+        // through `--json`.
+        if error.is_some() {
+            return Ok(ExitCode::from(2));
+        }
+        // `enforce = false` is adoption-only: refusals are reported and the
+        // build still passes, exactly as in the human path. The two modes must
+        // not disagree about what an exit code means.
+        let enforced = register.is_none_or(|contract| contract.enforce);
+        return Ok(if refusals.is_empty() || !enforced {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(2)
+        });
+    }
+
+    if let Some(message) = error {
+        return refuse(message, err);
+    }
+    // Unreachable through `run_check`, which refuses on the error path rather
+    // than passing `None` here. The arm exists because the type admits it, and
+    // the one thing it must not do is report success for a register it never
+    // read.
+    let Some(contract) = register else {
+        return refuse("no register was read", err);
+    };
+    let named = root.unwrap_or(Path::new("."));
     if refusals.is_empty() {
-        report_ok(&root, register.entries.len(), out)
+        report_ok(named, contract.entries.len(), out)
     } else {
-        report_refusals(&root, &register, &refusals, err)
+        report_refusals(named, contract, refusals, err)
+    }
+}
+
+/// Writes the verdict as one JSON object on `out`.
+///
+/// Built through `lgwks_std::json` rather than by hand. This crate enforces the
+/// rule that JSON comes through the estate facade, and emitting its own JSON by
+/// string concatenation would make the checker the first thing that violates it
+/// — which is exactly how `print_freshness_json` came to escape only the double
+/// quote and produce invalid output for any string carrying a backslash.
+///
+/// The shape is contractual and every key is always present, so a consumer can
+/// read `refusals` without first testing for its existence. `error` is `null`
+/// unless the gate could not reach a verdict at all.
+fn print_check_json(
+    root: Option<&Path>,
+    register: Option<&Contract>,
+    refusals: &[Refusal],
+    error: Option<&str>,
+    out: &mut impl io::Write,
+) -> io::Result<()> {
+    use lgwks_std::json::{Map, Value};
+
+    let mut refusal_rows = Vec::with_capacity(refusals.len());
+    for refusal in refusals {
+        let mut row = Map::new();
+        row.insert(
+            "crate".to_owned(),
+            Value::String(refusal.krate().to_owned()),
+        );
+        row.insert("detail".to_owned(), Value::String(refusal.to_string()));
+        refusal_rows.push(Value::Object(row));
+    }
+
+    let mut payload = Map::new();
+    payload.insert(
+        "root".to_owned(),
+        match root {
+            Some(path) => Value::String(format!("{}", path.display())),
+            None => Value::Null,
+        },
+    );
+    payload.insert(
+        "enforce".to_owned(),
+        match register {
+            Some(contract) => Value::Bool(contract.enforce),
+            None => Value::Null,
+        },
+    );
+    // `admitted` is the same predicate the exit code carries: a tree the gate
+    // could not read is not admitted, so `error.is_some()` must make this false
+    // even though there are no refusals to list. Otherwise a consumer reading
+    // the payload instead of the exit code would see `admitted: true` beside an
+    // error, which is the fail-open reading this field must never support.
+    payload.insert(
+        "admitted".to_owned(),
+        Value::Bool(error.is_none() && refusals.is_empty()),
+    );
+    payload.insert(
+        "approvals".to_owned(),
+        // Bounded by the register's entry count, which is a file length.
+        Value::Number(serde_json_number(
+            register.map_or(0, |contract| contract.entries.len()),
+        )),
+    );
+    payload.insert("refusals".to_owned(), Value::Array(refusal_rows));
+    payload.insert(
+        "error".to_owned(),
+        match error {
+            Some(message) => Value::String(message.to_owned()),
+            None => Value::Null,
+        },
+    );
+
+    let rendered =
+        lgwks_std::json::to_string_pretty(&Value::Object(payload)).map_err(io::Error::other)?;
+    writeln!(out, "{rendered}")
+}
+
+/// Convert a `usize` count into a JSON number.
+///
+/// `serde_json::Number` is `i64`-backed unless the `arbitrary_precision` feature
+/// is on, which it is not. A register with more than `i64::MAX` entries cannot
+/// exist — the file would have to be exabytes long — so the conversion is total
+/// in practice, and the fallback keeps it total in the type system too rather
+/// than reaching for a cast the workspace forbids.
+fn serde_json_number(count: usize) -> lgwks_std::json::Number {
+    match i64::try_from(count) {
+        Ok(exact) => lgwks_std::json::Number::from(exact),
+        Err(_) => lgwks_std::json::Number::from(i64::MAX),
     }
 }
 
@@ -650,35 +823,44 @@ fn print_freshness_table(results: &[FreshnessResult], out: &mut impl io::Write) 
 /// were queried, with `error` present only when the lookup failed. A stale
 /// count is not emitted — consumers read `stale` per row and the process exit
 /// code carries the aggregate.
+///
+/// Built through `lgwks_std::json`, like `check --json`. The previous version
+/// assembled JSON by concatenation and escaped only the double quote, so any
+/// `repository` or `error` string containing a backslash produced a payload no
+/// parser would accept — from the crate whose whole purpose is enforcing that
+/// dependencies go through the facade.
 fn print_freshness_json(results: &[FreshnessResult], out: &mut impl io::Write) -> io::Result<()> {
-    writeln!(out, "[")?;
-    for (index, result) in results.iter().enumerate() {
-        // `index` comes from `enumerate` over `results`, so the successor is at
-        // most `results.len()` and the comparison below cannot overflow.
-        let comma = if index.saturating_add(1) < results.len() {
-            ","
-        } else {
-            ""
-        };
-        let error_field = match result.error.as_ref() {
-            Some(failure) => format!(", \"error\": \"{}\"", failure.replace('"', "\\\"")),
-            None => String::new(),
-        };
-        writeln!(
-            out,
-            "  {{\"name\": \"{}\", \"resolved\": \"{}\", \"latest\": \"{}\", \
-             \"stale\": {}, \"repository\": \"{}\"{}}}{}",
-            result.name,
-            result.resolved,
-            result.latest,
-            result.stale,
-            result.repository,
-            error_field,
-            comma
-        )?;
+    use lgwks_std::json::{Map, Value};
+
+    let mut rows = Vec::with_capacity(results.len());
+    for result in results {
+        let mut row = Map::new();
+        row.insert("name".to_owned(), Value::String(result.name.clone()));
+        row.insert(
+            "resolved".to_owned(),
+            Value::String(result.resolved.clone()),
+        );
+        row.insert("latest".to_owned(), Value::String(result.latest.clone()));
+        row.insert("stale".to_owned(), Value::Bool(result.stale));
+        row.insert(
+            "repository".to_owned(),
+            Value::String(result.repository.clone()),
+        );
+        // Always present, `null` when the lookup succeeded: a consumer reads a
+        // fixed set of keys rather than testing for the existence of each.
+        row.insert(
+            "error".to_owned(),
+            match result.error.as_ref() {
+                Some(failure) => Value::String(failure.clone()),
+                None => Value::Null,
+            },
+        );
+        rows.push(Value::Object(row));
     }
-    writeln!(out, "]")?;
-    Ok(())
+
+    let rendered =
+        lgwks_std::json::to_string_pretty(&Value::Array(rows)).map_err(io::Error::other)?;
+    writeln!(out, "{rendered}")
 }
 
 // ── vendor ──────────────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 [package]
 name = "lgwks_deps"
-description = "Dependency admission, the third-party storefront, and freshness for the std+ estate: every external edge names a human-approved owner."
+description = "Dependency admission and supply-chain policy for a workspace: every external edge names a human-approved owner, checked in CI."
 version = "0.1.8"
 edition = "2024"
 rust-version = "1.98"
@@ -9,8 +9,8 @@ repository = "https://github.com/srinji-kaggss/logicalworks-crates"
 documentation = "https://docs.rs/lgwks_deps"
 readme = "README.md"
 homepage = "https://github.com/srinji-kaggss/logicalworks-crates/tree/main/crates/lgwks-deps"
-categories = ["development-tools"]
-keywords = ["dependencies", "audit", "supply-chain", "lgwks"]
+categories = ["development-tools", "config"]
+keywords = ["dependencies", "audit", "supply-chain", "cargo", "policy"]
 
 # The deps crate consumes JSON only through the estate facade it enforces.
 # Depending on serde_json directly here would make the checker its own first
