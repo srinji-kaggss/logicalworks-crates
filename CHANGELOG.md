@@ -225,6 +225,16 @@ Changed:
 - `docs/guides/lgwks-bot/background-work.md`, `crates/lgwks-bot/README.md`, and
   the `rt::task` / `rt::process` module docs now describe the supervised-only
   surface rather than the deleted one.
+- **`Bot::resolve_effect` takes the `PendingWork` it is about rather than
+  `(WorkId, revision)`.** `PendingWork` carries the address, the generation and
+  the attempt, and all three are compared before anything is read or written. A
+  caller passes back the value `pending()` handed it, so "settle an attempt I
+  invented" and "settle the wrong attempt" stop being representable rather than
+  being refused after the fact. `WorkId` remains as the address a report names,
+  which is what it always was: SPEC-02's "a slot index is instrumentation only".
+  This is the intentional tightening RQ-059 asks to be documented — a program
+  that named a slot and a revision still compiles if it reads its work from
+  `pending()`, and a program that fabricated the pair no longer does.
 
 **No crate version is bumped.** The change is unpublished like the five public
 modules above it, and it ships in the same release.
@@ -540,6 +550,22 @@ modules above it, and it ships in the same release.
 
 ### lgwks_bot Fixed
 
+- **A settlement is about one attempt, and a repeat of it can no longer land on
+  the next one.** The ledger guarded the slot and the generation but not the
+  attempt, and a chain retries *within* a generation: an entry held as an
+  unknown outcome is settled `NotApplied`, that makes it eligible, and the next
+  tick begins attempt 2 at the same address under the same revision. A repeat of
+  the attempt-1 report — which settlement tolerates on purpose, because a caller
+  that never saw its first delivery acknowledged has to be able to send it again
+  — then found the entry held, passed every check, and recorded "definitely did
+  not happen" about attempt 2 on the strength of a statement about attempt 1.
+  Attempt 3 ran against an effect that may have been live. The ledger now
+  numbers the attempts it begins and refuses evidence whose attempt is not the
+  outstanding one (`BotError::EvidenceStaleAttempt`), and the number is handed
+  back by the ledger rather than derived beside it, so a settled entry cannot
+  restart the count at one and give two attempts the same name.
+  `tests/ecs_tick.rs::a_settlement_names_the_attempt_it_settles_and_no_other`
+  fails with the guard removed and passes with it.
 - **A transition that is dropped hands its payload back to the chain that owned
   it, so a settled chain settles.** Found by `bench/`'s fairness gate and by
   nothing else, which is the point: **the bot fired 896,000 effects where the

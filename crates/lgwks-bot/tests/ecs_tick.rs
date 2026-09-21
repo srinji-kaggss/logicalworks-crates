@@ -1179,7 +1179,7 @@ fn a_settlement_names_the_generation_it_settles_and_no_other() -> TestResult {
     // The caller's own settlement for revision 1, naming revision 1. Accepted,
     // and the generation it settles is now decided, so the transition has
     // nothing open and is dropped by the next tick.
-    bot.resolve_effect(first.id(), first.revision(), EffectEvidence::Applied)?;
+    bot.resolve_effect(&first, EffectEvidence::Applied)?;
     assert_eq!(bot.tick()?, 0, "an acknowledged effect is not replayed");
     assert!(
         bot.pending().is_empty(),
@@ -1229,7 +1229,7 @@ fn a_settlement_names_the_generation_it_settles_and_no_other() -> TestResult {
     // there now — a generic refusal would leave it guessing whether to retry the
     // report or re-read the work.
     let delayed = first;
-    match bot.resolve_effect(delayed.id(), delayed.revision(), EffectEvidence::Applied) {
+    match bot.resolve_effect(&delayed, EffectEvidence::Applied) {
         Ok(()) => {
             return Err(
                 "a settlement computed against revision 1 was accepted against revision 2".into(),
@@ -1254,7 +1254,7 @@ fn a_settlement_names_the_generation_it_settles_and_no_other() -> TestResult {
     // `NotApplied` is the sharper half: accepting it would make an attempt the
     // caller was never asked about eligible to run again. It is refused by the
     // same variant — the reason is the generation, not the evidence.
-    match bot.resolve_effect(delayed.id(), delayed.revision(), EffectEvidence::NotApplied) {
+    match bot.resolve_effect(&delayed, EffectEvidence::NotApplied) {
         Ok(()) => {
             return Err(
                 "NotApplied for revision 1 was accepted against revision 2, authorising a \
@@ -1281,18 +1281,18 @@ fn a_settlement_names_the_generation_it_settles_and_no_other() -> TestResult {
 
     // The current generation, settled with the evidence that is actually about
     // it: accepted.
-    bot.resolve_effect(second.id(), second.revision(), EffectEvidence::Applied)?;
+    bot.resolve_effect(&second, EffectEvidence::Applied)?;
 
     // The same identity and the same evidence again is a duplicate report, not
     // a contradiction and not an error: a caller whose first delivery was
     // ambiguous has to be able to repeat it.
-    bot.resolve_effect(second.id(), second.revision(), EffectEvidence::Applied)?;
+    bot.resolve_effect(&second, EffectEvidence::Applied)?;
 
     // Evidence contradicting what this generation was settled with is refused,
     // and the settlement it contradicts stands. The refusal names both pieces of
     // evidence, because "your report was refused" without saying which way round
     // leaves the caller unable to tell whether it misread its own observation.
-    match bot.resolve_effect(second.id(), second.revision(), EffectEvidence::NotApplied) {
+    match bot.resolve_effect(&second, EffectEvidence::NotApplied) {
         Ok(()) => {
             return Err(
                 "evidence contradicting the generation's own settlement was accepted".into(),
@@ -1572,7 +1572,7 @@ fn an_abandoned_entry_blocks_its_successors() -> TestResult {
         .into_iter()
         .next()
         .ok_or("the abandoned entry is reported")?;
-    chained.resolve_effect(blocked.id(), blocked.revision(), EffectEvidence::NotApplied)?;
+    chained.resolve_effect(&blocked, EffectEvidence::NotApplied)?;
     assert_eq!(
         chained.tick()?,
         2,
@@ -1716,5 +1716,137 @@ fn an_open_transition_is_bound_to_the_payload_it_was_opened_under() -> TestResul
          acknowledged A, and a B effect must not be combined with that acknowledgment"
     );
     assert_eq!(bot.tick()?, 0, "and the chain is settled");
+    Ok(())
+}
+
+/// Tick, expecting the held effect's own error rather than a decision.
+///
+/// A held effect is one the substrate cannot decide about on its own, so the
+/// tick reports the action's error and leaves the entry standing.
+fn tick_expecting_held(bot: &mut Bot) -> TestResult {
+    match bot.tick() {
+        Ok(fired) => Err(format!("an indeterminate effect was reported as {fired} fired").into()),
+        Err(error) => {
+            assert!(
+                matches!(error, BotError::EffectIndeterminate { .. }),
+                "expected the action's own error, got {error:?}"
+            );
+            Ok(())
+        }
+    }
+}
+
+/// A settlement is accepted only for the attempt it names.
+///
+/// The counterexample this closes: a chain retries *within* one generation, so
+/// the revision that [`a_settlement_names_the_generation_it_settles_and_no_other`]
+/// binds does not separate attempt 1 from attempt 2. The entry at `(0, 0)` is
+/// held indeterminate at revision 1 and the caller reads `pending()`. It
+/// establishes that the attempt did not happen, which is what makes the entry
+/// eligible again, and the next tick begins attempt 2 at the same address under
+/// the same revision. The caller's report is then delivered a second time —
+/// which the ledger has to tolerate, because a caller that never saw its first
+/// delivery acknowledged must be able to send it again.
+///
+/// Before the repair the repeat was accepted, because the entry was held and
+/// held is what settlement looked for. `NotApplied` then overwrote attempt 2
+/// with "definitely did not happen" on the strength of a statement about
+/// attempt 1, and attempt 3 ran against an effect that may have been live.
+///
+/// The attempt ordinal is the part of the identity that survives a retry, and
+/// it is what this binds.
+#[test]
+fn a_settlement_names_the_attempt_it_settles_and_no_other() -> TestResult {
+    let value = Rc::new(Cell::new(1));
+    let uncertain = Rc::new(Cell::new(true));
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let mut bot = Bot::builder("attempts")
+        .observe(Dial {
+            value: Rc::clone(&value),
+        })
+        .on(
+            |_observed: &u32| true,
+            Doubtful {
+                uncertain: Rc::clone(&uncertain),
+                seen: Rc::clone(&seen),
+            },
+        )
+        .build(&GrantSet::empty())?;
+
+    // Attempt 1, revision 1: held, because the effect may be live.
+    tick_expecting_held(&mut bot)?;
+    let held = bot.pending();
+    let first = held.first().ok_or("the held entry is reported")?;
+    assert_eq!(first.revision(), 1, "the transition opened at revision 1");
+    assert_eq!(first.attempt(), 1, "the attempt is the first");
+    assert!(
+        matches!(
+            first.hold(),
+            TransitionHold::OutcomeUnknown { attempts: 1, .. }
+        ),
+        "held as an unknown outcome: {:?}",
+        first.hold()
+    );
+
+    // The caller establishes that attempt 1 did not happen. The entry is
+    // eligible again, and the source has not moved: the retry is at the same
+    // address, under the same revision.
+    bot.resolve_effect(first, EffectEvidence::NotApplied)?;
+    tick_expecting_held(&mut bot)?;
+    let held_again = bot.pending();
+    let second = held_again.first().ok_or("the retry is reported")?;
+    assert_eq!(second.revision(), 1, "still the same generation");
+    assert_eq!(second.id(), first.id(), "and the same address");
+    assert_eq!(
+        second.attempt(),
+        2,
+        "but a second attempt, not the first again"
+    );
+    assert!(
+        matches!(
+            second.hold(),
+            TransitionHold::OutcomeUnknown { attempts: 2, .. }
+        ),
+        "attempt 2 is what is held: {:?}",
+        second.hold()
+    );
+
+    // The attempt-1 report arrives a second time. It is about work that is
+    // over, and accepting it is what makes an attempt eligible to run again.
+    match bot.resolve_effect(first, EffectEvidence::NotApplied) {
+        Err(BotError::EvidenceStaleAttempt {
+            reported,
+            outstanding,
+            ..
+        }) => assert_eq!(
+            (reported, outstanding),
+            (1, 2),
+            "the refusal names both attempts, so the caller knows what to report against"
+        ),
+        other => {
+            return Err(format!(
+                "a report about attempt 1 was answered with {other:?} while attempt 2 was held"
+            )
+            .into());
+        }
+    }
+    let held_after = bot.pending();
+    let after = held_after.first().ok_or("attempt 2 is still held")?;
+    assert_eq!(
+        after.hold(),
+        second.hold(),
+        "attempt 2 was not moved by a report about attempt 1"
+    );
+
+    // The report about the attempt that *is* outstanding is accepted, and a
+    // repeat of that one is still idempotent: the refusal above must not take
+    // away the tolerance it was carved out of.
+    bot.resolve_effect(second, EffectEvidence::NotApplied)?;
+    bot.resolve_effect(second, EffectEvidence::NotApplied)?;
+
+    // And the chain is not wedged: attempt 3 runs and the transition settles.
+    uncertain.set(false);
+    assert_eq!(bot.tick()?, 1, "the attempt after the refused report runs");
+    assert!(bot.pending().is_empty(), "and the transition settles");
     Ok(())
 }
