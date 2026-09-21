@@ -149,6 +149,20 @@ impl Observe for Source {
         Ok(self.clock.0.get() / period)
     }
 
+    /// The value itself, which is the cheapest faithful key this source has.
+    ///
+    /// It is what the source already computes, so it costs nothing extra and it
+    /// is exactly the digest the contract asks for: equal fingerprints imply
+    /// equal values, because it *is* the value. A real source would use an ETag
+    /// or an `mtime` — something cheaper than the value — and the point of this
+    /// one is that the rig measures the seam's overhead with no such shortcut
+    /// available, so the number it reports is a floor on the gain and not a
+    /// best case.
+    fn fingerprint(&self) -> Option<u128> {
+        let period = if self.period == 0 { 1 } else { self.period };
+        Some(u128::from(self.clock.0.get() / period))
+    }
+
     fn domain_id(&self) -> &'static str {
         "bench::source"
     }

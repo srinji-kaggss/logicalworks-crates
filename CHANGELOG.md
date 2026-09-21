@@ -224,8 +224,45 @@ Changed:
 **No crate version is bumped.** The change is unpublished like the five public
 modules above it, and it ships in the same release.
 
-### lgwks_bot Changed
+### lgwks_bot Added
 
+- **`Observe::fingerprint`, and with it the lazy seam: a source that holds still
+  is no longer polled.** Change detection is an *equality* question — the
+  substrate reduces every observation to one bit and discards the value — so
+  making a source produce the value in order to ask the bit is the eager part of
+  the loop. `fn fingerprint(&self) -> Option<u128>` lets a source answer the
+  equality question from a key it already holds (an `ETag`, an `mtime`, a row
+  version, a mutation counter, a hash of a framebuffer), and the tick then
+  **never calls `poll`**: no value is constructed, nothing is boxed, and no
+  future is built. The decision is taken *before* the future exists — a check
+  inside the future would still have allocated the box carrying it, which on a
+  quiet tick is the only thing there was to allocate.
+  - **The contract is exact: equal fingerprints must imply equal values.** A
+    digest that collides across two different values makes the substrate skip a
+    real movement, which is a silent no-op rather than a wrong effect — the one
+    failure this can introduce. The digest is recorded at the moment it is read,
+    *before* the poll, so a source that moves in between leaves a digest that no
+    longer matches and the next tick polls again: the error is one redundant
+    poll, never a missed movement. A poll that fails clears the digest, so a
+    source that errors still reports every tick, exactly as before.
+  - **The default is `None`, which is today's path exactly** — every source
+    written before this method existed keeps its behaviour and its cost, and
+    there is no configuration in which a domain silently loses an observation.
+  - Measured, `bench/` A/B/A in one session, seam versus the tick-allocations
+    change beneath it: `poll-only-64x100` **1.65x faster**, `steady-64x100`
+    **1.68x**, `wide-256x10` **1.46x**. `fanout-1x64` and `churn-64x1` are
+    unchanged: their moves (1.8% and 7.6%) are smaller than the control's own
+    drift at the same scenario (6.9% and 10.8%). Allocations per tick:
+    **167.6 -> 22.9** steady, **171.0 -> 21.4** poll-only, **650.9 -> 141.7**
+    wide. Against the base before either change: **2.71x**, **1.99x** and
+    **1.66x**.
+  - The rig's own source implements it as the identity (`u128::from(value)`),
+    deliberately: a real source would use a key cheaper than the value, so the
+    reported gain is a **floor** and not a best case.
+  - Three tests, each verified to fail against the seam removed: a quiet source
+    is polled once over twenty-one ticks (it reports 21 without the seam), a
+    digest that moves is polled again and fires, and a source with no digest is
+    polled every tick exactly as before.
 - **The tick no longer allocates its own bookkeeping, and a source that holds
   still is no longer boxed.** A steady-state tick at 64 chains made **171 heap
   allocations**; it now makes **97**, and the tick is up to **1.6x faster**.
@@ -463,9 +500,7 @@ modules above it, and it ships in the same release.
   `from_spec` materializer was a deliberate position; the invariant ledger's
   reading of it prevailed and the paragraph now says so. And two citations in
   `docs/guides/lgwks-bot/index.md` pointed `Bot::tick` and `Bot::tick_async` at
-  lines inside their doc blocks rather than at the functions
-  (`crates/lgwks-bot/src/ecs.rs:1490`→`1496`, `crates/lgwks-bot/src/ecs.rs:1408`→`1411`)
-  — a class
+  lines inside their doc blocks rather than at the functions — a class
   `scripts/check-doc-citations.py` cannot catch, because it verifies that a
   citation resolves and not that it names the right item.
 
