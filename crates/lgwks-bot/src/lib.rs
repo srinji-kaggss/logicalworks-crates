@@ -109,6 +109,8 @@ pub mod json;
 /// timers, channels, and opt-in drivers.
 #[cfg(feature = "rt")]
 pub mod rt;
+/// Synchronous validated guidance flows and session runner.
+pub mod session;
 /// The serializable spec contract and the builder that assembles bots.
 ///
 /// `BotSpec` is validate-only: there is no `from_spec` materializer. A spec
@@ -125,6 +127,11 @@ pub use error::BotError;
 pub use gate::GrantSet;
 #[cfg(feature = "rt")]
 pub use rt::{Builder, Handle, Runtime, block_on};
+pub use session::{
+    ChoiceArm, FlowBounds, FlowEdge, FlowNodeKind, FlowSpec, Interpolate, Journal, KeywordResolver,
+    MemoryJournal, NodeId, NodeKind, Predicate, Resolver, Session, SessionId, TemplateInterpolator,
+    Terminal, TerminalOutcome, TranscriptEntry, Value, ValueExpr, VarScope, VarType,
+};
 pub use spec::{Bot, BotSpec};
 pub use verb::{Evaluate, Execute, Observe, Query};
 
