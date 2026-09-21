@@ -87,7 +87,7 @@ never thread an `Auth` through your own call sites for the chained path.
 ## The grant set is a snapshot
 
 This is the part that surprises people. `EcsBot::assemble` clones the set into
-the world (`crates/lgwks-bot/src/ecs.rs:2351`):
+the world (`crates/lgwks-bot/src/ecs.rs:2541`):
 
 ```rust
 world.insert_resource(Grants(grants.clone()));

@@ -1,7 +1,7 @@
 # What a failed tick means
 
 Both entry points return `Result<usize, BotError>`: `Bot::tick` is the
-synchronous adapter (`crates/lgwks-bot/src/ecs.rs:1839`) and `Bot::tick_async` is
+synchronous adapter (`crates/lgwks-bot/src/ecs.rs:1999`) and `Bot::tick_async` is
 the one to `await` from inside a runtime (`crates/lgwks-bot/src/ecs.rs:1752`).
 Four different things can produce an `Err`. Three are failures that mean
 different things for your data — the distinction is the difference between a
