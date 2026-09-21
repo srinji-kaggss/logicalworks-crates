@@ -74,16 +74,25 @@ let point: Point = json::from_str(r#"{"x":1,"y":2}"#).expect("valid JSON");
 
 ## Feature map
 
+One manifest key, three alternative lines. Use exactly one of them:
+
 ```toml
 [dependencies]
-lgwks_std = "0.6"                       # core only, zero deps
-lgwks_std = { version = "0.6", features = ["hash", "json"] }  # pick what you need
-lgwks_std = { version = "0.6", features = ["full"] }           # everything
+# Zero external deps: defaults off, core selected. The default build is core
+# plus trace, so a bare `lgwks_std = "0.6"` is NOT zero-dependency.
+lgwks_std = { version = "0.6", default-features = false, features = ["core"] }
+
+# Pick what you need, on top of the default core + trace.
+# lgwks_std = { version = "0.6", features = ["hash", "json"] }
+
+# Everything.
+# lgwks_std = { version = "0.6", features = ["full"] }
 ```
 
 | Feature | Modules | What it adds | External deps |
 |---------|---------|-------------|---------------|
 | `core` (default) | encoding, fs, glob, hex, leb128, retry, task, time | — | **0** |
+| `trace` (default) | trace | Structured logging (`tracing` re-export) | tracing, tracing-core, pin-project-lite, once_cell |
 | `random` | random, id | UUID v4, OS entropy | getrandom |
 | `hash` | hash | BLAKE3 content-addressable hashing | blake3 |
 | `pattern` | pattern | Linear-time compiled regex | regex |

@@ -235,7 +235,7 @@ capability is neither assumed to be present nor added as an unregistered edge:
 | Capability | Path |
 |---|---|
 | `thiserror`, `anyhow` | Implement `std::error::Error` manually; keep typed error enums at library boundaries (the workspace's own crates do this). |
-| `log`, `tracing`, `env_logger` | Nothing to add, and nowhere to print: library code **returns** information instead of emitting it. `print_stdout`/`print_stderr` are `forbid` (§6.1), so there is no print path to route through. |
+| `log`, `env_logger` | Nothing to add: `lgwks_std::trace` is the logging path, and it is default-on. `print_stdout`/`print_stderr` are `forbid` (§6.1), so there is no print path to route through. |
 | `clap`, `argh` | Parse `std::env::args` directly; CLI parsing is not a capability of this workspace. |
 | `toml`, `serde_yaml`, `csv` | Not provided. Use `json`/`ron` for data; the gate parses TOML line-wise on purpose to avoid a TOML dependency. |
 | `sha2`, `hmac`, `aes-gcm`, `argon2`, `ed25519` | Not provided (BLAKE3 only). Crypto is a BOUNDARY tier: register it with the concrete reason. |
