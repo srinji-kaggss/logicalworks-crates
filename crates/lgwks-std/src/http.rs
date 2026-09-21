@@ -22,6 +22,11 @@
 //! preview declares [`BodyPolicy::Preview`] instead, which keeps the prefix and
 //! reports [`Truncation::Cut`]. There is no unbounded spelling: a remote server
 //! does not get to decide how much memory this process commits.
+//!
+//! [`Options::max_body_bytes`]: crate::http::Options::max_body_bytes
+//! [`Error::BodyTooLarge`]: crate::http::Error::BodyTooLarge
+//! [`BodyPolicy::Preview`]: crate::http::BodyPolicy::Preview
+//! [`Truncation::Cut`]: crate::http::Truncation::Cut
 
 use std::fmt;
 use std::io::Read;
