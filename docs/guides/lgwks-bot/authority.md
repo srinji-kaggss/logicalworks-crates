@@ -139,7 +139,7 @@ cannot be denied for want of a capability at run time.** Two facts make that so:
   (`crates/lgwks-bot/src/ecs.rs:2312`), so a bot whose declared requirements are
   not granted does not exist to run.
 - Every per-call proof is minted from **the same list**. `run_any` calls
-  `grants.issue(self.0.required_caps())` (`crates/lgwks-bot/src/spec.rs:287`),
+  `grants.issue(self.0.required_caps())` (`crates/lgwks-bot/src/spec.rs:596`),
   and the action then checks `call.0.check(self.required_caps())`. The two cannot
   disagree, and nothing narrows `Grants` after `assemble` — the only writer is
   `assemble` itself.

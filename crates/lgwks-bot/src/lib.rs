@@ -143,6 +143,12 @@ pub mod interface;
 pub mod json;
 /// Language understanding: the tiered lexicon behind the resolver seam.
 pub mod language;
+/// The `domain_id -> constructor` registry: what a spec's strings resolve to.
+///
+/// Private, with curated re-exports beside `BotSpec` below, because the registry
+/// is one concern — which identifiers a binary can run — rather than a second
+/// namespace to learn.
+mod registry;
 /// Async runtime surface (feature `rt`): owned `Runtime`, bounded fan-out,
 /// timers, channels, and opt-in drivers.
 #[cfg(feature = "rt")]
@@ -155,17 +161,19 @@ pub mod session;
 ///
 /// `BotSpec` is validate-only today: there is no `from_spec` materializer, so a
 /// spec that validates still has to be built through `Bot::builder`, which
-/// takes verbs rather than wire data. Materializing a bot from a spec needs a
-/// `domain_id -> constructor` registry — `"gh::pr_status"` has to become a
-/// concrete `Observe` — and no such registry exists. That absence is recorded
-/// as open in `experience/invariants/sdk.yaml`, not as a design position, and
-/// the registry is the piece of work that closes it.
+/// takes verbs rather than wire data. The half of that which now exists is the
+/// [`DomainRegistry`] — the list of `domain_id -> constructor` entries a binary
+/// declares, written with [`domains!`](crate::domains) — and the half that does
+/// not is the materializer that walks a spec against one. See
+/// [`DomainRegistry`] for what remains, which is more than plumbing.
 ///
-/// Whenever it lands, the builder stays the only path that mints authority:
-/// grants come from a `GrantSet` the caller holds, never from the spec, so wire
-/// data still cannot choose what the bot is able to reach. There is
-/// deliberately no `bot!` proc-macro either — it would drag `syn` into every
-/// consumer and hide the per-call `Auth::check` that auditors read.
+/// The builder stays the only path that mints authority: grants come from a
+/// `GrantSet` the caller holds, never from the spec, so wire data still cannot
+/// choose what the bot is able to reach. There is deliberately no `bot!`
+/// proc-macro: it would drag the `syn` stack into every consumer and hide the
+/// per-call `Auth::check` that auditors read. [`domains!`](crate::domains)
+/// declares the registry as data instead, with no proc macro and no new
+/// dependency.
 pub mod spec;
 /// The four verbs: Observe, Evaluate, Execute, Query. No fifth verb exists.
 pub mod verb;
@@ -178,6 +186,7 @@ pub use frontier::{
 };
 pub use gate::GrantSet;
 pub use language::{Alias, LanguageResolver};
+pub use registry::{Action, ActionCtor, DomainRegistry, Source, SourceCtor};
 #[cfg(feature = "rt")]
 pub use rt::{Builder, Handle, Runtime, block_on};
 pub use semantic::{Embedder, EmbedderIdentity, SemanticError, SemanticPolicy, SemanticResolver};

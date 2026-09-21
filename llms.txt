@@ -24,6 +24,7 @@ Development index. Every link below resolves against `main` as it stood when thi
 - [Bounded background work](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-bot/background-work.md) — Bounded fan-out, supervision, and the cancellation limits.
 - [Guidance sessions](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-bot/sessions.md) — Unreleased: validated guidance flows and the session runner.
 - [Resolution and degraded verdicts](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-bot/resolution.md) — Unreleased: lexical and semantic resolution, and degraded verdicts.
+- [The registry: what a spec's identifiers resolve to](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-bot/domains.md) — Unreleased: the domain registry, and what a spec's identifiers resolve to.
 - [lgwks_std consumer guide](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-std/index.md) — `lgwks_std`: install, feature selection, and logging.
 - [lgwks_ast consumer guide](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-ast/index.md) — `lgwks_ast`: install, grammar selection, bounds, and diagnostics.
 - [lgwks_deps: library and CLI](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-deps/index.md) — `lgwks_deps`: library use versus CLI and policy adoption.

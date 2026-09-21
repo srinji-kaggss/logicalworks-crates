@@ -261,51 +261,12 @@ where
         }
     }
 
-    struct TypedExec<A>(A);
-
-    impl<A: super::verb::Execute> ExecuteAny for TypedExec<A>
-    where
-        A::Input: 'static,
-        A::Output: 'static,
-    {
-        fn required_caps(&self) -> &[Cap] {
-            self.0.required_caps()
-        }
-
-        fn domain_id(&self) -> &str {
-            self.0.domain_id()
-        }
-
-        fn run_any<'a>(
-            &'a self,
-            grants: &'a GrantSet,
-            input: &'a Erased,
-        ) -> crate::BoxFuture<'a, Result<Box<dyn Any>, BotError>> {
-            Box::pin(async move {
-                match input.as_any().downcast_ref::<A::Input>() {
-                    Some(typed) => {
-                        let auth: Auth = grants.issue(self.0.required_caps())?;
-                        let value = self.0.execute_action((auth, typed)).await?;
-                        let boxed: Box<dyn Any> = Box::new(value);
-                        Ok(boxed)
-                    }
-                    None => Err(BotError::TypeMismatch {
-                        site: "spec::typed_entry",
-                        chain: None,
-                        expected: type_name::<A::Input>(),
-                        observed: input.witness.name(),
-                    }),
-                }
-            })
-        }
-    }
-
     ChainEntry {
         condition: Box::new(TypedEval {
             inner: condition,
             _marker: std::marker::PhantomData::<T>,
         }),
-        action: Box::new(TypedExec(action)),
+        action: Box::new(TypedExec::new(action)),
     }
 }
 
@@ -358,9 +319,10 @@ pub(crate) struct ChainEntry {
 /// The id is process-local and is not serializable, so this serves the Rust
 /// path only. A durable identity for the same question — which type a chain's
 /// source produces, readable by a materializer that has only wire data — is a
-/// schema key, and that belongs to the `domain_id -> constructor` registry this
-/// crate does not have yet (see the [`spec`](self) module docs). Do not reach
-/// for `TypeId` to answer it.
+/// schema key, and no such key exists: [`DomainRegistry`](crate::DomainRegistry)
+/// maps an identifier to a constructor and stops there, so the type a source
+/// produces is written down nowhere a document could name. Do not reach for
+/// `TypeId` to answer it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Witness {
     /// The type, as an identity. This is the comparison.
@@ -412,9 +374,9 @@ impl Witness {
 /// - [`TypeId`] is process-local and is not serializable, so this serves the
 ///   Rust path only. A materializer holding wire data instead of a `Witness`
 ///   needs a durable identity for the same question, and this field is where
-///   that key goes once the `domain_id -> constructor` registry exists — see the
-///   [`spec`](self) module docs for that absence. Do not reach for `TypeId` to
-///   answer it.
+///   that key goes once one exists — [`DomainRegistry`](crate::DomainRegistry)
+///   is where such a key would be declared. Do not reach for `TypeId` to answer
+///   it.
 /// - A witness is `TypeId::of::<S::Output>()`, so it distinguishes *types*, not
 ///   *chains*. Two chains that both produce a `u16` are indistinguishable to it:
 ///   a value produced by one and delivered to the other passes this check. It
@@ -593,6 +555,58 @@ pub(crate) trait ExecuteAny {
         grants: &'a GrantSet,
         input: &'a Erased,
     ) -> crate::BoxFuture<'a, Result<Box<dyn Any>, BotError>>;
+}
+
+/// Erases one [`Execute`](crate::verb::Execute) to [`ExecuteAny`].
+///
+/// The action half of a chain is stored erased, so a concrete action is wrapped
+/// before it can be boxed. This is that wrapper, and it is the only one: an
+/// action built by [`typed_entry`] and one built from a registry entry reach the
+/// same erasure, so a correction to one cannot leave the other behind.
+pub(crate) struct TypedExec<A>(A);
+
+impl<A> TypedExec<A> {
+    /// Wrap one concrete action for erasure.
+    pub(crate) const fn new(action: A) -> Self {
+        Self(action)
+    }
+}
+
+impl<A: super::verb::Execute> ExecuteAny for TypedExec<A>
+where
+    A::Input: 'static,
+    A::Output: 'static,
+{
+    fn required_caps(&self) -> &[Cap] {
+        self.0.required_caps()
+    }
+
+    fn domain_id(&self) -> &str {
+        self.0.domain_id()
+    }
+
+    fn run_any<'a>(
+        &'a self,
+        grants: &'a GrantSet,
+        input: &'a Erased,
+    ) -> crate::BoxFuture<'a, Result<Box<dyn Any>, BotError>> {
+        Box::pin(async move {
+            match input.as_any().downcast_ref::<A::Input>() {
+                Some(typed) => {
+                    let auth: Auth = grants.issue(self.0.required_caps())?;
+                    let value = self.0.execute_action((auth, typed)).await?;
+                    let boxed: Box<dyn Any> = Box::new(value);
+                    Ok(boxed)
+                }
+                None => Err(BotError::TypeMismatch {
+                    site: "spec::typed_entry",
+                    chain: None,
+                    expected: type_name::<A::Input>(),
+                    observed: input.witness.name(),
+                }),
+            }
+        })
+    }
 }
 
 // ── Builder ────────────────────────────────────────────────────────────────

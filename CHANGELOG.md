@@ -231,6 +231,45 @@ modules above it, and it ships in the same release.
 
 ### lgwks_bot Added
 
+- **The `domain_id -> constructor` registry exists.** A `BotSpec` carries
+  identifiers rather than code, and something has to turn `"github::pr_status"`
+  back into a running `Observe`. `DomainRegistry` is that list, and `domains!`
+  is the one entry point that declares it:
+  ```rust
+  domains! {
+      pub DOMAINS {
+          observe { "github::pr_status" => GithubPrStatus::from_target }
+          execute { "notify::slack"     => SlackNotify::from_target }
+      }
+  }
+  ```
+  The list is a `static` built at compile time — no constructor to call, no
+  global to mutate, so two components cannot race to register a domain and the
+  set a binary can run is readable from its source. `Source` and `Action` are
+  the erased handles a constructor returns, and `build_source`/`build_action`
+  refuse an unlisted identifier with `BotError::UnregisteredDomain`, escaped
+  because the name came from the document.
+  - **A declarative list, not a proc macro.** The mapping is data a reader can
+    see whole. `domains!` is `macro_rules!`, so this adds no dependency and
+    leaves the repo's stated position on the `syn` stack untouched —
+    `lgwks-std/Cargo.toml` records that policy, and it still holds. A `bot!`
+    proc-macro remains deliberately absent for the second reason it always had:
+    it would hide the per-call `Auth::check` that auditors read.
+  - **The registry is not a permission.** It answers which constructor an
+    identifier names, never what a bot may reach. Authority still comes from the
+    caller-held `GrantSet`, so a spec cannot grant itself anything by naming a
+    domain.
+  - **`from_spec` is still open, and now for stated reasons.** It is not
+    plumbing: `ChainSpec::on` is `Vec<(String, ActionSpec)>`, so a condition is a
+    bare identifier with no slot for `Above<u16>`'s threshold, and an erased
+    `Box<dyn ObserveAny>` carries no serializable statement of its `Output` type
+    (`spec::Witness` is a `TypeId`, process-local). Both are recorded in
+    `experience/invariants/sdk.yaml`, which gains a `registry` lane.
+  - `crates/lgwks-bot/tests/registry.rs` enforces the above, including that a
+    source identifier never resolves as an action, and
+    `docs/guides/lgwks-bot/domains.md` is the guide.
+
+
 - **`Observe::fingerprint`, and with it the lazy seam: a source that holds still
   is no longer polled.** Change detection is an *equality* question — the
   substrate reduces every observation to one bit and discards the value — so

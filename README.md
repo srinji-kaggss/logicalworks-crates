@@ -225,6 +225,7 @@ the rest of this table is design history and contributor policy.
 | [`docs/guides/lgwks-bot/background-work.md`](docs/guides/lgwks-bot/background-work.md) | Bounded fan-out, supervision, and the cancellation limits. |
 | [`docs/guides/lgwks-bot/sessions.md`](docs/guides/lgwks-bot/sessions.md) | Unreleased: validated guidance flows and the session runner. |
 | [`docs/guides/lgwks-bot/resolution.md`](docs/guides/lgwks-bot/resolution.md) | Unreleased: lexical and semantic resolution, and degraded verdicts. |
+| [`docs/guides/lgwks-bot/domains.md`](docs/guides/lgwks-bot/domains.md) | Unreleased: the domain registry, and what a spec's identifiers resolve to. |
 | [`docs/guides/lgwks-std/index.md`](docs/guides/lgwks-std/index.md) | `lgwks_std`: install, feature selection, and logging. |
 | [`docs/guides/lgwks-ast/index.md`](docs/guides/lgwks-ast/index.md) | `lgwks_ast`: install, grammar selection, bounds, and diagnostics. |
 | [`docs/guides/lgwks-deps/index.md`](docs/guides/lgwks-deps/index.md) | `lgwks_deps`: library use versus CLI and policy adoption. |
