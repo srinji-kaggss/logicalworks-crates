@@ -54,6 +54,12 @@
 //!
 //! let fired = bot.tick().expect("tick propagates domain errors");
 //! ```
+//!
+//! `tick` is the synchronous adapter and belongs outside an async runtime:
+//! inside one it returns `BotError::TickInsideRuntime` rather than park the
+//! thread whose reactor the bot's own verbs need. Await `bot.tick_async()`
+//! there instead — the same four phases, the same `Result`, driven on the
+//! caller's executor.
 
 // Verbs are async by design (single-threaded `lgwks_std::task` driver, futures
 // deliberately not `Send`). The lint fires on `pub trait` methods declared
