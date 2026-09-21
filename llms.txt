@@ -4,6 +4,8 @@
 
 Source: https://github.com/srinji-kaggss/logicalworks-crates
 
+Development index. Every link below resolves against `main` as it stood when this file was generated, and `main` moves. The crates.io links name the latest published version and the docs.rs links describe it; the documentation links describe unreleased source. For a released version, use that release's tag rather than anything below.
+
 ## Crates
 
 - [lgwks_std](https://docs.rs/lgwks_std) — Everyday primitives with no async runtime required: JSON/RON/wire codecs, a blocking HTTP client, retry policies, structured logging, time and calendars, hashing, ids, globs, process control
