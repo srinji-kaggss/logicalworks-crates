@@ -49,6 +49,17 @@
 //! returns [`Resolution::Degraded`], and a caller that does not distinguish it
 //! still re-asks, which is the safe direction.
 //!
+//! An embedder can also answer with something no comparison can be drawn from: a
+//! zero vector, or one carrying a non-finite value. That is not a failure of the
+//! dependency and it is not an absence of meaning either — it is a comparison
+//! that was never made, and a decision over a set missing a member is not the
+//! decision the option list calls for. So an unusable vector anywhere in the set
+//! — the utterance's or a competitor's — degrades the whole verdict rather than
+//! dropping the candidate. Dropping it would let a survivor claim a lead over a
+//! competitor nobody measured, and scoring it as zero would assert a similarity
+//! that was never observed. There is no [`Resolution`] variant carrying partial
+//! evidence, and a partial result is not worth inventing one for.
+//!
 //! This module does not log. It reports. The cause travels to the caller in the
 //! verdict and is written into the session transcript, which is the run's
 //! declared record; a log line would be a second, unmanaged copy of the same
@@ -428,6 +439,42 @@ impl<E: Embedder> SemanticResolver<E> {
         }
     }
 
+    /// Maps a refused comparison to the reason the whole decision degrades.
+    ///
+    /// Every refusal degrades, including one this crate has never seen:
+    /// `CosineError` is `#[non_exhaustive]`, so a future variant lands on the
+    /// final arm and stops the decision rather than being dropped. Dropping the
+    /// candidate is the tempting reading — one option the tier cannot speak
+    /// about, with the rest still comparable — and it is the defect: the
+    /// decision then runs over a field one member short, and a surviving winner
+    /// reports a lead over a competitor that was never measured. Issue #31 is
+    /// the same defect reached through the threshold instead of through an
+    /// error, and a fallback arm is exactly how it comes back.
+    fn degrade(reason: CosineError) -> DegradedReason {
+        match reason {
+            // The provider contradicted its own declared identity, so the
+            // tier's input contract is what broke rather than one value.
+            CosineError::DimensionMismatch { .. } => DegradedReason::EmbedderUnavailable,
+            // A vector with no computable direction: zero magnitude, or a
+            // value that is not finite. The comparison was not made.
+            _ => DegradedReason::UnmeasurableEmbedding,
+        }
+    }
+
+    /// Refuses a vector no angle can be computed from.
+    ///
+    /// The check runs the metric against the vector itself rather than
+    /// restating the rule: a vector carrying a direction scores exactly `1.0`
+    /// against itself, and one that does not is refused by
+    /// [`Cosine::try_score`] for the same reason a real comparison would. Two
+    /// definitions of "measurable" would be free to disagree.
+    fn ensure_measurable(metric: &Cosine, vector: &[f32]) -> Result<(), DegradedReason> {
+        match metric.try_score(vector, vector) {
+            Ok(_) => Ok(()),
+            Err(reason) => Err(Self::degrade(reason)),
+        }
+    }
+
     /// Scores every option against the utterance, best-first.
     ///
     /// Every option whose vector can be compared is measured and returned,
@@ -436,37 +483,35 @@ impl<E: Embedder> SemanticResolver<E> {
     /// *win*: applying it here would delete the runner-up before the lead over
     /// it was measured, and a winner whose only competitor was discarded reports
     /// the whole of its score as a lead it never held.
+    ///
+    /// An incomplete comparison set is not scored at all. If any embedding —
+    /// the utterance's or a candidate's — is one no angle can be drawn from,
+    /// the decision degrades, because the alternatives are worse: skipping the
+    /// candidate lets a survivor claim a lead over an unmeasured field, and
+    /// scoring the degenerate vector as zero asserts a similarity that was
+    /// never observed. The set is all-or-nothing on purpose; there is no
+    /// `Resolution` variant that carries partial evidence, so a partial result
+    /// cannot be reported honestly and is not reported at all.
     fn score_semantically(
         &self,
         utterance: &str,
         options: &[String],
     ) -> Result<Vec<(usize, MatchTier, f64)>, DegradedReason> {
-        let target = self.embed(utterance)?;
         let metric = Cosine::new();
+        let target = self.embed(utterance)?;
+        // Checked before the loop as well as inside it, so a degenerate
+        // utterance degrades even when there is no candidate to compare it
+        // against and no comparison would otherwise be attempted.
+        Self::ensure_measurable(&metric, &target)?;
 
         let mut scored: Vec<(usize, MatchTier, f64)> = Vec::with_capacity(options.len());
         for (index, option) in options.iter().enumerate() {
             let candidate = self.embed(option)?;
+            // The utterance is known to carry a direction from the check
+            // above, so a refusal here can only be about this candidate.
             match metric.try_score(&target, &candidate) {
                 Ok(score) => scored.push((index, MatchTier::Semantic, score)),
-                // The two refusals are not the same refusal. A dimension
-                // mismatch means the provider contradicted its own declared
-                // identity, which no candidate can recover from. A degenerate
-                // vector is one option the tier cannot speak about, and the
-                // remaining options are still comparable.
-                Err(CosineError::DimensionMismatch { .. }) => {
-                    return Err(DegradedReason::EmbedderUnavailable);
-                }
-                Err(CosineError::ZeroMagnitude) => {}
-                // `CosineError` is `#[non_exhaustive]`, so a future refusal
-                // reaches here. It defaults to the conservative reading — this
-                // tier cannot speak about this one candidate — because the
-                // alternative, degrading the whole decision, would let an
-                // unrelated future variant stop a resolution that is otherwise
-                // available. A refusal that warrants degrading is a refusal
-                // about the provider, and `DimensionMismatch` above is that
-                // case; a new refusal about a *value* belongs here.
-                Err(_) => {}
+                Err(reason) => return Err(Self::degrade(reason)),
             }
         }
 
@@ -801,6 +846,184 @@ mod tests {
         );
         assert!(calls.get() > 0, "the tier did look, and found nothing");
         Ok(())
+    }
+
+    #[test]
+    fn a_broken_competitor_cannot_manufacture_semantic_confidence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // GitHub issue #50's counterexample. The utterance and the winning
+        // option are the same vector, and the competitor's embedding is
+        // all-zero — the width is right, so the dimension check waves it
+        // through. Skipping it used to leave a one-option field, and the
+        // survivor reported its entire score as a lead: `Resolved { index: 0,
+        // tier: Semantic, score: 1.0, lead: 1.0 }`. That lead was never held
+        // over anything. Missing evidence is not evidence that the competitor
+        // is distant.
+        let (embedder, _) = stub(
+            vec![
+                ("the usual", vec![1.0, 0.0]),
+                ("Repeat last order", vec![1.0, 0.0]),
+                ("Cancel", vec![0.0, 0.0]),
+            ],
+            vec![0.0, 1.0],
+            false,
+        )?;
+        let verdict = SemanticResolver::new(embedder)
+            .resolve("the usual", &options(&["Repeat last order", "Cancel"]));
+        assert_eq!(
+            verdict,
+            Resolution::Degraded {
+                reason: DegradedReason::UnmeasurableEmbedding,
+            },
+            "an unmeasured competitor cannot leave the field intact"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_degenerate_utterance_degrades_rather_than_finding_nothing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // The other half of issue #50: when the *utterance* vector is zero or
+        // non-finite, every comparison is invalid, and the old code reported
+        // `Absent { best_score: 0.0 }` — the same verdict a healthy model
+        // returns when it genuinely finds no matching meaning. The flow then
+        // blamed the person's phrasing instead of reporting the failure.
+        let options = options(&["Repeat last order", "Cancel"]);
+        // The premise the whole test rests on: neither phrase is reachable by
+        // letters alone, so the model is what the verdict comes from.
+        let lexicon = crate::language::LanguageResolver::new();
+        for phrase in ["the usual", "a second phrasing"] {
+            assert!(
+                matches!(lexicon.resolve(phrase, &options), Resolution::Absent { .. }),
+                "{phrase:?} must not be reachable by the lexicon, or this proves nothing"
+            );
+        }
+
+        for broken in [
+            vec![0.0, 0.0],
+            vec![f32::NAN, 0.0],
+            vec![f32::INFINITY, 0.0],
+        ] {
+            let (embedder, _) = stub(
+                vec![
+                    ("the usual", broken.clone()),
+                    ("a second phrasing", vec![1.0, 0.1]),
+                    ("Repeat last order", vec![1.0, 0.1]),
+                    ("Cancel", vec![0.0, 1.0]),
+                ],
+                vec![0.0, 1.0],
+                false,
+            )?;
+            let resolver = SemanticResolver::new(embedder);
+
+            let verdict = resolver.resolve("the usual", &options);
+            assert_eq!(
+                verdict,
+                Resolution::Degraded {
+                    reason: DegradedReason::UnmeasurableEmbedding,
+                },
+                "a {broken:?} utterance vector is not an absence of meaning"
+            );
+
+            // Recovery with valid measurements: the same resolver, an utterance
+            // whose vector carries a direction, resolves normally. The tier is
+            // not poisoned by the previous failure.
+            let healthy = resolver.resolve("a second phrasing", &options);
+            assert!(
+                matches!(
+                    healthy,
+                    Resolution::Resolved {
+                        index: 0,
+                        tier: MatchTier::Semantic,
+                        score,
+                        lead,
+                    } if (score - 1.0).abs() < 1e-6 && lead > 0.8
+                ),
+                "a valid utterance still resolves after a degraded one, got {healthy:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn an_invalid_embedding_at_either_end_of_the_field_degrades()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Position must not matter. A first-competitor failure and a
+        // last-competitor failure are the same failure: the comparison set is
+        // one member short.
+        let cases = [
+            ("Repeat last order", vec![0.0, 0.0]),
+            ("Later", vec![f32::INFINITY, 0.0]),
+        ];
+        for (broken_option, broken_vector) in cases {
+            let (embedder, _) = stub(
+                vec![
+                    ("the usual", vec![1.0, 0.0]),
+                    ("Repeat last order", vec![1.0, 0.1]),
+                    ("Cancel", vec![0.0, 1.0]),
+                    ("Later", vec![-1.0, 0.0]),
+                    (broken_option, broken_vector),
+                ],
+                vec![0.0, 1.0],
+                false,
+            )?;
+            let verdict = SemanticResolver::new(embedder).resolve(
+                "the usual",
+                &options(&["Repeat last order", "Cancel", "Later"]),
+            );
+            assert_eq!(
+                verdict,
+                Resolution::Degraded {
+                    reason: DegradedReason::UnmeasurableEmbedding,
+                },
+                "an invalid embedding for {broken_option} must stop the decision"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_field_of_unmeasurable_vectors_is_degraded_not_absent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Every candidate invalid. The old code skipped all of them and
+        // returned `Absent { best_score: 0.0 }`, which is the number a healthy
+        // model returns for a field it looked at and rejected.
+        let (embedder, _) = stub(
+            vec![
+                ("the usual", vec![1.0, 0.0]),
+                ("Repeat last order", vec![0.0, 0.0]),
+                ("Cancel", vec![f32::NAN, 0.0]),
+            ],
+            vec![0.0, 1.0],
+            false,
+        )?;
+        let verdict = SemanticResolver::new(embedder)
+            .resolve("the usual", &options(&["Repeat last order", "Cancel"]));
+        assert_eq!(
+            verdict,
+            Resolution::Degraded {
+                reason: DegradedReason::UnmeasurableEmbedding,
+            },
+            "no comparison was made, so no best score exists"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_unmeasurable_embedding_is_named_apart_from_a_missing_embedder() {
+        // Two different repairs: restore the dependency, versus find whatever
+        // produced a vector with no direction. The verdict has to say which,
+        // and the rendered record is what an operator reads.
+        assert_ne!(
+            DegradedReason::UnmeasurableEmbedding,
+            DegradedReason::EmbedderUnavailable,
+            "the two causes must not collapse into one verdict"
+        );
+        assert_ne!(
+            DegradedReason::UnmeasurableEmbedding.to_string(),
+            DegradedReason::EmbedderUnavailable.to_string(),
+            "and must not render identically in the transcript"
+        );
     }
 
     #[test]

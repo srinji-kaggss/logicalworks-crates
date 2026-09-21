@@ -1249,12 +1249,31 @@ pub enum DegradedReason {
     /// The semantic tier's embedder returned an error, or a vector of the
     /// wrong length.
     EmbedderUnavailable,
+    /// An embedding came back as a value no angle can be computed from, so a
+    /// comparison the decision needs was never made.
+    ///
+    /// The embedder answered, and its answer is not a direction: an all-zero
+    /// vector, or one carrying `NaN` or an infinity. That is a different
+    /// failure from [`Self::EmbedderUnavailable`] and has a different repair —
+    /// nothing is down, one of the vectors is degenerate — which is why it is
+    /// not folded into it.
+    ///
+    /// The finer cause is carried by [`lgwks_std::similarity::CosineError`],
+    /// which separates a zero magnitude from a non-finite one. It is not
+    /// repeated here because the routing is identical: a comparison set missing
+    /// even one member cannot produce the `Resolved` or `Absent` verdict a
+    /// complete set produces, so the session re-asks and records the cause
+    /// whichever of the two it was.
+    UnmeasurableEmbedding,
 }
 
 impl fmt::Display for DegradedReason {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::EmbedderUnavailable => formatter.write_str("the embedder is unavailable"),
+            Self::UnmeasurableEmbedding => {
+                formatter.write_str("an embedding could not be measured")
+            }
         }
     }
 }
@@ -1296,14 +1315,20 @@ pub enum Resolution {
     /// means the options were all considered and none fit: the person was not
     /// understood, and asking again in different words can help. `Degraded`
     /// means the resolver never got to consider them: a dependency it needs is
-    /// unavailable, and asking the person again cannot help — the same
-    /// utterance will degrade identically.
+    /// unavailable, or answered with a value no comparison can be drawn from,
+    /// and asking the person again cannot help — the same utterance will
+    /// degrade identically.
     ///
     /// Carries no `best_score`, deliberately. There is no score; a failed
     /// resolver observed no similarity, and reporting `0.0` would be a
-    /// measurement that was never taken. That is the same two-valued record
+    /// measurement that was never taken. It is the same two-valued record
     /// [`Self::Ambiguous`] exists to remove — *nothing matched* versus *may have
     /// matched, and we could not look* — arriving a fourth time.
+    ///
+    /// That is also why an incomplete comparison set degrades instead of
+    /// deciding: a winner measured against fewer competitors than the list
+    /// holds is a winner over a field that was never fully looked at, and the
+    /// margin it reports would be the whole of its own score.
     Degraded {
         /// The cause, for the caller to record and route on.
         reason: DegradedReason,

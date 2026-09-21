@@ -594,10 +594,27 @@ fn order_flow() -> Result<FlowSpec, BotError> {
     )
 }
 
+/// Whether every embedding an [`OrderEmbedder`] returns carries a direction.
+///
+/// A named type rather than a `bool` on the embedder, so the test that reads it
+/// says which state it is asking for and the compiler checks that the two
+/// states are the two that exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Measurability {
+    /// Every embedding is a direction, so every comparison that is attempted
+    /// produces a score.
+    Complete,
+    /// One competitor embeds to the zero vector: the right width, so the
+    /// resolver's dimension check accepts it, and no direction, so no angle
+    /// exists between it and anything else.
+    DegenerateCompetitor,
+}
+
 /// An embedder that places `"the usual"` next to `"Repeat last order"` and
 /// everything else orthogonally, so the test's geometry is its assertion.
 struct OrderEmbedder {
     identity: EmbedderIdentity,
+    measurability: Measurability,
 }
 
 impl Embedder for OrderEmbedder {
@@ -608,10 +625,12 @@ impl Embedder for OrderEmbedder {
     }
 
     fn embed(&self, text: &str) -> Result<Vec<f32>, Self::Error> {
-        Ok(match text {
-            "the usual" | "Repeat last order" => vec![1.0, 0.0],
+        let vector = match (text, self.measurability) {
+            ("the usual" | "Repeat last order", _) => vec![1.0, 0.0],
+            ("Cancel", Measurability::DegenerateCompetitor) => vec![0.0, 0.0],
             _ => vec![0.0, 1.0],
-        })
+        };
+        Ok(vector)
     }
 }
 
@@ -623,6 +642,7 @@ fn a_session_resolves_a_phrase_only_a_model_can_relate() -> TestResult {
     // `semantic.rs` prove the tier's arithmetic; only this proves it plugs in.
     let embedder = OrderEmbedder {
         identity: EmbedderIdentity::new("test-model", "digest-test", 2)?,
+        measurability: Measurability::Complete,
     };
     let mut session =
         Session::with_resolver("semantic", order_flow()?, SemanticResolver::new(embedder))?;
@@ -689,6 +709,72 @@ fn a_degraded_resolver_reasks_without_claiming_absence() -> TestResult {
     assert_eq!(
         recorded, "Resolver unavailable: the embedder is unavailable",
         "the record names the cause rather than reporting an empty score"
+    );
+    Ok(())
+}
+
+#[test]
+fn an_unmeasurable_competitor_does_not_advance_the_session() -> TestResult {
+    // End to end through the real `SemanticResolver`, not a fixed verdict. The
+    // utterance and the competitor both embed to the zero vector: the width is
+    // right, so the dimension check passes, and no angle can be drawn from
+    // either. Before the repair this resolved to `Repeat last order` with a lead
+    // equal to its whole score — a winner over a one-option field it was never
+    // compared against — and the session advanced on it.
+    let identity = || EmbedderIdentity::new("test-model", "digest-test", 2);
+    let mut session = Session::with_resolver(
+        "semantic",
+        order_flow()?,
+        SemanticResolver::new(OrderEmbedder {
+            identity: identity()?,
+            measurability: Measurability::DegenerateCompetitor,
+        }),
+    )?;
+
+    session.answer("the usual")?;
+
+    assert_eq!(
+        session.current(),
+        Some("ask"),
+        "an incomplete comparison set must not advance the session"
+    );
+    assert_eq!(session.terminal(), None);
+    assert_eq!(
+        session.scope().get("order"),
+        None,
+        "no option was chosen, so the variable is not bound"
+    );
+    let recorded = session
+        .transcript()
+        .iter()
+        .find(|entry| entry.role() == "resolver-degraded")
+        .map(TranscriptEntry::text)
+        .unwrap_or_default();
+    assert_eq!(
+        recorded, "Resolver unavailable: an embedding could not be measured",
+        "the record names the unmeasurable embedding, not a missing dependency"
+    );
+
+    // The same flow with a healthy competitor set: one option is measured
+    // against both competitors and the session completes. Without this half the
+    // test could pass on a resolver that never advances at all.
+    let mut healthy = Session::with_resolver(
+        "semantic",
+        order_flow()?,
+        SemanticResolver::new(OrderEmbedder {
+            identity: identity()?,
+            measurability: Measurability::Complete,
+        }),
+    )?;
+    healthy.answer("the usual")?;
+    assert_eq!(
+        healthy.terminal(),
+        Some(&Terminal::Completed),
+        "the same utterance resolves once every comparison can be made"
+    );
+    assert_eq!(
+        healthy.scope().get("order"),
+        Some(&Value::Choice(String::from("Repeat last order")))
     );
     Ok(())
 }
