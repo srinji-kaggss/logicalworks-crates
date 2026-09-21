@@ -32,6 +32,12 @@ the rest of this document is about what the 100x buys and where it goes.
 | `fanout-1x64` | 4 390.8 | 49.7 | 88.83x | [87.89, 97.52] |
 | `wide-256x10` | 31 293.5 | 252.2 | 119.20x | [118.61, 122.36] |
 
+**This table predates two allocation and polling changes to the bot and has not
+been re-measured.** It is the record of the run this document was written
+around, not a statement about the current tree. The scenario names still
+resolve; the ratios are stale, and stale in the direction that understates the
+bot, because the changes removed work rather than adding it.
+
 Every interval excludes parity, so each of these is a distinguishable
 difference rather than noise. The `churn-64x1` interval is the widest, which is
 what a scenario whose cost depends on how much work the scheduler actually
@@ -140,7 +146,11 @@ This is a *correctness* observation and no timing can make it; the formal
 statement and proof are in `../proofs/`, and the claim is that the schedule is a
 function of its inputs.
 
-## A defect this rig found: `Auth::check` is super-linear
+## A defect this rig found: `Auth::check` was super-linear
+
+**These measurements were taken before the fix recorded at the end of this
+section, and have not been re-measured since.** They are kept because they are
+the evidence the fix was made on.
 
 | required caps | ns/call | ns per cap |
 |---:|---:|---:|
@@ -149,13 +159,13 @@ function of its inputs.
 | 32 | 1 029.85 | 32.18 |
 | 128 | 12 886.19 | 100.67 |
 
-`Auth::check` iterates the required capabilities and asks, for each, whether a
-`Vec<Cap>` contains it — a linear scan inside a linear scan. The cost grows
-**3 794x for a 128x increase in capabilities**, and a single check reaches
+`Auth::check` iterated the required capabilities and asked, for each, whether a
+`Vec<Cap>` contains it — a linear scan inside a linear scan. The cost grew
+**3 794x for a 128x increase in capabilities**, and a single check reached
 **12.9 microseconds** at 128 capabilities.
 
-The growth is not proportional to the capability count, and at large counts it
-fits a quadratic term closely: at 128 capabilities the measured 12 886 ns is
+The growth was not proportional to the capability count, and at large counts it
+fit a quadratic term closely: at 128 capabilities the measured 12 886 ns is
 within 1% of 128² scaled by the ~0.79 ns a single `Cap` string comparison costs
 in that loop. The small-count numbers are dominated by fixed call overhead — at
 one capability the whole check is 3.40 ns — which is why the headline growth
@@ -163,12 +173,20 @@ figure (3 794x) is *below* the 16 384x a pure quadratic would give. The
 quadratic term is what governs once the count is large, which is the regime the
 shipped configuration never reaches and a custom domain can.
 
-With the four shipped capabilities this is invisible (3.4 ns). It is a real
+With the four shipped capabilities this was invisible (3.4 ns). It was a real
 scalability limit for a custom domain that requires many, and `Cap::new` accepts
-any dotted name by convention, so nothing prevents one. The fix is
-straightforward — `required` is a set, so sorting it or storing a `HashSet`
-makes the check linear or constant — but it is not made here: this directory
-measures, and changing `cap.rs` is a separate, independently-reviewable change.
+any dotted name by convention, so nothing prevented one.
+
+**The fix has since landed, and it is the one this section proposed.** Capability
+lists are a set, so the sorted representation is now the only one:
+`Auth::new` sorts and de-duplicates at mint
+(`crates/lgwks-bot/src/cap.rs:365`), and both the membership question
+(`covers_cap`) and the coverage question (`uncovered`) are binary searches over
+that sorted slice (`crates/lgwks-bot/src/cap.rs:382`). The product the table above
+measures therefore moves from `required.len() * granted.len()` to
+`required.len() * log2(granted.len())`, paid once per mint rather than once per
+check. The derivation is stated on the type itself, at
+`crates/lgwks-bot/src/cap.rs:345`.
 
 ## What is deliberately excluded
 
