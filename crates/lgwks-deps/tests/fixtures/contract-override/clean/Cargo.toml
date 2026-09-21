@@ -1,0 +1,16 @@
+# One of the two isolated repositories the `check --contract` tests need.
+#
+# This one is *clean*: it authors no dependency edge at all, so it has nothing
+# to refuse and its own register approves nothing. That combination is what
+# makes it dangerous as an accidental audit target — a gate pointed here
+# reports success, and the subject the operator asked about is never looked at.
+#
+# `[workspace]` is not decoration. Without it Cargo walks up to this
+# repository's own workspace root and refuses the fixture as a package that
+# believes it is a member when it is not.
+[package]
+name = "clean"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]

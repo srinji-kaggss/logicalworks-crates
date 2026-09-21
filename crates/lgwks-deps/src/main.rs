@@ -21,6 +21,7 @@
 //! trips `clippy::print_stdout`, which the workspace forbids outright. The
 //! policy lives in one place (`settle`) instead of at each write site.
 
+use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -56,6 +57,10 @@ USAGE
              [--json]                  emit one JSON object on stdout and
                                        nothing on stderr; the exit code still
                                        carries the verdict
+  `check` parses its own arguments in one pass, and refuses rather than
+  guesses: a missing or repeated --contract value, an unknown --flag, or a
+  second PATH exits 2 without auditing anything. --contract's FILE is a
+  register and never the audit target, whichever order the two appear in.
   lgwks-deps invariants [PATH]         audit the optional invariant register
   lgwks-deps request <CRATE> <VERSION> print an approval block to fill in
   lgwks-deps init [PATH]               write a fail-closed starting register
@@ -88,39 +93,189 @@ fn settle(result: io::Result<ExitCode>) -> ExitCode {
     }
 }
 
-/// Splits `check`'s arguments into the path to audit and an optional
-/// `--contract` register override.
+/// What `check` was asked to do, after one consuming pass over its arguments.
 ///
-/// The first non-flag argument is the target; the value after `--contract` is
-/// the override. Anything else is ignored rather than rejected, so an
-/// unrecognised flag is a no-op instead of a hard failure on a path that is
-/// already diagnosed by `check` itself.
-fn parse_check_args(args: &[String]) -> (Option<PathBuf>, Option<PathBuf>, bool) {
-    // `--json` is a mode, not a value: it is read the same way here as in
-    // `freshness`, so the two commands cannot disagree about what it means.
-    let json_output = args.iter().any(|arg| arg == "--json");
-    let positional: Vec<&String> = args.iter().filter(|arg| !arg.starts_with("--")).collect();
-    let override_path = args
-        .iter()
-        .position(|arg| arg == "--contract")
-        // `position` yields an index strictly inside `args`, so its successor
-        // cannot overflow `usize`; `get` still bounds-checks it.
-        .and_then(|index| args.get(index.saturating_add(1)))
-        .map(PathBuf::from);
-    let target_path = positional
-        .first()
-        .map(|candidate| PathBuf::from(candidate.as_str()));
-    (target_path, override_path, json_output)
+/// The two path fields are separate and separately typed. An earlier revision
+/// read every token that did not start with `--` as positional, which made the
+/// *value* of `--contract` a candidate audit target as well as the register:
+/// `check --contract other/contract/APPROVED.toml` then discovered its
+/// repository root inside `other/` and reported a verdict for a tree nobody
+/// asked about. The register and the subject are different things and are now
+/// different fields, so no parse can conflate them.
+struct CheckArgs {
+    /// Repository to audit. `None` means the process working directory, which
+    /// is the documented default for an omitted `PATH`.
+    target: Option<PathBuf>,
+    /// Register to read instead of the target's own `contract/APPROVED.toml`.
+    /// Diagnosis only: a build always reads the register beside the code.
+    contract: Option<PathBuf>,
+    /// True when the verdict is rendered as one JSON object on stdout.
+    json: bool,
+}
+
+/// What one parse of `check`'s arguments resolved to.
+///
+/// An enum rather than a `help` flag on [`CheckArgs`]: a request to print the
+/// usage block has no audit target, and a bool would leave every consumer
+/// deciding what an empty target means when the flag is set.
+enum CheckRequest {
+    /// Audit a repository.
+    Audit(CheckArgs),
+    /// Print the usage block and exit successfully.
+    Help,
+}
+
+/// Why `check`'s arguments were refused.
+///
+/// Refusals rather than guesses. Every variant names the token that caused it,
+/// because the operator's next action is to look at that token, and every one
+/// of them used to be silently tolerated — which is how an option's value
+/// became the audited repository.
+enum CheckArgError {
+    /// An option that takes a value was the last argument.
+    MissingValue {
+        /// The option that needed a value.
+        flag: &'static str,
+    },
+    /// An option that takes a value was handed another option.
+    ///
+    /// `--contract --json` is a missing value, not a path named `--json`:
+    /// treating it as a path would silently redirect the register to a
+    /// filename that does not exist and turn a diagnosis into a refusal about
+    /// the wrong file. No usable path begins with `--`.
+    ValueLooksLikeOption {
+        /// The option that needed a value.
+        flag: &'static str,
+        /// The token it was handed instead.
+        value: String,
+    },
+    /// A value-taking option appeared twice.
+    DuplicateOverride {
+        /// The option that was repeated.
+        flag: &'static str,
+    },
+    /// A `--flag` this command does not define.
+    UnknownFlag {
+        /// The unrecognised token, verbatim.
+        flag: String,
+    },
+    /// A second positional argument.
+    SurplusTarget {
+        /// The extra token, verbatim.
+        value: String,
+    },
+}
+
+impl fmt::Display for CheckArgError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::MissingValue { flag } => {
+                write!(formatter, "{flag} needs a value: {flag} FILE")
+            }
+            Self::ValueLooksLikeOption { flag, ref value } => write!(
+                formatter,
+                "{flag} was given {value:?}, which is another option, not a path"
+            ),
+            Self::DuplicateOverride { flag } => write!(
+                formatter,
+                "{flag} was given more than once; `check` reads one register"
+            ),
+            Self::UnknownFlag { ref flag } => {
+                write!(formatter, "unknown option for `check`: {flag}")
+            }
+            Self::SurplusTarget { ref value } => write!(
+                formatter,
+                "`check` audits one repository, and {value:?} is a second path"
+            ),
+        }
+    }
+}
+
+/// Parses `check`'s arguments in one consuming pass.
+///
+/// The pass consumes each option's value, so a value can never also be read as
+/// the positional target. `PATH` may appear before or after the options and
+/// means the same thing either way; omitting it leaves [`CheckArgs::target`]
+/// as `None`, which [`run_check`] resolves to the working directory.
+///
+/// `--json` may repeat: it is a mode, and repeating a mode cannot change what
+/// the command does. `--contract` may not: two registers are two policies, and
+/// picking either one silently would make the verdict depend on argument order.
+/// The `--contract=FILE` spelling is not accepted — it is reported as an
+/// unknown option rather than parsed into a path, so a caller that guessed the
+/// wrong spelling is told instead of audited against the wrong file.
+fn parse_check_args(args: &[String]) -> Result<CheckRequest, CheckArgError> {
+    let mut target: Option<PathBuf> = None;
+    let mut contract: Option<PathBuf> = None;
+    let mut json = false;
+    let mut cursor = args.iter();
+    while let Some(argument) = cursor.next() {
+        match argument.as_str() {
+            "--help" | "-h" => return Ok(CheckRequest::Help),
+            "--json" => json = true,
+            "--contract" => {
+                if contract.is_some() {
+                    return Err(CheckArgError::DuplicateOverride { flag: "--contract" });
+                }
+                let Some(value) = cursor.next() else {
+                    return Err(CheckArgError::MissingValue { flag: "--contract" });
+                };
+                if value.starts_with("--") {
+                    return Err(CheckArgError::ValueLooksLikeOption {
+                        flag: "--contract",
+                        value: value.clone(),
+                    });
+                }
+                contract = Some(PathBuf::from(value));
+            }
+            flag if flag.starts_with("--") => {
+                return Err(CheckArgError::UnknownFlag {
+                    flag: flag.to_owned(),
+                });
+            }
+            // A single `-` token is a path, not an option: the only short flag
+            // this command defines is `-h`, which is matched above.
+            path => {
+                if target.is_some() {
+                    return Err(CheckArgError::SurplusTarget {
+                        value: path.to_owned(),
+                    });
+                }
+                target = Some(PathBuf::from(path));
+            }
+        }
+    }
+    Ok(CheckRequest::Audit(CheckArgs {
+        target,
+        contract,
+        json,
+    }))
 }
 
 /// Runs `check`, keeping the argument parsing out of the audit path.
+///
+/// A refused invocation prints the reason and the usage block and exits 2
+/// without auditing anything: the one thing it must never do is fall back to
+/// auditing something that parses.
 fn handle_check(
     args: &[String],
     out: &mut impl io::Write,
     err: &mut impl io::Write,
 ) -> io::Result<ExitCode> {
-    let (target_path, override_path, json_output) = parse_check_args(args);
-    run_check(target_path, override_path, json_output, out, err)
+    let request = match parse_check_args(args) {
+        Ok(request) => request,
+        Err(error) => {
+            writeln!(err, "lgwks-deps: {error}\n")?;
+            write!(err, "{USAGE}")?;
+            return Ok(ExitCode::from(2));
+        }
+    };
+    match request {
+        CheckRequest::Help => handle_help(out),
+        CheckRequest::Audit(parsed) => {
+            run_check(parsed.target, parsed.contract, parsed.json, out, err)
+        }
+    }
 }
 
 /// Prints the usage block and reports success.

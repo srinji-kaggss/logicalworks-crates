@@ -88,7 +88,7 @@ pub fn scan_source(source: &str, path: &str) -> Result<Vec<Hit>, ScanError> {
     })?;
     let mut hits = Vec::new();
     detect_error_swallow(source, &file, &mut hits);
-    detect_unlogged_err(source, &file, &mut hits);
+    detect_unlogged_err(&file, &mut hits);
     detect_allow_silence(&file, &mut hits);
     detect_long_try_chain(&file, &mut hits);
     detect_tautological_doc(&file, &mut hits);
@@ -1285,10 +1285,16 @@ impl<'ast> Visit<'ast> for ErrorSwallowVisitor<'_> {
 
 /// Macro and path prefixes that count as a log emission.
 ///
-/// Both forms are listed because the detector matches two ways: the textual
-/// window reads physical lines, where `tracing::warn!` appears with its path,
-/// while the AST statement check renders a macro path as `warn!(`. A marker
-/// absent from this list is a macro the detector does not treat as a signal.
+/// Both the path prefix (`tracing::`) and the bare macro name (`warn!(`) are
+/// listed because the one match site, [`stmt_is_log`], renders a macro path
+/// from the AST and then looks for either spelling in that rendering
+/// ([`macro_marker_text`]). A marker absent from this list is a macro the
+/// detector does not treat as a signal.
+///
+/// These markers are matched against *parsed statements* only. Nothing in this
+/// module matches them against raw source text, so a marker in a comment or a
+/// string literal is not a log: `syn` discards comments before any visitor
+/// runs, and a `syn::Lit::Str` is not a `syn::Macro`.
 const LOG_MARKERS: &[&str] = &[
     "tracing::",
     "log::",
@@ -1325,27 +1331,6 @@ fn is_direct_err_construction(expr: &syn::Expr) -> bool {
         .is_some_and(|segment| segment.ident == "Err")
 }
 
-/// True when a log marker appears within `window` physical lines above the
-/// return. Covers returns nested inside expressions, which the statement
-/// walk does not classify.
-fn has_log_within(source: &str, line_number: usize, window: usize) -> bool {
-    let start_line = line_number.saturating_sub(window);
-    for (index, line) in source.lines().enumerate() {
-        // `index` counts lines of an in-memory `&str`, so it is at most
-        // `source.len() - 1` and `index + 1` cannot exceed `usize::MAX`; the
-        // addition is saturating anyway so a caller-supplied source cannot
-        // make this wrap in a release build.
-        let current_line = index.saturating_add(1);
-        if current_line >= start_line
-            && current_line <= line_number
-            && contains_any(line, LOG_MARKERS)
-        {
-            return true;
-        }
-    }
-    false
-}
-
 /// Builds the finding for a `return Err(...)` that no log statement vouches
 /// for. The snippet is fixed rather than interpolated: CI printers key their
 /// remediation text off the rule name, and a stable snippet keeps that mapping
@@ -1354,7 +1339,7 @@ fn unlogged_err_hit(line_number: usize) -> Hit {
     Hit {
         rule: "unlogged-err-return",
         line: line_number,
-        snippet: "return Err(...) with no log emission before it in the same block — the caller sees only a value, not a signal. Log the error with enough context to diagnose it. Line wrapping does not matter: the check is on statements, not physical lines.".to_owned(),
+        snippet: "return Err(...) with no log emission that runs before it — the caller sees only a value, not a signal. Log the error with enough context to diagnose it. Wording, line wrapping, and formatting do not matter: the check reads parsed statements, never physical lines.".to_owned(),
     }
 }
 
@@ -1386,92 +1371,100 @@ fn stmt_is_log(stmt: &syn::Stmt) -> bool {
     contains_any(&macro_marker_text(mac), LOG_MARKERS)
 }
 
-/// Control flow severs adjacency: a log before an `if` does not vouch for an
-/// `Err` return after it.
-fn stmt_is_control_flow(stmt: &syn::Stmt) -> bool {
-    let syn::Stmt::Expr(ref expr, _) = *stmt else {
-        return false;
-    };
-    matches!(
-        expr,
-        syn::Expr::If(_)
-            | syn::Expr::Match(_)
-            | syn::Expr::While(_)
-            | syn::Expr::ForLoop(_)
-            | syn::Expr::Loop(_)
-    )
-}
-
-/// The line of a statement that is exactly `return Err(..)` and `None` for
-/// every other statement.
+/// Lines of `return Err(..)` that a log emission has already run before.
 ///
-/// A bare `return;` has no expression and a `return Ok(..)` is not an error, so
-/// both answer `None`; a `return` nested inside a larger expression is not a
-/// statement and is handled by the physical-line window instead.
-fn stmt_direct_err_return_line(stmt: &syn::Stmt) -> Option<usize> {
-    let syn::Stmt::Expr(syn::Expr::Return(ref ret), _) = *stmt else {
-        return None;
-    };
-    let inner = ret.expr.as_deref()?;
-    if !is_direct_err_construction(inner) {
-        return None;
-    }
-    Some(ret.span().start().line)
-}
-
-/// Lines of `return Err(...)` a log in the SAME BLOCK already explains.
-/// Formatting-immune where the physical window is not: a wrapped log macro
-/// is still one statement.
-/// Collects the lines of every `return Err(..)` that a log statement earlier in
-/// the same block already explains, across the whole file.
+/// The evidence is a log *statement* (see [`stmt_is_log`]) that executes
+/// unconditionally on the way into the return: either earlier in the same
+/// block, or in an enclosing block before the statement that encloses the
+/// return. A line absent from the set is a return no emitted diagnostic
+/// vouches for.
 ///
-/// The result is a set of line numbers rather than a per-block value because
-/// the physical-line window in [`ErrReturnWalker::check_return_expr`] looks at
-/// the file as text and cannot see block structure. A line absent from the set
-/// is a return no statement-level log vouches for.
-fn block_logged_return_lines(file: &syn::File) -> HashSet<usize> {
-    let mut walker = BlockWalker {
-        logged_returns: HashSet::new(),
+/// Three things are deliberately NOT evidence, and all three were evidence in
+/// an earlier revision that matched [`LOG_MARKERS`] against raw physical lines:
+///
+/// - Prose. `syn` discards comments before any visitor runs, so a commented
+///   `// tracing::warn!(..)` is invisible here; a string literal is a
+///   `syn::Lit`, not a `syn::Macro`, so `let s = "warn!(";` is invisible too.
+///   Neither emits a diagnostic, so neither may excuse an unobserved error.
+/// - A log on a path the return is not on. A log inside an untaken `if` branch
+///   is not a statement of the enclosing block and does not seal it, so the
+///   return after it stays unevidenced.
+/// - Physical proximity. Line numbers never enter this decision except as the
+///   identity of a return once its evidence has been established from
+///   structure, so reflowing the same program cannot change the verdict.
+///
+/// The walk is conservative in the direction a gate must be: a log it cannot
+/// place before the return leaves the return unevidenced, and an unevidenced
+/// return is reported.
+fn evidenced_err_return_lines(file: &syn::File) -> HashSet<usize> {
+    let mut walker = EvidenceWalker {
+        evidenced: HashSet::new(),
+        sealed: false,
     };
     walker.visit_file(file);
-    walker.logged_returns
+    walker.evidenced
 }
 
-/// Visit state for [`block_logged_return_lines`]: the set of return lines
-/// already vouched for by a log in their own block.
-struct BlockWalker {
-    /// Line numbers of `return Err(..)` statements preceded by a log statement
-    /// in the same block.
-    logged_returns: HashSet<usize>,
+/// Visit state for [`evidenced_err_return_lines`].
+struct EvidenceWalker {
+    /// Line numbers of `return Err(..)` expressions a log has already run
+    /// before.
+    evidenced: HashSet<usize>,
+    /// True when a log statement certainly runs before the node currently
+    /// being visited, on every path that reaches it.
+    sealed: bool,
 }
 
-impl<'ast> Visit<'ast> for BlockWalker {
+impl<'ast> Visit<'ast> for EvidenceWalker {
     fn visit_block(&mut self, block: &'ast syn::Block) {
-        self.scan_statements(block);
-        visit::visit_block(self, block);
-    }
-}
-
-impl BlockWalker {
-    /// Walks one block's statements in order, remembering whether a log has
-    /// been seen since the last control-flow statement.
-    ///
-    /// Control flow resets the flag: a log that ran in an earlier `if` branch
-    /// says nothing about a return reached by a different path, so a return
-    /// after an `if` / `match` / loop needs its own log to be explained.
-    fn scan_statements(&mut self, block: &syn::Block) {
-        let mut log_seen = false;
+        // A block inherits the seal of the statement that encloses it and
+        // raises it as its own statements are read. `sealed` never falls
+        // inside one block: a log statement that has already run stays run for
+        // every later statement, including one reached through a later `if`.
+        // A log inside a *branch* does not leak out, because the branch is a
+        // nested block with its own loop and this frame's `log_seen` is not
+        // shared with it.
+        let inherited = self.sealed;
+        let mut log_seen = inherited;
         for stmt in &block.stmts {
             if stmt_is_log(stmt) {
                 log_seen = true;
-            } else if let Some(line) = stmt_direct_err_return_line(stmt) {
-                if log_seen {
-                    self.logged_returns.insert(line);
-                }
-            } else if stmt_is_control_flow(stmt) {
-                log_seen = false;
+                continue;
             }
+            self.sealed = log_seen;
+            visit::visit_stmt(self, stmt);
+            self.sealed = inherited;
         }
+        self.sealed = inherited;
+    }
+
+    fn visit_expr_return(&mut self, node: &'ast syn::ExprReturn) {
+        if self.sealed
+            && let Some(ref inner) = node.expr
+            && is_direct_err_construction(inner)
+        {
+            self.evidenced.insert(node.span().start().line);
+        }
+        visit::visit_expr_return(self, node);
+    }
+
+    /// A function body starts unsealed: an enclosing block's log did not run
+    /// inside a function that may be called from anywhere, and a top-level
+    /// function has no enclosing block at all.
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        let saved = self.sealed;
+        self.sealed = false;
+        visit::visit_item_fn(self, node);
+        self.sealed = saved;
+    }
+
+    /// Same boundary as [`Self::visit_item_fn`], for an `impl` nested in a
+    /// block.
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        let saved = self.sealed;
+        self.sealed = false;
+        visit::visit_impl_item_fn(self, node);
+        self.sealed = saved;
     }
 }
 
@@ -1494,26 +1487,23 @@ fn is_test_attr(attributes: &[syn::Attribute]) -> bool {
 /// Runs the unlogged-error detector over a whole file, accumulating findings
 /// into the caller's `hits`.
 ///
-/// The block-level log map is computed once up front and shared by reference
-/// with every return the walk visits, so the two passes cannot disagree about
-/// which returns are already explained.
-fn detect_unlogged_err(source: &str, file: &syn::File, hits: &mut Vec<Hit>) {
-    let logged_returns = block_logged_return_lines(file);
+/// The evidence map is computed once up front and shared by reference with
+/// every return the walk visits, so the two passes cannot disagree about which
+/// returns are already explained.
+fn detect_unlogged_err(file: &syn::File, hits: &mut Vec<Hit>) {
+    let evidenced = evidenced_err_return_lines(file);
     let mut walker = ErrReturnWalker {
-        source,
         hits,
         test_scope_stack: Vec::new(),
-        logged_returns: &logged_returns,
+        evidenced_returns: &evidenced,
     };
     walker.visit_file(file);
 }
 
-/// Walker state for [`detect_unlogged_err`]: the source text the physical-line
-/// window reads, the accumulated findings, the enclosing fn test-ness stack,
-/// and the pre-computed set of log-explained return lines.
+/// Walker state for [`detect_unlogged_err`]: the accumulated findings, the
+/// enclosing fn test-ness stack, and the pre-computed set of returns an
+/// emitted log already covers.
 struct ErrReturnWalker<'a> {
-    /// Source text of the file being scanned, used for the line window.
-    source: &'a str,
     /// Findings accumulated during the walk, in visit order.
     hits: &'a mut Vec<Hit>,
     /// One entry per enclosing function, `true` when that function is test-only.
@@ -1521,9 +1511,9 @@ struct ErrReturnWalker<'a> {
     /// needed because an inner non-test fn inside a test module is still test
     /// code, and an inner test helper inside a production fn is still exempt.
     test_scope_stack: Vec<bool>,
-    /// Lines whose `return Err(..)` a log in the same block already explains,
-    /// computed once by [`block_logged_return_lines`].
-    logged_returns: &'a HashSet<usize>,
+    /// Lines whose `return Err(..)` a log statement runs before, computed once
+    /// by [`evidenced_err_return_lines`].
+    evidenced_returns: &'a HashSet<usize>,
 }
 
 impl ErrReturnWalker<'_> {
@@ -1547,12 +1537,13 @@ impl ErrReturnWalker<'_> {
     }
 
     /// Records a finding when a `return Err(..)` in production code has no log
-    /// statement in its block and no log marker within three physical lines
-    /// above it.
+    /// emission that runs before it.
     ///
-    /// Both checks run before the finding is pushed, so a return the block
-    /// walker already accepted is never reported by the window check and vice
-    /// versa: the two are alternatives, not cumulative evidence.
+    /// There is exactly one source of evidence — the statement walk in
+    /// [`evidenced_err_return_lines`] — so a return cannot be certified by
+    /// anything that is not an emitted diagnostic: not by a comment naming a
+    /// log macro, not by a string literal that spells one, and not by a log
+    /// statement sitting a few lines above on a path this return never takes.
     fn check_return_expr(&mut self, node: &syn::ExprReturn) {
         if self.is_scope_disabled() {
             return;
@@ -1564,10 +1555,7 @@ impl ErrReturnWalker<'_> {
             return;
         }
         let line_number = node.span().start().line;
-        if self.logged_returns.contains(&line_number) {
-            return;
-        }
-        if !has_log_within(self.source, line_number, 3) {
+        if !self.evidenced_returns.contains(&line_number) {
             self.hits.push(unlogged_err_hit(line_number));
         }
     }
@@ -2454,6 +2442,154 @@ pub fn count() -> usize {
             "fn f(x: bool) -> Result<(), E> {\n    if x {\n        eprintln!(\"bad\");\n        return Err(E::Flat);\n    }\n    Ok(())\n}\n",
         )?;
         assert!(!rules(&hits).contains(&"unlogged-err-return"), "{hits:?}");
+        Ok(())
+    }
+
+    /// Lines the unlogged-error rule reports, ascending.
+    ///
+    /// The line is asserted rather than the rule alone because the defect this
+    /// rule had was about *which* return it excused: a verdict that names the
+    /// wrong line, or names two where the program has one unobserved return,
+    /// is as wrong as a missing finding.
+    fn unlogged_lines(hits: &[Hit]) -> Vec<usize> {
+        hits.iter()
+            .filter(|hit| hit.rule == "unlogged-err-return")
+            .map(|hit| hit.line)
+            .collect()
+    }
+
+    // The issue-46 counterexample, verbatim: a comment that names a log macro
+    // on the error path. The program emits nothing, so the return is
+    // unobserved. Prose is not an emitted diagnostic and cannot excuse it.
+    const COMMENTED_MARKER: &str = "pub fn validate(reject: bool) -> Result<(), &'static str> {\n    if reject {\n        // tracing::warn!(\"this is a comment, not an emitted event\");\n        return Err(\"denied\");\n    }\n    Ok(())\n}\n";
+
+    // The same program with only the comment removed. Only the comment line
+    // number differs between the two, so a verdict that changes between them
+    // changed it because prose was doing the work.
+    const UNCOMMENTED_MARKER: &str = "pub fn validate(reject: bool) -> Result<(), &'static str> {\n    if reject {\n        return Err(\"denied\");\n    }\n    Ok(())\n}\n";
+
+    #[test]
+    fn a_comment_naming_a_log_macro_is_not_evidence() -> TestResult {
+        let commented = scan(COMMENTED_MARKER)?;
+        assert_eq!(
+            unlogged_lines(&commented),
+            vec![4],
+            "the return on line 4 emits nothing; a comment above it must not excuse it: {commented:?}"
+        );
+        let uncommented = scan(UNCOMMENTED_MARKER)?;
+        assert_eq!(
+            unlogged_lines(&uncommented),
+            vec![3],
+            "removing only a comment must not change the verdict, beyond the line shift: {uncommented:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_string_literal_spelling_a_log_macro_is_not_evidence() -> TestResult {
+        let hits = scan(
+            "fn f(x: bool) -> Result<(), E> {\n    if x {\n        let hint = \"tracing::warn!(\";\n        return Err(E::Flat);\n    }\n    Ok(())\n}\n",
+        )?;
+        assert_eq!(
+            unlogged_lines(&hits),
+            vec![4],
+            "a string that spells a log macro emits nothing: {hits:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_log_on_the_untaken_branch_is_not_evidence() -> TestResult {
+        let hits = scan(
+            "fn f(x: bool) -> Result<(), E> {\n    if x {\n        tracing::warn!(\"the other arm ran\");\n    }\n    return Err(E::Flat);\n}\n",
+        )?;
+        assert_eq!(
+            unlogged_lines(&hits),
+            vec![5],
+            "a log inside a branch the return is not on does not run before it: {hits:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_log_statement_after_the_return_is_not_evidence() -> TestResult {
+        let hits = scan(
+            "fn f(x: bool) -> Result<(), E> {\n    if x {\n        return Err(E::Flat);\n        tracing::warn!(\"unreachable\");\n    }\n    Ok(())\n}\n",
+        )?;
+        assert_eq!(
+            unlogged_lines(&hits),
+            vec![3],
+            "a log reached only after the return is not evidence for it: {hits:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_log_before_a_return_nested_in_a_match_is_evidence() -> TestResult {
+        let hits = scan(
+            "fn f(x: Option<u32>) -> Result<(), E> {\n    tracing::warn!(\"adding context\");\n    match x {\n        Some(_) => return Err(E::Flat),\n        None => {}\n    }\n    Ok(())\n}\n",
+        )?;
+        assert!(
+            unlogged_lines(&hits).is_empty(),
+            "a log that runs unconditionally before the match runs before a return inside it: {hits:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_log_inside_a_closure_body_is_evidence_for_that_body() -> TestResult {
+        let hits = scan(
+            "fn f() -> Result<(), E> {\n    let check = || {\n        tracing::warn!(\"bad\");\n        return Err(E::Flat);\n    };\n    check()\n}\n",
+        )?;
+        assert!(
+            unlogged_lines(&hits).is_empty(),
+            "the log is a statement of the closure's own block: {hits:?}"
+        );
+        Ok(())
+    }
+
+    /// Formatting is not evidence in either direction: the same two programs
+    /// written three ways must produce the same verdicts.
+    #[test]
+    fn reflowing_a_program_does_not_change_its_verdict() -> TestResult {
+        let flagged = [
+            "fn f(x: bool) -> Result<(), E> {\n    if x {\n        return Err(E::Flat);\n    }\n    Ok(())\n}\n",
+            "fn f(x: bool) -> Result<(), E> {\n    if x\n    {\n        return\n            Err(E::Flat);\n    }\n    Ok(())\n}\n",
+            "fn f(x: bool) -> Result<(), E> { if x { return Err(E::Flat); } Ok(()) }\n",
+        ];
+        for source in flagged {
+            let hits = scan(source)?;
+            assert_eq!(
+                unlogged_lines(&hits).len(),
+                1,
+                "every wrapping of an unobserved return reports it exactly once: {source:?} -> {hits:?}"
+            );
+        }
+        let clean = [
+            "fn f(x: bool) -> Result<(), E> {\n    tracing::warn!(\"x\");\n    return Err(E::Flat);\n}\n",
+            "fn f(x: bool) -> Result<(), E> {\n    tracing::warn!(\n        \"x\"\n    );\n    return Err(E::Flat);\n}\n",
+            "fn f(x: bool) -> Result<(), E> { tracing::warn!(\"x\"); return Err(E::Flat); }\n",
+        ];
+        for source in clean {
+            let hits = scan(source)?;
+            assert!(
+                unlogged_lines(&hits).is_empty(),
+                "a wrapped log macro is still one statement: {source:?} -> {hits:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A `#[test]`-annotated function is exempt from this rule; the fixture
+    /// above is not, so the exemption cannot be what produced the finding.
+    #[test]
+    fn the_counterexample_is_reported_because_it_is_not_a_test_fn() -> TestResult {
+        let source = format!("#[test]\n{COMMENTED_MARKER}");
+        let hits = scan(&source)?;
+        assert!(
+            unlogged_lines(&hits).is_empty(),
+            "the same body under #[test] is exempt: {hits:?}"
+        );
         Ok(())
     }
 

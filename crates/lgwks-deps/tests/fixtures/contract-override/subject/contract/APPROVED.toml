@@ -1,0 +1,6 @@
+# The subject's own register: enforcing, and approving nothing.
+#
+# It is deliberately as permissive as `clean`'s, so the *policy* the tests
+# audit under is not what changes the verdict — the inspected repository is.
+[policy]
+enforce = true
