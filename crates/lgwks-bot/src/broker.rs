@@ -36,6 +36,7 @@
 //! counter the broker invents.
 //!
 //! [`Broker::authorize`]: crate::broker::Broker::authorize
+//! [`Broker::revalidate`]: crate::broker::Broker::revalidate
 //! [`BrokerError::NeverIssued`]: crate::broker::BrokerError::NeverIssued
 //! [`BrokerError::Superseded`]: crate::broker::BrokerError::Superseded
 //! [`DurableAck`]: crate::journal::DurableAck
