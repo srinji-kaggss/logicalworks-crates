@@ -70,6 +70,8 @@ pub mod retry;
 /// RON encoding and decoding via serde (feature `ron`).
 #[cfg(feature = "ron")]
 pub mod ron;
+/// Pure, replaceable similarity metrics and weighted composition.
+pub mod similarity;
 /// Single-threaded executor: `block_on`, `join_all`, `spawn_blocking`.
 pub mod task;
 /// RFC 3339 timestamps and calendar math.
