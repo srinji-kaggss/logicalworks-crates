@@ -11,7 +11,7 @@
 //! smuggled inside a client.
 //!
 //! Jitter is caller-supplied (`u64` entropy the caller already holds, e.g.
-//! from [`random`](crate::random)) so `core` stays free of entropy sources:
+//! from `lgwks_std::random`) so `core` stays free of entropy sources:
 //!
 //! ```rust
 //! use std::time::Duration;

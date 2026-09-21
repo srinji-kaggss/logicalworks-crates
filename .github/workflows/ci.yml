@@ -140,7 +140,12 @@ jobs:
           RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
           -p lgwks_deps --features tokio-full
       - name: Doc build without default features
+        # lgwks_std is included because a module in `core` that links to a
+        # feature-gated module resolves under `--all-features` and breaks here.
+        # retry linked to `random` and only this lane could see it.
         run: >
+          RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
+          --manifest-path crates/lgwks-std/Cargo.toml --no-default-features &&
           RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
           --manifest-path crates/lgwks-bot/Cargo.toml --no-default-features &&
           RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked

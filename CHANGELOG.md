@@ -30,6 +30,15 @@ Documentation release. No API change in any crate. This supersedes 0.6.5 / 0.4.1
   intra-doc link targets, code fences, and fenced example content are byte
   identical to the previous release, so no documented example changed behaviour.
 
+### lgwks_std Fixed
+
+- The `retry` module documentation linked to `crate::random`, which is behind
+  the `random` feature. The link resolves under `--all-features`, so it built on
+  `docs.rs`, and it failed under `--no-default-features`. Found while verifying
+  this release; predates it. The module is now named in code font instead of
+  linked. The `docs` CI job gained a `lgwks_std` no-default-features doc build,
+  which is the lane that would have caught it.
+
 ### lgwks_deps Changed
 
 - The CLI help and admission-ladder text no longer carry internal vocabulary.
