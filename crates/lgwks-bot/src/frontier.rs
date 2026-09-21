@@ -68,9 +68,9 @@
 //! [`Frontier::next_admissible`] and [`Frontier::admit`] are two questions about
 //! the same state — *who is next* and *may I dispatch this one* — and they must
 //! not be able to disagree. They are one function here:
-//! [`Frontier::decide`], which takes `&self` and returns a [`Verdict`] with no
+//! `Frontier::decide`, which takes `&self` and returns a `Verdict` with no
 //! side effect at all. Selection returns a host only when that function says
-//! [`Verdict::Admit`]; reservation reserves only when it says the same, and
+//! `Verdict::Admit`; reservation reserves only when it says the same, and
 //! re-derives the keys itself. The alternative that shipped — a selector that
 //! reimplemented the predicate by hand — omitted the rules check, so a
 //! permanently disallowed lexicographically-first host was selected on every
@@ -97,8 +97,8 @@
 //!
 //! That section's expiry is time-driven, and a time-driven transition is the
 //! easiest place for two predicates to drift. It is computed in exactly one
-//! place — [`RulesState::effective`] — and *recorded* in exactly one place —
-//! [`Frontier::promote_rules`], when a reservation acts on the verdict that
+//! place — `RulesState::effective` — and *recorded* in exactly one place —
+//! `Frontier::promote_rules`, when a reservation acts on the verdict that
 //! computed it. The selector reads the same computation, so a host whose grace
 //! has expired is selectable at the same instant the gate would admit it, with
 //! no independently maintained approximation on either side.
@@ -280,8 +280,8 @@ impl RulesState {
     /// This state as it stands at `at`, with RFC 9309 §2.3.1.4's expiry applied.
     ///
     /// Side-effect free, and the single definition of the time-driven part of
-    /// the rules state machine: [`Frontier::decide`] reads it to form a verdict
-    /// and [`Frontier::promote_rules`] writes it down when a reservation acts on
+    /// the rules state machine: `Frontier::decide` reads it to form a verdict
+    /// and `Frontier::promote_rules` writes it down when a reservation acts on
     /// that verdict. Two copies of this rule — one for the selector and one for
     /// the gate — is how a host becomes selectable some finite time before it
     /// becomes admissible.
@@ -896,7 +896,7 @@ fn deferral_order(verdict: &Verdict) -> Option<(Duration, DeferralKind, &Constra
 /// touching wall-clock and get an identical result on every run.
 ///
 /// Not `Clone`: the reservation ledger is a single accounting, and a copy would
-/// be a second one that no permit can settle. See [`Issuer`].
+/// be a second one that no permit can settle. See `Issuer`.
 #[derive(Debug)]
 pub struct Frontier {
     /// The policy in force.
@@ -980,7 +980,7 @@ impl Frontier {
     /// The state as *recorded*, not as it stands at some instant: an
     /// unreachability whose grace has expired still reads as
     /// [`RulesState::Unreachable`] until something acts on it. Pass the instant
-    /// to [`Self::decide`] to get the verdict that expiry implies.
+    /// to `Self::decide` to get the verdict that expiry implies.
     #[must_use]
     pub fn rules(&self, key: &ConstraintKey) -> RulesState {
         self.state
@@ -1110,7 +1110,7 @@ impl Frontier {
     /// anything.
     ///
     /// The single admission predicate. [`Self::admit`] reserves only when this
-    /// says [`Verdict::Admit`], [`Self::next_admissible`] returns a host only
+    /// says `Verdict::Admit`, [`Self::next_admissible`] returns a host only
     /// when this says the same, and [`Self::next_prerequisite`] reports the
     /// deferrals that are work rather than waits. Every arm is a physical
     /// action; there is no fourth.
@@ -1188,7 +1188,7 @@ impl Frontier {
     /// The deferral for `key` at `at`, or `None` when it has room.
     ///
     /// Reads `&self` and creates nothing: a constraint nobody has exercised is
-    /// not yet owed a record, and [`Self::decide`] must stay free of the side
+    /// not yet owed a record, and `Self::decide` must stay free of the side
     /// effects that would make the selector and the gate two implementations.
     fn saturated(&self, key: &ConstraintKey, at: Duration) -> Option<Verdict> {
         let entry = self.state.get(key)?;
@@ -1216,7 +1216,7 @@ impl Frontier {
     /// [`Self::complete`] of the permit it was handed, once the request leaves
     /// flight.
     ///
-    /// The decision is [`Self::decide`]'s, not a second evaluation of the same
+    /// The decision is `Self::decide`'s, not a second evaluation of the same
     /// question: a caller that has already asked [`Self::next_admissible`] gets
     /// the same answer here on unchanged state, which is what lets a scheduler
     /// select and dispatch without maintaining a shadow predicate of its own.
@@ -1230,7 +1230,7 @@ impl Frontier {
     /// Takes the slots `decide` found free and mints the permit for them.
     ///
     /// Reached only from [`Self::admit`], immediately after that same call
-    /// returned [`Verdict::Admit`] — there is no second predicate here to
+    /// returned `Verdict::Admit` — there is no second predicate here to
     /// disagree with it. What this adds is the record: the exact keys reserved,
     /// the origin as it stood at this instant, and an identity the ledger
     /// recognises when the request completes.
@@ -1370,7 +1370,7 @@ impl Frontier {
     ///
     /// Returns the host and the deferral that held it, so the caller dispatches
     /// the fetch the kind names rather than guessing at it. Derives the same
-    /// [`Self::decide`] verdict as selection and admission; it is a view of one
+    /// `Self::decide` verdict as selection and admission; it is a view of one
     /// predicate, not a third one.
     #[must_use]
     pub fn next_prerequisite(&self, at: Duration) -> Option<(String, DeferralKind)> {
