@@ -100,6 +100,25 @@ explicitly under that crate.
 
 ### lgwks_bot Fixed
 
+- **A transition is bound to the observed payload it was opened under, and a
+  newer value is admitted only once it has nothing open.** Conditions were
+  evaluated and actions were run against the *newest* observation, while a
+  resumed transition kept the revision and the entries of the old one. A chain
+  whose first action succeeded and whose second refused under one input would
+  retry that second action under the *next* input, so one transition produced
+  effects of two different command inputs and reported itself as a single
+  finished unit of work — the acknowledgment of the first combined with an
+  effect of the second. The observation is now *moved* out of the fold's slot
+  and into the transition when it opens or resumes, every entry of that
+  transition reads the binding, and the slot stays empty for as long as the
+  binding is out on loan. It is moved rather than copied, so nothing here asks a
+  source's `Output` for `Clone`: `EcsObserveBuilder::observe` requires
+  `PartialEq + 'static` exactly as before. A movement that arrives mid-transition
+  is deferred, not dropped — it is still in the slot, and it becomes the next
+  transition's payload on the first tick after the current one drains. The
+  ledger becomes a non-send resource as a consequence, because the payload
+  travels inside the transition rather than in a second index that every
+  `take`, `put`, `begin`, `skip` and `fail` would have to keep in step.
 - **An abandoned entry is a barrier to its successors, and a tick over one is
   never clean.** `plan_chain` treated `Abandoned` like `Succeeded` and walked
   past it, so the entry behind a prerequisite that had been given up on ran

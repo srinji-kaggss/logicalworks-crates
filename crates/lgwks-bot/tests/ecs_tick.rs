@@ -1575,3 +1575,121 @@ fn an_abandoned_entry_blocks_its_successors() -> TestResult {
     );
     Ok(())
 }
+
+/// An action that refuses a fixed number of attempts, then succeeds.
+///
+/// Recording the value it ran against is the whole point here: the defect is an
+/// entry executed against a payload that did not come from the transition it
+/// belongs to, and the only way to see that is to look at what it received.
+/// Refusing rather than holding keeps the transition open across the movement
+/// without the effect being indeterminate, which is the shape the review's
+/// counterexample has.
+struct Grudging {
+    /// How many more attempts still refuse.
+    refusals: Rc<Cell<usize>>,
+    /// The value each attempt actually ran with, in the order it ran.
+    seen: Rc<RefCell<Vec<u32>>>,
+}
+
+impl Execute for Grudging {
+    type Input = u32;
+    type Output = ();
+
+    fn required_caps(&self) -> &[Cap] {
+        &[]
+    }
+
+    async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
+        call.0.check(Execute::required_caps(self))?;
+        self.seen.borrow_mut().push(*call.1);
+        let left = self.refusals.get();
+        if left > 0 {
+            self.refusals.set(left.saturating_sub(1));
+            return Err(BotError::DomainError {
+                domain: "test::grudging".to_owned(),
+                cause: "refused".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn domain_id(&self) -> &str {
+        "test::grudging"
+    }
+}
+
+/// An open transition is bound to the payload it was opened under.
+///
+/// The counterexample this closes, stated as the review states it: the source
+/// reports request A, the first entry succeeds against A and the second
+/// definitely fails against A, so the transition stays open with the second
+/// entry still owed an attempt. The next poll returns request B.
+///
+/// Before the repair the transition was retained — correctly, the work was
+/// still outstanding — but the walk and the driver both read the *newest*
+/// observed value, so the second entry's retry ran against B while the first
+/// entry had only ever run against A. The chain acknowledged A and then
+/// executed a B effect: two commands' effects in one transition, with nothing
+/// recording that they came from different inputs.
+///
+/// The invariant is that an open transition is bound to the payload it was
+/// opened (or resumed) under. Its entries are evaluated and executed only
+/// against that payload, and a newer observation is admitted only when the
+/// transition has nothing open. The movement is not lost by waiting: it is
+/// admitted on the tick after the outstanding work resolves, and the whole
+/// chain — including the entry that had already succeeded under A — runs
+/// against it.
+#[test]
+fn an_open_transition_is_bound_to_the_payload_it_was_opened_under() -> TestResult {
+    let value = Rc::new(Cell::new(1));
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let mut bot = Bot::builder("bound-payload")
+        .observe(Dial {
+            value: Rc::clone(&value),
+        })
+        .on(|_observed: &u32| true, Noted(Rc::clone(&seen)))
+        .on(
+            |_observed: &u32| true,
+            Grudging {
+                refusals: Rc::new(Cell::new(1)),
+                seen: Rc::clone(&seen),
+            },
+        )
+        .build(&GrantSet::empty())?;
+
+    // Request A: the first entry runs against it, the second refuses against it,
+    // and the transition stays open with the second entry still owed an attempt.
+    match bot.tick() {
+        Ok(fired) => return Err(format!("a refusal was reported as {fired} fired").into()),
+        Err(error) => assert!(
+            matches!(error, BotError::DomainError { .. }),
+            "expected the action's own error, got {error:?}"
+        ),
+    }
+    assert_eq!(*seen.borrow(), vec![1, 1], "both entries ran against A");
+
+    // Request B arrives while that work is outstanding.
+    value.set(2);
+
+    // The retry runs against A, because A is what the transition is bound to.
+    // It succeeds, so the transition has nothing open afterwards.
+    assert_eq!(bot.tick()?, 1, "the outstanding entry's retry runs");
+    assert_eq!(
+        *seen.borrow(),
+        vec![1, 1, 1],
+        "the retry of the second entry ran against A, not B: an open transition is bound to \
+         the payload it was opened under"
+    );
+
+    // B was not dropped for being unadmitted: it is admitted now that nothing is
+    // open, and the whole chain runs against it.
+    assert_eq!(bot.tick()?, 2, "the movement to B runs the chain against B");
+    assert_eq!(
+        *seen.borrow(),
+        vec![1, 1, 1, 2, 2],
+        "the first entry runs against B too, which is the half the defect skipped: it had \
+         acknowledged A, and a B effect must not be combined with that acknowledgment"
+    );
+    assert_eq!(bot.tick()?, 0, "and the chain is settled");
+    Ok(())
+}
