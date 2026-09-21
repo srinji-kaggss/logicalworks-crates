@@ -227,6 +227,18 @@ jobs:
           cat /tmp/docsrs_features.sh
           RUSTDOCFLAGS='-D warnings --cfg docsrs' sh -e /tmp/docsrs_features.sh
 
+      - name: llms.txt matches the documentation index
+        # `llms.txt` is generated from the README's own tables by
+        # `scripts/gen-llms-txt.py`. Regenerate and fail if the committed copy
+        # differs, so the index cannot drift from the documents it points at: a
+        # stale index is worse than none, because an agent trusts it and stops
+        # looking. The script also fails when a document in `docs/` is missing
+        # from the table, so a new document cannot be invisible to every reader
+        # that arrives through this file.
+        run: |
+          set -eu
+          python3 scripts/gen-llms-txt.py
+          git diff --exit-code -- llms.txt
       - name: Root README quickstart matches its compiled example
         run: |
           python - <<'PY'
