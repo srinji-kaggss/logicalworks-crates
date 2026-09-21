@@ -10,6 +10,8 @@
     "skills",
     "contract",
     "scripts",
+    "bench",
+    "proofs",
     ".cargo",
     ".github"
   ],
@@ -27,9 +29,11 @@
     "Async, timers, channels, and runners come from lgwks_bot. Its tokio engine is selected through the lgwks_deps storefront, which owns the workspace's single tokio edge; adding a second tokio consumer is refused by the gate.",
     "Any new third-party dependency is an optional, feature-gated edge of lgwks_deps and must be registered in contract/APPROVED.toml. Do not introduce a new owner crate or a new top-level crate for third-party code.",
     "lgwks_bot executes exactly four verbs: Observe, Evaluate, Execute, Query. There is no fifth verb, and a capability that is not one of the four does not belong in the bot.",
+    "Observe::fingerprint is opt-in and defaults to None, which polls every tick exactly as before. A source that can answer \"has this moved?\" from a key it already holds — an ETag, an mtime, a row version, a mutation counter — returns Some(u128) and the tick then never calls poll and never constructs the value. The contract is exact: equal fingerprints must imply equal values, or the substrate skips a real movement silently. Return None when producing the digest would cost a round trip, or when the key is not a faithful function of the value.",
     "Authority in lgwks_bot is proof-carrying. Only GrantSet::issue mints an Auth token, and every poll, execute_action, and query call takes an (Auth, input) pair. Evaluate takes no proof because it is pure.",
-    "Build bots with the Bot::builder DSL. BotSpec is validate-only and there is deliberately no from_spec materializer, so a spec that validates is still assembled through the builder where grants stay explicit.",
+    "Build bots with Bot::builder(name).observe(source).on(condition, action), ending in build(&grants). observe does not erase: the source stays a concrete S, so on types its condition and action against S::Output and a mismatched chain fails to compile rather than at runtime. BotSpec is validate-only and there is deliberately no from_spec materializer, so a spec that validates is still assembled through the builder where grants stay explicit.",
     "Use tracing for diagnostics. println! and eprintln! are forbidden in library code, and library code must not unwrap or expect on recoverable paths — return typed errors with ?.",
+    "A domain that fails returns BotError::DomainError { domain, certainty, cause }. The certainty: DispatchCertainty field is required, not optional: Refused means nothing was dispatched and nothing ever will be, NotDelivered means nothing reached the peer, and Unsettled means it may have taken effect so a retry is a possible duplicate. BotError::retry_class() reads it — Never, Safe, RequiresEvidence. State what the failure actually establishes; never parse a cause string to decide whether to retry.",
     "lgwks_ast is standalone and grandfathered. Do not grow it into a fourth dependency surface or route it through lgwks_deps."
   ]
 }
