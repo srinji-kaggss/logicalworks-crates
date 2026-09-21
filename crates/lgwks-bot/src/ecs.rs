@@ -544,6 +544,26 @@ pub enum EffectEvidence {
     NotApplied,
 }
 
+/// Renders the fact the caller established, not the enum arm, because these
+/// appear in refusal messages a person reads to decide whether their own
+/// observation was wrong: `applied` and `not applied` are what they were asked
+/// for, and `Applied`/`NotApplied` would make them translate.
+///
+/// Lives here rather than in `error.rs` for the same reason
+/// [`PendingWork`]'s does — the type owns its rendering, so a later variant
+/// cannot be interpolated anywhere unhandled.
+impl fmt::Display for EffectEvidence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Matched through a dereference rather than through the reference: the
+        // type is `Copy`, and `clippy::pattern_type_mismatch` is forbidden in
+        // this workspace.
+        f.write_str(match *self {
+            Self::Applied => "applied",
+            Self::NotApplied => "not applied",
+        })
+    }
+}
+
 /// How many times an entry whose effect definitely did not happen is attempted.
 ///
 /// A policy rather than a constant, because the right number is a property of
@@ -675,20 +695,76 @@ impl EntryState {
 }
 
 /// The work of one source transition: one state per entry of its chain.
-#[derive(Debug, Clone)]
+///
+/// Deliberately neither `Clone` nor a derived `Debug`: it owns the observed
+/// payload it is bound to, and that payload is erased. Copying a transition
+/// would quietly copy the payload with it — the very copy the sources are not
+/// required to support — and printing one would demand `Debug` of a type the
+/// source never promised it for. The manual [`fmt::Debug`] below renders the
+/// binding as its presence, which is the part a reader of a log wants.
 struct Transition {
     /// The revision that opened it.
     revision: u64,
     /// One state per entry of the chain, in declaration order.
     entries: Vec<EntryState>,
+    /// What evidence settled each entry, for the generation [`Self::revision`]
+    /// names, indexed as [`Self::entries`] is.
+    ///
+    /// The record is what makes a settlement idempotent and what makes a
+    /// contradicting one refusable, and neither is answerable from
+    /// [`EntryState`] alone: `Applied` and an attempt that returned `Ok` both
+    /// land on [`EntryState::Succeeded`], and `NotApplied` and an entry that
+    /// has not been reached both land on [`EntryState::NotStarted`]. Without
+    /// this, a caller whose first delivery was ambiguous cannot safely repeat
+    /// it — the repeat would read as evidence about an entry that was never
+    /// settled at all.
+    ///
+    /// Per generation, not per entry: it is cleared when a transition is opened
+    /// or resumed, because a settlement is a statement about one attempt and it
+    /// does not carry into the next.
+    settled: Vec<Option<EffectEvidence>>,
+    /// The observed payload this transition is bound to.
+    ///
+    /// The binding is the whole point of the field. One transition is one
+    /// generation of work over a chain, and every entry of it — the conditions
+    /// that are evaluated and the actions that are run — must see the value the
+    /// generation was opened under. Reading the newest observation instead
+    /// splits a transition across two inputs: an entry that was acknowledged
+    /// against the old value is retried against the new one, and the run ends
+    /// up reporting an effect of the new value that was actually produced from
+    /// the old.
+    ///
+    /// It is *moved* here out of the observation slot rather than copied from
+    /// it, which is why nothing in this module asks a source's `Output` to be
+    /// `Clone`. The observation slot is empty for exactly as long as a live
+    /// transition owns the value, and [`observe_fold`] reads the binding back
+    /// when it needs to know what the chain last acted on.
+    ///
+    /// `None` only for a transition opened while nothing had been observed —
+    /// there is then no payload to bind, and the entries are held rather than
+    /// evaluated against a value nobody read.
+    value: Option<Box<dyn Any>>,
+}
+
+impl fmt::Debug for Transition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Transition")
+            .field("revision", &self.revision)
+            .field("entries", &self.entries)
+            .field("settled", &self.settled)
+            .field("bound", &self.value.is_some())
+            .finish()
+    }
 }
 
 impl Transition {
-    /// A transition with every entry outstanding.
-    fn opened(revision: u64, entries: usize) -> Self {
+    /// A transition with every entry outstanding, bound to `value`.
+    fn opened(revision: u64, entries: usize, value: Option<Box<dyn Any>>) -> Self {
         Self {
             revision,
             entries: vec![EntryState::NotStarted; entries],
+            settled: vec![None; entries],
+            value,
         }
     }
 
@@ -698,7 +774,7 @@ impl Transition {
     /// given up on: those are terminal until evidence revives them, and
     /// carrying their record forward is what keeps a lost effect reported
     /// instead of silently dropped the moment the source moves.
-    fn resumed(revision: u64, previous: &Self) -> Self {
+    fn resumed(revision: u64, previous: &Self, value: Option<Box<dyn Any>>) -> Self {
         Self {
             revision,
             entries: previous
@@ -712,6 +788,8 @@ impl Transition {
                     _ => EntryState::NotStarted,
                 })
                 .collect(),
+            settled: vec![None; previous.entries.len()],
+            value,
         }
     }
 
@@ -729,6 +807,45 @@ impl Transition {
     }
 }
 
+/// What a settlement did to the ledger.
+///
+/// Four answers, because a caller's next move differs for each: [`Decided`] and
+/// [`Duplicate`] are both success, and the other three are three distinct
+/// refusals that must not be collapsed into one. Only [`NoSuchWork`] means
+/// "there is no held effect at this address"; a caller told that about an
+/// address it has a `PendingWork` for is being told its evidence is stale or
+/// contradictory, which is a different repair.
+///
+/// [`Decided`]: Settled::Decided
+/// [`Duplicate`]: Settled::Duplicate
+/// [`NoSuchWork`]: Settled::NoSuchWork
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Settled {
+    /// The named generation's entry was outstanding, and this evidence is now
+    /// its outcome.
+    Decided,
+    /// The named generation was already given exactly this evidence for this
+    /// entry. A caller that could not tell whether its first delivery landed
+    /// repeats it and must not be punished for the repetition, nor may the
+    /// repeat move the entry a second time.
+    Duplicate,
+    /// The named generation is not the one in the slot now: the work the caller
+    /// is reporting on was superseded, and the live transition is about a
+    /// different attempt with a different revision.
+    Superseded {
+        /// The revision the slot holds now.
+        current: u64,
+    },
+    /// The named generation's entry is settled, and this evidence says the
+    /// opposite of what settled it.
+    Contradicted {
+        /// The evidence already recorded for this generation.
+        settled: EffectEvidence,
+    },
+    /// No transition at this chain, or no such entry in the one that is there.
+    NoSuchWork,
+}
+
 /// The eligible work of the bot, keyed by chain.
 ///
 /// One transition per chain, and never one per revision: an entry's work cannot
@@ -736,7 +853,14 @@ impl Transition {
 /// would replay an acknowledged effect on the older one to reach an entry the
 /// newer one skipped. Bounded by construction — at most one state per entry of
 /// the spec, so the ledger cannot grow with the number of ticks.
-#[derive(Resource, Debug, Default)]
+///
+/// A non-send resource rather than a plain one, because a transition owns the
+/// observed payload it is bound to and `Box<dyn Any>` is neither `Send` nor
+/// `Sync`. The binding travels *inside* the transition deliberately: a second
+/// structure holding the payloads would have to be kept in step with this one
+/// through every `take`, `put`, `begin`, `skip` and `fail`, and the first path
+/// that forgot would silently re-bind a live transition to the wrong value.
+#[derive(Debug, Default)]
 struct Ledger {
     /// One live transition per chain, in declaration order.
     transitions: Vec<Option<Transition>>,
@@ -840,47 +964,118 @@ impl Ledger {
     }
 
     /// Settle an entry whose effect may or may not have happened.
-    fn settle(&mut self, id: WorkId, evidence: EffectEvidence) -> bool {
+    ///
+    /// The caller names the generation the evidence is about — the revision the
+    /// [`PendingWork`] they read carried — and nothing is read or written until
+    /// it matches the transition's own. This is not a formality. A chain has one
+    /// transition at a time and a slot is reused by every generation over it, so
+    /// a `(chain, entry)` that matches says only that the *address* is the same;
+    /// it says nothing about which attempt the caller is reporting on. A report
+    /// computed against revision N and delivered after the slot was re-opened at
+    /// revision N+1 would otherwise be accepted against work the caller has
+    /// never seen: `Applied` would acknowledge an effect at a generation that
+    /// never happened, and `NotApplied` — worse, because it authorises a retry —
+    /// would make an unknown attempt eligible to run again.
+    ///
+    /// Returns a decision about the named generation, not a bool, because the
+    /// four answers lead a caller to four different next actions and two of them
+    /// are not errors.
+    fn settle(&mut self, id: WorkId, revision: u64, evidence: EffectEvidence) -> Settled {
         let Some(transition) = self
             .transitions
             .get_mut(id.chain())
             .and_then(Option::as_mut)
         else {
-            return false;
+            return Settled::NoSuchWork;
         };
-        let Some(state) = transition.entries.get_mut(id.entry()) else {
-            return false;
-        };
-        match *state {
-            // Indeterminate: evidence is exactly what this needs.
-            EntryState::Unrecorded | EntryState::OutcomeUnknown { .. } => {}
-            // Given up on: evidence revives it, which is the caller's way to
-            // take back an abandonment they have since disproved.
-            EntryState::Abandoned { .. } => {}
+        // The generation first, before the entry is even looked up: an entry
+        // that matches inside a transition that does not is exactly the case
+        // this exists to refuse.
+        if transition.revision != revision {
+            return Settled::Superseded {
+                current: transition.revision,
+            };
+        }
+        let recorded = transition.settled.get(id.entry()).copied().flatten();
+        let settleable = matches!(
+            transition.entries.get(id.entry()),
+            Some(
+                EntryState::Unrecorded
+                    | EntryState::OutcomeUnknown { .. }
+                    | EntryState::Abandoned { .. }
+            )
+        );
+        if !settleable {
             // Decided: an entry that ran, one whose condition was false, one
             // that has not been attempted yet, and one with a live budget all
             // have an answer, and evidence supplied after the fact cannot
             // contradict an attempt whose outcome was recorded.
-            _ => return false,
+            //
+            // But an answer this *generation* was already given is not a
+            // contradiction, it is the same answer twice, and a caller whose
+            // first delivery it never saw an outcome for has to be able to
+            // repeat it. Only the record distinguishes that from a fresh claim
+            // about an entry that was never settled.
+            return match recorded {
+                Some(previous) if previous == evidence => Settled::Duplicate,
+                Some(previous) => Settled::Contradicted { settled: previous },
+                None => Settled::NoSuchWork,
+            };
         }
-        *state = match evidence {
+        let next = match evidence {
             EffectEvidence::Applied => EntryState::Succeeded,
             EffectEvidence::NotApplied => EntryState::NotStarted,
         };
-        true
+        if let Some(state) = transition.entries.get_mut(id.entry()) {
+            *state = next;
+        }
+        if let Some(slot) = transition.settled.get_mut(id.entry()) {
+            *slot = Some(evidence);
+        }
+        Settled::Decided
     }
 
-    /// The first entry that is open, in `(chain, entry)` order.
-    fn first_open(&self, budget: u32) -> Option<PendingWork> {
+    /// The payload the chain's live transition is bound to, if it has one.
+    ///
+    /// The binding is on loan from the observation slot, which is empty while
+    /// the transition holds it, so this is the only way to read back what the
+    /// chain last acted on. Two callers need that and they need it for the same
+    /// reason: the change filter, which cannot compare a new poll against a
+    /// slot that has nothing in it, and the executor, which must run an entry
+    /// against the value its transition was opened under rather than against
+    /// whatever has arrived since.
+    fn bound(&self, chain: usize) -> Option<&dyn Any> {
+        self.transitions
+            .get(chain)
+            .and_then(Option::as_ref)
+            .and_then(|transition| transition.value.as_deref())
+    }
+
+    /// The first entry that is unresolved, in `(chain, entry)` order.
+    ///
+    /// "Unresolved" is open *or* abandoned, and the second half is load-bearing.
+    /// An abandoned entry asks nothing of the substrate — it will not be
+    /// attempted again and no evidence is owed by the tick — so a scan that
+    /// looked only for open entries walked straight past it and reported a clean
+    /// tick. But abandoned work is not handled work: [`Self::pending`] names it,
+    /// and a caller that read `Ok` as "the chain is done" was reading the
+    /// opposite of what the ledger held. It is also a prerequisite that is *not*
+    /// satisfied, so the entries behind it are unresolved through it.
+    ///
+    /// Taking the first in declaration order is deliberate: the abandonment is
+    /// the entry that explains every successor blocked behind it, so naming it
+    /// is naming the reason.
+    fn first_unresolved(&self, budget: u32) -> Option<PendingWork> {
         for (chain, transition) in self.transitions.iter().enumerate() {
             let Some(transition) = transition.as_ref() else {
                 continue;
             };
             for (entry, state) in transition.entries.iter().enumerate() {
-                if !state.is_open() {
+                if !(state.is_open() || state.is_abandoned()) {
                     continue;
                 }
-                // Unreachable in practice: an open state always renders a hold.
+                // Unreachable in practice: an open or abandoned state always
+                // renders a hold.
                 let Some(hold) = state.hold(budget) else {
                     continue;
                 };
@@ -915,49 +1110,122 @@ impl Ledger {
         pending
     }
 
-    /// How many entries are still open, across every chain.
-    fn open_count(&self) -> usize {
+    /// How many entries are still unresolved, across every chain: open, or
+    /// abandoned and so still blocking whatever is behind them.
+    ///
+    /// Counted the same way [`Self::first_unresolved`] scans, because the two
+    /// are rendered together in [`BotError::PendingTransition`]: a count that
+    /// omitted abandoned entries would report a non-zero entry alongside an
+    /// "0 outstanding", which reads as the one thing the pair is there to rule
+    /// out — a chain that is somehow both stuck and finished.
+    fn unresolved_count(&self) -> usize {
         self.transitions
             .iter()
             .flatten()
             .flat_map(|transition| transition.entries.iter())
-            .filter(|state| state.is_open())
+            .filter(|state| state.is_open() || state.is_abandoned())
             .count()
     }
+}
+
+/// The revision the chain's source last moved to, or zero if it never has.
+fn revision_of(world: &World, chain: usize) -> u64 {
+    world
+        .resource::<Order>()
+        .0
+        .get(chain)
+        .and_then(|entity| world.get::<Revision>(*entity))
+        .map_or(0, |revision| revision.0)
+}
+
+/// Move the newest observation for `chain` out of its slot.
+///
+/// Moved, not copied. A source's `Output` carries no `Clone` bound and this is
+/// the reason it does not need one: the value is not wanted in two places at
+/// once. Once a transition is bound to it, the transition is what speaks for
+/// it, and the slot being empty is not a loss — it is the record that the value
+/// is out on loan, which [`observe_fold`] reads back through the binding.
+fn take_observed(world: &mut World, chain: usize) -> Option<Box<dyn Any>> {
+    let mut observed = world.non_send_mut::<Observed>();
+    observed.0.get_mut(chain).and_then(Option::take)
+}
+
+/// Whether the newest observation for `chain` should be admitted over the
+/// payload a retained transition is bound to.
+///
+/// The comparison is the chain's own, the same one the change filter uses, so
+/// "moved" means one thing in this substrate rather than two. It stands in for
+/// a `Changed<Revision>` test rather than supplementing one: a movement that
+/// arrives while the transition is open does bump the revision, but the change
+/// filter is consumed on the tick it is seen, so by the time the transition
+/// drains there is nothing left to consult — the observation itself is the only
+/// surviving record that the source moved at all.
+fn admits(world: &World, chain: usize, bound: Option<&dyn Any>) -> bool {
+    let seen = world.non_send::<Observed>();
+    let Some(next) = seen.0.get(chain).and_then(|slot| slot.as_deref()) else {
+        // Nothing to admit. An empty slot beside a transition that has nothing
+        // open is not a movement, and reading it as one would reopen the chain
+        // on every tick and run its entries forever.
+        return false;
+    };
+    let Some(bound) = bound else {
+        // Bound to nothing, and now there is something: that is a movement.
+        return true;
+    };
+    let chains = world.non_send::<Chains>();
+    chains
+        .0
+        .get(chain)
+        .is_some_and(|chain| !(chain.same)(bound, next))
 }
 
 /// The transition a chain should be walking this tick, if any.
 ///
 /// Three ways one exists: work is outstanding (walked whether or not the source
 /// moved — that is the whole point), the transition is kept only for an
-/// abandonment record and the source held still, or the source moved and a
-/// transition is opened or resumed.
+/// abandonment record and the newest observation is not admitted over it, or a
+/// transition is opened or resumed under an observation that is.
+///
+/// Opening and resuming are where the payload is bound, and both *take* it out
+/// of the observation slot. That is the mechanism that keeps a transition on
+/// one input: the entries it evaluates and runs read the binding, so a value
+/// that arrives mid-transition cannot reach them, however many ticks the
+/// transition takes to drain. The admission itself is then deferred rather than
+/// dropped — the newer observation is still sitting in the slot, and the tick
+/// after the transition stops being retained is the tick it becomes work.
 fn resume(
-    world: &World,
+    world: &mut World,
     chain: usize,
     moving: bool,
     held: Option<Transition>,
 ) -> Option<Transition> {
-    let revision = || {
-        world
-            .resource::<Order>()
-            .0
-            .get(chain)
-            .and_then(|entity| world.get::<Revision>(*entity))
-            .map_or(0, |revision| revision.0)
-    };
     match held {
+        // Outstanding work keeps the payload it was opened under. A newer
+        // observation is not admitted here, and deliberately: the entries
+        // still running were acknowledged against this one.
         Some(transition) if transition.has_open() => Some(transition),
-        Some(transition) if !moving => Some(transition),
-        Some(transition) => Some(Transition::resumed(revision(), &transition)),
-        None if moving => Some(Transition::opened(
-            revision(),
-            world
+        // Nothing open: the transition is only a name for the work of a
+        // generation that has finished. It gives way to the newest observation
+        // when that observation has actually moved away from its binding, and
+        // is otherwise kept exactly as it stands — abandonment record and all.
+        Some(transition) if !admits(world, chain, transition.value.as_deref()) => Some(transition),
+        Some(transition) => Some(Transition::resumed(
+            revision_of(world, chain),
+            &transition,
+            take_observed(world, chain),
+        )),
+        None if moving => {
+            let entries = world
                 .non_send::<Chains>()
                 .0
                 .get(chain)
-                .map_or(0, |chain| chain.entries.len()),
-        )),
+                .map_or(0, |chain| chain.entries.len());
+            Some(Transition::opened(
+                revision_of(world, chain),
+                entries,
+                take_observed(world, chain),
+            ))
+        }
         None => None,
     }
 }
@@ -1026,16 +1294,30 @@ fn observe_fold(world: &mut World) {
     let changed: Vec<bool> = {
         let chains = world.non_send::<Chains>();
         let seen = world.non_send::<Observed>();
+        let ledger = world.non_send::<Ledger>();
         values
             .iter()
             .enumerate()
-            .map(
-                |(index, next)| match seen.0.get(index).and_then(Option::as_ref) {
-                    // No remembered value: this source has, by definition, changed.
+            .map(|(index, next)| {
+                // The comparison baseline is what the chain last acted on, and
+                // once a transition owns the payload its slot is empty. Reading
+                // that emptiness as "changed" would be a trap the whole binding
+                // falls into: every tick after an admission would count as a
+                // movement, bump the revision again, and open the chain afresh
+                // forever. So the fall back is to the binding itself, which is
+                // the same value by a different route.
+                let baseline = seen
+                    .0
+                    .get(index)
+                    .and_then(|slot| slot.as_deref())
+                    .or_else(|| ledger.bound(index));
+                match baseline {
+                    // No remembered value, and no transition holding one: this
+                    // source has, by definition, changed.
                     None => true,
-                    Some(previous) => !(chains.0[index].same)(previous.as_ref(), next.as_ref()),
-                },
-            )
+                    Some(previous) => !(chains.0[index].same)(previous, next.as_ref()),
+                }
+            })
             .collect()
     };
 
@@ -1109,7 +1391,7 @@ fn fire_plan(world: &mut World) {
     let mut failures: Vec<Option<BotError>> = (0..count).map(|_| None).collect();
 
     for index in 0..count {
-        let held = world.resource_mut::<Ledger>().take(index);
+        let held = world.non_send_mut::<Ledger>().take(index);
         let Some(transition) = resume(
             world,
             index,
@@ -1121,35 +1403,27 @@ fn fire_plan(world: &mut World) {
 
         // The borrow of the world for the walk is scoped: `Ledger::take` above
         // and `Ledger::put` below each need it mutably, while the walk needs the
-        // chains and the observed value immutably. Nothing is written to the
-        // transition here — every state that depends on an attempt is written by
-        // the driver, which is the only place that knows the outcome.
+        // chains and the transition's binding immutably. Nothing is written to
+        // the transition here — every state that depends on an attempt is
+        // written by the driver, which is the only place that knows the outcome.
         {
             let chains = world.non_send::<Chains>();
-            let observed = world.non_send::<Observed>();
             if let (Some(chain), Some(value), Some(failure)) = (
                 chains.0.get(index),
-                observed.0.get(index).and_then(Option::as_ref),
+                transition.value.as_deref(),
                 failures.get_mut(index),
             ) {
-                plan_chain(
-                    chain,
-                    &transition,
-                    value.as_ref(),
-                    index,
-                    &mut steps,
-                    failure,
-                );
+                plan_chain(chain, &transition, value, index, &mut steps, failure);
             }
-            // No chain, or a source that has never answered: the work is kept,
-            // not discarded. A transition exists only for a source that was
-            // polled, so this is a world that was mutated behind the schedule's
-            // back.
+            // No chain, or a transition bound to nothing: the work is kept,
+            // not discarded. A transition is opened only for a source that was
+            // polled, so a chain with no value bound to it is a world that was
+            // mutated behind the schedule's back.
         }
 
         let retained = transition.is_retained();
         world
-            .resource_mut::<Ledger>()
+            .non_send_mut::<Ledger>()
             .put(index, if retained { Some(transition) } else { None });
     }
 
@@ -1185,9 +1459,25 @@ fn plan_chain(
             continue;
         };
         match *state {
-            // Decided. An entry that ran, one whose condition was false, and one
-            // given up on are all behind us, so the chain continues past them.
-            EntryState::Succeeded | EntryState::Skipped | EntryState::Abandoned { .. } => continue,
+            // Decided, and the chain continues past it: an entry that ran, and
+            // one whose condition was false. Both are facts about the entry that
+            // leave the entry behind it with nothing standing in its way.
+            EntryState::Succeeded | EntryState::Skipped => continue,
+            // Given up on, and a *barrier* to everything behind it. This is the
+            // line between declaration order and success dependency, and it is
+            // the one this walk used to get wrong: an entry in a chain is a
+            // prerequisite of the next, so an abandonment is the strongest
+            // possible statement that the entry behind it must not run — the
+            // draft was never reserved, so there is nothing to send. Continuing
+            // past it completed a command whose prerequisite had been given up
+            // on.
+            //
+            // The successors are not lost or forgotten by stopping here. They
+            // stay `NotStarted`, so [`Ledger::pending`] keeps reporting them and
+            // the tick that finds them names the abandonment in front of them.
+            // The way past it is evidence: `NotApplied` revives the entry, and
+            // the successors with it.
+            EntryState::Abandoned { .. } => break,
             // Held: the effect may be live and only evidence settles that. A
             // later entry is not run ahead of it.
             EntryState::Unrecorded | EntryState::OutcomeUnknown { .. } => break,
@@ -1446,12 +1736,14 @@ impl EcsBot {
         // one the budget gave up on — is held, and a held entry is reported
         // rather than passed over in silence: a caller that read a clean `Ok` as
         // "the transition was handled" would be reading something that is not
-        // true.
-        let ledger = self.world.resource::<Ledger>();
-        match ledger.first_open(budget) {
+        // true. That includes an abandonment, which is the case this used to
+        // miss: it asks the tick for nothing, so it looks finished from inside
+        // the walk, but it is work nobody resolved.
+        let ledger = self.world.non_send::<Ledger>();
+        match ledger.first_unresolved(budget) {
             Some(work) => Err(BotError::PendingTransition {
                 work,
-                outstanding: ledger.open_count(),
+                outstanding: ledger.unresolved_count(),
             }),
             None => Ok(self.world.resource::<Fired>().0),
         }
@@ -1619,7 +1911,7 @@ impl EcsBot {
             };
             let attempts = match step.decision {
                 Decision::Skip => {
-                    self.world.resource_mut::<Ledger>().skip(work);
+                    self.world.non_send_mut::<Ledger>().skip(work);
                     continue;
                 }
                 Decision::Attempt { attempts } => attempts,
@@ -1631,7 +1923,7 @@ impl EcsBot {
             // effect instead of replaying it. A panic unwinding out of the action
             // is a limit this substrate does not close, and it is stated in the
             // module documentation.
-            if !self.world.resource_mut::<Ledger>().begin(work) {
+            if !self.world.non_send_mut::<Ledger>().begin(work) {
                 // The entry is not in a state an attempt can start from, so the
                 // world moved behind the schedule's back. The run stops here
                 // rather than guessing what the entry now means.
@@ -1640,19 +1932,25 @@ impl EcsBot {
 
             // Scoped, so the world is borrowed immutably only across the await
             // and the ledger is reachable mutably on either side of it.
+            //
+            // The value is the transition's binding, not the newest observation.
+            // That is the whole of the invariant: this entry was *selected*
+            // against the payload its transition was opened under, so it has to
+            // be *run* against that same payload. Reading the observation slot
+            // here is how a chain comes to refuse against one input and then
+            // retry against another, combining two command inputs into one
+            // transition's effects. The slot is empty for as long as the binding
+            // is out on loan, so there is nothing to reach for by accident.
             let outcome = {
                 let chains = self.world.non_send::<Chains>();
-                let observed = self.world.non_send::<Observed>();
                 let grants = self.world.resource::<Grants>();
-                match (
-                    chains.0.get(step.chain),
-                    observed.0.get(step.chain).and_then(Option::as_ref),
-                ) {
+                let bound = self.world.non_send::<Ledger>().bound(step.chain);
+                match (chains.0.get(step.chain), bound) {
                     (Some(chain), Some(value)) => match chain.entries.get(step.entry) {
-                        Some(entry) => Some(entry.action.run_any(&grants.0, value.as_ref()).await),
+                        Some(entry) => Some(entry.action.run_any(&grants.0, value).await),
                         None => None,
                     },
-                    // No chain, or a source that has never answered: the entry
+                    // No chain, or a transition bound to nothing: the entry
                     // stays held by the record written above rather than being
                     // guessed at.
                     _ => None,
@@ -1664,13 +1962,13 @@ impl EcsBot {
             };
             match outcome {
                 Ok(_) => {
-                    if self.world.resource_mut::<Ledger>().succeed(work) {
+                    if self.world.non_send_mut::<Ledger>().succeed(work) {
                         fired = fired.saturating_add(1);
                     }
                 }
                 Err(error) => {
                     self.world
-                        .resource_mut::<Ledger>()
+                        .non_send_mut::<Ledger>()
                         .fail(work, &error, attempts, budget);
                     failure = Some(error);
                     break;
@@ -1692,7 +1990,7 @@ impl EcsBot {
     #[must_use]
     pub fn pending(&self) -> Vec<PendingWork> {
         let budget = self.world.resource::<Policy>().0.max_attempts();
-        self.world.resource::<Ledger>().pending(budget)
+        self.world.non_send::<Ledger>().pending(budget)
     }
 
     /// Settle an entry whose effect may or may not have happened.
@@ -1706,6 +2004,17 @@ impl EcsBot {
     /// An entry that was given up on accepts evidence too, which is how a
     /// caller revives work the attempt budget abandoned.
     ///
+    /// `revision` names the generation the evidence is about: the
+    /// [`PendingWork::revision`] of the [`pending`](Self::pending) entry the
+    /// caller read. It is required, and compared before anything is read or
+    /// written, because a chain reuses one slot for every generation over it. A
+    /// delayed report about revision N delivered after the slot re-opened at
+    /// revision N+1 would otherwise land on an attempt the caller has never
+    /// seen — `Applied` acknowledging an effect at a generation that never
+    /// happened, `NotApplied` making an unknown attempt eligible to run again.
+    /// Passing the revision that came with the work is what makes the delivery
+    /// safe to retry.
+    ///
     /// # Errors
     ///
     /// [`BotError::NoSuchWork`] when the entry is not held: it ran, its
@@ -1713,15 +2022,46 @@ impl EcsBot {
     /// transition at all. Evidence cannot contradict an attempt whose outcome
     /// was recorded, and accepting it silently would let a caller believe an
     /// effect was acknowledged when nothing was.
+    ///
+    /// [`BotError::EvidenceSuperseded`] when the chain holds a transition whose
+    /// revision is not `revision` — the work the caller is reporting on was
+    /// superseded, and nothing was changed. Re-read
+    /// [`pending`](Self::pending) and report against the generation that is
+    /// there now.
+    ///
+    /// [`BotError::EvidenceContradicted`] when this generation's entry was
+    /// already settled with the opposite evidence. Nothing was changed:
+    /// [`Applied`](EffectEvidence::Applied) does not become
+    /// [`NotApplied`](EffectEvidence::NotApplied), or the reverse, after the
+    /// fact. Repeating the *same* evidence is not a contradiction and succeeds
+    /// idempotently, so a caller that never saw its first delivery through can
+    /// safely send it again.
     pub fn resolve_effect(
         &mut self,
         work: WorkId,
+        revision: u64,
         evidence: EffectEvidence,
     ) -> Result<(), BotError> {
-        if self.world.resource_mut::<Ledger>().settle(work, evidence) {
-            Ok(())
-        } else {
-            Err(BotError::NoSuchWork { work })
+        match self
+            .world
+            .non_send_mut::<Ledger>()
+            .settle(work, revision, evidence)
+        {
+            // Both are success, and deliberately one arm: to the caller, a
+            // repeat that landed a second time is the same fact as one that
+            // landed the first.
+            Settled::Decided | Settled::Duplicate => Ok(()),
+            Settled::Superseded { current } => Err(BotError::EvidenceSuperseded {
+                work,
+                named: revision,
+                current,
+            }),
+            Settled::Contradicted { settled } => Err(BotError::EvidenceContradicted {
+                work,
+                settled,
+                submitted: evidence,
+            }),
+            Settled::NoSuchWork => Err(BotError::NoSuchWork { work }),
         }
     }
 }
@@ -1934,8 +2274,9 @@ impl EcsBot {
         // Not `vec![None; count]`: `Box<dyn Any>` is not `Clone`, so the
         // repeat-form macro cannot build this.
         world.insert_non_send(Observed((0..count).map(|_| None).collect()));
-        // The eligible work of the bot, one idle slot per chain.
-        world.insert_resource(Ledger::with_chains(count));
+        // The eligible work of the bot, one idle slot per chain. Non-send,
+        // because each transition owns the observed payload it is bound to.
+        world.insert_non_send(Ledger::with_chains(count));
         // The two staging resources the awaited phases hand to the schedule.
         // Inserted here rather than at first use so every phase can name them
         // unconditionally: a phase that found one missing would have to decide
@@ -2568,27 +2909,62 @@ mod tests {
             "the given-up-on entry is named after the tick that gave up on it"
         );
 
-        // And the work it was holding back is not lost with it. The walk stops
-        // at the attempt that spent the budget, so the successor runs on the
-        // next tick, which reports it rather than leaving it to an unchanged
-        // source that would never come.
+        // And the work it was holding back is not lost with it — but it is not
+        // run either. The walk stops at the attempt that spent the budget, and
+        // the abandonment it leaves is a barrier: the successor stays
+        // `NotStarted` behind it and stays reported.
+        //
+        // These two assertions used to read `assert_eq!(bot.tick()?, 1, "the
+        // unattempted work runs as soon as the entry ahead of it is decided")`
+        // followed by `assert_eq!(*log.borrow(), vec![200])`, and later
+        // `assert_eq!(bot.tick()?, 0, "the resolved transition fires nothing")`
+        // while `pending()` was non-empty. Both are the F02 defect written down
+        // as the intent — a successor executed past an abandoned prerequisite,
+        // and a clean tick reported over work the ledger still names. They are
+        // corrected rather than loosened: the tick is now expected to refuse
+        // where it was expected to succeed.
         assert!(
             log.borrow().is_empty(),
             "the successor is not run ahead of the entry that was just decided"
         );
-        assert_eq!(
-            bot.tick()?,
-            1,
-            "the unattempted work runs as soon as the entry ahead of it is decided"
-        );
-        assert_eq!(*log.borrow(), vec![200], "and that effect happens once");
-
-        // Terminal, and the rest of the chain is resolved, so the transition is
-        // clean from here — except that the abandoned entry stays listed.
-        assert_eq!(bot.tick()?, 0, "the resolved transition fires nothing");
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(format!(
+                    "a tick with an abandoned prerequisite reported {fired} fired and ran {:?}",
+                    log.borrow()
+                )
+                .into());
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::PendingTransition { .. }),
+                "expected the unresolved chain to be reported, got {error:?}"
+            ),
+        }
         assert!(
-            identities(&bot) == vec![(0, 0)],
-            "the abandoned entry is all that is left to report: {:?}",
+            log.borrow().is_empty(),
+            "the unattempted work does not run past the entry that was given up on"
+        );
+
+        // Terminal, and the rest of the chain is blocked behind it, so the
+        // transition stays reported: the abandonment first, because it is the
+        // entry that explains the one behind it.
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(format!(
+                    "an abandoned entry was reported as {fired} fired while pending() still \
+                     names it: {:?}",
+                    bot.pending()
+                )
+                .into());
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::PendingTransition { .. }),
+                "expected the unresolved chain to be reported, got {error:?}"
+            ),
+        }
+        assert!(
+            identities(&bot) == vec![(0, 0), (0, 1)],
+            "the abandoned entry and the entry it blocks are what is left to report: {:?}",
             bot.pending()
         );
         Ok(())
@@ -2620,13 +2996,60 @@ mod tests {
             "the entry behind the abandoned one is not run in the tick that abandoned it"
         );
 
-        assert_eq!(
-            bot.tick()?,
-            1,
-            "the next tick runs the work the abandoned entry was holding back"
-        );
-        assert_eq!(*log.borrow(), vec![200], "that effect happened once");
+        // The next tick does not run what the abandoned entry was holding back,
+        // and does not report a clean tick either. This assertion used to read
+        // `assert_eq!(bot.tick()?, 1, "the next tick runs the work the abandoned
+        // entry was holding back")`, which is the defect written down as the
+        // intent: an abandonment is a prerequisite that is *not* satisfied, so
+        // the send behind an unreserved draft must not run. It is corrected
+        // rather than loosened — the tick is now expected to refuse, which is
+        // strictly more than it was expected to do before.
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(format!(
+                    "a tick with an abandoned prerequisite reported {fired} fired and ran {:?}",
+                    log.borrow()
+                )
+                .into());
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::PendingTransition { .. }),
+                "expected the unresolved chain to be reported, got {error:?}"
+            ),
+        }
         assert_eq!(attempts.get(), 1, "the abandoned entry is not retried");
+        assert!(
+            log.borrow().is_empty(),
+            "the successor of an abandoned entry is not attempted while it stands abandoned"
+        );
+        assert_eq!(
+            identities(&bot),
+            vec![(0, 0), (0, 1)],
+            "the abandonment and the entry it blocks are both still reported: {:?}",
+            bot.pending()
+        );
+
+        // Evidence that the effect did not happen is the way past the barrier:
+        // the entry becomes eligible again and its successor with it. The
+        // action refuses once more, so this tick abandons it again — which is
+        // the point of asserting it: evidence reopens the chain, it does not
+        // promise the retry will succeed.
+        let blocked = bot.pending().into_iter().next().ok_or("held")?;
+        bot.resolve_effect(blocked.id(), blocked.revision(), EffectEvidence::NotApplied)?;
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(format!("a refusal was reported as {fired} fired").into());
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::DomainError { .. }),
+                "expected the retry's own error, got {error:?}"
+            ),
+        }
+        assert_eq!(attempts.get(), 2, "the revived entry attempted again");
+        assert!(
+            log.borrow().is_empty(),
+            "and the successor is behind the barrier again, because the retry failed too"
+        );
         Ok(())
     }
 
@@ -2736,13 +3159,15 @@ mod tests {
         );
 
         // Evidence that it did not happen: the entry becomes eligible again and
-        // the attempt finally lands.
+        // the attempt finally lands. The revision the report carries is passed
+        // back with the identity, which is what makes this delivery sound: the
+        // evidence is about the generation the caller was shown.
         let held = bot
             .pending()
-            .first()
-            .map(PendingWork::id)
+            .into_iter()
+            .next()
             .ok_or("the held entry disappeared from the report")?;
-        bot.resolve_effect(held, EffectEvidence::NotApplied)?;
+        bot.resolve_effect(held.id(), held.revision(), EffectEvidence::NotApplied)?;
         assert_eq!(bot.tick()?, 1, "the entry runs once evidence authorises it");
         assert_eq!(*log.borrow(), vec![200], "the effect happened, once");
         assert!(
@@ -2785,10 +3210,10 @@ mod tests {
 
         let held = bot
             .pending()
-            .first()
-            .map(PendingWork::id)
+            .into_iter()
+            .next()
             .ok_or("the held entry is not reported")?;
-        bot.resolve_effect(held, EffectEvidence::Applied)?;
+        bot.resolve_effect(held.id(), held.revision(), EffectEvidence::Applied)?;
         assert_eq!(
             bot.tick()?,
             0,
@@ -2807,13 +3232,18 @@ mod tests {
 
         // Evidence about an entry that is not held is refused rather than
         // silently accepted: a caller that thinks it acknowledged something
-        // needs to find out that it did not.
-        match bot.resolve_effect(held, EffectEvidence::Applied) {
+        // needs to find out that it did not. The generation is still named
+        // here, and the refusal is still `NoSuchWork` rather than a generation
+        // complaint — the tick above resolved the transition and dropped its
+        // slot, so there is genuinely no held effect at this address. That
+        // distinction is the whole reason the two new refusals exist.
+        match bot.resolve_effect(held.id(), held.revision(), EffectEvidence::Applied) {
             Ok(()) => Err("evidence was accepted for an entry that is not held".into()),
             Err(error) => {
                 assert!(
-                    matches!(error, BotError::NoSuchWork { work } if work == held),
-                    "expected NoSuchWork for {held:?}, got {error:?}"
+                    matches!(error, BotError::NoSuchWork { work } if work == held.id()),
+                    "expected NoSuchWork for {:?}, got {error:?}",
+                    held.id()
                 );
                 Ok(())
             }
@@ -2824,9 +3254,10 @@ mod tests {
     fn a_source_that_moves_while_work_is_outstanding_neither_loses_nor_duplicates_it() -> TestResult
     {
         // Two movements while work is outstanding, and then a movement after it
-        // resolves. The value the entries read is the newest one; the effect
-        // that already happened is not replayed; and the chain is not wedged
-        // afterwards — the next movement is a new transition over every entry.
+        // resolves. An entry the transition is *holding* reads the payload the
+        // transition was opened under — not the newest one — while an entry in a
+        // new transition reads the newest; the effect that already happened is
+        // not replayed; and the chain is not wedged afterwards.
         let first = Rc::new(RefCell::new(Vec::new()));
         let second = Rc::new(RefCell::new(Vec::new()));
         let mut bot = EcsBot::builder("moving")
@@ -2854,7 +3285,16 @@ mod tests {
 
         // 503 arrives while the second entry is still outstanding. The
         // acknowledged first entry is not replayed to reach it, and the retry
-        // reads the value as it stands now.
+        // runs against the value the transition is *bound to*: 200, the value
+        // the first entry already succeeded on.
+        //
+        // This is the invariant, and it used to read the other way — the retry
+        // took the value as it stood, and this test asserted `vec![503]` under
+        // the words "the outstanding entry reads the newest value, not the one
+        // it failed on". That is F04 stated as intent: entry zero had produced
+        // an effect of 200, entry one would then produce an effect of 503, and
+        // the transition would have acted on two command inputs while reporting
+        // itself as one unit of work. A transition is one input.
         assert_eq!(bot.tick()?, 1, "only the outstanding entry runs");
         assert_eq!(
             *first.borrow(),
@@ -2863,8 +3303,9 @@ mod tests {
         );
         assert_eq!(
             *second.borrow(),
-            vec![503],
-            "the outstanding entry reads the newest value, not the one it failed on"
+            vec![200],
+            "the outstanding entry reads the payload its transition was opened under, \
+             not the one that arrived since"
         );
         assert!(
             bot.pending().is_empty(),
@@ -2872,15 +3313,36 @@ mod tests {
             bot.pending()
         );
 
-        // A movement with nothing outstanding is a new transition over every
-        // entry, so the chain is not wedged by the coalescing above.
-        assert_eq!(bot.tick()?, 2, "a new movement re-evaluates both entries");
+        // The source is back at 200 by the next tick, which is the value the
+        // transition was opened under and acknowledged against. Nothing is
+        // admitted, so nothing fires: the 503 the source passed through on the
+        // way is superseded, and re-running both entries here would replay an
+        // effect that is already acknowledged — the duplicate half of this
+        // test's name.
+        //
+        // This assertion used to read `assert_eq!(bot.tick()?, 2, "a new
+        // movement re-evaluates both entries")` with `vec![503, 200]` logged for
+        // the second entry, and it was only true because the retry above had
+        // already jumped to 503. Under the binding it is 200 that is current,
+        // 200 that the chain has already handled, and 503 that nothing ever
+        // acted on — and nothing claims it did.
+        //
+        // What a source that *stays* moved does is the other half of the
+        // invariant, and `an_open_transition_is_bound_to_the_payload_it_was_opened_under`
+        // is where it is pinned: the new value is admitted as soon as the
+        // transition has nothing open, over every entry, against itself.
+        assert_eq!(
+            bot.tick()?,
+            0,
+            "a source that has returned to the value the transition was acknowledged \
+             for is not new work"
+        );
         assert_eq!(
             *first.borrow(),
-            vec![200, 200],
-            "the first entry runs again for the new value"
+            vec![200],
+            "and the acknowledged effect is not replayed to make it look like one"
         );
-        assert_eq!(*second.borrow(), vec![503, 200], "and so does the second");
+        assert_eq!(*second.borrow(), vec![200], "nor is the second entry");
         // A movement that did not move is still nothing at all.
         assert_eq!(
             bot.tick()?,
@@ -2916,12 +3378,18 @@ mod tests {
         assert_eq!(bot.tick()?, 1, "the first tick runs the action");
         {
             let revision = *bot.revisions().first().ok_or("the source has a revision")?;
-            let mut transition = Transition::opened(revision, 1);
+            // The payload is part of the record: a transition is bound to the
+            // observation it was opened under, and the value here is the one the
+            // script has been answering with. `None` would be a transition
+            // opened with nothing observed, which holds its entries rather than
+            // evaluating them against a value nobody read — a real state, but
+            // not this one.
+            let mut transition = Transition::opened(revision, 1, Some(Box::new(200_u16)));
             *transition
                 .entries
                 .first_mut()
                 .ok_or("the chain declares no entries")? = EntryState::Unrecorded;
-            bot.world.resource_mut::<Ledger>().put(0, Some(transition));
+            bot.world.non_send_mut::<Ledger>().put(0, Some(transition));
         }
 
         assert!(
@@ -2948,13 +3416,14 @@ mod tests {
             "the action was not run a second time: the first attempt may have taken effect"
         );
 
-        // Evidence that it did not take effect is what unlocks the retry.
+        // Evidence that it did not take effect is what unlocks the retry, and
+        // it is evidence about the generation the caller was shown.
         let held = bot
             .pending()
-            .first()
-            .map(PendingWork::id)
+            .into_iter()
+            .next()
             .ok_or("the held entry is not reported")?;
-        bot.resolve_effect(held, EffectEvidence::NotApplied)?;
+        bot.resolve_effect(held.id(), held.revision(), EffectEvidence::NotApplied)?;
         assert_eq!(bot.tick()?, 1, "and then it runs");
         assert_eq!(*log.borrow(), vec![200, 200], "exactly once more");
         Ok(())

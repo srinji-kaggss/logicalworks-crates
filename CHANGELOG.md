@@ -226,6 +226,63 @@ modules above it, and it ships in the same release.
 
 ### lgwks_bot Fixed
 
+- **A transition is bound to the observed payload it was opened under, and a
+  newer value is admitted only once it has nothing open.** Conditions were
+  evaluated and actions were run against the *newest* observation, while a
+  resumed transition kept the revision and the entries of the old one. A chain
+  whose first action succeeded and whose second refused under one input would
+  retry that second action under the *next* input, so one transition produced
+  effects of two different command inputs and reported itself as a single
+  finished unit of work — the acknowledgment of the first combined with an
+  effect of the second. The observation is now *moved* out of the fold's slot
+  and into the transition when it opens or resumes, every entry of that
+  transition reads the binding, and the slot stays empty for as long as the
+  binding is out on loan. It is moved rather than copied, so nothing here asks a
+  source's `Output` for `Clone`: `EcsObserveBuilder::observe` requires
+  `PartialEq + 'static` exactly as before. A movement that arrives mid-transition
+  is deferred, not dropped — it is still in the slot, and it becomes the next
+  transition's payload on the first tick after the current one drains. The
+  ledger becomes a non-send resource as a consequence, because the payload
+  travels inside the transition rather than in a second index that every
+  `take`, `put`, `begin`, `skip` and `fail` would have to keep in step.
+- **An abandoned entry is a barrier to its successors, and a tick over one is
+  never clean.** `plan_chain` treated `Abandoned` like `Succeeded` and walked
+  past it, so the entry behind a prerequisite that had been given up on ran
+  anyway: reserve a draft, fail the reserve under `RetryPolicy::ONE_ATTEMPT`, and
+  the next tick sent the draft that was never reserved. Declaration order is a
+  prerequisite chain, not a list of independent steps, and abandonment is the
+  strongest statement that the entry behind it must not run. The walk now stops
+  there; successors stay `NotStarted` and stay reported, and evidence
+  (`EffectEvidence::NotApplied`) remains the way past, reviving the entry and
+  them with it.
+- `EntryState::is_open` excludes `Abandoned`, so the tick's completion check — a
+  scan for the first open entry — walked past an abandonment too and returned
+  `Ok(0)` while `Bot::pending()` still named it. A caller reading a clean `Ok` as
+  "this chain is handled" read the opposite of what the ledger held. The check is
+  now `Ledger::first_unresolved`, over open *or* abandoned entries, and
+  `outstanding` counts that same set: the abandonment is named first, because it
+  is the entry that explains every successor blocked behind it.
+- **A settlement now names the generation it settles, and one naming any other
+  is refused.** A chain holds one transition at a time and reuses its slot for
+  every generation over it, so `(chain, entry)` alone could not distinguish a
+  report about the attempt the caller was shown from one about the attempt that
+  replaced it. `Bot::resolve_effect` read a delayed report for revision N against
+  revision N+1: `Applied` acknowledged an effect at a generation nobody had
+  asked about, and `NotApplied` — the sharper half — made an attempt the caller
+  was never shown eligible to run again, which is a duplicate merge, message or
+  launch. `resolve_effect` now takes the `revision` that `Bot::pending()` reports
+  with the work, compares it before reading or writing anything, and refuses a
+  superseded generation with `BotError::EvidenceSuperseded`, carrying both the
+  named and the live revision so the caller can re-read and report again. This
+  is a breaking signature change; the revision is not inferable, which is why it
+  is required rather than defaulted.
+- `BotError::EvidenceContradicted` is the second new refusal: evidence saying the
+  opposite of what already settled *this* generation's entry. Repeating the same
+  evidence is not that — it succeeds idempotently, so a caller whose first
+  delivery was ambiguous can send it again without having to know whether it
+  landed. Neither new variant is `NoSuchWork`, which keeps meaning exactly "there
+  is no held effect at this address"; collapsing the three would leave a caller
+  reading a stale-report refusal as a wrong address, which is a different repair.
 - **A tick can no longer be run from inside an async runtime through the
   synchronous adapter.** `Bot::tick` drives the tick with a thread-parking
   executor. Called from a thread that an async runtime is driving — a

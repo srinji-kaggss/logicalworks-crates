@@ -148,7 +148,8 @@ four phases, of which only the two middle ones are those systems:
 2. **Fold** (`observe_fold`) — compare each result with the remembered one and
    bump that source's `Revision(u64)` marker component *only when the value
    moved*. A poll that failed is reported here, before any `Revision` is
-   written.
+   written. The remembered value is the one the chain last acted on, so while a
+   transition owns it the comparison is against that transition's binding.
 3. **Decide** (`fire_plan`) — walk the bot's *eligible work*, recorded in a
    ledger keyed by `(chain, entry)`, in declaration order: a chain whose
    `Revision` moved opens or resumes a transition, and a chain with work
@@ -164,6 +165,20 @@ four phases, of which only the two middle ones are those systems:
 The ledger in phase 3 is what makes `Changed<Revision>` a *trigger* rather than
 the whole answer: the change filter decides which chain opens a transition, and
 the ledger decides what that chain still owes from then on.
+
+**A transition is bound to one observed payload.** Opening or resuming a
+transition *moves* the observed value out of the fold's slot and into the
+transition, and every entry of that transition — every condition evaluated and
+every action run — reads that binding, never the newest observation. A value
+that arrives while a transition still has entries open is not admitted; it is
+still in the slot, and it becomes the next transition's payload on the first
+tick after the current one has nothing open. Without the binding, a chain whose
+second action refused under one input would retry under the next one, and its
+acknowledgment of the first would be reported alongside an effect of the second.
+
+The value is moved rather than copied, which is why nothing here requires a
+source's `Output` to be `Clone`. `EcsObserveBuilder::observe` asks for
+`PartialEq + 'static`, and that is the whole list.
 
 Two consequences of that order are worth knowing before you rely on a tick:
 
@@ -253,7 +268,11 @@ Two consequences follow, and neither is fixed by retrying blindly:
   anything. `tick` returns `Err(BotError::PendingTransition)` while work is held,
   so a clean tick is never "the transition was handled" when it was not, and
   `Bot::pending()` lists every entry that is not finished — including any entry
-  the attempt budget gave up on, with its reason. `RetryPolicy` sets the budget
+  the attempt budget gave up on, with its reason. An entry that was given up on
+  is a *barrier*, not a step behind you: the entries after it are not attempted
+  while it stands, because declaration order is a prerequisite chain, and they
+  stay reported behind it. Evidence
+  (`EffectEvidence::NotApplied`) is the way past. `RetryPolicy` sets the budget
   (three attempts by default, `RetryPolicy::ONE_ATTEMPT` for none).
 - **A retry may duplicate.** An action that failed after its request was sent
   fails as `BotError::EffectIndeterminate`, which says the effect may be live.
@@ -264,9 +283,17 @@ Two consequences follow, and neither is fixed by retrying blindly:
   that retry should match on the variant and treat these two differently.
 
 An effect that may already have happened is never re-attempted on its own: the
-entry is held and reported, and `Bot::resolve_effect(work, evidence)` is how a
-caller says what happened — `EffectEvidence::Applied` records it without
-replaying it, `NotApplied` makes the entry eligible for an attempt again.
+entry is held and reported, and `Bot::resolve_effect(work, revision, evidence)`
+is how a caller says what happened — `EffectEvidence::Applied` records it without
+replaying it, `NotApplied` makes the entry eligible for an attempt again. The
+`revision` is the one `Bot::pending()` reported with the work, and it is not
+optional: a chain reuses one slot for every generation over it, so the revision
+is the only part of the identity that says *which* attempt the evidence is about.
+A report naming a generation that has since been superseded is refused with
+`BotError::EvidenceSuperseded`, and one contradicting the evidence already
+recorded for its generation is refused with `BotError::EvidenceContradicted`;
+repeating the same evidence succeeds idempotently, so a delivery whose outcome
+the caller never saw can be sent again.
 
 Delivering exactly-once across an external effect still needs durable intent
 outside this process: the ledger is in memory, so it reports an unsettled effect
