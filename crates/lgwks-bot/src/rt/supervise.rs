@@ -1424,6 +1424,10 @@ where
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[expect(
+    clippy::items_after_test_module,
+    reason = "the `Debug` impl appended below is deliberately last; see its comment for why it cannot precede this module"
+)]
 mod tests {
     use super::{
         AtCapacity, Budget, MAX_PANIC_MESSAGE_CHARS, Outcome, Supervisor, TaskId, TaskOutcome,
@@ -2302,5 +2306,35 @@ mod tests {
             "short",
             "a message within the cap is carried unchanged"
         );
+    }
+}
+
+/// Reports the supervisor's counters, its remaining capacity, and how much it
+/// is still tracking.
+///
+/// Manual rather than derived: the supervisor owns a `JoinSet`, a permit pool
+/// and a report buffer, and a derived rendering would descend into each of them
+/// without answering the question a reader of a supervisor's `Debug` actually
+/// has — what is still running, and what is left to run it. Every field printed
+/// here is one of those answers, and each is read through the accessor or
+/// length the type already exposes rather than through its interior.
+///
+/// Placed after the test module because the module's own guide cites the
+/// `#[cfg(test)]` line by number (`docs/guides/lgwks-bot/background-work.md`),
+/// and an item inserted above it would renumber that citation — and would land
+/// on a bare closing brace, which `scripts/check-doc-citations.py` rejects.
+/// Item order carries no meaning in Rust, so nothing is lost by writing this
+/// impl last; the expectation declared on the test module above is what tells
+/// the lint that the placement is deliberate rather than an oversight.
+impl core::fmt::Debug for Supervisor {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Supervisor")
+            .field("stats", &self.stats())
+            .field("available_permits", &self.permits.available_permits())
+            .field("tracked", &self.set.len())
+            .field("reports_queued", &self.reports.len())
+            .field("report_cap", &self.report_cap)
+            .field("cancelled", &self.token.is_cancelled())
+            .finish()
     }
 }

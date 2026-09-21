@@ -26,6 +26,7 @@ impl Message {
 }
 
 /// Send a notification to a Slack channel. Execute only.
+#[derive(Debug)]
 pub struct Slack {
     /// The destination channel; echoed in the "binding required" diagnostic.
     channel: String,

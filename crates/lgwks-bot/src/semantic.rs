@@ -397,9 +397,8 @@ impl Default for SemanticPolicy {
 /// the lexicon's answer is the answer. What it adds is the case the lexicon
 /// answers `Absent`.
 ///
-/// Deliberately not `Debug`, for the reason [`LanguageResolver`] is not: the
-/// learned alias table is the interesting state, and a derived `Debug` would
-/// print it in whatever order the map iterates.
+/// `Debug` is manual rather than derived; see the impl for why the injected
+/// model is not part of the rendering.
 #[non_exhaustive]
 pub struct SemanticResolver<E> {
     /// The deterministic tiers, consulted first and authoritatively.
@@ -408,6 +407,22 @@ pub struct SemanticResolver<E> {
     embedder: E,
     /// The acceptance policy for the semantic tier.
     policy: SemanticPolicy,
+}
+
+impl<E> core::fmt::Debug for SemanticResolver<E> {
+    /// Manual rather than derived, and not because the state is unsuitable: a
+    /// derive would attach an `E: Debug` bound, making `Debug` unavailable for
+    /// exactly the embedders a consumer is most likely to supply, since
+    /// [`Embedder`] does not require it. The lexicon and the policy are printed
+    /// because they are this crate's own state; the model is the caller's, so
+    /// the rendering stops at `finish_non_exhaustive` rather than demanding
+    /// that every embedder be printable.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SemanticResolver")
+            .field("lexicon", &self.lexicon)
+            .field("policy", &self.policy)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<E: Embedder> SemanticResolver<E> {

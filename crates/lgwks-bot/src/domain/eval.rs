@@ -5,6 +5,7 @@ use crate::verb::Evaluate;
 
 /// True when a value has changed since last check. Requires the observed type
 /// to implement `PartialEq + Clone`.
+#[derive(Debug)]
 pub struct Changed<T: Clone + PartialEq> {
     /// The value seen on the previous check, or `None` before the first one.
     /// Interior mutability because `Evaluate::check` takes `&self`: a condition
@@ -16,6 +17,7 @@ pub struct Changed<T: Clone + PartialEq> {
 
 impl<T: Clone + PartialEq> Changed<T> {
     /// Create a new change detector.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             last: std::cell::RefCell::new(None),
@@ -46,6 +48,7 @@ impl<T: Clone + PartialEq + 'static> Evaluate<T> for Changed<T> {
 }
 
 /// True when a numeric value crosses below a threshold.
+#[derive(Debug)]
 pub struct Below<T> {
     /// The comparison bound. Strictly below: a value equal to the threshold
     /// does not fire.
@@ -54,6 +57,7 @@ pub struct Below<T> {
 
 impl<T: PartialOrd + 'static> Below<T> {
     /// Create a below-threshold evaluator.
+    #[must_use]
     pub fn new(threshold: T) -> Self {
         Self { threshold }
     }
@@ -70,6 +74,7 @@ impl<T: PartialOrd + 'static> Evaluate<T> for Below<T> {
 }
 
 /// True when a numeric value crosses above a threshold.
+#[derive(Debug)]
 pub struct Above<T> {
     /// The comparison bound. Strictly above: a value equal to the threshold
     /// does not fire.
@@ -78,6 +83,7 @@ pub struct Above<T> {
 
 impl<T: PartialOrd + 'static> Above<T> {
     /// Create an above-threshold evaluator.
+    #[must_use]
     pub fn new(threshold: T) -> Self {
         Self { threshold }
     }
@@ -94,6 +100,7 @@ impl<T: PartialOrd + 'static> Evaluate<T> for Above<T> {
 }
 
 /// True when a string field contains a pattern.
+#[derive(Debug)]
 pub struct Contains {
     /// The substring searched for, literally: this is not a pattern language,
     /// so a value that looks like a regex is matched as its own bytes.
@@ -163,6 +170,31 @@ pub struct All<T> {
     conditions: Vec<Box<dyn Evaluate<T>>>,
 }
 
+/// The `condition_id` of each condition, formatted as a list.
+///
+/// `dyn Evaluate` has no `Debug` and the trait does not gain one: it is a
+/// consumer seam, and obliging every implementor to be printable would be a
+/// public requirement this crate has no reason to impose. `condition_id` is
+/// already the trait's own name for a condition, so it is what is printed, and
+/// a combinator's `Debug` reports its structure rather than its build.
+struct ConditionIds<'a, T>(&'a [Box<dyn Evaluate<T>>]);
+
+impl<T> core::fmt::Debug for ConditionIds<'_, T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(|condition| condition.condition_id()))
+            .finish()
+    }
+}
+
+impl<T: 'static> core::fmt::Debug for All<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("All")
+            .field("conditions", &ConditionIds(&self.conditions))
+            .finish()
+    }
+}
+
 impl<T: 'static> All<T> {
     /// Create an all-of combinator.
     #[must_use]
@@ -192,6 +224,14 @@ pub struct Any<T> {
     /// `true`. A condition that errors is propagated rather than treated as a
     /// `false`, so a structural failure never reads as "nothing matched".
     conditions: Vec<Box<dyn Evaluate<T>>>,
+}
+
+impl<T: 'static> core::fmt::Debug for Any<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Any")
+            .field("conditions", &ConditionIds(&self.conditions))
+            .finish()
+    }
 }
 
 impl<T: 'static> Any<T> {

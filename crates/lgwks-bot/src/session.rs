@@ -4015,6 +4015,30 @@ where
     Ok(predicate(ordering))
 }
 
+/// Reports the cursor's position and the session's accounting.
+///
+/// Manual rather than derived: the session holds its resolver and its journal
+/// behind `dyn` seams, so a derive is not available, and it holds the transcript
+/// in full, which a derived rendering would print entry by entry. What a reader
+/// of a session's `Debug` wants is where the cursor is, what it is holding, and
+/// what it has spent — so the collections are printed as the counts that answer
+/// that, and `finish_non_exhaustive` marks the omission rather than hiding it.
+impl core::fmt::Debug for Session {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Session")
+            .field("id", &self.id)
+            .field("current", &self.current)
+            .field("terminal", &self.terminal)
+            .field("steps", &self.steps)
+            .field("visited", &self.visited.len())
+            .field("transcript", &self.transcript.len())
+            .field("decisions", &self.decisions.len())
+            .field("retained", &self.retained)
+            .field("limits", &self.limits)
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

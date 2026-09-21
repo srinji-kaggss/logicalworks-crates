@@ -373,8 +373,11 @@ impl Similarity for GeometryComponent {
 
 /// A weighted recognition vector, plus the lead it requires before committing.
 ///
-/// Deliberately not `Debug`: the component list is a set of `dyn` trait objects,
-/// and a derived `Debug` would print addresses rather than policy.
+/// `Debug` is derived and prints the scorer through [`Weighted`]'s own manual
+/// impl, which reports the composition — how many components, their weights,
+/// the acceptance threshold — rather than the `dyn` trait objects behind them.
+/// The margin is printed alongside it. Nothing here prints an address.
+#[derive(Debug)]
 pub struct RecognitionVector {
     /// The composed scorer, already validated against the unit interval.
     scorer: Weighted<ElementFacts>,

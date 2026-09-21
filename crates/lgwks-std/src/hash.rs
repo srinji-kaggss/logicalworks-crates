@@ -137,7 +137,20 @@ pub fn keyed(key: &[u8; 32], data: &[u8]) -> Digest {
 }
 
 /// Incremental hasher for streaming data.
+///
+/// Manual `Debug` rather than a derive: the wrapped engine hasher's own
+/// formatting is an implementation detail of the `blake3` edge, and a consumer
+/// asking to print this type wants to know where the stream stands, not which
+/// crate is underneath. `bytes_written` is the one field that answers that.
 pub struct Hasher(blake3::Hasher);
+
+impl core::fmt::Debug for Hasher {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Hasher")
+            .field("bytes_written", &self.0.count())
+            .finish_non_exhaustive()
+    }
+}
 
 impl Hasher {
     /// Create a new incremental hasher.

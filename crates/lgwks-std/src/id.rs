@@ -28,13 +28,6 @@ impl Uuid {
         &self.0
     }
 
-    /// Builds an identifier from raw bytes without imposing version bits. Use
-    /// this only to rehydrate a value that was generated elsewhere.
-    #[must_use]
-    pub fn from_bytes(raw: [u8; 16]) -> Self {
-        Self(raw)
-    }
-
     /// The RFC 4122 version nibble, or `None` for a value that carries no
     /// recognisable variant.
     #[must_use]
@@ -53,6 +46,18 @@ impl Uuid {
         let mut raw = [0u8; 16];
         parse_uuid_groups(bytes, &mut raw)?;
         Ok(Self(raw))
+    }
+}
+
+impl From<[u8; 16]> for Uuid {
+    /// Rehydrates an identifier from raw bytes without imposing version bits.
+    ///
+    /// The raw bytes are the identifier's network-order form, so this is a
+    /// widening of the value rather than a parse: use it only for a value that
+    /// was generated elsewhere, and use [`Uuid::new_v4`] for one this process
+    /// originates.
+    fn from(raw: [u8; 16]) -> Self {
+        Self(raw)
     }
 }
 

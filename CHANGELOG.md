@@ -8,6 +8,56 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### lgwks_std Breaking
+
+- `BoundingBox::as_array` is now `to_array`. The method builds the four-element
+  array from four separate fields, so the call copies rather than reborrows and
+  the `as_` prefix promised a cost it did not have. Same signature, same value.
+- `http::get_response` is now `http::get`, so the pair reads `get` / `get_with`
+  the way `post` / `post_with` already did.
+- `Uuid::from_bytes` is gone, replaced by `impl From<[u8; 16]> for Uuid`. The
+  behaviour is unchanged; the conversion is now reachable by a caller that
+  bounds on `From<[u8; 16]>` rather than on this crate's naming.
+- `Pattern::find_all` returns `impl Iterator<Item = Match<'_>>` and
+  `Pattern::split` returns `impl Iterator<Item = &str>`. Code that assigned the
+  result to a `Vec` needs a `.collect()`; code that only counted the matches,
+  took the first, or short-circuited no longer allocates one item per
+  occurrence.
+- `Weighted::try_new` is removed. It was an alias for `Weighted::new` with no
+  callers anywhere in the workspace.
+
+### lgwks_std Added
+
+- `Debug` for `Hasher` (reports bytes written), `Weighted` (reports the
+  composition rather than the components) and `task::JoinHandle` (reports
+  running / done / panicked / taken). All three were unprintable, so a consumer
+  that wanted to log one wrote a wrapper that then had to change whenever the
+  type did.
+
+### lgwks_bot Added
+
+- `Debug` for the public surface. Every public type in the crate now implements
+  it except three macro-invoked families in `effect.rs` (`Id128`-generated ids,
+  `counter_role!`, `digest_role!`). Derived where a derive is the right
+  rendering, manual where it is not, with the reason on the impl.
+  `SemanticResolver` uses `finish_non_exhaustive` rather than acquiring an
+  `E: Debug` bound that no `Embedder` is required to satisfy. `Session` prints
+  counts rather than the transcript entry by entry, and the `bevy_ecs`-backed
+  types do not descend into a schedule that has no `Debug`.
+- `#[must_use]` on `eval::{Changed, Below, Above}::new`, which their three
+  sibling constructors already carried. `must_use_candidate` does not reach
+  `-> Self` constructors, which is how the inconsistency survived a green build.
+
+### lgwks_bot Fixed
+
+- `interface::RecognitionVector` and `language::LanguageResolver` each carried a
+  comment explaining why they were deliberately not `Debug`. The first stopped
+  being true when `lgwks_std`'s `Weighted` gained an impl that reports
+  composition rather than addresses. The second was wrong when it was written:
+  the alias table is a `BTreeMap`, so a derived `Debug` prints it in key order
+  and is stable across runs. Both now derive `Debug`, and both comments say what
+  is true.
+
 ## [lgwks_std 0.6.7 / lgwks_bot 0.5.0 / lgwks_deps 0.1.13] - 2026-09-21
 
 ### Proofs

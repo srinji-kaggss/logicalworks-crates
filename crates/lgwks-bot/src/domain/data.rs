@@ -5,6 +5,7 @@ use crate::error::{BotError, DispatchCertainty};
 use crate::verb;
 
 /// A JSON store backed by a file path. Supports Observe and Query.
+#[derive(Debug)]
 pub struct JsonStore {
     /// The file read on each poll. Resolved at construction and retained, so a
     /// relative path is relative to the process working directory at the time

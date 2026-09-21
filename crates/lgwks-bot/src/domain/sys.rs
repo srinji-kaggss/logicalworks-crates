@@ -5,6 +5,7 @@ use crate::error::{BotError, DispatchCertainty};
 use crate::verb;
 
 /// Observe or execute a system process. Supports Observe, Execute, Query.
+#[derive(Debug)]
 pub struct Process {
     /// The command name. Retained for the "binding required" diagnostic and for
     /// the eventual process binding; the domain performs no parsing of it here.

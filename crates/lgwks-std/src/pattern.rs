@@ -71,17 +71,21 @@ impl Regex {
         })
     }
 
-    /// Returns all non-overlapping matches in `text`.
-    #[must_use]
-    pub fn find_all<'t>(&self, text: &'t str) -> Vec<Match<'t>> {
-        self.0
-            .find_iter(text)
-            .map(|matched| Match {
-                text: matched.as_str(),
-                start: matched.start(),
-                end: matched.end(),
-            })
-            .collect()
+    /// Returns all non-overlapping matches in `text`, lazily.
+    ///
+    /// Iterates rather than collecting: a caller that wants the count, the
+    /// first match, or a short-circuiting predicate should not have to allocate
+    /// one `Match` per occurrence in the haystack to get it, and an iterator
+    /// can be collected at the call site when a `Vec` is what is wanted.
+    ///
+    /// No `#[must_use]` is written here: an iterator already carries the
+    /// attribute, so a second one would only satisfy the eye.
+    pub fn find_all<'t>(&self, text: &'t str) -> impl Iterator<Item = Match<'t>> {
+        self.0.find_iter(text).map(|matched| Match {
+            text: matched.as_str(),
+            start: matched.start(),
+            end: matched.end(),
+        })
     }
 
     /// Returns the capture groups for the first match, or `None`.
@@ -112,13 +116,18 @@ impl Regex {
         self.0.replace_all(text, replacement).into_owned()
     }
 
-    /// Split `text` by occurrences of the pattern.
+    /// Split `text` by occurrences of the pattern, lazily.
     ///
     /// The separators are removed and the borrowed pieces are the text between
-    /// them; a pattern that can match empty splits between every character.
-    #[must_use]
-    pub fn split<'t>(&self, text: &'t str) -> Vec<&'t str> {
-        self.0.split(text).collect()
+    /// them; a pattern that can match empty splits between every character. The
+    /// pieces are produced one at a time, matching [`Regex::find_all`]
+    /// and the underlying engine's own `split`, so a caller that stops early
+    /// does not pay for the remainder of the haystack.
+    ///
+    /// No `#[must_use]` is written here: an iterator already carries the
+    /// attribute, so a second one would only satisfy the eye.
+    pub fn split<'t>(&self, text: &'t str) -> impl Iterator<Item = &'t str> {
+        self.0.split(text)
     }
 }
 
@@ -202,11 +211,29 @@ mod tests {
     #[test]
     fn find_all_returns_every_match() -> Result<(), PatternError> {
         let re = Regex::new(r"\d+")?;
-        let matches = re.find_all("a1b22c333");
+        let matches: Vec<Match<'_>> = re.find_all("a1b22c333").collect();
         assert_eq!(matches.len(), 3);
         assert_eq!(matches[0].text, "1");
         assert_eq!(matches[1].text, "22");
         assert_eq!(matches[2].text, "333");
+        Ok(())
+    }
+
+    /// The iterator is lazy, so stopping early leaves the rest of the haystack
+    /// unvisited. Liveness is observed through a counter the closure
+    /// increments: `.take(1)` must yield one match and the predicate must run
+    /// for one match only, which a collected `Vec` could not have shown.
+    #[test]
+    fn find_all_stops_where_the_caller_stops() -> Result<(), PatternError> {
+        let re = Regex::new(r"\d+")?;
+        let mut seen = 0usize;
+        let first = re
+            .find_all("a1b22c333d4444")
+            .inspect(|_| seen = seen.saturating_add(1))
+            .take(1)
+            .next();
+        assert_eq!(first.map(|matched| matched.text), Some("1"));
+        assert_eq!(seen, 1);
         Ok(())
     }
 
@@ -239,7 +266,10 @@ mod tests {
     #[test]
     fn split_divides_on_pattern() -> Result<(), PatternError> {
         let re = Regex::new(r"[,;]\s*")?;
-        assert_eq!(re.split("a, b; c,d"), vec!["a", "b", "c", "d"]);
+        assert_eq!(
+            re.split("a, b; c,d").collect::<Vec<&str>>(),
+            vec!["a", "b", "c", "d"]
+        );
         Ok(())
     }
 

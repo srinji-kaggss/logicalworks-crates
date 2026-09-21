@@ -445,7 +445,12 @@ fn map_error(error: ureq::Error) -> Error {
 }
 
 /// GET `url` with default options.
-pub fn get_response(url: &str) -> Result<Response, Error> {
+///
+/// Named for the verb, matching [`post`]: the default-options form of each
+/// method carries the bare verb and the configured form takes the `_with`
+/// suffix, so the pair reads the same way in both directions. This is a GET
+/// request, not a lookup, so it is not an accessor and takes no `get_` prefix.
+pub fn get(url: &str) -> Result<Response, Error> {
     get_with(url, &Options::default())
 }
 
@@ -623,7 +628,7 @@ mod tests {
             ("200 OK", "ok".to_owned()),
         ])?;
         let url = format!("http://127.0.0.1:{port}/");
-        let got = get_response(&url)?;
+        let got = get(&url)?;
         assert_eq!(got.status, 200);
         assert_eq!(got.body, b"hello");
         let posted = post(&url, "text/plain", ECHO.as_bytes())?;

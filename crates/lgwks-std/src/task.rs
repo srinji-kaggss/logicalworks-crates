@@ -315,6 +315,25 @@ where
     JoinHandle { shared }
 }
 
+impl<T> core::fmt::Debug for JoinHandle<T> {
+    /// Reports whether the job is still running, never the value.
+    ///
+    /// `T` carries no `Debug` bound here on purpose: the handle is awaited for
+    /// its value, and a caller that only wants to log which job is outstanding
+    /// should not have to make the payload printable to do it. The job state is
+    /// the one fact the handle holds, so it is the whole of what is printed.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let state = lock(&self.shared);
+        let state = match state.job {
+            Job::Running => "running",
+            Job::Done(_) => "done",
+            Job::Panicked(_) => "panicked",
+            Job::Taken => "taken",
+        };
+        f.debug_struct("JoinHandle").field("state", &state).finish()
+    }
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

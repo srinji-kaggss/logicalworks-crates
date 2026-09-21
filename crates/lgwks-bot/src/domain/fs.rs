@@ -7,6 +7,7 @@ use crate::error::BotError;
 use crate::verb;
 
 /// Observe a filesystem path for changes. Supports Observe and Query.
+#[derive(Debug)]
 pub struct Path {
     /// The path inspected on each poll. Resolved at construction, so a relative
     /// path is relative to the working directory as it was when the domain was

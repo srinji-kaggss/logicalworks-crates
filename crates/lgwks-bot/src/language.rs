@@ -543,9 +543,9 @@ pub(crate) fn decide(
 
 /// The shipped lexicon resolver: tiered matching plus learned aliases.
 ///
-/// Deliberately not `Debug`: the alias table is the interesting state and a
-/// derived `Debug` would print it in whatever order the map iterates.
-#[derive(Clone)]
+/// `Debug` prints the learned table, the resolver's whole mutable state, in
+/// `BTreeMap` key order — so the rendering is stable and diffable across runs.
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct LanguageResolver {
     /// Learned aliases: question id, then normalized utterance.

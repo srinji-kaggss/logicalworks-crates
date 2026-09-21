@@ -8,6 +8,7 @@ use crate::verb;
 // ── pr_status ──────────────────────────────────────────────────────────────
 
 /// Observe the status of a pull request. Supports Observe and Query.
+#[derive(Debug)]
 pub struct PrStatus {
     /// The `owner/repo` observed; echoed in the "binding required" diagnostic.
     repo: String,
@@ -94,6 +95,7 @@ pub fn pr_status(repo: impl Into<String>) -> PrStatus {
 // ── ci_run ─────────────────────────────────────────────────────────────────
 
 /// Observe CI run status. Supports Observe, Query.
+#[derive(Debug)]
 pub struct CiRun {
     /// The `owner/repo` observed; echoed in the "binding required" diagnostic.
     repo: String,
@@ -180,6 +182,7 @@ pub fn ci_run(repo: impl Into<String>) -> CiRun {
 // ── merge ──────────────────────────────────────────────────────────────────
 
 /// Execute a PR merge. Supports Execute only.
+#[derive(Debug)]
 pub struct Merge {
     /// The `owner/repo` merged; echoed in the "binding required" diagnostic.
     repo: String,
