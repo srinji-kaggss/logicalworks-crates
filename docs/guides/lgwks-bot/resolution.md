@@ -214,10 +214,10 @@ confirmation that still names an option it offers.
 
 | Operation | Effect |
 |---|---|
-| `learn(question, utterance, option)` (`language.rs:603`) | binds the phrase, returning the binding it replaced, if any |
-| `forget(question, utterance)` (`language.rs:616`) | removes one binding, returning it |
-| `with_aliases(aliases)` (`language.rs:580`) | loads a shipped table, normalizing each phrase as it is stored |
-| `aliases()` (`language.rs:641`) | exports the table, so a session's confirmations survive a restart |
+| `learn(question, utterance, option)` (`crates/lgwks-bot/src/language.rs:603`) | binds the phrase, returning the binding it replaced, if any |
+| `forget(question, utterance)` (`crates/lgwks-bot/src/language.rs:616`) | removes one binding, returning it |
+| `with_aliases(aliases)` (`crates/lgwks-bot/src/language.rs:580`) | loads a shipped table, normalizing each phrase as it is stored |
+| `aliases()` (`crates/lgwks-bot/src/language.rs:641`) | exports the table, so a session's confirmations survive a restart |
 
 Two properties make this safe to spend. The phrase is normalized once, on the way
 in, so a shipped table and a learned binding are compared the same way. And a
