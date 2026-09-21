@@ -1,0 +1,114 @@
+
+---------------------------------------------------------------------
+     HOL4 [Trindemossen 2 (stdknl, built Mon Sep 21 12:19:55 2026)]
+
+     For introductory HOL help, type: help "hol";
+     To exit type <Control>-D
+---------------------------------------------------------------------
+> val it = (): unit
+<<HOL message: Defined type: "BExpr">>
+<<HOL message: Defined type: "Entry">>
+<<HOL message: Defined type: "LExpr">>
+Definition has been stored under "bdepth_def"
+val bdepth_def =
+   ⊢ (∀[0;32mb[0m. bdepth (BLit [0;32mb[0m) = 1) ∧ (∀[0;32mi[0m. bdepth (BVar [0;32mi[0m) = 1) ∧
+     (∀[0;32mi[0m [0;32mj[0m. bdepth (BLt [0;32mi[0m [0;32mj[0m) = 1) ∧
+     (∀[0;32ma[0m [0;32mb[0m. bdepth (BAnd [0;32ma[0m [0;32mb[0m) = 1 + bdepth [0;32ma[0m + bdepth [0;32mb[0m) ∧
+     (∀[0;32ma[0m [0;32mb[0m. bdepth (BOr [0;32ma[0m [0;32mb[0m) = 1 + bdepth [0;32ma[0m + bdepth [0;32mb[0m) ∧
+     ∀[0;32ma[0m. bdepth (BNot [0;32ma[0m) = 1 + bdepth [0;32ma[0m: thm
+Definition has been stored under "eval_n_def"
+val eval_n_def =
+   ⊢ (∀[0;32mb[0m [0;32menv[0m [0;32mn[0m. eval_n (BLit [0;32mb[0m) [0;32menv[0m [0;32mn[0m = if [0;32mn[0m = 0 then NONE else SOME [0;32mb[0m) ∧
+     (∀[0;32mi[0m [0;32menv[0m [0;32mn[0m.
+        eval_n (BVar [0;32mi[0m) [0;32menv[0m [0;32mn[0m = if [0;32mn[0m = 0 then NONE else SOME ([0;32menv[0m [0;32mi[0m ≠ 0)) ∧
+     (∀[0;32mi[0m [0;32mj[0m [0;32menv[0m [0;32mn[0m.
+        eval_n (BLt [0;32mi[0m [0;32mj[0m) [0;32menv[0m [0;32mn[0m = if [0;32mn[0m = 0 then NONE else SOME ([0;32menv[0m [0;32mi[0m < [0;32menv[0m [0;32mj[0m)) ∧
+     (∀[0;32ma[0m [0;32mb[0m [0;32menv[0m [0;32mn[0m.
+        eval_n (BAnd [0;32ma[0m [0;32mb[0m) [0;32menv[0m [0;32mn[0m =
+        if [0;32mn[0m = 0 then NONE
+        else
+          case eval_n [0;32ma[0m [0;32menv[0m ([0;32mn[0m − 1) of
+            NONE => NONE
+          | SOME [0;32mx[0m =>
+            case eval_n [0;32mb[0m [0;32menv[0m ([0;32mn[0m − 1) of
+              NONE => NONE
+            | SOME [0;32my[0m => SOME ([0;32mx[0m ∧ [0;32my[0m)) ∧
+     (∀[0;32ma[0m [0;32mb[0m [0;32menv[0m [0;32mn[0m.
+        eval_n (BOr [0;32ma[0m [0;32mb[0m) [0;32menv[0m [0;32mn[0m =
+        if [0;32mn[0m = 0 then NONE
+        else
+          case eval_n [0;32ma[0m [0;32menv[0m ([0;32mn[0m − 1) of
+            NONE => NONE
+          | SOME [0;32mx[0m =>
+            case eval_n [0;32mb[0m [0;32menv[0m ([0;32mn[0m − 1) of
+              NONE => NONE
+            | SOME [0;32my[0m => SOME ([0;32mx[0m ∨ [0;32my[0m)) ∧
+     ∀[0;32ma[0m [0;32menv[0m [0;32mn[0m.
+       eval_n (BNot [0;32ma[0m) [0;32menv[0m [0;32mn[0m =
+       if [0;32mn[0m = 0 then NONE
+       else case eval_n [0;32ma[0m [0;32menv[0m ([0;32mn[0m − 1) of NONE => NONE | SOME [0;32mx[0m => SOME (¬[0;32mx[0m):
+   thm
+Definition has been stored under "eval_def"
+val eval_def =
+   ⊢ (∀[0;32mb[0m [0;32menv[0m. eval (BLit [0;32mb[0m) [0;32menv[0m ⇔ [0;32mb[0m) ∧
+     (∀[0;32mi[0m [0;32menv[0m. eval (BVar [0;32mi[0m) [0;32menv[0m ⇔ [0;32menv[0m [0;32mi[0m ≠ 0) ∧
+     (∀[0;32mi[0m [0;32mj[0m [0;32menv[0m. eval (BLt [0;32mi[0m [0;32mj[0m) [0;32menv[0m ⇔ [0;32menv[0m [0;32mi[0m < [0;32menv[0m [0;32mj[0m) ∧
+     (∀[0;32ma[0m [0;32mb[0m [0;32menv[0m. eval (BAnd [0;32ma[0m [0;32mb[0m) [0;32menv[0m ⇔ eval [0;32ma[0m [0;32menv[0m ∧ eval [0;32mb[0m [0;32menv[0m) ∧
+     (∀[0;32ma[0m [0;32mb[0m [0;32menv[0m. eval (BOr [0;32ma[0m [0;32mb[0m) [0;32menv[0m ⇔ eval [0;32ma[0m [0;32menv[0m ∨ eval [0;32mb[0m [0;32menv[0m) ∧
+     ∀[0;32ma[0m [0;32menv[0m. eval (BNot [0;32ma[0m) [0;32menv[0m ⇔ ¬eval [0;32ma[0m [0;32menv[0m: thm
+<<HOL message: inventing new type variable names: 'a>>
+Definition has been stored under "evalL_n_def"
+val evalL_n_def =
+   ⊢ (∀[0;32mb[0m [0;32menv[0m [0;32mn[0m. evalL_n (LLit [0;32mb[0m) [0;32menv[0m [0;32mn[0m = if [0;32mn[0m = 0 then NONE else SOME [0;32mb[0m) ∧
+     (∀[0;32ma[0m [0;32mb[0m [0;32menv[0m [0;32mn[0m.
+        evalL_n (LAnd [0;32ma[0m [0;32mb[0m) [0;32menv[0m [0;32mn[0m =
+        if [0;32mn[0m = 0 then NONE
+        else
+          case evalL_n [0;32ma[0m [0;32menv[0m ([0;32mn[0m − 1) of
+            NONE => NONE
+          | SOME [0;32mx[0m =>
+            case evalL_n [0;32mb[0m [0;32menv[0m ([0;32mn[0m − 1) of
+              NONE => NONE
+            | SOME [0;32my[0m => SOME ([0;32mx[0m ∧ [0;32my[0m)) ∧
+     ∀[0;32mb[0m [0;32menv[0m [0;32mn[0m. evalL_n (LLoop [0;32mb[0m) [0;32menv[0m [0;32mn[0m = if [0;32mn[0m = 0 then NONE else NONE: thm
+Definition has been stored under "fired_def"
+val fired_def =
+   ⊢ ∀[0;32mg[0m [0;32menv[0m [0;32mes[0m. fired [0;32mg[0m [0;32menv[0m [0;32mes[0m = FILTER (λ[0;32me[0m. eval [0;32me[0m.cond [0;32menv[0m ∧ [0;32mg[0m [0;32me[0m.cap) [0;32mes[0m:
+   thm
+Definition has been stored under "record_def"
+val record_def =
+   ⊢ ∀[0;32mg[0m [0;32menv[0m [0;32mes[0m. record [0;32mg[0m [0;32menv[0m [0;32mes[0m = MAP (λ[0;32me[0m. ([0;32me[0m.cap,[0;32me[0m.action)) (fired [0;32mg[0m [0;32menv[0m [0;32mes[0m):
+   thm
+<<HOL message: inventing new type variable names: 'a, 'b>>
+Definition has been stored under "replay_def"
+val replay_def = ⊢ ∀[0;32mps[0m. replay [0;32mps[0m = MAP SND [0;32mps[0m: thm
+val EVAL_N_AGREE =
+   ⊢ ∀[0;32me[0m [0;32menv[0m [0;32mn[0m. bdepth [0;32me[0m ≤ [0;32mn[0m ⇒ eval_n [0;32me[0m [0;32menv[0m [0;32mn[0m = SOME (eval [0;32me[0m [0;32menv[0m): thm
+val T1 = ⊢ ∀[0;32me[0m [0;32menv[0m. ∃[0;32mn[0m [0;32mv[0m. eval_n [0;32me[0m [0;32menv[0m [0;32mn[0m = SOME [0;32mv[0m: thm
+<<HOL warning: Context.snapshot: ambient context read while a proof was running (in scratch)>>
+val T2_MONO =
+   ⊢ ∀[0;32me[0m [0;32menv[0m [0;32mn[0m [0;32mm[0m [0;32mv[0m. eval_n [0;32me[0m [0;32menv[0m [0;32mn[0m = SOME [0;32mv[0m ∧ [0;32mn[0m ≤ [0;32mm[0m ⇒ eval_n [0;32me[0m [0;32menv[0m [0;32mm[0m = SOME [0;32mv[0m:
+   thm
+val T3 = ⊢ ∀[0;32me[0m [0;32menv[0m [0;32mn[0m [0;32mv[0m. eval_n [0;32me[0m [0;32menv[0m [0;32mn[0m = SOME [0;32mv[0m ⇒ (eval [0;32me[0m [0;32menv[0m ⇔ [0;32mv[0m): thm
+val T4 = ⊢ ∀[0;32mg[0m [0;32menv[0m [0;32mes[0m [0;32me[0m. MEM [0;32me[0m (fired [0;32mg[0m [0;32menv[0m [0;32mes[0m) ⇒ [0;32mg[0m [0;32me[0m.cap: thm
+val T5 =
+   ⊢ ∀[0;32mg[0m [0;32mg'[0m [0;32menv[0m [0;32mes[0m [0;32me[0m.
+       (∀[0;32mc[0m. [0;32mg[0m [0;32mc[0m ⇒ [0;32mg'[0m [0;32mc[0m) ∧ MEM [0;32me[0m (fired [0;32mg[0m [0;32menv[0m [0;32mes[0m) ⇒ MEM [0;32me[0m (fired [0;32mg'[0m [0;32menv[0m [0;32mes[0m):
+   thm
+val T6 =
+   ⊢ ∀[0;32mg[0m [0;32menv[0m [0;32mes[0m.
+       replay (record [0;32mg[0m [0;32menv[0m [0;32mes[0m) = MAP (λ[0;32me[0m. [0;32me[0m.action) (fired [0;32mg[0m [0;32menv[0m [0;32mes[0m): thm
+<<HOL message: inventing new type variable names: 'a>>
+val T7 = ⊢ ∀[0;32menv[0m [0;32mn[0m. ∃[0;32me[0m. ∀[0;32mv[0m. evalL_n [0;32me[0m [0;32menv[0m [0;32mn[0m ≠ SOME [0;32mv[0m: thm
+val check = fn: string * thm * term -> unit
+SPEC_CHECK_BEGIN
+[VERIFIED] T1
+[VERIFIED] T2
+[VERIFIED] T3
+[VERIFIED] T4
+[VERIFIED] T5
+[VERIFIED] T6
+<<HOL message: inventing new type variable names: 'a>>
+[VERIFIED] T7
+ALL_SEVEN_THEOREMS_PROVEN
+> 

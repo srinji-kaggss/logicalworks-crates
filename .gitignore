@@ -6,3 +6,15 @@ Cargo.lock.orig
 
 # graphify AST cache: derived build artifact, never source
 graphify-out/
+
+# The benchmark rig is its own Cargo workspace, so a default `cargo run` there
+# creates a target directory the root `/target` rule does not cover.
+bench/target/
+
+# HOL4 theory output: compiled objects and the signature store are derived build
+# artifacts. The proof script is the source and is committed; these are not.
+proofs/sigobj/
+proofs/*.uo
+proofs/*.ui
+proofs/*.uo.tmp
+proofs/.hol/
