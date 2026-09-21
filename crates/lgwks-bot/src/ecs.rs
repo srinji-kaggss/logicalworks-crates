@@ -155,7 +155,7 @@ use lgwks_deps::bevy_ecs::{
 };
 
 use super::cap::{Deficit, Demand, Shortage};
-use super::error::{BotError, Escaped};
+use super::error::{BotError, DispatchCertainty, Escaped, RetryClass};
 use super::gate::GrantSet;
 use super::spec::{ChainEntry, ObserveAny, typed_entry};
 use super::verb::{Evaluate, Execute, Observe};
@@ -1236,23 +1236,31 @@ fn resume(
 /// afterwards: a retry is a retry, a retry may be a duplicate, and a retry is
 /// pointless because the failure is not something another attempt can change. The
 /// budget is consulted only for the first of them.
+///
+/// The classification is [`BotError::retry_class`] and nothing else. The error's
+/// *variant* is not the question: `DomainError` is where a permanent refusal, a
+/// connection that never opened, and a wiring defect all used to land, and they
+/// want three different answers. Reading the rendered `cause` to tell them apart
+/// is worse still — it makes a retry policy depend on the wording of a message.
+/// The producer states what the failure establishes about the effect, the
+/// certainty carries it here, and this function is a total map over that.
 fn failure_state(error: &BotError, attempts: u32, budget: u32) -> EntryState {
     let cause = error.to_string();
-    match *error {
+    match error.retry_class() {
         // The effect definitely did not happen: a retry is a retry, and the
         // budget bounds it.
-        BotError::DomainError { .. } if attempts < budget => {
-            EntryState::DefinitelyFailed { attempts, cause }
-        }
-        BotError::DomainError { .. } => EntryState::Abandoned {
+        RetryClass::Safe if attempts < budget => EntryState::DefinitelyFailed { attempts, cause },
+        RetryClass::Safe => EntryState::Abandoned {
             reason: AbandonReason::AttemptsExhausted { attempts },
             cause,
         },
         // It may have happened. Never attempted again without evidence, whatever
         // the budget says.
-        BotError::EffectIndeterminate { .. } => EntryState::OutcomeUnknown { attempts, cause },
-        // No retry fixes a refused capability or a type mismatch.
-        _ => EntryState::Abandoned {
+        RetryClass::RequiresEvidence => EntryState::OutcomeUnknown { attempts, cause },
+        // No retry fixes a refused capability, a parse refusal, or a type
+        // mismatch — and the budget is untouched, so the disposition reports
+        // what actually happened rather than "we ran out of attempts".
+        RetryClass::Never => EntryState::Abandoned {
             reason: AbandonReason::Terminal,
             cause,
         },
@@ -1548,6 +1556,7 @@ fn validate(schedule: &mut Schedule, world: &mut World) -> Result<(), BotError> 
         .map(|_| ())
         .map_err(|error| BotError::DomainError {
             domain: "ecs::schedule".into(),
+            certainty: DispatchCertainty::Refused,
             // `ScheduleBuildError` carries an inherent `to_string(&self, graph,
             // world)` that shadows `Display::to_string`; the inherent one is the
             // one that resolves system names against the graph.
@@ -2372,6 +2381,7 @@ mod tests {
             if left == 0 {
                 return Err(BotError::DomainError {
                     domain: "test::exhausting".into(),
+                    certainty: DispatchCertainty::NotDelivered,
                     cause: "script exhausted".into(),
                 });
             }
@@ -2465,6 +2475,7 @@ mod tests {
             Err(match self.kind {
                 FlakyKind::Refused => BotError::DomainError {
                     domain: "test::flaky".into(),
+                    certainty: DispatchCertainty::NotDelivered,
                     cause: "refused, and the effect did not happen".into(),
                 },
                 FlakyKind::Indeterminate => BotError::EffectIndeterminate {
@@ -2510,6 +2521,7 @@ mod tests {
             self.0.set(self.0.get().saturating_add(1));
             Err(BotError::DomainError {
                 domain: "test::refuses".into(),
+                certainty: DispatchCertainty::NotDelivered,
                 cause: "refused".into(),
             })
         }
@@ -3556,6 +3568,158 @@ mod tests {
         });
         ordered.add_systems((observe_fold, fire_plan).chain());
         validate(&mut ordered, &mut world)?;
+        Ok(())
+    }
+
+    /// An action that declares `Input = u32` while counting its attempts.
+    ///
+    /// Paired below with a `u16` source: the pairing is the fault, and the
+    /// count is how the test tells "one attempt" from "the whole budget".
+    struct CountsU32(Rc<Cell<usize>>);
+
+    impl Execute for CountsU32 {
+        type Input = u32;
+        type Output = ();
+
+        fn required_caps(&self) -> &[Cap] {
+            &[]
+        }
+
+        async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
+            call.0.check(&[])?;
+            self.0.set(self.0.get().saturating_add(1));
+            Ok(())
+        }
+
+        fn domain_id(&self) -> &str {
+            "test::counts_u32"
+        }
+    }
+
+    /// An action whose failure is permanent and happens before dispatch: the
+    /// shape every "binding required" domain has.
+    struct RefusesPermanently(Rc<Cell<usize>>);
+
+    impl Execute for RefusesPermanently {
+        type Input = u16;
+        type Output = ();
+
+        fn required_caps(&self) -> &[Cap] {
+            &[]
+        }
+
+        async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
+            call.0.check(&[])?;
+            self.0.set(self.0.get().saturating_add(1));
+            Err(BotError::DomainError {
+                domain: "test::permanent".into(),
+                certainty: DispatchCertainty::Refused,
+                cause: "no binding is installed for this domain".into(),
+            })
+        }
+
+        fn domain_id(&self) -> &str {
+            "test::permanent"
+        }
+    }
+
+    #[test]
+    fn a_mismatched_pairing_costs_one_attempt_not_the_retry_budget() -> TestResult {
+        // The chain is wired for `u16` while the action declares `u32`. That is
+        // a wiring defect behind the erasure, not a domain failure: no number
+        // of retries reaches a different answer, so it costs one attempt and
+        // lands as terminal rather than spending the whole budget and being
+        // reported as "we ran out of budget" — which names the budget as the
+        // reason when the reason is that the two halves disagree.
+        //
+        // The attempt count is read from the ledger rather than counted by the
+        // action, because the action must never be reached: the downcast is
+        // checked before the proof is issued, so a mismatch costs no side
+        // effect. `ran` is that second half.
+        let ran = Rc::new(Cell::new(0));
+        let mut bot = EcsBot::builder("mismatched")
+            .observe(Script::new(vec![200, 200, 200, 200]))
+            .on::<_, _, u16>(|value: &u16| *value >= 200, CountsU32(Rc::clone(&ran)))
+            .build(&net_grants())?;
+
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(format!("a wiring mismatch was reported as {fired} fired").into());
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::DomainError { .. }),
+                "expected the action's own error, got {error:?}"
+            ),
+        }
+        assert_eq!(
+            ran.get(),
+            0,
+            "the downcast is checked before the action runs, so the mismatch was not a side effect"
+        );
+        assert!(
+            matches!(
+                first_hold(&bot),
+                Some(TransitionHold::Abandoned {
+                    reason: AbandonReason::Terminal,
+                    ..
+                })
+            ),
+            "one attempt, and the disposition is terminal rather than `AttemptsExhausted`: {:?}",
+            first_hold(&bot)
+        );
+
+        // The second tick must not spend a second attempt on the same answer.
+        // That is the observable difference the budget makes: `AttemptsExhausted`
+        // is a fact about how many times the substrate was willing to ask, and
+        // asking twice here buys nothing.
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(format!("a retried wiring mismatch reported {fired} fired").into());
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::PendingTransition { .. }),
+                "the abandoned entry is the barrier the next tick reports, got {error:?}"
+            ),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_permanent_refusal_does_not_burn_the_retry_budget() -> TestResult {
+        // A refusal that happens before dispatch and cannot be changed by
+        // repeating it. Retrying spends attempts to learn the same answer, and
+        // the report then blames the budget for a failure the budget was never
+        // the reason for.
+        let attempts = Rc::new(Cell::new(0));
+        let mut bot = EcsBot::builder("permanent")
+            .observe(Script::new(vec![200, 200, 200, 200]))
+            .on(
+                |value: &u16| *value >= 200,
+                RefusesPermanently(Rc::clone(&attempts)),
+            )
+            .build(&net_grants())?;
+
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(format!("a permanent refusal was reported as {fired} fired").into());
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::DomainError { .. }),
+                "expected the action's own error, got {error:?}"
+            ),
+        }
+        assert_eq!(attempts.get(), 1, "a permanent refusal is attempted once");
+        assert!(
+            matches!(
+                first_hold(&bot),
+                Some(TransitionHold::Abandoned {
+                    reason: AbandonReason::Terminal,
+                    ..
+                })
+            ),
+            "the disposition is terminal, not `AttemptsExhausted`: {:?}",
+            first_hold(&bot)
+        );
         Ok(())
     }
 }

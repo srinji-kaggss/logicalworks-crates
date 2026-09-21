@@ -1,7 +1,7 @@
 //! `data` owns the data store domain. Requires `bot.fs`.
 
 use crate::cap::{Auth, Cap};
-use crate::error::BotError;
+use crate::error::{BotError, DispatchCertainty};
 use crate::verb;
 
 /// A JSON store backed by a file path. Supports Observe and Query.
@@ -54,6 +54,7 @@ impl verb::Observe for JsonStore {
             .await
             .map_err(|error| BotError::DomainError {
                 domain: self.domain_id().into(),
+                certainty: DispatchCertainty::NotDelivered,
                 cause: error.to_string(),
             })?;
         Ok(DataState {

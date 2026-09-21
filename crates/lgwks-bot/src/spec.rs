@@ -5,7 +5,7 @@
 use lgwks_std::json::{Deserialize, Serialize};
 
 use super::cap::{Auth, Cap};
-use super::error::BotError;
+use super::error::{BotError, DispatchCertainty};
 use super::gate::GrantSet;
 
 // ── Serializable spec ──────────────────────────────────────────────────────
@@ -168,6 +168,7 @@ where
                     }
                     None => Err(BotError::DomainError {
                         domain: self.0.domain_id().into(),
+                        certainty: DispatchCertainty::Refused,
                         cause: "type mismatch in execute input".into(),
                     }),
                 }
@@ -358,6 +359,7 @@ mod tests {
     fn failed(cause: impl Into<String>) -> BotError {
         BotError::DomainError {
             domain: "spec::tests".into(),
+            certainty: DispatchCertainty::NotDelivered,
             cause: cause.into(),
         }
     }
@@ -408,6 +410,7 @@ mod tests {
         async fn poll(&self, _call: (Auth, ())) -> Result<u32, BotError> {
             Err(BotError::DomainError {
                 domain: "test::failing".into(),
+                certainty: DispatchCertainty::NotDelivered,
                 cause: "boom".into(),
             })
         }

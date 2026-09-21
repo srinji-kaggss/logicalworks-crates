@@ -1,7 +1,7 @@
 //! `sys` owns the system process domain. Requires `bot.sys`.
 
 use crate::cap::{Auth, Cap};
-use crate::error::BotError;
+use crate::error::{BotError, DispatchCertainty};
 use crate::verb;
 
 /// Observe or execute a system process. Supports Observe, Execute, Query.
@@ -50,6 +50,7 @@ impl verb::Observe for Process {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
+            certainty: DispatchCertainty::Refused,
             cause: format!("polling {:?} — binding required", self.command),
         })
     }
@@ -71,6 +72,7 @@ impl verb::Execute for Process {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
+            certainty: DispatchCertainty::Refused,
             cause: format!("executing {:?} — binding required", self.command),
         })
     }
@@ -92,6 +94,7 @@ impl verb::Query for Process {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
+            certainty: DispatchCertainty::Refused,
             cause: format!("querying {:?} — binding required", self.command),
         })
     }

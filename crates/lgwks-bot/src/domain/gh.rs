@@ -2,7 +2,7 @@
 //! GitHub operation requires `bot.net`.
 
 use crate::cap::{Auth, Cap};
-use crate::error::BotError;
+use crate::error::{BotError, DispatchCertainty};
 use crate::verb;
 
 // ── pr_status ──────────────────────────────────────────────────────────────
@@ -54,6 +54,7 @@ impl verb::Observe for PrStatus {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
+            certainty: DispatchCertainty::Refused,
             cause: format!("polling {:?} — binding required", self.repo),
         })
     }
@@ -75,6 +76,7 @@ impl verb::Query for PrStatus {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
+            certainty: DispatchCertainty::Refused,
             cause: format!("querying {:?} — binding required", self.repo),
         })
     }
@@ -138,6 +140,7 @@ impl verb::Observe for CiRun {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
+            certainty: DispatchCertainty::Refused,
             cause: format!("polling {:?} — binding required", self.repo),
         })
     }
@@ -159,6 +162,7 @@ impl verb::Query for CiRun {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
+            certainty: DispatchCertainty::Refused,
             cause: format!("querying {:?} — binding required", self.repo),
         })
     }
@@ -206,6 +210,7 @@ impl verb::Execute for Merge {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
+            certainty: DispatchCertainty::Refused,
             cause: format!("merging {:?} — binding required", self.repo),
         })
     }

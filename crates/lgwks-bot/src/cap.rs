@@ -422,7 +422,7 @@ impl Auth {
 #[cfg(test)]
 mod tests {
     use super::{Auth, Cap, Deficit, Demand};
-    use crate::error::BotError;
+    use crate::error::{BotError, DispatchCertainty};
     use crate::gate::GrantSet;
 
     /// A typed test failure, in the shape the other modules' tests use. Not a
@@ -430,6 +430,7 @@ mod tests {
     fn failed(cause: impl Into<String>) -> BotError {
         BotError::DomainError {
             domain: "cap::tests".into(),
+            certainty: DispatchCertainty::NotDelivered,
             cause: cause.into(),
         }
     }
