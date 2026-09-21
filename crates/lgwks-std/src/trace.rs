@@ -6,7 +6,7 @@
 //! use, and one ignoring it had `println!`; the rule was enforceable against
 //! the wrong practice and unenforceable in favour of the right one.
 //!
-//! It is a re-export, like [`json`](crate::json): this crate names the
+//! It is a re-export, like the `json` module: this crate names the
 //! capability rather than the crate, so replacing the implementation is one
 //! change here rather than one per consumer.
 //!
