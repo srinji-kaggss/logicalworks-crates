@@ -1205,9 +1205,52 @@ impl Interpolate for TemplateInterpolator {
     }
 }
 
+/// One question's candidate vocabulary, as the resolver seam sees it.
+///
+/// A resolver is handed three things and a slice of options is only two of
+/// them: what the person typed, the options in front of them, and the *identity
+/// of the question* those options belong to. The identity is not decoration. A
+/// learned alias is a confirmed fact about a question — *in this question, "the
+/// usual" means "Repeat last order"* — and a slice of strings is not a question:
+/// the same slice can appear in two different questions, and the same question
+/// offers a *different* slice after an edit or a reorder. Carrying the identity
+/// alongside the options is what lets a confirmation follow its option to a new
+/// position, and refuse to follow whatever occupies its old one.
+///
+/// Borrowed rather than owned, because the caller already holds both: an owned
+/// copy would be a second copy of the same fact, and two copies of a fact drift.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct Question<'a> {
+    /// Stable identity of the question. In a flow this is the ask node id.
+    id: &'a str,
+    /// The options offered right now.
+    options: &'a [String],
+}
+
+impl<'a> Question<'a> {
+    /// Names one question's vocabulary.
+    #[must_use]
+    pub const fn new(id: &'a str, options: &'a [String]) -> Self {
+        Self { id, options }
+    }
+
+    /// Returns the question's stable identity.
+    #[must_use]
+    pub const fn id(&self) -> &'a str {
+        self.id
+    }
+
+    /// Returns the options offered right now.
+    #[must_use]
+    pub const fn options(&self) -> &'a [String] {
+        self.options
+    }
+}
+
 /// Free-text option resolver seam.
 pub trait Resolver {
-    /// Resolves an utterance against the candidate options.
+    /// Resolves an utterance against the question in front of the person.
     ///
     /// Returns a [`Resolution`], never an `Option<usize>`. The two-way form
     /// collapses *nothing matched* and *several matched equally well* into one
@@ -1215,7 +1258,10 @@ pub trait Resolver {
     /// options as well as each other is reported as unrecognized, so the
     /// session re-asks the full list and the identical answer resolves the
     /// identical way forever. A caller that cannot see the tie cannot narrow.
-    fn resolve(&self, utterance: &str, options: &[String]) -> Resolution;
+    ///
+    /// A question is more than its option list — see [`Question`] for why the
+    /// identity travels with the options.
+    fn resolve(&self, utterance: &str, question: &Question<'_>) -> Resolution;
 }
 
 /// Which match tier produced a resolution.
@@ -1271,7 +1317,13 @@ pub enum Resolution {
         tier: MatchTier,
         /// The match score.
         score: f64,
-        /// The lead held over the runner-up.
+        /// The lead held over the runner-up *within the winning tier*.
+        ///
+        /// Within, not across: tier scores are not comparable, and a resolver
+        /// that applied precedence has already excluded every lower tier from
+        /// the comparison. A `lead` of `1.0` on a lone exact candidate therefore
+        /// says "nothing in the exact tier contested this", not "nothing at all
+        /// came close".
         lead: f64,
     },
     /// Options matched but none led by the required margin.
@@ -1282,6 +1334,14 @@ pub enum Resolution {
     Ambiguous {
         /// Every option index still in play, lowest first.
         tied: Vec<usize>,
+        /// The tier whose candidates tied.
+        ///
+        /// Reported for the reason [`Self::Resolved::tier`] is: two exact
+        /// candidates that fold to one normalized form, two phonetic candidates
+        /// that share a sound-alike key, and two fuzzy candidates inside a
+        /// margin are three different ties with three different repairs, and a
+        /// bare list of indices names none of them.
+        tier: MatchTier,
         /// The highest score observed.
         score: f64,
     },
@@ -1573,7 +1633,8 @@ impl Session {
             return Err(BotError::SessionNotAwaitingAnswer);
         };
         self.charge_step()?;
-        let index = match self.resolver.resolve(utterance, &options) {
+        let question = Question::new(&node_id, &options);
+        let index = match self.resolver.resolve(utterance, &question) {
             Resolution::Resolved { index, .. } => index,
             Resolution::Ambiguous { tied, .. } => {
                 // Narrow the re-ask to the options still in play. Repeating the
@@ -1819,16 +1880,17 @@ mod tests {
     #[test]
     fn the_default_resolver_has_an_explicit_unrecognized_case() {
         let options = vec![String::from("yes"), String::from("no")];
+        let question = Question::new("ask", &options);
         let resolver = crate::language::LanguageResolver::new();
         assert!(
             matches!(
-                resolver.resolve("maybe", &options),
+                resolver.resolve("maybe", &question),
                 Resolution::Absent { .. }
             ),
             "an unrecognized answer is Absent, which is not the same as Ambiguous"
         );
         assert_eq!(
-            resolver.resolve("yes", &options),
+            resolver.resolve("yes", &question),
             Resolution::Resolved {
                 index: 0,
                 tier: MatchTier::Exact,

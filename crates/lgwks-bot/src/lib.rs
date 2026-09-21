@@ -170,8 +170,8 @@ pub use semantic::{Embedder, EmbedderIdentity, SemanticError, SemanticPolicy, Se
 pub use session::{
     ChoiceArm, DegradedReason, Disposition, EffectLedger, FlowBounds, FlowEdge, FlowNodeKind,
     FlowSpec, Interpolate, Journal, MatchTier, MemoryJournal, NodeId, NodeKind, Outcome, Predicate,
-    Resolution, Resolver, Session, SessionId, TemplateInterpolator, Terminal, TranscriptEntry,
-    Value, ValueExpr, VarScope, VarType,
+    Question, Resolution, Resolver, Session, SessionId, TemplateInterpolator, Terminal,
+    TranscriptEntry, Value, ValueExpr, VarScope, VarType,
 };
 pub use spec::{Bot, BotSpec};
 pub use verb::{Evaluate, Execute, Observe, Query};

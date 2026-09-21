@@ -27,6 +27,18 @@
 //! comparable. Ordering is the policy, and it is the reason a resolution can
 //! report which tier it came from.
 //!
+//! # Precedence is over the whole candidate set, not per option
+//!
+//! The order above is applied to the **set**, not to each option: an exact
+//! candidate anywhere in the list ends the search, and the phonetic and fuzzy
+//! tiers are not consulted at all. Tagging each option with its own tier and
+//! then sorting the mixture by numeric score is not a tier order, because the
+//! numbers do not mean the same thing in different tiers — a fuzzy candidate
+//! can score `0.97` against text an exact candidate matched perfectly, and one
+//! margin applied across both ranks reports `Ambiguous` for an answer the
+//! person typed in full. Only the winning tier is ever compared, and the margin
+//! is applied inside it, which is the only place it has a meaning.
+//!
 //! [`Weighted`]: lgwks_std::similarity::Weighted
 //! [`phonetic_key`]: crate::language::phonetic_key
 //! [`Jaccard`]: lgwks_std::similarity::Jaccard
@@ -55,7 +67,7 @@ use std::collections::BTreeMap;
 
 use lgwks_std::similarity::{EditDistance, Jaccard, Similarity};
 
-use crate::session::{MatchTier, Resolution};
+use crate::session::{MatchTier, Question, Resolution};
 
 /// The longest normalized input the shipped resolver will compare.
 pub const MAX_UTTERANCE_CHARS: usize = 512;
@@ -69,7 +81,7 @@ const DISTANCE_WEIGHT: f64 = 0.5;
 /// The score at or above which a fuzzy match is a candidate at all.
 pub const MATCH_THRESHOLD: f64 = 0.55;
 
-/// The lead the best candidate must hold over the runner-up.
+/// The lead the best candidate must hold over the runner-up *in its own tier*.
 pub const MATCH_MARGIN: f64 = 0.08;
 
 /// Folds text to a comparable form: lower case, ASCII, single-spaced.
@@ -238,17 +250,51 @@ fn tokens(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Scores two option candidates against one utterance, best-first.
+/// Orders the tiers by precedence: the lowest rank wins outright.
+///
+/// The order is the module's policy and is stated once, here, so precedence is
+/// a property of the resolver rather than of the numbers a tier happens to
+/// produce. `Semantic` ranks last because it is consulted only when the lexicon
+/// found nothing at all, and never to outvote a lexical verdict.
+const fn tier_rank(tier: MatchTier) -> u8 {
+    match tier {
+        MatchTier::Exact => 0,
+        MatchTier::Phonetic => 1,
+        MatchTier::Fuzzy => 2,
+        MatchTier::Semantic => 3,
+    }
+}
+
+/// Reduces scored candidates to the highest tier that produced any.
+///
+/// This is the step that makes "Exact, Phonetic, Fuzzy" an *order* rather than a
+/// label. Scoring every option, tagging each with the tier it reached, and then
+/// sorting the mixture by numeric score is not a tier order: a fuzzy candidate
+/// can score 0.97 against an option an exact answer already matched perfectly,
+/// and the margin rule then reports `Ambiguous` for an answer the person typed
+/// in full. Cross-tier scores are not comparable — each tier's number means
+/// something different — so exactly one tier is allowed into the comparison.
+fn winning_tier(mut scored: Vec<(usize, MatchTier, f64)>) -> Vec<(usize, MatchTier, f64)> {
+    let Some(best) = scored.iter().map(|candidate| tier_rank(candidate.1)).min() else {
+        return scored;
+    };
+    scored.retain(|candidate| tier_rank(candidate.1) == best);
+    scored
+}
+
+/// Scores every option against one utterance, best-first, within the winning
+/// tier.
 ///
 /// Deterministic: the returned order is by descending score, and ties keep
 /// lowest-index-first, so the caller's verdict does not depend on iteration
 /// order — the comparator rule `docs/bot-on-ecs.md` §8 takes from Heritrix.
 fn score_all(
     utterance: &str,
-    options: &[String],
+    question: &Question<'_>,
     aliases: &BTreeMap<String, usize>,
     distance: &EditDistance,
 ) -> Vec<(usize, MatchTier, f64)> {
+    let options = question.options();
     let spoken = normalize(utterance);
     let spoken_key = phonetic_key(utterance);
     let spoken_tokens = tokens(utterance);
@@ -279,6 +325,7 @@ fn score_all(
         }
     }
 
+    let mut scored = winning_tier(scored);
     // Stable sort by descending score. `sort_by` is stable, and the input is in
     // ascending index order, so equal scores keep lowest-index-first for free.
     scored.sort_by(|left, right| {
@@ -297,6 +344,13 @@ fn score_all(
 /// everything inside that margin is still in play — is the *policy* of a
 /// three-way verdict, and two copies of it would be two policies that drift.
 /// Only the margin differs between callers, so the margin is a parameter.
+///
+/// The lead is measured **within** the tier of the candidates it is given, and
+/// never across tiers: they are not comparable, and `score_all` has already
+/// reduced the set to a single tier. Two exact candidates therefore tie at
+/// `lead == 0.0` however far the nearest fuzzy competitor is — which is the
+/// intended reading, because a fuzzy competitor is not a rival for an exact
+/// answer, and the tie that matters is between the two exact ones.
 pub(crate) fn decide(scored: &[(usize, MatchTier, f64)], margin: f64) -> Resolution {
     let Some(&(index, tier, score)) = scored.first() else {
         return Resolution::Absent { best_score: 0.0 };
@@ -320,7 +374,7 @@ pub(crate) fn decide(scored: &[(usize, MatchTier, f64)], margin: f64) -> Resolut
         .take_while(|candidate| score - candidate.2 < margin)
         .map(|candidate| candidate.0)
         .collect();
-    Resolution::Ambiguous { tied, score }
+    Resolution::Ambiguous { tied, tier, score }
 }
 
 /// The shipped lexicon resolver: tiered matching plus learned aliases.
@@ -381,11 +435,11 @@ impl LanguageResolver {
         self.aliases.len()
     }
 
-    /// Resolves `utterance` against `options` as a three-way verdict.
+    /// Resolves `utterance` against `question` as a three-way verdict.
     #[must_use]
-    pub fn decide_for(&self, utterance: &str, options: &[String]) -> Resolution {
+    pub fn decide_for(&self, utterance: &str, question: &Question<'_>) -> Resolution {
         decide(
-            &score_all(utterance, options, &self.aliases, &self.distance),
+            &score_all(utterance, question, &self.aliases, &self.distance),
             MATCH_MARGIN,
         )
     }
@@ -398,8 +452,8 @@ impl Default for LanguageResolver {
 }
 
 impl crate::session::Resolver for LanguageResolver {
-    fn resolve(&self, utterance: &str, options: &[String]) -> Resolution {
-        self.decide_for(utterance, options)
+    fn resolve(&self, utterance: &str, question: &Question<'_>) -> Resolution {
+        self.decide_for(utterance, question)
     }
 }
 
@@ -408,6 +462,18 @@ mod tests {
     use super::*;
     use crate::session::Resolver;
 
+    /// The sentence the cross-tier tests resolve, and the two competitors that
+    /// sit below an exact match of it.
+    ///
+    /// `IDENTICAL` is the utterance itself. `PHONETIC_TWIN` keeps a *different*
+    /// spelling of one word, so it lands on the phonetic tier, and `FUZZY_TWIN`
+    /// transposes the first two words, which leaves the token set identical and
+    /// the edit distance at four characters — a fuzzy score above the phonetic
+    /// tier's `0.9`, which is exactly the ordering these tests exist to pin.
+    const IDENTICAL: &str = "a monthly account statement should be sent to my email address";
+    const PHONETIC_TWIN: &str = "a monthlee account statement should be sent to my email address";
+    const FUZZY_TWIN: &str = "monthly a account statement should be sent to my email address";
+
     /// Builds the option list most tests resolve against.
     fn options() -> Vec<String> {
         vec![
@@ -415,6 +481,29 @@ mod tests {
             String::from("No, go back"),
             String::from("Speak to a person"),
         ]
+    }
+
+    /// Names the question most tests resolve against.
+    fn ask(options: &[String]) -> Question<'_> {
+        Question::new("ask", options)
+    }
+
+    /// Returns the option and tier a verdict selected, or `None` for any other
+    /// verdict — so a test can assert identity and tier in one comparison
+    /// without a `panic!`, which this workspace forbids.
+    fn selected(verdict: &Resolution) -> Option<(usize, MatchTier)> {
+        match *verdict {
+            Resolution::Resolved { index, tier, .. } => Some((index, tier)),
+            _ => None,
+        }
+    }
+
+    /// Returns the tied options and the tier they tied in, or `None`.
+    fn tied(verdict: &Resolution) -> Option<(Vec<usize>, MatchTier)> {
+        match *verdict {
+            Resolution::Ambiguous { ref tied, tier, .. } => Some((tied.clone(), tier)),
+            _ => None,
+        }
     }
 
     /// Asserts two scores agree to within the tolerance float arithmetic needs.
@@ -478,7 +567,7 @@ mod tests {
 
     #[test]
     fn an_exact_normalized_match_resolves_at_the_exact_tier() {
-        let resolution = LanguageResolver::new().resolve("  yes, CONTINUE ", &options());
+        let resolution = LanguageResolver::new().resolve("  yes, CONTINUE ", &ask(&options()));
         assert_eq!(
             resolution,
             Resolution::Resolved {
@@ -493,7 +582,7 @@ mod tests {
     #[test]
     fn a_spelling_variation_resolves_at_the_phonetic_tier() {
         let choices = vec![String::from("Smyth"), String::from("Marcus")];
-        let resolution = LanguageResolver::new().resolve("Smith", &choices);
+        let resolution = LanguageResolver::new().resolve("Smith", &ask(&choices));
         assert_eq!(
             resolution,
             Resolution::Resolved {
@@ -507,7 +596,7 @@ mod tests {
 
     #[test]
     fn an_unrecognized_answer_is_absent() {
-        let resolution = LanguageResolver::new().resolve("maybe later", &options());
+        let resolution = LanguageResolver::new().resolve("maybe later", &ask(&options()));
         assert!(
             matches!(resolution, Resolution::Absent { .. }),
             "expected Absent, got {resolution:?}"
@@ -516,20 +605,35 @@ mod tests {
 
     #[test]
     fn two_equally_close_options_are_ambiguous_and_both_are_tied() {
+        // Both options share a sound-alike key with the utterance, so both are
+        // phonetic candidates at the same score and neither leads.
         let choices = vec![
             String::from("Accept the offer"),
             String::from("Accept the order"),
         ];
-        let resolution = LanguageResolver::new().resolve("accept the", &choices);
-        match resolution {
-            Resolution::Ambiguous { tied, .. } => {
-                assert_eq!(tied, vec![0, 1], "both options must stay in play");
-            }
-            other => assert!(
-                matches!(other, Resolution::Ambiguous { .. }),
-                "expected Ambiguous, got {other:?}"
-            ),
-        }
+        let resolution = LanguageResolver::new().resolve("accept the", &ask(&choices));
+        assert_eq!(
+            tied(&resolution),
+            Some((vec![0, 1], MatchTier::Phonetic)),
+            "both options must stay in play, and the tie names its tier: {resolution:?}"
+        );
+    }
+
+    #[test]
+    fn a_fuzzy_tie_is_reported_at_the_fuzzy_tier() {
+        // The margin still has its intended meaning *inside* a tier: two
+        // candidates that fold to the same text score identically, and the
+        // resolver reports the tie rather than letting index order decide.
+        let choices = vec![
+            String::from(FUZZY_TWIN),
+            String::from("monthly a account statement should be sent to my email address!"),
+        ];
+        let resolution = LanguageResolver::new().resolve(IDENTICAL, &ask(&choices));
+        assert_eq!(
+            tied(&resolution),
+            Some((vec![0, 1], MatchTier::Fuzzy)),
+            "two equally fuzzy candidates stay ambiguous: {resolution:?}"
+        );
     }
 
     #[test]
@@ -540,7 +644,7 @@ mod tests {
         assert_eq!(resolver.learned(), 1);
 
         assert_eq!(
-            resolver.resolve("The usual!", &options()),
+            resolver.resolve("The usual!", &ask(&options())),
             Resolution::Resolved {
                 index: 2,
                 tier: MatchTier::Exact,
@@ -570,7 +674,7 @@ mod tests {
     fn a_shipped_alias_table_is_normalized_on_load() {
         let resolver = LanguageResolver::with_aliases(vec![(String::from("  The Usual "), 2)]);
         assert_eq!(
-            resolver.resolve("the usual", &options()),
+            resolver.resolve("the usual", &ask(&options())),
             Resolution::Resolved {
                 index: 2,
                 tier: MatchTier::Exact,
@@ -591,7 +695,7 @@ mod tests {
         // `EditDistance` refuses an over-limit input and scores it 0.0 rather
         // than allocating a quadratic table, so a hostile input degrades to the
         // token tier instead of hanging. The bound is the contract.
-        let resolution = LanguageResolver::new().resolve(&long, &options());
+        let resolution = LanguageResolver::new().resolve(&long, &ask(&options()));
         assert!(
             matches!(
                 resolution,
@@ -604,8 +708,126 @@ mod tests {
     #[test]
     fn an_empty_option_list_is_absent_not_a_panic() {
         assert_eq!(
-            LanguageResolver::new().resolve("yes", &[]),
+            LanguageResolver::new().resolve("yes", &ask(&[])),
             Resolution::Absent { best_score: 0.0 }
         );
+    }
+
+    /// The `FUZZY_TWIN` reading of `IDENTICAL` must really be a *fuzzy* reading
+    /// scoring above the phonetic tier, or the precedence tests below would be
+    /// comparing nothing. This test states that premise so a change to the
+    /// similarity arithmetic cannot quietly hollow them out.
+    #[test]
+    fn the_fuzzy_competitor_really_outscores_the_phonetic_tier() {
+        let alone = vec![String::from(FUZZY_TWIN)];
+        let verdict = LanguageResolver::new().resolve(IDENTICAL, &ask(&alone));
+        assert!(
+            matches!(
+                verdict,
+                Resolution::Resolved {
+                    tier: MatchTier::Fuzzy,
+                    score,
+                    ..
+                } if score > 0.9
+            ),
+            "the fuzzy competitor must score above the phonetic tier's 0.9: {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn an_exact_answer_is_not_vetoed_by_a_fuzzy_competitor() {
+        // The filed counterexample: the person typed the complete text of
+        // option 0, and a transposed competitor one tier down scored high
+        // enough to sit inside the margin.
+        let choices = vec![String::from(IDENTICAL), String::from(FUZZY_TWIN)];
+        let verdict = LanguageResolver::new().resolve(IDENTICAL, &ask(&choices));
+        assert_eq!(
+            selected(&verdict),
+            Some((0, MatchTier::Exact)),
+            "a unique exact answer must not be vetoed by a lower tier: {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn an_exact_answer_is_not_vetoed_by_a_phonetic_competitor() {
+        let choices = vec![String::from(IDENTICAL), String::from(PHONETIC_TWIN)];
+        let verdict = LanguageResolver::new().resolve(IDENTICAL, &ask(&choices));
+        assert_eq!(
+            selected(&verdict),
+            Some((0, MatchTier::Exact)),
+            "the phonetic tier ranks below the exact tier: {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn a_phonetic_candidate_outranks_a_higher_scoring_fuzzy_candidate() {
+        let choices = vec![String::from(PHONETIC_TWIN), String::from(FUZZY_TWIN)];
+        let verdict = LanguageResolver::new().resolve(IDENTICAL, &ask(&choices));
+        assert_eq!(
+            selected(&verdict),
+            Some((0, MatchTier::Phonetic)),
+            "precedence is the tier order, not the numeric score: {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn two_normalized_equal_exact_options_tie_rather_than_taking_the_first() {
+        // Both options fold to `yes continue`, so both are exact. Picking the
+        // first would be an arbitrary choice between two options the person's
+        // answer genuinely does not distinguish.
+        let choices = vec![String::from("Yes, continue"), String::from("yes continue!")];
+        let verdict = LanguageResolver::new().resolve("yes continue", &ask(&choices));
+        assert_eq!(
+            tied(&verdict),
+            Some((vec![0, 1], MatchTier::Exact)),
+            "an exact collision stays ambiguous at the exact tier: {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn a_learned_alias_conflicting_with_a_normalized_exact_option_ties() {
+        // The confirmation says `yes` means `No`; the folding says it means
+        // `Yes`. Both are exact-tier readings, so the resolver reports the
+        // conflict rather than letting the alias table silently outrank the
+        // option text.
+        let mut resolver = LanguageResolver::new();
+        resolver.learn("yes", 1);
+        let choices = vec![String::from("Yes"), String::from("No")];
+        let verdict = resolver.resolve("yes", &ask(&choices));
+        assert_eq!(
+            tied(&verdict),
+            Some((vec![0, 1], MatchTier::Exact)),
+            "a conflicting confirmation is a tie, not an override: {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn tier_precedence_survives_option_permutation() {
+        let resolver = LanguageResolver::new();
+        for (choices, expected) in [
+            (
+                vec![String::from(IDENTICAL), String::from(FUZZY_TWIN)],
+                (0_usize, MatchTier::Exact),
+            ),
+            (
+                vec![String::from(FUZZY_TWIN), String::from(IDENTICAL)],
+                (1, MatchTier::Exact),
+            ),
+            (
+                vec![String::from(PHONETIC_TWIN), String::from(FUZZY_TWIN)],
+                (0, MatchTier::Phonetic),
+            ),
+            (
+                vec![String::from(FUZZY_TWIN), String::from(PHONETIC_TWIN)],
+                (1, MatchTier::Phonetic),
+            ),
+        ] {
+            let verdict = resolver.resolve(IDENTICAL, &ask(&choices));
+            assert_eq!(
+                selected(&verdict),
+                Some(expected),
+                "the winning option must follow its text, not its position: {choices:?} gave {verdict:?}"
+            );
+        }
     }
 }

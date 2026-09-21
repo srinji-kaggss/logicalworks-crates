@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use lgwks_bot::{
     BotError, DegradedReason, Embedder, EmbedderIdentity, FlowBounds, FlowEdge, FlowSpec, NodeKind,
-    Predicate, Resolution, Resolver, SemanticResolver, Session, Terminal, TranscriptEntry, Value,
-    ValueExpr, VarType,
+    Predicate, Question, Resolution, Resolver, SemanticResolver, Session, Terminal,
+    TranscriptEntry, Value, ValueExpr, VarType,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -528,7 +528,7 @@ fn validation_rejects_an_unknown_node_kind() -> TestResult {
 struct FixedResolver(Resolution);
 
 impl Resolver for FixedResolver {
-    fn resolve(&self, _utterance: &str, _options: &[String]) -> Resolution {
+    fn resolve(&self, _utterance: &str, _question: &Question<'_>) -> Resolution {
         self.0.clone()
     }
 }

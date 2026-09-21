@@ -72,7 +72,7 @@ use std::fmt;
 use lgwks_std::similarity::{Cosine, CosineError};
 
 use crate::language::{LanguageResolver, decide};
-use crate::session::{DegradedReason, MatchTier, Resolution, Resolver};
+use crate::session::{DegradedReason, MatchTier, Question, Resolution, Resolver};
 
 /// A source of dense vector representations for text, and its own identity.
 ///
@@ -484,15 +484,15 @@ impl<E: Embedder> SemanticResolver<E> {
 }
 
 impl<E: Embedder> Resolver for SemanticResolver<E> {
-    fn resolve(&self, utterance: &str, options: &[String]) -> Resolution {
-        let deterministic = self.lexicon.decide_for(utterance, options);
+    fn resolve(&self, utterance: &str, question: &Question<'_>) -> Resolution {
+        let deterministic = self.lexicon.decide_for(utterance, question);
         if !matches!(deterministic, Resolution::Absent { .. }) {
             return deterministic;
         }
         // The lexicon considered every option and none fit. This is the only
         // path on which a model is consulted, so no verdict the lexicon reached
         // can be changed by enabling this tier.
-        match self.score_semantically(utterance, options) {
+        match self.score_semantically(utterance, question.options()) {
             Ok(scored) => decide(&scored, self.policy.margin()),
             Err(reason) => Resolution::Degraded { reason },
         }
@@ -502,7 +502,7 @@ impl<E: Embedder> Resolver for SemanticResolver<E> {
 #[cfg(test)]
 mod tests {
     use super::{Embedder, EmbedderIdentity, SemanticError, SemanticPolicy, SemanticResolver};
-    use crate::session::{DegradedReason, MatchTier, Resolution, Resolver};
+    use crate::session::{DegradedReason, MatchTier, Question, Resolution, Resolver};
     use std::cell::Cell;
     use std::collections::BTreeMap;
     use std::fmt;
@@ -583,6 +583,11 @@ mod tests {
         names.iter().map(|name| (*name).to_owned()).collect()
     }
 
+    /// Names the question the resolver tests resolve against.
+    fn ask(options: &[String]) -> Question<'_> {
+        Question::new("ask", options)
+    }
+
     /// The two vectors a paraphrase relationship is built from, plus an
     /// unrelated one. `"the usual"` and `"Repeat last order"` share no word and
     /// no sound-alike key, which is the point: the lexicon cannot relate them,
@@ -620,7 +625,7 @@ mod tests {
         let (embedder, calls) = stub(paraphrase_vectors(), vec![0.0, 1.0], false)?;
         let resolver = SemanticResolver::new(embedder);
 
-        let resolution = resolver.resolve("yes", &options(&["yes", "no"]));
+        let resolution = resolver.resolve("yes", &ask(&options(&["yes", "no"])));
 
         assert_eq!(
             resolution,
@@ -649,7 +654,7 @@ mod tests {
         let (embedder, calls) = stub(paraphrase_vectors(), vec![0.0, 1.0], false)?;
         let resolver = SemanticResolver::new(embedder);
 
-        let resolution = resolver.resolve("order", &options(&["order", "order"]));
+        let resolution = resolver.resolve("order", &ask(&options(&["order", "order"])));
 
         assert!(
             matches!(resolution, Resolution::Ambiguous { .. }),
@@ -674,13 +679,13 @@ mod tests {
         let lexicon = crate::language::LanguageResolver::new();
         assert!(
             matches!(
-                lexicon.resolve("the usual", &options),
+                lexicon.resolve("the usual", &ask(&options)),
                 Resolution::Absent { .. }
             ),
             "\"the usual\" must not be reachable by letters alone, or this test proves nothing"
         );
 
-        let resolution = resolver.resolve("the usual", &options);
+        let resolution = resolver.resolve("the usual", &ask(&options));
 
         assert!(
             matches!(
@@ -711,7 +716,7 @@ mod tests {
         // the whole reason the verdict is three-way.
         let resolution = resolver.resolve(
             "the usual",
-            &options(&["Repeat last order", "Repeat last order"]),
+            &ask(&options(&["Repeat last order", "Repeat last order"])),
         );
 
         assert!(
@@ -729,7 +734,7 @@ mod tests {
 
         // Both options are orthogonal or opposed to the utterance, so the tier
         // has nothing to say and must say nothing rather than pick the least bad.
-        let resolution = resolver.resolve("the usual", &options(&["Cancel", "Later"]));
+        let resolution = resolver.resolve("the usual", &ask(&options(&["Cancel", "Later"])));
 
         assert!(
             matches!(resolution, Resolution::Absent { .. }),
@@ -745,7 +750,10 @@ mod tests {
         let (embedder, _calls) = stub(paraphrase_vectors(), vec![0.0, 1.0], true)?;
         let resolver = SemanticResolver::new(embedder);
 
-        let resolution = resolver.resolve("the usual", &options(&["Repeat last order", "Cancel"]));
+        let resolution = resolver.resolve(
+            "the usual",
+            &ask(&options(&["Repeat last order", "Cancel"])),
+        );
 
         assert_eq!(
             resolution,
@@ -770,7 +778,10 @@ mod tests {
         )?;
         let resolver = SemanticResolver::new(embedder);
 
-        let resolution = resolver.resolve("the usual", &options(&["Repeat last order", "Cancel"]));
+        let resolution = resolver.resolve(
+            "the usual",
+            &ask(&options(&["Repeat last order", "Cancel"])),
+        );
 
         assert_eq!(
             resolution,
@@ -794,7 +805,7 @@ mod tests {
             "the first binding for a phrase has no predecessor"
         );
 
-        let resolution = resolver.resolve("the usual", &options);
+        let resolution = resolver.resolve("the usual", &ask(&options));
         assert_eq!(
             resolution,
             Resolution::Resolved {
