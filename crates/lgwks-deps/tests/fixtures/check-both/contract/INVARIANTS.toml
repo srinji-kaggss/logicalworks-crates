@@ -1,0 +1,13 @@
+[policy]
+enforce = true
+
+[[invariant]]
+id = "INV-CHECK-BOTH-LOADED"
+statement = "The fixture invariant is bound to an authored source path."
+scope = "check_both"
+owner = "check_both"
+enforcement = "static-check"
+enforced_by = "src/lib.rs"
+approved_by = "maintainer"
+approved_on = "2026-09-20"
+review = "src/lib.rs"

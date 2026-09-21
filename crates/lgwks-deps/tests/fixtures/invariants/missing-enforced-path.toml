@@ -1,0 +1,13 @@
+[policy]
+enforce = true
+
+[[invariant]]
+id = "INV-BOT-FOUR-VERBS"
+statement = "The bot surface exposes four fixed verbs through explicit roles."
+scope = "lgwks_bot"
+owner = "lgwks_bot"
+enforcement = "static-check"
+enforced_by = "crates/lgwks-bot/src/does-not-exist.rs"
+approved_by = "maintainer"
+approved_on = "2026-09-20"
+review = "crates/lgwks-deps/src/invariants.rs"

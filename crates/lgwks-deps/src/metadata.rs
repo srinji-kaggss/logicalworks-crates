@@ -275,6 +275,11 @@ fn source(dependency: &CargoDependency) -> Result<DependencySource, MetadataErro
 /// Decodes format-version 1 metadata into direct workspace edges.
 pub fn parse(text: &str) -> Result<Vec<DirectEdge>, MetadataError> {
     let metadata: CargoMetadata = lgwks_std::json::from_str(text).map_err(MetadataError::Json)?;
+    direct_edges(metadata)
+}
+
+/// Extracts direct edges from one decoded Cargo metadata response.
+fn direct_edges(metadata: CargoMetadata) -> Result<Vec<DirectEdge>, MetadataError> {
     let members: std::collections::BTreeSet<&str> = metadata
         .workspace_members
         .iter()
@@ -325,8 +330,8 @@ pub fn parse(text: &str) -> Result<Vec<DirectEdge>, MetadataError> {
     Ok(edges)
 }
 
-/// Runs locked Cargo metadata and returns every direct workspace edge.
-pub fn read(root: &Path) -> Result<Vec<DirectEdge>, MetadataError> {
+/// Runs locked Cargo metadata and decodes the supported response shape.
+fn read_metadata(root: &Path) -> Result<CargoMetadata, MetadataError> {
     let output = Command::new("cargo")
         .args([
             "metadata",
@@ -345,7 +350,34 @@ pub fn read(root: &Path) -> Result<Vec<DirectEdge>, MetadataError> {
             String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         ));
     }
-    parse(&String::from_utf8_lossy(&output.stdout))
+    lgwks_std::json::from_slice(&output.stdout).map_err(MetadataError::Json)
+}
+
+/// Runs locked Cargo metadata and returns every direct workspace edge.
+pub fn read(root: &Path) -> Result<Vec<DirectEdge>, MetadataError> {
+    direct_edges(read_metadata(root)?)
+}
+
+/// Runs locked Cargo metadata and returns the names of its workspace members.
+///
+/// Scope validation uses this list rather than path prefixes, so an invariant
+/// cannot claim authority over a directory merely because it lives under the
+/// repository. The names are sorted for deterministic diagnostics.
+pub fn workspace_package_names(root: &Path) -> Result<Vec<String>, MetadataError> {
+    let metadata = read_metadata(root)?;
+    let members: std::collections::BTreeSet<&str> = metadata
+        .workspace_members
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let mut names: Vec<String> = metadata
+        .packages
+        .iter()
+        .filter(|package| members.contains(package.id.as_str()))
+        .map(|package| package.name.clone())
+        .collect();
+    names.sort();
+    Ok(names)
 }
 
 #[cfg(test)]
