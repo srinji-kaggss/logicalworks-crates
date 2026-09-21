@@ -422,7 +422,10 @@ pub enum BotError {
 /// `Deficit`'s rendering lives here rather than in `cap.rs`, and the reason is
 /// the escaping contract below rather than the module it describes: every
 /// untrusted field a deficit carries is a capability name or a domain id, both
-/// of which are `String`s a caller supplied, so both go through [`Escaped`].
+/// of which are `String`s a caller supplied, so both go through `Escaped`, the
+/// private helper below. It is named here rather than linked because it is not
+/// reachable from the public docs, and a link a reader cannot follow is worse
+/// than the plain name.
 /// Putting the arm next to `Escaped` is what keeps a later field from being
 /// interpolated without it.
 impl fmt::Display for Deficit {

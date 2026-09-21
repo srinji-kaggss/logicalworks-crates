@@ -334,7 +334,7 @@ where
 // ── Sealed proof ─────────────────────────────────────────────────────────────
 
 /// Proof of granted authority. A tuple struct with a private payload:
-/// only [`GrantSet`](super::gate::GrantSet) can mint one, so presenting an
+/// only [`GrantSet`] can mint one, so presenting an
 /// `Auth` proves the host granted every capability it covers. Deliberately
 /// not serializable: authority must not round-trip through JSON.
 ///
