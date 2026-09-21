@@ -14,14 +14,13 @@
 //! - [`Supervisor`](crate::rt::supervise::Supervisor) — a bounded set of tasks
 //!   that reports every terminal outcome ([`TaskOutcome`]) and stops its tasks
 //!   when it is dropped or cancelled. This is the module a bot's background work
-//!   belongs in, and the only place a subprocess is started
-//!   ([`Supervisor::spawn_process`]).
+//!   belongs in, and the only place a subprocess is started (`spawn_process`,
+//!   behind the `process` feature).
 //! - [`JoinSet`] — the tracked envelope itself. Its constructor takes the tasks,
 //!   its drop aborts them, and `join_next` yields [`JoinError`]-carrying results
 //!   to the caller, so nothing is started that nothing owns.
 //!
 //! [`Supervisor`]: crate::rt::supervise::Supervisor
-//! [`Supervisor::spawn_process`]: crate::rt::supervise::Supervisor::spawn_process
 //! [`TaskOutcome`]: crate::rt::supervise::TaskOutcome
 //!
 //! What remains here besides the set is the fan-out an agent SDK actually

@@ -301,8 +301,9 @@ pub enum TaskOutcome {
     /// A supervised process ended without exiting successfully — and the
     /// supervisor did not stop it.
     ///
-    /// This is [`Supervisor::spawn_process`]'s outcome, and it is the one a
-    /// task body cannot produce: a body that returns *is* a success, so before
+    /// This is the outcome `Supervisor::spawn_process` reports — that method is
+    /// behind the `process` feature — and it is the one a task body cannot
+    /// produce: a body that returns *is* a success, so before
     /// this variant existed a command that exited non-zero and a command that
     /// exited zero were the same report. A process the supervisor killed
     /// because its token was cancelled is [`Self::Cancelled`], not this, so the
@@ -465,9 +466,9 @@ impl ShutdownReport {
     /// order.
     ///
     /// The counterpart of [`ShutdownReport::panicked`] for
-    /// [`Supervisor::spawn_process`]: a report whose only readable failure is a
-    /// panic would leave a command that exited non-zero to be found by
-    /// hand-filtering [`ShutdownReport::outcomes`].
+    /// `Supervisor::spawn_process` (behind the `process` feature): a report
+    /// whose only readable failure is a panic would leave a command that exited
+    /// non-zero to be found by hand-filtering [`ShutdownReport::outcomes`].
     pub fn failed(&self) -> impl Iterator<Item = &TaskOutcome> {
         self.outcomes
             .iter()
