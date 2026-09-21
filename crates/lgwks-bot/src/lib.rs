@@ -167,6 +167,14 @@ pub mod journal;
 pub mod json;
 /// Language understanding: the tiered lexicon behind the resolver seam.
 pub mod language;
+/// Whether a failed attempt may be tried again.
+///
+/// The vocabulary lives in [`error`](error): [`RetryClass`](RetryClass) says
+/// what a failure permits and [`DispatchCertainty`](DispatchCertainty) says
+/// what it established. What this module adds is RQ-009's decision rule, which
+/// composes those with the budget, the authority, the intent and any remote
+/// deduplication contract.
+pub mod retry;
 /// Async runtime surface (feature `rt`): owned `Runtime`, bounded fan-out,
 /// timers, channels, and opt-in drivers.
 #[cfg(feature = "rt")]

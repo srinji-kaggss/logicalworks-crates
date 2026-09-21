@@ -386,6 +386,44 @@ modules above it, and it ships in the same release.
     journal untouched. What they do not do is reach a real environment: no process,
     socket or input seat exists here, so `EnvironmentId` arrives from the host's
     own entropy and nothing in this crate creates one.
+- **`retry`, RQ-009's admissibility rule: the vocabulary existed, the decision
+  did not.** `RetryClass` already said what a failure permits and
+  `DispatchCertainty` already said what it established, with
+  `BotError::retry_class` as the total map between them that never reads a
+  rendered cause. What was missing is the rule that composes those with the
+  budget, the authority, the intent and a remote deduplication contract:
+  `retry_admissible = budget_remaining AND live_authority AND
+  unchanged_logical_intent AND (proven_not_applied OR contract_valid)`.
+  - **It is a pure function of facts the caller established**, the shape
+    `DispatchCertainty` already has with its producers. It reaches for no clock,
+    no broker and no journal, so every branch is pinned by a test rather than by
+    a scenario.
+  - **`DeduplicationContract` records all five things RQ-009 lists**: the
+    logical request key, the payload binding, the scope, the retention window
+    and the late-arrival behaviour. The key and the payload reuse the effect
+    key's own vocabulary, because that split is already the right one: the
+    `ActionId` is the logical intent that stays fixed across a resend, and the
+    `ActionDigest` is the bound payload that must not change with it.
+  - **The late-arrival answer is where a contract can be worth nothing.** Inside
+    the retention window the remote deduplicates by construction. Past it, the
+    contract rules out a duplicate only if the remote demonstrably *refuses* a
+    late arrival. `Applied` means a second application; `Unspecified` means
+    nobody knows, and not knowing is not a basis for sending. An adapter that
+    leaves that field unstated gets a refusal rather than a duplicate.
+  - **Every failing conjunct is reported, not the first.** The four have four
+    unrelated repairs, and the estate already made this argument for
+    capabilities: a check that reveals one missing item at a time makes the
+    repair a loop. The one exception is a permanent failure, which short-circuits
+    because the remaining conjuncts are moot and reporting them would be noise.
+  - **What a retry cannot reach: a GUI click.** RQ-009's contract half is
+    reachable only by supplying a recorded contract, and nothing here can
+    express one for a click, so an unsettled click is never retried on that half
+    of the disjunct.
+  - **21 unit tests**, covering both directions of the retention boundary, a
+    contract recorded for another action and for another payload, the refusing
+    default on the authority fact, and the all-conjuncts-failed report. No eval
+    case moves off `not_run`: RQ-009's rule is a decision over stated facts, and
+    the cases that would exercise it end to end need a real receiver.
 - **`Observe::fingerprint`, and with it the lazy seam: a source that holds still
   is no longer polled.** Change detection is an *equality* question — the
   substrate reduces every observation to one bit and discards the value — so
