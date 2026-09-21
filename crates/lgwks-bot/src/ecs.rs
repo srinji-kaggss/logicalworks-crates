@@ -737,6 +737,54 @@ mod tests {
         }
     }
 
+    /// An action that records what it saw, so a test can assert on a
+    /// *persistent* effect rather than on a call count.
+    struct Record(Rc<RefCell<Vec<u16>>>);
+
+    impl Execute for Record {
+        type Input = u16;
+        type Output = ();
+
+        fn required_caps(&self) -> &[Cap] {
+            &[]
+        }
+
+        async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
+            call.0.check(&[])?;
+            self.0.borrow_mut().push(*call.1);
+            Ok(())
+        }
+
+        fn domain_id(&self) -> &str {
+            "test::record"
+        }
+    }
+
+    /// An action that is always refused: the second half of a chain whose first
+    /// half already took effect.
+    struct Fails;
+
+    impl Execute for Fails {
+        type Input = u16;
+        type Output = ();
+
+        fn required_caps(&self) -> &[Cap] {
+            &[]
+        }
+
+        async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
+            call.0.check(&[])?;
+            Err(BotError::DomainError {
+                domain: "test::fails".into(),
+                cause: "refused after the first action ran".into(),
+            })
+        }
+
+        fn domain_id(&self) -> &str {
+            "test::fails"
+        }
+    }
+
     fn net_grants() -> GrantSet {
         GrantSet::empty().grant(Cap::net())
     }
@@ -803,7 +851,7 @@ mod tests {
                 remaining: Rc::new(Cell::new(1)),
                 caps: vec![Cap::net()],
             })
-            .on(|value: &u16| *value >= 500, Count(counter))
+            .on(|value: &u16| *value >= 500, Count(Rc::clone(&counter)))
             .build(&net_grants())?;
 
         assert_eq!(
@@ -827,6 +875,68 @@ mod tests {
             bot.revisions(),
             after_success,
             "a failed tick must not commit a new Revision"
+        );
+        assert_eq!(
+            counter.get(),
+            0,
+            "a failed poll fires nothing: the action must not have run"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_action_failure_leaves_earlier_effects_and_returns_err() -> TestResult {
+        // The counterexample to "a tick is all-or-nothing", kept as a
+        // regression because the README claimed it for long enough to be
+        // retrieved as fact. Two actions on one chain: the first records an
+        // effect, the second is refused. `tick` returns Err *and* the first
+        // effect is live, so a caller reading Err as "nothing happened" retries
+        // into a duplicate.
+        //
+        // The script holds still at 200 so the second tick has an unchanged
+        // source, which is what makes the "not retried" half falsifiable: a
+        // moving source would fire again for reasons unrelated to the failure.
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut bot = EcsBot::builder("partial")
+            .observe(Script::new(vec![200, 200]))
+            .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
+            .on(|value: &u16| *value >= 200, Fails)
+            .build(&net_grants())?;
+
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(format!("a refused action was reported as {fired} fired").into());
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::DomainError { .. }),
+                "expected the action's own error, got {error:?}"
+            ),
+        }
+        assert_eq!(
+            *log.borrow(),
+            vec![200],
+            "the action before the failure ran and its effect is not rolled back"
+        );
+
+        // The unattempted work is not queued for the next tick: revisions are
+        // committed in the observe phase, before any action runs, so an
+        // unchanged source does not re-fire the chain. This is a limitation,
+        // not a repair — it is what "partial run" means here.
+        let revisions = bot.revisions();
+        assert_eq!(
+            bot.tick()?,
+            0,
+            "the chain must not re-fire on a still source"
+        );
+        assert_eq!(
+            bot.revisions(),
+            revisions,
+            "the source did not move, so no new Revision was committed"
+        );
+        assert_eq!(
+            log.borrow().len(),
+            1,
+            "the refused action's predecessor ran exactly once in total"
         );
         Ok(())
     }
