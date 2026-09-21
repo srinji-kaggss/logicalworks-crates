@@ -103,6 +103,8 @@ mod ecs;
 pub mod error;
 /// Grant sets: build-time admission and per-tick proof minting.
 pub mod gate;
+/// The interface model: recognizing the element a step names.
+pub mod interface;
 /// JSON through the shared facade (`lgwks_std::json`).
 pub mod json;
 /// Async runtime surface (feature `rt`): owned `Runtime`, bounded fan-out,
