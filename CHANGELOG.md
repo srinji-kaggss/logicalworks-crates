@@ -6,6 +6,103 @@ independently; each release lists per-crate deltas. The format follows
 `0.x`, so any minor may carry breaking changes, which are then listed
 explicitly under that crate.
 
+## [lgwks_bot 0.4.0] — 2026-09-20
+
+**Breaking.** The four verbs now execute as systems on a `bevy_ecs` schedule,
+and that substrate is the only path — there is no feature flag that selects it,
+because a default-off implementation is a candidate rather than an architecture.
+
+### lgwks_bot Changed
+
+- `Bot::tick` is **synchronous**. The exclusive systems drive the non-`Send`
+  verb futures themselves, so there is nothing for a caller to await.
+  `bot.tick().await?` becomes `bot.tick()?`, and the bot binding is now `mut`.
+- A condition fires on the tick its source value **moves**
+  (`Changed<Revision>`), not on every tick it holds. A source that never changes
+  fires nothing.
+- A tick is **all-or-nothing**: every source is polled before any effect runs,
+  so a failing poll fires nothing and returns the first error. The previous
+  contract fired the chains declared before the failure.
+- A schedule that cannot be ordered deterministically is refused at `build()`
+  (`ambiguity_detection: LogLevel::Error`), not misordered at tick.
+
+### lgwks_bot Removed
+
+- `Bot::block_on_tick` — a pure alias for `tick` once `tick` became
+  synchronous. Two equivalent entry points for one job is one too many.
+- `Bot::chains()` — replaced by `Bot::source_domains()`, which answers what a
+  caller actually wanted ("what is this bot watching") without exposing erased
+  observer objects.
+- The `Chain`, `ChainEntry`, and `ObserveBuilder::entries` types. `ChainEntry`
+  was public only because `chains()` returned it.
+
+### lgwks_bot Added
+
+- `Bot::fired`, `Bot::world`, `Bot::revisions`, `Bot::source_domains` — the
+  change-detection state a caller needs to reason about a tick.
+- `rt::sync::CancellationToken` (+ `DropGuard`). The estate requires every
+  background task to listen to one; the type was absent from the estate, so the
+  rule named something unobtainable. Built on `tokio::sync::watch`, not
+  `tokio-util`: no new third-party edge.
+- `rt::task::LocalSet` and `rt::task::spawn_local`. Every verb is deliberately
+  non-`Send`, and `spawn` requires `Send`, so the crate's own futures could not
+  be spawned at all.
+- `rt::io` (feature `io`): `AsyncRead`/`AsyncWrite`/`AsyncBufRead` and their
+  extensions, `BufReader`, `BufWriter`, `duplex`, `copy`. The storefront gained
+  `tokio-io` for it, because `io-util` was previously reachable only through the
+  whole networking stack. `net`, `process`, and `fs` now imply `io`.
+
+### lgwks_std 0.6.4 Added
+
+- `trace` (default-on): structured, levelled logging via `tracing`, with
+  `tracing` registered in `contract/APPROVED.toml` under `owner = "lgwks_std"`.
+  The estate's PRINTS rule forbids `println!` in library code and names
+  `tracing` as the replacement, but no crate could reach it.
+- Measured cost: four crates (`tracing`, `tracing-core`, `pin-project-lite`,
+  `once_cell`). `attributes` is off, so `#[instrument]` is unavailable and no
+  `syn` proc-macro stack enters the foundation; no subscriber is bundled.
+  `--no-default-features --features core` is still genuinely zero-dependency.
+
+### lgwks_deps 0.1.9 Added
+
+- `check --json`: one JSON object on stdout, nothing on stderr, exit code
+  unchanged. Keys are always `root`, `enforce`, `admitted`, `approvals`,
+  `refusals[]`, `error`.
+- `tokio-io` storefront feature; `tokio-net` now builds on it.
+- Both JSON printers are built through `lgwks_std::json`. `freshness --json` had
+  been escaping only the double quote, so any string containing a backslash
+  produced invalid JSON.
+
+### lgwks_deps 0.1.9 Fixed
+
+- `check --json` exited **0** for a repository with no register — the gate
+  passing without reading its own contract, which the fail-closed rule exists to
+  prevent. Reachable only through the new flag. The exit code checks the error
+  arm first, and `admitted` is `error.is_none() && refusals.is_empty()` so a
+  payload cannot report admission beside a failed read.
+
+### lgwks_ast 0.1.4 Changed
+
+- `Language` and its four lookup tables are now generated from a single row per
+  grammar, so a language cannot be added by halves: the variant, its slot in
+  `Language::ALL`, and its arm in each table are gated together. A grammar that
+  is compiled out has no variant for a table arm to mention, which is what keeps
+  the enum exhaustive without a wildcard.
+- `CustomLang` gained explicit extension handling (`with_extensions`,
+  `of_path`) and traversal metrics that keep `nodes` saturating, `max_depth`
+  monotone, and `has_syntax_issues` sticky.
+- `examples/parse.rs` extended. No public item was removed.
+
+### Shared Changed
+
+- The bot README is compiled: `#[cfg(doctest)] #[doc =
+  include_str!("../README.md")]` runs every Rust block in it. Two defects fell
+  out on the first run — a `r#"…"#` literal terminated early by a `"#deploys"`
+  payload, and a round-trip whose error types were documented as one type when
+  `from_json` returns `BotError` and `to_json` returns `json::Error`.
+- crates.io metadata and the GitHub repository description and topics no longer
+  use internal vocabulary ("estate", "std+", "lane"), which matched no search.
+
 ## [lgwks_deps 0.1.8] — 2026-09-17
 
 ### lgwks_deps Added
