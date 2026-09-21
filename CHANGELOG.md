@@ -49,6 +49,16 @@ because a default-off implementation is a candidate rather than an architecture.
   background task to listen to one; the type was absent from the estate, so the
   rule named something unobtainable. Built on `tokio::sync::watch`, not
   `tokio-util`: no new third-party edge.
+- `rt::supervise` — `Supervisor`, `Budget`, `Outcome`, `repeat`. Background work
+  that cannot leak and cannot run away. A task cannot leak because nothing is
+  detached (no handle to drop), there is no unbounded constructor and no
+  internal queue (a bounded permit is acquired *before* the spawn, and
+  `try_spawn` refuses rather than grows), every entry point reaps finished tasks
+  so the retained set tracks the live bound rather than the lifetime total, and
+  `Drop` cancels and aborts. A loop cannot run away because `repeat` cannot be
+  written without a `Budget`, and every iteration *races* cancellation instead
+  of checking it between iterations — so a cancel interrupts a body that is
+  still awaiting rather than waiting for it to finish.
 - `rt::task::LocalSet` and `rt::task::spawn_local`. Every verb is deliberately
   non-`Send`, and `spawn` requires `Send`, so the crate's own futures could not
   be spawned at all.

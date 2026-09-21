@@ -69,6 +69,8 @@ pub mod process;
 #[cfg(all(feature = "signal", any(unix, windows)))]
 pub mod signal;
 #[cfg(feature = "sync")]
+pub mod supervise;
+#[cfg(feature = "sync")]
 pub mod sync;
 #[cfg(feature = "time")]
 pub mod time;
