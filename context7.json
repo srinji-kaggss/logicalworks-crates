@@ -1,8 +1,11 @@
 {
   "$schema": "https://context7.com/schema/context7.json",
   "projectTitle": "Logical Works Crates",
-  "description": "Four Rust crates for the Logical Works estate: lgwks_std, a zero-config replacement for a dozen common crates; lgwks_bot, a capability-gated automation runtime built on four verbs; lgwks_deps, the install-and-select storefront that owns every third-party edge; and lgwks_ast, a standalone parser.",
-  "folders": ["crates", "docs"],
+  "description": "Four Rust crates: lgwks_std, a zero-config stand-in for a dozen crates; lgwks_bot, a capability-gated runtime; lgwks_deps, the storefront that owns every edge; lgwks_ast, a standalone parser.",
+  "folders": [
+    "crates",
+    "docs"
+  ],
   "excludeFolders": [
     "vendor",
     "target",
@@ -29,12 +32,20 @@
     "Async, timers, channels, and runners come from lgwks_bot. Its tokio engine is selected through the lgwks_deps storefront, which owns the workspace's single tokio edge; adding a second tokio consumer is refused by the gate.",
     "Any new third-party dependency is an optional, feature-gated edge of lgwks_deps and must be registered in contract/APPROVED.toml. Do not introduce a new owner crate or a new top-level crate for third-party code.",
     "lgwks_bot executes exactly four verbs: Observe, Evaluate, Execute, Query. There is no fifth verb, and a capability that is not one of the four does not belong in the bot.",
-    "Observe::fingerprint is opt-in and defaults to None, which polls every tick exactly as before. A source that can answer \"has this moved?\" from a key it already holds — an ETag, an mtime, a row version, a mutation counter — returns Some(u128) and the tick then never calls poll and never constructs the value. The contract is exact: equal fingerprints must imply equal values, or the substrate skips a real movement silently. Return None when producing the digest would cost a round trip, or when the key is not a faithful function of the value.",
+    "Observe::fingerprint is opt-in and defaults to None, which polls every tick exactly as before. A source that can answer \"has this moved?\" from a key it already holds \u2014 an ETag, an mtime, a row version, a mutation counter \u2014 returns Some(u128).",
+    "When a source returns Some(fingerprint), the tick never calls poll and never constructs the value. The contract is exact: equal fingerprints must imply equal values, or the substrate skips a real movement silently.",
+    "Return None from Observe::fingerprint when producing the digest would cost a round trip, or when the key is not a faithful function of the value.",
     "Authority in lgwks_bot is proof-carrying. Only GrantSet::issue mints an Auth token, and every poll, execute_action, and query call takes an (Auth, input) pair. Evaluate takes no proof because it is pure.",
-    "Build bots with Bot::builder(name).observe(source).on(condition, action), ending in build(&grants). observe does not erase: the source stays a concrete S, so on types its condition and action against S::Output and a mismatched chain fails to compile rather than at runtime. A spec's strings resolve through the DomainRegistry a binary declares with domains!, and an identifier outside that list is refused with BotError::UnregisteredDomain naming it. BotSpec is validate-only: there is no from_spec materializer yet, for two stated reasons — ChainSpec::on is a bare identifier with no slot for a condition's parameters such as Above<u16>'s threshold, and an erased source carries no durable statement of its Output type.",
-    "Use tracing for diagnostics. println! and eprintln! are forbidden in library code, and library code must not unwrap or expect on recoverable paths — return typed errors with ?.",
-    "A domain that fails returns BotError::DomainError { domain, certainty, cause }. The certainty: DispatchCertainty field is required, not optional: Refused means nothing was dispatched and nothing ever will be, NotDelivered means nothing reached the peer, and Unsettled means it may have taken effect so a retry is a possible duplicate. BotError::retry_class() reads it — Never, Safe, RequiresEvidence. State what the failure actually establishes; never parse a cause string to decide whether to retry.",
+    "Build bots with Bot::builder(name).observe(source).on(condition, action), ending in build(&grants).",
+    "observe does not erase: the source stays a concrete S, so on types its condition and action against S::Output, and a mismatched chain fails to compile rather than at runtime.",
+    "A spec's strings resolve through the DomainRegistry a binary declares with domains!, and an identifier outside that list is refused with BotError::UnregisteredDomain naming it.",
+    "BotSpec is validate-only: no from_spec materializer exists yet. ChainSpec::on is a bare identifier with no slot for a condition's parameters such as Above<u16>'s threshold.",
+    "The second obstacle to a from_spec materializer: an erased source carries no durable statement of its Output type.",
+    "Use tracing for diagnostics. println! and eprintln! are forbidden in library code, and library code must not unwrap or expect on recoverable paths \u2014 return typed errors with ?.",
+    "A domain that fails returns BotError::DomainError { domain, certainty, cause }. The certainty: DispatchCertainty field is required: Refused means nothing was dispatched and nothing ever will be, NotDelivered means nothing reached the peer.",
+    "Unsettled means it may have taken effect, so a retry is a possible duplicate. BotError::retry_class() reads it \u2014 Never, Safe, RequiresEvidence. State what the failure actually establishes; never parse a cause string to decide whether to retry.",
     "lgwks_ast is standalone and finished, not grandfathered and not awaiting work. Do not grow it into a fourth dependency surface, do not route it through lgwks_deps, and do not propose capability additions to it.",
-    "Licences differ by crate and are load-bearing: lgwks_bot is MPL-2.0, which is file-level copyleft, while lgwks_std, lgwks_ast and lgwks_deps are Apache-2.0, and the repository root is MPL-2.0. The LICENSE file in a crate's own directory governs that crate; LICENSING.md states the model, including the commercial option and the reason lgwks_bot is closed to outside contributions until a contributor licence agreement exists."
+    "Licences differ by crate and are load-bearing: lgwks_bot is MPL-2.0, file-level copyleft, while lgwks_std, lgwks_ast and lgwks_deps are Apache-2.0, and the repository root is MPL-2.0.",
+    "The LICENSE file in a crate's own directory governs that crate; LICENSING.md states the model, the commercial option, and why lgwks_bot is closed to outside contributions until a CLA exists."
   ]
 }
