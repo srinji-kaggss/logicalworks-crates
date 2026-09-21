@@ -190,9 +190,12 @@ passes, a test that a missing register is not a failure, and a test that
 Named so they are not silently dropped, and so a later reader knows they were
 considered.
 
-- The interface model (element entities, recognition-vector components,
-  acquisition systems) on the ECS substrate. It depends on Workstream A landing
-  first.
+- ~~The interface model (element entities, recognition-vector components,
+  acquisition systems) on the ECS substrate.~~ **Started**: Workstream A landed
+  `lgwks_std::similarity`, so the element entities and the recognition-vector
+  components are now in `crates/lgwks-bot/src/interface.rs`. The acquisition
+  systems on the ECS substrate, and the locator ladder that joins anchors to
+  candidates, remain open and are sequenced in `docs/general-bot-fold.md`.
 - A synchronous path for the four verb traits. It is an API decision for the
   maintainer, not an implementation task, because it touches the published
   surface of `lgwks_bot` and the one-path policy.

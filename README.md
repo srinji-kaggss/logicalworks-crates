@@ -222,6 +222,8 @@ Depth lives in [`docs/`](docs/), not in this file.
 | [`docs/candle-admission.md`](docs/candle-admission.md) | ML inference admission: authority, transitive surface, verification. |
 | [`docs/appcui-admission.md`](docs/appcui-admission.md) | Native terminal UI admission: authority and verification. |
 | [`docs/distributed-boundaries.md`](docs/distributed-boundaries.md) | What these crates do and refuse on a distributed network path. Read it before placing them on one. |
+| [`docs/general-bot-fold.md`](docs/general-bot-fold.md) | How a full browser recorder-and-replayer architecture folds into this bot: what already is it, what becomes a seam, and what is refused. |
+| [`docs/guidance-runner-spec.md`](docs/guidance-runner-spec.md) | The flow-document and session-runner contract, with the corrections from the brittleness sweep. |
 | [`docs/releasing.md`](docs/releasing.md) | The release process. |
 | [`CHANGELOG.md`](CHANGELOG.md) | Per-release changes across all four crates. |
 | [`SECURITY.md`](SECURITY.md) | Attack surface, reporting process, and advisories assessed. |
