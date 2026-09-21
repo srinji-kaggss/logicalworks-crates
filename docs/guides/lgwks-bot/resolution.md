@@ -35,9 +35,34 @@ identically every time. That is why `Degraded` carries no `best_score`: no
 measurement was taken, and reporting `0.0` would be an observation that never
 happened.
 
-`DegradedReason` has one variant in the inspected source,
-`EmbedderUnavailable` (`crates/lgwks-bot/src/session.rs:1248`), reached when the
-semantic tier's embedder returns an error or a vector of the wrong length.
+`DegradedReason` has two variants in the inspected source
+(`crates/lgwks-bot/src/session.rs:1248`). `EmbedderUnavailable` is reached when
+the semantic tier's embedder returns an error or a vector of the wrong length.
+`UnmeasurableEmbedding` is reached when an embedding comes back as a value no
+angle can be computed from — an all-zero vector, or one carrying `NaN` or an
+infinity. The first is a dependency that is down; the second is a dependency
+that answered with something unusable. Different causes, different repairs, so
+they are not one variant.
+
+`lgwks_std::similarity::CosineError` splits that second case further, naming a
+zero magnitude apart from a non-finite value, because the two send you to
+different places: a zero vector is usually an empty or padded input, a
+non-finite one a numeric fault inside the provider. The resolver does not repeat
+the split in its own verdict, because it routes both the same way.
+
+An incomplete comparison set is never decided. If any embedding in the set — the
+utterance's or a competitor's — carries no direction, the whole decision
+degrades rather than scoring the surviving options. Dropping the unusable
+candidate leaves a field one member short, and a winner measured against fewer
+competitors than the list holds reports a lead it never held; scoring the
+degenerate vector as `0.0` would assert a similarity that was never observed.
+GitHub issue #50 filed this: a zero competitor turned
+`Resolved { score: 1.0, lead: 1.0 }` — the whole of the winner's score, reported
+as a margin over a competitor that was never measured — into an ordinary
+verdict, and a zero *utterance* vector turned every comparison invalid and
+reported `Absent { best_score: 0.0 }`, which is what a healthy model returns
+when it looks at a field and finds nothing. Unknown future `CosineError`
+variants fail closed into the same degraded verdict rather than being skipped.
 
 ## The lexical tier
 
@@ -62,6 +87,17 @@ miss is a threshold.
 The two constants are `MATCH_THRESHOLD = 0.55` and `MATCH_MARGIN = 0.08`
 (`crates/lgwks-bot/src/language.rs:70`, `crates/lgwks-bot/src/language.rs:73`). A score at or above the threshold that
 does not lead the runner-up by the margin is `Ambiguous`, not `Resolved`.
+
+The threshold and the margin are asked in that order, and the order is the
+contract. Every option is measured first; the threshold then says which options
+*may win*, and the margin asks whether the winner separated itself from the best
+of everything else that was measured — including an option whose score fell just
+short of the threshold. A below-threshold option does not stop being a measured
+proximity because it may not be selected, so it still counts against the lead
+and still appears in `Ambiguous::tied`. Filtering first and measuring second was
+the defect GitHub issue #31 filed: it let a competitor one hundredth below the
+threshold disappear, so a winner holding a `0.02` lead against a required `0.05`
+reported the whole of its score as a margin and was accepted.
 
 The phonetic tier deliberately does not absorb a differing initial consonant, so
 `cat`/`kat` and `Catherine`/`Kathryn` do not match. The module documentation
