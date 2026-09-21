@@ -4,7 +4,7 @@ Status: **design contract; task-first facade not implemented**. Reviewed against
 `51897f8c0cda627d3b3abcee28bda6ebb690f7a1`, 2026-09-21.
 Tracking: [#87](https://github.com/srinji-kaggss/logicalworks-crates/issues/87).
 This revision replaces the earlier scope-first proposal; it does not declare
-its proposed symbols available in `lgwks_bot = "0.4.2"` or on main.
+its proposed symbols available in any `lgwks_bot` version or on main.
 
 ## The contract
 

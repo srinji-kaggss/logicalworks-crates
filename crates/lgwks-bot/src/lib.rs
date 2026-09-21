@@ -35,12 +35,14 @@
 //!
 //! # Release boundary
 //!
-//! The `session`, `language`, `semantic`, `interface`, and `frontier` modules
-//! are **development APIs**: they exist on `main` and are not in the published
-//! `lgwks_bot-v0.4.2` tag. Documentation on this page describes the `main` tree
-//! and must not be read as a statement about a version installed from a
-//! registry. Check the changelog for the release that carries a given symbol
-//! before relying on it.
+//! The `broker`, `effect`, `frontier`, `interface`, `journal`, `language`,
+//! `retry`, `semantic`, and `session` modules are **development APIs**: they
+//! exist on `main` and are in no published tag. The newest `lgwks_bot` tag is
+//! `lgwks_bot-v0.4.2`, and the manifest reads `0.5.0` for the release cut that
+//! carries them, which has no tag yet either. Documentation on this page
+//! describes the `main` tree and must not be read as a statement about a version
+//! installed from a registry. Check the changelog for the release that carries a
+//! given symbol before relying on it.
 //!
 //! # Quick start
 //!

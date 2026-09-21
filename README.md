@@ -26,13 +26,15 @@ They share a workspace and a release process, not a dependency graph. Only
 
 | Crate | Version | Docs | What it gives you |
 |---|---|---|---|
-| `lgwks_std` | 0.6.6 | [docs.rs](https://docs.rs/lgwks_std) | Everyday primitives with no async runtime required: JSON/RON/wire codecs, a blocking HTTP client, retry policies, structured logging, time and calendars, hashing, ids, globs, process control |
-| `lgwks_bot` | 0.4.2 | [docs.rs](https://docs.rs/lgwks_bot) | A runtime for bots that run for weeks: four verbs (Observe, Evaluate, Execute, Query), capability-gated authority, change-triggered execution, and supervision that bounds background work |
+| `lgwks_std` | 0.6.7 | [docs.rs](https://docs.rs/lgwks_std) | Everyday primitives with no async runtime required: JSON/RON/wire codecs, a blocking HTTP client, retry policies, structured logging, time and calendars, hashing, ids, globs, process control |
+| `lgwks_bot` | 0.5.0 | [docs.rs](https://docs.rs/lgwks_bot) | A runtime for bots that run for weeks: four verbs (Observe, Evaluate, Execute, Query), capability-gated authority, change-triggered execution, and supervision that bounds background work |
 | `lgwks_ast` | 0.2.2 | [docs.rs](https://docs.rs/lgwks_ast) | Parse many languages into one AST type. tree-sitter grammars behind cargo features, bounded traversal, and typed diagnostics for tools that report on code |
-| `lgwks_deps` | 0.1.12 | [docs.rs](https://docs.rs/lgwks_deps) | One audited place to opt into third-party stacks, plus `lgwks-deps check` to prove no dependency entered your build unreviewed |
+| `lgwks_deps` | 0.1.13 | [docs.rs](https://docs.rs/lgwks_deps) | One audited place to opt into third-party stacks, plus `lgwks-deps check` to prove no dependency entered your build unreviewed |
 
 Versions move independently from one repository and one tag. The table lists the
-current published versions.
+versions in this tree's manifests. A manifest version is not an upload: the
+newest tags are recorded in [`docs/guides/index.md`](docs/guides/index.md), and
+[`docs/releasing.md`](docs/releasing.md) keeps the two apart.
 
 > **Names.** Package `lgwks_std` (underscore) lives in directory
 > `crates/lgwks-std` (hyphen) and is imported as `use lgwks_std::...`. The one

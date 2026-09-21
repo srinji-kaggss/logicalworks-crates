@@ -4,7 +4,7 @@ Everyday Rust primitives with no async runtime required, each behind one
 audited dependency stack. The package is `lgwks_std` (underscore) in the
 directory `crates/lgwks-std` (hyphen), used as `use lgwks_std::...`.
 
-Current version: `0.6.6`. MSRV: Rust 1.98.0, edition 2024
+Current version: `0.6.7`. MSRV: Rust 1.98.0, edition 2024
 (`crates/lgwks-std/Cargo.toml`).
 
 ## Install
@@ -45,11 +45,11 @@ it needs both halves:
 
 ```toml
 [dependencies]
-lgwks_std = { version = "0.6.6", default-features = false, features = ["core"] }
+lgwks_std = { version = "0.6.7", default-features = false, features = ["core"] }
 ```
 
 `default-features = false` removes `trace`. `features = ["core"]` puts the core
-modules back. A bare `lgwks_std = "0.6.6"` is **not** zero-dependency: it is
+modules back. A bare `lgwks_std = "0.6.7"` is **not** zero-dependency: it is
 `core` plus `trace`.
 
 This is checkable rather than assertable. From a clean project:

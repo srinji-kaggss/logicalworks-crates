@@ -23,13 +23,14 @@ Cognitive load is `std` + `bot` + `deps`, plus the standalone `ast`:
 - `lgwks_std`: the core surface, depended on by the other three or used alone.
 - `lgwks_bot` — async, runners, actors.
 - `lgwks_deps` — the **storefront**: install it, select features, get deps.
-- `lgwks_ast` — standalone, grandfathered.
+- `lgwks_ast` — standalone, and finished. Complete, not parked: no further work
+  is owed on it.
 
 A new dependency is registered with `owner = "lgwks_deps"` and exposed as an
 optional feature of `lgwks_deps` (for example `--features gpui`). Storefront
 capability features are default-off; the reviewed `scan` gate-tool feature is
 the explicit default-on exception. `lgwks_std`'s core feature stack and
-`lgwks_ast`'s parser are grandfathered. `lgwks_std` cannot route through
+`lgwks_ast`'s parser are settled. `lgwks_std` cannot route through
 `lgwks_deps` because `lgwks_deps` depends on `lgwks_std`; the reverse would be
 a cycle.
 
