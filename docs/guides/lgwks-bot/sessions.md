@@ -114,9 +114,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `FlowSpec` is the document. It owns variable declarations, an entry node, a node
 map, explicit continuations, terminal overrides, and `FlowBounds`. `FlowSpec::new`
-validates on construction and `FlowSpec::from_json` validates on parse
-(`crates/lgwks-bot/src/session.rs:1081`). `MAX_FLOW_BYTES` is 2,097,152, and input
+validates on construction, and both parsers validate on parse
+(`crates/lgwks-bot/src/session.rs:1091`). `MAX_FLOW_BYTES` is 2,097,152, and input
 past it is refused with `BotError::FlowTooLarge` before parsing runs.
+
+A flow can be written in JSON or in RON. RON is the estate's notation for
+human-facing documents, so it is the one to reach for by hand: it takes
+comments, trailing commas and unquoted keys. The two are one document, and the
+size limit, the unknown-node-kind diagnostic and the structural validation are
+the same on both paths, so nothing is acceptable in one notation and refused in
+the other (`crates/lgwks-bot/src/session.rs:1124`).
+
+```ron
+// review-pr.flow.ron
+FlowSpec(
+    vars: {},
+    entry: "end",
+    nodes: {
+        "end": (kind: "end"),   // the only node
+    },
+)
+```
+
+The node kinds need the map spelling rather than RON's native `End` form.
+`NodeKind` is a serde internally-tagged enum (`tag = "kind"`), and an internally
+tagged enum needs its tag to be a real field, so `(kind: "end")` is what decodes
+and `End` is not. `Predicate` is tagged the same way on `op`. `from_ron` says so
+in its own documentation, and
+`crates/lgwks-bot/tests/flow_ron.rs` pins it.
 
 `NodeKind` is a closed set: `Say`, `Ask`, `Branch`, `Handoff`, `Refer`, `Route`,
 `End`. `NodeKind::Ask` carries the variable it writes, the candidate option

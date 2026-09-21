@@ -8,6 +8,19 @@
 
 pub use serde::{Deserialize, Serialize};
 
+/// The encoder's error, as the functions above return it.
+///
+/// Re-exported because a facade that returns a type has to let a caller name
+/// it. Without this the type is reachable only as `ron::Error` through a crate
+/// this surface does not re-export, so a caller could receive a value it could
+/// not write down.
+pub use ron::Error;
+
+/// The decoder's error, with the position it was found at.
+///
+/// Re-exported for the same reason as [`Error`]: [`from_str`] returns it.
+pub use ron::error::SpannedError;
+
 // ── Encoding ────────────────────────────────────────────────────────────────
 
 /// Serialize `value` to a compact RON string (no indentation).

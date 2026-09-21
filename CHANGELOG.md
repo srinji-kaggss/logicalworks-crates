@@ -229,7 +229,34 @@ Changed:
 **No crate version is bumped.** The change is unpublished like the five public
 modules above it, and it ships in the same release.
 
+### lgwks_std Added
+
+- **`ron::Error` and `ron::error::SpannedError` are re-exported.** The `ron`
+  module's own functions returned them and no caller could name them, because
+  the `ron` crate is an optional dependency and nothing re-exported the types.
+  A facade that returns a type has to let a caller write it down, which is the
+  same reason `wire` re-exports `rkyv`. Additive.
+
 ### lgwks_bot Added
+
+- **A flow can be written in RON, as well as JSON.** `FlowSpec::from_ron` and
+  `FlowSpec::to_ron` are the codec, over the same serde types, so no second set
+  of impls exists. RON is the estate's notation for human-facing documents and a
+  flow is one, so a hand-written flow now takes comments, trailing commas and
+  unquoted keys.
+  - **The two notations are one document.** Both parsers converge on one
+    validation, so the `MAX_FLOW_BYTES` size limit, the
+    `BotError::UnknownNodeKind` diagnostic and the structural checks are
+    identical on either path. A document cannot be acceptable in one notation and
+    refused in the other.
+  - **The node kinds need a map spelling.** `NodeKind` is a serde internally
+    tagged enum (`tag = "kind"`), and an internally tagged enum needs its tag to
+    be a real field, so `(kind: "end")` decodes and RON's native `End` does not.
+    `Predicate` is tagged the same way on `op`. Moving `NodeKind` to external
+    tagging would make a flow read `Say(text: "hello")`, which is a change to the
+    wire contract rather than a spelling detail, so it is not made here.
+  - `crates/lgwks-bot/tests/flow_ron.rs` pins all of the above, including that
+    the tagging constraint is what it is and not something else.
 
 - **`Observe::fingerprint`, and with it the lazy seam: a source that holds still
   is no longer polled.** Change detection is an *equality* question — the

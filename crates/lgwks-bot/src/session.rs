@@ -1077,23 +1077,53 @@ impl FlowSpec {
         crate::json::to_string_pretty(self)
     }
 
+    /// Serialize the validated flow as RON.
+    ///
+    /// RON is the estate's notation for human-facing documents, and a flow is
+    /// one: a file a person writes and reads. The encoding is serde's, so the
+    /// document is the same one [`to_json`](Self::to_json) writes, spelled with
+    /// the unquoted keys, comments and trailing commas RON allows.
+    pub fn to_ron(&self) -> Result<String, lgwks_std::ron::Error> {
+        lgwks_std::ron::to_string_pretty(self)
+    }
+
     /// Parse and validate a flow using the shared JSON facade.
     pub fn from_json(source: &str) -> Result<Self, BotError> {
-        if source.len() > MAX_FLOW_BYTES {
-            return Err(BotError::FlowTooLarge {
-                bytes: source.len(),
-                limit: MAX_FLOW_BYTES,
-            });
-        }
-        let value: JsonValue =
-            crate::json::from_str(source).map_err(|error| BotError::MalformedFlow {
-                cause: error.to_string().escape_debug().to_string(),
-            })?;
+        check_flow_size(source)?;
+        let value: JsonValue = crate::json::from_str(source).map_err(malformed_flow)?;
+        Self::from_document(value)
+    }
+
+    /// Parse and validate a flow written in RON.
+    ///
+    /// Both codecs converge on the same validation, so the size limit, the
+    /// unknown-node-kind diagnostic and the structural checks are identical
+    /// whichever spelling a document arrives in. Only the parse differs, which
+    /// is what keeps one document from being acceptable in one notation and
+    /// refused in the other.
+    ///
+    /// Note the spelling the node kinds require. `NodeKind` carries
+    /// `tag = "kind"` and `Predicate` carries `tag = "op"`, and a serde
+    /// internally-tagged enum needs its tag to be a real field, so RON's native
+    /// `Say(text: "hello")` form does not decode. A map is what does:
+    ///
+    /// ```ron
+    /// FlowSpec(
+    ///     vars: {},
+    ///     entry: "end",
+    ///     nodes: { "end": (kind: "end") },
+    /// )
+    /// ```
+    pub fn from_ron(source: &str) -> Result<Self, BotError> {
+        check_flow_size(source)?;
+        let value: JsonValue = lgwks_std::ron::from_str(source).map_err(malformed_flow)?;
+        Self::from_document(value)
+    }
+
+    /// Turn a parsed document into a validated flow.
+    fn from_document(value: JsonValue) -> Result<Self, BotError> {
         reject_unknown_node_kinds(&value)?;
-        let spec: Self =
-            crate::json::from_value(value).map_err(|error| BotError::MalformedFlow {
-                cause: error.to_string().escape_debug().to_string(),
-            })?;
+        let spec: Self = crate::json::from_value(value).map_err(malformed_flow)?;
         spec.validate()?;
         Ok(spec)
     }
@@ -1886,6 +1916,31 @@ fn valid_identifier(value: &str) -> bool {
     };
     (first.is_ascii_alphabetic() || first == '_')
         && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
+/// Refuse an oversized document before a decoder walks it.
+///
+/// Every notation is measured the same way, so a document cannot be too large
+/// in one and acceptable in another.
+fn check_flow_size(source: &str) -> Result<(), BotError> {
+    if source.len() > MAX_FLOW_BYTES {
+        return Err(BotError::FlowTooLarge {
+            bytes: source.len(),
+            limit: MAX_FLOW_BYTES,
+        });
+    }
+    Ok(())
+}
+
+/// A decoder failure, as a typed flow error.
+///
+/// The diagnostic is escaped before it is stored. A document is untrusted
+/// input, and a raw newline or escape in one would otherwise forge lines in
+/// whatever log line ends up carrying the refusal.
+fn malformed_flow(error: impl std::fmt::Display) -> BotError {
+    BotError::MalformedFlow {
+        cause: error.to_string().escape_debug().to_string(),
+    }
 }
 
 /// Reject unknown tagged node kinds before serde turns them into a generic
