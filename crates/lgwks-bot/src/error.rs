@@ -21,6 +21,17 @@
 //! The links above resolve at the crate root, where `BotError` is re-exported,
 //! rather than in this module — see `frontier.rs` for the module whose items
 //! are *not* all re-exported and which therefore needs reference definitions.
+//!
+//! "Did not take effect" is necessary but not sufficient for a retry decision,
+//! and the second half is what [`DispatchCertainty`] carries. A refusal that
+//! happened before dispatch and a connection that never opened are both "the
+//! effect did not happen", and they do not want the same answer: the first is
+//! permanent, the second is a plain retry. Every `DomainError` producer states
+//! which of the two it is, and [`BotError::retry_class`] is the single total map
+//! from the vocabulary to [`RetryClass`] that a retry policy reads. No retry
+//! decision in this crate inspects a rendered cause: a policy that turns on the
+//! wording of a diagnostic message is a policy that changes when someone edits
+//! the message.
 
 use std::fmt;
 
@@ -95,9 +106,19 @@ pub enum BotError {
     /// rather than constructed.
     TickInsideRuntime,
     /// A domain action failed at runtime.
+    ///
+    /// Carries [`DispatchCertainty`] rather than leaving a consumer to infer
+    /// the answer from the variant or from the cause. "It failed" is not the
+    /// fact a retry decision turns on; "nothing reached the peer" and "the
+    /// input was refused outright" are, and they are the same variant today
+    /// without this field.
     DomainError {
         /// The domain that failed (e.g. `"gh::pr_status"`).
         domain: String,
+        /// What the failure establishes about the effect. Required, so every
+        /// producer states what it knows instead of defaulting to the
+        /// retriable answer.
+        certainty: DispatchCertainty,
         /// The underlying cause.
         cause: String,
     },
@@ -125,6 +146,31 @@ pub enum BotError {
     EvaluateError {
         /// What went wrong.
         cause: String,
+    },
+    /// A value at the erasure boundary was handed to a stage that expects a
+    /// different type.
+    ///
+    /// A wiring defect in the chain, not a domain failure, and this variant
+    /// exists so the two cannot be confused for one another. The action never
+    /// ran; no domain was reached; there is nothing to retry. It used to be
+    /// reported as a [`DomainError`](Self::DomainError), which read as "the
+    /// domain failed" and — before certainty was carried — spent a whole retry
+    /// budget on a defect no attempt could repair.
+    ///
+    /// The fields are all `&'static str` because this is a *constructive* error:
+    /// it is caught where the concrete types are still in hand, so it can name
+    /// them, and naming them is the whole diagnostic. It is never built from
+    /// runtime text.
+    TypeMismatch {
+        /// Where it was caught, as a stable site name (`"spec::typed_entry"`,
+        /// `"observe_fold rendezvous"`), so the loud report is also greppable.
+        site: &'static str,
+        /// The chain index, when the site knows which chain it was walking.
+        chain: Option<usize>,
+        /// The type the stage was built for.
+        expected: &'static str,
+        /// The type it was handed.
+        observed: &'static str,
     },
     /// The serialized flow exceeds [`crate::session::MAX_FLOW_BYTES`].
     FlowTooLarge {
@@ -467,6 +513,109 @@ pub enum BotError {
     },
 }
 
+/// What a failed attempt establishes about the effect it was making.
+///
+/// The one fact a retry decision turns on, carried *by* the failure rather than
+/// inferred from it. A consumer that has to read a cause string to learn
+/// whether it may retry will eventually get it wrong, and the price of getting
+/// it wrong is a duplicated merge, message, or process launch.
+///
+/// The arms are ordered by what they permit: [`Self::Refused`] permits nothing,
+/// [`Self::NotDelivered`] permits a retry as a retry, and [`Self::Unsettled`]
+/// permits a retry only against the caller's evidence.
+///
+/// The third case is deliberately its own variant rather than a
+/// [`BotError::DomainError`] carrying [`Self::Unsettled`]: an effect that may
+/// or may not have happened is [`BotError::EffectIndeterminate`], which is not
+/// a domain error and must not become part of one — that is the catch-all this
+/// vocabulary exists to prevent. No `DomainError` this crate constructs carries
+/// `Unsettled`; the arm is here because it is the third answer to the question
+/// this type asks, and a consumer reading the type should see all three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DispatchCertainty {
+    /// Nothing was dispatched and nothing ever will be: the failure refused the
+    /// input itself — a parse or schema refusal, a target that cannot be
+    /// resolved, an action that will not accept the value it was handed, a
+    /// schedule that will not validate.
+    ///
+    /// Permanent, and before dispatch. The same input produces the same
+    /// refusal on every attempt, so a retry spends an attempt to learn an
+    /// answer that was already known.
+    Refused,
+    /// The attempt was made and nothing reached the peer: no bytes could have
+    /// reached a previous or live connection for this attempt, so the effect
+    /// definitely did not happen.
+    ///
+    /// A retry is a retry, bounded by the caller's declared budget. This is the
+    /// arm a connection that was never established, or a local read that failed
+    /// before it produced anything, belongs to.
+    NotDelivered,
+    /// The attempt reached the peer, and whether it took effect is not knowable
+    /// from the failure. A retry is a possible duplicate.
+    Unsettled,
+}
+
+impl DispatchCertainty {
+    /// What this certainty permits a caller to do about the failure.
+    #[must_use]
+    pub const fn retry_class(self) -> RetryClass {
+        match self {
+            Self::Refused => RetryClass::Never,
+            Self::NotDelivered => RetryClass::Safe,
+            Self::Unsettled => RetryClass::RequiresEvidence,
+        }
+    }
+}
+
+/// What a failure permits a caller to do about it.
+///
+/// Read from the failure through [`BotError::retry_class`], which is total over
+/// the vocabulary and never inspects a rendered cause. A caller that branches
+/// on this is not choosing a retry policy by string-matching, which is the
+/// thing the type exists to make unnecessary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RetryClass {
+    /// No retry can change the answer: the failure is a refusal or a wiring
+    /// violation, and repeating it produces the same refusal at the cost of an
+    /// attempt.
+    Never,
+    /// The effect definitely did not happen, so a retry is a retry. Bounded by
+    /// the caller's budget, which is what [`crate::spec::RetryPolicy`] declares.
+    Safe,
+    /// The effect may have happened, so a retry is a possible duplicate. Not
+    /// attempted again without the caller reporting evidence.
+    RequiresEvidence,
+}
+
+impl BotError {
+    /// What this failure establishes about the effect it was making.
+    ///
+    /// Exhaustive over the vocabulary and computed from the value, never from
+    /// the rendered cause. Every variant that is not a
+    /// [`DomainError`](Self::DomainError) or an
+    /// [`EffectIndeterminate`](Self::EffectIndeterminate) names a refusal that
+    /// happens *before* an effect is attempted — a capability that is not
+    /// granted, an erased verb handed the wrong type, a spec that does not
+    /// validate, a tick that may not park the thread it was called on — so all
+    /// of them answer [`DispatchCertainty::Refused`].
+    #[must_use]
+    pub fn dispatch_certainty(&self) -> DispatchCertainty {
+        match *self {
+            Self::DomainError { certainty, .. } => certainty,
+            Self::EffectIndeterminate { .. } => DispatchCertainty::Unsettled,
+            _ => DispatchCertainty::Refused,
+        }
+    }
+
+    /// What this failure permits a caller to do about it.
+    #[must_use]
+    pub fn retry_class(&self) -> RetryClass {
+        self.dispatch_certainty().retry_class()
+    }
+}
+
 /// `Deficit`'s rendering lives here rather than in `cap.rs`, and the reason is
 /// the escaping contract below rather than the module it describes: every
 /// untrusted field a deficit carries is a capability name or a domain id, both
@@ -596,6 +745,7 @@ impl fmt::Display for BotError {
             ),
             Self::DomainError {
                 ref domain,
+                certainty: _,
                 ref cause,
             } => {
                 write!(f, "{}: {}", Escaped(domain), Escaped(cause))
@@ -617,6 +767,21 @@ impl fmt::Display for BotError {
             Self::EvaluateError { ref cause } => {
                 write!(f, "evaluate: {}", Escaped(cause))
             }
+            Self::TypeMismatch {
+                site,
+                chain,
+                expected,
+                observed,
+            } => match chain {
+                Some(index) => write!(
+                    f,
+                    "{site}: type mismatch on chain {index} — expected {expected}, got {observed}"
+                ),
+                None => write!(
+                    f,
+                    "{site}: type mismatch — expected {expected}, got {observed}"
+                ),
+            },
             Self::FlowTooLarge { bytes, limit } => {
                 write!(f, "flow is {bytes} bytes, over the {limit}-byte limit")
             }
@@ -878,7 +1043,7 @@ impl std::error::Error for BotError {
 
 #[cfg(test)]
 mod tests {
-    use super::{BotError, Escaped, Terminal};
+    use super::{BotError, DispatchCertainty, Escaped, RetryClass, Terminal};
     use crate::cap::{Cap, Deficit, Demand, Shortage};
 
     /// The retry classifier a consumer writes, and the entire reason the two
@@ -896,6 +1061,7 @@ mod tests {
         // reading of "did not happen" is a retry that duplicates.
         let refused = BotError::DomainError {
             domain: String::from("gh::merge"),
+            certainty: DispatchCertainty::NotDelivered,
             cause: String::from("connection closed"),
         };
         let unknown = BotError::EffectIndeterminate {
@@ -916,6 +1082,78 @@ mod tests {
             unknown.to_string(),
             "an operator triages from these lines, so they cannot render alike"
         );
+    }
+
+    #[test]
+    fn the_retry_class_is_total_and_never_reads_a_cause() {
+        // The three arms are ordered by what they permit, and every error maps
+        // into exactly one of them. A wiring defect and a refused binding are
+        // `Never`, a connection that never opened is `Safe`, and only an
+        // unsettled effect is `RequiresEvidence` — which is the same answer the
+        // variant-level classifier above gives, reached without inspecting a
+        // variant.
+        let cases = [
+            (
+                BotError::DomainError {
+                    domain: String::from("test::wiring"),
+                    certainty: DispatchCertainty::Refused,
+                    cause: String::from("type mismatch in execute input"),
+                },
+                RetryClass::Never,
+            ),
+            (
+                BotError::DomainError {
+                    domain: String::from("test::read"),
+                    certainty: DispatchCertainty::NotDelivered,
+                    cause: String::from("connection reset before any byte was sent"),
+                },
+                RetryClass::Safe,
+            ),
+            (
+                BotError::EffectIndeterminate {
+                    domain: String::from("test::merge"),
+                    cause: String::from("the acknowledgment never arrived"),
+                },
+                RetryClass::RequiresEvidence,
+            ),
+            (BotError::TickInsideRuntime, RetryClass::Never),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(
+                error.retry_class(),
+                expected,
+                "the class is what the retry decision reads: {error}"
+            );
+            assert_eq!(
+                error.dispatch_certainty().retry_class(),
+                expected,
+                "the two-step path must agree with the one-step path: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refusal_and_a_wiring_defect_are_both_terminal() {
+        // Two producers with two different reasons to be permanent: a binding
+        // that is not installed, and a chain whose stages do not line up. Both
+        // must stop the entry dead rather than spend the budget, because no
+        // number of attempts changes either.
+        let binding = BotError::DomainError {
+            domain: String::from("gh::pr_status"),
+            certainty: DispatchCertainty::Refused,
+            cause: String::from("binding required"),
+        };
+        let wiring = BotError::DomainError {
+            domain: String::from("pipeline::step"),
+            certainty: DispatchCertainty::Refused,
+            cause: String::from("type mismatch in pipeline step input"),
+        };
+
+        for error in [&binding, &wiring] {
+            assert_eq!(error.retry_class(), RetryClass::Never);
+            assert_eq!(error.dispatch_certainty(), DispatchCertainty::Refused);
+        }
     }
 
     #[test]
@@ -969,6 +1207,7 @@ mod tests {
             },
             BotError::DomainError {
                 domain: payload.clone(),
+                certainty: DispatchCertainty::Refused,
                 cause: payload.clone(),
             },
             BotError::EffectIndeterminate {
@@ -1095,6 +1334,7 @@ mod tests {
         // Unicode and punctuation pass through byte for byte.
         let error = BotError::DomainError {
             domain: String::from("gh::merge"),
+            certainty: DispatchCertainty::NotDelivered,
             cause: String::from("PR #7 — \"timeout\" after 30s, ünïcode 日本 ok"),
         };
         let rendered = error.to_string();

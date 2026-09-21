@@ -4,7 +4,7 @@
 //! history). It is NOT a separate verb; it is where triggers come from.
 
 use crate::cap::{Auth, Cap};
-use crate::error::BotError;
+use crate::error::{BotError, DispatchCertainty};
 use crate::verb;
 
 /// An incoming chat message.
@@ -64,6 +64,7 @@ impl verb::Observe for SlackChannel {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
+            certainty: DispatchCertainty::Refused,
             cause: format!("polling {:?} — binding required", self.channel),
         })
     }
@@ -85,6 +86,7 @@ impl verb::Query for SlackChannel {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
+            certainty: DispatchCertainty::Refused,
             cause: format!("querying {:?} — binding required", self.channel),
         })
     }
@@ -129,6 +131,7 @@ impl verb::Observe for HttpWebhook {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
+            certainty: DispatchCertainty::Refused,
             cause: format!("polling {:?} — binding required", self.path),
         })
     }

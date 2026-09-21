@@ -95,12 +95,13 @@ impl GrantSet {
 mod tests {
     use super::GrantSet;
     use crate::cap::{Cap, Demand};
-    use crate::error::BotError;
+    use crate::error::{BotError, DispatchCertainty};
 
     /// A typed test failure; this workspace forbids `panic!`.
     fn failed(cause: impl Into<String>) -> BotError {
         BotError::DomainError {
             domain: "gate::tests".into(),
+            certainty: DispatchCertainty::NotDelivered,
             cause: cause.into(),
         }
     }

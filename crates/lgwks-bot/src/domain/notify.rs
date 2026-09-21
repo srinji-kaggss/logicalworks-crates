@@ -2,7 +2,7 @@
 //! `bot.net` (delivery dials out).
 
 use crate::cap::{Auth, Cap};
-use crate::error::BotError;
+use crate::error::{BotError, DispatchCertainty};
 use crate::verb;
 
 /// A message payload for notification delivery.
@@ -57,6 +57,7 @@ impl verb::Execute for Slack {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: self.domain_id().into(),
+            certainty: DispatchCertainty::Refused,
             cause: format!("notifying {:?} — binding required", self.channel),
         })
     }

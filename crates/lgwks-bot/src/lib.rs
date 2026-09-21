@@ -171,7 +171,7 @@ pub mod spec;
 pub mod verb;
 
 pub use cap::{Auth, Cap, Deficit, Demand, Shortage};
-pub use error::BotError;
+pub use error::{BotError, DispatchCertainty, RetryClass};
 pub use frontier::{
     Admission, CompletionError, ConstraintKey, DeferralKind, Frontier, InFlightPermit,
     PolitenessError, PolitenessPolicy, RejectKind, Resolved, RulesState,

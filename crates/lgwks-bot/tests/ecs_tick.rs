@@ -42,7 +42,9 @@ use lgwks_bot::rt::sync::{Mutex, mpsc};
 use lgwks_bot::rt::task::JoinSet;
 use lgwks_bot::rt::time::{sleep, timeout};
 use lgwks_bot::spec::{AbandonReason, EffectEvidence, RetryPolicy, TransitionHold};
-use lgwks_bot::{Auth, Bot, BotError, Builder, Cap, Execute, GrantSet, Observe, block_on};
+use lgwks_bot::{
+    Auth, Bot, BotError, Builder, Cap, DispatchCertainty, Execute, GrantSet, Observe, block_on,
+};
 
 /// What a test reports when its precondition did not hold.
 ///
@@ -329,6 +331,7 @@ impl Observe for ChannelSource {
         let Some(receiver) = held.as_mut() else {
             return Err(BotError::DomainError {
                 domain: "test::channel_source".to_owned(),
+                certainty: DispatchCertainty::NotDelivered,
                 cause: "this source was already drained by an earlier poll".to_owned(),
             });
         };
@@ -336,6 +339,7 @@ impl Observe for ChannelSource {
             Some(value) => Ok(value),
             None => Err(BotError::DomainError {
                 domain: "test::channel_source".to_owned(),
+                certainty: DispatchCertainty::NotDelivered,
                 cause: "the sibling task dropped its sender before sending".to_owned(),
             }),
         }
@@ -856,6 +860,7 @@ fn socket_source_on_the_shipped_runtime() -> TestResult {
                 .local_addr()
                 .map_err(|error| BotError::DomainError {
                     domain: domain.clone(),
+                    certainty: DispatchCertainty::NotDelivered,
                     cause: error.to_string(),
                 })?;
             let mut client =
@@ -863,11 +868,17 @@ fn socket_source_on_the_shipped_runtime() -> TestResult {
                     .await
                     .map_err(|error| BotError::DomainError {
                         domain: domain.clone(),
+                        certainty: DispatchCertainty::NotDelivered,
                         cause: error.to_string(),
                     })?;
             if let Err(error) = client.write_all(b"7").await {
+                // A write that failed on an established connection is the
+                // `Unsettled` arm, not `NotDelivered`: the connection existed,
+                // so bytes may already have reached the peer and a retry here
+                // is a possible duplicate.
                 return Err(BotError::DomainError {
                     domain,
+                    certainty: DispatchCertainty::Unsettled,
                     cause: error.to_string(),
                 });
             }
@@ -877,12 +888,14 @@ fn socket_source_on_the_shipped_runtime() -> TestResult {
                     .await
                     .map_err(|error| BotError::DomainError {
                         domain: "test::socket_source".to_owned(),
+                        certainty: DispatchCertainty::NotDelivered,
                         cause: error.to_string(),
                     })?;
             let mut byte = [0u8; 1];
             if let Err(error) = server.read_exact(&mut byte).await {
                 return Err(BotError::DomainError {
                     domain: "test::socket_source".to_owned(),
+                    certainty: DispatchCertainty::NotDelivered,
                     cause: error.to_string(),
                 });
             }
@@ -1340,6 +1353,7 @@ impl Execute for Refuses {
         if self.refusing.get() {
             return Err(BotError::DomainError {
                 domain: "test::refuses".to_owned(),
+                certainty: DispatchCertainty::NotDelivered,
                 cause: "refused".to_owned(),
             });
         }
@@ -1611,8 +1625,13 @@ impl Execute for Grudging {
         let left = self.refusals.get();
         if left > 0 {
             self.refusals.set(left.saturating_sub(1));
+            // `NotDelivered` and not `Refused`: this fixture is a *transient*
+            // refusal that the chain is expected to retry while it has budget,
+            // and `Refused` classifies as `RetryClass::Never`, which abandons
+            // the entry on the first failure.
             return Err(BotError::DomainError {
                 domain: "test::grudging".to_owned(),
+                certainty: DispatchCertainty::NotDelivered,
                 cause: "refused".to_owned(),
             });
         }

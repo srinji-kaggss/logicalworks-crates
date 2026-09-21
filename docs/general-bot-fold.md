@@ -49,7 +49,7 @@ That is this workspace's bot model, arrived at independently:
 | `What[]` action pipeline | `Execute::execute_action`, one effect per call | `verb.rs` |
 | `WorkflowInterpreter` state matcher | the ECS schedule: a condition is `Changed<T>` | `docs/bot-on-ecs.md` §1 |
 | `WorkflowFile.meta` + graph | `FlowSpec` (vars, entry, nodes, edges, terminals) | `crates/lgwks-bot/src/session.rs:1023` |
-| a step that dispatches to a subsystem | `NodeKind::Route { dispatch, fallback }` | `crates/lgwks-bot/src/session.rs:700` |
+| a step that dispatches to a subsystem | `NodeKind::Route { dispatch, fallback }` | `crates/lgwks-bot/src/session.rs:660` |
 
 So the first and largest correction to make is that **the fold does not need a
 new IR**. A recorder's output is a `FlowSpec`; a scheduler's unit of work is a

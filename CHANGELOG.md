@@ -224,6 +224,50 @@ Changed:
 **No crate version is bumped.** The change is unpublished like the five public
 modules above it, and it ships in the same release.
 
+### lgwks_bot Changed
+
+- **`ObserveBuilder` is now generic over its source, and a chain that does not
+  type against that source no longer builds.** `EcsObserveBuilder::on` tied the
+  condition to a *free* type parameter connected to nothing else, so the builder
+  accepted a wiring that could not work and the tick found out instead: a `u16`
+  source, a `u16` condition, and an action whose `Execute::Input` was `u32`
+  compiled, ran, and failed every attempt as a domain error the retry policy
+  then retried. `on<C, A, T>` is now `on<C, A>` with `C: Evaluate<S::Output>`
+  and `A: Execute<Input = S::Output>`, and the builder holds `source: S` until
+  the erasure boundary. **This is a deliberate source-breaking tightening**, not
+  an accident of the rewrite:
+  `Bot::builder("x").observe(source).on(condition, action)` now fails to compile
+  when `condition`'s `Evaluate<T>` is not `Evaluate<S::Output>` or `action`'s
+  `Execute::Input` is not `S::Output`. Both rejected shapes only ever failed at
+  tick time, so nothing that worked stops working — but code that compiled and
+  misbehaved now does not compile at all, and a caller who was relying on the
+  old looseness must fix the wiring rather than the budget. `observe`/`build`
+  remain the erasure boundary and still box into `Box<dyn ObserveAny>`. Sound
+  because `Evaluate::check` returns `bool` — a pure predicate with no derived
+  output — so `Source::Output == Condition::Input == Action::Input` is already
+  the real semantics. The rule a future verb has to keep: no stage may introduce
+  a caller-selected type parameter disconnected from its input; a transform must
+  carry `Transform<I>::Output` as an associated type. Every `.on` call site in
+  the estate already annotated its closure or named its condition type, so no
+  call site needed a turbofish added.
+- **The erasure boundary carries a witness, and a mis-pairing across it is a
+  loud invariant violation rather than a domain error.** `Observed` was a
+  `Vec<Option<Box<dyn Any>>>` paired to `Chains` by *index*, and nothing about
+  that pairing was checked, so a value delivered to the wrong chain produced a
+  downcast miss reported as a domain failure — which the retry policy then
+  retried. The staging slot now holds an `Erased` — the boxed value and the
+  `TypeId` witness of the type it was erased from, one allocation rather than
+  two — and the witness is compared at the rendezvous before any downcast. A
+  miss is `BotError::TypeMismatch`, naming the site, the chain, and both types.
+  The witness rides with the value rather than only on the chain, so the
+  comparison is a producer's *claim* against a consumer's *expectation* rather
+  than ground truth against an expectation. `TypeId` is process-local and not
+  serializable, so the witness serves the Rust path only; the durable schema key
+  belongs to the registry, and `Erased::witness` is the field it will land in.
+  One limitation is documented and not solved here: the witness distinguishes
+  *types*, not *chains*, so two chains that both produce a `u16` are
+  indistinguishable and a mis-pairing between them still passes.
+
 ### lgwks_bot Fixed
 
 - **A transition is bound to the observed payload it was opened under, and a
@@ -245,6 +289,22 @@ modules above it, and it ships in the same release.
   ledger becomes a non-send resource as a consequence, because the payload
   travels inside the transition rather than in a second index that every
   `take`, `put`, `begin`, `skip` and `fail` would have to keep in step.
+- **A failure now carries what it establishes, not only what went wrong.**
+  `BotError::DomainError` was the adapter's catch-all, and `failure_state`
+  classified from the variant — so it was "retryable" by construction. A
+  permanent refusal and a wiring defect both burned the whole
+  `RetryPolicy::DEFAULT` budget and were reported as `AttemptsExhausted` ("we
+  ran out of budget") when the truth was `Terminal`. `DomainError` carries a
+  required `certainty: DispatchCertainty` (`Refused` / `NotDelivered` /
+  `Unsettled`), `BotError::retry_class()` is the single total map to `RetryClass`
+  (`Never` / `Safe` / `RequiresEvidence`) that never inspects a rendered cause,
+  and `failure_state` reads that and nothing else. A wiring defect or a parse
+  refusal is `Terminal` and costs exactly one attempt whatever the budget says.
+  Every one of the 16 production `DomainError` construction sites was classified
+  and the classification is now required by the type, so a new producer cannot
+  omit it: 15 are `Refused`, and the `JsonStore` local read in `domain/data.rs`
+  is `NotDelivered` — a read that never left the process is the one failure here
+  that is safe to repeat.
 - **An abandoned entry is a barrier to its successors, and a tick over one is
   never clean.** `plan_chain` treated `Abandoned` like `Succeeded` and walked
   past it, so the entry behind a prerequisite that had been given up on ran

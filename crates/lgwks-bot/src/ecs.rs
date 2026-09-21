@@ -155,9 +155,9 @@ use lgwks_deps::bevy_ecs::{
 };
 
 use super::cap::{Deficit, Demand, Shortage};
-use super::error::{BotError, Escaped};
+use super::error::{BotError, DispatchCertainty, Escaped, RetryClass};
 use super::gate::GrantSet;
-use super::spec::{ChainEntry, ObserveAny, typed_entry};
+use super::spec::{ChainEntry, Erased, ObserveAny, Witness, typed_entry};
 use super::verb::{Evaluate, Execute, Observe};
 
 // ── Components: identity and the change marker are separate ────────────────
@@ -235,6 +235,14 @@ struct EcsChain {
     same: fn(&dyn Any, &dyn Any) -> bool,
     /// The `(condition, action)` tuples, in declaration order.
     entries: Vec<ChainEntry>,
+    /// What type this chain's source produces, taken where `S::Output` was
+    /// still a type parameter and checked at every rendezvous.
+    ///
+    /// The chain is the *claim*: it is what the condition and the action were
+    /// built against. The value that arrives each tick carries its own witness,
+    /// and the rendezvous compares them. Neither half can be checked alone —
+    /// both are erased — so the pair is the proof.
+    witness: Witness,
 }
 
 /// Every chain, in declaration order.
@@ -242,8 +250,13 @@ struct EcsChain {
 struct Chains(Vec<EcsChain>);
 
 /// The observed value per chain, from the most recent successful poll.
+///
+/// Paired to [`Chains`] by index, and by index only: a vector position carries
+/// no type. Nothing here proves that `Observed[i]` belongs to `Chains[i]`, which
+/// is why each value keeps its [`Witness`] and the fold compares it against the
+/// chain's before committing anything.
 #[derive(Default)]
-struct Observed(Vec<Option<Box<dyn Any>>>);
+struct Observed(Vec<Option<Erased>>);
 
 // ── Staging between the awaited phases and the schedule steps ──────────────
 //
@@ -259,7 +272,7 @@ struct Observed(Vec<Option<Box<dyn Any>>>);
 /// them: the fold commits them positionally, so a result that arrived early
 /// cannot be committed to the wrong chain.
 #[derive(Default)]
-struct Polled(Vec<Result<Box<dyn Any>, BotError>>);
+struct Polled(Vec<Result<Erased, BotError>>);
 
 /// What the decision phase decided for one entry it reached.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -743,7 +756,7 @@ struct Transition {
     /// `None` only for a transition opened while nothing had been observed —
     /// there is then no payload to bind, and the entries are held rather than
     /// evaluated against a value nobody read.
-    value: Option<Box<dyn Any>>,
+    value: Option<Erased>,
 }
 
 impl fmt::Debug for Transition {
@@ -759,7 +772,7 @@ impl fmt::Debug for Transition {
 
 impl Transition {
     /// A transition with every entry outstanding, bound to `value`.
-    fn opened(revision: u64, entries: usize, value: Option<Box<dyn Any>>) -> Self {
+    fn opened(revision: u64, entries: usize, value: Option<Erased>) -> Self {
         Self {
             revision,
             entries: vec![EntryState::NotStarted; entries],
@@ -774,7 +787,7 @@ impl Transition {
     /// given up on: those are terminal until evidence revives them, and
     /// carrying their record forward is what keeps a lost effect reported
     /// instead of silently dropped the moment the source moves.
-    fn resumed(revision: u64, previous: &Self, value: Option<Box<dyn Any>>) -> Self {
+    fn resumed(revision: u64, previous: &Self, value: Option<Erased>) -> Self {
         Self {
             revision,
             entries: previous
@@ -1044,11 +1057,11 @@ impl Ledger {
     /// slot that has nothing in it, and the executor, which must run an entry
     /// against the value its transition was opened under rather than against
     /// whatever has arrived since.
-    fn bound(&self, chain: usize) -> Option<&dyn Any> {
+    fn bound(&self, chain: usize) -> Option<&Erased> {
         self.transitions
             .get(chain)
             .and_then(Option::as_ref)
-            .and_then(|transition| transition.value.as_deref())
+            .and_then(|transition| transition.value.as_ref())
     }
 
     /// The first entry that is unresolved, in `(chain, entry)` order.
@@ -1145,7 +1158,7 @@ fn revision_of(world: &World, chain: usize) -> u64 {
 /// once. Once a transition is bound to it, the transition is what speaks for
 /// it, and the slot being empty is not a loss — it is the record that the value
 /// is out on loan, which [`observe_fold`] reads back through the binding.
-fn take_observed(world: &mut World, chain: usize) -> Option<Box<dyn Any>> {
+fn take_observed(world: &mut World, chain: usize) -> Option<Erased> {
     let mut observed = world.non_send_mut::<Observed>();
     observed.0.get_mut(chain).and_then(Option::take)
 }
@@ -1160,9 +1173,9 @@ fn take_observed(world: &mut World, chain: usize) -> Option<Box<dyn Any>> {
 /// filter is consumed on the tick it is seen, so by the time the transition
 /// drains there is nothing left to consult — the observation itself is the only
 /// surviving record that the source moved at all.
-fn admits(world: &World, chain: usize, bound: Option<&dyn Any>) -> bool {
+fn admits(world: &World, chain: usize, bound: Option<&Erased>) -> bool {
     let seen = world.non_send::<Observed>();
-    let Some(next) = seen.0.get(chain).and_then(|slot| slot.as_deref()) else {
+    let Some(next) = seen.0.get(chain).and_then(|slot| slot.as_ref()) else {
         // Nothing to admit. An empty slot beside a transition that has nothing
         // open is not a movement, and reading it as one would reopen the chain
         // on every tick and run its entries forever.
@@ -1176,7 +1189,7 @@ fn admits(world: &World, chain: usize, bound: Option<&dyn Any>) -> bool {
     chains
         .0
         .get(chain)
-        .is_some_and(|chain| !(chain.same)(bound, next))
+        .is_some_and(|chain| !(chain.same)(bound.as_any(), next.as_any()))
 }
 
 /// The transition a chain should be walking this tick, if any.
@@ -1208,7 +1221,7 @@ fn resume(
         // generation that has finished. It gives way to the newest observation
         // when that observation has actually moved away from its binding, and
         // is otherwise kept exactly as it stands — abandonment record and all.
-        Some(transition) if !admits(world, chain, transition.value.as_deref()) => Some(transition),
+        Some(transition) if !admits(world, chain, transition.value.as_ref()) => Some(transition),
         Some(transition) => Some(Transition::resumed(
             revision_of(world, chain),
             &transition,
@@ -1236,23 +1249,31 @@ fn resume(
 /// afterwards: a retry is a retry, a retry may be a duplicate, and a retry is
 /// pointless because the failure is not something another attempt can change. The
 /// budget is consulted only for the first of them.
+///
+/// The classification is [`BotError::retry_class`] and nothing else. The error's
+/// *variant* is not the question: `DomainError` is where a permanent refusal, a
+/// connection that never opened, and a wiring defect all used to land, and they
+/// want three different answers. Reading the rendered `cause` to tell them apart
+/// is worse still — it makes a retry policy depend on the wording of a message.
+/// The producer states what the failure establishes about the effect, the
+/// certainty carries it here, and this function is a total map over that.
 fn failure_state(error: &BotError, attempts: u32, budget: u32) -> EntryState {
     let cause = error.to_string();
-    match *error {
+    match error.retry_class() {
         // The effect definitely did not happen: a retry is a retry, and the
         // budget bounds it.
-        BotError::DomainError { .. } if attempts < budget => {
-            EntryState::DefinitelyFailed { attempts, cause }
-        }
-        BotError::DomainError { .. } => EntryState::Abandoned {
+        RetryClass::Safe if attempts < budget => EntryState::DefinitelyFailed { attempts, cause },
+        RetryClass::Safe => EntryState::Abandoned {
             reason: AbandonReason::AttemptsExhausted { attempts },
             cause,
         },
         // It may have happened. Never attempted again without evidence, whatever
         // the budget says.
-        BotError::EffectIndeterminate { .. } => EntryState::OutcomeUnknown { attempts, cause },
-        // No retry fixes a refused capability or a type mismatch.
-        _ => EntryState::Abandoned {
+        RetryClass::RequiresEvidence => EntryState::OutcomeUnknown { attempts, cause },
+        // No retry fixes a refused capability, a parse refusal, or a type
+        // mismatch — and the budget is untouched, so the disposition reports
+        // what actually happened rather than "we ran out of attempts".
+        RetryClass::Never => EntryState::Abandoned {
             reason: AbandonReason::Terminal,
             cause,
         },
@@ -1291,6 +1312,34 @@ fn observe_fold(world: &mut World) {
         }
     };
 
+    // The rendezvous. `values` arrived in chain order because `poll_sources`
+    // collected them that way, and the pairing from here on is by index — a
+    // vector position, which carries no type. The witness is what proves the
+    // two halves still agree, and it is checked *before* anything is committed
+    // or compared, so a mis-pairing cannot reach a downcast.
+    //
+    // A miss is a defect in this crate — a chain whose index no longer names the
+    // source it was built with — not a domain failure and not something a retry
+    // can change. It is reported as `TypeMismatch`, which is classified terminal,
+    // so it does not spend a budget; and it commits nothing, so the world is left
+    // exactly as the previous tick left it.
+    {
+        let chains = world.non_send::<Chains>();
+        let mismatch = values.iter().enumerate().find_map(|(index, next)| {
+            let chain = chains.0.get(index)?;
+            (!chain.witness.agrees_with(next.witness)).then_some(BotError::TypeMismatch {
+                site: "observe_fold rendezvous",
+                chain: Some(index),
+                expected: chain.witness.name(),
+                observed: next.witness.name(),
+            })
+        });
+        if let Some(error) = mismatch {
+            world.resource_mut::<TickError>().0 = Some(error);
+            return;
+        }
+    }
+
     let changed: Vec<bool> = {
         let chains = world.non_send::<Chains>();
         let seen = world.non_send::<Observed>();
@@ -1309,13 +1358,13 @@ fn observe_fold(world: &mut World) {
                 let baseline = seen
                     .0
                     .get(index)
-                    .and_then(|slot| slot.as_deref())
+                    .and_then(|slot| slot.as_ref())
                     .or_else(|| ledger.bound(index));
                 match baseline {
                     // No remembered value, and no transition holding one: this
                     // source has, by definition, changed.
                     None => true,
-                    Some(previous) => !(chains.0[index].same)(previous, next.as_ref()),
+                    Some(previous) => !(chains.0[index].same)(previous.as_any(), next.as_any()),
                 }
             })
             .collect()
@@ -1410,7 +1459,7 @@ fn fire_plan(world: &mut World) {
             let chains = world.non_send::<Chains>();
             if let (Some(chain), Some(value), Some(failure)) = (
                 chains.0.get(index),
-                transition.value.as_deref(),
+                transition.value.as_ref(),
                 failures.get_mut(index),
             ) {
                 plan_chain(chain, &transition, value, index, &mut steps, failure);
@@ -1449,7 +1498,7 @@ fn fire_plan(world: &mut World) {
 fn plan_chain(
     chain: &EcsChain,
     transition: &Transition,
-    value: &dyn Any,
+    value: &Erased,
     index: usize,
     steps: &mut Vec<Step>,
     failure: &mut Option<BotError>,
@@ -1548,6 +1597,7 @@ fn validate(schedule: &mut Schedule, world: &mut World) -> Result<(), BotError> 
         .map(|_| ())
         .map_err(|error| BotError::DomainError {
             domain: "ecs::schedule".into(),
+            certainty: DispatchCertainty::Refused,
             // `ScheduleBuildError` carries an inherent `to_string(&self, graph,
             // world)` that shadows `Display::to_string`; the inherent one is the
             // one that resolves system names against the graph.
@@ -1814,7 +1864,7 @@ impl EcsBot {
     /// The wave cap is what keeps that from becoming unbounded blocking-thread
     /// fan-out. Determinism is unaffected: the results are collected in
     /// declaration order whatever order they resolve in.
-    async fn poll_sources(&self) -> Vec<Result<Box<dyn Any>, BotError>> {
+    async fn poll_sources(&self) -> Vec<Result<Erased, BotError>> {
         let chains = self.world.non_send::<Chains>();
         let grants = self.world.resource::<Grants>();
         let mut polled = Vec::with_capacity(chains.0.len());
@@ -2092,21 +2142,20 @@ impl EcsBuilder {
 
     /// Bind a source to observe.
     ///
-    /// The `PartialEq` bound is the substrate's one extra requirement, and it
-    /// is semantic rather than incidental: the condition on this substrate *is*
-    /// change detection, and a value that cannot be compared cannot be detected
-    /// as changed. [`Bot::builder`](crate::Bot::builder) carries no such bound
-    /// because its condition is re-evaluated every tick and needs no equality.
-    pub fn observe<S>(self, source: S) -> EcsObserveBuilder
+    /// The source is *not* erased here. It stays a concrete `S` inside the
+    /// returned builder for as long as the chain is being declared, so `on` can
+    /// type its condition and its action against `S::Output`; the erasure
+    /// happens in [`EcsObserveBuilder::observe`] and
+    /// [`EcsObserveBuilder::build`], which are the two points where the chain
+    /// stops being a declaration and becomes a chain.
+    pub fn observe<S>(self, source: S) -> EcsObserveBuilder<S>
     where
-        S: Observe + 'static,
-        S::Output: PartialEq + 'static,
+        S: Observe,
     {
         EcsObserveBuilder {
             name: self.name,
             prior: self.chains,
-            source: Box::new(source),
-            same: same_output::<S>,
+            source,
             entries: Vec::new(),
             policy: self.policy,
         }
@@ -2119,87 +2168,138 @@ impl EcsBuilder {
     }
 }
 
-impl EcsObserveBuilder {
+impl<S: Observe> EcsObserveBuilder<S> {
     /// Add a `(condition, action)` tuple to this chain.
+    ///
+    /// Both halves are typed against the source this chain is observing: the
+    /// condition reads `S::Output`, and the action takes exactly it. There is no
+    /// third type parameter, and that is the point — the shape this replaced had
+    /// one (`on<C, A, T>`) which was tied to nothing at all, so a chain whose
+    /// condition read one type and whose action expected another compiled, built,
+    /// and failed at tick time with a downcast miss. A wiring defect that
+    /// compiles is a defect that ships.
     ///
     /// The tuple's erasure is shared with the `Bot` executor rather than
     /// re-implemented, so the `Auth` issue, the downcast and the type-mismatch
     /// error cannot drift between the two substrates.
-    pub fn on<C, A, T>(mut self, condition: C, action: A) -> Self
+    ///
+    /// # The rule this relies on
+    ///
+    /// Equal types across the chain is sound only because every verb so far
+    /// consumes its input and produces a caller-visible one: [`Evaluate::check`]
+    /// returns a `bool`, a pure predicate with no derived output, so
+    /// `Source::Output == Condition::Input == Action::Input` is already the real
+    /// semantics rather than a simplification of it.
+    ///
+    /// **No stage may introduce a caller-selected type parameter disconnected
+    /// from its input.** A stage that transforms the value must carry the
+    /// transformation as an associated type — `Transform<I>::Output` — so the
+    /// next stage's input is a consequence of the previous one's output. A free
+    /// parameter here is how this defect happened once, and it will happen again
+    /// the first time a verb takes a type the chain does not determine.
+    pub fn on<C, A>(mut self, condition: C, action: A) -> Self
     where
-        T: 'static,
-        C: Evaluate<T> + 'static,
-        A: Execute + 'static,
-        A::Input: 'static,
+        S::Output: 'static,
+        C: Evaluate<S::Output> + 'static,
+        A: Execute<Input = S::Output> + 'static,
         A::Output: 'static,
     {
-        self.entries.push(typed_entry(condition, action));
+        self.entries
+            .push(typed_entry::<C, A, S::Output>(condition, action));
         self
     }
 
     /// Finish this chain and start another.
-    pub fn observe<S>(self, source: S) -> EcsObserveBuilder
+    ///
+    /// The erasure boundary for the chain being closed: `S` stops being a type
+    /// parameter here, and the witness is taken in the same breath, while
+    /// `S::Output` can still be named.
+    ///
+    /// The `PartialEq` bound is the substrate's one extra requirement, and it is
+    /// semantic rather than incidental: the condition on this substrate *is*
+    /// change detection, and a value that cannot be compared cannot be detected
+    /// as changed. [`Bot::builder`](crate::Bot::builder) carries no such bound
+    /// because its condition is re-evaluated every tick and needs no equality.
+    pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
     where
-        S: Observe + 'static,
+        S: 'static,
         S::Output: PartialEq + 'static,
+        U: Observe,
     {
         // Destructured rather than moved field by field: taking `prior` by
         // `mem::take` and then moving `source` out leaves `self` partially
         // moved, and the borrow checker will not let a method call finish the
         // chain in between.
-        let EcsObserveBuilder {
+        let Self {
             name,
             mut prior,
             source: previous,
-            same,
             entries,
             policy,
         } = self;
         prior.push(EcsChain {
-            source: previous,
-            same,
+            source: Box::new(previous),
+            same: same_output::<S>,
+            witness: Witness::of::<S::Output>(),
             entries,
         });
         EcsObserveBuilder {
             name,
             prior,
-            source: Box::new(source),
-            same: same_output::<S>,
+            source,
             entries: Vec::new(),
             policy,
         }
     }
 
     /// Assemble the bot, admitting every capability and validating the schedule.
-    pub fn build(self, grants: &GrantSet) -> Result<EcsBot, BotError> {
-        let EcsObserveBuilder {
+    ///
+    /// The erasure boundary for the last chain, for the same reason as
+    /// [`observe`](Self::observe), and the one call that turns a declaration into
+    /// a running bot.
+    pub fn build(self, grants: &GrantSet) -> Result<EcsBot, BotError>
+    where
+        S: 'static,
+        S::Output: PartialEq + 'static,
+    {
+        let Self {
             name,
             mut prior,
             source,
-            same,
             entries,
             policy,
         } = self;
         prior.push(EcsChain {
-            source,
-            same,
+            source: Box::new(source),
+            same: same_output::<S>,
+            witness: Witness::of::<S::Output>(),
             entries,
         });
         EcsBot::assemble(name, prior, grants, policy)
     }
 }
 
-/// A chain being assembled.
-pub struct EcsObserveBuilder {
+/// A chain being assembled, holding its source as the concrete type it is.
+///
+/// Generic over the source so that [`on`](Self::on) can type a condition and an
+/// action against `S::Output`. The type parameter is the chain's one claim about
+/// its own wiring, and it is checked by the compiler rather than by a downcast:
+/// a `(condition, action)` tuple attached here has both halves typed against the
+/// source, so a chain that cannot work does not build.
+///
+/// `S` is erased at [`observe`](Self::observe) and [`build`](Self::build), which
+/// are the only two points where the chain is finished. There is no third state
+/// between "declaring a chain" and "a chain": the builder cannot be stored,
+/// serialized, or passed to anything that expects an `EcsChain`, because it is
+/// not one until the erasure runs.
+pub struct EcsObserveBuilder<S> {
     /// Carried from [`EcsBuilder`]; the chain being built does not consume it.
     name: String,
     /// Chains finished by an earlier `observe` call, in order.
     prior: Vec<EcsChain>,
-    /// The source being bound.
-    source: Box<dyn ObserveAny>,
-    /// Equality for `source`'s output.
-    same: fn(&dyn Any, &dyn Any) -> bool,
-    /// Tuples attached so far.
+    /// The source being bound, still concrete.
+    source: S,
+    /// Tuples attached so far, each already erased for storage.
     entries: Vec<ChainEntry>,
     /// Carried from [`EcsBuilder`] alongside `name`.
     policy: RetryPolicy,
@@ -2372,6 +2472,7 @@ mod tests {
             if left == 0 {
                 return Err(BotError::DomainError {
                     domain: "test::exhausting".into(),
+                    certainty: DispatchCertainty::NotDelivered,
                     cause: "script exhausted".into(),
                 });
             }
@@ -2465,6 +2566,7 @@ mod tests {
             Err(match self.kind {
                 FlakyKind::Refused => BotError::DomainError {
                     domain: "test::flaky".into(),
+                    certainty: DispatchCertainty::NotDelivered,
                     cause: "refused, and the effect did not happen".into(),
                 },
                 FlakyKind::Indeterminate => BotError::EffectIndeterminate {
@@ -2510,6 +2612,7 @@ mod tests {
             self.0.set(self.0.get().saturating_add(1));
             Err(BotError::DomainError {
                 domain: "test::refuses".into(),
+                certainty: DispatchCertainty::NotDelivered,
                 cause: "refused".into(),
             })
         }
@@ -3384,7 +3487,7 @@ mod tests {
             // opened with nothing observed, which holds its entries rather than
             // evaluating them against a value nobody read — a real state, but
             // not this one.
-            let mut transition = Transition::opened(revision, 1, Some(Box::new(200_u16)));
+            let mut transition = Transition::opened(revision, 1, Some(Erased::new(200_u16)));
             *transition
                 .entries
                 .first_mut()
@@ -3437,15 +3540,23 @@ mod tests {
         // it is not run ahead of a question that has no answer — the failure
         // the old substrate turned into "this chain is done".
         //
-        // The mismatch is buildable because the builder ties a condition to the
-        // action's erased input, not to the source's output type: the downcast
-        // happens at check time, which is where this reports.
+        // The mismatched condition is built *behind* the builder now, because
+        // the typed `on` refuses it: a `u16` source cannot carry a condition
+        // that reads a `String`. That refusal is the front half of this fix, and
+        // the back half is still needed, because erasure is not the only way to
+        // reach a mis-paired chain — anything holding this world can insert an
+        // entry. `typed_entry` is the erasure helper and keeps its free `T`, so
+        // it can still express the defect; this test is the one place that does,
+        // on purpose, to pin what happens when it is reached.
         let log = Rc::new(RefCell::new(Vec::new()));
         let mut bot = EcsBot::builder("mismatched")
             .observe(Script::new(vec![200, 200]))
-            .on(|value: &String| value.len() >= 3, Record(Rc::clone(&log)))
             .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
             .build(&net_grants())?;
+        bot.world.non_send_mut::<Chains>().0[0].entries.insert(
+            0,
+            typed_entry::<_, _, String>(|value: &String| value.len() >= 3, Record(Rc::clone(&log))),
+        );
 
         match bot.tick() {
             Ok(fired) => {
@@ -3556,6 +3667,233 @@ mod tests {
         });
         ordered.add_systems((observe_fold, fire_plan).chain());
         validate(&mut ordered, &mut world)?;
+        Ok(())
+    }
+
+    /// An action that declares `Input = u32` while counting its attempts.
+    ///
+    /// Paired below with a `u16` source: the pairing is the fault, and the
+    /// count is how the test tells "one attempt" from "the whole budget".
+    struct CountsU32(Rc<Cell<usize>>);
+
+    impl Execute for CountsU32 {
+        type Input = u32;
+        type Output = ();
+
+        fn required_caps(&self) -> &[Cap] {
+            &[]
+        }
+
+        async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
+            call.0.check(&[])?;
+            self.0.set(self.0.get().saturating_add(1));
+            Ok(())
+        }
+
+        fn domain_id(&self) -> &str {
+            "test::counts_u32"
+        }
+    }
+
+    /// An action whose failure is permanent and happens before dispatch: the
+    /// shape every "binding required" domain has.
+    struct RefusesPermanently(Rc<Cell<usize>>);
+
+    impl Execute for RefusesPermanently {
+        type Input = u16;
+        type Output = ();
+
+        fn required_caps(&self) -> &[Cap] {
+            &[]
+        }
+
+        async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
+            call.0.check(&[])?;
+            self.0.set(self.0.get().saturating_add(1));
+            Err(BotError::DomainError {
+                domain: "test::permanent".into(),
+                certainty: DispatchCertainty::Refused,
+                cause: "no binding is installed for this domain".into(),
+            })
+        }
+
+        fn domain_id(&self) -> &str {
+            "test::permanent"
+        }
+    }
+
+    #[test]
+    fn a_mispairing_behind_the_erasure_is_a_witness_miss() -> TestResult {
+        // The pairing from `Chains` to `Observed` is by index, and a vector
+        // position carries no type. This is that pairing gone wrong: the chain
+        // declares a `u16` source, and the staged value is a `u32`.
+        //
+        // Written into the staging resource directly, because the shipped path
+        // cannot produce this state: `poll_sources` boxes the output of the very
+        // source it took the witness from, so a disagreement means the world
+        // moved behind the schedule's back. That is precisely the state the
+        // witness exists to refuse rather than to downcast, and it is why the
+        // test has to construct it rather than trigger it.
+        //
+        // The assertions are the three things the witness is for. It fires
+        // *before* the value is used, so nothing is committed and no condition
+        // is asked. It names both types and the site. And it is a mismatch, not
+        // a domain failure, so the disposition is terminal and no retry budget
+        // is touched.
+        let ran = Rc::new(Cell::new(0));
+        let mut bot = EcsBot::builder("mispairing")
+            .observe(Script::new(vec![200]))
+            .on(|value: &u16| *value >= 200, Refuses(Rc::clone(&ran)))
+            .build(&net_grants())?;
+
+        bot.world.non_send_mut::<Polled>().0 = vec![Ok(Erased::new(300u32))];
+        bot.schedule.run(&mut bot.world);
+
+        match bot.world.resource::<TickError>().0 {
+            Some(BotError::TypeMismatch {
+                site,
+                chain,
+                expected,
+                observed,
+            }) => {
+                assert_eq!(site, "observe_fold rendezvous", "the site is greppable");
+                assert_eq!(chain, Some(0), "the report names which chain disagreed");
+                assert_eq!(expected, "u16", "the chain's claim");
+                assert_eq!(observed, "u32", "what actually arrived");
+            }
+            ref other => {
+                return Err(format!("expected a witness miss, got {other:?}").into());
+            }
+        }
+
+        assert!(
+            bot.world
+                .non_send::<Observed>()
+                .0
+                .iter()
+                .all(Option::is_none),
+            "the fold commits nothing on a mismatch, so the previous tick's state survives"
+        );
+        assert_eq!(ran.get(), 0, "the action was never reached");
+        Ok(())
+    }
+
+    #[test]
+    fn a_mismatched_pairing_costs_one_attempt_not_the_retry_budget() -> TestResult {
+        // The chain is wired for `u16` while the action declares `u32`. That is
+        // a wiring defect behind the erasure, not a domain failure: no number
+        // of retries reaches a different answer, so it costs one attempt and
+        // lands as terminal rather than spending the whole budget and being
+        // reported as "we ran out of budget" — which names the budget as the
+        // reason when the reason is that the two halves disagree.
+        //
+        // The report names both types, which is what makes it a diagnosis
+        // rather than a report that something is wrong somewhere. It names no
+        // domain, because no domain was reached.
+        //
+        // The attempt count is read from the ledger rather than counted by the
+        // action, because the action must never be reached: the downcast is
+        // checked before the proof is issued, so a mismatch costs no side
+        // effect. `ran` is that second half.
+        // Built behind the builder for the same reason as the condition
+        // mismatch above: `on` no longer admits `CountsU32` on a `u16` source,
+        // which is the fix, and the downcast arm is still what reports the
+        // mis-pairing that reaches the erasure boundary anyway.
+        let ran = Rc::new(Cell::new(0));
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut bot = EcsBot::builder("mismatched")
+            .observe(Script::new(vec![200, 200, 200, 200]))
+            .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
+            .build(&net_grants())?;
+        bot.world.non_send_mut::<Chains>().0[0].entries[0] =
+            typed_entry::<_, _, u16>(|value: &u16| *value >= 200, CountsU32(Rc::clone(&ran)));
+
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(format!("a wiring mismatch was reported as {fired} fired").into());
+            }
+            Err(error) => assert!(
+                matches!(
+                    error,
+                    BotError::TypeMismatch {
+                        site: "spec::typed_entry",
+                        expected: "u32",
+                        observed: "u16",
+                        ..
+                    }
+                ),
+                "a wiring defect is a type mismatch naming both types, not a domain failure: {error:?}"
+            ),
+        }
+        assert_eq!(
+            ran.get(),
+            0,
+            "the downcast is checked before the action runs, so the mismatch was not a side effect"
+        );
+        assert!(
+            matches!(
+                first_hold(&bot),
+                Some(TransitionHold::Abandoned {
+                    reason: AbandonReason::Terminal,
+                    ..
+                })
+            ),
+            "one attempt, and the disposition is terminal rather than `AttemptsExhausted`: {:?}",
+            first_hold(&bot)
+        );
+
+        // The second tick must not spend a second attempt on the same answer.
+        // That is the observable difference the budget makes: `AttemptsExhausted`
+        // is a fact about how many times the substrate was willing to ask, and
+        // asking twice here buys nothing.
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(format!("a retried wiring mismatch reported {fired} fired").into());
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::PendingTransition { .. }),
+                "the abandoned entry is the barrier the next tick reports, got {error:?}"
+            ),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_permanent_refusal_does_not_burn_the_retry_budget() -> TestResult {
+        // A refusal that happens before dispatch and cannot be changed by
+        // repeating it. Retrying spends attempts to learn the same answer, and
+        // the report then blames the budget for a failure the budget was never
+        // the reason for.
+        let attempts = Rc::new(Cell::new(0));
+        let mut bot = EcsBot::builder("permanent")
+            .observe(Script::new(vec![200, 200, 200, 200]))
+            .on(
+                |value: &u16| *value >= 200,
+                RefusesPermanently(Rc::clone(&attempts)),
+            )
+            .build(&net_grants())?;
+
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(format!("a permanent refusal was reported as {fired} fired").into());
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::DomainError { .. }),
+                "expected the action's own error, got {error:?}"
+            ),
+        }
+        assert_eq!(attempts.get(), 1, "a permanent refusal is attempted once");
+        assert!(
+            matches!(
+                first_hold(&bot),
+                Some(TransitionHold::Abandoned {
+                    reason: AbandonReason::Terminal,
+                    ..
+                })
+            ),
+            "the disposition is terminal, not `AttemptsExhausted`: {:?}",
+            first_hold(&bot)
+        );
         Ok(())
     }
 }

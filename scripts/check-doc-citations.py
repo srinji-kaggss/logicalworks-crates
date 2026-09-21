@@ -9,14 +9,22 @@ accurate citation from a stale one.
 
 This checks the part that is not a judgement call:
 
-  * the cited file exists, and
-  * the cited line exists in it, and is not blank.
+  * the cited file exists,
+  * the cited line exists in it, and is not blank, and
+  * the cited line is not one that cannot support any claim at all.
 
-It deliberately does **not** try to decide whether the line is the *right* one.
-The guides point at a definition, at a doc-comment, or at a re-export depending
-on what the claim is about, so "is this the symbol it names" is a human call.
-Claiming to check it would produce false positives, which is how a check gets
-switched off instead of fixed.
+The third is a narrow subset of "is this the right line", and it is worth
+separating from the rest because it is mechanical: a bare closing brace, or an
+empty `///` or `//!`, carries no content a sentence could have been written
+from. A citation pointing at one is stale beyond argument, whatever the claim
+says. This is the shape a long refactor leaves behind — the symbol moved, the
+line number stayed, and the number now lands on the `}` that closed it.
+
+It deliberately does **not** go further and decide whether the line is the
+*right* one. The guides point at a definition, at a doc-comment, or at a
+re-export depending on what the claim is about, so "is this the symbol it
+names" is a human call. Claiming to check it would produce false positives,
+which is how a check gets switched off instead of fixed.
 
 Citation roots are resolved against the repository root, so a citation is
 written the way a reader would open it: `crates/…/src/ecs.rs:1496`.
@@ -80,6 +88,28 @@ def line_numbers(spec: str) -> list[int]:
     return numbers
 
 
+# A line no claim can have been written from. Kept deliberately small: every
+# entry here is a line with no content at all, so there is no reading of any
+# sentence for which it is the right citation. Anything that could plausibly be
+# the intended target — an attribute, a `use`, a fragment of a signature — is
+# left alone rather than guessed at.
+UNSUPPORTIVE = (
+    (re.compile(r"^[}\]\);]+$"), "it is only a closing delimiter"),
+    (re.compile(r"^///$"), "it is an empty `///`"),
+    (re.compile(r"^//!$"), "it is an empty `//!`"),
+    (re.compile(r"^//$"), "it is an empty comment"),
+)
+
+
+def unsupportive_reason(line: str) -> str | None:
+    """Why `line` cannot be the source of a citation, or `None` if it can."""
+    stripped = line.strip()
+    for pattern, reason in UNSUPPORTIVE:
+        if pattern.match(stripped):
+            return reason
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -131,9 +161,18 @@ def main() -> int:
                         f"{relative_doc}: {match.group(0)} — "
                         f"line {number} is outside the file (it has {len(lines)})"
                     )
-                elif not lines[number - 1].strip():
+                    continue
+                cited_line = lines[number - 1]
+                if not cited_line.strip():
                     failures.append(
                         f"{relative_doc}: {match.group(0)} — line {number} is blank"
+                    )
+                    continue
+                reason = unsupportive_reason(cited_line)
+                if reason is not None:
+                    failures.append(
+                        f"{relative_doc}: {match.group(0)} — line {number} is "
+                        f"`{cited_line.strip()[:40]}`, which supports no claim: {reason}"
                     )
 
     if failures:

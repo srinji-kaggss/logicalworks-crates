@@ -1,8 +1,8 @@
 # What a failed tick means
 
 Both entry points return `Result<usize, BotError>`: `Bot::tick` is the
-synchronous adapter (`crates/lgwks-bot/src/ecs.rs:1789`) and `Bot::tick_async` is
-the one to `await` from inside a runtime (`crates/lgwks-bot/src/ecs.rs:1702`).
+synchronous adapter (`crates/lgwks-bot/src/ecs.rs:1839`) and `Bot::tick_async` is
+the one to `await` from inside a runtime (`crates/lgwks-bot/src/ecs.rs:1752`).
 Four different things can produce an `Err`. Three are failures that mean
 different things for your data — the distinction is the difference between a
 retry and a duplicate — and the fourth is the adapter refusing to run a tick at
@@ -44,7 +44,7 @@ a transition, and a chain with a transition outstanding is walked whether or not
 it moved — and records one ordered `Step` per condition that held
 (`crates/lgwks-bot/src/ecs.rs:1494`); the `run_steps` pass then awaits those steps
 on the caller's executor in exactly that order
-(`crates/lgwks-bot/src/ecs.rs:1849`). It breaks on the first failure and records
+(`crates/lgwks-bot/src/ecs.rs:1899`). It breaks on the first failure and records
 it, and there is no rollback:
 
 ```rust,ignore
@@ -279,7 +279,7 @@ Two failures come from the wiring rather than from a domain, and both are typed
 so they cannot be mistaken for a condition that simply did not fire.
 
 - A condition whose `Evaluate<T>` implementation returns `Err` stops the chain
-  with that error (`crates/lgwks-bot/src/ecs.rs:1502`). A structural failure in a
+  with that error (`crates/lgwks-bot/src/ecs.rs:2635`). A structural failure in a
   condition is `BotError::EvaluateError`, not `false`. The stop is ordered rather
   than absolute: the steps `fire_plan` recorded before the failing condition are
   still run, so an effect the walk had already cleared does take effect, while
@@ -291,10 +291,19 @@ so they cannot be mistaken for a condition that simply did not fire.
   pins the other.
 - The erased chain wrappers downcast the observed value back to the type the
   condition was registered with. A mismatch in the condition is
-  `EvaluateError`; a mismatch in the action's input is `BotError::DomainError`
-  naming the action's domain (`crates/lgwks-bot/src/spec.rs`). The `Auth` is
-  issued before the downcast in the action path, so a type mismatch fails
-  without a side effect.
+  `EvaluateError`; a mismatch in the action's input is
+  `BotError::TypeMismatch`, naming the site that caught it and both types
+  (`crates/lgwks-bot/src/spec.rs`). It names no domain, because a mismatch
+  means no domain was reached — and it is `Terminal`, so it costs one attempt
+  rather than a whole retry budget. The `Auth` is issued before the downcast in
+  the action path, so a type mismatch fails without a side effect.
+- The witness is checked before either downcast. Each chain records the type its
+  source produces (`TypeId`, taken where the type was still a parameter) and
+  every polled value carries the type it was erased from; `observe_fold` compares
+  them at the rendezvous and reports `BotError::TypeMismatch` from site
+  `observe_fold rendezvous` if they disagree, committing nothing. This is the
+  half a typed builder cannot prove: the builder fixes the pairing at
+  construction, and the witness checks it still holds across erasure.
 
 ## The order errors are reported in
 
@@ -307,6 +316,6 @@ in declaration order and `run_steps` runs them in that same order, parking the
 first failure it saw and reporting that one, while the chains behind the failing
 one still run and still record their work. `TickError` is a resource rather than
 a return value because an exclusive system returns `()` and cannot propagate
-(`crates/lgwks-bot/src/ecs.rs:212`); `tick` takes it after the schedule runs, and
+(`crates/lgwks-bot/src/ecs.rs:213`); `tick` takes it after the schedule runs, and
 it takes precedence over the `PendingTransition` report because it carries the
 typed variant a retry classifier matches on.

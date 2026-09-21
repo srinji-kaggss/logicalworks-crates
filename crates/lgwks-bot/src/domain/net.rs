@@ -16,7 +16,7 @@ use std::time::Duration;
 use lgwks_std::http::{self, BodyPolicy, Options};
 
 use crate::cap::{Auth, Cap};
-use crate::error::BotError;
+use crate::error::{BotError, DispatchCertainty};
 use crate::verb;
 
 /// Characters of body kept for observation.
@@ -109,6 +109,7 @@ impl verb::Observe for Endpoint {
             }),
             Err(http::Error::InvalidUrl) => Err(BotError::DomainError {
                 domain: self.domain_id().into(),
+                certainty: DispatchCertainty::Refused,
                 cause: "invalid endpoint URL (absolute http(s) URI required)".into(),
             }),
             Err(_) => Ok(NetState {

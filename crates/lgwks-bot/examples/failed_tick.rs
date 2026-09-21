@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use lgwks_bot::spec::{AbandonReason, TransitionHold};
-use lgwks_bot::{Auth, Bot, BotError, Cap, Execute, GrantSet, Observe};
+use lgwks_bot::{Auth, Bot, BotError, Cap, DispatchCertainty, Execute, GrantSet, Observe};
 
 /// A source whose value the test drives by hand.
 struct Reading(Arc<AtomicU32>);
@@ -69,6 +69,7 @@ impl Execute for Fail {
         call.0.check(self.required_caps())?;
         Err(BotError::DomainError {
             domain: "test::fail".into(),
+            certainty: DispatchCertainty::NotDelivered,
             cause: "the second action refused".into(),
         })
     }

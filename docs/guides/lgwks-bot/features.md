@@ -26,10 +26,10 @@ storefront, and `lgwks_deps` is the only crate in the workspace that authors a
 | `net` | `io` | `rt::net`: `TcpListener`, `TcpStream`, `UdpSocket`, `lookup_host` |
 | `process` | `io`, `sync` | `rt::process`: `Command` — how to describe a child. Running one is `Supervisor::spawn_process` (`sync`), and it is the only way: `Child` and its pipes are deliberately not exported |
 | `fs` | `io` | `rt::fs`: an async filesystem, a blocking-threadpool wrapper |
-| `signal` | `rt` | `rt::signal`: OS signal streams. Compiled only on `unix` or `windows` (`crates/lgwks-bot/src/rt/mod.rs:92`) |
+| `signal` | `rt` | `rt::signal`: OS signal streams. Compiled only on `unix` or `windows` (`crates/lgwks-bot/src/rt/mod.rs:96`) |
 | `full` | | `rt`, `time`, `sync`, `macros`, `io`, `net`, `process`, `fs`, `signal` |
 
-The module gates are in `crates/lgwks-bot/src/rt/mod.rs:82`. `rt::supervise` and
+The module gates are in `crates/lgwks-bot/src/rt/mod.rs:85`. `rt::supervise` and
 `rt::sync` are both behind `sync`, so disabling `sync` removes the supervisor as
 well as the channels.
 
@@ -66,7 +66,7 @@ which this workspace bans.
 
 ## Limits by feature
 
-**`rt` is not a scheduler with realtime guarantees.** `crates/lgwks-bot/src/rt/mod.rs:72`
+**`rt` is not a scheduler with realtime guarantees.** `crates/lgwks-bot/src/rt/mod.rs:75`
 states the bound: future completion order across worker threads is not
 deterministic, and only the result order of `join_all_bounded` is.
 

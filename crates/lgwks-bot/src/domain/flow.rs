@@ -2,7 +2,7 @@
 //! Execute impls that chain other Execute actions. No new verb needed.
 
 use crate::cap::{Auth, Cap};
-use crate::error::BotError;
+use crate::error::{BotError, DispatchCertainty};
 use crate::verb;
 
 /// Execute actions in sequence. Each action's output feeds the next.
@@ -55,6 +55,7 @@ where
                 }
                 None => Err(BotError::DomainError {
                     domain: verb::Execute::domain_id(self).into(),
+                    certainty: DispatchCertainty::Refused,
                     cause: "type mismatch in pipeline step input".into(),
                 }),
             }
