@@ -13,6 +13,15 @@
 //! (`lgwks_bot::rt::task::join_all_bounded`), not open unbounded parallel
 //! requests. Retries, backoff, and circuit-breaking are caller policy, not
 //! client behavior: the client makes exactly one attempt per call.
+//!
+//! Response bodies are read under a ceiling the caller declares
+//! ([`Options::max_body_bytes`], 8 MiB by default). A body that reaches the
+//! ceiling is refused with [`Error::BodyTooLarge`] rather than truncated
+//! silently, so a caller that asked for a body never receives a prefix
+//! believing it is the whole thing. A caller whose use of the body is a
+//! preview declares [`BodyPolicy::Preview`] instead, which keeps the prefix and
+//! reports [`Truncation::Cut`]. There is no unbounded spelling: a remote server
+//! does not get to decide how much memory this process commits.
 
 use std::fmt;
 use std::io::Read;
@@ -20,9 +29,67 @@ use std::time::Duration;
 
 use iri_string::types::UriAbsoluteStr;
 
+// ── Body ceilings ───────────────────────────────────────────────────────────
+
+/// Default ceiling on the bytes one response body may occupy: 8 MiB.
+///
+/// Finite on purpose. A remote server authors its own response, so an unbounded
+/// read lets it author this process's memory footprint as well; there is no
+/// spelling for "no ceiling" anywhere in this module. The default is generous
+/// for a client built for tooling and probes, and a caller that legitimately
+/// needs more raises it through [`Options::max_body_bytes`] — an explicit
+/// decision, made once, at the call site that needs it.
+pub const DEFAULT_MAX_BODY_BYTES: usize = 8_388_608;
+
+/// Bytes read per `read` call in [`read_bounded`].
+///
+/// Bounds each read to a stack buffer rather than letting the reader size its
+/// own windows: the chunk handed to a socket is whatever this constant says,
+/// independent of the transport's buffering.
+const READ_CHUNK_BYTES: usize = 8_192;
+
+/// What an exchange does when a response body reaches its declared ceiling.
+///
+/// Declared with the ceiling rather than decided after the fact: a caller that
+/// wants a whole body and a caller that wants a preview disagree about what a
+/// cut-off body means, and only the caller knows which it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum BodyPolicy {
+    /// Read the body whole, and refuse the exchange with
+    /// [`Error::BodyTooLarge`] at the ceiling. The default: a truncated body is
+    /// indistinguishable from a short one at the point of use, so a caller that
+    /// was handed a prefix it believed was whole would parse half a document
+    /// and call it success.
+    #[default]
+    Whole,
+    /// Keep the first [`Options::max_body_bytes`] and mark the response
+    /// [`Truncation::Cut`]. For a caller whose use of the body is a preview,
+    /// where stopping at the ceiling is the declared outcome rather than a
+    /// failure — and where refusing would throw away the status code, headers,
+    /// and prefix the caller can actually use.
+    Preview,
+}
+
+/// Whether a response body ended before the exchange's declared ceiling.
+///
+/// Reported rather than left implicit: under [`BodyPolicy::Preview`] the body
+/// is a prefix by contract, and a consumer that must know whether it holds
+/// everything has to be able to read that off the response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Truncation {
+    /// The body ended on its own, at or below the ceiling.
+    Complete,
+    /// The body reached the ceiling and reading stopped there:
+    /// [`Response::body`] holds a prefix.
+    Cut,
+}
+
 // ── Options ─────────────────────────────────────────────────────────────────
 
-/// Request options. Start from [`Options::default`](crate::http::Options::default) (30s timeout).
+/// Request options. Start from [`Options::default`](crate::http::Options::default)
+/// (30s timeout, 8 MiB body ceiling).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Options {
@@ -35,6 +102,12 @@ pub struct Options {
     /// header bytes; an invalid pair is a caller bug and the request errors
     /// rather than silently dropping the header.
     pub headers: Vec<(String, String)>,
+    /// Ceiling on the response body in bytes, enforced while reading. See
+    /// [`DEFAULT_MAX_BODY_BYTES`] for the default and the reason there is no
+    /// unbounded value, and [`BodyPolicy`] for what happens at the ceiling.
+    pub max_body_bytes: usize,
+    /// What to do when the body reaches [`Options::max_body_bytes`].
+    pub body_policy: BodyPolicy,
 }
 
 impl Default for Options {
@@ -43,6 +116,8 @@ impl Default for Options {
             timeout: Duration::from_secs(30),
             user_agent: format!("lgwks-std/{}", env!("CARGO_PKG_VERSION")),
             headers: Vec::new(),
+            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            body_policy: BodyPolicy::Whole,
         }
     }
 }
@@ -56,6 +131,25 @@ impl Options {
     #[must_use]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Set the ceiling on the response body in bytes.
+    ///
+    /// A body that reaches the ceiling is refused with [`Error::BodyTooLarge`],
+    /// or kept as a prefix under [`BodyPolicy::Preview`]. Either way the read
+    /// stops there: the ceiling bounds the memory a response can commit, so
+    /// raising it is raising the amount of memory one remote server may claim.
+    #[must_use]
+    pub fn max_body_bytes(mut self, max_body_bytes: usize) -> Self {
+        self.max_body_bytes = max_body_bytes;
+        self
+    }
+
+    /// Set what happens when the body reaches [`Options::max_body_bytes`].
+    #[must_use]
+    pub fn body_policy(mut self, body_policy: BodyPolicy) -> Self {
+        self.body_policy = body_policy;
         self
     }
 
@@ -75,7 +169,7 @@ impl Options {
 
 // ── Response ────────────────────────────────────────────────────────────────
 
-/// A completed HTTP exchange: status, headers, and full body.
+/// A completed HTTP exchange: status, headers, and body.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Response {
@@ -83,8 +177,10 @@ pub struct Response {
     pub status: u16,
     /// Response headers in wire order as `(name, value)` pairs.
     pub headers: Vec<(String, String)>,
-    /// Full response body bytes.
+    /// Response body bytes, at most [`Options::max_body_bytes`] long.
     pub body: Vec<u8>,
+    /// Whether [`Response::body`] is the whole body or a prefix of it.
+    pub truncation: Truncation,
 }
 
 impl Response {
@@ -120,6 +216,14 @@ pub enum Error {
     InvalidUrl,
     /// The request hit [`Options::timeout`](crate::http::Options::timeout).
     Timeout,
+    /// The response body reached [`Options::max_body_bytes`] without ending,
+    /// under [`BodyPolicy::Whole`]. The ceiling is reported, the bytes read are
+    /// not: they are a prefix, and handing a prefix to a caller that asked for
+    /// a body is the whole failure this variant exists to refuse.
+    BodyTooLarge {
+        /// The declared ceiling the body reached.
+        limit: usize,
+    },
     /// The exchange never completed: DNS, TCP, TLS, or protocol failure.
     Transport(String),
 }
@@ -134,6 +238,12 @@ impl fmt::Display for Error {
                 write!(f, "invalid http(s) URL (absolute http(s) URI required)")
             }
             Self::Timeout => write!(f, "request timed out"),
+            Self::BodyTooLarge { limit } => write!(
+                f,
+                "response body reached the declared {limit}-byte ceiling; raise \
+                 `max_body_bytes` to read it whole, or select `BodyPolicy::Preview` to keep a \
+                 prefix"
+            ),
             Self::Transport(ref cause) => write!(f, "transport failure: {cause}"),
         }
     }
@@ -214,7 +324,14 @@ fn agent(options: &Options) -> ureq::Agent {
 /// read is reported as [`Error::Transport`] rather than returned as a short
 /// body. Non-UTF-8 *bodies* are not an error at this layer: [`Response::text`]
 /// is where that is decided.
-fn response_of(mut response: ureq::http::Response<ureq::Body>) -> Result<Response, Error> {
+///
+/// The body is read under `options.max_body_bytes`; see [`read_bounded`] for
+/// how the ceiling is enforced on the way in rather than checked on the way
+/// out.
+fn response_of(
+    mut response: ureq::http::Response<ureq::Body>,
+    options: &Options,
+) -> Result<Response, Error> {
     let status = response.status().as_u16();
     let headers = response
         .headers()
@@ -226,16 +343,79 @@ fn response_of(mut response: ureq::http::Response<ureq::Body>) -> Result<Respons
             )
         })
         .collect();
-    let mut body = Vec::new();
-    response
-        .body_mut()
-        .as_reader()
-        .read_to_end(&mut body)
-        .map_err(|read_error| Error::Transport(read_error.to_string()))?;
+    let (body, truncation) = read_bounded(&mut response.body_mut().as_reader(), options)?;
     Ok(Response {
         status,
         headers,
         body,
+        truncation,
+    })
+}
+
+/// Read at most `options.max_body_bytes` from `reader`.
+///
+/// The ceiling is enforced *while* reading, not checked after: each `read` is
+/// handed a window clamped to the bytes that remain, so the buffer never holds
+/// more than the ceiling even momentarily, and a server that declares one
+/// length and sends another cannot make this process allocate the difference.
+/// The read never asks for more than [`READ_CHUNK_BYTES`], so a single
+/// oversized frame is bounded too.
+///
+/// A body that fills the ceiling is not assumed to have ended there. One
+/// further byte is read to tell a body that stopped exactly at the ceiling from
+/// one that continues, and that byte is dropped rather than kept: it lies past
+/// the ceiling, which is the one thing the ceiling exists to prevent. Keeping
+/// it is also unnecessary, because the two cases are already distinguished by
+/// the [`Truncation`] the response reports.
+///
+/// Under [`BodyPolicy::Whole`] a body that reached the ceiling is refused
+/// outright: a prefix returned as a body is a short read the caller cannot see,
+/// and the caller asked for a body. Under [`BodyPolicy::Preview`] the prefix is
+/// the declared result.
+fn read_bounded(reader: &mut impl Read, options: &Options) -> Result<(Vec<u8>, Truncation), Error> {
+    let ceiling = options.max_body_bytes;
+    let mut body = Vec::new();
+    let mut chunk = [0_u8; READ_CHUNK_BYTES];
+    let truncation = loop {
+        let remaining = ceiling.saturating_sub(body.len());
+        if remaining == 0 {
+            break probe_for_more(reader)?;
+        }
+        // `wanted` is clamped to the chunk length, so this slice is in bounds
+        // for every ceiling: the window is what remains, or one chunk,
+        // whichever is smaller.
+        let wanted = remaining.min(READ_CHUNK_BYTES);
+        let read = reader
+            .read(&mut chunk[..wanted])
+            .map_err(|read_error| Error::Transport(read_error.to_string()))?;
+        if read == 0 {
+            break Truncation::Complete;
+        }
+        body.extend_from_slice(&chunk[..read]);
+    };
+    if options.body_policy == BodyPolicy::Whole && truncation == Truncation::Cut {
+        return Err(Error::BodyTooLarge { limit: ceiling });
+    }
+    Ok((body, truncation))
+}
+
+/// Whether `reader` has more to give, without keeping the byte.
+///
+/// Reading one byte is what makes [`Truncation::Cut`] a fact rather than a
+/// guess for a body that ends exactly at the ceiling; discarding it is what
+/// keeps the ceiling a bound on memory. A byte that is read and dropped is
+/// still a byte consumed from the socket, which is correct here: the exchange
+/// ends at this point, and the transport is about to stop reading the body
+/// either way.
+fn probe_for_more(reader: &mut impl Read) -> Result<Truncation, Error> {
+    let mut scratch = [0_u8; 1];
+    let read = reader
+        .read(&mut scratch)
+        .map_err(|read_error| Error::Transport(read_error.to_string()))?;
+    Ok(if read == 0 {
+        Truncation::Complete
+    } else {
+        Truncation::Cut
     })
 }
 
@@ -275,7 +455,9 @@ pub fn get_with(url: &str, options: &Options) -> Result<Response, Error> {
     for header in &options.headers {
         call = call.header(header.0.as_str(), header.1.as_str());
     }
-    call.call().map_err(map_error).and_then(response_of)
+    call.call()
+        .map_err(map_error)
+        .and_then(|response| response_of(response, options))
 }
 
 /// POST `body` to `url` with `content_type`, using default options.
@@ -304,7 +486,7 @@ pub fn post_with(
         request = request.header(header.0.as_str(), header.1.as_str());
     }
     let response = request.send(body).map_err(map_error)?;
-    response_of(response)
+    response_of(response, options)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -334,7 +516,7 @@ mod tests {
     /// Fallible rather than unwrapping, so a bind or socket refusal is reported
     /// to the test that asked for the server instead of panicking in a helper.
     fn serve(
-        replies: Vec<(&'static str, &'static str)>,
+        replies: Vec<(&'static str, String)>,
     ) -> std::io::Result<(u16, thread::JoinHandle<std::io::Result<()>>)> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
@@ -375,7 +557,7 @@ mod tests {
                 }
                 let full = String::from_utf8_lossy(&head);
                 let echoed = full.contains(ECHO);
-                let payload = if echoed { ECHO } else { body };
+                let payload = if echoed { ECHO.to_owned() } else { body };
                 let reply = format!(
                     "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
                     payload.len()
@@ -398,12 +580,43 @@ mod tests {
         Ok(())
     }
 
+    /// Serve one raw response byte-for-byte.
+    ///
+    /// The canned `serve` helper always writes a `Content-Length`, so it cannot
+    /// express the two framings where a body's length is discovered while
+    /// reading it: chunked, and close-delimited. Those are the frames a ceiling
+    /// has to hold under, since a declared length can be read before a single
+    /// body byte arrives.
+    fn serve_raw(
+        reply: Vec<u8>,
+    ) -> std::io::Result<(u16, thread::JoinHandle<std::io::Result<()>>)> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        let handle = thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let mut request = vec![0u8; 4096];
+            let mut head = Vec::new();
+            loop {
+                let n = stream.read(&mut request)?;
+                head.extend_from_slice(&request[..n]);
+                if head.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            stream.write_all(&reply)
+        });
+        Ok((port, handle))
+    }
+
     // These tests return `Result` rather than unwrapping: a refusal reports its
     // own `Debug` on failure, which is the same report `.unwrap` would have
     // panicked with, without an `unwrap` in the tree.
     #[test]
     fn default_option_wrappers_reach_the_same_path() -> Result<(), Box<dyn std::error::Error>> {
-        let (port, server) = serve(vec![("200 OK", "hello"), ("200 OK", "ok")])?;
+        let (port, server) = serve(vec![
+            ("200 OK", "hello".to_owned()),
+            ("200 OK", "ok".to_owned()),
+        ])?;
         let url = format!("http://127.0.0.1:{port}/");
         let got = get_response(&url)?;
         assert_eq!(got.status, 200);
@@ -420,12 +633,37 @@ mod tests {
             timeout: Duration::from_secs(5),
             user_agent: "lgwks-std-test".into(),
             headers: Vec::new(),
+            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            body_policy: BodyPolicy::Whole,
         }
+    }
+
+    /// The ceiling the bound tests use.
+    ///
+    /// Small because the enforcement path does not depend on size: the same
+    /// clamped window, the same one-byte probe, and the same refusal decide a
+    /// 64-byte ceiling and an 8 MiB one. Keeping the bodies small keeps `serve`
+    /// from blocking on a socket the refusing client has stopped reading.
+    const SMALL_CEILING: usize = 64;
+
+    /// `quiet()` with a declared ceiling.
+    fn ceiling(max_body_bytes: usize) -> Options {
+        quiet().max_body_bytes(max_body_bytes)
+    }
+
+    /// `quiet()` with a declared ceiling and the preview policy.
+    fn previewing(max_body_bytes: usize) -> Options {
+        ceiling(max_body_bytes).body_policy(BodyPolicy::Preview)
+    }
+
+    /// A body of exactly `bytes` bytes.
+    fn filler(bytes: usize) -> String {
+        "x".repeat(bytes)
     }
 
     #[test]
     fn gets_status_headers_and_body() -> Result<(), Box<dyn std::error::Error>> {
-        let (port, server) = serve(vec![("200 OK", "hello")])?;
+        let (port, server) = serve(vec![("200 OK", "hello".to_owned())])?;
         let response = get_with(&format!("http://127.0.0.1:{port}/"), &quiet())?;
         assert_eq!(response.status, 200);
         assert_eq!(response.body, b"hello");
@@ -442,7 +680,7 @@ mod tests {
 
     #[test]
     fn error_statuses_are_responses_not_errors() -> Result<(), Box<dyn std::error::Error>> {
-        let (port, server) = serve(vec![("404 Not Found", "missing")])?;
+        let (port, server) = serve(vec![("404 Not Found", "missing".to_owned())])?;
         let response = get_with(&format!("http://127.0.0.1:{port}/"), &quiet())?;
         assert_eq!(response.status, 404);
         assert_eq!(response.text()?, "missing");
@@ -452,7 +690,7 @@ mod tests {
 
     #[test]
     fn posts_body_with_content_type() -> Result<(), Box<dyn std::error::Error>> {
-        let (port, server) = serve(vec![("200 OK", "")])?;
+        let (port, server) = serve(vec![("200 OK", String::new())])?;
         let response = post_with(
             &format!("http://127.0.0.1:{port}/"),
             "text/plain",
@@ -526,11 +764,10 @@ mod tests {
             stream.write_all(reply.as_bytes())?;
             Ok(text)
         });
-        let options = Options {
-            timeout: Duration::from_secs(5),
-            user_agent: "lgwks-std-test".into(),
-            headers: vec![("Authorization".into(), "Bearer test-token".into())],
-        };
+        let mut options = quiet();
+        options
+            .headers
+            .push(("Authorization".into(), "Bearer test-token".into()));
         let response = post_with(
             &format!("http://127.0.0.1:{port}/"),
             "text/plain",
@@ -561,16 +798,247 @@ mod tests {
             thread::sleep(Duration::from_secs(30));
             Ok(())
         });
-        let options = Options {
-            timeout: Duration::from_millis(200),
-            user_agent: "lgwks-std-test".into(),
-            headers: Vec::new(),
-        };
+        let options = quiet().timeout(Duration::from_millis(200));
         let Err(error) = get_with(&format!("http://127.0.0.1:{port}/"), &options) else {
             return Err("a silent server must hit the read timeout".into());
         };
         assert_eq!(error, Error::Timeout);
         drop(handle);
+        Ok(())
+    }
+
+    // ── Body ceilings ───────────────────────────────────────────────────────
+
+    /// The ceiling bounds a read; it does not clip a body that fits under it.
+    #[test]
+    fn a_body_under_the_ceiling_is_whole() -> Result<(), Box<dyn std::error::Error>> {
+        let (port, server) = serve(vec![("200 OK", "hello".to_owned())])?;
+        let response = get_with(
+            &format!("http://127.0.0.1:{port}/"),
+            &ceiling(SMALL_CEILING),
+        )?;
+        assert_eq!(response.body, b"hello");
+        assert_eq!(
+            response.truncation,
+            Truncation::Complete,
+            "a body below the ceiling ended on its own"
+        );
+        join_server(server)?;
+        Ok(())
+    }
+
+    /// A body that ends exactly at the ceiling has not overflowed it, and the
+    /// exchange must not refuse it: the boundary is inclusive, and getting it
+    /// wrong here would make the ceiling one byte smaller than declared.
+    #[test]
+    fn a_body_exactly_at_the_ceiling_is_whole() -> Result<(), Box<dyn std::error::Error>> {
+        let payload = filler(SMALL_CEILING);
+        let (port, server) = serve(vec![("200 OK", payload)])?;
+        let response = get_with(
+            &format!("http://127.0.0.1:{port}/"),
+            &ceiling(SMALL_CEILING),
+        )?;
+        assert_eq!(
+            response.body.len(),
+            SMALL_CEILING,
+            "the whole body is kept at the ceiling"
+        );
+        assert_eq!(
+            response.truncation,
+            Truncation::Complete,
+            "a body that ends at the ceiling has not overflowed it"
+        );
+        join_server(server)?;
+        Ok(())
+    }
+
+    /// One byte past the ceiling is a refusal, not a body that happens to be
+    /// short: the caller asked for a body and cannot see that it got a prefix.
+    #[test]
+    fn a_body_one_byte_past_the_ceiling_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+        let payload = filler(SMALL_CEILING.saturating_add(1));
+        let (port, server) = serve(vec![("200 OK", payload)])?;
+        let Err(error) = get_with(
+            &format!("http://127.0.0.1:{port}/"),
+            &ceiling(SMALL_CEILING),
+        ) else {
+            return Err(
+                "a body past the ceiling must be refused, not handed over as a prefix".into(),
+            );
+        };
+        assert_eq!(
+            error,
+            Error::BodyTooLarge {
+                limit: SMALL_CEILING
+            },
+            "the refusal names the ceiling that was reached"
+        );
+        join_server(server)?;
+        Ok(())
+    }
+
+    /// The ceiling holds for a body whose length is discovered while reading.
+    ///
+    /// A `Content-Length` can be compared against the ceiling before a single
+    /// body byte arrives; a chunked body has no such number, so this is the
+    /// frame where the bound has to be enforced by how much is read.
+    #[test]
+    fn a_chunked_body_past_the_ceiling_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+        // Two 64-byte chunks: 128 bytes of body under a 64-byte ceiling.
+        const CHUNKED: &[u8] = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n40\r\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n40\r\nyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\r\n0\r\n\r\n";
+        let (port, server) = serve_raw(CHUNKED.to_vec())?;
+        let Err(error) = get_with(
+            &format!("http://127.0.0.1:{port}/"),
+            &ceiling(SMALL_CEILING),
+        ) else {
+            return Err("a chunked body past the ceiling must be refused".into());
+        };
+        assert_eq!(
+            error,
+            Error::BodyTooLarge {
+                limit: SMALL_CEILING
+            },
+            "the ceiling is enforced against the decoded body, not the framing"
+        );
+        join_server(server)?;
+        Ok(())
+    }
+
+    /// The same ceiling holds for a close-delimited body, where the end of the
+    /// body is the end of the connection and nothing declares its length.
+    #[test]
+    fn a_close_delimited_body_past_the_ceiling_is_refused() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut reply = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
+        reply.extend_from_slice(filler(SMALL_CEILING.saturating_mul(2)).as_bytes());
+        let (port, server) = serve_raw(reply)?;
+        let Err(error) = get_with(
+            &format!("http://127.0.0.1:{port}/"),
+            &ceiling(SMALL_CEILING),
+        ) else {
+            return Err("a close-delimited body past the ceiling must be refused".into());
+        };
+        assert_eq!(
+            error,
+            Error::BodyTooLarge {
+                limit: SMALL_CEILING
+            },
+            "a body with no declared length is bounded by the read, not by a header"
+        );
+        join_server(server)?;
+        Ok(())
+    }
+
+    /// A preview is a declared truncation: the prefix is the result, and the
+    /// response says so.
+    #[test]
+    fn a_preview_keeps_the_ceiling_and_reports_the_cut() -> Result<(), Box<dyn std::error::Error>> {
+        let payload = filler(SMALL_CEILING.saturating_mul(2));
+        let (port, server) = serve(vec![("200 OK", payload)])?;
+        let response = get_with(
+            &format!("http://127.0.0.1:{port}/"),
+            &previewing(SMALL_CEILING),
+        )?;
+        assert_eq!(
+            response.body.len(),
+            SMALL_CEILING,
+            "the preview stops at the ceiling and keeps no more"
+        );
+        assert!(
+            response.body.iter().all(|byte| *byte == b'x'),
+            "the preview is the body's own prefix"
+        );
+        assert_eq!(
+            response.truncation,
+            Truncation::Cut,
+            "a body that continues past the ceiling is reported as cut"
+        );
+        join_server(server)?;
+        Ok(())
+    }
+
+    /// The preview policy reports a body that fits as whole: `Cut` is a fact
+    /// about the body, not a restatement of the policy that was selected.
+    #[test]
+    fn a_preview_of_a_body_that_ends_under_the_ceiling_is_whole()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (port, server) = serve(vec![("200 OK", "alive".to_owned())])?;
+        let response = get_with(
+            &format!("http://127.0.0.1:{port}/"),
+            &previewing(SMALL_CEILING),
+        )?;
+        assert_eq!(response.body, b"alive");
+        assert_eq!(
+            response.truncation,
+            Truncation::Complete,
+            "a preview of a body that ended on its own is not a cut"
+        );
+        join_server(server)?;
+        Ok(())
+    }
+
+    /// A non-UTF-8 body reaching the ceiling is still refused, and the refusal
+    /// is about the size, not the encoding: deciding UTF-8 is
+    /// [`Response::text`]'s job and it never runs on a prefix.
+    #[test]
+    fn the_ceiling_is_enforced_before_any_utf8_decision() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut reply = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
+        reply.extend_from_slice(&vec![0xFF_u8; SMALL_CEILING.saturating_mul(2)]);
+        let (port, server) = serve_raw(reply)?;
+        let Err(error) = get_with(
+            &format!("http://127.0.0.1:{port}/"),
+            &ceiling(SMALL_CEILING),
+        ) else {
+            return Err("a multi-byte body past the ceiling must be refused".into());
+        };
+        assert_eq!(
+            error,
+            Error::BodyTooLarge {
+                limit: SMALL_CEILING
+            },
+            "the ceiling counts bytes, whatever they encode"
+        );
+        join_server(server)?;
+        Ok(())
+    }
+
+    /// A preview stops reading at its ceiling, and the stop is observable.
+    ///
+    /// The reply served here is larger than a socket buffer can hold, so the
+    /// fixture can only finish writing it to a client that keeps draining it. A
+    /// reader that stops at the ceiling leaves the server's write refused, and
+    /// that refusal is the only evidence the bound exists: a bounded preview and
+    /// an unbounded read trimmed afterwards produce the same bytes, and differ
+    /// in what the server was allowed to make the client hold while producing
+    /// them.
+    #[test]
+    fn a_preview_stops_reading_at_the_ceiling() -> Result<(), Box<dyn std::error::Error>> {
+        let mut reply = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
+        reply.extend_from_slice(&vec![b'x'; SMALL_CEILING.saturating_mul(65_536)]);
+        let (port, server) = serve_raw(reply)?;
+        let response = get_with(
+            &format!("http://127.0.0.1:{port}/"),
+            &previewing(SMALL_CEILING),
+        )?;
+        assert_eq!(
+            response.body.len(),
+            SMALL_CEILING,
+            "the preview stops at the ceiling"
+        );
+        assert_eq!(
+            response.truncation,
+            Truncation::Cut,
+            "the reply continues past the ceiling"
+        );
+        let served = server
+            .join()
+            .map_err(|_| "the raw server thread panicked before replying")?;
+        assert!(
+            served.is_err(),
+            "a 4 MiB reply can only be written in full to a reader that keeps reading, so a \
+             completed write means the client drained it: a preview must stop at its ceiling"
+        );
         Ok(())
     }
 }
