@@ -1,6 +1,6 @@
 //! Authored invariant register and its refusal rules.
 //!
-//! The register deliberately goes through [`crate::contract::parse_register`]
+//! The register deliberately goes through `crate::contract::parse_register`
 //! rather than acquiring a TOML dependency or copying the dependency reader.
 //! Parsing is shared; this module owns only the invariant schema and the
 //! repository-aware checks that give each claim a real enforcement boundary.
