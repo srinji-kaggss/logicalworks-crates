@@ -24,8 +24,11 @@
 //!   which refuses.
 //! - [`no_first_party_text_claims_revocation_this_crate_lacks`] reads every
 //!   first-party text file in the repository and requires each mention of
-//!   `revok*` to sit in text that denies the operation, so a claim with no
+//!   `revo*` to sit in text that denies the operation, so a claim with no
 //!   operation behind it fails the build. It is the grep, left behind as a test.
+//! - [`the_claim_guard_flags_the_claim_it_was_written_for`] is that guard's own
+//!   control: it feeds the guard the pre-fix sentence, and both spellings of the
+//!   family, and requires each to be reported.
 //!
 //! Nothing here asserts that an in-process SDK confines a process. The issue's
 //! own evidence section says the same: this is an authority-lifetime contract,
@@ -261,26 +264,77 @@ fn the_authority_source_offers_no_revoke_operation() -> TestResult {
 
 // ── The prose ───────────────────────────────────────────────────────────────
 
-/// The stem the scan looks for: `revoke`, `revoked`, `revoking`, `revocation`.
-const REVOCATION_STEM: &str = "revok";
+/// The stem the scan looks for: `revo`.
+///
+/// The word family splits its spelling — `revoke`, `revoked`, `revoking` carry a
+/// `k`; `revocation`, `revocable`, `RevocationFence` carry a `c` — and the two
+/// earlier versions of this scan each used one of them, so each silently missed
+/// half the family. `revok` could not see `RevocationFence`; `revoc` could not
+/// see `revoked`, which is the word the original defect was written with. The
+/// prefix is what they share, and nothing else in this repository's prose
+/// contains it.
+const REVOCATION_STEM: &str = "revo";
 
 /// How much flattened text either side of a mention counts as its context.
 const WINDOW: usize = 200;
 
 /// Phrases that turn a mention of revocation into a denial that the operation
-/// exists. A claim needs only one of them nearby, because the point is that a
-/// reader who lands on the mention is told the truth.
-const DENIALS: [&str; 5] = [
+/// exists. A claim needs only one of them nearby: the point is that a reader
+/// who lands on the mention is told the truth there.
+const DENIALS: [&str; 7] = [
+    // `GrantSet` has no `revoke`, and no method that removes a capability.
     "no revoke",
+    // `the no revocation boundary` — the guide's name for the same fact.
+    "no revocation",
+    // `nothing revokes it` — the ECS `fire` comment.
     "nothing revokes",
+    // `No revocable authority.` — the guide's non-goal.
     "no revocable",
+    // The crate contract's phrase for what an `Auth` is not.
     "not a live lease",
-    "no system has a",
+    // `there is no in process revocation and nothing here should be described
+    // as one` — the README's own sentence, the one #59 added.
+    "no in process revocation",
+    // `the name is wrong for what exists` — the security-posture row.
+    "wrong for what exists",
 ];
 
-/// Phrases that show the mention is about a different subject: a lexicon alias
-/// row, which is deleted, not revoked.
-const OTHER_SUBJECTS: [&str; 1] = ["deleting a row"];
+/// Phrases that show the mention is about a different subject.
+///
+/// Neither subject is authority lifetime: a lexicon **alias row**
+/// (`language.rs`, `general-bot-fold.md`), which is deleted rather than revoked,
+/// and a **sibling repository's** revocation machinery — `Rocco`'s
+/// `rocco-runtime::RevocationFence`, which `docs/estate-asset-inventory.md`
+/// inventories as an asset to port and `docs/guidance-runner-spec.md` cites as
+/// one of the shapes a future runner would draw on. Neither is a claim about
+/// `lgwks_bot`.
+const OTHER_SUBJECTS: [&str; 5] = [
+    // The alias table: "revoking one is deleting a row".
+    "deleting a row",
+    // The `learn` method's doc: "a row is readable and revocable which a
+    // fitted weight is not".
+    "readable and revocable",
+    // The test that pins the alias behaviour.
+    "learned alias",
+    // `Rocco`'s type, named as an asset rather than as this crate's.
+    "revocationfence",
+    // The runner spec's sentence about where the estate's assets stop: "the
+    // estate assets inform the shape ... while the bot keeps its own seams".
+    "estate assets inform the shape",
+];
+
+/// Files the scan does not read, each with the reason it is not read.
+///
+/// One file, and the cost is stated: nothing in it is checked. It is the
+/// state-of-the-art survey — macaroons, leases, revocation fences, published
+/// work and design targets — so every mention in it is a claim about the field
+/// rather than about this crate's shipped surface, and the phrases that would
+/// qualify them are not denials of a shipped operation.
+const NOT_AUTHORITY_CLAIMS: [(&str, &str); 1] = [(
+    "docs/frontier.md",
+    "the state-of-the-art survey: its mentions are published research and design \
+     targets, not statements about this crate's shipped authority",
+)];
 
 /// File extensions the scan reads. A revocation claim is prose or code; a
 /// lockfile or an image is neither.
@@ -420,6 +474,21 @@ fn the_claim_guard_flags_the_claim_it_was_written_for() -> TestResult {
         "a claim that carries the denial must pass: {:#?}",
         unqualified_mentions("synthetic.md", &denied)
     );
+
+    // Both spellings of the family, because each earlier version of this scan
+    // used one stem and could not see the other: a claim written with the verb
+    // (`revoke`, the word the original defect used) and one written with the
+    // noun (`revocable`, which is what `RevocationFence` is built from).
+    for probe in [
+        "the host can revoke a capability at runtime and the next call is denied",
+        "authority is revocable through whatever grant set the caller holds",
+    ] {
+        assert_eq!(
+            unqualified_mentions("synthetic.md", probe).len(),
+            1,
+            "the guard must report a claim written with either spelling: {probe}"
+        );
+    }
     Ok(())
 }
 
@@ -450,34 +519,56 @@ fn no_first_party_text_claims_revocation_this_crate_lacks() -> TestResult {
 
     let mut flagged = Vec::new();
     let mut mentions = 0usize;
+    let mut checked_files = 0usize;
+    let mut exempt_seen = vec![false; NOT_AUTHORITY_CLAIMS.len()];
     for path in &files {
         if is_this_file(path) {
             continue;
         }
-        let text = fs::read_to_string(path)
-            .map_err(|error| format!("{} could not be read: {error}", path.display()))?;
         let relative = path
             .strip_prefix(&root)
             .map_err(|error| format!("{} is outside the repository root: {error}", path.display()))?
             .to_string_lossy()
             .into_owned();
-        let unqualified = unqualified_mentions(&relative, &text);
+        if let Some(index) = NOT_AUTHORITY_CLAIMS
+            .iter()
+            .position(|entry| entry.0 == relative)
+        {
+            if let Some(seen) = exempt_seen.get_mut(index) {
+                *seen = true;
+            }
+            continue;
+        }
+        let text = fs::read_to_string(path)
+            .map_err(|error| format!("{} could not be read: {error}", path.display()))?;
+        checked_files = checked_files.saturating_add(1);
         mentions = mentions.saturating_add(text.to_lowercase().matches(REVOCATION_STEM).count());
-        flagged.extend(unqualified);
+        flagged.extend(unqualified_mentions(&relative, &text));
+    }
+
+    // A stale exemption is an unchecked file nobody noticed: every name in the
+    // list has to be a file the walk actually reaches.
+    for (entry, seen) in NOT_AUTHORITY_CLAIMS.iter().zip(exempt_seen.iter()) {
+        assert!(
+            *seen,
+            "{} is exempt from this scan ({}) and the walk did not reach it, \
+             so the exemption is protecting nothing",
+            entry.0, entry.1
+        );
     }
 
     // The scan's own control: at least one mention must have been found, or
     // the assertion below is passing on a corpus with nothing in it.
     assert!(
         mentions > 0,
-        "no mention of `{REVOCATION_STEM}` was found in {} files: the scan is not looking where the claims are",
-        files.len()
+        "no mention of `{REVOCATION_STEM}` was found in {checked_files} files: the scan is not looking where the claims are"
     );
     assert!(
         flagged.is_empty(),
         "these mentions read as revocation claims, and no operation backs them:\n{flagged:#?}\n\
          Each mention must sit in text that denies the operation (`{DENIALS:?}`), or in one that \
-         shows it is about another subject (`{OTHER_SUBJECTS:?}`)"
+         shows it is about another subject (`{OTHER_SUBJECTS:?}`), or the file must be listed in \
+         `NOT_AUTHORITY_CLAIMS` with the reason it is not a claim about this crate"
     );
     Ok(())
 }
