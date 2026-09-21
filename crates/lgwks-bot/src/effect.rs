@@ -384,6 +384,20 @@ impl DigestAlgorithm {
         }
     }
 
+    /// The fixed-width byte this algorithm is tagged with inside a hash chain.
+    ///
+    /// Deliberately not [`Self::as_str`]: that is the spelling a person reads in
+    /// `effect-key-v1` JSON, this is the tag the journal hashes into a chain
+    /// position. Zero is left unused so a zeroed buffer can never be read as a
+    /// tagged digest.
+    #[must_use]
+    pub const fn chain_tag(self) -> u8 {
+        match self {
+            Self::Blake3_256 => 1,
+            Self::Sha256 => 2,
+        }
+    }
+
     /// Parse the wire spelling. Exact: no case folding, no aliases.
     #[must_use]
     pub fn from_wire(text: &str) -> Option<Self> {
@@ -685,6 +699,79 @@ impl EffectKey {
             && self.environment == other.environment
             && self.epoch.get() < other.epoch.get()
     }
+
+    /// Length of [`Self::to_bytes`] output.
+    ///
+    /// Summed from the field widths rather than written as a literal, so that
+    /// adding a field to the key is a compile error here until the encoding is
+    /// extended to carry it. A hand-written total would let a new field be
+    /// silently absent from every chain position computed after it.
+    pub const ENCODED_LEN: usize = WIDTH_ID
+        + WIDTH_ID
+        + WIDTH_COUNTER
+        + WIDTH_TAG
+        + WIDTH_DIGEST
+        + WIDTH_TAG
+        + WIDTH_DIGEST
+        + WIDTH_ID
+        + WIDTH_COUNTER;
+
+    /// The key as a fixed-width byte string, for hashing into a chain.
+    ///
+    /// Every field is written and every field is big-endian, so two keys differ
+    /// in bytes exactly when they differ in identity. The digests carry their
+    /// algorithm tag: the same 32 bytes under a different algorithm is a
+    /// different binding, and folding the two would let a caller swap the
+    /// algorithm without moving the chain position the journal recorded.
+    ///
+    /// Fixed width, not self-describing. A journal hashes this into a chain, and
+    /// a length prefix is one more thing that can be written two ways by two
+    /// implementations that then disagree about the head hash.
+    #[must_use]
+    pub fn to_bytes(self) -> [u8; Self::ENCODED_LEN] {
+        let mut out = [0_u8; Self::ENCODED_LEN];
+        let mut at = 0;
+        at = write_at(&mut out, at, &self.run.id().get().get().to_be_bytes());
+        at = write_at(&mut out, at, &self.action.id().get().get().to_be_bytes());
+        at = write_at(&mut out, at, &self.attempt.get().to_be_bytes());
+        at = write_at(&mut out, at, &[FlowRevision::algorithm().chain_tag()]);
+        at = write_at(&mut out, at, self.flow.digest().as_bytes());
+        at = write_at(&mut out, at, &[ActionDigest::algorithm().chain_tag()]);
+        at = write_at(&mut out, at, self.digest.digest().as_bytes());
+        at = write_at(
+            &mut out,
+            at,
+            &self.environment.id().get().get().to_be_bytes(),
+        );
+        write_at(&mut out, at, &self.epoch.get().to_be_bytes());
+        out
+    }
+}
+
+/// Width of one 128-bit identifier in the fixed encoding.
+const WIDTH_ID: usize = 16;
+
+/// Width of one checked counter in the fixed encoding.
+const WIDTH_COUNTER: usize = 8;
+
+/// Width of one algorithm tag in the fixed encoding.
+const WIDTH_TAG: usize = 1;
+
+/// Width of one 256-bit digest in the fixed encoding.
+const WIDTH_DIGEST: usize = 32;
+
+/// Write `bytes` into `out` at `at` and return the next free offset.
+///
+/// Cannot fail short of the layout arithmetic being wrong, which
+/// [`EffectKey::ENCODED_LEN`] and the byte-exact test in this module between
+/// them rule out. Written with `get_mut` rather than indexing so that even the
+/// impossible case is not a panic: the crate refuses a panicking path, and an
+/// encoder is no place to make an exception for one.
+fn write_at(out: &mut [u8], at: usize, bytes: &[u8]) -> usize {
+    if let Some(slot) = out.get_mut(at..at.saturating_add(bytes.len())) {
+        slot.copy_from_slice(bytes);
+    }
+    at.saturating_add(bytes.len())
 }
 
 impl fmt::Display for EffectKey {

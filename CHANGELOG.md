@@ -280,6 +280,61 @@ modules above it, and it ships in the same release.
   - Nothing is wired to the ledger yet. This is the identity layer; the
     settlement call site needs a run and an environment to key against, and a
     grep for either concept across the crate returns nothing before this module.
+- **`journal`, the durable append that has to land before the irreversible
+  boundary, and the durability grade that decides whether a store may host one.**
+  `effect` supplied the identity a settlement is about; an identity held only in
+  memory is lost at exactly the moment it is needed. A controller that hands
+  bytes to an external system and then dies cannot say whether they arrived, and
+  a controller that guesses either duplicates a non-idempotent effect or drops
+  one. `EffectJournal::compare_and_append` is the seam: append `event` if and only
+  if `expected_tail` is still the committed tail, returning a `DurableAck` that
+  names the committed position and the promise claimed for it.
+  - **The tail is a position, not a counter.** `JournalPosition` carries a
+    sequence number *and* a hash over every event up to and including that one,
+    chained so that the same two events in the other order produce a different
+    head. A sequence alone would let two journals that diverged agree on where
+    they were. `verify_chain` recomputes the chain and names the first entry that
+    does not follow, which is what makes a dropped or reordered entry detectable
+    rather than merely suspicious.
+  - **The ordering ladder is enforced at the append rather than trusted.** One
+    attempt at one intent walks `IntentAdmitted`, `DispatchPrepared`,
+    `OutcomeObserved`, `Verified`, exactly once. A second `DispatchPrepared` for
+    an existing key is refused as `OutOfOrder`, so a blind resend is not
+    representable at all. A legitimate retry is a new `AttemptId` and therefore a
+    new key with its own fresh ladder, and `tests/effect_journal.rs` pins the
+    retry alongside the refusal so the guard cannot be mistaken for a ban on
+    trying again.
+  - **Durability is graded, and the grade is what refuses.** `DurabilityPromise`
+    is `Ephemeral`, `ProcessCrash` or `PowerLoss`, and `admit_external_handoff`
+    refuses anything below `ProcessCrash`. The in-memory adapter reports
+    `Ephemeral` and is refused, which is the whole reason it is a named type
+    rather than a default: a caller that reaches for it gets a refusal at the
+    boundary instead of a green test that means nothing.
+  - **The acknowledgment records the promise rather than implying one was
+    proven.** Nothing here can verify a durability claim, because a filesystem, a
+    device cache or a virtualization layer can each accept a write and lose it
+    anyway. `DurableAck` carries the promise it was minted under and its
+    documentation says so. The tests that would decide the claim are crash tests
+    against a real store, and they are not unit tests.
+  - **`EffectEvidence` is the ledger's, re-exported rather than restated.** The
+    journal and the ledger answer the same question, and a second enum with the
+    same two arms would drift from the first the next time an arm was added. It
+    gained `Hash`, which is additive on a fieldless enum.
+  - **`EffectKey::to_bytes` is the canonical encoding the chain hashes**, fixed
+    width at 130 bytes, every field written and every integer big-endian, with
+    each digest carrying its algorithm tag so swapping the algorithm moves the
+    chain position. The length is summed from the field widths rather than
+    written as a literal, so adding a field to the key is a compile error until
+    the encoding carries it.
+  - **24 unit tests, plus 7 that encode the journal half of eval cases E10 and
+    E11** (`tests/effect_journal.rs`), both of which `okf/evals.json` records as
+    `not_run`. E10 is a lost reply after a real external commit and E11 is a
+    crash at every durable boundary. Both require a real receiver, a real restart
+    or a persistent-state oracle, and the crate has none of the three, so
+    neither case moves off `not_run` on the strength of this entry.
+  - **Nothing is wired to a real store or to the ledger yet.** `MemoryJournal` is
+    a reference adapter that exists in order to be refused at the boundary, and
+    no call site outside the tests appends to it.
 - **`Observe::fingerprint`, and with it the lazy seam: a source that holds still
   is no longer polled.** Change detection is an *equality* question — the
   substrate reduces every observation to one bit and discards the value — so

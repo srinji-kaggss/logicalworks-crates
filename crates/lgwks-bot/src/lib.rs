@@ -147,6 +147,14 @@ pub mod frontier;
 pub mod gate;
 /// The interface model: recognizing the element a step names.
 pub mod interface;
+/// The durable journal an effect is appended to before it leaves the process.
+///
+/// Identity without persistence is identity that is lost exactly when it is
+/// needed, so this is the other half of what [`effect`](effect) supplies. It is
+/// also where the durability grade lives: a journal that cannot survive its own
+/// writer dying refuses to be the record behind an external handoff, rather
+/// than accepting an append it will lose.
+pub mod journal;
 /// JSON through the shared facade (`lgwks_std::json`).
 pub mod json;
 /// Language understanding: the tiered lexicon behind the resolver seam.

@@ -596,7 +596,7 @@ impl fmt::Display for PendingWork {
 /// decision that matters — attempt it again or not — follows from which one
 /// they are. "Unknown and staying unknown" is not evidence and has no arm: an
 /// entry in that state stays reported, which is the honest outcome.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum EffectEvidence {
     /// The effect happened. The entry is acknowledged and never attempted
