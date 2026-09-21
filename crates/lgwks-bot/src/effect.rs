@@ -1,8 +1,8 @@
 //! Durable effect identity: the exact key a settlement is a statement about.
 //!
 //! The ECS ledger already settles an entry and already refuses a contradicting
-//! settlement — [`crate::ecs`] keeps one settlement record per entry per
-//! generation for exactly that reason. What it does not carry is *which
+//! settlement (`crate::ecs` keeps one settlement record per entry per
+//! generation for exactly that reason). What it does not carry is *which
 //! attempt* the evidence is about. An attempt count is not an identity: two
 //! deliveries that both arrive as "attempt 3" for the same entry are
 //! indistinguishable to the ledger, so a repeat of an old settlement and a
@@ -34,6 +34,11 @@
 //! render as 64 lowercase hex characters under an algorithm tag. See
 //! [`DigestAlgorithm`] for why this crate accepts exactly one of the two tags
 //! the schema permits.
+//!
+//! [`ActionDigest`]: crate::effect::ActionDigest
+//! [`DigestAlgorithm`]: crate::effect::DigestAlgorithm
+//! [`EffectKey`]: crate::effect::EffectKey
+//! [`FlowRevision`]: crate::effect::FlowRevision
 
 use core::fmt;
 use core::num::{NonZeroU64, NonZeroU128};
@@ -95,8 +100,8 @@ impl std::error::Error for IdError {}
 /// The non-zero invariant is carried by [`NonZeroU128`] rather than checked at
 /// each use, so "is this id real?" has one answer and the compiler enforces it.
 /// Equality is the ordinary integer comparison: unlike
-/// [`Digest`](lgwks_std::hash::Digest), these are public identifiers rather than
-/// secret-derived values, and a constant-time comparison would buy nothing.
+/// [`Digest`], these are public identifiers rather than secret-derived values,
+/// and a constant-time comparison would buy nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Id128(NonZeroU128);
 
