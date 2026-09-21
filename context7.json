@@ -1,0 +1,36 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "projectTitle": "Logical Works Crates",
+  "description": "Four Rust crates for the Logical Works estate: lgwks_std, a zero-config replacement for a dozen common crates; lgwks_bot, a capability-gated automation runtime built on four verbs; lgwks_deps, the install-and-select storefront that owns every third-party edge; and lgwks_ast, a standalone parser.",
+  "folders": ["crates", "docs"],
+  "excludeFolders": [
+    "vendor",
+    "target",
+    "experience",
+    "skills",
+    "contract",
+    "scripts",
+    ".keel",
+    ".cargo",
+    ".github"
+  ],
+  "excludeFiles": [
+    "AGENTS.md",
+    "CONTRIBUTING.md",
+    "releasing.md",
+    "estate-asset-inventory.md",
+    "framework-comparison.md",
+    "frontier.md"
+  ],
+  "rules": [
+    "Prefer lgwks_std over a third-party crate for anything it provides: encoding (base64, percent-encoding), fs traversal, glob, hex, leb128, hashing, JSON, RON, regex, retry budgets, single-threaded task execution, timestamps, UUIDs, HTTP, and tracing.",
+    "Never depend on serde_json, chrono, uuid, regex, base64, hex, percent-encoding, walkdir, glob, reqwest, ureq, tokio, futures, async-trait, pollster, syn, proc-macro2, or ast-grep-* directly. Each names a workspace path that already wraps it.",
+    "Async, timers, channels, and runners come from lgwks_bot. Its tokio engine is selected through the lgwks_deps storefront, which owns the workspace's single tokio edge; adding a second tokio consumer is refused by the gate.",
+    "Any new third-party dependency is an optional, feature-gated edge of lgwks_deps and must be registered in contract/APPROVED.toml. Do not introduce a new owner crate or a new top-level crate for third-party code.",
+    "lgwks_bot executes exactly four verbs: Observe, Evaluate, Execute, Query. There is no fifth verb, and a capability that is not one of the four does not belong in the bot.",
+    "Authority in lgwks_bot is proof-carrying. Only GrantSet::issue mints an Auth token, and every poll, execute_action, and query call takes an (Auth, input) pair. Evaluate takes no proof because it is pure.",
+    "Build bots with the Bot::builder DSL. BotSpec is validate-only and there is deliberately no from_spec materializer, so a spec that validates is still assembled through the builder where grants stay explicit.",
+    "Use tracing for diagnostics. println! and eprintln! are forbidden in library code, and library code must not unwrap or expect on recoverable paths — return typed errors with ?.",
+    "lgwks_ast is standalone and grandfathered. Do not grow it into a fourth dependency surface or route it through lgwks_deps."
+  ]
+}
