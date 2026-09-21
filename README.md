@@ -222,6 +222,7 @@ Depth lives in [`docs/`](docs/), not in this file.
 | [`docs/candle-admission.md`](docs/candle-admission.md) | ML inference admission: authority, transitive surface, verification. |
 | [`docs/appcui-admission.md`](docs/appcui-admission.md) | Native terminal UI admission: authority and verification. |
 | [`docs/distributed-boundaries.md`](docs/distributed-boundaries.md) | What these crates do and refuse on a distributed network path. Read it before placing them on one. |
+| [`docs/general-bot-fold.md`](docs/general-bot-fold.md) | How a full browser recorder-and-replayer architecture folds into this bot: what already is it, what becomes a seam, and what is refused. |
 | [`docs/security-posture.md`](docs/security-posture.md) | The security case: the execution-locus claim and its ceiling, what the browser integrity stack does and does not prove, and the evidence a reviewer can check without trusting the vendor. |
 | [`docs/guidance-runner-spec.md`](docs/guidance-runner-spec.md) | The session, flow and invariant-register workstreams: what each delivers, the seam every borrowed part sits behind, and the corrections two research sweeps made to the original design. |
 | [`docs/estate-asset-inventory.md`](docs/estate-asset-inventory.md) | The adjacent repositories searched before any of it was written, what was taken, and what was deliberately left behind. |
