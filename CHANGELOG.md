@@ -264,8 +264,22 @@ modules above it, and it ships in the same release.
     the schema's own exclusion and also what a zeroed or truncated buffer
     produces, so refusing it turns a class of uninitialised-identity bugs into a
     parse error.
-  - 19 tests. Nothing is wired to the ledger yet: this is the identity layer, and
-    the settlement call site is the next change.
+  - **19 unit tests, plus 6 that encode the identity half of eval cases E06 and
+    E07** (`tests/effect_identity.rs`), both of which `okf/evals.json` records as
+    `not_run`. What those six establish is that the identity predicates
+    distinguish every delivery the two cases name: a reused slot, a forward epoch
+    bump, a previous attempt, an exact duplicate, and a rewritten payload. What
+    they do not establish is the durable half, because E06 and E07 both require a
+    real receiver or persistent-state oracle and the crate has neither a journal
+    nor an environment. That gap is not narrowed by anything here.
+  - **One of the six is the design result worth keeping.** A key cannot
+    distinguish a settled attempt from a contradicted one, because both are the
+    same key with different evidence. That is why the ledger keeps its per
+    generation settlement record beside the entry rather than deriving settlement
+    from identity alone, and why this module does not attempt to replace it.
+  - Nothing is wired to the ledger yet. This is the identity layer; the
+    settlement call site needs a run and an environment to key against, and a
+    grep for either concept across the crate returns nothing before this module.
 - **`Observe::fingerprint`, and with it the lazy seam: a source that holds still
   is no longer polled.** Change detection is an *equality* question — the
   substrate reduces every observation to one bit and discards the value — so
