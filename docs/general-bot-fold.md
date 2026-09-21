@@ -464,7 +464,8 @@ exhausting it is a typed terminal outcome, not a silent stop.
 
 ## 6. Sequence
 
-Each step lands green and independently. Steps 1–2 are unblocked now.
+Each step lands green and independently. Steps 1–3 have landed, as has the
+first half of step 5; step 4 is unblocked now.
 
 1. **The interface model.** ✅ Landed in this change: `interface.rs` —
    `ElementFacts`, the four recognition-vector components, `RecognitionVector`,
@@ -503,6 +504,33 @@ Each step lands green and independently. Steps 1–2 are unblocked now.
 10. **The recorder and its visible-delta compiler** (§3.3), on the ECS substrate.
 11. **The agent domain**, closed-enum actions and `FlowBounds` budget (§5.7).
 12. **The MCP adapter**, over the four verbs.
+13. **Semantic-tier calibration.** `SemanticPolicy::DEFAULT` is `{ threshold:
+    0.72, margin: 0.05 }`: declared, not fitted (§3.6), and constructor
+    arguments because the right values depend on the model. What is missing is
+    any way to *find* them or to *measure* whether they are right. Semantic
+    Router — the closest production implementation — ships `fit(X, y)`,
+    `evaluate(X, y)` and `get_thresholds()` for exactly this. The useful part of
+    that precedent is its own published result: a five-route healthcare split
+    scores **54.2%** validation accuracy *after* fitting, so the honest number
+    for embedding-similarity routing can be far worse than a threshold's
+    confidence suggests. Until this exists, "the semantic tier helps" is an
+    assertion with no measurement behind it, and step 3's constants are
+    unexamined.
+14. **Precomputed embeddings at the resolver boundary.** `SemanticResolver`
+    embeds the utterance and every candidate option on each `resolve`, so a flow
+    with *n* options costs *n + 1* provider calls per turn, every turn. The same
+    implementation's `BaseRouter.__call__` takes an optional `vector` that skips
+    encoding entirely and pushes the lifetime decision to the caller. That shape
+    is what fits here: it needs no cache, which the estate forbids without a
+    bound and an eviction policy, and it keeps one implementation of the
+    decision rather than adding a second entry point to the same work.
+
+One note against a future simplification. Semantic Router's `BaseRouter`
+*raises* when its index is not built — the same *could not look* situation
+`Resolution::Degraded` carries as a verdict. Both express it; only one forces
+the caller to handle it. It is recorded here because `Degraded` looks like a
+value that could be folded into `Absent`, and it cannot: that is the exact
+collapse step 5 exists to prevent.
 
 ## 7. What this document does not decide
 
