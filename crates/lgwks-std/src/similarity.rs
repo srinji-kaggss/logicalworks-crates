@@ -296,6 +296,96 @@ impl Similarity for Geometry {
     }
 }
 
+/// Why a cosine similarity was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CosineError {
+    /// The two vectors had different lengths.
+    ///
+    /// A dimension mismatch is a defect in whatever produced the vectors, not a
+    /// pair of values that merely differ, so it is reported rather than scored
+    /// as zero. Reporting `0.0` would make an inconsistent provider
+    /// indistinguishable from two genuinely unrelated vectors.
+    DimensionMismatch {
+        /// Length of the left-hand vector.
+        left: usize,
+        /// Length of the right-hand vector.
+        right: usize,
+    },
+    /// A vector had zero magnitude, so its angle is undefined.
+    ZeroMagnitude,
+}
+
+impl fmt::Display for CosineError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::DimensionMismatch { left, right } => write!(
+                formatter,
+                "cosine vectors differ in length: {left} and {right}"
+            ),
+            Self::ZeroMagnitude => formatter.write_str("cosine vector has zero magnitude"),
+        }
+    }
+}
+
+impl core::error::Error for CosineError {}
+
+/// Cosine similarity over dense `f32` vectors, as a model's embedding produces.
+///
+/// The dot product and both magnitudes accumulate in `f64` even though the
+/// inputs are `f32`. Summing a few hundred `f32` products in `f32` loses
+/// precision exactly where it matters — near the decision threshold, where two
+/// candidates are close and the ordering is the answer. `f64::from` is exact,
+/// so the wider accumulator costs nothing in fidelity and no cast.
+///
+/// The result is clamped to `[-1.0, 1.0]`: the arithmetic cannot leave that
+/// interval, so a value outside it means the inputs were not finite, and
+/// clamping keeps the metric inside the range every [`Similarity`] promises.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Cosine;
+
+impl Cosine {
+    /// Creates a cosine scorer.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+
+    /// Calculates the cosine similarity, or reports why it is undefined.
+    pub fn try_score(&self, left: &[f32], right: &[f32]) -> Result<f64, CosineError> {
+        if left.len() != right.len() {
+            return Err(CosineError::DimensionMismatch {
+                left: left.len(),
+                right: right.len(),
+            });
+        }
+        let mut dot = 0.0_f64;
+        let mut left_squared = 0.0_f64;
+        let mut right_squared = 0.0_f64;
+        for (left_value, right_value) in left.iter().zip(right) {
+            let left_value = f64::from(*left_value);
+            let right_value = f64::from(*right_value);
+            dot += left_value * right_value;
+            left_squared += left_value * left_value;
+            right_squared += right_value * right_value;
+        }
+        let magnitudes = left_squared.sqrt() * right_squared.sqrt();
+        if magnitudes <= 0.0 || !magnitudes.is_finite() {
+            return Err(CosineError::ZeroMagnitude);
+        }
+        Ok((dot / magnitudes).clamp(-1.0, 1.0))
+    }
+}
+
+impl Similarity for Cosine {
+    type Value = [f32];
+
+    fn score(&self, left: &Self::Value, right: &Self::Value) -> f64 {
+        self.try_score(left, right).unwrap_or(0.0)
+    }
+}
+
 /// Why a weighted scorer could not be constructed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -656,6 +746,64 @@ mod tests {
         assert_close(scorer.score(&["a", "b"], &["a", "b"]), 1.0);
         assert_close(scorer.score(&["a"], &["b"]), 0.0);
         assert_close(scorer.score(&["a", "a"], &["a"]), 1.0);
+    }
+
+    #[test]
+    fn cosine_scores_known_angles() -> Result<(), CosineError> {
+        let scorer = Cosine::new();
+        // Identical direction, different magnitude: the magnitude cancels, and
+        // that is the property that makes cosine the right metric for an
+        // embedding, where a longer vector is not a closer one.
+        assert_close(scorer.try_score(&[1.0, 2.0, 3.0], &[2.0, 4.0, 6.0])?, 1.0);
+        assert_close(scorer.try_score(&[1.0, 0.0], &[0.0, 1.0])?, 0.0);
+        assert_close(scorer.try_score(&[1.0, 0.0], &[-1.0, 0.0])?, -1.0);
+        // 45 degrees: cos(pi/4).
+        let diagonal = scorer.try_score(&[1.0, 0.0], &[1.0, 1.0])?;
+        assert!((diagonal - core::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn cosine_refuses_a_dimension_mismatch_rather_than_scoring_zero() {
+        let scorer = Cosine::new();
+        assert!(matches!(
+            scorer.try_score(&[1.0, 0.0], &[1.0, 0.0, 0.0]),
+            Err(CosineError::DimensionMismatch { left: 2, right: 3 })
+        ));
+        // The infallible trait method still maps refusal to no similarity, so a
+        // caller that ignores the typed error cannot read refusal as a match.
+        assert_close(scorer.score(&[1.0, 0.0], &[1.0, 0.0, 0.0]), 0.0);
+    }
+
+    #[test]
+    fn cosine_refuses_a_zero_magnitude_vector() {
+        let scorer = Cosine::new();
+        assert!(matches!(
+            scorer.try_score(&[0.0, 0.0], &[1.0, 0.0]),
+            Err(CosineError::ZeroMagnitude)
+        ));
+        assert!(matches!(
+            scorer.try_score(&[], &[]),
+            Err(CosineError::ZeroMagnitude)
+        ));
+    }
+
+    #[test]
+    fn cosine_stays_inside_the_contract_interval() -> Result<(), CosineError> {
+        let scorer = Cosine::new();
+        // `f32::from(u16)` is lossless and needs no cast; the second vector is
+        // the first scaled, so the two are the same direction by construction.
+        let wide: Vec<f32> = (0_u16..64).map(f32::from).collect();
+        let narrow: Vec<f32> = wide.iter().map(|value| value * 0.5).collect();
+        for (left, right) in [(&wide, &narrow), (&narrow, &wide)] {
+            let score = scorer.try_score(left, right)?;
+            assert!(
+                (-1.0..=1.0).contains(&score),
+                "score {score} left the contract interval"
+            );
+        }
+        assert_close(scorer.try_score(&wide, &narrow)?, 1.0);
+        Ok(())
     }
 
     #[test]

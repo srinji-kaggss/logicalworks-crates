@@ -113,6 +113,8 @@ pub mod language;
 /// timers, channels, and opt-in drivers.
 #[cfg(feature = "rt")]
 pub mod rt;
+/// The semantic tier: resolving an utterance a lexicon cannot reach.
+pub mod semantic;
 /// Synchronous validated guidance flows and session runner.
 pub mod session;
 /// The serializable spec contract and the builder that assembles bots.
@@ -132,6 +134,7 @@ pub use gate::GrantSet;
 pub use language::LanguageResolver;
 #[cfg(feature = "rt")]
 pub use rt::{Builder, Handle, Runtime, block_on};
+pub use semantic::{Embedder, EmbedderIdentity, SemanticError, SemanticPolicy, SemanticResolver};
 pub use session::{
     ChoiceArm, DegradedReason, FlowBounds, FlowEdge, FlowNodeKind, FlowSpec, Interpolate, Journal,
     MatchTier, MemoryJournal, NodeId, NodeKind, Predicate, Resolution, Resolver, Session,
