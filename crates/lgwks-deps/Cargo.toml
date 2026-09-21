@@ -46,7 +46,12 @@ tokio = ["dep:tokio"]
 tokio-time = ["tokio", "tokio/time"]
 tokio-sync = ["tokio", "tokio/sync"]
 tokio-macros = ["tokio", "tokio/macros"]
-tokio-net = ["tokio", "tokio/io-util", "tokio/net"]
+# The reader/writer traits and their extensions. Split out from `net` because a
+# consumer can need `AsyncRead`/`AsyncWrite` over a pipe, a file, or its own
+# transport without ever opening a socket — and until this existed, `io-util`
+# was reachable only by enabling the whole networking stack to get it.
+tokio-io = ["tokio", "tokio/io-util", "tokio/io-std"]
+tokio-net = ["tokio-io", "tokio/net"]
 tokio-process = ["tokio", "tokio/process"]
 tokio-fs = ["tokio", "tokio/fs"]
 tokio-signal = ["tokio", "tokio/signal"]
@@ -54,6 +59,7 @@ tokio-full = [
     "tokio-time",
     "tokio-sync",
     "tokio-macros",
+    "tokio-io",
     "tokio-net",
     "tokio-process",
     "tokio-fs",

@@ -60,6 +60,8 @@ pub mod task;
 mod cancel;
 #[cfg(feature = "fs")]
 pub mod fs;
+#[cfg(feature = "io")]
+pub mod io;
 #[cfg(feature = "net")]
 pub mod net;
 #[cfg(feature = "process")]

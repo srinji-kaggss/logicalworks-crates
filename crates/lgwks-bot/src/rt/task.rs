@@ -4,12 +4,38 @@
 //! [`join_all_bounded`], which is the fan-out an agent SDK actually needs:
 //! run many futures, never exceed a concurrency ceiling, and return results in
 //! input order regardless of completion order.
+//!
+//! # Send and non-`Send` tasks
+//!
+//! [`spawn`] requires `Send`, because it may place the task on any worker
+//! thread. Every verb in this crate is deliberately **not** `Send` — a domain
+//! may hold thread-local state, which is the whole reason
+//! [`BoxFuture`](crate::BoxFuture) is unconstrained — so a bot's own futures
+//! cannot go through it.
+//!
+//! [`LocalSet`] is the other half: it runs non-`Send` futures on the thread that
+//! owns it, and [`spawn_local`] places a task there. A bot driven on one thread
+//! uses these; a task that may migrate between workers uses [`spawn`]. Both are
+//! needed, and only one of them was here before.
 
 use std::future::Future;
 
 pub use lgwks_deps::tokio::task::{
-    AbortHandle, JoinError, JoinHandle, JoinSet, spawn_blocking, yield_now,
+    AbortHandle, JoinError, JoinHandle, JoinSet, LocalSet, spawn_blocking, yield_now,
 };
+
+/// Place a non-`Send` future on the [`LocalSet`] running on this thread.
+///
+/// A re-export rather than a wrapper, unlike [`spawn`]: `clippy.toml` bans
+/// `tokio::spawn` by path because an untracked task is dropped on the floor, but
+/// the local variant carries no such history, and a call site here resolves to
+/// this crate's path either way.
+///
+/// # Panics
+///
+/// Panics if there is no [`LocalSet`] running on this thread. Running one is the
+/// point: a future that is not `Send` has nowhere else to go.
+pub use lgwks_deps::tokio::task::spawn_local;
 
 /// Place a future on the current runtime without waiting for it.
 ///

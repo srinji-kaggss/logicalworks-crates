@@ -22,11 +22,15 @@ rt = ["lgwks_deps/tokio"]
 time = ["rt", "lgwks_deps/tokio-time"]
 sync = ["rt", "lgwks_deps/tokio-sync"]
 macros = ["rt", "lgwks_deps/tokio-macros"]
-net = ["rt", "lgwks_deps/tokio-net"]
-process = ["rt", "lgwks_deps/tokio-process"]
-fs = ["rt", "lgwks_deps/tokio-fs"]
+# Reader/writer traits. Not implied by `rt`: a consumer reading from a pipe or a
+# file needs `AsyncRead` without any of the drivers, and it is the module that
+# makes `net`, `process`, and `fs` composable with each other.
+io = ["rt", "lgwks_deps/tokio-io"]
+net = ["io", "lgwks_deps/tokio-net"]
+process = ["io", "lgwks_deps/tokio-process"]
+fs = ["io", "lgwks_deps/tokio-fs"]
 signal = ["rt", "lgwks_deps/tokio-signal"]
-full = ["rt", "time", "sync", "macros", "net", "process", "fs", "signal"]
+full = ["rt", "time", "sync", "macros", "io", "net", "process", "fs", "signal"]
 
 [dependencies]
 lgwks_std = { workspace = true, features = ["json", "http"] }

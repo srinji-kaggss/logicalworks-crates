@@ -5,16 +5,27 @@
 //! never exceeds its limit and preserves input order, a panicking input is
 //! resumed on the awaiter (not converted to a `JoinError`), abort is
 //! cancellation, and dropping a handle detaches rather than cancels.
-#![cfg(all(feature = "rt", feature = "time", feature = "sync", feature = "macros"))]
+#![cfg(all(
+    feature = "rt",
+    feature = "time",
+    feature = "sync",
+    feature = "macros",
+    feature = "io"
+))]
 
+use std::cell::Cell;
 use std::num::NonZeroUsize;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 use std::time::Duration;
 
+use lgwks_bot::rt::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter, duplex};
 use lgwks_bot::rt::runtime::MAX_WORKER_THREADS;
 use lgwks_bot::rt::sync::{CancellationToken, mpsc};
-use lgwks_bot::rt::task::{JoinError, JoinSet, join_all_bounded, spawn, spawn_blocking, yield_now};
+use lgwks_bot::rt::task::{
+    JoinError, JoinSet, LocalSet, join_all_bounded, spawn, spawn_blocking, spawn_local, yield_now,
+};
 use lgwks_bot::rt::time::{sleep, timeout};
 use lgwks_bot::{Builder, Runtime};
 
@@ -612,6 +623,55 @@ fn a_token_cancelled_before_the_await_still_releases_the_task() -> TestResult {
     assert_eq!(
         joined?, "released",
         "a pre-cancelled token must still release its waiter"
+    );
+    Ok(())
+}
+
+/// The crate's own thesis: its verbs are deliberately not `Send`, so a domain
+/// may hold thread-local state. Until `LocalSet` was exposed there was no way to
+/// spawn a future with that property — `spawn` requires `Send`, which every verb
+/// in this crate violates on purpose.
+#[test]
+fn a_local_set_runs_a_task_that_is_not_send() -> TestResult {
+    let runtime = Runtime::new()?;
+    let observed = runtime.block_on(async {
+        let local = LocalSet::new();
+        local
+            .run_until(async {
+                // `Rc` and `Cell` are the point: this future cannot be `Send`,
+                // and `spawn` would refuse it at compile time.
+                let shared = Rc::new(Cell::new(0u8));
+                let held = Rc::clone(&shared);
+                let handle = spawn_local(async move {
+                    held.set(7);
+                    held.get()
+                });
+                handle.await
+            })
+            .await
+    })?;
+    assert_eq!(observed, 7, "the local task must run and return its value");
+    Ok(())
+}
+
+/// `rt::io` is what makes the drivers composable: without the traits in scope a
+/// consumer can open a socket or a pipe but cannot read from it.
+#[test]
+fn io_traits_compose_over_a_duplex_stream() -> TestResult {
+    let runtime = Runtime::new()?;
+    let echoed = runtime.block_on(async {
+        let (client, server) = duplex(64);
+        let mut writer = BufWriter::new(client);
+        let mut reader = BufReader::new(server);
+        writer.write_all(b"ping\n").await?;
+        writer.flush().await?;
+        let mut line = String::new();
+        reader.read_line(&mut line).await?;
+        Ok::<String, std::io::Error>(line)
+    })?;
+    assert_eq!(
+        echoed, "ping\n",
+        "a buffered reader must recover the written line"
     );
     Ok(())
 }
