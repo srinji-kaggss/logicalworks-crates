@@ -487,18 +487,37 @@ is unblocked now.
    could not look* render identically and asking the person again is the wrong
    repair for the second. And the two halves of the §3.1 defect:
    `BotError::EffectIndeterminate` so a timed-out `Execute` is not retyped
-   `Failed` and retried into a duplicate, and `TerminalOutcome::Partial` so a
-   run that produced some but not all of its output is distinguishable from one
-   that produced none — the described platform's `completed | partial | failed`
-   triage.
+   `Failed` and retried into a duplicate.
+
+   **The second half landed wrong, and the correction is the interesting part.**
+   It shipped first as a three-arm `TerminalOutcome` (`Success | Partial |
+   Failure`) returned by `Terminal::outcome(unsettled)`, on the reasoning that a
+   run which left an effect unsettled is neither a success nor a failure. That
+   classifier then turned out to destroy exactly the information it was built to
+   carry, in two ways. It mapped every `Refused` terminal to `Failure` whatever
+   the unsettled count, so a refused run that had also left an earlier effect in
+   doubt reported the refusal and dropped the doubt. And `Partial`'s own
+   documentation claimed "part of its output is not known to exist, and part of
+   it is", which does not follow from the count it was handed: one attempted
+   effect whose response was lost may have produced none at all. `unsettled > 0`
+   is uncertainty about *occurrence*, not evidence of partial completion.
+
+   The repair is that the two facts are independent and are stored that way.
+   `Outcome` carries a `Disposition` (`Completed | Referred | HandedOff |
+   Refused` — the routing class, payload-free) beside an `EffectLedger`, which
+   holds `confirmed` and `unsettled` counts. A refusal no longer overwrites
+   uncertainty, and neither count is read as evidence of the other.
+
+   That is the same invariant arriving a fourth time, from the opposite
+   direction. The first three arrivals were types that could not say a thing;
+   this one was a type that said something it had not been told — which is the
+   harder failure to notice, because a loss of information leaves a smaller
+   surface than a missing one.
 
    **They are one law, not two patches.** The error says an effect *may* have
-   happened; the class says the run is therefore neither a success nor a
-   failure. `Terminal::outcome(unsettled)` is where they meet, and it is why
-   they landed in one step: `Partial` has no reachable producer without
-   `EffectIndeterminate`, and `EffectIndeterminate` changes no consumer's
-   behaviour until something classifies the run it occurred in. Two findings
-   came out of writing it:
+   happened; the ledger is where that fact is retained rather than resolved.
+   `EffectIndeterminate` changes no consumer's behaviour until something records
+   the run it occurred in. Two findings came out of writing it:
 
    - **The variant, not the cause, has to carry the retry decision.** A consumer
      that parses a cause string to learn whether it may retry will eventually

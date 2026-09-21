@@ -277,26 +277,123 @@ impl FlowEdge {
     }
 }
 
-/// The terminal class of a completed session: `completed | partial | failed`.
+/// How a run's workflow ended, without its payload.
 ///
-/// Three arms, not two, and the third is load-bearing: a run that produced some
-/// of its output and a run that produced none are different reports, and a
-/// two-valued class renders them identically. The *detail* stays in
-/// [`Terminal`], which names what ended the flow; this is the triage class a
-/// consumer routes on. [`Terminal::outcome`] is where the two compose.
+/// The routing class: a consumer acting on a refusal, a referral or a handoff
+/// matches here, and reads the detail from [`Terminal`]. Payload-free so it is
+/// `Copy` and can be matched in a guard.
+///
+/// This says nothing about effects. It is deliberately a separate fact from
+/// [`EffectLedger`] rather than an arm of one enum, because "the flow was
+/// refused" and "an earlier effect may be live" are independent, and a single
+/// classifier that prioritises either one destroys the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(crate = "lgwks_std::json::serde", rename_all = "snake_case")]
 #[non_exhaustive]
-pub enum TerminalOutcome {
-    /// Successful completion, with every effect the run attempted settled.
-    Success,
-    /// Completion that left at least one effect whose occurrence could not be
-    /// determined. Neither a success nor a failure: part of the output is not
-    /// known to exist, and part of it is known to. Retrying is a possible
-    /// duplicate rather than a repair.
-    Partial,
-    /// Refused or failed completion.
-    Failure,
+pub enum Disposition {
+    /// The flow ran to its own end.
+    Completed,
+    /// The flow referred the caller to another tier.
+    Referred,
+    /// The flow handed ownership to another actor.
+    HandedOff,
+    /// The flow refused to continue. A *decided* outcome, which settles nothing
+    /// about an effect an earlier step already attempted.
+    Refused,
+}
+
+/// What a run knows about the effects it attempted.
+///
+/// Two counts, because they answer different questions and neither can be
+/// inferred from the other. `confirmed` is what the run watched take effect.
+/// `unsettled` is what it attempted and could not settle — the effects a domain
+/// reported as [`BotError::EffectIndeterminate`].
+///
+/// A non-zero `unsettled` does **not** imply that anything succeeded. One
+/// attempted effect whose response was lost may have produced zero effects or
+/// one, and that ambiguity is what this type keeps rather than resolves: the
+/// honest report is "nothing is confirmed, and one is in doubt", not "part of
+/// the output exists".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde", deny_unknown_fields)]
+#[non_exhaustive]
+pub struct EffectLedger {
+    /// Effects the run watched take effect.
+    confirmed: usize,
+    /// Effects whose occurrence could not be determined.
+    unsettled: usize,
+}
+
+impl EffectLedger {
+    /// Record a run's effect history.
+    #[must_use]
+    pub const fn new(confirmed: usize, unsettled: usize) -> Self {
+        Self {
+            confirmed,
+            unsettled,
+        }
+    }
+
+    /// Effects the run watched take effect.
+    #[must_use]
+    pub const fn confirmed(&self) -> usize {
+        self.confirmed
+    }
+
+    /// Effects whose occurrence could not be determined.
+    #[must_use]
+    pub const fn unsettled(&self) -> usize {
+        self.unsettled
+    }
+
+    /// Whether any attempted effect's occurrence is unknown, and therefore
+    /// whether a retry is a possible duplicate rather than a repair.
+    ///
+    /// Reads the count and never the disposition: a refusal does not settle an
+    /// earlier network outcome, so this stays `true` for a refused run that
+    /// left an effect in doubt.
+    #[must_use]
+    pub const fn needs_reconciliation(&self) -> bool {
+        self.unsettled > 0
+    }
+}
+
+/// A run's report: what the workflow decided, and what is known about the
+/// effects it attempted.
+///
+/// Two independent fields rather than arms of one enum. A refused run that also
+/// leaves an effect in doubt is both *refused* and *in need of reconciliation*,
+/// and no single arm can say that: an earlier version of this type returned
+/// `Failure` for every refusal and erased the uncertainty, which is the exact
+/// information [`BotError::EffectIndeterminate`] was introduced to preserve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde", deny_unknown_fields)]
+#[non_exhaustive]
+pub struct Outcome {
+    /// What the workflow decided.
+    disposition: Disposition,
+    /// What is known about the effects it attempted.
+    effects: EffectLedger,
+}
+
+impl Outcome {
+    /// What the workflow decided.
+    #[must_use]
+    pub const fn disposition(&self) -> Disposition {
+        self.disposition
+    }
+
+    /// What is known about the effects the run attempted.
+    #[must_use]
+    pub const fn effects(&self) -> EffectLedger {
+        self.effects
+    }
+
+    /// Whether any attempted effect's occurrence is unknown.
+    #[must_use]
+    pub const fn needs_reconciliation(&self) -> bool {
+        self.effects.needs_reconciliation()
+    }
 }
 
 /// One predicate arm used by callers building a higher-level choice.
@@ -362,32 +459,26 @@ pub enum Terminal {
 }
 
 impl Terminal {
-    /// Classify this terminal given how many effects the run left unsettled.
+    /// Report this terminal together with the run's effect history.
     ///
-    /// `unsettled` counts the effects the run attempted whose occurrence could
-    /// not be determined — the ones a domain reported as
-    /// [`BotError::EffectIndeterminate`]. A run with any of them classifies as
-    /// [`TerminalOutcome::Partial`]: it is
-    /// not a success, because part of its output is not known to exist, and it
-    /// is not a failure, because part of it is.
-    ///
-    /// [`Terminal::Refused`] is the one exception and stays
-    /// [`TerminalOutcome::Failure`] however many effects were left unsettled,
-    /// because a refusal is a *decided* outcome rather than an unknown one.
-    /// Reporting it as partial would let a declared refusal hide behind the
-    /// same class as an unsettled duplicate, and a consumer that must act on a
-    /// refusal has to be able to see it.
+    /// Both facts are carried through unchanged, and that is the whole of the
+    /// method. It does not classify, because classifying is where the
+    /// information was being lost: an earlier version returned a single enum
+    /// and had to choose, for a refused run that also left an effect unsettled,
+    /// whether to report the refusal or the uncertainty. Both are true, both
+    /// matter to different consumers, and a report that drops either one is
+    /// wrong for whoever needed it.
     #[must_use]
-    pub fn outcome(&self, unsettled: usize) -> TerminalOutcome {
-        match *self {
-            Self::Refused { .. } => TerminalOutcome::Failure,
-            Self::Completed | Self::Referred { .. } | Self::HandedOff { .. } => {
-                if unsettled > 0 {
-                    TerminalOutcome::Partial
-                } else {
-                    TerminalOutcome::Success
-                }
-            }
+    pub fn outcome(&self, effects: EffectLedger) -> Outcome {
+        let disposition = match *self {
+            Self::Completed => Disposition::Completed,
+            Self::Referred { .. } => Disposition::Referred,
+            Self::HandedOff { .. } => Disposition::HandedOff,
+            Self::Refused { .. } => Disposition::Refused,
+        };
+        Outcome {
+            disposition,
+            effects,
         }
     }
 }
@@ -1755,95 +1846,173 @@ mod tests {
         Ok(())
     }
 
+    /// The four terminals, each paired with the disposition it must report.
+    fn terminals() -> [(Terminal, Disposition); 4] {
+        [
+            (Terminal::Completed, Disposition::Completed),
+            (
+                Terminal::Referred {
+                    target: String::from("tier-2"),
+                },
+                Disposition::Referred,
+            ),
+            (
+                Terminal::HandedOff {
+                    target: String::from("agent"),
+                },
+                Disposition::HandedOff,
+            ),
+            (
+                Terminal::Refused {
+                    reason: String::from("out of scope"),
+                },
+                Disposition::Refused,
+            ),
+        ]
+    }
+
     #[test]
-    fn a_settled_run_classifies_by_its_terminal() {
-        assert_eq!(
-            Terminal::Completed.outcome(0),
-            TerminalOutcome::Success,
-            "a completed run with every effect settled is a success"
-        );
-        assert_eq!(
-            Terminal::Referred {
-                target: String::from("tier-2")
+    fn disposition_and_effect_knowledge_are_reported_independently() {
+        // The cross-product: every terminal against every effect history. Each
+        // axis comes back unchanged whatever the other says, because they are
+        // two facts rather than two arms of one choice.
+        let histories = [
+            EffectLedger::new(0, 0), // nothing attempted
+            EffectLedger::new(1, 0), // one effect, confirmed
+            EffectLedger::new(0, 1), // one attempted, occurrence unknown
+            EffectLedger::new(2, 1), // confirmed and unknown at once
+            EffectLedger::new(3, 2),
+        ];
+
+        for (terminal, expected) in terminals() {
+            for ledger in histories {
+                let report = terminal.outcome(ledger);
+                assert_eq!(
+                    report.disposition(),
+                    expected,
+                    "no effect history may change what the workflow decided"
+                );
+                assert_eq!(
+                    report.effects(),
+                    ledger,
+                    "no disposition may change what is known about the effects"
+                );
+                assert_eq!(
+                    report.needs_reconciliation(),
+                    ledger.unsettled() > 0,
+                    "reconciliation follows the unsettled count and nothing else"
+                );
             }
-            .outcome(0),
-            TerminalOutcome::Success,
-            "a referral completes this flow's part of the work"
-        );
+        }
+    }
+
+    #[test]
+    fn a_refusal_no_longer_erases_an_unsettled_effect() {
+        // The counterexample from the review, kept as a regression. Two runs
+        // refused for the same reason, differing only in whether an earlier
+        // effect was left in doubt. The old classifier returned `Failure` for
+        // both, which is the one answer that cannot be acted on: only the
+        // second one needs an effect reconciled before anyone retries.
+        let refused = Terminal::Refused {
+            reason: String::from("later step denied"),
+        };
+
+        let settled = refused.outcome(EffectLedger::new(0, 0));
+        let unknown = refused.outcome(EffectLedger::new(0, 1));
+
         assert_eq!(
-            Terminal::HandedOff {
-                target: String::from("agent")
-            }
-            .outcome(0),
-            TerminalOutcome::Success
+            settled.disposition(),
+            unknown.disposition(),
+            "both runs were refused, and the report says so in both cases"
         );
-        assert_eq!(
-            Terminal::Refused {
-                reason: String::from("out of scope")
-            }
-            .outcome(0),
-            TerminalOutcome::Failure
+        assert!(
+            !settled.needs_reconciliation(),
+            "nothing was attempted, so there is nothing to reconcile"
+        );
+        assert!(
+            unknown.needs_reconciliation(),
+            "an earlier effect may be live; a refusal does not settle it"
+        );
+        assert_ne!(
+            settled, unknown,
+            "histories differing on a possibly-live effect must stay distinguishable"
         );
     }
 
     #[test]
-    fn an_unsettled_effect_makes_a_completed_run_partial() {
-        // The second half of the invariant the two-valued class could not
-        // carry: "some of the output exists" is not "all of it does", and a
-        // consumer told only success-or-failure reports the first as the
-        // second. The count is what a run journal holds, and one unsettled
-        // effect is already enough to make the report wrong.
+    fn an_unsettled_effect_does_not_imply_a_confirmed_one() {
+        // The second inference error the review named. `unsettled > 0` was
+        // documented as "part of the output exists", which does not follow: one
+        // attempted effect whose response was lost may have produced none, and
+        // the report has to say what is known rather than the flattering half.
+        let report = Terminal::Completed.outcome(EffectLedger::new(0, 1));
+
         assert_eq!(
-            Terminal::Completed.outcome(1),
-            TerminalOutcome::Partial,
-            "one indeterminate effect is enough: the run is neither a success nor a failure"
+            report.effects().confirmed(),
+            0,
+            "nothing was confirmed, so nothing may be claimed to exist"
         );
         assert_eq!(
-            Terminal::HandedOff {
-                target: String::from("agent")
-            }
-            .outcome(3),
-            TerminalOutcome::Partial,
-            "the count does not change the class, only what a report can say about it"
+            report.effects().unsettled(),
+            1,
+            "the unknown effect is still counted"
+        );
+        assert!(
+            report.needs_reconciliation(),
+            "the run needs reconciling, which is not the same statement as having \
+             partly succeeded"
         );
     }
 
     #[test]
-    fn a_refusal_outranks_an_unsettled_effect() {
-        // A refusal is decided, an unsettled effect is unknown. Folding the
-        // decided outcome into `Partial` would let a declared refusal hide in
-        // the same class as a possible duplicate, and a consumer acting on a
-        // refusal has to be able to see it.
-        assert_eq!(
-            Terminal::Refused {
-                reason: String::from("out of scope")
-            }
-            .outcome(2),
-            TerminalOutcome::Failure,
-            "a decided refusal stays a failure however many effects were left unsettled"
-        );
-    }
-
-    #[test]
-    fn an_indeterminate_effect_is_what_makes_a_run_partial() {
+    fn an_indeterminate_effect_is_what_puts_a_run_in_doubt() {
         // The law tying the two halves of this change together: the error says
-        // an effect may have happened, and that is exactly what makes the run's
-        // class partial. Neither half is reachable in practice without the
-        // other, which is why they landed in one step.
-        let unsettled = [BotError::EffectIndeterminate {
+        // an effect may have happened, and that is exactly what puts the run in
+        // doubt. Neither half is reachable in practice without the other.
+        let errors = [BotError::EffectIndeterminate {
             domain: String::from("gh::merge"),
             cause: String::from("request timed out"),
         }];
-        let count = unsettled
+        let unsettled = errors
             .iter()
             .filter(|error| matches!(**error, BotError::EffectIndeterminate { .. }))
             .count();
 
-        assert_eq!(count, 1, "the run left one effect unsettled");
+        assert_eq!(unsettled, 1, "the run left one effect unsettled");
+        let report = Terminal::Completed.outcome(EffectLedger::new(0, unsettled));
         assert_eq!(
-            Terminal::Completed.outcome(count),
-            TerminalOutcome::Partial,
-            "an indeterminate effect is what moves a completed run out of Success"
+            report.disposition(),
+            Disposition::Completed,
+            "an unsettled effect does not change what the workflow decided"
         );
+        assert!(
+            report.needs_reconciliation(),
+            "an indeterminate effect is what puts a completed run in doubt"
+        );
+    }
+
+    #[test]
+    fn a_report_round_trips_through_json() -> Result<(), Box<dyn std::error::Error>> {
+        // A report is written to a journal and read back by whoever reconciles
+        // it, so it has to survive the trip with both facts intact.
+        let report = Terminal::Refused {
+            reason: String::from("denied"),
+        }
+        .outcome(EffectLedger::new(2, 1));
+
+        let json = crate::json::to_string(&report)?;
+        let back: Outcome = crate::json::from_str(&json)?;
+
+        assert_eq!(
+            back, report,
+            "a report has to survive the journal it is written to"
+        );
+        assert_eq!(
+            back.disposition(),
+            Disposition::Refused,
+            "the refusal survives the round trip"
+        );
+        assert!(back.needs_reconciliation(), "so does the unresolved effect");
+        Ok(())
     }
 }
