@@ -150,6 +150,42 @@ jobs:
           --manifest-path crates/lgwks-bot/Cargo.toml --no-default-features &&
           RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
           --manifest-path crates/lgwks-ast/Cargo.toml --no-default-features
+      - name: Doc build at the default feature set
+        # The two lanes above are both boundary cases a consumer never selects.
+        # `default` is the one `cargo add lgwks_std` actually hands them, and
+        # neither lane builds it: `--all-features` resolves a link into a gated
+        # module, and `--no-default-features` does not compile the module that
+        # holds the link. A link from a default-on module to a default-off one
+        # is therefore invisible to both. `trace` (default-on) linked to `json`
+        # (default-off) and every consumer saw the break; the repository did
+        # not.
+        run: >
+          RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked -p lgwks_std &&
+          RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked -p lgwks_bot &&
+          RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked -p lgwks_ast
+      - name: Doc build for each lgwks-std feature alone
+        # The lane above catches a link from a default-on module to a
+        # default-off one. This catches the general case: a link between two
+        # optional modules where neither implies the other, so every
+        # combination of `--all-features` and `--no-default-features` resolves
+        # it. `wire` linked to `json` and only this lane can see it. Each
+        # feature is documented alone, so every gated module is documented
+        # while every module it does not pull in is genuinely absent.
+        run: |
+          set -eu
+          features=$(python3 - <<'PY'
+          import tomllib
+          parsed = tomllib.load(open("crates/lgwks-std/Cargo.toml", "rb"))
+          names = [n for n in parsed["features"] if n not in ("default", "full")]
+          print(" ".join(sorted(names)))
+          PY
+          )
+          echo "lgwks-std features: $features"
+          for feature in $features; do
+            echo "--- $feature"
+            RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked \
+              -p lgwks_std --no-default-features --features "$feature"
+          done
       - name: docs.rs metadata names a buildable feature set
         # docs.rs builds with whatever `[package.metadata.docs.rs]` declares,
         # and a failure there is invisible from the repository: the crate page
