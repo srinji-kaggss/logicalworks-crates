@@ -7,6 +7,8 @@ statement = "The claimed scope must belong to this workspace."
 scope = "not_a_workspace_crate"
 owner = "not_a_workspace_crate"
 enforcement = "static-check"
+# The enforcement reference is deliberately a resolvable one so this fixture
+# isolates the scope rule: exactly one refusal, from the scope.
 enforced_by = "crates/lgwks-deps/src/invariants.rs"
 approved_by = "maintainer"
 approved_on = "2026-09-20"

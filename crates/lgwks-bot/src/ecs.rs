@@ -12,10 +12,31 @@
 //! | Verb | On this substrate |
 //! |---|---|
 //! | `GrantSet` | the `Grants` resource: one authority per world |
-//! | `Observe` | a `Chains` entry, polled by the `observe` system |
+//! | `Observe` | a `Chains` entry, polled by the `observe_fold` system |
 //! | `Evaluate::check` | `Changed<Revision>` on the source entity |
-//! | `Execute::execute_action` | the `fire` system |
-//! | `Bot::tick()` | `EcsBot::tick()`, one `Schedule::run` |
+//! | `Execute::execute_action` | the `fire_plan` system, whose effects run between schedule steps |
+//! | `Bot::tick()` | [`EcsBot::tick_async`], one `Schedule::run` between two awaited phases |
+//!
+//! # One execution path, and who drives it
+//!
+//! A tick is four phases, and only the middle one is a synchronous schedule
+//! step:
+//!
+//! 1. **observe** — every source is polled, in bounded waves, awaited on the
+//!    caller's executor.
+//! 2. **decide** — one `Schedule::run` folds those observations into the world
+//!    (committing each value and bumping `Revision` where it moved) and records
+//!    the effect program for this tick.
+//! 3. **act** — the recorded effects run in declaration order, awaited on the
+//!    caller's executor.
+//! 4. **report** — the count and the first failure are written back.
+//!
+//! [`EcsBot::tick_async`] is the whole of it, and it is the way to run a bot
+//! from async code: the verb futures are awaited *by* the caller's runtime, so
+//! a source that waits on a timer, a socket, or a sibling task has a driver
+//! making progress underneath it. [`EcsBot::tick`] is a synchronous adapter
+//! over the same four phases for verbs that need no reactor; it is refused,
+//! not hung, when an async runtime is already driving the calling thread.
 //!
 //! # One semantic delta, stated rather than discovered
 //!
@@ -222,6 +243,77 @@ struct Chains(Vec<EcsChain>);
 /// The observed value per chain, from the most recent successful poll.
 #[derive(Default)]
 struct Observed(Vec<Option<Box<dyn Any>>>);
+
+// ── Staging between the awaited phases and the schedule steps ──────────────
+//
+// The verb futures are non-`Send` and may need an executor, so they are awaited
+// by the driver *outside* the schedule. What crosses into the schedule is
+// therefore data, in declaration order, and the two resources below are that
+// handover. Both are overwritten wholesale at the point they are consumed, so
+// a tick that is dropped between phases leaves nothing behind for the next one.
+
+/// The results of the observation phase, staged for `observe_fold`.
+///
+/// In chain order, one entry per chain, exactly as `poll_sources` collected
+/// them: the fold commits them positionally, so a result that arrived early
+/// cannot be committed to the wrong chain.
+#[derive(Default)]
+struct Polled(Vec<Result<Box<dyn Any>, BotError>>);
+
+/// What the decision phase decided for one entry it reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Decision {
+    /// The condition held, so the entry is attempted. `attempts` is the attempt
+    /// number this one will be, counted from the attempts the entry has already
+    /// spent, and it is carried here rather than re-derived so the program the
+    /// driver runs is the one the decision phase recorded.
+    Attempt {
+        /// Which attempt this will be.
+        attempts: u32,
+    },
+    /// The condition did not hold, so the entry is recorded as skipped and the
+    /// walk moves past it. Recorded rather than dropped: an entry whose
+    /// condition is false owes nothing, and saying so is what lets a chain
+    /// settle and stop being walked.
+    Skip,
+}
+
+/// One entry the decision phase reached.
+struct Step {
+    /// Index into [`Chains`].
+    chain: usize,
+    /// Index into that chain's `entries`, in declaration order.
+    entry: usize,
+    /// What the walk decided for it.
+    decision: Decision,
+}
+
+/// The effect program the decision phase recorded, plus the condition failures
+/// it met on the way.
+///
+/// A failure is carried here rather than parked in [`TickError`] because it
+/// happened at a *position* in the walk rather than at the end of it: the
+/// [`Step`]s alongside it are exactly the effects the walk reached before that
+/// position, and they still run. Whichever failure comes first in walk order is
+/// the one the tick reports, which is the ordering the synchronous loop had when
+/// it evaluated a condition and ran an action in the same iteration.
+///
+/// One failure per chain rather than one for the tick, because a condition that
+/// cannot be evaluated stops its own chain: the chains after it are still
+/// walked, and a failing action earlier in a chain is a more specific report than
+/// a failing condition later in the same one. That is also why the failures are
+/// indexed rather than ordered — the `chain` field of each [`Step`] is the order
+/// they are reported in.
+#[derive(Default)]
+struct Plan {
+    /// The decisions to apply, in declaration order: one chain's entries in
+    /// walk order, then the next chain's.
+    steps: Vec<Step>,
+    /// The condition failure each chain's walk met, indexed by chain. A chain
+    /// whose walk met none has `None`, and an action failure recorded by the
+    /// driver displaces the condition failure of the chain it happened in.
+    failures: Vec<Option<BotError>>,
+}
 
 /// Upper bound on sources polled simultaneously by one tick. A source poll may
 /// occupy one `spawn_blocking` thread, so this caps the blocking-thread fan-out
@@ -671,6 +763,81 @@ impl Ledger {
         }
     }
 
+    /// The entry a [`WorkId`] names, when the ledger holds it.
+    fn entry_mut(&mut self, id: WorkId) -> Option<&mut EntryState> {
+        self.transitions
+            .get_mut(id.chain())
+            .and_then(Option::as_mut)
+            .and_then(|transition| transition.entries.get_mut(id.entry()))
+    }
+
+    /// Record that an attempt on this entry is about to be made, *before* it is
+    /// awaited.
+    ///
+    /// This is the write-ahead half of the ledger, and it is why the driver
+    /// writes to the world between awaits at all: a tick dropped while the effect
+    /// is in flight leaves this record behind, and "an attempt began and no
+    /// outcome was recorded" is held exactly as an unknown outcome is. Without
+    /// it, a dropped tick would leave a `NotStarted` entry behind and the next
+    /// tick would replay an effect that may already be live.
+    ///
+    /// `false` when the entry is not in a state an attempt can start from, which
+    /// means the world moved behind the schedule's back.
+    fn begin(&mut self, id: WorkId) -> bool {
+        let Some(state) = self.entry_mut(id) else {
+            return false;
+        };
+        if !matches!(
+            *state,
+            EntryState::NotStarted | EntryState::DefinitelyFailed { .. }
+        ) {
+            return false;
+        }
+        *state = EntryState::Unrecorded;
+        true
+    }
+
+    /// Record that the entry's condition did not hold, so it owes nothing.
+    fn skip(&mut self, id: WorkId) -> bool {
+        let Some(state) = self.entry_mut(id) else {
+            return false;
+        };
+        if !matches!(
+            *state,
+            EntryState::NotStarted | EntryState::DefinitelyFailed { .. }
+        ) {
+            return false;
+        }
+        *state = EntryState::Skipped;
+        true
+    }
+
+    /// Record that the attempt returned without error.
+    fn succeed(&mut self, id: WorkId) -> bool {
+        let Some(state) = self.entry_mut(id) else {
+            return false;
+        };
+        if !matches!(*state, EntryState::Unrecorded) {
+            return false;
+        }
+        *state = EntryState::Succeeded;
+        true
+    }
+
+    /// Record what a failed attempt means for the entry it was made on.
+    fn fail(&mut self, id: WorkId, error: &BotError, attempts: u32, budget: u32) -> bool {
+        let Some(state) = self.entry_mut(id) else {
+            return false;
+        };
+        // Only an attempt in flight can fail: an outcome recorded for an entry
+        // that was never begun is not this tick's to write.
+        if !matches!(*state, EntryState::Unrecorded) {
+            return false;
+        }
+        *state = failure_state(error, attempts, budget);
+        true
+    }
+
     /// Settle an entry whose effect may or may not have happened.
     fn settle(&mut self, id: WorkId, evidence: EffectEvidence) -> bool {
         let Some(transition) = self
@@ -794,148 +961,55 @@ fn resume(
     }
 }
 
-/// What one chain's walk produced.
-#[derive(Debug, Default)]
-struct Advance {
-    /// Actions that ran.
-    fired: usize,
-    /// The first failure, in declaration order within the chain.
-    failure: Option<BotError>,
-}
-
-/// Advance one chain's transition as far as this tick can take it.
+/// What a failed attempt means for the entry it was made on.
 ///
-/// Entries are walked in declaration order, resuming at the first that is not
-/// resolved, and the walk stops at the first entry it cannot settle: the
-/// successors of an unresolved attempt stay untouched rather than running out
-/// of order, which is what keeps an acknowledged effect from being replayed to
-/// reach an entry a failure skipped.
-fn advance(
-    chain: &EcsChain,
-    transition: &mut Transition,
-    value: &dyn Any,
-    grants: &GrantSet,
-    budget: u32,
-) -> Advance {
-    let mut result = Advance::default();
-
-    for (entry_index, entry) in chain.entries.iter().enumerate() {
-        let Some(state) = transition.entries.get_mut(entry_index) else {
-            continue;
-        };
-        // `*state` so the patterns are the enum's own type; the causes are
-        // `ref`, and each is cloned out before `*state` is written, so the
-        // borrow ends where the assignment begins.
-        match *state {
-            // Decided. An entry that ran, one whose condition was false, and
-            // one given up on are all behind us, so the chain continues past
-            // them.
-            EntryState::Succeeded | EntryState::Skipped | EntryState::Abandoned { .. } => continue,
-            // Held: the effect may be live and only evidence settles that. A
-            // later entry is not run ahead of it.
-            EntryState::Unrecorded | EntryState::OutcomeUnknown { .. } => break,
-            EntryState::NotStarted | EntryState::DefinitelyFailed { .. } => {}
+/// The three cases are the three things a caller has to be able to tell apart
+/// afterwards: a retry is a retry, a retry may be a duplicate, and a retry is
+/// pointless because the failure is not something another attempt can change. The
+/// budget is consulted only for the first of them.
+fn failure_state(error: &BotError, attempts: u32, budget: u32) -> EntryState {
+    let cause = error.to_string();
+    match *error {
+        // The effect definitely did not happen: a retry is a retry, and the
+        // budget bounds it.
+        BotError::DomainError { .. } if attempts < budget => {
+            EntryState::DefinitelyFailed { attempts, cause }
         }
-
-        // The condition reads the value as it stands *now*, which is why an
-        // outstanding transition is walked on a tick where the source held
-        // still: the value it has not been evaluated against is the one from
-        // the movement that joined the transition.
-        match entry.condition.check_any(value) {
-            Ok(true) => {}
-            Ok(false) => {
-                *state = EntryState::Skipped;
-                continue;
-            }
-            Err(error) => {
-                // A condition that cannot be evaluated has decided nothing
-                // about the effect: the entry stays where it is, the chain
-                // stops, and the tick reports the error. Nothing is abandoned,
-                // because nothing was attempted.
-                result.failure = Some(error);
-                break;
-            }
-        }
-
-        let attempts = match *state {
-            EntryState::DefinitelyFailed { attempts, .. } => attempts.saturating_add(1),
-            _ => 1,
-        };
-        // Written *before* the attempt, not after: the walk stops at an entry it
-        // cannot settle, so a record that says "begun, outcome unknown" is what
-        // makes the next tick hold the effect instead of replaying it. The
-        // record reaches the ledger when this tick returns; a panic unwinding
-        // out of the action is a limit this substrate does not close, and it is
-        // stated in the module documentation.
-        *state = EntryState::Unrecorded;
-        match lgwks_std::task::block_on(entry.action.run_any(grants, value)) {
-            Ok(_) => {
-                *state = EntryState::Succeeded;
-                result.fired = result.fired.saturating_add(1);
-            }
-            Err(error) => {
-                let cause = error.to_string();
-                *state = match error {
-                    // The effect definitely did not happen: a retry is a retry,
-                    // and the budget bounds it.
-                    BotError::DomainError { .. } if attempts < budget => {
-                        EntryState::DefinitelyFailed { attempts, cause }
-                    }
-                    BotError::DomainError { .. } => EntryState::Abandoned {
-                        reason: AbandonReason::AttemptsExhausted { attempts },
-                        cause,
-                    },
-                    // It may have happened. Never attempted again without
-                    // evidence, whatever the budget says.
-                    BotError::EffectIndeterminate { .. } => {
-                        EntryState::OutcomeUnknown { attempts, cause }
-                    }
-                    // No retry fixes a refused capability or a type mismatch.
-                    _ => EntryState::Abandoned {
-                        reason: AbandonReason::Terminal,
-                        cause,
-                    },
-                };
-                result.failure = Some(error);
-                break;
-            }
-        }
+        BotError::DomainError { .. } => EntryState::Abandoned {
+            reason: AbandonReason::AttemptsExhausted { attempts },
+            cause,
+        },
+        // It may have happened. Never attempted again without evidence, whatever
+        // the budget says.
+        BotError::EffectIndeterminate { .. } => EntryState::OutcomeUnknown { attempts, cause },
+        // No retry fixes a refused capability or a type mismatch.
+        _ => EntryState::Abandoned {
+            reason: AbandonReason::Terminal,
+            cause,
+        },
     }
-
-    result
 }
 
 // ── Systems ────────────────────────────────────────────────────────────────
 
-/// Observe: poll every source, then bump `Revision` for the ones that moved.
+/// Observe, fold half: commit the polled values, then bump `Revision` for the
+/// sources that moved.
 ///
-/// Exclusive because the verbs are non-`Send`. All sources are polled before
-/// any `Revision` is written, matching `Bot::tick`'s documented error ordering:
-/// the first error in declaration order is returned, and no source is left
-/// half-updated.
-fn observe(world: &mut World) {
+/// Exclusive because the verbs are non-`Send`. Every source has already been
+/// polled and awaited by the driver by the time this runs, so all that is left
+/// is the commit — and a poll that failed is reported *before* any `Revision`
+/// is written, which is `Bot::tick`'s documented error ordering: the first
+/// error in declaration order, with no source left half-updated.
+///
+/// That the polls themselves happen outside is what makes a timer- or
+/// socket-backed source work: this system is a synchronous step, and a source
+/// awaiting a reactor inside it would have no reactor making progress.
+fn observe_fold(world: &mut World) {
     if parked(world) {
         return;
     }
 
-    // Bounded waves, joined concurrently: a source poll may occupy one
-    // `spawn_blocking` thread, so polling them one at a time would make a tick
-    // as slow as the sum of its sources rather than as slow as its slowest. The
-    // wave cap is what keeps that from becoming unbounded blocking-thread
-    // fan-out. Determinism is unaffected: the results are collected in
-    // declaration order, and actions still run sequentially.
-    let polled: Vec<Result<Box<dyn Any>, BotError>> = {
-        let chains = world.non_send::<Chains>();
-        let grants = world.resource::<Grants>();
-        let mut polled = Vec::with_capacity(chains.0.len());
-        for wave in chains.0.chunks(MAX_IN_FLIGHT_POLLS) {
-            let batch = lgwks_std::task::join_all_boxed(
-                wave.iter().map(|chain| chain.source.poll_any(&grants.0)),
-            );
-            polled.extend(lgwks_std::task::block_on(batch));
-        }
-        polled
-    };
+    let polled = std::mem::take(&mut world.non_send_mut::<Polled>().0);
 
     // `collect` into a `Result<Vec<_>, _>` keeps the first error and drops the
     // rest, which is the ordering `Bot::tick` promises. Nothing is committed on
@@ -977,12 +1051,11 @@ fn observe(world: &mut World) {
     }
 }
 
-/// Execute: advance the ledger of every chain that has work, in declaration
-/// order.
+/// Fire, decide half: walk the eligible work of every chain, in declaration
+/// order, and record the effects this tick should run.
 ///
-/// The capability check is not repeated here: `poll_any` and `run_any` each
-/// mint a fresh `Auth` from the retained `GrantSet`, which is where the proof
-/// belongs.
+/// The capability check is not repeated when the effect runs: `run_any` mints a
+/// fresh `Auth` from the retained `GrantSet`, which is where the proof belongs.
 ///
 /// The load-bearing word is *retained*. `assemble` clones the set into the world
 /// as `Grants(grants.clone())` and nothing revokes it, so this substrate offers
@@ -990,10 +1063,26 @@ fn observe(world: &mut World) {
 /// or dropping the caller's `GrantSet` after build cannot narrow a bot that is
 /// already running. An earlier version of this comment claimed the opposite.
 ///
-/// The change filter decides only which chains *open* a transition. A chain
-/// whose ledger entry is outstanding is walked whether or not it moved, and a
-/// failure stops its own chain rather than every chain after it.
-fn fire(world: &mut World) {
+/// Conditions are evaluated here, in the schedule, and the effects they select
+/// are run by the driver afterwards. That is a reordering of *when* each verb
+/// runs, not of which effects happen or in what order: a condition takes only
+/// the observed value (`Evaluate::check` has no other input) and so cannot
+/// observe an action's effect, which makes the selected list a pure function of
+/// the observations. The plan is therefore the exact effect program the
+/// synchronous loop would have walked.
+///
+/// What is walked is the *ledger*, not the change set. `Changed<Revision>`
+/// decides only which chains *open* a transition; a chain whose ledger entry is
+/// outstanding is walked whether or not it moved, which is what keeps an
+/// unattempted effect from being lost when its source holds still. A failure
+/// stops its own chain rather than every chain after it, so the chains behind a
+/// failing one still record their work.
+fn fire_plan(world: &mut World) {
+    {
+        let mut plan = world.non_send_mut::<Plan>();
+        plan.steps.clear();
+        plan.failures.clear();
+    }
     if parked(world) {
         return;
     }
@@ -1004,7 +1093,6 @@ fn fire(world: &mut World) {
     };
 
     let count = world.non_send::<Chains>().0.len();
-    let budget = world.resource::<Policy>().0.max_attempts();
 
     // A flag per chain rather than a search of `moved`: the walk below is in
     // declaration order, and membership has to be answerable in constant time
@@ -1016,12 +1104,12 @@ fn fire(world: &mut World) {
         }
     }
 
-    let mut fired: usize = 0;
-    let mut failure: Option<BotError> = None;
+    let mut steps: Vec<Step> = Vec::new();
+    let mut failures: Vec<Option<BotError>> = (0..count).map(|_| None).collect();
 
     for index in 0..count {
         let held = world.resource_mut::<Ledger>().take(index);
-        let Some(mut transition) = resume(
+        let Some(transition) = resume(
             world,
             index,
             moving.get(index).copied().unwrap_or(false),
@@ -1031,39 +1119,31 @@ fn fire(world: &mut World) {
         };
 
         // The borrow of the world for the walk is scoped: `Ledger::take` above
-        // and `Ledger::put` below each need it mutably, and the walk needs the
-        // chains, the observed value and the grant set immutably.
-        let walked = {
+        // and `Ledger::put` below each need it mutably, while the walk needs the
+        // chains and the observed value immutably. Nothing is written to the
+        // transition here — every state that depends on an attempt is written by
+        // the driver, which is the only place that knows the outcome.
+        {
             let chains = world.non_send::<Chains>();
             let observed = world.non_send::<Observed>();
-            let grants = world.resource::<Grants>();
-            match (
+            if let (Some(chain), Some(value), Some(failure)) = (
                 chains.0.get(index),
                 observed.0.get(index).and_then(Option::as_ref),
+                failures.get_mut(index),
             ) {
-                (Some(chain), Some(value)) => Some(advance(
+                plan_chain(
                     chain,
-                    &mut transition,
+                    &transition,
                     value.as_ref(),
-                    &grants.0,
-                    budget,
-                )),
-                // No chain, or a source that has never answered: the work is
-                // kept, not discarded. A transition exists only for a source
-                // that was polled, so this is a world that was mutated behind
-                // the schedule's back.
-                _ => None,
+                    index,
+                    &mut steps,
+                    failure,
+                );
             }
-        };
-
-        if let Some(result) = walked {
-            fired = fired.saturating_add(result.fired);
-            // Chain order, so "the first error in declaration order" is the one
-            // a caller gets, exactly as before — except that the chains after
-            // it still ran.
-            if failure.is_none() {
-                failure = result.failure;
-            }
+            // No chain, or a source that has never answered: the work is kept,
+            // not discarded. A transition exists only for a source that was
+            // polled, so this is a world that was mutated behind the schedule's
+            // back.
         }
 
         let retained = transition.is_retained();
@@ -1072,9 +1152,81 @@ fn fire(world: &mut World) {
             .put(index, if retained { Some(transition) } else { None });
     }
 
-    world.resource_mut::<Fired>().0 = fired;
-    if let Some(error) = failure {
-        world.resource_mut::<TickError>().0 = Some(error);
+    let mut plan = world.non_send_mut::<Plan>();
+    plan.steps = steps;
+    plan.failures = failures;
+}
+
+/// Record the decisions one chain's walk reaches, in entry order.
+///
+/// Only the decisions a walk can make without attempting anything are taken
+/// here: an entry the walk is finished with, and an entry it reached whose
+/// condition did not hold. Everything that depends on an attempt — marking the
+/// entry in flight, and what its outcome means — is left to the driver, which is
+/// the only place that knows it.
+///
+/// A skipped entry is recorded as a [`Decision::Skip`] rather than written to the
+/// ledger here so that the condition behind it is evaluated against the value the
+/// attempt will actually see. An entry the walk never reaches because an earlier
+/// action failed keeps the state that makes it reachable, instead of being marked
+/// decided by a condition evaluated ahead of the failure that stopped the walk
+/// before it.
+fn plan_chain(
+    chain: &EcsChain,
+    transition: &Transition,
+    value: &dyn Any,
+    index: usize,
+    steps: &mut Vec<Step>,
+    failure: &mut Option<BotError>,
+) {
+    for (entry_index, entry) in chain.entries.iter().enumerate() {
+        let Some(state) = transition.entries.get(entry_index) else {
+            continue;
+        };
+        match *state {
+            // Decided. An entry that ran, one whose condition was false, and one
+            // given up on are all behind us, so the chain continues past them.
+            EntryState::Succeeded | EntryState::Skipped | EntryState::Abandoned { .. } => continue,
+            // Held: the effect may be live and only evidence settles that. A
+            // later entry is not run ahead of it.
+            EntryState::Unrecorded | EntryState::OutcomeUnknown { .. } => break,
+            EntryState::NotStarted | EntryState::DefinitelyFailed { .. } => {}
+        }
+
+        // The condition reads the value as it stands *now*, which is why an
+        // outstanding transition is walked on a tick where the source held
+        // still: the value it has not been evaluated against is the one from the
+        // movement that joined the transition.
+        match entry.condition.check_any(value) {
+            Ok(true) => {}
+            Ok(false) => {
+                steps.push(Step {
+                    chain: index,
+                    entry: entry_index,
+                    decision: Decision::Skip,
+                });
+                continue;
+            }
+            Err(error) => {
+                // A condition that cannot be evaluated has decided nothing about
+                // the effect: the entry stays where it is, this chain stops, and
+                // the tick reports the error. Nothing is abandoned, because
+                // nothing was attempted. Recorded at most once per chain, since
+                // the walk stops here.
+                *failure = Some(error);
+                break;
+            }
+        }
+
+        let attempts = match *state {
+            EntryState::DefinitelyFailed { attempts, .. } => attempts.saturating_add(1),
+            _ => 1,
+        };
+        steps.push(Step {
+            chain: index,
+            entry: entry_index,
+            decision: Decision::Attempt { attempts },
+        });
     }
 }
 
@@ -1090,8 +1242,9 @@ fn schedule() -> Schedule {
         ambiguity_detection: LogLevel::Error,
         ..Default::default()
     });
-    // `.chain()` is the declared order: poll, then fire.
-    schedule.add_systems((observe, fire).chain());
+    // `.chain()` is the declared order: commit the observations, then decide
+    // the effects.
+    schedule.add_systems((observe_fold, fire_plan).chain());
     schedule
 }
 
@@ -1115,7 +1268,8 @@ fn validate(schedule: &mut Schedule, world: &mut World) -> Result<(), BotError> 
 
 /// A bot executing on a `bevy_ecs` world.
 ///
-/// Stepped by hand: [`EcsBot::tick`] is one `Schedule::run`. No framework owns
+/// Stepped by hand: one tick is one [`EcsBot::tick_async`], which is one
+/// `Schedule::run` between the awaited observe and act phases. No framework owns
 /// a loop, and no `App::run` is ever called.
 pub struct EcsBot {
     /// The name the spec declared.
@@ -1182,36 +1336,116 @@ impl EcsBot {
             .collect()
     }
 
-    /// Run one tick. Returns the number of actions fired.
+    /// Run one tick, awaiting the verb futures on the caller's executor.
     ///
-    /// Synchronous: the systems drive the non-`Send` verb futures on this
-    /// thread, so there is nothing for a caller to await.
+    /// Returns the number of actions that fired. The bot is `mut` because a
+    /// tick advances its world.
     ///
-    /// `Ok` means every entry of every transition is resolved — it ran or its
-    /// condition was false. `Err` is the failure a source or an action produced,
-    /// or [`BotError::PendingTransition`] when work is still held and nothing
-    /// failed. A caller that reads a clean tick as "the transition was handled"
-    /// is reading a fact, because a tick with anything left to report is not
-    /// clean.
+    /// # What this is for
     ///
-    /// The failure keeps precedence over the pending report when a tick has
-    /// both, because it carries the typed variant a retry classifier reads: an
+    /// This is the tick to call from async code, and the reason is that the
+    /// verb futures are awaited **by the caller's runtime** rather than by a
+    /// thread parked inside a synchronous system. A source that waits on
+    /// `rt::time`, on a socket, on a channel fed by a sibling task, or on
+    /// anything else that needs a driver resolves while this future is pending,
+    /// because the runtime that owns it is the one driving.
+    ///
+    /// # Phases
+    ///
+    /// 1. every source is polled in bounded waves of `MAX_IN_FLIGHT_POLLS`,
+    ///    concurrently, in declaration order;
+    /// 2. one `Schedule::run` commits those observations, detects which values
+    ///    moved, and records the effect program (`observe_fold`, `fire_plan`),
+    ///    walking the ledger's outstanding work rather than the change set;
+    /// 3. the recorded effects run one at a time, in declaration order, and each
+    ///    entry is written into the ledger as it goes;
+    /// 4. the count, the first failure, and any entry still held are reported.
+    ///
+    /// The middle two phases are what keep this deterministic: the schedule is
+    /// a total order validated at build, the observations are folded
+    /// positionally, and the effect program is fixed before any effect runs.
+    ///
+    /// # Failure
+    ///
+    /// A poll that failed fires nothing (no `Revision` was written), while an
+    /// action that failed leaves the effects before it live and returns the first
+    /// error. A condition that fails stops its own chain where it failed, so the
+    /// effects that chain's walk had already reached still run — the plan carries
+    /// the decisions and the chains after it are still walked, and the tick
+    /// reports the first failure in declaration order. `Err` therefore means "this
+    /// run did not finish", never "nothing happened".
+    ///
+    /// The failure keeps precedence over the pending report when a tick has both,
+    /// because it carries the typed variant a retry classifier reads: an
     /// [`BotError::EffectIndeterminate`] written into a string would stop being
-    /// the distinction the whole error type exists to draw. So the tick that
-    /// gives up on an entry reports the error that caused it, and the
-    /// abandonment — never a silent drop — is reported by [`Self::pending`],
-    /// which names every abandoned entry, its reason, and its source revision
-    /// for as long as it stands.
-    pub fn tick(&mut self) -> Result<usize, BotError> {
-        self.world.resource_mut::<TickError>().0 = None;
-        self.world.resource_mut::<Fired>().0 = 0;
+    /// the distinction the whole error type exists to draw. So the tick that gives
+    /// up on an entry reports the error that caused it, and the abandonment —
+    /// never a silent drop — is reported by [`Self::pending`], which names every
+    /// abandoned entry, its reason, and its source revision for as long as it
+    /// stands.
+    ///
+    /// # Cancellation
+    ///
+    /// Dropping this future before it resolves cancels the tick at the point it
+    /// was dropped. Between phases 2 and 3 that loses the effects phase 2
+    /// selected, and the next tick does not re-fire them: the revisions were
+    /// committed in phase 2, so the sources no longer read as moved. This is the
+    /// same "unattempted work is lost, not queued" rule the failure path
+    /// documents, and it is stated rather than discovered because it is the price
+    /// of a tick that is a future.
+    ///
+    /// Dropping it *during* phase 3 is the case the ledger exists for. An entry
+    /// whose attempt was in flight was written to the ledger before the effect
+    /// was awaited, so the next tick finds it held as
+    /// [`TransitionHold::Unrecorded`] — "an attempt began and no outcome was
+    /// recorded" — and does not replay it. An entry whose turn had not come is
+    /// left `NotStarted`, so it is walked again. Which of the two an entry is
+    /// depends only on whether the effect was awaited, which is the same fact the
+    /// caller is missing; the difference is that the substrate no longer has to
+    /// guess.
+    ///
+    /// # Errors
+    ///
+    /// The first domain failure of the tick, in the order described above, or
+    /// [`BotError::PendingTransition`] when nothing failed and work is still held.
+    pub async fn tick_async(&mut self) -> Result<usize, BotError> {
+        self.begin_tick();
+
+        let polled = self.poll_sources().await;
+        self.world.non_send_mut::<Polled>().0 = polled;
+
         self.schedule.run(&mut self.world);
+
+        // Taken rather than borrowed: the effects are awaited below, and a
+        // borrow of the plan would outlive the schedule that wrote it. An empty
+        // plan is left behind, so a tick dropped here stages nothing.
+        let plan = {
+            let mut guard = self.world.non_send_mut::<Plan>();
+            std::mem::take(&mut *guard)
+        };
+        let Plan {
+            steps,
+            mut failures,
+        } = plan;
+        let budget = self.world.resource::<Policy>().0.max_attempts();
+        let (fired, failure) = self.run_steps(&steps, &mut failures, budget).await;
+
+        self.world.resource_mut::<Fired>().0 = fired;
+        if let Some(error) = failure {
+            self.world.resource_mut::<TickError>().0 = Some(error);
+        }
 
         if let Some(error) = self.world.resource_mut::<TickError>().0.take() {
             return Err(error);
         }
 
-        let budget = self.world.resource::<Policy>().0.max_attempts();
+        // A tick that reported no failure is not necessarily a tick with nothing
+        // left. An entry the substrate cannot settle on its own — an attempt in
+        // flight whose outcome was never recorded, an effect that may be live, or
+        // one the budget gave up on — is held, and a held entry is reported
+        // rather than passed over in silence: a caller that read a clean `Ok` as
+        // "the transition was handled" would be reading something that is not
+        // true.
         let ledger = self.world.resource::<Ledger>();
         match ledger.first_open(budget) {
             Some(work) => Err(BotError::PendingTransition {
@@ -1220,6 +1454,231 @@ impl EcsBot {
             }),
             None => Ok(self.world.resource::<Fired>().0),
         }
+    }
+
+    /// Run one tick on this thread, without an async runtime.
+    ///
+    /// # Scope
+    ///
+    /// This is the adapter for **runtime-independent futures**: polls and
+    /// actions that complete without a timer or an I/O driver. Immediate
+    /// futures, `lgwks_std::task::spawn_blocking` work, and a channel fed by
+    /// another thread all belong here; it drives the same four phases as
+    /// [`EcsBot::tick_async`] with `lgwks_std::task::block_on`, which parks
+    /// this thread until they resolve.
+    ///
+    /// A verb that needs this crate's timer (`rt::time`) or a driver cannot run
+    /// here, because there is no reactor for it to register with: on this
+    /// adapter `rt::time::sleep` reaches the runtime-context panic its own
+    /// documentation names. Await [`EcsBot::tick_async`] from inside a runtime
+    /// instead.
+    ///
+    /// # The refusal
+    ///
+    /// [`BotError::TickInsideRuntime`] when an async runtime is already driving
+    /// the calling thread. Parking a thread that owns a runtime's driver is not
+    /// a slow tick, it is a deadlock — the timer never fires, the socket never
+    /// reports ready, and the tick never returns — so the one thing this
+    /// adapter must not do is what its name suggests. The check is made here
+    /// rather than left to the caller because the calling mode is not knowable
+    /// from the verb API.
+    ///
+    /// This refuses even on a runtime with several worker threads, where
+    /// parking one worker may happen to work. Which thread the caller was
+    /// handed is not knowable from here, and a deadlock that appears only on
+    /// the current-thread runtime is the failure this exists to prevent rather
+    /// than to mask.
+    ///
+    /// # Errors
+    ///
+    /// [`BotError::TickInsideRuntime`] as above, or the first domain failure of
+    /// the tick.
+    pub fn tick(&mut self) -> Result<usize, BotError> {
+        #[cfg(feature = "rt")]
+        if lgwks_deps::tokio::runtime::Handle::try_current().is_ok() {
+            return Err(BotError::TickInsideRuntime);
+        }
+        lgwks_std::task::block_on(self.tick_async())
+    }
+
+    /// Reset the per-tick scratch, so a tick starts from the same state however
+    /// the previous one ended.
+    ///
+    /// The staged observations and the effect program are not cleared here:
+    /// both are overwritten wholesale by the phase that produces them, which is
+    /// what makes a *dropped* tick safe as well as a completed one.
+    fn begin_tick(&mut self) {
+        self.world.resource_mut::<Fired>().0 = 0;
+        self.world.resource_mut::<TickError>().0 = None;
+    }
+
+    /// Poll every source, `MAX_IN_FLIGHT_POLLS` at a time, awaiting each wave
+    /// on the caller's executor.
+    ///
+    /// Bounded waves, joined concurrently: a source poll may occupy one
+    /// `spawn_blocking` thread, so polling them one at a time would make a tick
+    /// as slow as the sum of its sources rather than as slow as its slowest.
+    /// The wave cap is what keeps that from becoming unbounded blocking-thread
+    /// fan-out. Determinism is unaffected: the results are collected in
+    /// declaration order whatever order they resolve in.
+    async fn poll_sources(&self) -> Vec<Result<Box<dyn Any>, BotError>> {
+        let chains = self.world.non_send::<Chains>();
+        let grants = self.world.resource::<Grants>();
+        let mut polled = Vec::with_capacity(chains.0.len());
+        for wave in chains.0.chunks(MAX_IN_FLIGHT_POLLS) {
+            let batch = lgwks_std::task::join_all_boxed(
+                wave.iter().map(|chain| chain.source.poll_any(&grants.0)),
+            );
+            polled.extend(batch.await);
+        }
+        polled
+    }
+
+    /// Run the effects the decision phase selected, in the order it selected
+    /// them, awaiting each on the caller's executor.
+    ///
+    /// Returns the number that fired and the first failure in declaration order,
+    /// or `None` when nothing failed.
+    ///
+    /// Every chain is run on its own, because a failure stops its own chain rather
+    /// than every chain after it: the chains behind a failing one still run and
+    /// still record their work. Iterating chains rather than steps is also what
+    /// keeps a chain that recorded *no* step from being skipped: a condition the
+    /// walk could not evaluate stops that chain before it records anything, and
+    /// its failure is still the tick's to report. The failure of the first chain
+    /// in declaration order that has one is that report, which is the ordering the
+    /// synchronous walk had.
+    ///
+    /// States are written to the ledger as the walk reaches them — an attempt in
+    /// flight *before* its effect is awaited, and its outcome after — so a tick
+    /// dropped in the middle holds what it had begun instead of leaving a
+    /// `NotStarted` entry for the next tick to replay.
+    async fn run_steps(
+        &mut self,
+        steps: &[Step],
+        failures: &mut [Option<BotError>],
+        budget: u32,
+    ) -> (usize, Option<BotError>) {
+        let mut fired: usize = 0;
+        let mut failure: Option<BotError> = None;
+        let mut start = 0;
+        for chain in 0..failures.len() {
+            // `steps` is in `(chain, entry)` walk order, so the steps of `chain`
+            // are the run at `start` — and a chain that recorded none contributes
+            // the empty run, because its first step is a later chain's.
+            let end = steps[start..]
+                .iter()
+                .position(|step| step.chain != chain)
+                .map_or(steps.len(), |offset| start.saturating_add(offset));
+            let run = match steps.get(start) {
+                Some(step) if step.chain == chain => &steps[start..end],
+                _ => &[],
+            };
+
+            // Taken, so the condition failure belongs to the chain it was recorded
+            // for and cannot be reported for a chain that never reached it.
+            let condition_failure = failures.get_mut(chain).and_then(Option::take);
+            let (chain_fired, chain_failure) = self.run_chain(run, condition_failure, budget).await;
+            fired = fired.saturating_add(chain_fired);
+            // Chain order, so "the first error in declaration order" is the one a
+            // caller gets, exactly as the synchronous walk had it — except that
+            // the chains after it still ran.
+            if failure.is_none() {
+                failure = chain_failure;
+            }
+            start = end;
+        }
+        (fired, failure)
+    }
+
+    /// Apply one chain's walk, in entry order, awaiting each attempt.
+    ///
+    /// A [`Decision::Skip`] is applied without an attempt. A
+    /// [`Decision::Attempt`] is written to the ledger as in flight, awaited, and
+    /// then recorded. The run stops at the first failure, leaving the entries
+    /// behind it exactly as they were, so an acknowledged effect is never
+    /// replayed to reach a successor.
+    ///
+    /// The report falls back to the condition failure the decision phase recorded
+    /// for this chain when no attempt of its own failed: a condition the walk
+    /// could not evaluate is a failure of the chain it is in, and the decisions
+    /// before it are exactly the effects the walk had already cleared.
+    async fn run_chain(
+        &mut self,
+        steps: &[Step],
+        condition_failure: Option<BotError>,
+        budget: u32,
+    ) -> (usize, Option<BotError>) {
+        let mut fired: usize = 0;
+        let mut failure: Option<BotError> = None;
+        for step in steps {
+            let work = WorkId {
+                chain: step.chain,
+                entry: step.entry,
+            };
+            let attempts = match step.decision {
+                Decision::Skip => {
+                    self.world.resource_mut::<Ledger>().skip(work);
+                    continue;
+                }
+                Decision::Attempt { attempts } => attempts,
+            };
+
+            // Written *before* the attempt, not after: a tick dropped while the
+            // effect is in flight leaves this behind, and a record that says
+            // "begun, outcome unknown" is what makes the next tick hold the
+            // effect instead of replaying it. A panic unwinding out of the action
+            // is a limit this substrate does not close, and it is stated in the
+            // module documentation.
+            if !self.world.resource_mut::<Ledger>().begin(work) {
+                // The entry is not in a state an attempt can start from, so the
+                // world moved behind the schedule's back. The run stops here
+                // rather than guessing what the entry now means.
+                break;
+            }
+
+            // Scoped, so the world is borrowed immutably only across the await
+            // and the ledger is reachable mutably on either side of it.
+            let outcome = {
+                let chains = self.world.non_send::<Chains>();
+                let observed = self.world.non_send::<Observed>();
+                let grants = self.world.resource::<Grants>();
+                match (
+                    chains.0.get(step.chain),
+                    observed.0.get(step.chain).and_then(Option::as_ref),
+                ) {
+                    (Some(chain), Some(value)) => match chain.entries.get(step.entry) {
+                        Some(entry) => Some(entry.action.run_any(&grants.0, value.as_ref()).await),
+                        None => None,
+                    },
+                    // No chain, or a source that has never answered: the entry
+                    // stays held by the record written above rather than being
+                    // guessed at.
+                    _ => None,
+                }
+            };
+
+            let Some(outcome) = outcome else {
+                break;
+            };
+            match outcome {
+                Ok(_) => {
+                    if self.world.resource_mut::<Ledger>().succeed(work) {
+                        fired = fired.saturating_add(1);
+                    }
+                }
+                Err(error) => {
+                    self.world
+                        .resource_mut::<Ledger>()
+                        .fail(work, &error, attempts, budget);
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        // An action failure happens *earlier* in walk order than a condition
+        // failure that follows it, so it is the more specific report.
+        (fired, failure.or(condition_failure))
     }
 
     /// Every entry that is not finished, in `(chain, entry)` order.
@@ -1454,7 +1913,15 @@ impl EcsBot {
         // Not `vec![None; count]`: `Box<dyn Any>` is not `Clone`, so the
         // repeat-form macro cannot build this.
         world.insert_non_send(Observed((0..count).map(|_| None).collect()));
+        // The eligible work of the bot, one idle slot per chain.
         world.insert_resource(Ledger::with_chains(count));
+        // The two staging resources the awaited phases hand to the schedule.
+        // Inserted here rather than at first use so every phase can name them
+        // unconditionally: a phase that found one missing would have to decide
+        // what that means, and there is no answer that is better than "this
+        // cannot happen".
+        world.insert_non_send(Polled::default());
+        world.insert_non_send(Plan::default());
 
         let mut schedule = schedule();
         validate(&mut schedule, &mut world)?;
@@ -1686,6 +2153,26 @@ mod tests {
         }
 
         fn domain_id(&self) -> &str {
+            "test::refuses"
+        }
+    }
+
+    /// A condition that fails structurally rather than evaluating to `false`.
+    ///
+    /// Named apart from the refusing *action* above rather than sharing a name
+    /// with it: the two refuse in different halves of a chain, one is a condition
+    /// and one is an action, and a single name for both would make a call site
+    /// that reads `.on(Refuses, ..)` ambiguous about which half it is asserting on.
+    struct RefusesToEvaluate;
+
+    impl Evaluate<u16> for RefusesToEvaluate {
+        fn check(&self, observed: &u16) -> Result<bool, BotError> {
+            Err(BotError::EvaluateError {
+                cause: format!("this condition cannot decide about {observed}"),
+            })
+        }
+
+        fn condition_id(&self) -> &str {
             "test::refuses"
         }
     }
@@ -2398,6 +2885,49 @@ mod tests {
     }
 
     #[test]
+    fn a_condition_failure_stops_the_walk_after_the_effects_it_cleared() -> TestResult {
+        // The other half of "partial run", on the condition side, and a
+        // characterisation rather than a new guarantee: this passes before and
+        // after the decision phase was split out of the effect phase, and it is
+        // here because that split is only sound if it does.
+        //
+        // Conditions are pure over the observed value, so the whole effect
+        // program can be recorded before any of it runs. The equivalence to the
+        // interleaved loop it replaced rests on exactly three things: the
+        // entries before a failing condition still run, the entries after it
+        // are not attempted, and the tick reports the condition's own error.
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let after = Rc::new(Cell::new(0));
+        let mut bot = EcsBot::builder("condition-failure")
+            .observe(Script::new(vec![200, 200]))
+            .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
+            .on(RefusesToEvaluate, Count(Rc::clone(&after)))
+            .on(|value: &u16| *value >= 200, Count(Rc::clone(&after)))
+            .build(&net_grants())?;
+
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(format!("a refused condition was reported as {fired} fired").into());
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::EvaluateError { .. }),
+                "expected the condition's own error, got {error:?}"
+            ),
+        }
+        assert_eq!(
+            *log.borrow(),
+            vec![200],
+            "the effect the walk cleared before the failing condition ran"
+        );
+        assert_eq!(
+            after.get(),
+            0,
+            "the entries after the failing condition were not attempted"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn an_ambiguous_schedule_is_refused_at_build() -> TestResult {
         let mut world = World::new();
 
@@ -2408,7 +2938,7 @@ mod tests {
             ambiguity_detection: LogLevel::Error,
             ..Default::default()
         });
-        ambiguous.add_systems((observe, fire));
+        ambiguous.add_systems((observe_fold, fire_plan));
 
         match validate(&mut ambiguous, &mut world) {
             Ok(()) => return Err("an ambiguous schedule was accepted at build".into()),
@@ -2425,7 +2955,7 @@ mod tests {
             ambiguity_detection: LogLevel::Error,
             ..Default::default()
         });
-        ordered.add_systems((observe, fire).chain());
+        ordered.add_systems((observe_fold, fire_plan).chain());
         validate(&mut ordered, &mut world)?;
         Ok(())
     }

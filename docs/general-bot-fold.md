@@ -85,6 +85,16 @@ implemented:
   exactly `1.0` in binary floating point rather than by rounding luck.
 - `Recognition` — the verdict.
 
+Two facts are decided before scoring rather than weighted: an element in another
+document, and an element of an incompatible tag. A fact that is absent on either
+side — no identifying attribute, no text, no structural path — contributes
+nothing, rather than the `1.0` its metric returns for the empty-vs-empty case.
+The weights are not renormalized around the gap, so identity and path together
+being `3/4` is what makes them required for the `3/4` threshold to be reachable.
+GitHub issue #39 filed this: two snapshot fields that are missing on *both*
+sides were scoring as agreement, which let an unrelated element with a different
+tag resolve against a target that had nothing to identify it by.
+
 `RecognitionVector::recognize` returns `Resolved` / `Ambiguous` / `Absent`, and
 **this is the load-bearing decision in the whole fold.** The described platform
 resolves an element to a single best candidate by similarity distance. A

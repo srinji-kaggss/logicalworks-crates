@@ -315,7 +315,24 @@ pub enum CosineError {
         right: usize,
     },
     /// A vector had zero magnitude, so its angle is undefined.
+    ///
+    /// An all-zero vector is a direction that does not exist. It is reported
+    /// apart from [`Self::NonFinite`] because the two have different causes and
+    /// different repairs: a zero vector is usually an empty or padded input at
+    /// the caller, where a non-finite one is a numeric fault inside whatever
+    /// produced it.
     ZeroMagnitude,
+    /// A vector carried a value that is not finite, so no angle can be computed.
+    ///
+    /// This is a *fourth* state behind a metric that most callers read as one
+    /// number, and it needs to be its own variant rather than folded into
+    /// [`Self::ZeroMagnitude`]. `NaN` compares `false` against everything,
+    /// including itself, so a caller that lets one through a comparison reads
+    /// "no measurement was possible" as "the measurement came out negative" —
+    /// which is exactly the inference that must not be available. The
+    /// accumulated sums are checked as well as the inputs, because a vector of
+    /// finite values can still overflow to infinity.
+    NonFinite,
 }
 
 impl fmt::Display for CosineError {
@@ -326,6 +343,7 @@ impl fmt::Display for CosineError {
                 "cosine vectors differ in length: {left} and {right}"
             ),
             Self::ZeroMagnitude => formatter.write_str("cosine vector has zero magnitude"),
+            Self::NonFinite => formatter.write_str("cosine vector is not finite"),
         }
     }
 }
@@ -368,12 +386,27 @@ impl Cosine {
         for (left_value, right_value) in left.iter().zip(right) {
             let left_value = f64::from(*left_value);
             let right_value = f64::from(*right_value);
+            // Checked before it is accumulated, so a `NaN` component is named
+            // as what it is rather than surfacing later as a `NaN` magnitude
+            // that a caller could mistake for an all-zero vector.
+            if !left_value.is_finite() || !right_value.is_finite() {
+                return Err(CosineError::NonFinite);
+            }
             dot += left_value * right_value;
             left_squared += left_value * left_value;
             right_squared += right_value * right_value;
         }
+        // Every `f32` is far below the smallest `f64` value whose square
+        // overflows, so the per-component check above already implies these
+        // sums are finite. The guard stays because it is the one that becomes
+        // load-bearing if the element type ever widens, and because a `NaN`
+        // accumulator would otherwise fall through `magnitudes <= 0.0` — `NaN`
+        // compares false against everything — and return as a score.
+        if !dot.is_finite() || !left_squared.is_finite() || !right_squared.is_finite() {
+            return Err(CosineError::NonFinite);
+        }
         let magnitudes = left_squared.sqrt() * right_squared.sqrt();
-        if magnitudes <= 0.0 || !magnitudes.is_finite() {
+        if magnitudes <= 0.0 {
             return Err(CosineError::ZeroMagnitude);
         }
         Ok((dot / magnitudes).clamp(-1.0, 1.0))
@@ -788,6 +821,46 @@ mod tests {
             scorer.try_score(&[], &[]),
             Err(CosineError::ZeroMagnitude)
         ));
+    }
+
+    #[test]
+    fn cosine_names_a_non_finite_vector_apart_from_a_zero_magnitude_one() {
+        let scorer = Cosine::new();
+        // A `NaN` component on either side, and an infinity on either side. All
+        // four are refused as `NonFinite`, not as `ZeroMagnitude`: the two have
+        // different repairs, and reporting the wrong one sends the operator to
+        // the wrong end of the pipeline.
+        for (left, right) in [
+            (&[f32::NAN, 1.0][..], &[1.0, 1.0][..]),
+            (&[1.0, 1.0][..], &[f32::NAN, 1.0][..]),
+            (&[f32::INFINITY, 1.0][..], &[1.0, 1.0][..]),
+            (&[1.0, 1.0][..], &[1.0, f32::NEG_INFINITY][..]),
+        ] {
+            assert!(
+                matches!(scorer.try_score(left, right), Err(CosineError::NonFinite)),
+                "a non-finite vector must be refused as NonFinite: {left:?} {right:?}"
+            );
+        }
+        // The distinction has to reach the operator, so it is carried by the
+        // rendered message and not only by the variant name.
+        assert_ne!(
+            CosineError::NonFinite.to_string(),
+            CosineError::ZeroMagnitude.to_string(),
+            "the two refusals must not render identically"
+        );
+    }
+
+    #[test]
+    fn cosine_never_returns_a_non_finite_score_from_the_infallible_method() {
+        let scorer = Cosine::new();
+        // This is the property the typed error protects. A caller that reads
+        // only the trait method gets `0.0` — "no similarity" — and never `NaN`,
+        // which would compare false against every threshold and turn "we could
+        // not measure this" into "this did not match".
+        let score = scorer.score(&[f32::NAN, 1.0], &[1.0, 1.0]);
+        assert!(score.is_finite(), "the infallible method returned {score}");
+        assert_close(score, 0.0);
+        assert_close(scorer.score(&[f32::INFINITY, 1.0], &[1.0, 1.0]), 0.0);
     }
 
     #[test]

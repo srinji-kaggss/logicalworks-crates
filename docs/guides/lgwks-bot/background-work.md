@@ -9,7 +9,7 @@ call. The units differ, and so do the guarantees.
 `rt::supervise::Supervisor` (feature `sync`) owns a set of background tasks and
 stops them when it goes away. `Supervisor::new(max_in_flight)` takes the ceiling,
 clamps it into `1..=Semaphore::MAX_PERMITS`, and offers no argument that produces
-an unbounded supervisor (`crates/lgwks-bot/src/rt/supervise.rs:209`).
+an unbounded supervisor (`crates/lgwks-bot/src/rt/supervise.rs:240`).
 
 Four properties, all in the module documentation
 (`crates/lgwks-bot/src/rt/supervise.rs:9`):
@@ -55,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## `repeat`: a bound on iterations
 
 `repeat(&token, budget, body)` is the only loop the module asks you to write, and
-it cannot be written without a `Budget` (`crates/lgwks-bot/src/rt/supervise.rs:387`).
+it cannot be written without a `Budget` (`crates/lgwks-bot/src/rt/supervise.rs:447`).
 The variants are `Iterations(NonZeroU64)`, `For(Duration)`, and `Ongoing`.
 
 Two details that decide how tight your bound really is:
@@ -68,6 +68,12 @@ Two details that decide how tight your bound really is:
   A cancel drops a body that is still awaiting, and the loop reports
   `Outcome::Cancelled` rather than `Outcome::Exhausted`, so a completed run is
   distinguishable from an interrupted one.
+- The loop also yields the executor every `YIELD_INTERVAL` iterations
+  (`crates/lgwks-bot/src/rt/supervise.rs:109`), which is what keeps a body whose
+  future is ready on its first poll from turning the whole loop into one
+  uninterruptible poll. Without it a cancel ordered by another task could not be
+  delivered until the budget ran out, and on a current-thread runtime the
+  cancelling task could not be scheduled at all.
 
 `Ongoing` is the unbounded budget, and it is bounded in the way that matters: it
 is cancellation-terminated, not free-running. It ends when the supervisor that
@@ -94,11 +100,12 @@ runs, with no pooled thread between calls. The doc says the quiet part out loud:
 "callers that need a ceiling on simultaneous threads (for example
 `lgwks_bot::Bot::tick`) bound their own fan-out."
 
-`Bot::tick` does exactly that. `MAX_IN_FLIGHT_POLLS` is 32
-(`crates/lgwks-bot/src/ecs.rs:177`), and `observe` polls sources in waves of that
-size, because a source poll may occupy one `spawn_blocking` thread. Chains beyond
-32 are polled in additional waves, so the cap holds regardless of how many chains
-a spec declares.
+The tick does exactly that, on both adapters, because the wave loop lives in the
+`observe_fold` system rather than in either entry point. `MAX_IN_FLIGHT_POLLS`
+is 32 (`crates/lgwks-bot/src/ecs.rs:322`), and `observe_fold` polls sources in
+waves of that size, because a source poll may occupy one `spawn_blocking` thread.
+Chains beyond 32 are polled in additional waves, so the cap holds regardless of
+how many chains a spec declares.
 
 ## The limits
 
