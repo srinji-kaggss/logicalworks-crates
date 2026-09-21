@@ -358,6 +358,20 @@ pub enum BotError {
         /// The current ask node id.
         node: String,
     },
+    /// The journal refused to record a decision receipt.
+    ///
+    /// The decision itself was reachable — the resolver produced a verdict and
+    /// the flow had a transition for it — but the audit record for that decision
+    /// was not accepted, so the answer was **not** applied. This variant exists
+    /// because a receipt and a transition are one event: a session that moved
+    /// while nothing recorded why would be a run whose transcript describes
+    /// something the run never decided.
+    ReceiptNotRecorded {
+        /// The current ask node id.
+        node: String,
+        /// The journal's own refusal.
+        cause: crate::session::JournalError,
+    },
     /// A session attempted to execute more nodes than its flow budget allows.
     SessionBudgetExceeded {
         /// The number of attempted steps.
@@ -691,6 +705,17 @@ impl fmt::Display for BotError {
                     f,
                     "resolver returned an invalid option for node {}",
                     Escaped(node)
+                )
+            }
+            Self::ReceiptNotRecorded {
+                ref node,
+                ref cause,
+            } => {
+                write!(
+                    f,
+                    "decision at node {} was not recorded: {}",
+                    Escaped(node),
+                    Escaped(&cause.to_string())
                 )
             }
             Self::SessionBudgetExceeded { steps, budget } => {

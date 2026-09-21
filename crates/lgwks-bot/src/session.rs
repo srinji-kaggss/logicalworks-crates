@@ -42,10 +42,12 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::num::IntErrorKind;
 
+use lgwks_std::hash::Hasher;
 use lgwks_std::json::Value as JsonValue;
 use lgwks_std::json::{Deserialize, Serialize};
 
 use crate::error::BotError;
+use crate::semantic::EmbedderIdentity;
 
 /// Maximum JSON flow size accepted before parsing begins.
 pub const MAX_FLOW_BYTES: usize = 2_097_152;
@@ -2395,16 +2397,181 @@ impl Interpolate for TemplateInterpolator {
 pub trait Resolver {
     /// Resolves an utterance against the question in front of the person.
     ///
-    /// Returns a [`Resolution`], never an `Option<usize>`. The two-way form
+    /// Returns a [`Verdict`] — the [`Resolution`] together with the policy and
+    /// model that produced it — and never an `Option<usize>`. The two-way form
     /// collapses *nothing matched* and *several matched equally well* into one
     /// `None`, and the second is the dangerous one: an answer that fits two
     /// options as well as each other is reported as unrecognized, so the
     /// session re-asks the full list and the identical answer resolves the
     /// identical way forever. A caller that cannot see the tie cannot narrow.
     ///
+    /// The provenance is part of the return value rather than a second call,
+    /// because *this score came from that model under that rule* is one fact.
+    /// A caller that has to ask a resolver afterwards what it just did is
+    /// re-deriving a fact it was already handed, and the derivation is only as
+    /// good as the resolver's willingness to keep answering the same way.
     /// A question is more than its option list — see [`Question`] for why the
     /// identity travels with the options.
-    fn resolve(&self, utterance: &str, question: &Question<'_>) -> Resolution;
+    fn resolve(&self, utterance: &str, question: &Question<'_>) -> Verdict;
+}
+
+/// The identity of the decision policy that produced a verdict.
+///
+/// Two fields rather than one string, because they answer different questions.
+/// `label` names the tier whose parameters were in force, so a reader knows
+/// what kind of decision this was before reading any score. `revision` is a
+/// digest over the parameters themselves, so a threshold that moved is a
+/// different version **without anyone remembering to bump a number by hand**:
+/// a hand-bumped version is a promise, and a receipt cannot rest on a promise.
+///
+/// The parameters are hashed by their bit patterns rather than by their decimal
+/// renderings, so two thresholds differing in the last bit are two versions and
+/// no rounding stands between the value used and the value recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde", deny_unknown_fields)]
+#[non_exhaustive]
+pub struct PolicyVersion {
+    /// The tier whose policy was in force, such as `lexicon` or `semantic`.
+    label: String,
+    /// Content digest over the parameters in force, as lowercase hex.
+    revision: String,
+}
+
+impl PolicyVersion {
+    /// Versions a policy from its label and the parameters in force.
+    ///
+    /// The label is hashed in as well, so two tiers that happen to declare the
+    /// same parameters still have different revisions: a revision alone
+    /// identifies one policy, which is what lets it be compared without reading
+    /// the label beside it.
+    #[must_use]
+    pub fn new(label: impl Into<String>, parameters: &[f64]) -> Self {
+        let label = label.into();
+        let mut hasher = Hasher::new();
+        hasher.update(label.as_bytes());
+        for parameter in parameters {
+            hasher.update(&parameter.to_bits().to_le_bytes());
+        }
+        Self {
+            revision: hasher.finalize().to_hex(),
+            label,
+        }
+    }
+
+    /// Returns the tier label.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Returns the content digest over the policy's parameters.
+    #[must_use]
+    pub fn revision(&self) -> &str {
+        &self.revision
+    }
+}
+
+impl fmt::Display for PolicyVersion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}/{}", self.label, self.revision)
+    }
+}
+
+/// What produced a verdict: the policy in force, and the model if there was one.
+///
+/// The two travel together because they are one fact. A receipt that named a
+/// score and a tier but not the rule that scored it cannot answer the question
+/// a score actually raises, which is *would this have decided the same way
+/// yesterday*.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde", deny_unknown_fields)]
+#[non_exhaustive]
+pub struct Provenance {
+    /// The decision policy in force when the verdict was reached.
+    policy: PolicyVersion,
+    /// The model consulted, when the verdict came from one.
+    model: Option<EmbedderIdentity>,
+}
+
+impl Provenance {
+    /// The deterministic tiers decided; no model was consulted.
+    #[must_use]
+    pub fn without_model(policy: PolicyVersion) -> Self {
+        Self {
+            policy,
+            model: None,
+        }
+    }
+
+    /// A model was consulted under a policy, whether or not it answered.
+    ///
+    /// A degraded verdict names its model deliberately. [`DegradedReason`] says
+    /// the resolver never reached a verdict, and *which* model was unavailable
+    /// is exactly what the repair needs; a record that dropped the identity on
+    /// the failure path would describe the one case an operator has to act on
+    /// as though no model had been involved.
+    #[must_use]
+    pub fn with_model(policy: PolicyVersion, model: EmbedderIdentity) -> Self {
+        Self {
+            policy,
+            model: Some(model),
+        }
+    }
+
+    /// Returns the policy in force.
+    #[must_use]
+    pub fn policy(&self) -> &PolicyVersion {
+        &self.policy
+    }
+
+    /// Returns the model consulted, or `None` when none was.
+    ///
+    /// `None` is a finding rather than a missing value: the deterministic tiers
+    /// answered, and naming a model here would claim a comparison that never
+    /// happened.
+    #[must_use]
+    pub fn model(&self) -> Option<&EmbedderIdentity> {
+        self.model.as_ref()
+    }
+}
+
+/// A resolver's answer: the verdict, and what produced it.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct Verdict {
+    /// The three-way verdict.
+    resolution: Resolution,
+    /// The policy and model behind it.
+    provenance: Provenance,
+}
+
+impl Verdict {
+    /// Pairs a resolution with what produced it.
+    #[must_use]
+    pub const fn new(resolution: Resolution, provenance: Provenance) -> Self {
+        Self {
+            resolution,
+            provenance,
+        }
+    }
+
+    /// Returns the verdict.
+    #[must_use]
+    pub const fn resolution(&self) -> &Resolution {
+        &self.resolution
+    }
+
+    /// Returns what produced the verdict.
+    #[must_use]
+    pub const fn provenance(&self) -> &Provenance {
+        &self.provenance
+    }
+
+    /// Consumes the verdict and returns the resolution alone.
+    #[must_use]
+    pub fn into_resolution(self) -> Resolution {
+        self.resolution
+    }
 }
 
 /// Which match tier produced a resolution.
@@ -2414,7 +2581,8 @@ pub trait Resolver {
 /// pointing at the wrong option; a `Phonetic` miss is the English bias of
 /// [`crate::language::phonetic_key`]; a `Fuzzy` miss is a threshold. Three
 /// different repairs, and a bare `usize` names none of them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum MatchTier {
     /// The utterance matched exactly, directly or through a learned alias.
@@ -2432,7 +2600,8 @@ pub enum MatchTier {
 /// A closed set rather than a string, so a caller can branch on the cause
 /// without parsing prose, and so the set of ways a resolver can fail is stated
 /// where a reviewer reads it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum DegradedReason {
     /// The semantic tier's embedder returned an error, or a vector of the
@@ -2468,7 +2637,12 @@ impl fmt::Display for DegradedReason {
 }
 
 /// The outcome of resolving an utterance against the candidate options.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Serializable, and not only for convenience: this is the shape a
+/// [`DecisionReceipt`] carries verbatim, so a receipt cannot hold a verdict the
+/// journal could not write down.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Resolution {
     /// One option matched and led the runner-up by the required margin.
@@ -2560,10 +2734,249 @@ pub enum Resolution {
     },
 }
 
+/// Schema version of the [`DecisionReceipt`] this crate writes.
+///
+/// Bumped when a field's meaning changes or a field is removed. A reader that
+/// finds a version it does not know can refuse the record rather than
+/// misinterpret it, which is the only reason to version it at all: a receipt
+/// outlives the code that wrote it, and the code that reads it is not always
+/// the same revision.
+pub const RECEIPT_VERSION: u32 = 1;
+
+/// One structured record of a decision, written as part of the transition it
+/// describes.
+///
+/// The receipt exists because a transcript cannot be the audit record. A
+/// transcript is text: it says a person said something and the session moved,
+/// and it cannot say which option was considered, on whose authority the
+/// comparison was made, or whether a score of nothing meant *no similarity* or
+/// *no measurement*. Those are the questions a run has to be able to answer
+/// afterwards, and each field here is one of them:
+///
+/// - `session` and `flow` — which session, running which revision of the flow.
+///   A receipt that names a node but not the document it came from cannot be
+///   read against the flow a reader has on disk.
+/// - `node` and `options` — where the decision was taken, and the *ordered*
+///   candidate set it was taken against. The option list is digested rather
+///   than counted, because a reordering is a different question with a
+///   different right answer.
+/// - `resolution` — the verdict verbatim, including the tier. A score is not
+///   comparable across tiers, so a receipt holding a score without its tier
+///   holds an unreadable number.
+/// - `provenance` — the policy in force, and the model when one was consulted.
+/// - `selected` and `route` — what was chosen, by the option's own text, and
+///   where the session went. The text is what survives a reordering; the route
+///   is what the session actually did.
+///
+/// Fields that were not measured are absent rather than zero. A [`Resolution`]
+/// carries a score where a score was observed, and a [`Resolution::Degraded`]
+/// carries none at all, which is the difference between *the options were
+/// compared and nothing was close* and *nothing was compared*.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde", deny_unknown_fields)]
+#[non_exhaustive]
+pub struct DecisionReceipt {
+    /// Schema version; see [`RECEIPT_VERSION`].
+    version: u32,
+    /// The session the decision was taken in.
+    session: SessionId,
+    /// Digest of the flow document the session is running.
+    flow: String,
+    /// The ask node the decision was taken at.
+    node: NodeId,
+    /// Digest of the ordered candidate options the verdict was reached against.
+    options: String,
+    /// The verdict, verbatim.
+    resolution: Resolution,
+    /// The policy in force, and the model when one was consulted.
+    provenance: Provenance,
+    /// The selected option's own text, when the verdict selected one.
+    ///
+    /// The text rather than the index: an index is a position in a list that
+    /// can be reordered, and the text is the only thing that still names the
+    /// choice once it is.
+    selected: Option<String>,
+    /// The node the accepted transition moved to, when it moved.
+    route: Option<NodeId>,
+}
+
+impl DecisionReceipt {
+    /// Returns the schema version.
+    #[must_use]
+    pub const fn version(&self) -> u32 {
+        self.version
+    }
+
+    /// Returns the session identity.
+    #[must_use]
+    pub fn session(&self) -> &SessionId {
+        &self.session
+    }
+
+    /// Returns the flow revision digest.
+    #[must_use]
+    pub fn flow(&self) -> &str {
+        &self.flow
+    }
+
+    /// Returns the ask node the decision was taken at.
+    #[must_use]
+    pub fn node(&self) -> &str {
+        &self.node
+    }
+
+    /// Returns the digest of the ordered candidate options.
+    #[must_use]
+    pub fn options(&self) -> &str {
+        &self.options
+    }
+
+    /// Returns the verdict.
+    #[must_use]
+    pub fn resolution(&self) -> &Resolution {
+        &self.resolution
+    }
+
+    /// Returns the policy and model behind the verdict.
+    #[must_use]
+    pub fn provenance(&self) -> &Provenance {
+        &self.provenance
+    }
+
+    /// Returns the selected option's text, when the verdict selected one.
+    #[must_use]
+    pub fn selected(&self) -> Option<&str> {
+        self.selected.as_deref()
+    }
+
+    /// Returns the node the accepted transition moved to, when it moved.
+    #[must_use]
+    pub fn route(&self) -> Option<&str> {
+        self.route.as_deref()
+    }
+}
+
+/// Where a journal accepted a decision receipt.
+///
+/// Reported by the sink rather than assumed by the session, because the two are
+/// different facts and only the sink knows which one is true. A receipt held in
+/// memory is evidence for the lifetime of the process; a receipt held durably
+/// is evidence after it. A run that could not tell them apart would put the
+/// second claim on the first record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ReceiptAcceptance {
+    /// Held only in this process, and gone when it ends.
+    InMemory,
+    /// Written to a sink that outlives the process.
+    Durable,
+}
+
+/// The failure a journal reports when it cannot accept a receipt.
+///
+/// A named sink and its own description rather than a closed enum of causes:
+/// the failure belongs to the sink, which owns its vocabulary — a full disk, a
+/// refused connection, a closed file — and this crate cannot enumerate another
+/// component's failures without inventing a taxonomy the sink would then have
+/// to translate into. What is fixed here is that the failure crosses the seam
+/// as a value the session must handle, rather than a diagnostic it may print
+/// and continue past.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct JournalError {
+    /// The sink that refused the receipt.
+    sink: String,
+    /// The sink's own description of the failure.
+    cause: String,
+}
+
+impl JournalError {
+    /// Records a sink's failure to accept a receipt.
+    #[must_use]
+    pub fn new(sink: impl Into<String>, cause: impl Into<String>) -> Self {
+        Self {
+            sink: sink.into(),
+            cause: cause.into(),
+        }
+    }
+
+    /// Returns the sink that refused.
+    #[must_use]
+    pub fn sink(&self) -> &str {
+        &self.sink
+    }
+
+    /// Returns the sink's description of the failure.
+    #[must_use]
+    pub fn cause(&self) -> &str {
+        &self.cause
+    }
+}
+
+impl fmt::Display for JournalError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "journal {} refused a decision receipt: {}",
+            self.sink, self.cause
+        )
+    }
+}
+
+impl std::error::Error for JournalError {}
+
+/// One receipt, and the way the journal accepted it.
+///
+/// The pair rather than a receipt carrying its own acceptance: the receipt is
+/// what both sides hold, and the acceptance is the journal's answer about it.
+/// Folding the answer into the record the journal was already given would mean
+/// the two copies differ on the field that matters most.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct RecordedDecision {
+    /// The receipt the journal accepted.
+    receipt: DecisionReceipt,
+    /// Where the journal said it accepted it.
+    acceptance: ReceiptAcceptance,
+}
+
+impl RecordedDecision {
+    /// Returns the receipt.
+    #[must_use]
+    pub fn receipt(&self) -> &DecisionReceipt {
+        &self.receipt
+    }
+
+    /// Returns where the journal accepted it.
+    #[must_use]
+    pub const fn acceptance(&self) -> ReceiptAcceptance {
+        self.acceptance
+    }
+}
+
 /// Journal seam for session path records.
 pub trait Journal {
     /// Receive a path node, role label, and rendered text record.
     fn record(&mut self, path_node: &str, role: &str, text: &str);
+
+    /// Accept one decision receipt, reporting where it was accepted.
+    ///
+    /// Fallible, and required rather than defaulted. [`Self::record`] cannot
+    /// report persistence failure, and neither could a defaulted version of
+    /// this method: a sink that has to do nothing to look successful is a sink
+    /// that silently drops every receipt, and the session would report an
+    /// accepted transition whose audit record does not exist. Requiring it
+    /// makes every implementation state what it does with a receipt — including
+    /// [`MemoryJournal`], which says `InMemory` in as many words.
+    ///
+    /// `Err` aborts the transition. A receipt is not a log line written beside
+    /// the work; it is part of accepting the answer, so a session that cannot
+    /// record the decision has not taken it.
+    fn record_decision(
+        &mut self,
+        receipt: &DecisionReceipt,
+    ) -> Result<ReceiptAcceptance, JournalError>;
 }
 
 /// One in-memory transcript record.
@@ -2600,11 +3013,18 @@ impl TranscriptEntry {
 }
 
 /// Bounded-by-session in-memory journal implementation.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// `PartialEq` but not `Eq`: the receipts it holds carry the scores a verdict
+/// was reached on, and `f64` is not `Eq`. That is a property of the record
+/// rather than a gap — `NaN` is not a score any tier produces, and `DecisionReceipt`
+/// has no `Eq` for the same reason.
+#[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct MemoryJournal {
     /// Records in insertion order.
     records: Vec<TranscriptEntry>,
+    /// Decision receipts in insertion order.
+    receipts: Vec<DecisionReceipt>,
 }
 
 impl MemoryJournal {
@@ -2613,6 +3033,7 @@ impl MemoryJournal {
     pub const fn new() -> Self {
         Self {
             records: Vec::new(),
+            receipts: Vec::new(),
         }
     }
 
@@ -2622,10 +3043,22 @@ impl MemoryJournal {
         &self.records
     }
 
+    /// Return decision receipts in insertion order.
+    #[must_use]
+    pub fn receipts(&self) -> &[DecisionReceipt] {
+        &self.receipts
+    }
+
     /// Consume the journal and return its records.
     #[must_use]
     pub fn into_records(self) -> Vec<TranscriptEntry> {
         self.records
+    }
+
+    /// Consume the journal and return its decision receipts.
+    #[must_use]
+    pub fn into_receipts(self) -> Vec<DecisionReceipt> {
+        self.receipts
     }
 }
 
@@ -2636,6 +3069,18 @@ impl Journal for MemoryJournal {
             role: role.to_owned(),
             text: text.to_owned(),
         });
+    }
+
+    /// Accepts a receipt, and says so: `InMemory` is the honest answer for a
+    /// sink whose whole storage is a `Vec` in this process. A caller that needs
+    /// a durable record has to install a journal that says `Durable`, and can
+    /// see from the receipt that this one did not.
+    fn record_decision(
+        &mut self,
+        receipt: &DecisionReceipt,
+    ) -> Result<ReceiptAcceptance, JournalError> {
+        self.receipts.push(receipt.clone());
+        Ok(ReceiptAcceptance::InMemory)
     }
 }
 
@@ -2684,6 +3129,8 @@ pub struct Session {
     id: SessionId,
     /// Validated flow document owned by this session.
     flow: FlowSpec,
+    /// Digest of the flow document, computed once at construction.
+    flow_revision: String,
     /// Current node, or `None` after terminal completion.
     current: Option<NodeId>,
     /// Typed variable scope.
@@ -2696,6 +3143,8 @@ pub struct Session {
     resolver: Box<dyn Resolver>,
     /// Pluggable record sink.
     journal: Box<dyn Journal>,
+    /// Decision receipts in insertion order, with how each was accepted.
+    decisions: Vec<RecordedDecision>,
     /// Terminal outcome, if the cursor has stopped.
     terminal: Option<Terminal>,
     /// Number of charged execution and answer steps.
@@ -2772,15 +3221,18 @@ impl Session {
         // become known to validation.
         validate_flow_within(&flow, effective)?;
         let scope = VarScope::new(flow.vars.clone())?;
+        let flow_revision = revision_of(&flow)?;
         let mut session = Self {
             id: id.into(),
             current: Some(flow.entry.clone()),
             flow,
+            flow_revision,
             scope,
             visited: Vec::new(),
             transcript: Vec::new(),
             resolver: Box::new(resolver),
             journal: Box::new(journal),
+            decisions: Vec::new(),
             terminal: None,
             steps: 0,
             last_utterance: None,
@@ -2860,6 +3312,24 @@ impl Session {
         &self.transcript
     }
 
+    /// Return the decision receipts written so far, in insertion order.
+    ///
+    /// This is the audit record. [`Self::transcript`] is a rendering of the
+    /// same events for a person to read; these are what a consumer reconciles
+    /// against, and they carry what a rendering cannot: the policy in force,
+    /// the model if one was consulted, the candidate set, and where each
+    /// receipt was accepted.
+    #[must_use]
+    pub fn decisions(&self) -> &[RecordedDecision] {
+        &self.decisions
+    }
+
+    /// Return the digest of the flow document this session is running.
+    #[must_use]
+    pub fn flow_revision(&self) -> &str {
+        &self.flow_revision
+    }
+
     /// Return the terminal outcome, if reached.
     #[must_use]
     pub fn terminal(&self) -> Option<&Terminal> {
@@ -2896,6 +3366,21 @@ impl Session {
 
     /// Submit one free-text answer. Unrecognized input is recorded, the same
     /// ask remains current, and the prompt is recorded again.
+    ///
+    /// Every verdict — resolved, ambiguous, absent, or degraded — writes a
+    /// [`DecisionReceipt`], because a re-ask is a decision too and the one an
+    /// operator most needs to see afterwards.
+    ///
+    /// The receipt is written through the journal before the transition it
+    /// describes is applied, and a journal that refuses it aborts the answer
+    /// with [`BotError::ReceiptNotRecorded`] leaving the session exactly as it
+    /// was: not advanced, not terminated, the variable unwritten, the
+    /// transcript untouched, and no receipt held. Recording is part of
+    /// accepting an answer, not a report written beside it, so the one failure
+    /// this ordering leaves behind is a decision that was reached and recorded
+    /// whose answer could not then be stored — which is the direction an audit
+    /// record must err in, and the opposite of an accepted answer with no
+    /// record of why.
     pub fn answer(&mut self, utterance: &str) -> Result<(), BotError> {
         if self.terminal.is_some() {
             return Err(BotError::SessionTerminated);
@@ -2926,8 +3411,40 @@ impl Session {
         self.charge_step()?;
         let question =
             Question::new(&node_id, &options).with_domain(self.scope.answer_domain(&var));
-        let index = match self.resolver.resolve(utterance, &question) {
-            Resolution::Resolved { index, .. } => index,
+        let verdict = self.resolver.resolve(utterance, &question);
+        match verdict.resolution().clone() {
+            Resolution::Resolved { index, .. } => {
+                let Some(option) = options.get(index) else {
+                    return Err(BotError::ResolverReturnedInvalidOption { node: node_id });
+                };
+                let Some(target) = routes.get(option).cloned() else {
+                    return Err(BotError::MissingAskRoute {
+                        node: node_id,
+                        option: option.clone(),
+                    });
+                };
+                // Written before the transition it describes, which is the
+                // ordering `answer`'s contract above requires: a journal that
+                // refuses the receipt aborts the answer with the session
+                // untouched — not advanced, the variable unwritten, the
+                // transcript bare.
+                self.write_receipt(
+                    &node_id,
+                    &options,
+                    &verdict,
+                    Some(option.clone()),
+                    Some(&target),
+                )?;
+                self.scope.set_from_answer_within(
+                    &var,
+                    option,
+                    self.limits.get(ResourceAxis::Value),
+                )?;
+                self.last_utterance = Some(utterance.to_owned());
+                self.record(&node_id, "user", utterance)?;
+                self.current = Some(target);
+                self.drive()
+            }
             Resolution::Ambiguous { tied, .. } => {
                 // Narrow the re-ask to the options still in play. Repeating the
                 // full list is what a two-way verdict forced, and it is why an
@@ -2938,18 +3455,20 @@ impl Session {
                     .iter()
                     .filter_map(|candidate| options.get(*candidate).cloned())
                     .collect();
+                self.write_receipt(&node_id, &options, &verdict, None, None)?;
                 self.record(&node_id, "user", utterance)?;
                 if narrowed.len() >= 2 {
                     self.record_prompt(&node_id, &narrowed)?;
                 } else {
                     self.record_prompt(&node_id, &options)?;
                 }
-                return Ok(());
+                Ok(())
             }
             Resolution::Absent { .. } => {
+                self.write_receipt(&node_id, &options, &verdict, None, None)?;
                 self.record(&node_id, "user", utterance)?;
                 self.record_prompt(&node_id, &options)?;
-                return Ok(());
+                Ok(())
             }
             Resolution::StaleAlias {
                 question: bound_question,
@@ -2961,37 +3480,69 @@ impl Session {
                 // rewrote its resolver's learned vocabulary would be editing the
                 // audit record it is supposed to be producing. The record names
                 // the binding and the question; retiring it is the owner's call.
+                // A re-ask is a decision, so it is receipted like every other
+                // verdict; the receipt names the withdrawal, and the roles
+                // below name it again for whoever reads the transcript.
+                self.write_receipt(&node_id, &options, &verdict, None, None)?;
                 self.record(&node_id, "user", utterance)?;
                 self.record_stale_alias(&node_id, &bound_question, &option)?;
                 self.record_prompt(&node_id, &options)?;
-                return Ok(());
+                Ok(())
             }
             Resolution::Degraded { reason } => {
                 // Re-ask, as for `Absent`, but record the cause under its own
                 // role: a transcript that renders a degraded re-ask exactly as
                 // an unclear one is how an operator concludes the person was
                 // being difficult while the embedder was down.
+                self.write_receipt(&node_id, &options, &verdict, None, None)?;
                 self.record(&node_id, "user", utterance)?;
                 self.record_degraded(&node_id, reason)?;
                 self.record_prompt(&node_id, &options)?;
-                return Ok(());
+                Ok(())
             }
+        }
+    }
+
+    /// Build one receipt and write it through the journal, or refuse the
+    /// answer.
+    ///
+    /// The session's own copy is stored only after the sink has taken it, and
+    /// the acceptance that comes back is stored beside it: what the journal
+    /// said about the receipt is its own fact, and a receipt that carried its
+    /// own acceptance would be the session answering a question only the sink
+    /// can answer.
+    fn write_receipt(
+        &mut self,
+        node_id: &str,
+        options: &[String],
+        verdict: &Verdict,
+        selected: Option<String>,
+        route: Option<&str>,
+    ) -> Result<(), BotError> {
+        let receipt = DecisionReceipt {
+            version: RECEIPT_VERSION,
+            session: self.id.clone(),
+            flow: self.flow_revision.clone(),
+            node: node_id.to_owned(),
+            options: options_revision(options),
+            resolution: verdict.resolution().clone(),
+            provenance: verdict.provenance().clone(),
+            selected,
+            route: route.map(str::to_owned),
         };
-        let Some(option) = options.get(index) else {
-            return Err(BotError::ResolverReturnedInvalidOption { node: node_id });
-        };
-        self.scope
-            .set_from_answer_within(&var, option, self.limits.get(ResourceAxis::Value))?;
-        self.last_utterance = Some(utterance.to_owned());
-        self.record(&node_id, "user", utterance)?;
-        let Some(target) = routes.get(option) else {
-            return Err(BotError::MissingAskRoute {
-                node: node_id,
-                option: option.clone(),
-            });
-        };
-        self.current = Some(target.clone());
-        self.drive()
+        // The sink takes it first. The session's own copy is stored only once
+        // the journal has accepted it, so a refusal leaves no receipt held.
+        let acceptance = self.journal.record_decision(&receipt).map_err(|cause| {
+            BotError::ReceiptNotRecorded {
+                node: node_id.to_owned(),
+                cause,
+            }
+        })?;
+        self.decisions.push(RecordedDecision {
+            receipt,
+            acceptance,
+        });
+        Ok(())
     }
 
     /// Charge one bounded step or return [`BotError::SessionBudgetExceeded`].
@@ -3258,6 +3809,38 @@ fn prompt_bytes(options: &[String]) -> Option<usize> {
             total.checked_add(option.len())
         })?
         .checked_add(separators)
+}
+
+/// Digest a flow document so a receipt names the revision it was decided under.
+///
+/// The document is digested through its JSON rendering rather than field by
+/// field, so a field added to [`FlowSpec`] later is covered without anyone
+/// remembering to extend a walk. `FlowSpec` holds `BTreeMap`s, so the rendering
+/// is canonical: two flows that differ only in the order their maps were built
+/// from digest identically, which is what makes this a *revision* rather than a
+/// serialization accident.
+fn revision_of(flow: &FlowSpec) -> Result<String, BotError> {
+    crate::json::to_string(flow)
+        .map(|rendered| lgwks_std::hash::blake3(rendered.as_bytes()).to_hex())
+        .map_err(|error| BotError::MalformedFlow {
+            cause: error.to_string().escape_debug().to_string(),
+        })
+}
+
+/// Digest an ordered candidate list, so a reordering is a different identity.
+///
+/// Each option is length-prefixed rather than separated, because an option is
+/// free text and could contain any separator: a digest that concatenated
+/// `["a", "b"]` and `["ab"]` to the same bytes would report two different
+/// questions as one identity, and the whole point of the field is to tell
+/// whether the question changed.
+fn options_revision(options: &[String]) -> String {
+    let mut hasher = Hasher::new();
+    for option in options {
+        hasher.update(&option.len().to_le_bytes());
+        hasher.update(option.as_bytes());
+    }
+    hasher.finalize().to_hex()
 }
 
 /// Resolve one scalar expression from a variable scope.
@@ -3581,13 +4164,13 @@ mod tests {
         let resolver = crate::language::LanguageResolver::new();
         assert!(
             matches!(
-                resolver.resolve("maybe", &question),
+                resolver.resolve("maybe", &question).into_resolution(),
                 Resolution::Absent { .. }
             ),
             "an unrecognized answer is Absent, which is not the same as Ambiguous"
         );
         assert_eq!(
-            resolver.resolve("yes", &question),
+            resolver.resolve("yes", &question).into_resolution(),
             Resolution::Resolved {
                 index: 0,
                 tier: MatchTier::Exact,

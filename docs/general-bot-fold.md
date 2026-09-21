@@ -44,12 +44,12 @@ That is this workspace's bot model, arrived at independently:
 | Described platform | This workspace | Where |
 |---|---|---|
 | `WhereWhatPair` | a `ChainSpec`: a condition bound to an action | `crates/lgwks-bot/src/spec.rs` |
-| `Where` boolean algebra | `Predicate::{And, Or, Not}` over a closed expression language | `session.rs:107` |
+| `Where` boolean algebra | `Predicate::{And, Or, Not}` over a closed expression language | `session.rs:109` |
 | `Where` URL / cookie / selector guards | the conditions an `Observe` domain reports | `domain/*.rs` |
 | `What[]` action pipeline | `Execute::execute_action`, one effect per call | `verb.rs` |
 | `WorkflowInterpreter` state matcher | the ECS schedule: a condition is `Changed<T>` | `docs/bot-on-ecs.md` §1 |
-| `WorkflowFile.meta` + graph | `FlowSpec` (vars, entry, nodes, edges, terminals) | `session.rs:387` |
-| a step that dispatches to a subsystem | `NodeKind::Route { dispatch, fallback }` | `session.rs:182` |
+| `WorkflowFile.meta` + graph | `FlowSpec` (vars, entry, nodes, edges, terminals) | `session.rs:521` |
+| a step that dispatches to a subsystem | `NodeKind::Route { dispatch, fallback }` | `session.rs:184` |
 
 So the first and largest correction to make is that **the fold does not need a
 new IR**. A recorder's output is a `FlowSpec`; a scheduler's unit of work is a
@@ -283,12 +283,23 @@ name, a content digest of its weights, and its vector width. The digest is what
 makes two runs comparable — same name, different weights is a different model —
 and it is supplied by the embedder rather than computed here, because only the
 code that loaded the weights can know them. A verdict a model produced is only
-declarable if the model is named.
+declarable if the model is named, so the identity travels on the verdict and
+from there into the decision receipt — not into a resolver accessor a caller
+holding a `Box<dyn Resolver>` cannot reach.
 
 **It reports rather than guesses.** A failed embedder, or one that contradicts
 its own declared width, produces `Resolution::Degraded` (§6 item 5) and not
 `Absent`. Re-asking is the right response to both, but the record distinguishes
 them, so an operator can tell an unclear person from a dependency that is down.
+
+**It says what it decided and on whose authority.** Each accepted answer is
+recorded as a versioned `DecisionReceipt` through a required, fallible
+`Journal::record_decision`: the session and the flow revision, the node and the
+identity of the *ordered* option set, the verdict with its tier and score, the
+policy in force, and the model when one was consulted. The transcript is a
+rendering of the conversation; the receipt is the audit record, and a sink that
+refuses the write aborts the answer rather than leaving a cursor that moved with
+nothing to say why.
 
 Three things are deliberate rather than missing. The policy constants
 (`0.72`, `0.05`) are **declared, not fitted**, and are constructor arguments
@@ -297,14 +308,15 @@ since two phrasings of one option legitimately score within hundredths of each
 other. There is **no cache**: an option list is authored and short, and a cache
 is a second piece of state needing a bound, an eviction policy and a test for
 both — the seam it would sit behind is `Embedder`. And there is **no logging**:
-the cause travels in the verdict and is written into the transcript, which is
-the run's record, rather than into a second unmanaged copy of the same fact.
+the cause travels in the verdict and the verdict reaches the decision receipt,
+which is the run's record, rather than into a second unmanaged copy of the same
+fact.
 
 ## 4. What maps onto something that already exists
 
 | Described subsystem | This workspace | Note |
 |---|---|---|
-| REST gateway with JWT and scopes | `Cap` / `GrantSet`, proof-carrying | Strictly stronger: a scope checked once at a gateway is ambient for the rest of the request; `Auth` is re-proved on every call, so a grant revoked after build cannot fire (`lib.rs`) |
+| REST gateway with JWT and scopes | `Cap` / `GrantSet`, proof-carrying | Different, not strictly stronger. A scope checked once at a gateway is ambient for the rest of the request; `Auth` is re-proved on every call, against the grant set the bot was built with. That set is a **snapshot** (`lib.rs`, `README.md`): `GrantSet` has no revoke operation, so narrowing a running bot needs a mechanism this crate does not have |
 | Socket.io stateful multiplexer | `rt::sync` bounded channels | Bounded by construction; `unbounded_channel` is forbidden workspace-wide |
 | Browser pool manager, lease/release | `rt::supervise`, `rt::cancel` | A supervised bounded pool is exactly what these already are |
 | Playwright Chromium behind a WebSocket | the CDP allow-list in `docs/security-posture.md` | The allow-list is the contract; the driver is an implementation of it |

@@ -241,7 +241,7 @@ questionnaire is used (CAIQ v4.1 / CCM v4.1 domain codes, SIG 2025):
 |---|---|---|
 | Where are session cookies, tokens and credentials stored, and are they encrypted at rest? | IAM, CEK | Item 5; the `guard` and `access` seams |
 | What network egress is the runner permitted, and how is that enforced? | DCS | `GrantSet`; declared observation intents |
-| Can the customer revoke the automation's access, and how quickly? | IAM | Item 5; the two-clock revocation model |
+| Can the customer revoke the automation's access, and how quickly? | IAM | **No** — item 5. `GrantSet` has no revoke operation and a built bot holds a snapshot of the set it was admitted with, so withdrawing a capability means ending the bot process. The two-clock fence in `docs/frontier.md` is a design target with no implementation here |
 | Are actions against our application logged in a form we can retrieve and verify? | LOG | Items 4 and 9 — answered as a *customer-facing export*, not an internal capability |
 | What data leaves our boundary? | DCS | Declared observation intents; the egress grant |
 

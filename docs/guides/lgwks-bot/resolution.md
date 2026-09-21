@@ -14,9 +14,9 @@ space. They answer different questions and they have different failure modes.
 ## The question goes in, not just its options
 
 `Resolver::resolve(&self, utterance, &Question)` takes the question
-(`crates/lgwks-bot/src/session.rs:2407`). A `Question` carries the id the answer
+(`crates/lgwks-bot/src/session.rs:2415`). A `Question` carries the id the answer
 is being given for, the options currently on offer, and the kind of answer the
-variable declares (`crates/lgwks-bot/src/session.rs:2267`). Both additions past
+variable declares (`crates/lgwks-bot/src/session.rs:2269`). Both additions past
 the option list exist because a resolver that sees only a list of strings cannot
 tell two different questions apart, and cannot tell a number from a label.
 
@@ -25,19 +25,26 @@ different fact from the same phrase at another question, and the resolver is tol
 which question it is answering.
 
 The kind is an `AnswerDomain`, derived from the declared `VarType` rather than
-chosen per call (`crates/lgwks-bot/src/session.rs:382`): an `Integer` variable
+chosen per call (`crates/lgwks-bot/src/session.rs:384`): an `Integer` variable
 declares `Integer`, and `String`, `Boolean` and `Choice` declare `Label`.
 `Question::new` defaults to `Label`, so a caller that says nothing gets the
 lexical reading described below and no caller's meaning changes by surprise.
 
-## The verdict is five-valued
+## The verdict is five-valued, and it carries its own provenance
 
-`Resolver::resolve` returns a `Resolution`, never an `Option<usize>`
-(`crates/lgwks-bot/src/session.rs:2473`). The trait documentation gives the
-reason: a two-way verdict collapses "nothing matched" and "several matched
-equally well" into one `None`, and the second is the dangerous one, because the
-session re-asks the identical list and the identical answer resolves the
-identical way forever.
+`Resolver::resolve` returns a `Verdict` — a `Resolution` together with the
+`Provenance` that produced it, in one value — and never an `Option<usize>`
+(`crates/lgwks-bot/src/session.rs:2415`). The trait documentation gives the
+reason the verdict is five-valued: a two-way verdict collapses "nothing matched"
+and "several matched equally well" into one `None`, and the second is the
+dangerous one, because the session re-asks the identical list and the identical
+answer resolves the identical way forever.
+
+The provenance travels in the return value rather than through a second call,
+because *this score came from that model under that rule* is one fact. A caller
+that has to ask a resolver afterwards what it just did is re-deriving a fact it
+was already handed, and the derivation is only as good as the resolver's
+willingness to keep answering the same way.
 
 | Variant | Means | What the session does |
 |---|---|---|
@@ -48,7 +55,7 @@ identical way forever.
 | `Degraded { reason }` | the resolver never got to consider the options | re-asks, and records the cause under its own role |
 
 `Degraded` is `Absent`'s neighbour, not a spelling of it
-(`crates/lgwks-bot/src/session.rs:2557`). `Absent` means the person was not
+(`crates/lgwks-bot/src/session.rs:2731`). `Absent` means the person was not
 understood, so asking again in different words can help. `Degraded` means a
 dependency the resolver needs is unavailable, so the same utterance will degrade
 identically every time. That is why `Degraded` carries no `best_score`: no
@@ -56,14 +63,28 @@ measurement was taken, and reporting `0.0` would be an observation that never
 happened.
 
 `StaleAlias` is separated from `Absent` for the same reason
-(`crates/lgwks-bot/src/session.rs:2531`). `Absent` says the words did not fit the
+(`crates/lgwks-bot/src/session.rs:2705`). `Absent` says the words did not fit the
 options and a rephrase may help. `StaleAlias` says the words *did* have a
 confirmed meaning at this question and the option it was bound to is no longer
 offered — so the repair is not a rephrase, it is a conversation, and it names
 both halves of the broken binding because either alone is unactionable.
 
+`Provenance` (`crates/lgwks-bot/src/session.rs:2489`) holds two fields, and the
+second is optional on purpose:
+
+- **`PolicyVersion`** — always present, including on the lexicon path, because
+  "the lexicon decided this" is itself a claim about a rule. It is
+  content-addressed over the tier's own parameters (`PolicyVersion::new`
+  digests the numbers it is handed), so retuning a threshold in a later release
+  changes the revision. A hand-kept version string is a claim that can drift.
+- **`Option<EmbedderIdentity>`** — present only when a model was consulted. A
+  lexicon verdict is reproducible from the input alone, and naming a model on it
+  would attribute that verdict to a model that never ran. A degraded verdict
+  does name its model, deliberately: the model is what was expected to answer
+  and did not, so a record of the failure that omits it cannot be reproduced.
+
 `DegradedReason` has two variants in the inspected source
-(`crates/lgwks-bot/src/session.rs:2437`). `EmbedderUnavailable` is reached when
+(`crates/lgwks-bot/src/session.rs:2606`). `EmbedderUnavailable` is reached when
 the semantic tier's embedder returns an error or a vector of the wrong length.
 `UnmeasurableEmbedding` is reached when an embedding comes back as a value no
 angle can be computed from — an all-zero vector, or one carrying `NaN` or an
@@ -99,16 +120,16 @@ any matching happens, and the two readings share no tier.
 ### An `Integer` answer is decoded and compared as a value
 
 The raw utterance goes through the resolver's integer decoder
-(`crates/lgwks-bot/src/session.rs:476`), which runs the same `parse::<i64>` over
+(`crates/lgwks-bot/src/session.rs:478`), which runs the same `parse::<i64>` over
 the same trimmed bytes as the store's `VarType::decode_answer`
-(`crates/lgwks-bot/src/session.rs:422`) — so an answer the resolver can compare
+(`crates/lgwks-bot/src/session.rs:424`) — so an answer the resolver can compare
 is an answer the variable can hold, and the two cannot disagree about which
 answers are whole numbers. It trims surrounding space and accepts a leading
 sign, so `" 5 "`, `"+5"` and `"5"` all name the value `5`, while `"5.0"`,
 `"five"` and an out-of-range literal such as `9223372036854775808` name nothing.
 The decoded value is then compared with each option's own decoded value, and the
 ordinary decision rule runs over that set
-(`crates/lgwks-bot/src/language.rs:448`).
+(`crates/lgwks-bot/src/language.rs:465`).
 
 No lexical, phonetic, fuzzy, alias or semantic tier runs for this domain, and
 that is the point rather than an optimisation. `normalize` folds punctuation and
@@ -144,13 +165,13 @@ tier that produced it.
 
 They are ordered tiers rather than one weighted sum because an exact match has to
 short-circuit, and a weighted sum cannot express that. `MatchTier` is reported
-rather than inferred (`crates/lgwks-bot/src/session.rs:2419`), because the tier
+rather than inferred (`crates/lgwks-bot/src/session.rs:2587`), because the tier
 names the repair: an `Exact` miss is a learned alias pointing at the wrong
 option, a `Phonetic` miss is the English bias of the sound-alike key, a `Fuzzy`
 miss is a threshold.
 
 **Precedence is over the whole candidate set, not per option**
-(`crates/lgwks-bot/src/language.rs:277`). The best tier that any option reached is
+(`crates/lgwks-bot/src/language.rs:283`). The best tier that any option reached is
 the tier the question is answered in, and every option below it is discarded
 before the margin is applied. An option does not win by scoring higher than an
 option in a stronger tier, and it does not take an `Ambiguous` verdict from a
@@ -160,9 +181,9 @@ transposition of two words keeps the whole token set and can score above `0.9` �
 and the tier order would be decoration.
 
 The three constants are `MATCH_THRESHOLD = 0.55`
-(`crates/lgwks-bot/src/language.rs:82`), `MATCH_MARGIN = 0.08`
-(`crates/lgwks-bot/src/language.rs:85`) and `MAX_UTTERANCE_CHARS = 512`
-(`crates/lgwks-bot/src/language.rs:73`). A score at or above the threshold that
+(`crates/lgwks-bot/src/language.rs:85`), `MATCH_MARGIN = 0.08`
+(`crates/lgwks-bot/src/language.rs:88`) and `MAX_UTTERANCE_CHARS = 512`
+(`crates/lgwks-bot/src/language.rs:76`). A score at or above the threshold that
 does not lead the runner-up **in its own tier** by the margin is `Ambiguous`, not
 `Resolved`. An utterance longer than the bound degrades rather than panicking.
 
@@ -185,7 +206,7 @@ calls that the conservative choice rather than an oversight.
 
 An `Alias` is a confirmation: a phrase a person used, the question they used it
 at, and the option text it was confirmed to mean
-(`crates/lgwks-bot/src/language.rs:378`). The option is stored **verbatim** — the
+(`crates/lgwks-bot/src/language.rs:384`). The option is stored **verbatim** — the
 option's own text, never its index and never a normalized form — so the binding
 is resolved into the current candidate set at use time rather than frozen to a
 position. A question that reorders or renames its options keeps every
@@ -193,10 +214,10 @@ confirmation that still names an option it offers.
 
 | Operation | Effect |
 |---|---|
-| `learn(question, utterance, option)` (`language.rs:597`) | binds the phrase, returning the binding it replaced, if any |
-| `forget(question, utterance)` (`language.rs:610`) | removes one binding, returning it |
-| `with_aliases(aliases)` (`language.rs:574`) | loads a shipped table, normalizing each phrase as it is stored |
-| `aliases()` (`language.rs:635`) | exports the table, so a session's confirmations survive a restart |
+| `learn(question, utterance, option)` (`language.rs:603`) | binds the phrase, returning the binding it replaced, if any |
+| `forget(question, utterance)` (`language.rs:616`) | removes one binding, returning it |
+| `with_aliases(aliases)` (`language.rs:580`) | loads a shipped table, normalizing each phrase as it is stored |
+| `aliases()` (`language.rs:641`) | exports the table, so a session's confirmations survive a restart |
 
 Two properties make this safe to spend. The phrase is normalized once, on the way
 in, so a shipped table and a learned binding are compared the same way. And a
@@ -230,18 +251,55 @@ binding has been superseded. Both are verdicts the deterministic path already
 reached, and a model that could rehabilitate either would be a second,
 unreviewable way for the folded-text defect to select an option.
 
-`Embedder` is a seam, not a dependency (`crates/lgwks-bot/src/semantic.rs:99`).
+`Embedder` is a seam, not a dependency (`crates/lgwks-bot/src/semantic.rs:117`).
 The crate carries no model, no tensor library, and no tokenizer. A consumer that
 has a model supplies it.
 
 What the seam requires is `Embedder::identity`, because a verdict a model
 produced is only declarable if the model is named. "The semantic tier resolved
-this" is not an audit record; a model name, digest, and dimension count is.
+this" is not an audit record; a model name, digest, and dimension count is. The
+identity travels out on the verdict itself, so a caller holding a
+`Box<dyn Resolver>` still has it, and from the verdict it reaches the decision
+receipt below.
+
+## The decision receipt
+
+Every answer a `Session` takes is recorded as a `DecisionReceipt`
+(`crates/lgwks-bot/src/session.rs:2778`) through
+`Journal::record_decision`. The receipt is the run's audit record; the
+transcript is a rendering of the conversation and cannot be one, because it
+says what was said and the receipt says what was decided. Its fields:
+
+| Field | Answers |
+|---|---|
+| `version` | which schema wrote it (`RECEIPT_VERSION`) |
+| `session`, `flow` | which session, running which digest of which flow document |
+| `node`, `options` | where the decision was taken, and the *ordered* candidate list it was taken against |
+| `resolution` | the verdict verbatim, tier included — a score without its tier is not readable |
+| `provenance` | the policy in force, and the model when one was consulted |
+| `selected`, `route` | what was chosen, by the option's own text, and where the session went |
+
+Two of those choices are load-bearing. `options` is a digest over the ordered
+list rather than a count, because reordering the options is a different
+question with a different right answer — and `selected` carries the option's
+text rather than its index for exactly that reason: an index is a position in a
+list that can move. Fields that were not measured are absent rather than zero,
+so `selected` and `route` are `None` on a re-ask and a `Degraded` resolution
+carries no score at all.
+
+`record_decision` is fallible and the `ReceiptAcceptance` it returns
+(`InMemory` or `Durable`) is stored beside the receipt, not inside it: two
+sinks handed identical bytes must produce identical receipts, and where a
+receipt was accepted is a question only the sink can answer. A sink that
+refuses the write aborts the answer — `BotError::ReceiptNotRecorded` — and the
+session does not move, does not write the variable, and does not record the
+utterance. A cursor that advanced while nothing recorded why would be a run
+whose transcript describes a decision the run never took.
 
 ## Thresholds are declared, not fitted
 
 `SemanticPolicy::DEFAULT` is `{ threshold: 0.72, margin: 0.05 }`
-(`crates/lgwks-bot/src/semantic.rs:312`). Those numbers are constructor
+(`crates/lgwks-bot/src/semantic.rs:350`). Those numbers are constructor
 arguments, not tuned constants, because the right values depend on the model.
 
 `docs/general-bot-fold.md` §3 item 13 records what is missing, and it is worth
@@ -285,8 +343,8 @@ resolver change fixes an option list that does not contain the answer.
 
 `Degraded` exists so an operator can tell a person who was unclear from a
 dependency that is down. The session records the degraded re-ask under its own
-transcript role (`crates/lgwks-bot/src/session.rs:3213`), and a superseded
-binding under a different one (`crates/lgwks-bot/src/session.rs:3225`), so the
+transcript role (`crates/lgwks-bot/src/session.rs:3764`), and a superseded
+binding under a different one (`crates/lgwks-bot/src/session.rs:3776`), so the
 three do not render identically. If you are building a dashboard, the degraded
 role is the signal to alert on; `Absent` is not. The superseded-binding role is
 neither: it is a prompt for someone to ask the person what they meant, and it
