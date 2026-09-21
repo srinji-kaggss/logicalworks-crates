@@ -4,8 +4,8 @@
 //! zero-copy deserialization: archived data is accessed directly from the
 //! byte buffer without allocation.
 //!
-//! This is the internal binary wire format. For external JSON APIs, use
-//! [`crate::json`]. Callers use the rkyv derive macros (`Archive`,
+//! This is the internal binary wire format. For external JSON APIs, use the
+//! `json` module. Callers use the rkyv derive macros (`Archive`,
 //! `Serialize`, `Deserialize`) on their types, then call the functions
 //! here with the error type already pinned.
 

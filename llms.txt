@@ -1,0 +1,37 @@
+# logicalworks-crates
+
+> Four independently versioned Rust crates: a zero-dependency core, a runtime for long-running automation, a multi-language AST front end, and an audited dependency storefront. Each is usable on its own. Take one and ignore the rest.
+
+Source: https://github.com/srinji-kaggss/logicalworks-crates
+
+## Crates
+
+- [lgwks_std](https://docs.rs/lgwks_std) — Everyday primitives with no async runtime required: JSON/RON/wire codecs, a blocking HTTP client, retry policies, structured logging, time and calendars, hashing, ids, globs, process control
+- [lgwks_bot](https://docs.rs/lgwks_bot) — A runtime for bots that run for weeks: four verbs (Observe, Evaluate, Execute, Query), capability-gated authority, change-triggered execution, and supervision that bounds background work
+- [lgwks_ast](https://docs.rs/lgwks_ast) — Parse many languages into one AST type. tree-sitter grammars behind cargo features, bounded traversal, and typed diagnostics for tools that report on code
+- [lgwks_deps](https://docs.rs/lgwks_deps) — One audited place to opt into third-party stacks, plus `lgwks-deps check` to prove no dependency entered your build unreviewed
+
+## Documentation
+
+- [Dependency doctrine](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/dependency-doctrine.md) — How a dependency is admitted, the replacement matrix, and where no equivalent exists. Read this before adding a crate.
+- [Async runtime parity](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/async-parity.md) — The `lgwks_bot::rt` surface against tokio and the alternatives: the capability matrix, the open gaps, and the deliberate divergences.
+- [The async surface as an SDK](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/async-sdk-shape.md) — The async surface as an SDK: its shape, its invariants, and how to migrate.
+- [Bot semantics on an ECS substrate](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/bot-on-ecs.md) — Bot semantics on an ECS substrate, and what that mapping costs.
+- [Bevy ECS admission](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/bevy-admission.md) — The Bevy ECS decision and the alternatives measured against it.
+- [Candle ML inference storefront admission](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/candle-admission.md) — ML inference admission: authority, transitive surface, verification.
+- [AppCUI native terminal storefront admission](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/appcui-admission.md) — Native terminal UI admission: authority and verification.
+- [Distributed-mesh boundaries](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/distributed-boundaries.md) — What these crates do and refuse on a distributed network path. Read it before placing them on one.
+- [Folding the general recorder-and-replayer architecture into `lgwks_bot`](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/general-bot-fold.md) — How a full browser recorder-and-replayer architecture folds into this bot: what already is it, what becomes a seam, and what is refused.
+- [Security posture](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/security-posture.md) — The security case: the execution-locus claim and its ceiling, what the browser integrity stack does and does not prove, and the evidence a reviewer can check without trusting the vendor.
+- [Guidance runner specification](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guidance-runner-spec.md) — The session, flow and invariant-register workstreams: what each delivers, the seam every borrowed part sits behind, and the corrections two research sweeps made to the original design.
+- [Adjacent asset inventory](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/estate-asset-inventory.md) — The adjacent repositories searched before any of it was written, what was taken, and what was deliberately left behind.
+- [Frontier definition](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/frontier.md) — The state of the art across the nine areas this bot competes in, with measured anchors and the design decision each forces.
+- [Framework comparison](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/framework-comparison.md) — Why the field looks the same, the four axes it actually differs on, and the axis nobody occupies.
+- [Releasing](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/releasing.md) — The release process.
+- [Changelog](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/CHANGELOG.md) — Per-release changes across all four crates.
+- [Security policy](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/SECURITY.md) — Attack surface, reporting process, and advisories assessed.
+
+## Optional
+
+- [AGENTS.md](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/AGENTS.md) — How to add a dependency to this repository
+- [contract/APPROVED.toml](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/contract/APPROVED.toml) — Every approved external edge, and its owner

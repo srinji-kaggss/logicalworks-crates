@@ -369,6 +369,21 @@ Invariants (enforced by `crates/lgwks-bot/tests/rt_async_tier.rs` and
   however many times it is spawned into, refuses rather than growing, and stops
   every task it owns when it is dropped or shut down.
 
+## The other crates
+
+Four crates ship from this repository. They share a release process, not a
+dependency graph: `lgwks_bot` and `lgwks_deps` depend on `lgwks_std`, and
+`lgwks_ast` stands alone.
+
+| Crate | What it gives you |
+|---|---|
+| [`lgwks_std`](https://docs.rs/lgwks_std) | Everyday primitives with no async runtime required: codecs, a blocking HTTP client, retry, structured logging, time, hashing, ids |
+| [`lgwks_ast`](https://docs.rs/lgwks_ast) | Parse many languages into one AST type, with bounded traversal and typed diagnostics |
+| [`lgwks_deps`](https://docs.rs/lgwks_deps) | The audited storefront for third-party stacks. `lgwks_bot`'s async engine is selected through it, so this crate's tokio edge is the workspace's only one |
+
+The [repository README](https://github.com/srinji-kaggss/logicalworks-crates#readme)
+indexes the design documents.
+
 ## License
 
 Apache-2.0 — Copyright 2026 Logical Works Incorporated
