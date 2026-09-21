@@ -1715,10 +1715,15 @@ fn is_test_marker(text: &str) -> bool {
 /// Whether an attribute group gates an item on a condition this gate cannot
 /// evaluate.
 ///
-/// `cfg(test)` is the one predicate the check knows is satisfied — the test
-/// profile is what runs it. Any other predicate, including a bare feature flag,
-/// is assumed unsatisfied: admitting it would report a mechanism as present on
-/// the strength of a configuration nobody built.
+/// Only the predicate `test` is known to hold — the test profile is what runs
+/// the item — and it is accepted bare or as a single-argument `all`/`any`.
+/// Everything else is read as unsatisfied, including predicates that merely
+/// mention `test`: `cfg(not(test))` is the *opposite* of selected, and a
+/// feature named `test` is a feature. Reading the whole predicate rather than a
+/// token inside it is what makes those distinguishable. The price is a
+/// conjunctive predicate such as `cfg(all(test, unix))`, refused although a
+/// Unix test profile would select it; refusing is the direction this gate is
+/// allowed to err in.
 fn is_unselected_marker(text: &str) -> bool {
     let Some(predicate) = text
         .strip_prefix("cfg(")
@@ -1726,13 +1731,11 @@ fn is_unselected_marker(text: &str) -> bool {
     else {
         return false;
     };
-    let names_test = predicate
-        .split(|character: char| !(character.is_alphanumeric() || character == '_'))
-        .any(|token| token == "test");
-    // A `test` inside a string literal is a value, not the profile: a feature
-    // named `test` is still a feature. Refusing it is the conservative reading,
-    // and refusing is the direction this gate is allowed to err in.
-    !names_test || predicate.contains("\"test\"")
+    let compact: String = predicate
+        .chars()
+        .filter(|character: &char| !character.is_whitespace())
+        .collect();
+    !matches!(compact.as_str(), "test" | "all(test)" | "any(test)")
 }
 
 /// Whether an attribute group keeps a test item out of a default run.
@@ -1998,6 +2001,20 @@ mod tests {
         ));
         assert!(!declares_active_test(
             "#[test]\n#[cfg(feature = \"never\")]\nfn unselected() {}\n"
+        ));
+        // The predicate that only *mentions* `test`, and the one that negates
+        // it: neither is the test profile, and the second is its opposite.
+        assert!(!declares_active_test(
+            "#[test]\n#[cfg(not(test))]\nfn inverted() {}\n"
+        ));
+        assert!(!declares_active_test(
+            "#[cfg(feature = \"test\")]\n#[test]\nfn feature_named_test() {}\n"
+        ));
+        assert!(!declares_active_test(
+            "#[test]\n#[cfg(all(test, unix))]\nfn conjunctive() {}\n"
+        ));
+        assert!(declares_active_test(
+            "#[cfg(test)]\n#[test]\nfn explicit_profile() {}\n"
         ));
         assert!(!declares_active_test("pub fn helper() {}\n"));
         assert!(!declares_active_test("#[cfg(test)]\nmod tests {\n}\n"));
