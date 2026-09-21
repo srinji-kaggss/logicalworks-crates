@@ -343,7 +343,7 @@ mod tests {
 
     /// Block the calling blocking-pool thread for `duration`.
     ///
-    /// `rt::time::sleep` cannot be used here: `Bot::block_on_tick` drives
+    /// `rt::time::sleep` cannot be used here: `Bot::tick` drives
     /// `lgwks_std::task::block_on`, whose executor has no timer driver, and the
     /// caller is a `spawn_blocking` closure that has nothing to await on. The
     /// property under test is wall-clock overlap between two polls, and holding
@@ -756,7 +756,7 @@ mod tests {
             .on(|seen: &u32| *seen > 100, CountAction(Arc::clone(&counter)))
             .build(&GrantSet::empty())?;
 
-        let fired = bot.block_on_tick()?;
+        let fired = bot.tick()?;
         assert_eq!(fired, 1);
         assert_eq!(counter.load(Ordering::Relaxed), 1);
         Ok(())
@@ -892,7 +892,7 @@ mod tests {
             .observe(source())
             .on(|_: &u32| true, Counting(Arc::new(AtomicUsize::new(0))))
             .build(&GrantSet::empty())?;
-        assert_eq!(bot.block_on_tick()?, 2);
+        assert_eq!(bot.tick()?, 2);
         let observed = peak.load(Ordering::SeqCst);
         assert!(
             observed >= 2,
@@ -916,7 +916,7 @@ mod tests {
         }
         let mut bot = builder.build(&GrantSet::empty())?;
         assert_eq!(bot.source_domains().len(), 40);
-        assert_eq!(bot.block_on_tick()?, 40);
+        assert_eq!(bot.tick()?, 40);
         assert_eq!(counter.load(Ordering::SeqCst), 40);
         Ok(())
     }
@@ -930,7 +930,7 @@ mod tests {
             .observe(Failing)
             .on(|_: &u32| true, Counting(Arc::clone(&counter)))
             .build(&GrantSet::empty())?;
-        match bot.block_on_tick() {
+        match bot.tick() {
             Err(BotError::DomainError { domain, .. }) => assert_eq!(domain, "test::failing"),
             other => {
                 return Err(failed(format!(

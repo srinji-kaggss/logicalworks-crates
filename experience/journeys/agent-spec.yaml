@@ -25,7 +25,10 @@ trust_boundaries:
 recovery_contracts:
   - A rejected spec names the field and the expected shape.
 agent_contracts:
-  - from_json errors are typed (crate::json::Error), not process aborts.
+  - from_json errors are typed (crate::BotError), not process aborts.
+  - The round-trip has two error types by design: from_json fails with BotError
+    (untrusted input can be wrong in domain ways — oversize, bad field), while
+    to_json fails only with crate::json::Error (a BotSpec in hand is valid).
   - Condition/action domain ids are stable strings auditable via source_domain/action_domain.
 probes:
   - id: hand-spec-round-trip

@@ -31,7 +31,7 @@
 //!     .build(&GrantSet::all_shipped())
 //!     .expect("shipped domains are covered by all_shipped");
 //!
-//! let fired = bot.block_on_tick().expect("tick propagates domain errors");
+//! let fired = bot.tick().expect("tick propagates domain errors");
 //! ```
 
 // Verbs are async by design (single-threaded `lgwks_std::task` driver, futures
@@ -52,6 +52,19 @@
     reason = "the four verb traits are the crate's public async contract and must stay non-Send; \
               see docs/async-sdk-shape.md and INV-BOT-FOUR-VERBS"
 )]
+
+/// Compiles every Rust block in `README.md` as a doctest.
+///
+/// The README is the first thing a consumer reads and the last thing anyone
+/// updates: it described a `lgwks_std::task` executor and an `async fn tick`
+/// for two commits after both had been replaced, and nothing failed, because a
+/// prose example is not compiled by anything. This makes it compiled.
+///
+/// `#[cfg(doctest)]` so the item exists only under `cargo test --doc` — it is
+/// not part of the library, not built by a normal compile, and not exported.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeExamples;
 
 use std::future::Future;
 use std::pin::Pin;

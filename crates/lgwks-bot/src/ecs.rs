@@ -425,15 +425,6 @@ impl EcsBot {
             .collect()
     }
 
-    /// Run one tick on the current thread.
-    ///
-    /// `tick` is already synchronous — the systems drive the non-`Send` verb
-    /// futures themselves — so this is the readable name for a blocking call,
-    /// not a second execution path.
-    pub fn block_on_tick(&mut self) -> Result<usize, BotError> {
-        self.tick()
-    }
-
     /// The observed sources' domain identifiers, in chain order.
     ///
     /// Replaces the old `chains()` accessor: what a caller wanted from it was
