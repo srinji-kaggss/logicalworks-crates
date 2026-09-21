@@ -24,12 +24,12 @@ storefront, and `lgwks_deps` is the only crate in the workspace that authors a
 | `macros` | `rt` | the `join!`, `select!`, and `try_join!` re-exports at the crate root |
 | `io` | `rt` | `rt::io`: `AsyncRead`, `AsyncWrite`, `AsyncBufRead`, `BufReader`, `BufWriter`, `duplex`, `copy` |
 | `net` | `io` | `rt::net`: `TcpListener`, `TcpStream`, `UdpSocket`, `lookup_host` |
-| `process` | `io` | `rt::process`: `Command`, `Child`, and its pipes |
+| `process` | `io`, `sync` | `rt::process`: `Command` — how to describe a child. Running one is `Supervisor::spawn_process` (`sync`), and it is the only way: `Child` and its pipes are deliberately not exported |
 | `fs` | `io` | `rt::fs`: an async filesystem, a blocking-threadpool wrapper |
-| `signal` | `rt` | `rt::signal`: OS signal streams. Compiled only on `unix` or `windows` (`crates/lgwks-bot/src/rt/mod.rs:69`) |
+| `signal` | `rt` | `rt::signal`: OS signal streams. Compiled only on `unix` or `windows` (`crates/lgwks-bot/src/rt/mod.rs:92`) |
 | `full` | | `rt`, `time`, `sync`, `macros`, `io`, `net`, `process`, `fs`, `signal` |
 
-The module gates are in `crates/lgwks-bot/src/rt/mod.rs:61`. `rt::supervise` and
+The module gates are in `crates/lgwks-bot/src/rt/mod.rs:82`. `rt::supervise` and
 `rt::sync` are both behind `sync`, so disabling `sync` removes the supervisor as
 well as the channels.
 
@@ -57,22 +57,26 @@ reads through the HTTP client. Those two edges are not optional either.
 
 A consumer reading from a pipe or a file needs `AsyncRead` without a socket
 layer, so `io` is its own feature. `net`, `process`, and `fs` each require `io`
-rather than the reverse. Selecting `rt` alone gives you `spawn`, `JoinSet`,
-`block_on`, and `spawn_blocking`, and no reader or writer traits.
+rather than the reverse. Selecting `rt` alone gives you `JoinSet`,
+`join_all_bounded` (with `sync`), and `block_on`, and no reader or writer traits.
+`process` additionally requires `sync`, because `Command` describes a child and
+`Supervisor::spawn_process` is what runs it: a `process` build without `sync`
+would ship the description with its only remaining runner being `Command::spawn`,
+which this workspace bans.
 
 ## Limits by feature
 
-**`rt` is not a scheduler with realtime guarantees.** `crates/lgwks-bot/src/rt/mod.rs:47`
+**`rt` is not a scheduler with realtime guarantees.** `crates/lgwks-bot/src/rt/mod.rs:72`
 states the bound: future completion order across worker threads is not
 deterministic, and only the result order of `join_all_bounded` is.
 
 **Worker-thread count is bounded.** `rt::runtime::MAX_WORKER_THREADS` is 1024,
 and `Builder::worker_threads` rejects a count above it with an error rather than
-clamping silently (`crates/lgwks-bot/src/rt/runtime.rs:103`).
+clamping silently (`crates/lgwks-bot/src/rt/runtime.rs:105`).
 
 **WASM has one thread.** On `target_family = "wasm"` the runtime is built with
 `new_current_thread`, and `Builder::worker_threads(Some(_))` returns
-`io::ErrorKind::Unsupported` (`crates/lgwks-bot/src/rt/runtime.rs:87`).
+`io::ErrorKind::Unsupported` (`crates/lgwks-bot/src/rt/runtime.rs:102`).
 
 **Signals need an OS.** `rt::signal` compiles only where `unix` or
 `windows` holds, so a `full` build on another target silently lacks it.

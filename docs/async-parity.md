@@ -27,10 +27,10 @@ reason to leave.
 |---|---|---|---|---|
 | Owned runtime + builder | ✅ | ✅ | ✅ | ✅ `Runtime`/`Builder`/`Handle` |
 | `block_on` | ✅ | ✅ | ✅ | ✅ `rt::runtime::block_on` |
-| `spawn` (`Send`) | ✅ | ✅ | ✅ | ✅ `rt::task::spawn` |
-| Spawn non-`Send` | ✅ `LocalSet` | ✅ `spawn_local` | ✅ | ✅ **closed 0.4.0** |
+| Spawn a `Send` task | ✅ | ✅ | ✅ | ❌ **by design** — `Supervisor::spawn`: bounded by an in-flight ceiling and reported, and it returns no handle to drop |
+| Spawn non-`Send` | ✅ `LocalSet` | ✅ `spawn_local` | ✅ | ❌ **by design** — a non-`Send` future is *driven* (await it, or `join_all_bounded`), never spawned |
 | Structured task set | ✅ `JoinSet` | ✅ | ✅ | ✅ `rt::task::JoinSet` |
-| `spawn_blocking` | ✅ | ✅ | ✅ | ✅ |
+| Off-thread blocking call | ✅ `spawn_blocking` | ✅ | ✅ | ✅ `lgwks_std::task::spawn_blocking` — not in `rt`, and it returns a future for the result rather than a handle |
 | `yield_now` | ✅ | ✅ | ✅ | ✅ |
 | Cancellation token | ✅ `tokio-util` | ❌ | ✅ | ✅ **closed 0.4.0** |
 | `sleep`/`timeout`/`interval` | ✅ | ✅ | ✅ | ✅ `rt::time` |
@@ -41,7 +41,7 @@ reason to leave.
 | Reader/writer traits, `BufReader`, `copy` | ✅ | ✅ | ✅ | ✅ **closed 0.4.0** |
 | `fs` | ✅ | ✅ | ✅ | ✅ |
 | `net` TCP/UDP/Unix + `lookup_host` | ✅ | ✅ | ✅ | ✅ |
-| `process` | ✅ | ✅ | ✅ | ✅ |
+| `process` | ✅ | ✅ | ✅ | ✅ `Command` to describe, `Supervisor::spawn_process` to run — bounded, killed as a process group, reported |
 | Signal streams | ✅ | ✅ | ✅ | ✅ |
 | `select!`/`join!`/`try_join!` | ✅ | ✅ | ✅ (futures-lite) | ✅ crate root |
 | Runtime shutdown with timeout | ✅ | ❌ | ❌ | ✅ `shutdown_timeout` |
@@ -51,22 +51,29 @@ reason to leave.
 | `#[main]` / `#[test]` attribute | ✅ | ✅ | ❌ | ❌ **by design** |
 | `tracing` integration | ✅ feature | ❌ | ❌ | ✅ via `lgwks_std::trace` |
 
-## 3. The three that were closed, and why each mattered
+## 3. The capabilities that were closed, and why each mattered
 
-### Non-`Send` spawning: the crate's own thesis was unusable
+### Spawning at all: the crate's own thesis decided it, twice
 
 Every verb in `lgwks_bot` is deliberately **not** `Send`, so a domain may hold
 thread-local state. That is why `BoxFuture` is unconstrained and why the crate
-carries its one `#[allow(async_fn_in_trait)]`. But `rt::task::spawn` requires
-`F: Future + Send`, so there was no way to spawn a future with the property the
-crate is built around. The thesis held for `tick` and evaporated the moment a
-consumer spawned anything.
+carries its one `#[allow(async_fn_in_trait)]`. `rt::task::spawn` required
+`F: Future + Send`, so a future with the property the crate is built around had
+nowhere to go; 0.4.0 answered that by exporting `LocalSet` and `spawn_local`.
 
-`LocalSet` and `spawn_local` are now exported, and
-`tests/rt_async_tier.rs::a_local_set_runs_a_task_that_is_not_send` drives a
-genuinely `!Send` future (`Rc<Cell<u8>>`) through it. Asserting the bound exists
-would not have proved anything; the test compiles only because the future is
-not `Send`.
+That answer is withdrawn, and the reason generalises past it: a single-threaded
+spawn returns the *same droppable handle* as the multi-threaded one. A caller
+could start a local task and forget it exactly as easily, with the added trap
+that the handle's type could not be named at the call site, so it could not even
+be stored. The thesis — no verb here starts work and hands back a handle to it —
+decides both.
+
+What serves the thesis is *driving* instead of spawning: await the future, run
+it through `join_all_bounded`, or place it on a `Supervisor`, which owns it and
+reports how it ended. `tests/rt_async_tier.rs::a_non_send_future_is_driven_rather_than_spawned`
+polls a genuinely `!Send` future (`Rc<Cell<u8>>`) to completion on the calling
+thread. Asserting the bound exists would not have proved anything; the test
+compiles only because the future is not `Send`.
 
 ### `CancellationToken`: the supervision rule named a type that did not exist
 
@@ -110,8 +117,8 @@ exist costs a search that cannot succeed.
    `Time<Virtual>` is the intended clock root (`docs/bot-on-ecs.md` §10 step 4).
    Until then the gap is real.
 2. **`block_in_place`.** For CPU-bound work inside an async task on a
-   multi-thread runtime. `spawn_blocking` covers the common case; this covers
-   the case where the future cannot be `'static`.
+   multi-thread runtime. `lgwks_std::task::spawn_blocking` covers the common
+   case; this covers the case where the future cannot be `'static`.
 3. **`shutdown_background`.** `shutdown_timeout` exists; the non-waiting form
    does not.
 4. **Task introspection** (`task::id`, per-task metrics). No crate in this
@@ -139,7 +146,8 @@ exist costs a search that cannot succeed.
   this workspace is that no background task is untracked and no loop is
   unbounded, so the
   shipped API is one that cannot express either. A consumer who wants the looser
-  model still has `rt::task::spawn` and a bare `JoinSet`.
+  model still has a bare `JoinSet`, which tracks what it starts and aborts on
+  drop, but imposes no ceiling of its own.
 
 ## 6. What parity is not claimed
 
