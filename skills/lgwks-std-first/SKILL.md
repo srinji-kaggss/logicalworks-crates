@@ -116,9 +116,10 @@ async server is inside this tier now — say so; do not add `tokio` yourself.
 
 ## Real gaps (no equivalent — do not fake it)
 
-`thiserror`/`anyhow` (implement `std::error::Error`); `log`/
-`tracing` (use stderr, keep machine output clean); `clap` (parse
-`std::env::args`); `toml`/`yaml`/`csv` (use `json`/`ron`); crypto beyond BLAKE3
+`thiserror`/`anyhow` (implement `std::error::Error`); `log`/`env_logger`
+(`tracing` is not a gap: `lgwks_std::trace`, feature `trace`, is default-on, and
+printing from library code is `forbid`); `clap` (parse `std::env::args`);
+`toml`/`yaml`/`csv` (use `json`/`ron`); crypto beyond BLAKE3
 (register it); `rand` distributions (only OS entropy exists).
 
 For any gap: either write the minimal `lgwks_std` module (ELIMINATE), or
