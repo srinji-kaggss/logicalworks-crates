@@ -496,6 +496,30 @@ pub enum BotError {
         /// The generation the chain holds now.
         current: u64,
     },
+    /// `resolve_effect` was given evidence about an attempt that is no longer
+    /// the outstanding one on that entry.
+    ///
+    /// The generation the work was read from is still the live one — otherwise
+    /// this would be [`EvidenceSuperseded`](Self::EvidenceSuperseded) — but the
+    /// entry has been attempted again since, so the report is about work that
+    /// is over. Nothing was changed.
+    ///
+    /// This is the one settlement refusal that is not a caller error at all. A
+    /// caller that repeats a delivery it could not confirm is behaving exactly
+    /// as it should, and the repeat is normally answered idempotently; it lands
+    /// here only when the first delivery *did* take effect, the entry was
+    /// attempted again, and the repeat then arrives after the new attempt
+    /// began. Reporting success would be a lie about which attempt the evidence
+    /// moved, and applying it would make an attempt whose effect may be live
+    /// eligible to run a third time.
+    EvidenceStaleAttempt {
+        /// The identity the evidence was submitted for.
+        work: WorkId,
+        /// The attempt the evidence was about.
+        reported: u32,
+        /// The attempt the entry is on now.
+        outstanding: u32,
+    },
     /// `resolve_effect` was given evidence opposite to what already settled the
     /// entry for this generation.
     ///
@@ -1011,6 +1035,18 @@ impl fmt::Display for BotError {
                 "evidence names generation {named} of chain {} entry {}, which has \
                  been superseded by generation {current}: nothing was changed, re-read \
                  pending() and report against the generation that is there now",
+                work.chain(),
+                work.entry()
+            ),
+            Self::EvidenceStaleAttempt {
+                work,
+                reported,
+                outstanding,
+            } => write!(
+                f,
+                "evidence was about attempt {reported} of chain {} entry {}, but that \
+                 entry is on attempt {outstanding} now: nothing was changed, and the \
+                 report is about an attempt that is over rather than one outstanding",
                 work.chain(),
                 work.entry()
             ),

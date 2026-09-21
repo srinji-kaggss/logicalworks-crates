@@ -58,7 +58,7 @@ full = ["rt", "time", "sync", "macros", "io", "net", "process", "fs", "signal"]
 # is the estate's notation for human-facing documents, so `FlowSpec` reads both
 # it and JSON through the same serde types. Like `json` and `hash` above, this
 # turns on a feature of an edge that already exists rather than adding a crate.
-lgwks_std = { workspace = true, features = ["json", "ron", "http", "hash"] }
+lgwks_std = { workspace = true, features = ["json", "ron", "http", "hash", "wire"] }
 # Not optional, and not behind a feature. The ECS substrate is **how a bot
 # executes** — the condition is change detection rather than a re-derivation —
 # so it is not a candidate the caller may decline. A default-off flag would mean

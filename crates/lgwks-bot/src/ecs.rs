@@ -328,14 +328,14 @@ struct Polling(Vec<bool>);
 /// What the decision phase decided for one entry it reached.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Decision {
-    /// The condition held, so the entry is attempted. `attempts` is the attempt
-    /// number this one will be, counted from the attempts the entry has already
-    /// spent, and it is carried here rather than re-derived so the program the
-    /// driver runs is the one the decision phase recorded.
-    Attempt {
-        /// Which attempt this will be.
-        attempts: u32,
-    },
+    /// The condition held, so the entry is attempted.
+    ///
+    /// It does not say *which* attempt this will be. The number belongs to the
+    /// ledger, which is the only thing that can keep it monotonic across a
+    /// settlement, and it is handed back by [`Ledger::begin`]. Deriving it here
+    /// from [`EntryState`] gave a settled entry the number one all over again,
+    /// so two attempts at one address could answer to the same name.
+    Attempt,
     /// The condition did not hold, so the entry is recorded as skipped and the
     /// walk moves past it. Recorded rather than dropped: an entry whose
     /// condition is false owes nothing, and saying so is what lets a chain
@@ -415,12 +415,17 @@ fn parked(world: &World) -> bool {
 
 // ── The work ledger: eligible work, separate from change detection ─────────
 
-/// The identity of one `(chain, entry)` tuple.
+/// One `(chain, entry)` slot of a chain.
 ///
-/// Identity, not position: the ledger is keyed by it, `resolve_effect` takes
-/// it, and it means the same thing on every tick. It is deliberately not
-/// constructible outside this crate — a caller that could mint one could
-/// settle work that does not exist.
+/// An address, not an identity, and the distinction is the whole of what
+/// [`PendingWork`] exists to carry. A slot is reused by every generation over
+/// its chain and by every attempt within one, so two `WorkId`s comparing equal
+/// says only that the *address* is the same — never that the work standing
+/// there is. It names a place in a report; it does not settle one.
+///
+/// It is deliberately not constructible outside this crate. That is not what
+/// makes settlement safe — a [`PendingWork`] is what does — but a caller that
+/// could mint one could name work it never observed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct WorkId {
     /// The chain's index, in declaration order.
@@ -547,12 +552,36 @@ impl fmt::Display for TransitionHold {
 }
 
 /// One entry of a transition that is not finished.
+///
+/// This is the address a settlement is made against, and it carries the three
+/// facts that together name *which* work: the slot ([`WorkId`]), the generation
+/// ([`Self::revision`]) and the attempt ([`Self::attempt`]).
+///
+/// The last of those is why settlement takes this value rather than the slot.
+/// A chain retries within one generation, so `NotApplied` for attempt 1 makes
+/// the entry eligible again and attempt 2 runs against the same address under
+/// the same revision. A report about attempt 1 that is *delivered twice* —
+/// which settlement is explicitly designed to tolerate, because a caller that
+/// never saw its first delivery acknowledged has to be able to repeat it —
+/// would otherwise land on attempt 2 and make an attempt whose effect may be
+/// live eligible to run a third time. Naming the attempt is what separates
+/// "send that again" from "that was about work that is over".
+///
+/// The fields are private and there is no public constructor, so a caller can
+/// only ever settle work it read from [`EcsBot::pending`]. That is a seal, not
+/// a formality: it makes "settle an attempt I invented" unrepresentable rather
+/// than merely refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingWork {
     /// Which entry this is.
     id: WorkId,
     /// The revision that opened the transition it belongs to.
     revision: u64,
+    /// Which attempt on that entry this is about.
+    ///
+    /// The attempt ordinal within the generation: zero when the entry has
+    /// never been attempted, otherwise the number of the latest attempt begun.
+    attempt: u32,
     /// What is holding it.
     hold: TransitionHold,
 }
@@ -570,6 +599,16 @@ impl PendingWork {
         self.revision
     }
 
+    /// Which attempt on this entry the work is about.
+    ///
+    /// Ascending within a generation and never reused, so a report about
+    /// attempt `n` is unambiguous for as long as the generation stands. Zero
+    /// means the entry has not been attempted.
+    #[must_use]
+    pub const fn attempt(&self) -> u32 {
+        self.attempt
+    }
+
     /// What is holding it back.
     #[must_use]
     pub const fn hold(&self) -> &TransitionHold {
@@ -581,10 +620,11 @@ impl fmt::Display for PendingWork {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "chain {} entry {} (revision {}): {}",
+            "chain {} entry {} (revision {}, attempt {}): {}",
             self.id.chain(),
             self.id.entry(),
             self.revision,
+            self.attempt,
             self.hold
         )
     }
@@ -596,7 +636,18 @@ impl fmt::Display for PendingWork {
 /// decision that matters — attempt it again or not — follows from which one
 /// they are. "Unknown and staying unknown" is not evidence and has no arm: an
 /// entry in that state stays reported, which is the honest outcome.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    lgwks_std::wire::Archive,
+    lgwks_std::wire::Serialize,
+    lgwks_std::wire::Deserialize,
+)]
+#[rkyv(attr(non_exhaustive), crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
 #[non_exhaustive]
 pub enum EffectEvidence {
     /// The effect happened. The entry is acknowledged and never attempted
@@ -758,6 +809,39 @@ impl EntryState {
     }
 }
 
+/// What the ledger knows about the attempts made on one entry of one
+/// generation.
+///
+/// Kept beside [`EntryState`] rather than inside it, because the state is
+/// overwritten by every settlement and every failure and this is not: an entry
+/// settled `NotApplied` and attempted again is a *later* attempt at the same
+/// address, and the ordinal is what says so.
+#[derive(Debug, Clone, Copy, Default)]
+struct AttemptRecord {
+    /// How many attempts have been begun on this entry in this generation.
+    ///
+    /// Monotonic by construction: only [`Ledger::begin`] moves it, and nothing
+    /// resets it while the transition stands. It is the entry's attempt
+    /// ordinal, and it is the number a [`PendingWork`] hands out.
+    begun: u32,
+    /// The attempt the latest settlement was about, and what it said.
+    ///
+    /// The ordinal is stored rather than assumed to be the latest, because a
+    /// settlement is what *permits* the next attempt: recording it against
+    /// whichever attempt happened to be current when a repeat arrived is how a
+    /// report about one attempt comes to authorise another.
+    settled: Option<SettledAttempt>,
+}
+
+/// The attempt one settlement was about, and the evidence it carried.
+#[derive(Debug, Clone, Copy)]
+struct SettledAttempt {
+    /// The attempt ordinal the evidence was submitted for.
+    attempt: u32,
+    /// What the evidence said.
+    evidence: EffectEvidence,
+}
+
 /// The work of one source transition: one state per entry of its chain.
 ///
 /// Deliberately neither `Clone` nor a derived `Debug`: it owns the observed
@@ -771,22 +855,24 @@ struct Transition {
     revision: u64,
     /// One state per entry of the chain, in declaration order.
     entries: Vec<EntryState>,
-    /// What evidence settled each entry, for the generation [`Self::revision`]
-    /// names, indexed as [`Self::entries`] is.
+    /// What the ledger knows about the attempts made on each entry, for the
+    /// generation [`Self::revision`] names, indexed as [`Self::entries`] is.
     ///
-    /// The record is what makes a settlement idempotent and what makes a
-    /// contradicting one refusable, and neither is answerable from
-    /// [`EntryState`] alone: `Applied` and an attempt that returned `Ok` both
-    /// land on [`EntryState::Succeeded`], and `NotApplied` and an entry that
-    /// has not been reached both land on [`EntryState::NotStarted`]. Without
-    /// this, a caller whose first delivery was ambiguous cannot safely repeat
-    /// it — the repeat would read as evidence about an entry that was never
-    /// settled at all.
+    /// Two facts live here, and each answers a question [`EntryState`] cannot.
+    /// The settlement is what makes evidence idempotent and a contradiction
+    /// refusable: `Applied` and an attempt that returned `Ok` both land on
+    /// [`EntryState::Succeeded`], and `NotApplied` and an entry that has not
+    /// been reached both land on [`EntryState::NotStarted`], so without it a
+    /// caller whose first delivery was ambiguous cannot safely repeat it. The
+    /// attempt ordinal is what makes the entry's attempts *numerable*: a
+    /// settled entry walks back to [`EntryState::NotStarted`], which carries no
+    /// count, so a number read off the state alone would restart at one and two
+    /// different attempts would answer to the same name.
     ///
-    /// Per generation, not per entry: it is cleared when a transition is opened
-    /// or resumed, because a settlement is a statement about one attempt and it
-    /// does not carry into the next.
-    settled: Vec<Option<EffectEvidence>>,
+    /// Per generation: both are reset when a transition is opened, because a
+    /// settlement is a statement about one attempt within one generation and
+    /// neither fact carries into the next.
+    attempts: Vec<AttemptRecord>,
     /// The observed payload this transition is bound to.
     ///
     /// The binding is the whole point of the field. One transition is one
@@ -815,19 +901,30 @@ impl fmt::Debug for Transition {
         f.debug_struct("Transition")
             .field("revision", &self.revision)
             .field("entries", &self.entries)
-            .field("settled", &self.settled)
+            .field("attempts", &self.attempts)
             .field("bound", &self.value.is_some())
             .finish()
     }
 }
 
 impl Transition {
+    /// How many attempts have been begun on `entry`, or zero when this
+    /// transition has no such entry.
+    ///
+    /// Read through here rather than off [`EntryState`] so that the number a
+    /// caller is handed and the number settlement checks are the same one: a
+    /// settled entry walks back to `NotStarted`, which carries no count, and a
+    /// number derived from the state would restart at one.
+    fn attempt_of(&self, entry: usize) -> u32 {
+        self.attempts.get(entry).map_or(0, |record| record.begun)
+    }
+
     /// A transition with every entry outstanding, bound to `value`.
     fn opened(revision: u64, entries: usize, value: Option<Erased>) -> Self {
         Self {
             revision,
             entries: vec![EntryState::NotStarted; entries],
-            settled: vec![None; entries],
+            attempts: vec![AttemptRecord::default(); entries],
             value,
         }
     }
@@ -852,7 +949,9 @@ impl Transition {
                     _ => EntryState::NotStarted,
                 })
                 .collect(),
-            settled: vec![None; previous.entries.len()],
+            // Attempts as well as settlements: both are statements about one
+            // attempt within one generation, and this is a new generation.
+            attempts: vec![AttemptRecord::default(); previous.entries.len()],
             value,
         }
     }
@@ -899,6 +998,20 @@ enum Settled {
     Superseded {
         /// The revision the slot holds now.
         current: u64,
+    },
+    /// The named attempt is not the one outstanding on that entry: a later
+    /// attempt has been begun since the caller read the work.
+    ///
+    /// Distinct from [`Self::Superseded`], which is about the generation, and
+    /// the distinction is the point of carrying an attempt at all. The
+    /// generation can be the one the caller named and the attempt still be
+    /// gone — that is the retry-inside-one-generation case — and accepting the
+    /// report there would apply it to an attempt the caller never observed.
+    StaleAttempt {
+        /// The attempt the evidence was submitted for.
+        reported: u32,
+        /// The attempt the entry is on now.
+        outstanding: u32,
     },
     /// The named generation's entry is settled, and this evidence says the
     /// opposite of what settled it.
@@ -972,18 +1085,23 @@ impl Ledger {
     ///
     /// `false` when the entry is not in a state an attempt can start from, which
     /// means the world moved behind the schedule's back.
-    fn begin(&mut self, id: WorkId) -> bool {
-        let Some(state) = self.entry_mut(id) else {
-            return false;
-        };
+    fn begin(&mut self, id: WorkId) -> Option<u32> {
+        let transition = self
+            .transitions
+            .get_mut(id.chain())
+            .and_then(Option::as_mut)?;
+        let state = transition.entries.get_mut(id.entry())?;
         if !matches!(
             *state,
             EntryState::NotStarted | EntryState::DefinitelyFailed { .. }
         ) {
-            return false;
+            return None;
         }
+        let record = transition.attempts.get_mut(id.entry())?;
+        record.begun = record.begun.saturating_add(1);
+        let attempt = record.begun;
         *state = EntryState::Unrecorded;
-        true
+        Some(attempt)
     }
 
     /// Record that the entry's condition did not hold, so it owes nothing.
@@ -1029,25 +1147,34 @@ impl Ledger {
 
     /// Settle an entry whose effect may or may not have happened.
     ///
-    /// The caller names the generation the evidence is about — the revision the
-    /// [`PendingWork`] they read carried — and nothing is read or written until
-    /// it matches the transition's own. This is not a formality. A chain has one
+    /// The caller hands over the [`PendingWork`] it read, and nothing is read or
+    /// written until that value's own three facts — the slot, the generation and
+    /// the attempt — match the ledger's.
+    ///
+    /// This is not a formality, and it takes all three. A chain has one
     /// transition at a time and a slot is reused by every generation over it, so
-    /// a `(chain, entry)` that matches says only that the *address* is the same;
-    /// it says nothing about which attempt the caller is reporting on. A report
-    /// computed against revision N and delivered after the slot was re-opened at
-    /// revision N+1 would otherwise be accepted against work the caller has
+    /// a `(chain, entry)` that matches says only that the *address* is the same.
+    /// A report computed against revision N and delivered after the slot was
+    /// re-opened at revision N+1 would be accepted against work the caller has
     /// never seen: `Applied` would acknowledge an effect at a generation that
     /// never happened, and `NotApplied` — worse, because it authorises a retry —
     /// would make an unknown attempt eligible to run again.
     ///
-    /// Returns a decision about the named generation, not a bool, because the
-    /// four answers lead a caller to four different next actions and two of them
-    /// are not errors.
-    fn settle(&mut self, id: WorkId, revision: u64, evidence: EffectEvidence) -> Settled {
+    /// The attempt closes the same hole one level down, where the generation
+    /// does not help. An entry is retried *within* a generation: settling it
+    /// `NotApplied` makes it eligible, and the next tick begins the next attempt
+    /// at the same address under the same revision. A repeat of the earlier
+    /// report — which must be tolerated, because a caller that never saw its
+    /// first delivery acknowledged has to be able to send it again — is
+    /// indistinguishable from a fresh one unless the attempt is named, and
+    /// accepting it would reset an in-flight attempt to eligible.
+    ///
+    /// Returns a decision rather than a bool, because the answers lead a caller
+    /// to different next actions and several of them are not errors.
+    fn settle(&mut self, work: &PendingWork, evidence: EffectEvidence) -> Settled {
         let Some(transition) = self
             .transitions
-            .get_mut(id.chain())
+            .get_mut(work.id.chain())
             .and_then(Option::as_mut)
         else {
             return Settled::NoSuchWork;
@@ -1055,14 +1182,16 @@ impl Ledger {
         // The generation first, before the entry is even looked up: an entry
         // that matches inside a transition that does not is exactly the case
         // this exists to refuse.
-        if transition.revision != revision {
+        if transition.revision != work.revision {
             return Settled::Superseded {
                 current: transition.revision,
             };
         }
-        let recorded = transition.settled.get(id.entry()).copied().flatten();
+        let Some(record) = transition.attempts.get(work.id.entry()).copied() else {
+            return Settled::NoSuchWork;
+        };
         let settleable = matches!(
-            transition.entries.get(id.entry()),
+            transition.entries.get(work.id.entry()),
             Some(
                 EntryState::Unrecorded
                     | EntryState::OutcomeUnknown { .. }
@@ -1080,21 +1209,60 @@ impl Ledger {
             // first delivery it never saw an outcome for has to be able to
             // repeat it. Only the record distinguishes that from a fresh claim
             // about an entry that was never settled.
-            return match recorded {
-                Some(previous) if previous == evidence => Settled::Duplicate,
-                Some(previous) => Settled::Contradicted { settled: previous },
-                None => Settled::NoSuchWork,
+            // The record answers for the attempt it was made about and no
+            // other. An entry can be decided while the record is about an
+            // earlier attempt — an entry settled and then failed again is on
+            // its second attempt with the first one's record still beside it —
+            // and reading that record as an answer about *this* attempt is how
+            // a report about attempt 2 comes back as a duplicate of attempt 1.
+            return match record.settled {
+                Some(previous)
+                    if previous.attempt == work.attempt && previous.evidence == evidence =>
+                {
+                    Settled::Duplicate
+                }
+                Some(previous) if previous.attempt == work.attempt => Settled::Contradicted {
+                    settled: previous.evidence,
+                },
+                Some(_) | None => Settled::NoSuchWork,
+            };
+        }
+        // Then the attempt, and this is the half that the slot and the
+        // generation together do not cover. Within one generation an entry is
+        // retried: settling it `NotApplied` makes it eligible and `begin` moves
+        // it to the next attempt at the same address under the same revision. A
+        // repeat of the earlier report — which has to be tolerated, because a
+        // caller that never saw its first delivery acknowledged must be able to
+        // send it again — would otherwise read as a statement about the attempt
+        // now outstanding, and `NotApplied` would make an attempt whose effect
+        // may be live eligible to run a third time.
+        //
+        // Placed after the decided case rather than before it, because a
+        // decided entry is where the repeat is *supposed* to land: it is only
+        // the live entry whose attempt has to match.
+        if work.attempt != record.begun {
+            return Settled::StaleAttempt {
+                reported: work.attempt,
+                outstanding: record.begun,
             };
         }
         let next = match evidence {
             EffectEvidence::Applied => EntryState::Succeeded,
             EffectEvidence::NotApplied => EntryState::NotStarted,
         };
-        if let Some(state) = transition.entries.get_mut(id.entry()) {
+        if let Some(state) = transition.entries.get_mut(work.id.entry()) {
             *state = next;
         }
-        if let Some(slot) = transition.settled.get_mut(id.entry()) {
-            *slot = Some(evidence);
+        if let Some(slot) = transition.attempts.get_mut(work.id.entry()) {
+            // Recorded against the attempt the evidence was *about*, never
+            // against whichever is current: this record is what decides
+            // whether a later report is a repeat, and a record that drifted
+            // onto the next attempt would make two different attempts look
+            // like one.
+            slot.settled = Some(SettledAttempt {
+                attempt: record.begun,
+                evidence,
+            });
         }
         Settled::Decided
     }
@@ -1146,6 +1314,7 @@ impl Ledger {
                 return Some(PendingWork {
                     id: WorkId { chain, entry },
                     revision: transition.revision,
+                    attempt: transition.attempt_of(entry),
                     hold,
                 });
             }
@@ -1166,6 +1335,7 @@ impl Ledger {
                     pending.push(PendingWork {
                         id: WorkId { chain, entry },
                         revision: transition.revision,
+                        attempt: transition.attempt_of(entry),
                         hold,
                     });
                 }
@@ -1728,14 +1898,10 @@ fn plan_chain(
             }
         }
 
-        let attempts = match *state {
-            EntryState::DefinitelyFailed { attempts, .. } => attempts.saturating_add(1),
-            _ => 1,
-        };
         steps.push(Step {
             chain: index,
             entry: entry_index,
-            decision: Decision::Attempt { attempts },
+            decision: Decision::Attempt,
         });
     }
 }
@@ -2272,13 +2438,10 @@ impl EcsBot {
                 chain: step.chain,
                 entry: step.entry,
             };
-            let attempts = match step.decision {
-                Decision::Skip => {
-                    self.world.non_send_mut::<Ledger>().skip(work);
-                    continue;
-                }
-                Decision::Attempt { attempts } => attempts,
-            };
+            if matches!(step.decision, Decision::Skip) {
+                self.world.non_send_mut::<Ledger>().skip(work);
+                continue;
+            }
 
             // Written *before* the attempt, not after: a tick dropped while the
             // effect is in flight leaves this behind, and a record that says
@@ -2286,12 +2449,16 @@ impl EcsBot {
             // effect instead of replaying it. A panic unwinding out of the action
             // is a limit this substrate does not close, and it is stated in the
             // module documentation.
-            if !self.world.non_send_mut::<Ledger>().begin(work) {
+            // The ordinal comes back *from* the ledger rather than being derived
+            // beside it. The attempt a caller is handed and the attempt
+            // settlement checks have to be one number, and two derivations of
+            // one number are two numbers the moment they disagree.
+            let Some(attempt) = self.world.non_send_mut::<Ledger>().begin(work) else {
                 // The entry is not in a state an attempt can start from, so the
                 // world moved behind the schedule's back. The run stops here
                 // rather than guessing what the entry now means.
                 break;
-            }
+            };
 
             // Scoped, so the world is borrowed immutably only across the await
             // and the ledger is reachable mutably on either side of it.
@@ -2332,7 +2499,7 @@ impl EcsBot {
                 Err(error) => {
                     self.world
                         .non_send_mut::<Ledger>()
-                        .fail(work, &error, attempts, budget);
+                        .fail(work, &error, attempt, budget);
                     failure = Some(error);
                     break;
                 }
@@ -2367,16 +2534,13 @@ impl EcsBot {
     /// An entry that was given up on accepts evidence too, which is how a
     /// caller revives work the attempt budget abandoned.
     ///
-    /// `revision` names the generation the evidence is about: the
-    /// [`PendingWork::revision`] of the [`pending`](Self::pending) entry the
-    /// caller read. It is required, and compared before anything is read or
-    /// written, because a chain reuses one slot for every generation over it. A
-    /// delayed report about revision N delivered after the slot re-opened at
-    /// revision N+1 would otherwise land on an attempt the caller has never
-    /// seen — `Applied` acknowledging an effect at a generation that never
-    /// happened, `NotApplied` making an unknown attempt eligible to run again.
-    /// Passing the revision that came with the work is what makes the delivery
-    /// safe to retry.
+    /// The evidence is submitted against the [`PendingWork`] it is about,
+    /// rather than against a slot: the value carries the address, the
+    /// generation and the attempt, and all three are compared before anything
+    /// is read or written. That is what makes the delivery safe to retry — a
+    /// caller that never saw its first report acknowledged can send the same
+    /// one again and have it answered idempotently, rather than applied a
+    /// second time.
     ///
     /// # Errors
     ///
@@ -2387,10 +2551,15 @@ impl EcsBot {
     /// effect was acknowledged when nothing was.
     ///
     /// [`BotError::EvidenceSuperseded`] when the chain holds a transition whose
-    /// revision is not `revision` — the work the caller is reporting on was
-    /// superseded, and nothing was changed. Re-read
+    /// revision is not the one the work was read from — the work the caller is
+    /// reporting on was superseded, and nothing was changed. Re-read
     /// [`pending`](Self::pending) and report against the generation that is
     /// there now.
+    ///
+    /// [`BotError::EvidenceStaleAttempt`] when the generation still holds but
+    /// the entry has moved on to a later attempt since. The report is about an
+    /// attempt that is over, so there is nothing for it to decide; re-read
+    /// [`pending`](Self::pending) to see the attempt that is outstanding.
     ///
     /// [`BotError::EvidenceContradicted`] when this generation's entry was
     /// already settled with the opposite evidence. Nothing was changed:
@@ -2401,30 +2570,33 @@ impl EcsBot {
     /// safely send it again.
     pub fn resolve_effect(
         &mut self,
-        work: WorkId,
-        revision: u64,
+        work: &PendingWork,
         evidence: EffectEvidence,
     ) -> Result<(), BotError> {
-        match self
-            .world
-            .non_send_mut::<Ledger>()
-            .settle(work, revision, evidence)
-        {
+        match self.world.non_send_mut::<Ledger>().settle(work, evidence) {
             // Both are success, and deliberately one arm: to the caller, a
             // repeat that landed a second time is the same fact as one that
             // landed the first.
             Settled::Decided | Settled::Duplicate => Ok(()),
             Settled::Superseded { current } => Err(BotError::EvidenceSuperseded {
-                work,
-                named: revision,
+                work: work.id(),
+                named: work.revision(),
                 current,
             }),
+            Settled::StaleAttempt {
+                reported,
+                outstanding,
+            } => Err(BotError::EvidenceStaleAttempt {
+                work: work.id(),
+                reported,
+                outstanding,
+            }),
             Settled::Contradicted { settled } => Err(BotError::EvidenceContradicted {
-                work,
+                work: work.id(),
                 settled,
                 submitted: evidence,
             }),
-            Settled::NoSuchWork => Err(BotError::NoSuchWork { work }),
+            Settled::NoSuchWork => Err(BotError::NoSuchWork { work: work.id() }),
         }
     }
 }
@@ -3706,7 +3878,7 @@ mod tests {
         // the point of asserting it: evidence reopens the chain, it does not
         // promise the retry will succeed.
         let blocked = bot.pending().into_iter().next().ok_or("held")?;
-        bot.resolve_effect(blocked.id(), blocked.revision(), EffectEvidence::NotApplied)?;
+        bot.resolve_effect(&blocked, EffectEvidence::NotApplied)?;
         match bot.tick() {
             Ok(fired) => {
                 return Err(format!("a refusal was reported as {fired} fired").into());
@@ -3838,7 +4010,7 @@ mod tests {
             .into_iter()
             .next()
             .ok_or("the held entry disappeared from the report")?;
-        bot.resolve_effect(held.id(), held.revision(), EffectEvidence::NotApplied)?;
+        bot.resolve_effect(&held, EffectEvidence::NotApplied)?;
         assert_eq!(bot.tick()?, 1, "the entry runs once evidence authorises it");
         assert_eq!(*log.borrow(), vec![200], "the effect happened, once");
         assert!(
@@ -3884,7 +4056,7 @@ mod tests {
             .into_iter()
             .next()
             .ok_or("the held entry is not reported")?;
-        bot.resolve_effect(held.id(), held.revision(), EffectEvidence::Applied)?;
+        bot.resolve_effect(&held, EffectEvidence::Applied)?;
         assert_eq!(
             bot.tick()?,
             0,
@@ -3908,7 +4080,7 @@ mod tests {
         // complaint — the tick above resolved the transition and dropped its
         // slot, so there is genuinely no held effect at this address. That
         // distinction is the whole reason the two new refusals exist.
-        match bot.resolve_effect(held.id(), held.revision(), EffectEvidence::Applied) {
+        match bot.resolve_effect(&held, EffectEvidence::Applied) {
             Ok(()) => Err("evidence was accepted for an entry that is not held".into()),
             Err(error) => {
                 assert!(
@@ -4094,7 +4266,7 @@ mod tests {
             .into_iter()
             .next()
             .ok_or("the held entry is not reported")?;
-        bot.resolve_effect(held.id(), held.revision(), EffectEvidence::NotApplied)?;
+        bot.resolve_effect(&held, EffectEvidence::NotApplied)?;
         assert_eq!(bot.tick()?, 1, "and then it runs");
         assert_eq!(*log.borrow(), vec![200, 200], "exactly once more");
         Ok(())

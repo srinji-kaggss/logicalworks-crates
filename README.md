@@ -231,6 +231,12 @@ the rest of this table is design history and contributor policy.
 | [`docs/dependency-doctrine.md`](docs/dependency-doctrine.md) | How a dependency is admitted, the replacement matrix, and where no equivalent exists. Read this before adding a crate. |
 | [`docs/async-parity.md`](docs/async-parity.md) | The `lgwks_bot::rt` surface against tokio and the alternatives: the capability matrix, the open gaps, and the deliberate divergences. |
 | [`docs/async-sdk-shape.md`](docs/async-sdk-shape.md) | The async surface as an SDK: its shape, its invariants, and how to migrate. |
+| [`docs/declarative-orchestration.spec.md`](docs/declarative-orchestration.spec.md) | The task-first front door: typed task, host and report, one registry and execution path, the responsibility split, and the full known-deficit repair. Proposed, not shipped. |
+| [`docs/orchestration-lifecycle.spec.md`](docs/orchestration-lifecycle.spec.md) | Single-owner state, atomic fingerprint and value commits, attempt-bound evidence, readiness and process-tree ownership, and the honest durability boundary. |
+| [`docs/ai-orchestration.spec.md`](docs/ai-orchestration.spec.md) | AI-authored scripts and AI workloads: constrained proposals, bounded artifact context, subject pinning, no-progress intervention and same-model evaluation. |
+| [`docs/pr-review-orchestration.spec.md`](docs/pr-review-orchestration.spec.md) | The reference journey: a pinned snapshot through script, checked publication and lost-response reconciliation, and its explicit non-CAS freshness limit. |
+| [`docs/orchestration-acceptance.spec.md`](docs/orchestration-acceptance.spec.md) | The 36 proposed public-interface falsifiers, and the developer-experience and quality evaluation that would accept the facade. Every case unrun. |
+| [`docs/orchestration-evidence.md`](docs/orchestration-evidence.md) | The pinned source findings, the foundational Rust assessment, and the reference entries the orchestration specs are built on. |
 | [`docs/bot-on-ecs.md`](docs/bot-on-ecs.md) | Bot semantics on an ECS substrate, and what that mapping costs. |
 | [`docs/bevy-admission.md`](docs/bevy-admission.md) | The Bevy ECS decision and the alternatives measured against it. |
 | [`docs/candle-admission.md`](docs/candle-admission.md) | ML inference admission: authority, transitive surface, verification. |

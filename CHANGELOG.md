@@ -148,6 +148,21 @@ explicitly under that crate.
     are on `main` and unpublished. They ship in one release once the registry and
     the scheduler have landed.
 
+### lgwks_std Added
+
+- **`wire` re-exports the `rkyv` crate, so a consumer crate can derive against
+  it.** The module re-exported the three derive macros but not the crate those
+  macros expand against, and the generated code names `::rkyv::…` absolutely. A
+  type outside `lgwks_std` that derived `Archive` through this module therefore
+  failed with `cannot find 'rkyv' in the crate root` before it ever reached a
+  layout question, which made the estate's binary surface usable only by its own
+  tests. A consumer now writes `#[rkyv(crate = lgwks_std::wire::rkyv)]` and
+  derives the macros from here as before.
+- **`Digest` carries the archive derives behind `wire`.** Thirty-two bytes with
+  no indirection, so it archives in place and any record that contains one
+  reaches it without a pointer — which is the property that makes the journal's
+  chain head a value a reader can compare against without decoding the record.
+
 ### lgwks_bot Breaking
 
 **There is no longer any public API that starts concurrent work or a process and
@@ -225,6 +240,25 @@ Changed:
 - `docs/guides/lgwks-bot/background-work.md`, `crates/lgwks-bot/README.md`, and
   the `rt::task` / `rt::process` module docs now describe the supervised-only
   surface rather than the deleted one.
+- **`Bot::resolve_effect` takes the `PendingWork` it is about rather than
+  `(WorkId, revision)`.** `PendingWork` carries the address, the generation and
+  the attempt, and all three are compared before anything is read or written. A
+  caller passes back the value `pending()` handed it, so "settle an attempt I
+  invented" and "settle the wrong attempt" stop being representable rather than
+  being refused after the fact. `WorkId` remains as the address a report names,
+  which is what it always was: SPEC-02's "a slot index is instrumentation only".
+  This is the intentional tightening RQ-059 asks to be documented — a program
+  that named a slot and a revision still compiles if it reads its work from
+  `pending()`, and a program that fabricated the pair no longer does.
+
+- **`EffectEvent::to_bytes` returns `lgwks_std::wire::AlignedVec` rather than
+  `Vec<u8>`.** The journal record is archived by the estate's binary format now
+  instead of a framing this crate maintained beside it, and an `AlignedVec` is
+  what the archive has to live in for a reader to access it in place rather than
+  decode it. The tag bytes, the width constants and the hand-written
+  `encode_into` are gone with it. **The bytes are what a chain head commits to**,
+  so this is a durable break as well as a signature one: a journal written before
+  this release does not verify against one written after it.
 
 **No crate version is bumped.** The change is unpublished like the five public
 modules above it, and it ships in the same release.
@@ -267,6 +301,199 @@ modules above it, and it ships in the same release.
   - `crates/lgwks-bot/tests/flow_ron.rs` pins all of the above, including that
     the internally tagged spelling no longer decodes.
 
+- **`effect`, the durable effect identity the ledger was missing: a settlement
+  now names *which attempt* it is about.** The ECS ledger already settles an
+  entry and already refuses a contradicting settlement. What it never carried is
+  identity: `EntryState::DefinitelyFailed` holds `attempts: u32`, so two
+  deliveries that both arrive as "attempt 3" are indistinguishable, and a repeat
+  of an old settlement looks exactly like a statement about a new one at the
+  moment the ledger decides whether to accept it. `EffectKey` binds the seven
+  fields a settlement must name (run, action, attempt, flow revision, action
+  digest, environment, environment epoch), so "is this the same settlement?" is
+  a comparison rather than a judgement about a counter.
+  - **It reuses the estate's one content hash rather than minting a second.**
+    `FlowRevision` and `ActionDigest` are newtypes over
+    `lgwks_std::hash::Digest`, not replacements for it. They have different
+    domains: one binds the validated flow document, the other binds operation,
+    target, preconditions, postcondition and exact input. A newtype each is what
+    stops a call site passing one where the other is required.
+  - **`AttemptId` and `EnvironmentEpoch` refuse to wrap.** `checked_next()`
+    returns `None` at `u64::MAX` instead of restarting at 1. A wrapped counter
+    hands out an identity it has already issued for this sequence, and the ledger
+    would then refuse a genuine settlement as a duplicate. Running out is
+    recoverable; silently reusing an identity is not.
+  - **The schema admits two digest algorithms; this crate accepts one.**
+    `sha256` parses and is then refused as `UnsupportedAlgorithm` rather than
+    rejected as malformed, because it is well-formed on the wire and the error a
+    caller sees should say the algorithm is unsupported rather than that their
+    JSON was wrong. A settlement is accepted because the receiver recomputed the
+    digest, and a tag naming an algorithm it cannot recompute is an unverifiable
+    claim dressed as identity.
+  - **Ids are strict on parse**: 32 lowercase hex characters, big-endian, with
+    uppercase rejected rather than folded and the all-zero id refused. Zero is
+    the schema's own exclusion and also what a zeroed or truncated buffer
+    produces, so refusing it turns a class of uninitialised-identity bugs into a
+    parse error.
+  - **19 unit tests, plus 6 that encode the identity half of eval cases E06 and
+    E07** (`tests/effect_identity.rs`), both of which `okf/evals.json` records as
+    `not_run`. What those six establish is that the identity predicates
+    distinguish every delivery the two cases name: a reused slot, a forward epoch
+    bump, a previous attempt, an exact duplicate, and a rewritten payload. What
+    they do not establish is the durable half, because E06 and E07 both require a
+    real receiver or persistent-state oracle and the crate has neither a journal
+    nor an environment. That gap is not narrowed by anything here.
+  - **One of the six is the design result worth keeping.** A key cannot
+    distinguish a settled attempt from a contradicted one, because both are the
+    same key with different evidence. That is why the ledger keeps its per
+    generation settlement record beside the entry rather than deriving settlement
+    from identity alone, and why this module does not attempt to replace it.
+  - Nothing is wired to the ledger yet. This is the identity layer; the
+    settlement call site needs a run and an environment to key against, and a
+    grep for either concept across the crate returns nothing before this module.
+- **`journal`, the durable append that has to land before the irreversible
+  boundary, and the durability grade that decides whether a store may host one.**
+  `effect` supplied the identity a settlement is about; an identity held only in
+  memory is lost at exactly the moment it is needed. A controller that hands
+  bytes to an external system and then dies cannot say whether they arrived, and
+  a controller that guesses either duplicates a non-idempotent effect or drops
+  one. `EffectJournal::compare_and_append` is the seam: append `event` if and only
+  if `expected_tail` is still the committed tail, returning a `DurableAck` that
+  names the committed position and the promise claimed for it.
+  - **The tail is a position, not a counter.** `JournalPosition` carries a
+    sequence number *and* a hash over every event up to and including that one,
+    chained so that the same two events in the other order produce a different
+    head. A sequence alone would let two journals that diverged agree on where
+    they were. `verify_chain` recomputes the chain and names the first entry that
+    does not follow, which is what makes a dropped or reordered entry detectable
+    rather than merely suspicious.
+  - **The ordering ladder is enforced at the append rather than trusted.** One
+    attempt at one intent walks `IntentAdmitted`, `DispatchPrepared`,
+    `OutcomeObserved`, `Verified`, exactly once. A second `DispatchPrepared` for
+    an existing key is refused as `OutOfOrder`, so a second dispatch of one
+    attempt is refused rather than merely discouraged. A legitimate retry is a
+    new `AttemptId` and therefore a new key with its own fresh ladder, and
+    `tests/effect_journal.rs` pins the retry alongside the refusal so the guard
+    cannot be mistaken for a ban on trying again.
+  - **What the ladder does not enforce: RQ-009's retry admissibility.** A caller
+    that mints a new attempt for the same intent gets a clean ladder, and nothing
+    here checks `budget_remaining`, live authority, unchanged intent or proof
+    that the effect did not land. The ladder makes a *resend* unrepresentable; it
+    does not decide whether a *retry* is admissible, and that decision does not
+    exist anywhere in the crate yet.
+  - **Durability is graded, and the grade is what refuses.** `DurabilityPromise`
+    is `Ephemeral`, `ProcessCrash` or `PowerLoss`, and `admit_external_handoff`
+    refuses anything below `ProcessCrash`. The in-memory adapter reports
+    `Ephemeral` and is refused, which is the whole reason it is a named type
+    rather than a default: a caller that reaches for it gets a refusal at the
+    boundary instead of a green test that means nothing.
+  - **The acknowledgment records the promise rather than implying one was
+    proven.** Nothing here can verify a durability claim, because a filesystem, a
+    device cache or a virtualization layer can each accept a write and lose it
+    anyway. `DurableAck` carries the promise it was minted under and its
+    documentation says so. The tests that would decide the claim are crash tests
+    against a real store, and they are not unit tests.
+  - **`EffectEvidence` is the ledger's, re-exported rather than restated.** The
+    journal and the ledger answer the same question, and a second enum with the
+    same two arms would drift from the first the next time an arm was added. It
+    gained `Hash`, which is additive on a fieldless enum.
+  - **`EffectKey::to_bytes` is the canonical encoding the chain hashes**, fixed
+    width at 130 bytes, every field written and every integer big-endian, with
+    each digest carrying its algorithm tag so swapping the algorithm moves the
+    chain position. The length is summed from the field widths rather than
+    written as a literal, so adding a field to the key is a compile error until
+    the encoding carries it.
+  - **24 unit tests, plus 7 that encode the journal half of eval cases E10 and
+    E11** (`tests/effect_journal.rs`), both of which `okf/evals.json` records as
+    `not_run`. E10 is a lost reply after a real external commit and E11 is a
+    crash at every durable boundary. Both require a real receiver, a real restart
+    or a persistent-state oracle, and the crate has none of the three, so
+    neither case moves off `not_run` on the strength of this entry.
+  - **Nothing is wired to a real store or to the ledger yet.** `MemoryJournal` is
+    a reference adapter that exists in order to be refused at the boundary, and
+    no call site outside the tests appends to it.
+- **`broker`, the environment fence: authority for one attempt at one
+  generation, and the refusal that stops a stale command from dispatching.** A
+  durable record of a dispatch aimed at an environment that has already been
+  replaced is accurate and still wrong, so the record cannot be where that is
+  caught. `Broker` owns which environments a run has and which generation each
+  is at, and `authorize` mints an `Authority` only when the generation named by
+  the `EffectKey` is the one currently held.
+  - **A stale generation and a generation the broker never issued are different
+    errors.** `Superseded` means the key names an older generation: the real
+    case, a command that was correct and is now fenced. `NeverIssued` means it
+    names a newer one the broker never minted, so the key did not come from this
+    broker at all. One "generation mismatch" error would print the same sentence
+    for both while calling for opposite investigations.
+  - **`Authority` is a sealed proof, and the seal is the constructor.** Fields
+    private, no public constructor, `Broker::authorize` the only minter, the same
+    shape as `cap`'s `Auth`. It is deliberately not `Clone`, which stops a
+    warrant being scattered. That is not what makes a double dispatch impossible:
+    the journal's ordering ladder is, and the type documents that rather than
+    implying otherwise.
+  - **The fence runs twice, and it has to.** Authorizing and handing over are
+    two instants. A replacement landing between them leaves a warrant that was
+    minted legitimately and is now stale, and a check that only runs at mint time
+    does not deliver RQ-006's "replacement invalidates all old commands". So
+    `revalidate` re-runs the identical comparison at the boundary, and it shares
+    one private `check_generation` with `authorize` rather than repeating it: a
+    second copy that drifted would refuse to mint a warrant and accept it at the
+    boundary, which is the failure fencing exists to prevent.
+  - **`prepare_dispatch` is where the RQ-007 order stops being prose.** It
+    authorizes, then appends `DispatchPrepared`, and only then returns a
+    `Prepared` holding both. A caller cannot append before it is authorized, or
+    hand over before the append landed, because there is nothing to hand over
+    until both steps have run. A superseded key never reaches the append, so a
+    fenced command cannot become a recorded attempt.
+  - **An environment is a resource with a declared lifetime.** `register` takes
+    ownership, `replace` bumps the generation and invalidates every warrant
+    already handed out, and `close` releases it. Closing is idempotent, because a
+    cleanup path that has to know whether it already ran is one that will
+    sometimes not run. Generation exhaustion is named rather than wrapped, since
+    a wrapped generation would re-authorize commands the broker already fenced.
+  - **18 unit tests.** They pin each refusal, both directions of the fencing
+    comparison, the boundary re-check on both a replaced and a closed
+    environment, the exhaustion path, and that a superseded key leaves the
+    journal untouched. What they do not do is reach a real environment: no process,
+    socket or input seat exists here, so `EnvironmentId` arrives from the host's
+    own entropy and nothing in this crate creates one.
+- **`retry`, RQ-009's admissibility rule: the vocabulary existed, the decision
+  did not.** `RetryClass` already said what a failure permits and
+  `DispatchCertainty` already said what it established, with
+  `BotError::retry_class` as the total map between them that never reads a
+  rendered cause. What was missing is the rule that composes those with the
+  budget, the authority, the intent and a remote deduplication contract:
+  `retry_admissible = budget_remaining AND live_authority AND
+  unchanged_logical_intent AND (proven_not_applied OR contract_valid)`.
+  - **It is a pure function of facts the caller established**, the shape
+    `DispatchCertainty` already has with its producers. It reaches for no clock,
+    no broker and no journal, so every branch is pinned by a test rather than by
+    a scenario.
+  - **`DeduplicationContract` records all five things RQ-009 lists**: the
+    logical request key, the payload binding, the scope, the retention window
+    and the late-arrival behaviour. The key and the payload reuse the effect
+    key's own vocabulary, because that split is already the right one: the
+    `ActionId` is the logical intent that stays fixed across a resend, and the
+    `ActionDigest` is the bound payload that must not change with it.
+  - **The late-arrival answer is where a contract can be worth nothing.** Inside
+    the retention window the remote deduplicates by construction. Past it, the
+    contract rules out a duplicate only if the remote demonstrably *refuses* a
+    late arrival. `Applied` means a second application; `Unspecified` means
+    nobody knows, and not knowing is not a basis for sending. An adapter that
+    leaves that field unstated gets a refusal rather than a duplicate.
+  - **Every failing conjunct is reported, not the first.** The four have four
+    unrelated repairs, and the estate already made this argument for
+    capabilities: a check that reveals one missing item at a time makes the
+    repair a loop. The one exception is a permanent failure, which short-circuits
+    because the remaining conjuncts are moot and reporting them would be noise.
+  - **What a retry cannot reach: a GUI click.** RQ-009's contract half is
+    reachable only by supplying a recorded contract, and nothing here can
+    express one for a click, so an unsettled click is never retried on that half
+    of the disjunct.
+  - **21 unit tests**, covering both directions of the retention boundary, a
+    contract recorded for another action and for another payload, the refusing
+    default on the authority fact, and the all-conjuncts-failed report. No eval
+    case moves off `not_run`: RQ-009's rule is a decision over stated facts, and
+    the cases that would exercise it end to end need a real receiver.
 - **`Observe::fingerprint`, and with it the lazy seam: a source that holds still
   is no longer polled.** Change detection is an *equality* question — the
   substrate reduces every observation to one bit and discards the value — so
@@ -383,6 +610,22 @@ modules above it, and it ships in the same release.
 
 ### lgwks_bot Fixed
 
+- **A settlement is about one attempt, and a repeat of it can no longer land on
+  the next one.** The ledger guarded the slot and the generation but not the
+  attempt, and a chain retries *within* a generation: an entry held as an
+  unknown outcome is settled `NotApplied`, that makes it eligible, and the next
+  tick begins attempt 2 at the same address under the same revision. A repeat of
+  the attempt-1 report — which settlement tolerates on purpose, because a caller
+  that never saw its first delivery acknowledged has to be able to send it again
+  — then found the entry held, passed every check, and recorded "definitely did
+  not happen" about attempt 2 on the strength of a statement about attempt 1.
+  Attempt 3 ran against an effect that may have been live. The ledger now
+  numbers the attempts it begins and refuses evidence whose attempt is not the
+  outstanding one (`BotError::EvidenceStaleAttempt`), and the number is handed
+  back by the ledger rather than derived beside it, so a settled entry cannot
+  restart the count at one and give two attempts the same name.
+  `tests/ecs_tick.rs::a_settlement_names_the_attempt_it_settles_and_no_other`
+  fails with the guard removed and passes with it.
 - **A transition that is dropped hands its payload back to the chain that owned
   it, so a settled chain settles.** Found by `bench/`'s fairness gate and by
   nothing else, which is the point: **the bot fired 896,000 effects where the

@@ -1,8 +1,8 @@
 # What a failed tick means
 
 Both entry points return `Result<usize, BotError>`: `Bot::tick` is the
-synchronous adapter (`crates/lgwks-bot/src/ecs.rs:1999`) and `Bot::tick_async` is
-the one to `await` from inside a runtime (`crates/lgwks-bot/src/ecs.rs:1752`).
+synchronous adapter (`crates/lgwks-bot/src/ecs.rs:2196`) and `Bot::tick_async` is
+the one to `await` from inside a runtime (`crates/lgwks-bot/src/ecs.rs:2088`).
 Four different things can produce an `Err`. Three are failures that mean
 different things for your data — the distinction is the difference between a
 retry and a duplicate — and the fourth is the adapter refusing to run a tick at
@@ -16,23 +16,32 @@ behind an indeterminate effect means.
 ## Case one: a poll failed
 
 Nothing ran. The `observe_fold` system returns before committing anything
-(`crates/lgwks-bot/src/ecs.rs:1289`):
+(`crates/lgwks-bot/src/ecs.rs:1542`):
 
 ```rust,ignore
-let values = match polled.into_iter().collect::<Result<Vec<_>, _>>() {
-    Ok(values) => values,
-    Err(error) => {
-        world.resource_mut::<TickError>().0 = Some(error);
-        return;
+// Pass one: the first error, in declaration order.
+let mut first_error = None;
+for result in polled.iter_mut() {
+    if result.is_err() {
+        first_error = std::mem::replace(result, Ok(None)).err();
+        break;
     }
-};
+}
+if let Some(error) = first_error {
+    world.resource_mut::<TickError>().0 = Some(error);
+    put_polled(world, polled);
+    return;
+}
 ```
 
-`collect` into a `Result<Vec<_>, _>` keeps the first error in declaration order
-and drops the rest. The early return happens before the observed values are
-written and before any `Revision` is bumped, so a source that held still on the
-previous tick still holds still, and a source that had moved still shows its
-previous revision. No condition is evaluated, so no action runs.
+The first error in declaration order is the one `tick` reports, and it is moved
+out of the slot it was found in rather than copied, because `BotError` is
+deliberately not `Clone` — a copy would let a caller settle an effect against a
+duplicate of the failure instead of the failure. The early return happens before
+the observed values are written and before any `Revision` is bumped, so a source
+that held still on the previous tick still holds still, and a source that had
+moved still shows its previous revision. No condition is evaluated, so no action
+runs.
 
 `tick` returns that error and the tick had no effect.
 
@@ -42,9 +51,9 @@ Actions run in declaration order, but deciding and doing are two systems. The
 `fire_plan` system walks the eligible work — a chain whose `Revision` moved opens
 a transition, and a chain with a transition outstanding is walked whether or not
 it moved — and records one ordered `Step` per condition that held
-(`crates/lgwks-bot/src/ecs.rs:1494`); the `run_steps` pass then awaits those steps
+(`crates/lgwks-bot/src/ecs.rs:1901`); the `run_steps` pass then awaits those steps
 on the caller's executor in exactly that order
-(`crates/lgwks-bot/src/ecs.rs:2212`). It breaks on the first failure and records
+(`crates/lgwks-bot/src/ecs.rs:2378`). It breaks on the first failure and records
 it, and there is no rollback:
 
 ```rust,ignore
@@ -60,7 +69,7 @@ means "this run did not finish", not "nothing happened".
 
 One consequence is easy to miss, and it is the reason the ledger exists.
 `observe_fold` commits the new values and bumps the revisions *before*
-`fire_plan` decides (`crates/lgwks-bot/src/ecs.rs:1324`), so selecting work by
+`fire_plan` decides (`crates/lgwks-bot/src/ecs.rs:1687`), so selecting work by
 `Changed<Revision>` alone means the next tick polls an unchanged source, finds
 nothing eligible, and never attempts the actions after the failure again. The
 work is lost, not queued.
@@ -279,7 +288,7 @@ Two failures come from the wiring rather than from a domain, and both are typed
 so they cannot be mistaken for a condition that simply did not fire.
 
 - A condition whose `Evaluate<T>` implementation returns `Err` stops the chain
-  with that error (`crates/lgwks-bot/src/ecs.rs:2635`). A structural failure in a
+  with that error (`crates/lgwks-bot/src/ecs.rs:1890`). A structural failure in a
   condition is `BotError::EvaluateError`, not `false`. The stop is ordered rather
   than absolute: the steps `fire_plan` recorded before the failing condition are
   still run, so an effect the walk had already cleared does take effect, while

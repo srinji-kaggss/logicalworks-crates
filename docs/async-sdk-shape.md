@@ -1,248 +1,127 @@
 # The async surface as an SDK
 
-This document is the design contract for the async tier of this workspace: the
-surface `lgwks_bot::rt` and `lgwks_std::task` expose, what a consumer of that
-surface is required to reason about, and what the crates owe the consumer
-instead. It governs any addition to either module.
+Status: **design contract; task-first facade not implemented**. Reviewed against
+`51897f8c0cda627d3b3abcee28bda6ebb690f7a1`, 2026-09-21.
+Tracking: [#87](https://github.com/srinji-kaggss/logicalworks-crates/issues/87).
+This revision replaces the earlier scope-first proposal; it does not declare
+its proposed symbols available in `lgwks_bot = "0.4.2"` or on main.
 
-Status: design. Nothing here is implemented yet beyond what is marked *shipped*.
+## The contract
 
-## 1. The one rule
+A task author supplies **what to do and the substantive script**, not the
+machinery that keeps it running. Reviewing a PR must not require another
+application-specific queue, supervisor, tick loop, retry controller, child
+process manager, capability-repair loop or reporting subsystem.
 
-A consumer of the async surface never names any of these:
+Illustrative target, not a compilable example of a shipped API:
 
-`tokio` · `Pin` · `Send` · `'static` · `JoinHandle` · `JoinError` · `abort` ·
-`Arc` (as task plumbing) · `select!` · `Future` extension traits
-
-Not "usually doesn't". *Never*. Each name in that list is a piece of
-scheduling machinery. Cognitive load is the sum of the machinery a caller must
-hold in their head to state their intent. The SDK's whole job is to pay that
-cost once, in one place, so callers pay it zero times.
-
-The test for any new API: **does the caller's code read as a description of
-what they want done, or of how the runtime should do it?** If the latter, the
-API is wrong.
-
-## 2. The constraint that shapes everything
-
-Withoutboats' *scoped task trilemma*: a sound API can provide **at most two** of
-
-1. **Concurrency**: children proceed concurrently with the parent.
-2. **Parallelizability**: children can proceed in parallel (multiple cores).
-3. **Borrowing**: children can borrow the parent's data without `Arc`.
-
-This is not a Rust implementation gap; it follows from `std::mem::forget` being
-safe. It is why `tokio::spawn` requires `'static + Send`, why `moro` is
-nightly-only and unsafe, and why `std::thread::scope` blocks.
-
-**Consequence for the design: do not promise all three.** An API that appears to
-offer them and quietly drops one is worse than one that names the trade. The SDK
-exposes two verbs, each honest about which two horns it has:
-
-| Verb | Concurrency | Parallel | Borrows | Cost |
-|---|---|---|---|---|
-| `scope.spawn(fut)` | yes | yes | no: `'static` | caller owns or `Arc`s its data |
-| `(a, b).join()` | yes | no (one task) | **yes** | a blocking branch stalls siblings |
-
-Choosing between them is a real decision the caller makes *once*, at the call
-site, and the type system tells them which one they got. That is the reduction
-in cognitive load: not hiding the trade, but making it a single, legible choice
-instead of a running background concern.
-
-## 3. The public surface
-
-### 3.1 Entry: *shipped*
-
-```rust
-let runtime = Runtime::new()?;          // owned, no ambient global
-let answer = runtime.block_on(async { 2 + 2 });
+```text
+let review = task("review-pr", review_script);
+let report = host.run(review, pr).await?;
 ```
 
-No attribute macro. A re-exported proc-macro expands to `::tokio` paths a
-consumer without a tokio edge cannot resolve. Entry stays explicit.
+A host is configured once with explicit policy and adapters. That configuration
+is real work and must be included in usability measurements. A tiny call site
+that hides hundreds of bespoke orchestration lines in `review_script` fails
+this contract just as surely as a verbose call site does.
 
-### 3.2 Structured scope: *to build*
+The task-first specification consists of:
 
-```rust
-let total = scope(|s| async move {
-    let a = s.spawn(async { fetch_prices().await });   // Task<Vec<Price>>
-    let b = s.spawn(async { fetch_fx().await });       // Task<FxTable>
-    let (prices, fx) = (a, b).join().await;
-    reconcile(prices, fx)
-})
-.await?;
-```
+| Document | Authority |
+|---|---|
+| [Declarative orchestration](declarative-orchestration.spec.md) | Author-facing semantics, composition, ownership boundaries and migration |
+| [Lifecycle](orchestration-lifecycle.spec.md) | Scheduling, attempts, cancellation, blocked work, durability and resources |
+| [AI orchestration](ai-orchestration.spec.md) | AI as API consumer and workload, context/evidence, bounded proposals and evaluation |
+| [PR review journey](pr-review-orchestration.spec.md) | The required end-to-end task plus script and its external-system boundaries |
+| [Acceptance](orchestration-acceptance.spec.md) | Falsifiers, developer-experience criteria and evidence required for release |
+| [Evidence](orchestration-evidence.md) | Pinned code findings and primary research; limits of this review |
 
-Guarantees, each of which is an invariant with a test:
+The specifications prescribe future behaviour. Actual source and exact-version
+release notes remain authoritative about what runs today. Where this contract
+conflicts with an older design sketch, it governs the proposed task-first
+surface, not a silent change to existing runtime behaviour.
 
-- **No escape from the scope** — the scope handle cannot leave the closure. The handle
-  is not a value the caller can store. (Swift enforces this with `inout` +
-  `mutating`; we enforce it by construction: the handle is only ever passed
-  into the closure.)
-- **No leak** — when `scope` returns, every child has finished, been
-  cancelled, or been reaped. It cannot return early on a momentarily-empty set.
-  A bare `JoinSet` loop does **not** satisfy this: it returns the moment the set
-  happens to be empty, which is not the same as "no more children will be
-  spawned". The scope must track *outstanding* children (a count incremented on
-  spawn and decremented on completion) and wait on a notify, rather than
-  observing set emptiness.
-- **No orphaned join** — a `Task` need not be awaited for the scope to wait
-  for it. Forgetting a task is not a leak; it is a discarded result.
-- **Fail-fast** — the first child error cancels its siblings and surfaces
-  at the scope boundary. `Scope::supervisor()` opts out and collects all errors.
+## Three audiences, one engine
 
-`Task<T>` awaits to `T`, not `Result<T, JoinError>`. A panicking child resumes
-the panic on the awaiter, matching what `join_all` already documents. A
-`JoinError` in a caller's signature is machinery leaking upward.
+The **task author** uses typed inputs/results and ordinary async/await. No
+`Pin`, engine `JoinError`, worker count, task-plumbing `Arc`, semaphore,
+`JoinSet`, detach, readiness sleep or PID cleanup belongs in the common task.
+That is an ergonomic acceptance criterion, not a prohibition on domain logic
+that genuinely uses an `Arc` or an advanced integrator choosing a lower level.
 
-### 3.3 Readiness handoff: *to build*
+The **host integrator** installs policy, storage, authority, sandbox and domain
+adapters, and chooses the host lifetime once. There is no implicit global
+runtime or automatic authority escalation. An existing async host drives work;
+a synchronous application explicitly owns runtime entry once.
 
-No Rust crate currently exposes this capability. It comes from trio's
-`nursery.start()` + `TaskStatus.started(value)`:
+The **adapter author** implements the real external contracts: typed I/O,
+authority requirements, dispatch certainty, readiness, bounded observations,
+reconciliation and cleanup. The SDK cannot derive those facts from an opaque
+Rust closure. Domain adapters continue to implement Observe, Evaluate, Execute
+and Query; composition and supervision are not a fifth domain verb.
 
-```rust
-let listener = scope(|s| async move {
-    let listener = s.start(bind(addr)).await?;   // fails HERE if bind fails
-    serve(listener).await
-})
-.await?;
-```
+## Existing mechanisms to retain
 
-Without it, "start a service and wait until it is up" is
-spawn → sleep → hope. With it, a failure during startup is an ordinary error at
-the call site, not a group failure arriving later from an unrelated direction.
-This is what makes "go do this thing" read as straight-line code.
+The current typed observation builder is valuable: it relates source output,
+condition input and action input before erasure. Keep it. Keep the retained
+payload binding and the distinction between refused, not-delivered and
+unsettled effects. Keep bounded admission and explicit snapshot authority.
+See the [source evidence](orchestration-evidence.md#repository-evidence).
 
-### 3.4 Declarative work: *partly shipped*
+`Runtime`, `Supervisor`, the ECS schedule and the local future driver are
+implementation/integration facilities beneath the task-first facade, not a
+checklist every application repeats. This proposal does not authorize replacing
+Tokio, removing ECS, adding a parallel workflow engine, or adding dependencies
+outside `AGENTS.md`'s ownership policy.
 
-`BotSpec` is already documented as *"what an AI emits and what a manifest
-contains"*, a serializable, capability-gated contract the runtime executes.
-That is the "tell it to go do something" surface, and it exists.
+## Corrections to the earlier proposal
 
-The gap is that it covers **observation chains**, not general work. The
-generalization is a `PlanSpec`: the same shape (serde, `deny_unknown_fields`,
-capability-validated at build) for arbitrary steps rather than source→action
-tuples. Do not design this until the scope work lands. `PlanSpec` should be
-expressed *in terms of* `scope`, not alongside it.
+1. **Scope/spawn is not the front door.** Structured lifetime remains necessary,
+   but consumers should name business work rather than manage child handles.
+   A result reference is not ownership of the execution; dropping a view must
+   not abandon its owner.
+2. **No second mandatory `PlanSpec`.** Native task code, existing `BotSpec` and
+   existing `FlowSpec` must converge on registered typed operations and one
+   execution/recording path. They are not equivalent today: `FlowSpec`'s Route
+   is a node transition, not a tool call. Evolve versioned node forms where
+   needed instead of asserting that a materializer already exists.
+3. **No magical scoped parallel borrowing.** Same-task local composition may
+   borrow and remain non-Send. Parallel/remote work crosses an explicit owned
+   boundary. Do not promise all lifetime/execution properties simultaneously;
+   see the Rust research in the evidence document.
+4. **No destructor-as-join claim.** Rust allows safe values to be forgotten and
+   Drop cannot await. The host owns cleanup, reports unresolved cleanup and
+   provides an explicit drain. Memory safety must not depend on a caller
+   polling a future to completion.
+5. **No absolute no-spawn claim about `lgwks_std::task`.** It has a
+   `spawn_blocking` facility. Scheduling policy must cover actual entry paths,
+   not names the guide wishes were absent.
+6. **No reopening owner decisions by implication.** The first-party scheduler
+   direction and the accepted existing time layers remain recorded decisions.
+   Exact simulated replay is a separate, unproved capability; wall-clock APIs
+   alone do not establish it. Any additional clock seam requires its own
+   implementation and acceptance, not a claim that it has already landed.
 
-## 4. Determinism
+## Entry modes and guarantees
 
-**Determinism is not an engine property.** It is four things, and none of them
-require leaving tokio:
+`run` is a scoped invocation under a live host. A deliberately persistent
+submission is a separately named operation on a configured durable host; it is
+not the accidental consequence of dropping a handle. Local borrowed tasks
+cannot be submitted as remote/durable work.
 
-1. A scheduler whose ready-queue order is a function of the seed, not of thread
-   arrival time.
-2. A virtual clock replacing wall-clock reads.
-3. Seeded entropy replacing OS entropy.
-4. Deterministic event ordering at every collection that is iterated.
+An arbitrary async function may run locally. It does not thereby become
+serializable or restartable. Durable tasks use versioned registered operation
+boundaries and recorded results; opaque scripts are a single effect unless
+they opt into an explicit checkpoint protocol. Model calls are external,
+potentially costly operations, not pure expressions recomputed during replay.
 
-The most important piece already exists in this workspace, and its significance
-has not been recorded: **`lgwks_std::task` has no `spawn`.** With no detach, there is no way to leak a
-task, and `join_all` returns results in input order regardless of completion
-order. It is a structured executor by construction, in zero dependencies.
+## Delivery order
 
-Two things it must gain:
+Repair the concrete lifecycle/cache defects first or alongside the facade;
+then land one typed local task returning a real result, bounded composition,
+owned process/readiness operations, registry materialization and the verified
+PR-review journey. Durable resumption and AI proposal helpers build on those
+same boundaries. A backend without a real consumer/test is not closure.
 
-- **A wake-set ready queue.** Today every child is polled with the same `cx`, so
-  any one child's wake repolls every pending child, unconditionally, whether or
-  not that child's event fired. Measured cost, standalone replica of
-  `join_all_boxed`'s algorithm, one chatty source among `m` quiet ones:
-  **21.6× wasted polls at m=31** (the current `MAX_IN_FLIGHT_POLLS`), rising to
-  **170.9× at m=511**. Giving each child its own waker and repolling only woken
-  children makes it O(woken) instead of O(pending). This is what makes wide
-  fan-out possible without tokio.
-
-  Precision on that number: the wasted polls are measured against a workload
-  whose quiet children do not wake themselves, which is what a future waiting on
-  an unfired timer or socket actually does: it registers its waker with the
-  event source and returns `Pending`. The Future contract requires exactly that,
-  so the waste accrues for well-behaved futures. A future that returns `Pending`
-  *without* registering a waker is relying on the current design's spurious
-  rescans to make progress at all; such a future would hang under a wake-set
-  queue, and it is already incorrect today. The fix therefore tightens the
-  contract rather than loosening it, worth stating in `join_all`'s docs when
-  this lands.
-- **A clock and an entropy source behind traits**, with real and virtual
-  implementations, so the same code runs reproducibly under a seed.
-
-`docs/distributed-boundaries.md` records virtual time as missing. It remains
-missing; this is the design that closes it.
-
-### What determinism does *not* buy
-
-Making the runtime deterministic does **not** make an AI agent deterministic.
-The nondeterminism lives in the model's sampling and in the tools it calls,
-neither of which the runtime owns. What journaling provides is that an agent's
-*decisions* can be replayed by reading them back rather than re-deriving them.
-Determinism of the runtime is not reproducibility of an agent, and is not
-presented as such.
-
-## 5. Failure and cancellation
-
-- **Fail-fast by default.** trio, Kotlin `coroutineScope`, and
-  `asyncio.TaskGroup` all fail fast; Kotlin's `supervisorScope` is the explicit
-  opt-out. Match that default.
-- **Cancellation is an expression, not bookkeeping.** `scope.cancel(reason)`
-  terminates the group and yields the reason, in the spirit of `moro`'s
-  `scope.cancel(v)`.
-- **`Drop` cannot await.** Services need an explicit shutdown; the runtime's
-  `shutdown_timeout` bounds the blocking pool only. Say so in the docs rather
-  than implying a grace period that does not exist.
-
-## 6. Existing properties to preserve
-
-- **The facade is the asset.** `lgwks_bot::rt` hiding tokio behind types defined
-  in this workspace is what makes a future engine swap cheap. `lgwks_bot` is the
-  designated async surface and `lgwks_deps` is the sole owner of the tokio edge.
-  Public signatures stay engine-agnostic.
-- **No `spawn` in `lgwks_std::task`.** Adding one would introduce an entire class
-  of leak problem that this workspace currently cannot have.
-- **Bounded fan-out.** `join_all_bounded` never exceeding its limit is a
-  property worth keeping in every new primitive.
-
-## 7. Non-goals
-
-- **No new async runtime.** `glommio` and `tokio-uring` are Linux-only;
-  `compio` (0.19.x, 18 breaking releases) falls back to kqueue on macOS, which
-  is what tokio already does. No local gain for a pre-1.0 API. `async-std` is
-  discontinued (its README says "use smol instead").
-- **No new logging dependency.** `log`/`tracing`/`env_logger` are not capabilities
-  of this workspace (`docs/distributed-boundaries.md`, Observability). Library
-  code returns information; it does not print it.
-- **No `futures-concurrency` dependency.** It would pull `futures-core`,
-  `futures-lite` and `pin-project` to provide a `(a, b).join()` this SDK can
-  offer natively on primitives the workspace already owns. Its API is worth
-  studying; its dependency closure is not taken.
-- **No `tokio-util` admission.** The obvious shortcut for §3.2 is
-  `tokio_util::task::TaskTracker` + `util::CancellationToken`. `tokio-util`
-  0.7.19 is present in `Cargo.lock` only as a transitive dependency; it is not
-  an admitted storefront edge, so both types are unavailable to code in this
-  workspace.
-  Admitting it would be defensible (it is well maintained and is exactly the
-  kind of edge `lgwks_deps` exists to carry), but the semantics needed here are
-  an outstanding-child counter, a notify, and a shutdown flag. That is a module,
-  not a storefront edge, and building it keeps the `forbid`-level guarantees of
-  this workspace (bounded, no detach, no `Drop`-as-async-shutdown) visible in one
-  place instead of spread across a third-party surface. Revisit if the scope
-  grows features beyond these three.
-- **No dependency at all for determinism, but not for the reason it looks like.** The clock, seeded RNG, and wake-set scheduler belong as `lgwks_std`
-  modules. That is the ELIMINATE rung of the dependency doctrine: a capability
-  that is a few hundred lines becomes a module, not a storefront edge.
-
-## 8. Migration order
-
-Each step must leave `cargo test --workspace --all-targets` green.
-
-1. Get the tree compiling (the lint contract landed before the code satisfied it).
-2. `scope` + `Task` + `Scope::supervisor`, on top of `tokio::task::JoinSet`
-   (already re-exported by `rt::task`) plus a ~40-line outstanding-child counter
-   and a `tokio::sync::Notify`. No new dependency: see §7 on `tokio-util`.
-3. Wake-set ready queue in `lgwks_std::task`, with the fan-out benchmark as the
-   acceptance test.
-4. Clock + entropy traits with real and virtual implementations.
-5. Readiness handoff (`scope.start`).
-6. `PlanSpec`, expressed in terms of `scope`.
-
-Step 2 is additive: `spawn`/`JoinSet`/`join_all_bounded` stay as they are and
-are re-expressed in terms of `scope` once it exists. The change is a seam rather
-than a replacement.
+The [acceptance specification](orchestration-acceptance.spec.md) is the release
+contract. Merging these documents alone does not close #87.

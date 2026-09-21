@@ -105,6 +105,14 @@ use std::pin::Pin;
 /// implementer must be able to name the return type.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
+/// The environment broker: which environments a run owns, which generation each
+/// is at, and the authority to hand one exact attempt to one of them.
+///
+/// Fencing lives here rather than in the journal because a durable record of a
+/// dispatch aimed at a replaced environment would be accurate and still wrong.
+/// See [`broker`](broker) for why a stale generation and a generation the broker
+/// never issued are deliberately different errors.
+pub mod broker;
 /// Capability tokens and sealed authority proofs.
 pub mod cap;
 pub mod domain {
@@ -125,6 +133,14 @@ pub mod domain {
 /// The `bevy_ecs` substrate the verbs execute on. Private: it is the
 /// implementation, not a second way to run a bot.
 mod ecs;
+/// Durable effect identity: the exact key a settlement is a statement about.
+///
+/// The ledger already refuses a contradicting settlement; this supplies the
+/// identity that makes "contradicting" decidable. An attempt count cannot: two
+/// deliveries both arriving as "attempt 3" are indistinguishable, so a repeat
+/// of an old settlement and a statement about a new one look the same at the
+/// moment the ledger accepts one. See [`EffectKey`](effect::EffectKey).
+pub mod effect;
 /// Typed bot errors.
 pub mod error;
 /// Politeness and admission: whether a host may be contacted now, and if not,
@@ -139,10 +155,26 @@ pub mod frontier;
 pub mod gate;
 /// The interface model: recognizing the element a step names.
 pub mod interface;
+/// The durable journal an effect is appended to before it leaves the process.
+///
+/// Identity without persistence is identity that is lost exactly when it is
+/// needed, so this is the other half of what [`effect`](effect) supplies. It is
+/// also where the durability grade lives: a journal that cannot survive its own
+/// writer dying refuses to be the record behind an external handoff, rather
+/// than accepting an append it will lose.
+pub mod journal;
 /// JSON through the shared facade (`lgwks_std::json`).
 pub mod json;
 /// Language understanding: the tiered lexicon behind the resolver seam.
 pub mod language;
+/// Whether a failed attempt may be tried again.
+///
+/// The vocabulary lives in [`error`](error): [`RetryClass`](RetryClass) says
+/// what a failure permits and [`DispatchCertainty`](DispatchCertainty) says
+/// what it established. What this module adds is RQ-009's decision rule, which
+/// composes those with the budget, the authority, the intent and any remote
+/// deduplication contract.
+pub mod retry;
 /// Async runtime surface (feature `rt`): owned `Runtime`, bounded fan-out,
 /// timers, channels, and opt-in drivers.
 #[cfg(feature = "rt")]
