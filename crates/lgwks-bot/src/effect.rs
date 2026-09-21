@@ -777,6 +777,103 @@ impl fmt::Display for EffectKey {
     }
 }
 
+/// The host-supplied facts that make one run's effect keys reproducible.
+///
+/// Three of [`EffectKey`]'s seven fields are constants of a run rather than of
+/// an attempt: which run this is, which environment it acts on, and which
+/// revision of the flow document it was admitted under. Keeping them in one
+/// value is what makes a key *reconstructible*: a controller that comes back
+/// after a crash can derive the same key for the same attempt only if it holds
+/// the same three facts, and a fact it has to remember separately is a fact it
+/// will eventually remember differently.
+///
+/// All three are the host's to supply, and none of them is derived here. The
+/// run identity is generated and persisted before the first admission, so two
+/// runs of the same flow are distinguishable; the environment identity names
+/// the process or container the host created, not a pid or a display name; and
+/// the flow revision is the digest of the document that was validated. A
+/// default for any of them would be a default identity, which is the one thing
+/// this module exists to refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EffectIdentity {
+    /// The run every key built from this identity belongs to.
+    run: RunId,
+    /// The environment every key built from this identity acts on.
+    environment: EnvironmentId,
+    /// The flow revision every key built from this identity came from.
+    flow: FlowRevision,
+}
+
+impl EffectIdentity {
+    /// Record the host's three run-level facts.
+    #[must_use]
+    pub const fn new(run: RunId, environment: EnvironmentId, flow: FlowRevision) -> Self {
+        Self {
+            run,
+            environment,
+            flow,
+        }
+    }
+
+    /// The run.
+    #[must_use]
+    pub const fn run(self) -> RunId {
+        self.run
+    }
+
+    /// The environment.
+    #[must_use]
+    pub const fn environment(self) -> EnvironmentId {
+        self.environment
+    }
+
+    /// The flow revision.
+    #[must_use]
+    pub const fn flow(self) -> FlowRevision {
+        self.flow
+    }
+
+    /// The key for one attempt: this identity's three fields plus the four the
+    /// attempt supplies.
+    #[must_use]
+    pub const fn key(
+        self,
+        action: ActionId,
+        attempt: AttemptId,
+        digest: ActionDigest,
+        epoch: EnvironmentEpoch,
+    ) -> EffectKey {
+        EffectKey::new(
+            self.run,
+            action,
+            attempt,
+            self.flow,
+            digest,
+            self.environment,
+            epoch,
+        )
+    }
+
+    /// Re-render `key` under this identity's environment at `epoch`.
+    ///
+    /// What a restart asks: the command was prepared against this environment
+    /// at an older epoch, and the environment is now at a newer one. Everything
+    /// but the generation is held, because everything but the generation is
+    /// what makes it the *same* attempt.
+    #[must_use]
+    pub const fn at_epoch(self, key: EffectKey, epoch: EnvironmentEpoch) -> EffectKey {
+        EffectKey::new(
+            key.run(),
+            key.action(),
+            key.attempt(),
+            key.flow(),
+            key.digest(),
+            self.environment,
+            epoch,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

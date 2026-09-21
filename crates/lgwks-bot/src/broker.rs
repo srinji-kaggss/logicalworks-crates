@@ -492,7 +492,7 @@ impl Prepared {
 /// reuses an `AttemptId` fails here rather than dispatching twice.
 pub fn prepare_dispatch(
     broker: &Broker,
-    journal: &mut impl EffectJournal,
+    journal: &mut dyn EffectJournal,
     key: EffectKey,
 ) -> Result<Prepared, DispatchError> {
     let authority = broker.authorize(key)?;

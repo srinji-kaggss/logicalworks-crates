@@ -85,6 +85,32 @@
 //! the reason and the source revision. A tick that gives up on work is never
 //! clean, and an entry it gave up on is never silently dropped.
 //!
+//! # A restart continues the record rather than the process
+//!
+//! [`EcsBot::tick`] is not a boundary the run has to survive: the journal is.
+//! Every dispatch appends `IntentAdmitted` and `DispatchPrepared` *before* the
+//! effect exists to hand over, so a process that dies mid-attempt leaves a
+//! record of an attempt with no outcome behind it — and
+//! [`EcsBot::into_journal`] is how a host carries that record into the next
+//! process. Assembly folds in every attempt the record names, and the three
+//! decisions it takes are deliberately different from one another:
+//!
+//! - **Outcome unknown** — nothing established whether the bytes arrived, so
+//!   the action is *held*. The walk stops at it rather than beginning another
+//!   attempt, the tick reports
+//!   [`BotError::PendingTransition`](crate::BotError::PendingTransition), and
+//!   the key a caller settles by is on the report.
+//! - **Outcome landed** — the effect is done for the generation its key names,
+//!   so the walk retires the entry rather than dispatching it again. That
+//!   retirement is scoped to the generation: a source that moves opens the next
+//!   one, and new work, which is the only thing that may legitimately re-run an
+//!   acknowledged action.
+//! - **Outcome missing or negative** — an admitted intent that was never handed
+//!   over, or a delivery that was established not to have happened. Neither
+//!   leaves anything held, so the entry is eligible again — under a *new*
+//!   attempt identity, because the journal's ladder allows one walk per key and
+//!   the attempt the record already holds cannot be minted twice.
+//!
 //! # Limits
 //!
 //! A panic that unwinds out of an action's future unwinds out of `fire` and out
@@ -141,7 +167,7 @@
 
 use std::any::Any;
 use std::fmt;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU128};
 
 // `self` is load-bearing: the `Component` and `Resource` derives expand to
 // `bevy_ecs::…` paths, so the crate name has to be in scope at the use site even
@@ -153,12 +179,430 @@ use lgwks_deps::bevy_ecs::{
         IntoScheduleConfigs, LogLevel, Schedule, ScheduleBuildSettings, SingleThreadedExecutor,
     },
 };
+use lgwks_std::hash::{Digest, Hasher};
 
+use super::broker::{Authority, Broker, DispatchError, prepare_dispatch};
 use super::cap::{Deficit, Demand, Shortage};
+use super::effect::{
+    ActionDigest, ActionId, AttemptId, EffectIdentity, EffectKey, EnvironmentEpoch, FlowRevision,
+    Id128,
+};
 use super::error::{BotError, DispatchCertainty, Escaped, RetryClass};
 use super::gate::GrantSet;
+use super::journal::{AttemptStatus, EffectEvent, EffectJournal, JournalError, recover};
 use super::spec::{ChainEntry, Erased, ObserveAny, Witness, typed_entry};
 use super::verb::{Evaluate, Execute, Observe};
+
+// ── The effect path: identity, fencing, and the write-ahead record ─────────
+
+/// The domain separator for an [`ActionId`] derived from a bot's structure.
+///
+/// A separator rather than a bare concatenation, because the fields hashed into
+/// an identity are variable-length strings and a run of them with no framing is
+/// a value two different bots can collide on.
+const ACTION_ID_DOMAIN: &[u8] = b"lgwks.bot.action-id.v1";
+
+/// The domain separator for an [`ActionDigest`] derived from a bound generation.
+const ACTION_DIGEST_DOMAIN: &[u8] = b"lgwks.bot.action-digest.v1";
+
+/// Hash a sequence of byte fields into the estate's content-identity digest.
+///
+/// The fields are fed in order with no length prefix, which is sound only
+/// because every caller's fields are fixed-width or domain-separated; see the
+/// two derivation functions below.
+fn hash_parts(parts: &[&[u8]]) -> Digest {
+    let mut hasher = Hasher::new();
+    for part in parts {
+        hasher.update(part);
+    }
+    hasher.finalize()
+}
+
+/// Fold a digest into a non-zero 128-bit identifier.
+///
+/// The all-zero identifier is not a valid one (see [`IdError`]), and a hash has
+/// no such exclusion, so a derivation that landed on zero would produce an
+/// identity the parser would refuse to read back. The zero case is mapped to
+/// [`NonZeroU128::MIN`] rather than refused, because a derivation that can fail
+/// is a derivation every caller has to handle, and the collision it introduces
+/// is one in 2^128.
+///
+/// [`IdError`]: crate::effect::IdError
+fn id_from_digest(digest: &Digest) -> Id128 {
+    let bytes = digest.as_bytes();
+    let mut wide = [0_u8; 16];
+    for (slot, byte) in wide.iter_mut().zip(bytes.iter()) {
+        *slot = *byte;
+    }
+    Id128::from_nonzero(NonZeroU128::new(u128::from_be_bytes(wide)).unwrap_or(NonZeroU128::MIN))
+}
+
+/// The logical intent of one entry of one chain.
+///
+/// Derived rather than declared, because the substrate is the only thing that
+/// knows a chain's position, and position is what a settlement must survive an
+/// edit elsewhere in the document to. The derivation reads the bot's name, the
+/// entry's position, and the action's own domain identifier, so two entries
+/// with the same domain in the same chain are still two intents.
+///
+/// `ActionId` is not a content digest, and this is not one either: [`ActionDigest`]
+/// is what binds the input, and this binds *which action* it is. Deriving it
+/// from the action's own `domain_id` is the closest the erased `ExecuteAny`
+/// comes to naming what it does.
+fn derive_action_id(bot: &str, chain: usize, entry: usize, domain: &str) -> ActionId {
+    ActionId::new(id_from_digest(&hash_parts(&[
+        ACTION_ID_DOMAIN,
+        bot.as_bytes(),
+        &chain.to_le_bytes(),
+        &entry.to_le_bytes(),
+        domain.as_bytes(),
+    ])))
+}
+
+/// The exact generation of bound input one entry was dispatched from.
+///
+/// The ECS substrate has no payload bytes to hash: a transition's binding is an
+/// erased `Box<dyn Any>` and nothing here asks it to be `Hash`. What it does
+/// have is the *revision* — the monotonic marker a source moves, which is
+/// exactly when a transition re-binds — so the generation is what this digest
+/// binds. Two attempts within one revision share a digest, which is what makes
+/// a retry a retry; a new revision gets a new digest, which is what makes a
+/// delayed settlement refusable rather than merged.
+fn derive_action_digest(
+    flow: FlowRevision,
+    chain: usize,
+    entry: usize,
+    revision: u64,
+) -> ActionDigest {
+    ActionDigest::new(hash_parts(&[
+        ACTION_DIGEST_DOMAIN,
+        flow.digest().as_bytes(),
+        &chain.to_le_bytes(),
+        &entry.to_le_bytes(),
+        &revision.to_le_bytes(),
+    ]))
+}
+
+/// The effect identity and the two adapters a dispatch is recorded through.
+///
+/// Handed to [`EcsBuilder::with_effects`], and required: there is no default
+/// and no way to build a bot without one. A default would be a default
+/// *identity*, and an identity a caller did not choose is one they cannot
+/// recover against — which is precisely the state that makes a restart resend a
+/// merge.
+///
+/// The three pieces are separate arguments rather than one because they fail
+/// differently. A journal with no durability refuses at the boundary; a broker
+/// with the wrong environment refuses to authorize; an identity naming the
+/// wrong run makes every recovered key foreign. Fusing them into one value
+/// would let a caller construct a scope it cannot reason about piece by piece.
+pub struct EffectScope {
+    /// Which run this is, which environment it acts on, and which flow revision
+    /// it came from.
+    identity: EffectIdentity,
+    /// The environment generations a dispatch is fenced against.
+    broker: Broker,
+    /// Where a dispatch is written down before it leaves the process.
+    journal: Box<dyn EffectJournal>,
+}
+
+/// Printed as the journal's promise and position rather than as the journal.
+///
+/// [`EffectJournal`] is an object-safe trait with no `Debug` bound, and adding
+/// one to serve a `{:?}` would push the burden onto every implementation for no
+/// gain. What a reader needs is which journal this is and how far it is
+/// committed, and both of those the trait already answers.
+impl fmt::Debug for EffectScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EffectScope")
+            .field("identity", &self.identity)
+            .field("broker", &self.broker)
+            .field("durability", &self.journal.durability())
+            .field("tail", &self.journal.tail())
+            .finish()
+    }
+}
+
+impl EffectScope {
+    /// Record the identity, the fence and the journal a bot dispatches under.
+    #[must_use]
+    pub fn new(identity: EffectIdentity, broker: Broker, journal: Box<dyn EffectJournal>) -> Self {
+        Self {
+            identity,
+            broker,
+            journal,
+        }
+    }
+
+    /// The host's three run-level facts.
+    #[must_use]
+    pub const fn identity(&self) -> EffectIdentity {
+        self.identity
+    }
+
+    /// The environment broker this scope fences against.
+    #[must_use]
+    pub const fn broker(&self) -> &Broker {
+        &self.broker
+    }
+
+    /// The journal a dispatch is appended to.
+    #[must_use]
+    pub fn journal(&self) -> &dyn EffectJournal {
+        &*self.journal
+    }
+
+    /// The journal, to append through.
+    ///
+    /// `&mut self` rather than interior mutability: [`EffectJournal`] fences
+    /// writers within one process through its receiver, and a shared handle
+    /// that could append from two places at once would hand that fence back.
+    #[must_use]
+    pub fn journal_mut(&mut self) -> &mut dyn EffectJournal {
+        &mut *self.journal
+    }
+
+    /// Take the journal back.
+    ///
+    /// What a host calls on its way out, so the record outlives the bot that
+    /// wrote it. See [`EcsBot::into_journal`].
+    #[must_use]
+    pub fn into_journal(self) -> Box<dyn EffectJournal> {
+        self.journal
+    }
+}
+
+/// The effect path as the kernel holds it, with the recovered state folded in.
+///
+/// Private, and deliberately not the public [`EffectScope`]: the scope is what
+/// a host declares, and this is what the kernel does with it — including the
+/// one piece of state the host cannot supply, which is what the journal already
+/// says about attempts this bot has not made yet.
+struct Effects {
+    /// What the host declared.
+    scope: EffectScope,
+    /// Attempts the journal records as dispatched with no outcome, and which
+    /// nothing has settled since.
+    ///
+    /// Seeded once, at assembly, from [`crate::journal::recover`]. Held as keys
+    /// rather than as a count because settling one has to name it, and an
+    /// attempt that is only a number in a total cannot be named.
+    unsettled: Vec<EffectKey>,
+    /// Attempts whose effect is recorded as landed, by the key that landed.
+    ///
+    /// Written when a recovered attempt is settled `Applied`, and seeded at
+    /// assembly from the attempts [`crate::journal::recover`] reads back as
+    /// applied or verified, and read by the walk before it dispatches: the
+    /// record says the effect landed, so the entry it was about is done *for
+    /// the generation the key names*. A source that moves opens a new
+    /// generation, and new work, which is the one thing that may legitimately
+    /// re-run an acknowledged action.
+    ///
+    /// Held as whole keys rather than as `(action, revision)` pairs because a
+    /// key carries the generation as a digest, and a recovered key has no
+    /// integer revision to pair with it — the digest is one-way. Comparing the
+    /// digest the run would mint for its current revision against the digests
+    /// it holds answers the same question, and it answers it for an
+    /// acknowledgement this process never made.
+    applied: Vec<EffectKey>,
+    /// The latest attempt the journal records for each action it names.
+    ///
+    /// Seeded once, at assembly, from [`crate::journal::recover`], and read
+    /// when the attempt after it is minted. A restart is not a fresh run: the
+    /// journal's ladder allows one walk of `IntentAdmitted → DispatchPrepared →
+    /// OutcomeObserved → Verified` per key, so minting an attempt the journal
+    /// already records reproduces the key it was recorded under and the append
+    /// is refused as out of order. Continuing a run therefore means continuing
+    /// its attempt sequence, and the number to continue from is in the record.
+    attempted: Vec<(ActionId, AttemptId)>,
+}
+
+impl Effects {
+    /// A scope with nothing recovered yet.
+    const fn new(scope: EffectScope) -> Self {
+        Self {
+            scope,
+            unsettled: Vec::new(),
+            applied: Vec::new(),
+            attempted: Vec::new(),
+        }
+    }
+
+    /// The host's three run-level facts.
+    const fn identity(&self) -> EffectIdentity {
+        self.scope.identity()
+    }
+
+    /// The environment broker this run's dispatches are fenced against.
+    const fn broker(&self) -> &Broker {
+        self.scope.broker()
+    }
+
+    /// Give the scope's journal back.
+    fn into_journal(self) -> Box<dyn EffectJournal> {
+        self.scope.into_journal()
+    }
+
+    /// Obtain the warrant for `key` and record the attempt as prepared.
+    ///
+    /// One method rather than two calls at the dispatch site, because the two
+    /// borrows it needs — the broker to authorize and the journal to append —
+    /// are two fields of one scope, and a call site that reached through
+    /// `&self` for one and `&mut self` for the other would have to restructure
+    /// itself to prove they do not overlap. The split is stated once, here.
+    ///
+    /// # Errors
+    ///
+    /// [`DispatchError::Broker`] when the environment refuses, and
+    /// [`DispatchError::Journal`] when the append is refused.
+    fn prepare(&mut self, key: EffectKey) -> Result<Authority, DispatchError> {
+        let scope = &mut self.scope;
+        let (authority, _ack) =
+            prepare_dispatch(&scope.broker, &mut *scope.journal, key)?.into_parts();
+        Ok(authority)
+    }
+
+    /// The generation the broker currently holds for this run's environment.
+    ///
+    /// `None` when the broker has never been told about the environment. That
+    /// is a declared state and not an accident: a broker that owns no
+    /// environment mints no authority, which is the refusal
+    /// [`prepare_dispatch`] reports as [`BrokerError::UnknownEnvironment`].
+    ///
+    /// [`BrokerError::UnknownEnvironment`]: crate::broker::BrokerError::UnknownEnvironment
+    fn epoch(&self) -> Option<EnvironmentEpoch> {
+        self.scope.broker().epoch(self.identity().environment())
+    }
+
+    /// The key for one attempt of one entry, or `None` when the broker does not
+    /// own the environment this run acts on.
+    fn key(
+        &self,
+        action: ActionId,
+        chain: usize,
+        entry: usize,
+        revision: u64,
+        attempt: AttemptId,
+    ) -> Option<EffectKey> {
+        Some(self.identity().key(
+            action,
+            attempt,
+            derive_action_digest(self.identity().flow(), chain, entry, revision),
+            self.epoch()?,
+        ))
+    }
+
+    /// Append one fact, fencing on the tail this process believes is committed.
+    ///
+    /// Read-then-append rather than a retained tail: a retained tail is state
+    /// this process would have to keep in step with every other writer, and the
+    /// journal's own compare-and-append is what refuses a stale belief. A
+    /// refusal here is a real one — another controller appended — and it is
+    /// reported rather than retried, because the caller's view of the run is
+    /// stale.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the journal refuses.
+    fn append(&mut self, event: &EffectEvent) -> Result<(), JournalError> {
+        let tail = self.scope.journal().tail();
+        self.scope.journal_mut().compare_and_append(tail, event)?;
+        Ok(())
+    }
+
+    /// Whether an attempt on `action` is recorded as dispatched with no
+    /// outcome, and nothing has settled it.
+    ///
+    /// This is the question a dispatch asks before it resends anything, and the
+    /// answer that stops it. An unknown outcome is not permission to try again:
+    /// nothing established that the bytes did not arrive.
+    fn blocks(&self, action: ActionId) -> bool {
+        self.unsettled.iter().any(|key| key.action() == action)
+    }
+
+    /// The unsettled key for `action`, when there is one.
+    fn unsettled_for(&self, action: ActionId) -> Option<EffectKey> {
+        self.unsettled
+            .iter()
+            .find(|key| key.action() == action)
+            .copied()
+    }
+
+    /// Whether `action` was acknowledged applied for the generation `revision`
+    /// of `(chain, entry)`.
+    ///
+    /// The comparison is between the digest the run would mint for its current
+    /// revision and the digest a held key carries, rather than between two
+    /// integers, because the held key may have come from a process that is
+    /// gone: the digest is what the record has, so the digest is what the
+    /// question is asked in.
+    fn applied_in(&self, action: ActionId, chain: usize, entry: usize, revision: u64) -> bool {
+        let digest = derive_action_digest(self.identity().flow(), chain, entry, revision);
+        self.applied
+            .iter()
+            .any(|key| key.action() == action && key.digest() == digest)
+    }
+
+    /// The attempt the journal already records for `action`, when it names one.
+    ///
+    /// The highest such attempt rather than the last seen, although the fold
+    /// that seeds this reaches them in ascending order: an ordering assumption
+    /// that a later record shape could break is not worth the two lines it
+    /// saves, and the answer being wrong is a refused append rather than a
+    /// loud failure.
+    fn recorded_attempt(&self, action: ActionId) -> Option<AttemptId> {
+        self.attempted
+            .iter()
+            .find(|entry| entry.0 == action)
+            .map(|entry| entry.1)
+    }
+
+    /// Note that the journal already records `attempt` for `action`.
+    fn note_journal_attempt(&mut self, action: ActionId, attempt: AttemptId) {
+        match self.attempted.iter_mut().find(|entry| entry.0 == action) {
+            Some(slot) => {
+                if attempt.get() > slot.1.get() {
+                    slot.1 = attempt;
+                }
+            }
+            None => self.attempted.push((action, attempt)),
+        }
+    }
+
+    /// Settle one recovered attempt, appending the outcome that settles it.
+    ///
+    /// The append lands first: the journal is the record, and a bot that
+    /// dropped the key from its own list and then crashed before writing the
+    /// outcome would come back with the same unknown it just cleared.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the journal refuses.
+    fn settle_recovered(
+        &mut self,
+        key: EffectKey,
+        evidence: EffectEvidence,
+    ) -> Result<(), JournalError> {
+        self.append(&EffectEvent::OutcomeObserved { key, evidence })?;
+        self.unsettled.retain(|held| *held != key);
+        if evidence == EffectEvidence::Applied {
+            self.applied.push(key);
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for Effects {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Effects")
+            .field("identity", &self.identity())
+            .field("journal", &self.scope.journal().durability())
+            .field("unsettled", &self.unsettled.len())
+            .field("applied", &self.applied.len())
+            .field("attempted", &self.attempted.len())
+            .finish()
+    }
+}
 
 // ── Components: identity and the change marker are separate ────────────────
 
@@ -481,6 +925,21 @@ pub enum TransitionHold {
     /// ended without one. Held exactly as an unknown outcome is: the effect may
     /// be live, so it is never attempted again without evidence.
     Unrecorded,
+    /// An attempt on this entry's action was recorded as dispatched earlier in
+    /// this run, and no outcome was ever recorded for it.
+    ///
+    /// Distinct from [`Self::Unrecorded`], which is an attempt *this* process
+    /// began and whose outcome the same process never wrote, and from
+    /// [`Self::OutcomeUnknown`], which is an attempt it ran and watched become
+    /// indeterminate. This one was found, not made: the bot was assembled
+    /// against a journal that already said the bytes may be live, and the
+    /// substrate will not begin another attempt on that action until a caller
+    /// settles it. The key to settle it with is
+    /// [`PendingWork::key`].
+    UnsettledByRecovery {
+        /// The action whose earlier attempt never settled.
+        action: ActionId,
+    },
     /// The effect definitely did not happen, and the attempt budget remains.
     Failed {
         /// Attempts made so far, including the failed one.
@@ -520,6 +979,12 @@ impl fmt::Display for TransitionHold {
             Self::Unrecorded => {
                 f.write_str("an attempt began and no outcome was recorded: the effect may be live")
             }
+            Self::UnsettledByRecovery { action } => write!(
+                f,
+                "may have happened: an earlier attempt on action {action} was dispatched \
+                 and nothing recorded its outcome, so nothing is sent again until it is \
+                 settled"
+            ),
             Self::Failed {
                 attempts,
                 budget,
@@ -551,21 +1016,29 @@ impl fmt::Display for TransitionHold {
     }
 }
 
-/// One entry of a transition that is not finished.
+/// One entry of a transition that is not finished, and the attempt it is about.
 ///
-/// This is the address a settlement is made against, and it carries the three
-/// facts that together name *which* work: the slot ([`WorkId`]), the generation
-/// ([`Self::revision`]) and the attempt ([`Self::attempt`]).
+/// This is the report a caller reads, and [`Self::key`] is what a settlement is
+/// made against. The two are one value because they are two halves of one fact:
+/// the address ([`WorkId`]) tells a caller *where* to look in its own books and
+/// the key tells the substrate *which* attempt, over *which* observed input, the
+/// evidence is about.
 ///
-/// The last of those is why settlement takes this value rather than the slot.
-/// A chain retries within one generation, so `NotApplied` for attempt 1 makes
-/// the entry eligible again and attempt 2 runs against the same address under
-/// the same revision. A report about attempt 1 that is *delivered twice* —
-/// which settlement is explicitly designed to tolerate, because a caller that
-/// never saw its first delivery acknowledged has to be able to repeat it —
-/// would otherwise land on attempt 2 and make an attempt whose effect may be
-/// live eligible to run a third time. Naming the attempt is what separates
-/// "send that again" from "that was about work that is over".
+/// The key is why settlement takes this value's key rather than the slot. A
+/// chain retries within one generation, so `NotApplied` for the first attempt
+/// makes the entry eligible again and a second attempt runs against the same
+/// address over the same binding. A report about the first attempt that is
+/// *delivered twice* — which settlement is explicitly designed to tolerate,
+/// because a caller that never saw its first delivery acknowledged has to be
+/// able to repeat it — would otherwise land on the second attempt and make an
+/// attempt whose effect may be live eligible to run a third time. Naming the
+/// attempt is what separates "send that again" from "that was about work that is
+/// over".
+///
+/// [`Self::key`] is `None` for an entry that has never been attempted. There is
+/// then nothing for evidence to settle, and the absence is the same absence
+/// rather than a zero attempt that would have to be special-cased at every
+/// settlement site.
 ///
 /// The fields are private and there is no public constructor, so a caller can
 /// only ever settle work it read from [`EcsBot::pending`]. That is a seal, not
@@ -575,38 +1048,49 @@ impl fmt::Display for TransitionHold {
 pub struct PendingWork {
     /// Which entry this is.
     id: WorkId,
-    /// The revision that opened the transition it belongs to.
-    revision: u64,
-    /// Which attempt on that entry this is about.
+    /// The attempt this entry is on, and the four facts that name it.
     ///
-    /// The attempt ordinal within the generation: zero when the entry has
-    /// never been attempted, otherwise the number of the latest attempt begun.
-    attempt: u32,
+    /// `None` when the entry has not been attempted, which is the only state
+    /// that has no attempt identity to hand out.
+    ///
+    /// Boxed because a key is a fixed-width identity — seven fields, 128 bytes
+    /// — and this type is embedded in [`BotError::PendingTransition`], which is
+    /// returned by value from every tick that leaves work unfinished. Held
+    /// inline, one key would put that error over the size at which the
+    /// `result_large_err` lint fires for every caller in the workspace; the
+    /// indirection costs one allocation on a path that already produces a
+    /// report, and buys back the error's size for all of them.
+    ///
+    /// [`BotError::PendingTransition`]: crate::BotError::PendingTransition
+    key: Option<Box<EffectKey>>,
     /// What is holding it.
     hold: TransitionHold,
 }
 
 impl PendingWork {
     /// Which entry this is.
+    ///
+    /// The address in the bot's own declarations, not an identity: a slot is
+    /// reused by every generation over its chain, so two reports comparing
+    /// equal here say only that the *place* is the same. [`Self::key`] is what
+    /// names the work.
     #[must_use]
     pub const fn id(&self) -> WorkId {
         self.id
     }
 
-    /// The revision that opened the transition this entry belongs to.
-    #[must_use]
-    pub const fn revision(&self) -> u64 {
-        self.revision
-    }
-
-    /// Which attempt on this entry the work is about.
+    /// The attempt this entry is on, when there has been one.
     ///
-    /// Ascending within a generation and never reused, so a report about
-    /// attempt `n` is unambiguous for as long as the generation stands. Zero
-    /// means the entry has not been attempted.
+    /// This is the value [`EcsBot::resolve_effect`] takes. It carries the run,
+    /// the action, the attempt, the flow, the binding, the environment and the
+    /// generation, and all seven are compared before anything is read or
+    /// written — which is what makes the delivery safe to repeat.
+    ///
+    /// `None` means nothing has been attempted on this entry yet, so there is
+    /// no attempt for evidence to be about.
     #[must_use]
-    pub const fn attempt(&self) -> u32 {
-        self.attempt
+    pub fn key(&self) -> Option<EffectKey> {
+        self.key.as_deref().copied()
     }
 
     /// What is holding it back.
@@ -618,15 +1102,21 @@ impl PendingWork {
 
 impl fmt::Display for PendingWork {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "chain {} entry {} (revision {}, attempt {}): {}",
-            self.id.chain(),
-            self.id.entry(),
-            self.revision,
-            self.attempt,
-            self.hold
-        )
+        // Written in two passes rather than through an intermediate `String`:
+        // this renders on every tick that leaves work unfinished, and a
+        // diagnostic that allocates twice to say which entry is stuck is a cost
+        // paid on the path that is already the unhappy one.
+        write!(f, "chain {} entry {} (", self.id.chain(), self.id.entry())?;
+        match self.key.as_deref() {
+            Some(key) => write!(
+                f,
+                "attempt {}, binding {}",
+                key.attempt().get(),
+                key.digest()
+            )?,
+            None => f.write_str("no attempt yet")?,
+        }
+        write!(f, "): {}", self.hold)
     }
 }
 
@@ -818,12 +1308,16 @@ impl EntryState {
 /// address, and the ordinal is what says so.
 #[derive(Debug, Clone, Copy, Default)]
 struct AttemptRecord {
-    /// How many attempts have been begun on this entry in this generation.
+    /// The latest attempt begun on this entry in this generation, or `None`
+    /// while none has been.
     ///
-    /// Monotonic by construction: only [`Ledger::begin`] moves it, and nothing
-    /// resets it while the transition stands. It is the entry's attempt
-    /// ordinal, and it is the number a [`PendingWork`] hands out.
-    begun: u32,
+    /// Monotonic by construction: only [`Ledger::begin_attempt`] moves it, and
+    /// nothing resets it while the transition stands. It is the entry's attempt
+    /// identity, and it is what a [`PendingWork`] hands out — an identity
+    /// rather than a count, so the number a caller is handed and the number a
+    /// settlement compares against are the same value rather than two
+    /// derivations of one.
+    begun: Option<AttemptId>,
     /// The attempt the latest settlement was about, and what it said.
     ///
     /// The ordinal is stored rather than assumed to be the latest, because a
@@ -836,8 +1330,8 @@ struct AttemptRecord {
 /// The attempt one settlement was about, and the evidence it carried.
 #[derive(Debug, Clone, Copy)]
 struct SettledAttempt {
-    /// The attempt ordinal the evidence was submitted for.
-    attempt: u32,
+    /// The attempt the evidence was submitted for.
+    attempt: AttemptId,
     /// What the evidence said.
     evidence: EffectEvidence,
 }
@@ -908,15 +1402,15 @@ impl fmt::Debug for Transition {
 }
 
 impl Transition {
-    /// How many attempts have been begun on `entry`, or zero when this
-    /// transition has no such entry.
+    /// The latest attempt begun on `entry`, or `None` when this transition has
+    /// no such entry or none has been begun.
     ///
-    /// Read through here rather than off [`EntryState`] so that the number a
-    /// caller is handed and the number settlement checks are the same one: a
-    /// settled entry walks back to `NotStarted`, which carries no count, and a
-    /// number derived from the state would restart at one.
-    fn attempt_of(&self, entry: usize) -> u32 {
-        self.attempts.get(entry).map_or(0, |record| record.begun)
+    /// Read through here rather than off [`EntryState`] so that the identity a
+    /// caller is handed and the identity settlement checks are the same one: a
+    /// settled entry walks back to `NotStarted`, which carries no attempt, and
+    /// an identity derived from the state would restart at the first one.
+    fn attempt_of(&self, entry: usize) -> Option<AttemptId> {
+        self.attempts.get(entry).and_then(|record| record.begun)
     }
 
     /// A transition with every entry outstanding, bound to `value`.
@@ -972,32 +1466,40 @@ impl Transition {
 
 /// What a settlement did to the ledger.
 ///
-/// Four answers, because a caller's next move differs for each: [`Decided`] and
-/// [`Duplicate`] are both success, and the other three are three distinct
+/// Six answers, because a caller's next move differs for each: [`Decided`] and
+/// [`Duplicate`] are both success, and the other four are four distinct
 /// refusals that must not be collapsed into one. Only [`NoSuchWork`] means
-/// "there is no held effect at this address"; a caller told that about an
-/// address it has a `PendingWork` for is being told its evidence is stale or
+/// "there is no held effect for this action"; a caller told that about an action
+/// it has a `PendingWork` for is being told its evidence is stale or
 /// contradictory, which is a different repair.
+///
+/// Each refusal carries the address it was about, worked out where the ledger
+/// already had it. A refusal that made the caller look the entry up again would
+/// have to answer what to do when the lookup fails, and there is no honest
+/// answer: the ledger just knew, and a second query is a chance for the two
+/// answers to differ.
 ///
 /// [`Decided`]: Settled::Decided
 /// [`Duplicate`]: Settled::Duplicate
 /// [`NoSuchWork`]: Settled::NoSuchWork
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Settled {
-    /// The named generation's entry was outstanding, and this evidence is now
+    /// The key's generation's entry was outstanding, and this evidence is now
     /// its outcome.
     Decided,
-    /// The named generation was already given exactly this evidence for this
+    /// The key's generation was already given exactly this evidence for this
     /// entry. A caller that could not tell whether its first delivery landed
     /// repeats it and must not be punished for the repetition, nor may the
     /// repeat move the entry a second time.
     Duplicate,
-    /// The named generation is not the one in the slot now: the work the caller
-    /// is reporting on was superseded, and the live transition is about a
-    /// different attempt with a different revision.
+    /// The key names a binding that is not the one in the slot now: the work
+    /// the caller is reporting on was superseded, and the live transition is
+    /// about a different attempt over a different observed input.
     Superseded {
-        /// The revision the slot holds now.
-        current: u64,
+        /// The entry the action is declared on.
+        id: WorkId,
+        /// The binding the slot holds now.
+        current: ActionDigest,
     },
     /// The named attempt is not the one outstanding on that entry: a later
     /// attempt has been begun since the caller read the work.
@@ -1008,19 +1510,31 @@ enum Settled {
     /// gone — that is the retry-inside-one-generation case — and accepting the
     /// report there would apply it to an attempt the caller never observed.
     StaleAttempt {
-        /// The attempt the evidence was submitted for.
-        reported: u32,
+        /// The entry the action is declared on.
+        id: WorkId,
+        /// The attempt the evidence was about.
+        reported: AttemptId,
         /// The attempt the entry is on now.
-        outstanding: u32,
+        outstanding: AttemptId,
     },
     /// The named generation's entry is settled, and this evidence says the
     /// opposite of what settled it.
     Contradicted {
+        /// The entry the action is declared on.
+        id: WorkId,
         /// The evidence already recorded for this generation.
         settled: EffectEvidence,
     },
-    /// No transition at this chain, or no such entry in the one that is there.
-    NoSuchWork,
+    /// The key has no work to settle: either the action is not declared here at
+    /// all, or it is declared at an entry whose outcome is already decided.
+    ///
+    /// The address is absent only in the first case, which is why it is an
+    /// `Option` rather than a fabricated slot: a caller told "no such work, at
+    /// chain 0 entry 0" would be reading a place the key never named.
+    NoSuchWork {
+        /// The entry the action is declared on, when it is declared at all.
+        id: Option<WorkId>,
+    },
 }
 
 /// The eligible work of the bot, keyed by chain.
@@ -1037,18 +1551,76 @@ enum Settled {
 /// structure holding the payloads would have to be kept in step with this one
 /// through every `take`, `put`, `begin`, `skip` and `fail`, and the first path
 /// that forgot would silently re-bind a live transition to the wrong value.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Ledger {
     /// One live transition per chain, in declaration order.
     transitions: Vec<Option<Transition>>,
+    /// The action each entry of each chain runs, in declaration order.
+    ///
+    /// Derived once, at assembly, from the declarations — the bot's name, the
+    /// chain's index, the entry's index and the action's own domain — rather
+    /// than re-derived per attempt. Two derivations of one identity are two
+    /// identities the moment they disagree, and an action identity that drifted
+    /// between the key a dispatch was recorded under and the key a settlement
+    /// names is a settlement that never lands.
+    actions: Vec<Vec<ActionId>>,
+    /// The effect path: the identity, the fence and the journal, plus what
+    /// recovery found in them.
+    effects: Effects,
 }
 
 impl Ledger {
-    /// A ledger with one idle slot per chain.
-    fn with_chains(chains: usize) -> Self {
+    /// A ledger with one idle slot per chain, no work recorded, and the
+    /// declared action identities indexed as the chains are.
+    fn new(actions: Vec<Vec<ActionId>>, effects: Effects) -> Self {
         Self {
-            transitions: (0..chains).map(|_| None).collect(),
+            transitions: (0..actions.len()).map(|_| None).collect(),
+            actions,
+            effects,
         }
+    }
+
+    /// The action one entry runs, when the ledger has that entry.
+    fn action_of(&self, id: WorkId) -> Option<ActionId> {
+        self.actions.get(id.chain())?.get(id.entry()).copied()
+    }
+
+    /// Give the journal back, leaving the ledger unusable.
+    ///
+    /// The undo of the move `assemble` made, and the only way a record outlives
+    /// the bot that wrote it.
+    fn into_journal(self) -> Box<dyn EffectJournal> {
+        self.effects.into_journal()
+    }
+
+    /// The generation a chain's live transition was opened at, when it has one.
+    ///
+    /// What a caller needs to ask whether an acknowledgement covers the work in
+    /// front of it: an `Applied` verdict retires its action for one generation
+    /// and no other, so the comparison is between the acknowledgement's
+    /// generation and this one.
+    fn generation(&self, chain: usize) -> Option<u64> {
+        self.transitions
+            .get(chain)
+            .and_then(Option::as_ref)
+            .map(|transition| transition.revision)
+    }
+
+    /// The entry an action is declared on, when the ledger has one.
+    ///
+    /// The action is what a key carries and an address is what the ledger is
+    /// indexed by, so this is the translation settlement runs first. It is a
+    /// search rather than a map because the declaration is bounded by the spec
+    /// — a handful of entries, scanned at most once per settlement and once per
+    /// recovery — and a second index kept in step with `actions` is a second
+    /// place for the two to disagree.
+    fn locate(&self, action: ActionId) -> Option<WorkId> {
+        for (chain, entries) in self.actions.iter().enumerate() {
+            if let Some(entry) = entries.iter().position(|declared| *declared == action) {
+                return Some(WorkId { chain, entry });
+            }
+        }
+        None
     }
 
     /// Take a chain's transition out, leaving its slot empty. The walk needs it
@@ -1083,25 +1655,93 @@ impl Ledger {
     /// it, a dropped tick would leave a `NotStarted` entry behind and the next
     /// tick would replay an effect that may already be live.
     ///
-    /// `false` when the entry is not in a state an attempt can start from, which
-    /// means the world moved behind the schedule's back.
-    fn begin(&mut self, id: WorkId) -> Option<u32> {
+    /// `Err` when the entry is not in a state an attempt can start from, when
+    /// the action identity is unknown, or when the journal or the broker
+    /// refused — which means the world moved behind the schedule's back.
+    ///
+    /// The two writes happen here, in this order, and neither can be moved
+    /// later. `IntentAdmitted` is the decision to act, and `DispatchPrepared` is
+    /// the warrant: both are committed *before* the caller builds the future that
+    /// reaches the external system. A crash anywhere after this returns leaves a
+    /// journal that says "this attempt was prepared and nothing recorded what
+    /// became of it", which recovery reads as an unknown rather than as a
+    /// never-sent — the exact distinction a duplicate merge turns on.
+    ///
+    /// The warrant is handed back rather than consumed here because the handoff
+    /// is the caller's: it runs after the payload the attempt acts on is in
+    /// hand, and it presents the warrant at [`Broker::revalidate`] on the way in.
+    fn begin_attempt(&mut self, id: WorkId) -> Result<(EffectKey, Authority), BotError> {
+        let no_such_work = || BotError::NoSuchWork { work: id };
+        let action = self.action_of(id).ok_or_else(no_such_work)?;
+        // Refused before anything is written, and refused for the reason
+        // recovery exists: an attempt on this action is recorded as dispatched
+        // with no outcome, so the bytes may already be live. Beginning another
+        // one is the blind resend, and the guard is here rather than at the top
+        // of the walk so it cannot be bypassed by a second caller.
+        if self.effects.blocks(action) {
+            return Err(BotError::EffectUnsettled { action });
+        }
         let transition = self
             .transitions
             .get_mut(id.chain())
-            .and_then(Option::as_mut)?;
-        let state = transition.entries.get_mut(id.entry())?;
+            .and_then(Option::as_mut)
+            .ok_or_else(no_such_work)?;
+        let state = transition
+            .entries
+            .get_mut(id.entry())
+            .ok_or_else(no_such_work)?;
         if !matches!(
             *state,
             EntryState::NotStarted | EntryState::DefinitelyFailed { .. }
         ) {
-            return None;
+            return Err(no_such_work());
         }
-        let record = transition.attempts.get_mut(id.entry())?;
-        record.begun = record.begun.saturating_add(1);
-        let attempt = record.begun;
+        let record = transition
+            .attempts
+            .get_mut(id.entry())
+            .ok_or_else(no_such_work)?;
+        // The attempt identity is minted here and nowhere else, which is what
+        // makes it monotonic within the generation: `FIRST` for an entry that
+        // has never been attempted, otherwise the successor of the last one. An
+        // exhausted chain of successes is refused rather than wrapped, because
+        // an identity that came round again would name two attempts.
+        //
+        // "Never been attempted" means *this run has not attempted it*, and the
+        // two are not the same question after a restart. A transition is opened
+        // fresh, so its record starts empty however far the journal got, and
+        // minting attempt one again would name the attempt the record already
+        // holds — which the journal refuses, and which is the refuse-forever
+        // dead end a settled `NotApplied` would otherwise lead into. The
+        // journal's own latest attempt for the action is therefore the floor,
+        // and the successor of that floor is what this mints.
+        let attempt = match record.begun {
+            Some(previous) => previous
+                .checked_next()
+                .ok_or(BotError::EffectUnsettled { action })?,
+            None => match self.effects.recorded_attempt(action) {
+                Some(recorded) => recorded
+                    .checked_next()
+                    .ok_or(BotError::EffectUnsettled { action })?,
+                None => AttemptId::FIRST,
+            },
+        };
+        record.begun = Some(attempt);
         *state = EntryState::Unrecorded;
-        Some(attempt)
+        let revision = transition.revision;
+        let key = self
+            .effects
+            .key(action, id.chain(), id.entry(), revision, attempt)
+            .ok_or(BotError::EffectUnsettled { action })?;
+        self.effects
+            .append(&EffectEvent::IntentAdmitted { key })
+            .map_err(|cause| BotError::EffectRefused {
+                cause: DispatchError::Journal(cause),
+            })?;
+        let authority = self
+            .effects
+            .prepare(key)
+            .map_err(|cause| BotError::EffectRefused { cause })?;
+        Ok((key, authority))
     }
 
     /// Record that the entry's condition did not hold, so it owes nothing.
@@ -1132,7 +1772,15 @@ impl Ledger {
     }
 
     /// Record what a failed attempt means for the entry it was made on.
-    fn fail(&mut self, id: WorkId, error: &BotError, attempts: u32, budget: u32) -> bool {
+    ///
+    /// The attempt arrives as the identity the key carries rather than as a
+    /// count, because the count [`EntryState::DefinitelyFailed`] renders is a
+    /// `u32` and the identity is not. The conversion is saturating rather than
+    /// wrapping: an attempt ordinal past `u32::MAX` would take the maximum,
+    /// which reports an entry as further along than it is, and that is the
+    /// direction a retry budget can absorb.
+    fn fail(&mut self, id: WorkId, error: &BotError, attempt: AttemptId, budget: u32) -> bool {
+        let attempts = u32::try_from(attempt.get()).unwrap_or(u32::MAX);
         let Some(state) = self.entry_mut(id) else {
             return false;
         };
@@ -1145,53 +1793,72 @@ impl Ledger {
         true
     }
 
-    /// Settle an entry whose effect may or may not have happened.
+    /// Settle an attempt whose effect may or may not have happened.
     ///
-    /// The caller hands over the [`PendingWork`] it read, and nothing is read or
-    /// written until that value's own three facts — the slot, the generation and
-    /// the attempt — match the ledger's.
+    /// The caller hands over the [`EffectKey`] it read from
+    /// [`PendingWork::key`], and nothing is read or written until that key's own
+    /// facts match the ledger's: the run and the flow it acts under, the action
+    /// that locates the entry, the binding the entry currently holds, and the
+    /// attempt the entry is on.
     ///
-    /// This is not a formality, and it takes all three. A chain has one
-    /// transition at a time and a slot is reused by every generation over it, so
-    /// a `(chain, entry)` that matches says only that the *address* is the same.
-    /// A report computed against revision N and delivered after the slot was
-    /// re-opened at revision N+1 would be accepted against work the caller has
-    /// never seen: `Applied` would acknowledge an effect at a generation that
-    /// never happened, and `NotApplied` — worse, because it authorises a retry —
-    /// would make an unknown attempt eligible to run again.
+    /// This is not a formality. A chain has one transition at a time and a slot
+    /// is reused by every generation over it, so an action that matches says
+    /// only that the *address* is the same. A report computed against one
+    /// generation's binding and delivered after the slot was re-opened under the
+    /// next would be accepted against work the caller has never seen: `Applied`
+    /// would acknowledge an effect produced from an input that is gone, and
+    /// `NotApplied` — worse, because it authorises a retry — would make an
+    /// unknown attempt eligible to run against the new one.
     ///
-    /// The attempt closes the same hole one level down, where the generation
-    /// does not help. An entry is retried *within* a generation: settling it
+    /// The binding is the digest, and it carries both halves of that check at
+    /// once: it is derived from the generation's revision *and* from the entry
+    /// it belongs to, so a key for one entry cannot be spent on another and a
+    /// key for one generation cannot be spent on the next. Comparing it is what
+    /// makes supersession a fact about the observed input rather than about a
+    /// counter that a restarted process would begin again at one.
+    ///
+    /// The attempt closes the same hole one level down, where the binding does
+    /// not help. An entry is retried *within* a generation: settling it
     /// `NotApplied` makes it eligible, and the next tick begins the next attempt
-    /// at the same address under the same revision. A repeat of the earlier
-    /// report — which must be tolerated, because a caller that never saw its
-    /// first delivery acknowledged has to be able to send it again — is
-    /// indistinguishable from a fresh one unless the attempt is named, and
-    /// accepting it would reset an in-flight attempt to eligible.
+    /// over the same binding. A repeat of the earlier report — which must be
+    /// tolerated, because a caller that never saw its first delivery
+    /// acknowledged has to be able to send it again — is indistinguishable from
+    /// a fresh one unless the attempt is named, and accepting it would reset an
+    /// in-flight attempt to eligible.
     ///
     /// Returns a decision rather than a bool, because the answers lead a caller
     /// to different next actions and several of them are not errors.
-    fn settle(&mut self, work: &PendingWork, evidence: EffectEvidence) -> Settled {
+    fn settle(&mut self, key: &EffectKey, evidence: EffectEvidence) -> Settled {
+        let Some(id) = self.locate(key.action()) else {
+            return Settled::NoSuchWork { id: None };
+        };
+        // The run and the flow are the identity this ledger speaks for. A key
+        // from another run is not this ledger's to settle, and answering it with
+        // any of the finer refusals would suggest the evidence nearly applied.
+        let identity = self.effects.identity();
+        if key.run() != identity.run() || key.flow() != identity.flow() {
+            return Settled::NoSuchWork { id: None };
+        }
         let Some(transition) = self
             .transitions
-            .get_mut(work.id.chain())
+            .get_mut(id.chain())
             .and_then(Option::as_mut)
         else {
-            return Settled::NoSuchWork;
+            return Settled::NoSuchWork { id: Some(id) };
         };
-        // The generation first, before the entry is even looked up: an entry
-        // that matches inside a transition that does not is exactly the case
-        // this exists to refuse.
-        if transition.revision != work.revision {
-            return Settled::Superseded {
-                current: transition.revision,
-            };
+        // The binding first, before the attempt is even looked up: a key that
+        // names the right action inside a generation that is gone is exactly the
+        // case this exists to refuse.
+        let live =
+            derive_action_digest(identity.flow(), id.chain(), id.entry(), transition.revision);
+        if key.digest() != live {
+            return Settled::Superseded { id, current: live };
         }
-        let Some(record) = transition.attempts.get(work.id.entry()).copied() else {
-            return Settled::NoSuchWork;
+        let Some(record) = transition.attempts.get(id.entry()).copied() else {
+            return Settled::NoSuchWork { id: Some(id) };
         };
         let settleable = matches!(
-            transition.entries.get(work.id.entry()),
+            transition.entries.get(id.entry()),
             Some(
                 EntryState::Unrecorded
                     | EntryState::OutcomeUnknown { .. }
@@ -1217,14 +1884,15 @@ impl Ledger {
             // a report about attempt 2 comes back as a duplicate of attempt 1.
             return match record.settled {
                 Some(previous)
-                    if previous.attempt == work.attempt && previous.evidence == evidence =>
+                    if previous.attempt == key.attempt() && previous.evidence == evidence =>
                 {
                     Settled::Duplicate
                 }
-                Some(previous) if previous.attempt == work.attempt => Settled::Contradicted {
+                Some(previous) if previous.attempt == key.attempt() => Settled::Contradicted {
+                    id,
                     settled: previous.evidence,
                 },
-                Some(_) | None => Settled::NoSuchWork,
+                Some(_) | None => Settled::NoSuchWork { id: Some(id) },
             };
         }
         // Then the attempt, and this is the half that the slot and the
@@ -1240,27 +1908,34 @@ impl Ledger {
         // Placed after the decided case rather than before it, because a
         // decided entry is where the repeat is *supposed* to land: it is only
         // the live entry whose attempt has to match.
-        if work.attempt != record.begun {
+        // An entry with nothing begun cannot be settleable, so the `None` arm
+        // is unreachable; it is answered with the same refusal as an entry the
+        // ledger does not hold rather than being asserted away.
+        let Some(outstanding) = record.begun else {
+            return Settled::NoSuchWork { id: Some(id) };
+        };
+        if key.attempt() != outstanding {
             return Settled::StaleAttempt {
-                reported: work.attempt,
-                outstanding: record.begun,
+                id,
+                reported: key.attempt(),
+                outstanding,
             };
         }
         let next = match evidence {
             EffectEvidence::Applied => EntryState::Succeeded,
             EffectEvidence::NotApplied => EntryState::NotStarted,
         };
-        if let Some(state) = transition.entries.get_mut(work.id.entry()) {
+        if let Some(state) = transition.entries.get_mut(id.entry()) {
             *state = next;
         }
-        if let Some(slot) = transition.attempts.get_mut(work.id.entry()) {
+        if let Some(slot) = transition.attempts.get_mut(id.entry()) {
             // Recorded against the attempt the evidence was *about*, never
             // against whichever is current: this record is what decides
             // whether a later report is a repeat, and a record that drifted
             // onto the next attempt would make two different attempts look
             // like one.
             slot.settled = Some(SettledAttempt {
-                attempt: record.begun,
+                attempt: outstanding,
                 evidence,
             });
         }
@@ -1281,6 +1956,23 @@ impl Ledger {
             .get(chain)
             .and_then(Option::as_ref)
             .and_then(|transition| transition.value.as_ref())
+    }
+
+    /// The key for the attempt an entry is currently on, when it has one.
+    ///
+    /// `None` for an entry never attempted, and for a chain or entry the ledger
+    /// does not hold. Both are the same answer to the caller — there is no
+    /// attempt identity to hand out — and one absence rather than two keeps the
+    /// settlement sites from having to tell them apart.
+    fn key_of(&self, chain: usize, entry: usize, transition: &Transition) -> Option<EffectKey> {
+        let id = WorkId { chain, entry };
+        self.effects.key(
+            self.action_of(id)?,
+            chain,
+            entry,
+            transition.revision,
+            transition.attempt_of(entry)?,
+        )
     }
 
     /// The first entry that is unresolved, in `(chain, entry)` order.
@@ -1306,15 +1998,30 @@ impl Ledger {
                 if !(state.is_open() || state.is_abandoned()) {
                     continue;
                 }
+                let id = WorkId { chain, entry };
+                // A recovered attempt nothing has settled outranks the entry's
+                // own state in the report, because it is the reason the entry
+                // cannot move. Reported first, and reported *instead*: two
+                // reports for one entry would read as two problems.
+                if let Some(key) = self
+                    .action_of(id)
+                    .and_then(|action| self.effects.unsettled_for(action))
+                {
+                    let action = key.action();
+                    return Some(PendingWork {
+                        id,
+                        key: Some(Box::new(key)),
+                        hold: TransitionHold::UnsettledByRecovery { action },
+                    });
+                }
                 // Unreachable in practice: an open or abandoned state always
                 // renders a hold.
                 let Some(hold) = state.hold(budget) else {
                     continue;
                 };
                 return Some(PendingWork {
-                    id: WorkId { chain, entry },
-                    revision: transition.revision,
-                    attempt: transition.attempt_of(entry),
+                    id,
+                    key: self.key_of(chain, entry, transition).map(Box::new),
                     hold,
                 });
             }
@@ -1331,11 +2038,23 @@ impl Ledger {
                 continue;
             };
             for (entry, state) in transition.entries.iter().enumerate() {
+                let id = WorkId { chain, entry };
+                if let Some(key) = self
+                    .action_of(id)
+                    .and_then(|action| self.effects.unsettled_for(action))
+                {
+                    let action = key.action();
+                    pending.push(PendingWork {
+                        id,
+                        key: Some(Box::new(key)),
+                        hold: TransitionHold::UnsettledByRecovery { action },
+                    });
+                    continue;
+                }
                 if let Some(hold) = state.hold(budget) {
                     pending.push(PendingWork {
-                        id: WorkId { chain, entry },
-                        revision: transition.revision,
-                        attempt: transition.attempt_of(entry),
+                        id,
+                        key: self.key_of(chain, entry, transition).map(Box::new),
                         hold,
                     });
                 }
@@ -1965,7 +2684,21 @@ impl EcsBot {
             name: name.into(),
             chains: Vec::new(),
             policy: RetryPolicy::DEFAULT,
+            effects: None,
         }
+    }
+
+    /// Take the journal back out of the bot.
+    ///
+    /// `None` when the ledger is not in the world, which is the state after a
+    /// previous call already took it. What a host calls on its way out, so the
+    /// record outlives the process that wrote it — and what a restart test
+    /// calls to hand the same journal to a second bot.
+    #[must_use]
+    pub fn into_journal(mut self) -> Option<Box<dyn EffectJournal>> {
+        self.world
+            .remove_non_send::<Ledger>()
+            .map(Ledger::into_journal)
     }
 
     /// The name the spec declared.
@@ -2443,22 +3176,81 @@ impl EcsBot {
                 continue;
             }
 
+            // Two questions the ledger answers before anything is sent, and
+            // they lead to different places. An action an acknowledgement has
+            // retired for this generation is *done*, so the walk steps over it
+            // exactly as it steps over a false condition: the effect landed, and
+            // the generation is the one it landed in. An action an unsettled
+            // recovered attempt stands against is *held*, so the walk stops:
+            // nothing established that the bytes did not arrive, and the report
+            // a caller needs is the one `first_unresolved` renders from the same
+            // fact.
+            if let Some(action) = self.world.non_send::<Ledger>().action_of(work) {
+                let ledger = self.world.non_send::<Ledger>();
+                if ledger.generation(step.chain).is_some_and(|revision| {
+                    ledger
+                        .effects
+                        .applied_in(action, step.chain, step.entry, revision)
+                }) {
+                    // Retired, not merely stepped over. An entry whose effect
+                    // landed owes nothing for this generation, and leaving it
+                    // outstanding would report finished work as pending for as
+                    // long as the generation lasts.
+                    self.world.non_send_mut::<Ledger>().skip(work);
+                    continue;
+                }
+                if ledger.effects.blocks(action) {
+                    break;
+                }
+            }
+
             // Written *before* the attempt, not after: a tick dropped while the
             // effect is in flight leaves this behind, and a record that says
-            // "begun, outcome unknown" is what makes the next tick hold the
-            // effect instead of replaying it. A panic unwinding out of the action
-            // is a limit this substrate does not close, and it is stated in the
-            // module documentation.
-            // The ordinal comes back *from* the ledger rather than being derived
+            // "dispatched, outcome unknown" is what makes the next tick hold the
+            // effect instead of replaying it. Both the intent and the prepared
+            // dispatch are committed here, so a crash after this line recovers
+            // as an unknown rather than as a never-sent. A panic unwinding out
+            // of the action is a limit this substrate does not close, and it is
+            // stated in the module documentation.
+            //
+            // The key comes back *from* the ledger rather than being derived
             // beside it. The attempt a caller is handed and the attempt
-            // settlement checks have to be one number, and two derivations of
-            // one number are two numbers the moment they disagree.
-            let Some(attempt) = self.world.non_send_mut::<Ledger>().begin(work) else {
-                // The entry is not in a state an attempt can start from, so the
-                // world moved behind the schedule's back. The run stops here
-                // rather than guessing what the entry now means.
-                break;
+            // settlement checks have to be one identity, and two derivations of
+            // one identity are two identities the moment they disagree.
+            let (key, authority) = match self.world.non_send_mut::<Ledger>().begin_attempt(work) {
+                Ok(pair) => pair,
+                Err(error) => {
+                    // The entry is not in a state an attempt can start from, or
+                    // a guard refused it. Either way nothing left the process,
+                    // and the run stops here rather than guessing what the entry
+                    // now means.
+                    failure = Some(error);
+                    break;
+                }
             };
+
+            // The generation check, at the handoff rather than at the mint.
+            // Authorization and handing over are two instants, and a replacement
+            // landing between them leaves a warrant that was minted legitimately
+            // and is now stale; a check that only ran at mint time would let it
+            // through. Nothing is awaited before this, so the warrant is
+            // presented as close to the handoff as the substrate can put it.
+            if let Err(cause) = self
+                .world
+                .non_send::<Ledger>()
+                .effects
+                .broker()
+                .revalidate(&authority)
+            {
+                let error = BotError::EffectRefused {
+                    cause: DispatchError::Broker(cause),
+                };
+                self.world
+                    .non_send_mut::<Ledger>()
+                    .fail(work, &error, key.attempt(), budget);
+                failure = Some(error);
+                break;
+            }
 
             // Scoped, so the world is borrowed immutably only across the await
             // and the ledger is reachable mutably on either side of it.
@@ -2490,6 +3282,37 @@ impl EcsBot {
             let Some(outcome) = outcome else {
                 break;
             };
+            // The outcome is written down for the two cases where it is a fact,
+            // and deliberately not for the third. `Applied` and `NotApplied` are
+            // answers; an indeterminate effect is the *absence* of one, and
+            // appending `NotApplied` for it would record a fact the substrate
+            // does not have — which is exactly how a recovery path comes to
+            // believe a merge did not land.
+            let observed = match outcome {
+                Ok(_) => Some(EffectEvidence::Applied),
+                Err(ref error) => match error.dispatch_certainty() {
+                    DispatchCertainty::Refused | DispatchCertainty::NotDelivered => {
+                        Some(EffectEvidence::NotApplied)
+                    }
+                    DispatchCertainty::Unsettled => None,
+                },
+            };
+            if let Some(evidence) = observed
+                && let Err(cause) = self
+                    .world
+                    .non_send_mut::<Ledger>()
+                    .effects
+                    .append(&EffectEvent::OutcomeObserved { key, evidence })
+            {
+                let error = BotError::EffectRefused {
+                    cause: DispatchError::Journal(cause),
+                };
+                self.world
+                    .non_send_mut::<Ledger>()
+                    .fail(work, &error, key.attempt(), budget);
+                failure = Some(error);
+                break;
+            }
             match outcome {
                 Ok(_) => {
                     if self.world.non_send_mut::<Ledger>().succeed(work) {
@@ -2499,7 +3322,7 @@ impl EcsBot {
                 Err(error) => {
                     self.world
                         .non_send_mut::<Ledger>()
-                        .fail(work, &error, attempt, budget);
+                        .fail(work, &error, key.attempt(), budget);
                     failure = Some(error);
                     break;
                 }
@@ -2570,33 +3393,68 @@ impl EcsBot {
     /// safely send it again.
     pub fn resolve_effect(
         &mut self,
-        work: &PendingWork,
+        key: &EffectKey,
         evidence: EffectEvidence,
     ) -> Result<(), BotError> {
-        match self.world.non_send_mut::<Ledger>().settle(work, evidence) {
+        // A recovered attempt is settled first, and the order is the whole of
+        // deliverable F05's second half: a key the journal records as dispatched
+        // with no outcome belongs to no live transition, so the ledger's own
+        // settlement has nothing to match it against and would answer
+        // `NoSuchWork`. It is the one case where "settle it" is the repair for a
+        // refusal the substrate itself raised.
+        let recovered = self
+            .world
+            .non_send::<Ledger>()
+            .effects
+            .unsettled_for(key.action())
+            .is_some_and(|held| held == *key);
+        if recovered {
+            // The generation the acknowledgement covers is the key's own. An
+            // `Applied` verdict retires the action for the generation that key
+            // names and no other, so a source that moves afterwards gets new
+            // work — which is what a new generation *is* — while the generation
+            // the effect was produced from never runs it again. Reading the
+            // generation off the key rather than off the entry's live
+            // transition is what makes this reach the recovered case: a
+            // recovered attempt belongs to no live transition, so the entry
+            // holds no revision to take it from.
+            return self
+                .world
+                .non_send_mut::<Ledger>()
+                .effects
+                .settle_recovered(*key, evidence)
+                .map_err(|cause| BotError::EffectRefused {
+                    cause: DispatchError::Journal(cause),
+                });
+        }
+        match self.world.non_send_mut::<Ledger>().settle(key, evidence) {
             // Both are success, and deliberately one arm: to the caller, a
             // repeat that landed a second time is the same fact as one that
             // landed the first.
             Settled::Decided | Settled::Duplicate => Ok(()),
-            Settled::Superseded { current } => Err(BotError::EvidenceSuperseded {
-                work: work.id(),
-                named: work.revision(),
+            Settled::Superseded { id, current } => Err(BotError::EvidenceSuperseded {
+                work: id,
+                named: key.digest(),
                 current,
             }),
             Settled::StaleAttempt {
+                id,
                 reported,
                 outstanding,
             } => Err(BotError::EvidenceStaleAttempt {
-                work: work.id(),
+                work: id,
                 reported,
                 outstanding,
             }),
-            Settled::Contradicted { settled } => Err(BotError::EvidenceContradicted {
-                work: work.id(),
+            Settled::Contradicted { id, settled } => Err(BotError::EvidenceContradicted {
+                work: id,
                 settled,
                 submitted: evidence,
             }),
-            Settled::NoSuchWork => Err(BotError::NoSuchWork { work: work.id() }),
+            Settled::NoSuchWork { id: Some(id) } => Err(BotError::NoSuchWork { work: id }),
+            Settled::NoSuchWork { id: None } => Err(BotError::ActionNotDeclared {
+                action: key.action(),
+            }),
         }
     }
 }
@@ -2609,6 +3467,15 @@ pub struct EcsBuilder {
     chains: Vec<EcsChain>,
     /// The retry policy every entry will run under.
     policy: RetryPolicy,
+    /// The identity, the fence and the journal every dispatch goes through.
+    ///
+    /// `None` until [`Self::with_effects`] supplies one, and `build` refuses
+    /// while it is. There is no default: a default would be a default
+    /// *identity*, and an identity a caller did not choose is one they cannot
+    /// recover against — which is precisely the state that makes a restart
+    /// resend a merge. A default-off variant of the same bot would be worse
+    /// still, because nothing would exercise it.
+    effects: Option<EffectScope>,
 }
 
 impl EcsBuilder {
@@ -2622,6 +3489,20 @@ impl EcsBuilder {
     #[must_use]
     pub fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
         self.policy = policy;
+        self
+    }
+
+    /// Bind the identity, the environment fence and the journal every dispatch
+    /// goes through.
+    ///
+    /// Required: [`build`](Self::build) refuses without it, reporting
+    /// [`BotError::IncompleteSpec`] with `field: "effects"`. That is the same
+    /// idiom the name check uses, and it is deliberate rather than a typestate —
+    /// a bot whose dispatch path is optional is a bot with two dispatch paths,
+    /// and the estate does not keep two implementations of one job.
+    #[must_use]
+    pub fn with_effects(mut self, effects: EffectScope) -> Self {
+        self.effects = Some(effects);
         self
     }
 
@@ -2643,17 +3524,29 @@ impl EcsBuilder {
             source,
             entries: Vec::new(),
             policy: self.policy,
+            effects: self.effects,
         }
     }
 
     /// Build with no observation chains: a bot that only serves direct
     /// `Query` and `Execute` calls.
     pub fn build(self, grants: &GrantSet) -> Result<EcsBot, BotError> {
-        EcsBot::assemble(self.name, self.chains, grants, self.policy)
+        EcsBot::assemble(self.name, self.chains, grants, self.policy, self.effects)
     }
 }
 
 impl<S: Observe> EcsObserveBuilder<S> {
+    /// Bind the effect path, as [`EcsBuilder::with_effects`] does.
+    ///
+    /// Offered here as well so the call can sit anywhere in the declaration
+    /// chain — after the last `on` as naturally as before the first `observe` —
+    /// rather than only at the one point the builder happens to hand it over.
+    #[must_use]
+    pub fn with_effects(mut self, effects: EffectScope) -> Self {
+        self.effects = Some(effects);
+        self
+    }
+
     /// Add a `(condition, action)` tuple to this chain.
     ///
     /// Both halves are typed against the source this chain is observing: the
@@ -2721,6 +3614,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
             source: previous,
             entries,
             policy,
+            effects,
         } = self;
         prior.push(EcsChain {
             source: Box::new(previous),
@@ -2734,6 +3628,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
             source,
             entries: Vec::new(),
             policy,
+            effects,
         }
     }
 
@@ -2753,6 +3648,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
             source,
             entries,
             policy,
+            effects,
         } = self;
         prior.push(EcsChain {
             source: Box::new(source),
@@ -2760,7 +3656,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
             witness: Witness::of::<S::Output>(),
             entries,
         });
-        EcsBot::assemble(name, prior, grants, policy)
+        EcsBot::assemble(name, prior, grants, policy, effects)
     }
 }
 
@@ -2780,6 +3676,9 @@ impl<S: Observe> EcsObserveBuilder<S> {
 pub struct EcsObserveBuilder<S> {
     /// Carried from [`EcsBuilder`]; the chain being built does not consume it.
     name: String,
+    /// Carried from [`EcsBuilder`] alongside `name`. Taken by the terminal
+    /// `build`, which is the only place it is needed.
+    effects: Option<EffectScope>,
     /// Chains finished by an earlier `observe` call, in order.
     prior: Vec<EcsChain>,
     /// The source being bound, still concrete.
@@ -2799,10 +3698,32 @@ impl EcsBot {
         chains: Vec<EcsChain>,
         grants: &GrantSet,
         policy: RetryPolicy,
+        effects: Option<EffectScope>,
     ) -> Result<Self, BotError> {
         if name.is_empty() {
             return Err(BotError::IncompleteSpec { field: "name" });
         }
+        // Refused before the capability gate, because a bot that cannot record
+        // a dispatch is not a bot that is missing a capability — it is one that
+        // was never given a dispatch path, and the repair is different.
+        let Some(effects) = effects else {
+            return Err(BotError::IncompleteSpec { field: "effects" });
+        };
+        // What recovery found, folded in before the world exists. A key naming
+        // an action this bot does not declare is a foreign journal — the
+        // record belongs to a different bot or a different revision of this
+        // one — and it is refused here rather than ignored, because ignoring it
+        // means dispatching an action whose earlier attempt the journal says
+        // may be live.
+        let recovered = recover(
+            effects
+                .journal()
+                .committed()
+                .map_err(|cause| BotError::EffectRefused {
+                    cause: DispatchError::Journal(cause),
+                })?
+                .iter(),
+        );
         // The same admission gate `Bot::build` applies: a bot requiring a
         // capability it was not granted fails before it runs, not at tick.
         //
@@ -2855,13 +3776,79 @@ impl EcsBot {
         world.insert_resource(Order(order));
 
         let count = chains.len();
+        // The declared action identity of every entry, derived once here and
+        // indexed exactly as the chains are. `derive_action_id` is the single
+        // producer of an `ActionId` in this crate: a second derivation anywhere
+        // else would be a second identity for the same entry.
+        let actions: Vec<Vec<ActionId>> = chains
+            .iter()
+            .enumerate()
+            .map(|(chain, held)| {
+                held.entries
+                    .iter()
+                    .enumerate()
+                    .map(|(entry, declared)| {
+                        derive_action_id(&name, chain, entry, declared.action.domain_id())
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut ledger = Ledger::new(actions, Effects::new(effects));
+        // Every attempt the journal names, folded in. Not only the uncertain
+        // ones: an attempt whose outcome is recorded is a fact about this run
+        // too, and the two things this loop derives from it are what let a
+        // restarted run continue instead of stopping at the first entry the
+        // previous process touched.
+        //
+        //   - the attempt the action must mint next, because the journal has
+        //     already walked its ladder for the attempts below it and a
+        //     repeated `IntentAdmitted` for one of them is an out-of-order
+        //     append rather than a dispatch;
+        //   - the attempts whose effect landed, which the walk retires rather
+        //     than dispatching again.
+        for attempt in recovered.attempts() {
+            let key = attempt.key();
+            let Some(id) = ledger.locate(key.action()) else {
+                return Err(BotError::ActionNotDeclared {
+                    action: key.action(),
+                });
+            };
+            // The journal's key must name this run. A journal that holds keys
+            // from another run is the foreign-journal case one step finer: the
+            // action matches, and the run does not, and settling it here would
+            // acknowledge an attempt in a run this bot is not.
+            if key.run() != ledger.effects.identity().run() {
+                return Err(BotError::ActionNotDeclared {
+                    action: key.action(),
+                });
+            }
+            let _ = id;
+            ledger
+                .effects
+                .note_journal_attempt(key.action(), key.attempt());
+            match attempt.status() {
+                // A dispatch with no outcome. Nothing established that the
+                // bytes did not arrive, so the action is held until a caller
+                // settles it.
+                AttemptStatus::OutcomeUnknown => ledger.effects.unsettled.push(key),
+                // The effect landed, and the record says so.
+                AttemptStatus::Applied | AttemptStatus::Verified => {
+                    ledger.effects.applied.push(key);
+                }
+                // Nothing to hold. `Prepared` means the intent was admitted and
+                // nothing was handed over, and `NotApplied` means exactly that
+                // the bytes did not arrive; both leave the entry free to be
+                // attempted again, under the next attempt identity.
+                AttemptStatus::Prepared | AttemptStatus::NotApplied => {}
+            }
+        }
         world.insert_non_send(Chains(chains));
         // Not `vec![None; count]`: `Box<dyn Any>` is not `Clone`, so the
         // repeat-form macro cannot build this.
         world.insert_non_send(Observed((0..count).map(|_| None).collect()));
         // The eligible work of the bot, one idle slot per chain. Non-send,
         // because each transition owns the observed payload it is bound to.
-        world.insert_non_send(Ledger::with_chains(count));
+        world.insert_non_send(ledger);
         // The two staging resources the awaited phases hand to the schedule.
         // Inserted here rather than at first use so every phase can name them
         // unconditionally: a phase that found one missing would have to decide
@@ -2943,6 +3930,8 @@ mod tests {
 
     use super::*;
     use crate::cap::{Auth, Cap, Demand};
+    use crate::effect::{EnvironmentId, RunId};
+    use crate::journal::MemoryJournal;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -3316,6 +4305,54 @@ mod tests {
         GrantSet::empty().grant(Cap::net())
     }
 
+    /// The attempt a report is about, for the tests that settle one.
+    ///
+    /// A `Result` rather than a bare key because an entry that has never been
+    /// attempted has no attempt identity, and a test that asked for one anyway
+    /// should say so rather than be handed a fabricated one.
+    fn held_key(work: &PendingWork) -> Result<EffectKey, Box<dyn std::error::Error>> {
+        work.key().ok_or_else(|| {
+            format!(
+                "chain {} entry {} has no attempt",
+                work.id().chain(),
+                work.id().entry()
+            )
+            .into()
+        })
+    }
+
+    /// The run every test dispatches under.
+    const TEST_RUN: &str = "0102030405060708090a0b0c0d0e0f10";
+    /// The environment every test dispatches against.
+    const TEST_ENV: &str = "2122232425262728292a2b2c2d2e2f30";
+    /// The flow revision every test dispatches from.
+    const TEST_FLOW: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+    /// A scope the tests dispatch under: one run, one environment at its first
+    /// generation, and an in-memory journal.
+    ///
+    /// Returns a `Result` rather than panicking, because the crate forbids a
+    /// panicking path anywhere — tests included — and a failure then names the
+    /// cause rather than a line number inside a macro.
+    ///
+    /// The environment is registered because a broker that owns none mints no
+    /// authority, so an unregistered one would make every dispatch refuse with
+    /// `UnknownEnvironment` and no test would reach the path it is about.
+    fn test_effects() -> Result<EffectScope, Box<dyn std::error::Error>> {
+        let environment = EnvironmentId::from_hex(TEST_ENV)?;
+        let mut broker = Broker::new();
+        broker.register(environment)?;
+        Ok(EffectScope::new(
+            EffectIdentity::new(
+                RunId::from_hex(TEST_RUN)?,
+                environment,
+                FlowRevision::from_tagged("blake3_256", TEST_FLOW)?,
+            ),
+            broker,
+            Box::new(MemoryJournal::new()),
+        ))
+    }
+
     /// The sequence every test uses: two ticks of 200, two of 503, one of 200.
     /// It holds still for a tick at a time, which is what makes a change filter
     /// falsifiable: a sequence that moved on every tick would make "changed"
@@ -3328,6 +4365,7 @@ mod tests {
         let mut bot = EcsBot::builder("scripted")
             .observe(Script::new(SCRIPT.to_vec()))
             .on(|value: &u16| *value >= 500, Count(Rc::clone(&counter)))
+            .with_effects(test_effects()?)
             .build(&net_grants())?;
 
         let mut fired = Vec::new();
@@ -3376,6 +4414,7 @@ mod tests {
         let mut bot = EcsBot::builder("held")
             .observe(Holds::new(200))
             .on(|value: &u16| *value >= 200, Count(Rc::clone(&counter)))
+            .with_effects(test_effects()?)
             .build(&net_grants())?;
 
         // The first tick is the movement: the chain opens and the effect runs.
@@ -3423,6 +4462,7 @@ mod tests {
         let mut bot = EcsBot::builder("lazy")
             .observe(Counted::new(200, Rc::clone(&polls)))
             .on(|value: &u16| *value >= 200, Count(Rc::clone(&counter)))
+            .with_effects(test_effects()?)
             .build(&net_grants())?;
 
         assert_eq!(
@@ -3466,6 +4506,7 @@ mod tests {
         let mut bot = EcsBot::builder("lazy-moving")
             .observe(source)
             .on(|value: &u16| *value >= 200, Count(Rc::clone(&counter)))
+            .with_effects(test_effects()?)
             .build(&net_grants())?;
 
         assert_eq!(bot.tick()?, 1, "the first value fires");
@@ -3495,6 +4536,7 @@ mod tests {
         let mut bot = EcsBot::builder("unguarded")
             .observe(Holds::new(200))
             .on(|value: &u16| *value >= 200, Count(Rc::clone(&counter)))
+            .with_effects(test_effects()?)
             .build(&net_grants())?;
 
         assert_eq!(bot.tick()?, 1);
@@ -3518,6 +4560,7 @@ mod tests {
         match EcsBot::builder("ungranted")
             .observe(Script::new(SCRIPT.to_vec()))
             .on(|value: &u16| *value >= 500, Count(counter))
+            .with_effects(test_effects()?)
             .build(&GrantSet::empty())
         {
             Ok(_) => Err("a source requiring `bot.net` built without it".into()),
@@ -3553,6 +4596,7 @@ mod tests {
                     domain: "test::writes",
                 },
             )
+            .with_effects(test_effects()?)
             .build(&GrantSet::empty())
         {
             Ok(_) => Err("a bot requiring two ungranted capabilities built".into()),
@@ -3597,6 +4641,7 @@ mod tests {
                 caps: vec![Cap::net()],
             })
             .on(|value: &u16| *value >= 500, Count(Rc::clone(&counter)))
+            .with_effects(test_effects()?)
             .build(&net_grants())?;
 
         assert_eq!(
@@ -3660,6 +4705,7 @@ mod tests {
                 },
             )
             .on(|value: &u16| *value >= 200, Record(Rc::clone(&third)))
+            .with_effects(test_effects()?)
             .build(&net_grants())?;
 
         match bot.tick() {
@@ -3745,6 +4791,7 @@ mod tests {
             .observe(Script::new(vec![200, 200, 200, 200]))
             .on(|value: &u16| *value >= 200, Refuses(Rc::clone(&attempts)))
             .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
+            .with_effects(test_effects()?)
             .build(&net_grants())?;
 
         for round in 1..=2 {
@@ -3863,6 +4910,7 @@ mod tests {
             .observe(Script::new(vec![200, 200, 200]))
             .on(|value: &u16| *value >= 200, Refuses(Rc::clone(&attempts)))
             .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
+            .with_effects(test_effects()?)
             .build(&net_grants())?;
 
         match bot.tick() {
@@ -3917,7 +4965,7 @@ mod tests {
         // the point of asserting it: evidence reopens the chain, it does not
         // promise the retry will succeed.
         let blocked = bot.pending().into_iter().next().ok_or("held")?;
-        bot.resolve_effect(&blocked, EffectEvidence::NotApplied)?;
+        bot.resolve_effect(&held_key(&blocked)?, EffectEvidence::NotApplied)?;
         match bot.tick() {
             Ok(fired) => {
                 return Err(format!("a refusal was reported as {fired} fired").into());
@@ -3947,6 +4995,7 @@ mod tests {
             .on(|value: &u16| *value >= 200, Refuses(Rc::clone(&attempts)))
             .observe(Script::new(vec![200, 200]))
             .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
+            .with_effects(test_effects()?)
             .build(&net_grants())?;
 
         match bot.tick() {
@@ -3988,6 +5037,7 @@ mod tests {
                     kind: FlakyKind::Indeterminate,
                 },
             )
+            .with_effects(test_effects()?)
             .build(&net_grants())?;
 
         match bot.tick() {
@@ -4049,7 +5099,7 @@ mod tests {
             .into_iter()
             .next()
             .ok_or("the held entry disappeared from the report")?;
-        bot.resolve_effect(&held, EffectEvidence::NotApplied)?;
+        bot.resolve_effect(&held_key(&held)?, EffectEvidence::NotApplied)?;
         assert_eq!(bot.tick()?, 1, "the entry runs once evidence authorises it");
         assert_eq!(*log.borrow(), vec![200], "the effect happened, once");
         assert!(
@@ -4076,6 +5126,7 @@ mod tests {
                     kind: FlakyKind::Indeterminate,
                 },
             )
+            .with_effects(test_effects()?)
             .build(&net_grants())?;
 
         match bot.tick() {
@@ -4095,7 +5146,7 @@ mod tests {
             .into_iter()
             .next()
             .ok_or("the held entry is not reported")?;
-        bot.resolve_effect(&held, EffectEvidence::Applied)?;
+        bot.resolve_effect(&held_key(&held)?, EffectEvidence::Applied)?;
         assert_eq!(
             bot.tick()?,
             0,
@@ -4119,7 +5170,7 @@ mod tests {
         // complaint — the tick above resolved the transition and dropped its
         // slot, so there is genuinely no held effect at this address. That
         // distinction is the whole reason the two new refusals exist.
-        match bot.resolve_effect(&held, EffectEvidence::Applied) {
+        match bot.resolve_effect(&held_key(&held)?, EffectEvidence::Applied) {
             Ok(()) => Err("evidence was accepted for an entry that is not held".into()),
             Err(error) => {
                 assert!(
@@ -4153,6 +5204,7 @@ mod tests {
                     kind: FlakyKind::Refused,
                 },
             )
+            .with_effects(test_effects()?)
             .build(&net_grants())?;
 
         match bot.tick() {
@@ -4255,6 +5307,7 @@ mod tests {
         let mut bot = EcsBot::builder("interrupted")
             .observe(Script::new(vec![200, 200, 200]))
             .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
+            .with_effects(test_effects()?)
             .build(&net_grants())?;
 
         assert_eq!(bot.tick()?, 1, "the first tick runs the action");
@@ -4271,6 +5324,18 @@ mod tests {
                 .entries
                 .first_mut()
                 .ok_or("the chain declares no entries")? = EntryState::Unrecorded;
+            // The attempt the unrecorded entry is on. `Unrecorded` is the state
+            // a prepared dispatch leaves, so there is always an attempt to name
+            // it by — and the record has to carry one, because the key a caller
+            // settles against is derived from the attempt and an entry with no
+            // attempt has no key for evidence to be about.
+            *transition
+                .attempts
+                .first_mut()
+                .ok_or("the chain declares no entries")? = AttemptRecord {
+                begun: Some(AttemptId::FIRST),
+                settled: None,
+            };
             bot.world.non_send_mut::<Ledger>().put(0, Some(transition));
         }
 
@@ -4305,7 +5370,7 @@ mod tests {
             .into_iter()
             .next()
             .ok_or("the held entry is not reported")?;
-        bot.resolve_effect(&held, EffectEvidence::NotApplied)?;
+        bot.resolve_effect(&held_key(&held)?, EffectEvidence::NotApplied)?;
         assert_eq!(bot.tick()?, 1, "and then it runs");
         assert_eq!(*log.borrow(), vec![200, 200], "exactly once more");
         Ok(())
@@ -4331,6 +5396,7 @@ mod tests {
         let mut bot = EcsBot::builder("mismatched")
             .observe(Script::new(vec![200, 200]))
             .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
+            .with_effects(test_effects()?)
             .build(&net_grants())?;
         bot.world.non_send_mut::<Chains>().0[0].entries.insert(
             0,
@@ -4392,6 +5458,7 @@ mod tests {
             .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
             .on(RefusesToEvaluate, Count(Rc::clone(&after)))
             .on(|value: &u16| *value >= 200, Count(Rc::clone(&after)))
+            .with_effects(test_effects()?)
             .build(&net_grants())?;
 
         match bot.tick() {
@@ -4523,6 +5590,7 @@ mod tests {
         let mut bot = EcsBot::builder("mispairing")
             .observe(Script::new(vec![200]))
             .on(|value: &u16| *value >= 200, Refuses(Rc::clone(&ran)))
+            .with_effects(test_effects()?)
             .build(&net_grants())?;
 
         // `Ok(Some(_))`: a value that *moved*, which is the only shape that
@@ -4587,6 +5655,7 @@ mod tests {
         let mut bot = EcsBot::builder("mismatched")
             .observe(Script::new(vec![200, 200, 200, 200]))
             .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
+            .with_effects(test_effects()?)
             .build(&net_grants())?;
         bot.world.non_send_mut::<Chains>().0[0].entries[0] =
             typed_entry::<_, _, u16>(|value: &u16| *value >= 200, CountsU32(Rc::clone(&ran)));
@@ -4654,6 +5723,7 @@ mod tests {
                 |value: &u16| *value >= 200,
                 RefusesPermanently(Rc::clone(&attempts)),
             )
+            .with_effects(test_effects()?)
             .build(&net_grants())?;
 
         match bot.tick() {

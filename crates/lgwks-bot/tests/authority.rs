@@ -40,6 +40,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use lgwks_bot::broker::Broker;
+use lgwks_bot::effect::{EnvironmentId, FlowRevision, RunId};
+use lgwks_bot::journal::MemoryJournal;
+use lgwks_bot::spec::{EffectIdentity, EffectScope};
 use lgwks_bot::verb::{Execute, Observe};
 use lgwks_bot::{Auth, Bot, BotError, Cap, GrantSet};
 
@@ -47,8 +51,14 @@ use lgwks_bot::{Auth, Bot, BotError, Cap, GrantSet};
 ///
 /// These tests cross `BotError` and `std::io`, so they return `Box<dyn Error>`
 /// and propagate with `?`. A precondition that fails is then a named reason
-/// rather than an unwind that reports only that something unwound.
+/// rather than an unwind that reports only that something unwound. A scope that
+/// cannot be built reports through the same box for the same reason: the error
+/// domains it crosses do not convert into one another, and flattening them
+/// would name the wrong failure.
 type TestResult = Result<(), Box<dyn Error>>;
+
+/// The same box, for the one helper that is not a test body.
+type ScopeResult<T> = Result<T, Box<dyn Error>>;
 
 // ── Test doubles ────────────────────────────────────────────────────────────
 
@@ -121,6 +131,35 @@ impl Execute for Count {
 
 // ── The lifetime itself ─────────────────────────────────────────────────────
 
+/// The effect scope a test's bot runs under.
+///
+/// A bot has no dispatch path without one: the scope names the run, the
+/// environment the run acts on, and the journal a dispatch is written to before
+/// it leaves the process. A fresh identity per call, so no test inherits
+/// another's held attempts, and an in-memory journal, because these tests are
+/// about a different boundary than durability is.
+///
+/// Returns `ScopeResult` because building a scope crosses `IdError` and
+/// `BrokerError` as well as `BotError`, and none of the three converts into
+/// another; the tests below report through `Box<dyn Error>` for the same reason.
+fn test_effects() -> ScopeResult<EffectScope> {
+    let environment = EnvironmentId::from_hex("2122232425262728292a2b2c2d2e2f30")?;
+    let mut broker = Broker::new();
+    broker.register(environment)?;
+    Ok(EffectScope::new(
+        EffectIdentity::new(
+            RunId::from_hex("0102030405060708090a0b0c0d0e0f10")?,
+            environment,
+            FlowRevision::from_tagged(
+                "blake3_256",
+                "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            )?,
+        ),
+        broker,
+        Box::new(MemoryJournal::new()),
+    ))
+}
+
 #[test]
 fn a_proof_minted_from_a_grant_set_outlives_that_set() -> TestResult {
     // The issue's counterexample, executed as written. What it demonstrates is
@@ -162,6 +201,7 @@ fn withdrawing_authority_after_build_means_building_again() -> TestResult {
     let mut bot = Bot::builder("snapshot")
         .observe(Script::new(vec![100, 200, 503]))
         .on(|value: &u16| *value >= 500, Count(Rc::clone(&counter)))
+        .with_effects(test_effects()?)
         .build(&authority)?;
 
     assert_eq!(bot.tick()?, 0, "100 is below the threshold");
@@ -189,6 +229,7 @@ fn withdrawing_authority_after_build_means_building_again() -> TestResult {
     match Bot::builder("narrowed")
         .observe(Script::new(vec![503]))
         .on(|value: &u16| *value >= 500, Count(Rc::new(Cell::new(0))))
+        .with_effects(test_effects()?)
         .build(&authority)
     {
         Ok(_) => Err("a source requiring `bot.net` was admitted by an empty grant set".into()),

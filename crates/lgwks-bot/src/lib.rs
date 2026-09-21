@@ -47,14 +47,41 @@
 //! # Quick start
 //!
 //! ```rust,no_run
+//! use lgwks_bot::broker::Broker;
+//! use lgwks_bot::effect::{EnvironmentId, FlowRevision, RunId};
+//! use lgwks_bot::journal::MemoryJournal;
+//! use lgwks_bot::spec::{EffectIdentity, EffectScope};
 //! use lgwks_bot::{Bot, Cap, GrantSet};
+//!
+//! // The host is the one authority. It names the run, the environment that run
+//! // acts on, and the flow revision it came from, and it holds the broker that
+//! // owns the environment's generation. A bot cannot be built without one: an
+//! // identity the caller did not choose is one it cannot recover against, and
+//! // recovery is what stops a restart from resending a merge.
+//! let environment = EnvironmentId::from_hex("2122232425262728292a2b2c2d2e2f30")?;
+//! let mut broker = Broker::new();
+//! broker.register(environment)?;
+//! let effects = EffectScope::new(
+//!     EffectIdentity::new(
+//!         RunId::from_hex("0102030405060708090a0b0c0d0e0f10")?,
+//!         environment,
+//!         FlowRevision::from_tagged(
+//!             "blake3_256",
+//!             "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+//!         )?,
+//!     ),
+//!     broker,
+//!     Box::new(MemoryJournal::new()),
+//! );
 //!
 //! let mut bot = Bot::builder("my-bot")
 //!     // .observe(source).on(condition, action)
+//!     .with_effects(effects)
 //!     .build(&GrantSet::all_shipped())
 //!     .expect("shipped domains are covered by all_shipped");
 //!
 //! let fired = bot.tick().expect("tick propagates domain errors");
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
 //! `tick` is the synchronous adapter and belongs outside an async runtime:
