@@ -29,6 +29,57 @@ explicitly under that crate.
   licence agreement must be in place before a non-trivial `lgwks_bot`
   contribution is merged.
 
+### lgwks_bot Fixed
+
+- **A supervised task's outcome is reported, not discarded.** `Supervisor::reap`
+  evaluated only `try_join_next().is_some()` and dropped the inner
+  `Result<(), JoinError>`, so a return, an abort and a panic were all one
+  increment of `completed` — a panicking task counted as a success. Every task
+  now ends in exactly one `TaskOutcome` (`Completed`, `Cancelled`, `Aborted`,
+  `Panicked { message }`) carrying the `TaskId` assigned in spawn order; `Stats`
+  splits `succeeded` / `cancelled` / `aborted` / `panicked`; and `shutdown`
+  returns a `ShutdownReport`. A panic payload is preserved, capped at 512
+  characters, and the report buffer is capped at the in-flight bound with
+  `Stats::reports_dropped` counting what it missed: detail is lost, never memory.
+- **Three first-party documents still promised live revocation, and this crate
+  has no revoke operation to promise.** `GrantSet` has no revoke operation, and a
+  built bot holds a snapshot of the set it was admitted with, so withdrawing a
+  capability means rebuilding or ending the bot. `docs/security-posture.md`,
+  `docs/general-bot-fold.md`, and `docs/guides/lgwks-bot/getting-started.md` all
+  asserted an authority model this workspace does not have; all three now state
+  the snapshot boundary. The new `crates/lgwks-bot/tests/authority.rs` enforces
+  it — a scan over every first-party text file refuses a claim this crate cannot
+  honour — and `a_proof_minted_from_a_grant_set_outlives_that_set` /
+  `withdrawing_authority_after_build_means_building_again` pin the behaviour the
+  prose now describes.
+
+### lgwks_bot Added
+
+- **A decision carries its provenance, and its receipt is written before the
+  transition.** `Resolver::resolve` returns `Verdict`: the `Resolution` and its
+  `Provenance` in one value, because "this score came from that model under that
+  rule" is one fact and a second call can only re-derive it. `Provenance` names a
+  `PolicyVersion` always — content-addressed over the tier's own parameters, so
+  retuning changes the revision — and an `EmbedderIdentity` only when a model was
+  consulted. `Session` writes a versioned, serializable `DecisionReceipt` per
+  decision through a required
+  `Journal::record_decision -> Result<ReceiptAcceptance, JournalError>`, binding
+  session and flow revision, node, the digest of the *ordered* option list, the
+  verdict verbatim, provenance, the selected option's **text** rather than an
+  index that moves, and the route. Because the receipt is written first, a
+  refused write aborts the answer with `BotError::ReceiptNotRecorded` and leaves
+  cursor, scope, transcript and receipt list untouched.
+
+### lgwks_bot Changed
+
+- `MemoryJournal` keeps `PartialEq` and loses `Eq`: it now holds
+  `DecisionReceipt`s, which carry the `f64` scores a verdict was reached on, and
+  `f64` is not `Eq`. The `session` module is not in the published
+  `lgwks_bot-v0.4.2` tag, so no shipped consumer is affected.
+- `lgwks_bot`'s existing `lgwks_std` dependency gains the `hash` feature, so
+  `PolicyVersion` content-addresses through the estate's own `blake3` wrapper
+  rather than adding a hashing dependency.
+
 ## [lgwks_deps 0.1.12] - 2026-09-20
 
 Documentation release. No API change, no behaviour change, and no command-line
