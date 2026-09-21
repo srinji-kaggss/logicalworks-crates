@@ -135,10 +135,10 @@ preserve completed results. A retry of the admission request must not rerun
 an already successful external effect. Workflows awaiting a person release
 active execution slots while retaining bounded continuation state.
 
-The existing `GrantSet` remains a snapshot. Any running-authority amendment is
-a new, recorded host admission epoch, not retroactive revocation of an `Auth`.
-The dispatch boundary must revalidate under the applicable host policy before
-new effects. This requires an actual authority adapter to enforce externally;
+The existing `GrantSet` remains a snapshot: it has no revoke operation, so a
+running-authority amendment is a new, recorded host admission epoch rather than
+a retroactive change to an `Auth`. The dispatch boundary must revalidate under
+the applicable host policy before new effects. This requires an actual authority adapter to enforce externally;
 a comment or cloned capability list is not live authority.
 
 ## Definition, compilation and registry
