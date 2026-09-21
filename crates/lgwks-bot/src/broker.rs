@@ -20,6 +20,11 @@
 //!   into one "generation mismatch" error these would print identically while
 //!   calling for opposite investigations.
 //!
+//! Minting is one instant of that comparison, and one instant is not a
+//! guarantee. [`Broker::revalidate`] runs the identical check again at the
+//! handoff, because a replacement landing between the mint and the handoff would
+//! otherwise leave a legitimately minted warrant dispatchable.
+//!
 //! # What the broker owns
 //!
 //! The environment identity itself comes from the host, because the host is what
@@ -79,28 +84,28 @@ pub enum BrokerError {
         /// The environment that was closed.
         id: EnvironmentId,
     },
-    /// The key names a generation that has been replaced.
+    /// The command names a generation that has been replaced.
     ///
     /// A command prepared against an older generation is refused here rather
     /// than dispatched, which is the whole point of fencing.
     Superseded {
-        /// The attempt that was refused.
-        ///
-        /// Boxed because [`EffectKey`] is 128 bytes and an error carrying one by
-        /// value would make every `Result` in this module pay for a case that is
-        /// refused before anything happens.
-        key: Box<EffectKey>,
+        /// The environment the command was prepared for.
+        environment: EnvironmentId,
+        /// The generation the command names.
+        presented: EnvironmentEpoch,
         /// The generation the broker currently holds.
         current: EnvironmentEpoch,
     },
-    /// The key names a generation this broker never issued.
+    /// The command names a generation this broker never issued.
     ///
     /// Distinct from [`Self::Superseded`] on purpose: a stale command means one
-    /// investigation and a key from nowhere means another, and one error for
-    /// both would print the same sentence for each.
+    /// investigation and a generation from nowhere means another, and one error
+    /// for both would print the same sentence for each.
     NeverIssued {
-        /// The attempt that was refused.
-        key: Box<EffectKey>,
+        /// The environment the command was prepared for.
+        environment: EnvironmentId,
+        /// The generation the command names.
+        presented: EnvironmentEpoch,
         /// The generation the broker currently holds.
         current: EnvironmentEpoch,
     },
@@ -130,15 +135,23 @@ impl fmt::Display for BrokerError {
             Self::Closed { id } => {
                 write!(f, "environment {id} is closed and mints no authority")
             }
-            Self::Superseded { ref key, current } => write!(
+            Self::Superseded {
+                environment,
+                presented,
+                current,
+            } => write!(
                 f,
-                "{key} was prepared for a generation that has been replaced; \
-                 the broker now holds {current}"
+                "a command for {environment} at generation {presented} names a \
+                 generation that has been replaced; the broker now holds {current}"
             ),
-            Self::NeverIssued { ref key, current } => write!(
+            Self::NeverIssued {
+                environment,
+                presented,
+                current,
+            } => write!(
                 f,
-                "{key} names a generation this broker never issued; \
-                 it holds {current}"
+                "a command for {environment} names generation {presented}, which \
+                 this broker never issued; it holds {current}"
             ),
             Self::Exhausted { id } => {
                 write!(f, "environment {id} has no generations left")
@@ -301,15 +314,18 @@ impl Broker {
             .is_some_and(|environment| environment.open)
     }
 
-    /// Mint authority for `key`, if and only if the generation it names is the
-    /// one this broker currently holds.
+    /// The generation check, run both when a warrant is minted and when it is
+    /// presented again.
     ///
-    /// # Errors
-    ///
-    /// [`BrokerError::UnknownEnvironment`], [`BrokerError::Closed`],
-    /// [`BrokerError::Superseded`] or [`BrokerError::NeverIssued`].
-    pub fn authorize(&self, key: EffectKey) -> Result<Authority, BrokerError> {
-        let id = key.environment();
+    /// One function because the two callers must agree exactly. A second copy
+    /// of this comparison that drifted would mean a warrant the broker would
+    /// refuse to mint and would accept at the boundary, which is the failure
+    /// fencing exists to prevent.
+    fn check_generation(
+        &self,
+        id: EnvironmentId,
+        presented: EnvironmentEpoch,
+    ) -> Result<EnvironmentEpoch, BrokerError> {
         let environment = self
             .environments
             .get(&id)
@@ -318,20 +334,56 @@ impl Broker {
             return Err(BrokerError::Closed { id });
         }
         let current = environment.epoch;
-        let presented = key.epoch();
         if presented.get() > current.get() {
             return Err(BrokerError::NeverIssued {
-                key: Box::new(key),
+                environment: id,
+                presented,
                 current,
             });
         }
         if presented != current {
             return Err(BrokerError::Superseded {
-                key: Box::new(key),
+                environment: id,
+                presented,
                 current,
             });
         }
+        Ok(current)
+    }
+
+    /// Mint authority for `key`, if and only if the generation it names is the
+    /// one this broker currently holds.
+    ///
+    /// This is a check at one instant. It is not sufficient on its own: see
+    /// [`Broker::revalidate`] for why the handoff path has to ask again.
+    ///
+    /// # Errors
+    ///
+    /// [`BrokerError::UnknownEnvironment`], [`BrokerError::Closed`],
+    /// [`BrokerError::Superseded`] or [`BrokerError::NeverIssued`].
+    pub fn authorize(&self, key: EffectKey) -> Result<Authority, BrokerError> {
+        let id = key.environment();
+        let current = self.check_generation(id, key.epoch())?;
         Ok(Authority::new(id, current))
+    }
+
+    /// Re-check a warrant that was minted earlier, immediately before the
+    /// handoff it authorizes.
+    ///
+    /// Authorizing and handing over are two instants, and a replacement landing
+    /// between them would leave a warrant that was minted legitimately and is
+    /// now stale. RQ-006 says replacement invalidates *all* old commands, and a
+    /// check that only runs at mint time does not deliver that. So the handoff
+    /// path presents its warrant here, and a warrant whose generation has been
+    /// replaced is refused even though nothing was wrong when it was minted.
+    ///
+    /// # Errors
+    ///
+    /// [`BrokerError::UnknownEnvironment`], [`BrokerError::Closed`],
+    /// [`BrokerError::Superseded`] or [`BrokerError::NeverIssued`].
+    pub fn revalidate(&self, authority: &Authority) -> Result<(), BrokerError> {
+        self.check_generation(authority.environment(), authority.epoch())?;
+        Ok(())
     }
 }
 
@@ -385,6 +437,11 @@ impl From<JournalError> for DispatchError {
 /// required order stops being a convention: authority is checked first, the
 /// `DispatchPrepared` append lands second, and only then does anything exist to
 /// hand over.
+///
+/// The warrant it carries was checked when it was minted, which is an instant
+/// and not a guarantee. The handoff path must present it to
+/// [`Broker::revalidate`] immediately before handing over, because a replacement
+/// landing in between would otherwise leave this preparation dispatchable.
 #[derive(Debug)]
 pub struct Prepared {
     /// Authority for the environment generation the attempt was prepared
@@ -550,10 +607,12 @@ mod tests {
 
         match broker.authorize(stale) {
             Err(BrokerError::Superseded {
-                key: refused,
+                environment,
+                presented,
                 current,
             }) => {
-                assert_eq!(*refused, stale);
+                assert_eq!(environment, env()?);
+                assert_eq!(presented, first);
                 assert_eq!(current, second);
             }
             Err(other) => return Err(format!("expected a superseded refusal, got {other}").into()),
@@ -586,6 +645,46 @@ mod tests {
                 .into());
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn a_warrant_minted_before_a_replacement_is_refused_at_the_boundary() -> TestResult {
+        let mut broker = Broker::new();
+        let first = broker.register(env()?)?;
+        let warrant = broker.authorize(key(&first.get().to_string())?)?;
+        assert!(broker.revalidate(&warrant).is_ok());
+
+        // The warrant was minted legitimately. A replacement between the mint
+        // and the handoff is what makes it stale, and the boundary check is the
+        // only thing that catches it.
+        let second = broker.replace(env()?)?;
+
+        match broker.revalidate(&warrant) {
+            Err(BrokerError::Superseded {
+                presented, current, ..
+            }) => {
+                assert_eq!(presented, first);
+                assert_eq!(current, second);
+            }
+            Err(other) => return Err(format!("expected a superseded refusal, got {other}").into()),
+            Ok(()) => {
+                return Err("a warrant from before the replacement must not revalidate".into());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_warrant_is_refused_at_the_boundary_once_the_environment_closes() -> TestResult {
+        let mut broker = Broker::new();
+        let first = broker.register(env()?)?;
+        let warrant = broker.authorize(key(&first.get().to_string())?)?;
+        broker.close(env()?)?;
+        assert!(matches!(
+            broker.revalidate(&warrant),
+            Err(BrokerError::Closed { .. })
+        ));
         Ok(())
     }
 

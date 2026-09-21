@@ -299,11 +299,17 @@ modules above it, and it ships in the same release.
   - **The ordering ladder is enforced at the append rather than trusted.** One
     attempt at one intent walks `IntentAdmitted`, `DispatchPrepared`,
     `OutcomeObserved`, `Verified`, exactly once. A second `DispatchPrepared` for
-    an existing key is refused as `OutOfOrder`, so a blind resend is not
-    representable at all. A legitimate retry is a new `AttemptId` and therefore a
-    new key with its own fresh ladder, and `tests/effect_journal.rs` pins the
-    retry alongside the refusal so the guard cannot be mistaken for a ban on
-    trying again.
+    an existing key is refused as `OutOfOrder`, so a second dispatch of one
+    attempt is refused rather than merely discouraged. A legitimate retry is a
+    new `AttemptId` and therefore a new key with its own fresh ladder, and
+    `tests/effect_journal.rs` pins the retry alongside the refusal so the guard
+    cannot be mistaken for a ban on trying again.
+  - **What the ladder does not enforce: RQ-009's retry admissibility.** A caller
+    that mints a new attempt for the same intent gets a clean ladder, and nothing
+    here checks `budget_remaining`, live authority, unchanged intent or proof
+    that the effect did not land. The ladder makes a *resend* unrepresentable; it
+    does not decide whether a *retry* is admissible, and that decision does not
+    exist anywhere in the crate yet.
   - **Durability is graded, and the grade is what refuses.** `DurabilityPromise`
     is `Ephemeral`, `ProcessCrash` or `PowerLoss`, and `admit_external_handoff`
     refuses anything below `ProcessCrash`. The in-memory adapter reports
@@ -354,6 +360,14 @@ modules above it, and it ships in the same release.
     warrant being scattered. That is not what makes a double dispatch impossible:
     the journal's ordering ladder is, and the type documents that rather than
     implying otherwise.
+  - **The fence runs twice, and it has to.** Authorizing and handing over are
+    two instants. A replacement landing between them leaves a warrant that was
+    minted legitimately and is now stale, and a check that only runs at mint time
+    does not deliver RQ-006's "replacement invalidates all old commands". So
+    `revalidate` re-runs the identical comparison at the boundary, and it shares
+    one private `check_generation` with `authorize` rather than repeating it: a
+    second copy that drifted would refuse to mint a warrant and accept it at the
+    boundary, which is the failure fencing exists to prevent.
   - **`prepare_dispatch` is where the RQ-007 order stops being prose.** It
     authorizes, then appends `DispatchPrepared`, and only then returns a
     `Prepared` holding both. A caller cannot append before it is authorized, or
@@ -366,9 +380,10 @@ modules above it, and it ships in the same release.
     cleanup path that has to know whether it already ran is one that will
     sometimes not run. Generation exhaustion is named rather than wrapped, since
     a wrapped generation would re-authorize commands the broker already fenced.
-  - **16 unit tests.** They pin each refusal, both directions of the fencing
-    comparison, the exhaustion path, and that a superseded key leaves the journal
-    untouched. What they do not do is reach a real environment: no process,
+  - **18 unit tests.** They pin each refusal, both directions of the fencing
+    comparison, the boundary re-check on both a replaced and a closed
+    environment, the exhaustion path, and that a superseded key leaves the
+    journal untouched. What they do not do is reach a real environment: no process,
     socket or input seat exists here, so `EnvironmentId` arrives from the host's
     own entropy and nothing in this crate creates one.
 - **`Observe::fingerprint`, and with it the lazy seam: a source that holds still
