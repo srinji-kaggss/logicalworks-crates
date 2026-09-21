@@ -294,7 +294,7 @@ the run's record, rather than into a second unmanaged copy of the same fact.
 
 | Described subsystem | This workspace | Note |
 |---|---|---|
-| REST gateway with JWT and scopes | `Cap` / `GrantSet`, proof-carrying | Strictly stronger: a scope checked once at a gateway is ambient for the rest of the request; `Auth` is re-proved on every call, so a grant revoked after build cannot fire (`lib.rs`) |
+| REST gateway with JWT and scopes | `Cap` / `GrantSet`, proof-carrying | Different, not strictly stronger. A scope checked once at a gateway is ambient for the rest of the request; `Auth` is re-proved on every call, against the grant set the bot was built with. That set is a **snapshot** (`lib.rs`, `README.md`): `GrantSet` has no revoke operation, so narrowing a running bot needs a mechanism this crate does not have |
 | Socket.io stateful multiplexer | `rt::sync` bounded channels | Bounded by construction; `unbounded_channel` is forbidden workspace-wide |
 | Browser pool manager, lease/release | `rt::supervise`, `rt::cancel` | A supervised bounded pool is exactly what these already are |
 | Playwright Chromium behind a WebSocket | the CDP allow-list in `docs/security-posture.md` | The allow-list is the contract; the driver is an implementation of it |

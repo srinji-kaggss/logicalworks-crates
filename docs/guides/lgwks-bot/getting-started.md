@@ -197,7 +197,8 @@ This is also the shape the repository root README compiles as its quickstart
 ## Where to go next
 
 - [Features](features.md) for which cargo features you actually need.
-- [Authority](authority.md) before you design anything around revoking a grant.
+- [Authority](authority.md) before you design anything around revoking a grant:
+  `GrantSet` has no revoke operation, and a built bot holds a snapshot of it.
 - [Failures](failures.md) before you write a retry.
 - [Background work](background-work.md) if the bot needs work running beside the
   tick rather than inside it.
