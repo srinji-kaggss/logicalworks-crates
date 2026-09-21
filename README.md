@@ -222,6 +222,11 @@ Depth lives in [`docs/`](docs/), not in this file.
 | [`docs/candle-admission.md`](docs/candle-admission.md) | ML inference admission: authority, transitive surface, verification. |
 | [`docs/appcui-admission.md`](docs/appcui-admission.md) | Native terminal UI admission: authority and verification. |
 | [`docs/distributed-boundaries.md`](docs/distributed-boundaries.md) | What these crates do and refuse on a distributed network path. Read it before placing them on one. |
+| [`docs/security-posture.md`](docs/security-posture.md) | The security case: the execution-locus claim and its ceiling, what the browser integrity stack does and does not prove, and the evidence a reviewer can check without trusting the vendor. |
+| [`docs/guidance-runner-spec.md`](docs/guidance-runner-spec.md) | The session, flow and invariant-register workstreams: what each delivers, the seam every borrowed part sits behind, and the corrections two research sweeps made to the original design. |
+| [`docs/estate-asset-inventory.md`](docs/estate-asset-inventory.md) | The adjacent repositories searched before any of it was written, what was taken, and what was deliberately left behind. |
+| [`docs/frontier.md`](docs/frontier.md) | The state of the art across the nine areas this bot competes in, with measured anchors and the design decision each forces. |
+| [`docs/framework-comparison.md`](docs/framework-comparison.md) | Why the field looks the same, the four axes it actually differs on, and the axis nobody occupies. |
 | [`docs/releasing.md`](docs/releasing.md) | The release process. |
 | [`CHANGELOG.md`](CHANGELOG.md) | Per-release changes across all four crates. |
 | [`SECURITY.md`](SECURITY.md) | Attack surface, reporting process, and advisories assessed. |
