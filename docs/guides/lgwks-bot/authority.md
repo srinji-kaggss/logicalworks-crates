@@ -7,7 +7,7 @@ boundary is worth reading before you design around it.
 ## Admission happens at build, and reports the whole shortfall
 
 `EcsBot::assemble` walks every source and every action before the world is built
-(`crates/lgwks-bot/src/ecs.rs:4260`):
+(`crates/lgwks-bot/src/ecs.rs:4295`):
 
 ```rust
 let mut shortages: Vec<Shortage> = Vec::new();
@@ -87,7 +87,7 @@ never thread an `Auth` through your own call sites for the chained path.
 ## The grant set is a snapshot
 
 This is the part that surprises people. `EcsBot::assemble` clones the set into
-the world (`crates/lgwks-bot/src/ecs.rs:4277`):
+the world (`crates/lgwks-bot/src/ecs.rs:4312`):
 
 ```rust
 world.insert_resource(Grants(grants.clone()));
@@ -136,7 +136,7 @@ from there — is **not implemented, and the reason is not effort. An action
 cannot be denied for want of a capability at run time.** Two facts make that so:
 
 - `EcsBot::assemble` admits every declared requirement before the world is built
-  (`crates/lgwks-bot/src/ecs.rs:4261`), so a bot whose declared requirements are
+  (`crates/lgwks-bot/src/ecs.rs:4296`), so a bot whose declared requirements are
   not granted does not exist to run.
 - Every per-call proof is minted from **the same list**. `run_any` calls
   `grants.issue(self.0.required_caps())` (`crates/lgwks-bot/src/spec.rs:627`),
@@ -146,7 +146,7 @@ cannot be denied for want of a capability at run time.** Two facts make that so:
 
 So `Auth::check` cannot fail inside a running bot.
 `BotError::CapabilityDenied` is a build-time failure, and the `failure_state` arm
-that folds it into an abandoned entry (`crates/lgwks-bot/src/ecs.rs:2597`) is
+that folds it into an abandoned entry (`crates/lgwks-bot/src/ecs.rs:2594`) is
 defensive rather than live. A hold was built on top of that arm and then removed,
 because machinery whose only caller is a contrived test is not a feature.
 
