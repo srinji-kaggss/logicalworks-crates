@@ -54,18 +54,16 @@ run finished while producers, unresolved events or held effects remain.
 
 ## Observation commits
 
-**LC-04.** Commit observation payload, its comparison baseline, cursor/revision
-and fingerprint atomically with respect to admission of work. A failed atomic
-observation group must invalidate or retain as uncommitted every successful
-member's new fingerprint; it may not remember that value as handled. The
-current two-source counterexample is recorded in the evidence document.
+**LC-04.** Commit an observation payload, its comparison baseline and its
+cursor/revision atomically with respect to admission of work. A failed atomic
+observation group commits no member's new payload and cannot mark it handled.
 
-A fingerprint is an invalidation contract, not an ordinary cached remote
-ETag: if no observer updates the key, blindly comparing last time's ETag would
-stop polling forever. Only a currently valid change witness may suppress an
-observation. Disconnection, watch overflow or expired freshness invalidates it.
-Equal keys must imply equal relevant values under the declared contract; hash
-collision assumptions must be explicit. Preserve the no-fingerprint path.
+A detached fingerprint or remote ETag must not suppress an asynchronous poll:
+the source may move A → B → A while that poll is pending, making an earlier A
+key inconsistent with the returned B payload. A fast skip is permitted only
+when an observer returns the value and a non-reused revision from one snapshot
+operation, with its invalidation and overflow behavior declared. Until that
+contract exists, poll and compare the returned value on every tick.
 
 ## Attempts and external effects
 

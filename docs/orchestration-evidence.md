@@ -29,7 +29,7 @@ All source links below are pinned rather than mutable main links.
 | E01 | [Typed builder](https://github.com/srinji-kaggss/logicalworks-crates/blob/51897f8c0cda627d3b3abcee28bda6ebb690f7a1/crates/lgwks-bot/src/ecs.rs#L2484-L2523) | Source/condition/action compatibility is enforced before public builder erasure. Preserve this repair. |
 | E02 | [Bound payload and discarded action output](https://github.com/srinji-kaggss/logicalworks-crates/blob/51897f8c0cda627d3b3abcee28bda6ebb690f7a1/crates/lgwks-bot/src/ecs.rs#L2262-L2345) | The old mixed-input failure is repaired; the chain still reduces successful output to effect accounting, not a general typed workflow result. |
 | E03 | [Settlement](https://github.com/srinji-kaggss/logicalworks-crates/blob/51897f8c0cda627d3b3abcee28bda6ebb690f7a1/crates/lgwks-bot/src/ecs.rs#L1052-L1110) | Duplicate record checked only when not settleable; revision is not a physical-attempt identity. |
-| E04 | [Fingerprint update](https://github.com/srinji-kaggss/logicalworks-crates/blob/51897f8c0cda627d3b3abcee28bda6ebb690f7a1/crates/lgwks-bot/src/ecs.rs#L2094-L2200), [handover before schedule](https://github.com/srinji-kaggss/logicalworks-crates/blob/51897f8c0cda627d3b3abcee28bda6ebb690f7a1/crates/lgwks-bot/src/ecs.rs#L1921-L1942), [atomic fold refusal](https://github.com/srinji-kaggss/logicalworks-crates/blob/51897f8c0cda627d3b3abcee28bda6ebb690f7a1/crates/lgwks-bot/src/ecs.rs#L1350-L1415) | Successful fingerprint can survive a different source's failure although its value did not commit. |
+| E04 | [Historical fingerprint update](https://github.com/srinji-kaggss/logicalworks-crates/blob/51897f8c0cda627d3b3abcee28bda6ebb690f7a1/crates/lgwks-bot/src/ecs.rs#L2094-L2200), [handover before schedule](https://github.com/srinji-kaggss/logicalworks-crates/blob/51897f8c0cda627d3b3abcee28bda6ebb690f7a1/crates/lgwks-bot/src/ecs.rs#L1921-L1942), [atomic fold refusal](https://github.com/srinji-kaggss/logicalworks-crates/blob/51897f8c0cda627d3b3abcee28bda6ebb690f7a1/crates/lgwks-bot/src/ecs.rs#L1350-L1415) | Historical cache defect: a successful fingerprint survived a different source's failure although its value did not commit. The detached-cache path is now retired. |
 | E05 | [Process handover and disarming](https://github.com/srinji-kaggss/logicalworks-crates/blob/51897f8c0cda627d3b3abcee28bda6ebb690f7a1/crates/lgwks-bot/src/rt/supervise.rs#L939-L1008), [group guard](https://github.com/srinji-kaggss/logicalworks-crates/blob/51897f8c0cda627d3b3abcee28bda6ebb690f7a1/crates/lgwks-bot/src/rt/supervise.rs#L1230-L1320) | Guard is constructed in the management future; direct-child exit disarms descendant cleanup; signalling errors are discarded. |
 | E06 | [Public process surface](https://github.com/srinji-kaggss/logicalworks-crates/blob/51897f8c0cda627d3b3abcee28bda6ebb690f7a1/crates/lgwks-bot/src/rt/process.rs), [method bans](https://github.com/srinji-kaggss/logicalworks-crates/blob/51897f8c0cda627d3b3abcee28bda6ebb690f7a1/clippy.toml) | Engine Command remains executable; banning spawn alone is not a description-only API. |
 | E07 | [Task fan-out](https://github.com/srinji-kaggss/logicalworks-crates/blob/51897f8c0cda627d3b3abcee28bda6ebb690f7a1/crates/lgwks-bot/src/rt/task.rs#L43-L110) | Parallel Send/static bound is not a local non-Send composition facade; aggregate result memory is separately unbounded by the active-task limit. |
@@ -37,13 +37,12 @@ All source links below are pinned rather than mutable main links.
 | E09 | [Materializer boundary](https://github.com/srinji-kaggss/logicalworks-crates/blob/51897f8c0cda627d3b3abcee28bda6ebb690f7a1/crates/lgwks-bot/src/lib.rs#L153-L178), [older SDK proposal](https://github.com/srinji-kaggss/logicalworks-crates/blob/51897f8c0cda627d3b3abcee28bda6ebb690f7a1/docs/async-sdk-shape.md) | Need one real registry and a task-first facade, not another parallel plan interpreter. |
 | E10 | [Benchmark](https://github.com/srinji-kaggss/logicalworks-crates/blob/51897f8c0cda627d3b3abcee28bda6ebb690f7a1/bench/README.md), [proof boundary](https://github.com/srinji-kaggss/logicalworks-crates/blob/51897f8c0cda627d3b3abcee28bda6ebb690f7a1/proofs/README.md) | One-machine loop comparison is not frontier orchestration evidence; model theorems do not prove the Rust implementation. |
 
-### Concrete cache counterexample (source-traced, not executed)
+### Historical cache counterexample (fixed by retiring the detached cache)
 
-A returns value 1 and fingerprint 1; B fails its poll. `poll_sources` remembers
-A's 1 and clears only B's failed key. `tick_async` puts the fingerprints into
-the world before running the schedule. `observe_fold` sees B's error and
-commits no values. Next tick A's key is still 1, so A is skipped; B recovers.
-The world can now continue without ever acting on A's uncommitted value.
+A returns value 1 and fingerprint 1; B fails its poll. The former
+`poll_sources` cache remembered A's 1 and cleared only B's failed key.
+`observe_fold` committed no values, but the next tick skipped A because its key
+was still 1. The retired cache can therefore not hide A's uncommitted value.
 Repeat with an already established baseline to test loss of a subsequent
 change. Atomicity must include the optimization cache, not just the value.
 
