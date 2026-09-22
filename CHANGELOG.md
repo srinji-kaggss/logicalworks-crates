@@ -85,12 +85,22 @@ explicitly under that crate.
   not happen.
 - `MintError` and `EphemeralError`, both `#[non_exhaustive]` and both carrying
   their cause rather than flattening it to a string.
-- Feature `ephemeral`, **on by default**, which turns on `lgwks_std/random`. It
-  authors no edge of its own: `getrandom` is owned by `lgwks_std` under
+- Feature `ephemeral`, **opt-in**, which turns on `lgwks_std/random`. It authors
+  no edge of its own: `getrandom` is owned by `lgwks_std` under
   `contract/APPROVED.toml` and this is a feature of a dependency the crate
   already has. `lgwks_std` enforces INV-RANDOM-ONE-SOURCE, which is why there is
   no cheaper fallback here — a run id derived from a clock, a pid or a counter
   is the collision that invariant exists to refuse.
+
+  It is not in the default set, and the reason is the target rather than the
+  cost. Minting needs OS entropy, `lgwks_std::random` is linux/macOS/windows
+  only and refuses the rest with a `compile_error!`, and this crate's default
+  feature set is built for `wasm32-wasip1` by the WASI boundary job. A
+  default-on `ephemeral` makes the default set fail to build on a target the
+  crate supports. `signal` is host-only in the same way and is default-off for
+  the same reason. `full` includes `ephemeral`, and the runner step tests
+  `--features full`, so the ephemeral tests execute in CI rather than only
+  compiling.
 
 
 - **Write-ahead dispatch.** `IntentAdmitted` and `DispatchPrepared` are committed
