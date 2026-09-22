@@ -174,6 +174,20 @@ explicitly under that crate.
 
 ### lgwks_bot Fixed
 
+- A recovered unknown is a barrier in front of a false condition, not
+  something a new observation can skip past. `plan_chain` used to evaluate
+  the current value first and emit `Decision::Skip` for an entry whose action
+  a journal already recorded as dispatched with no outcome; `run_chain`
+  marked that entry `Skipped` before it ever consulted `effects.blocks`, so
+  the successor ran and the tick could return `Ok` while `pending` still
+  named the unknown. A changed source is not evidence that the earlier
+  effect did not occur. The barrier is now checked before the condition, a
+  `Skip` that somehow reaches the walk for a blocked action stops the chain
+  instead of burying the hold, and `pending` / `first_unresolved` /
+  `unresolved_count` are one fold over the declared work — so a recovered
+  unknown is reported whether or not a transition exists, and the three
+  reports agree (`tests/durable_dispatch.rs::a_recovered_unknown_blocks_a_false_condition_and_its_successor`
+  and the unattempted false-condition control in `ecs::tests`).
 - Live settlement is journaled before it is acknowledged, and a repeat of the
   same evidence is idempotent across a restart. `Ledger::settle` used to move
   only in-memory state while `settle_recovered` appended `OutcomeObserved`, so
@@ -190,6 +204,9 @@ explicitly under that crate.
   `Settled::Duplicate`, the other evidence is `Settled::Contradicted`, and only
   a key the journal never recorded is `NoSuchWork`
   (`tests/durable_dispatch.rs::a_live_settlement_is_journaled_before_it_is_acknowledged`).
+- Locator ladder candidates now share the flat recognizer's frame and kind
+  eligibility gate, while anchor mismatches preserve measured fingerprint
+  evidence instead of reporting a falsified zero score.
 - Process supervision now establishes its process-group guard before scheduling
   the child and reports bounded descendant cleanup evidence instead of treating
   the leader's exit as proof that the process tree is gone.
