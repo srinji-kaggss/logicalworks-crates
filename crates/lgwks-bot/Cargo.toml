@@ -25,7 +25,7 @@ keywords = ["automation", "bot", "workflow", "agent", "ecs"]
 # `io` is not implied by `rt` for the same reason the storefront splits it: a
 # consumer reading a pipe needs `AsyncRead` without a socket layer.
 [features]
-default = ["rt", "time", "sync", "macros"]
+default = ["rt", "time", "sync", "macros", "ephemeral"]
 rt = ["lgwks_deps/tokio"]
 time = ["rt", "lgwks_deps/tokio-time"]
 sync = ["rt", "lgwks_deps/tokio-sync"]
@@ -46,7 +46,31 @@ net = ["io", "lgwks_deps/tokio-net"]
 process = ["io", "sync", "lgwks_std/process", "lgwks_deps/tokio-process"]
 fs = ["io", "lgwks_deps/tokio-fs"]
 signal = ["rt", "lgwks_deps/tokio-signal"]
-full = ["rt", "time", "sync", "macros", "io", "net", "process", "fs", "signal"]
+# Minting a run identity needs an entropy source, and the estate has exactly
+# one: `lgwks_std::random`, whose `random` feature is `getrandom` under
+# `lgwks_std`'s ownership. This crate authors no edge of its own — it turns on a
+# feature of a dependency it already has — which is what keeps the tree at one
+# entropy source rather than two. `lgwks_std`'s INV-RANDOM-ONE-SOURCE is the
+# reason there is no cheaper fallback here: a run id derived from a clock or a
+# counter is the shortcut that invariant exists to refuse.
+#
+# On by default, because what it enables is how a caller gets a run with no
+# persistence behind it — tests, examples, and any work whose effects stay in
+# the process. A default-off flag would mean the workspace gate never compiled
+# it and it rotted into a second opinion nobody chose.
+ephemeral = ["lgwks_std/random"]
+full = [
+    "rt",
+    "time",
+    "sync",
+    "macros",
+    "io",
+    "net",
+    "process",
+    "fs",
+    "signal",
+    "ephemeral",
+]
 
 [dependencies]
 # `hash` is enabled for the decision receipt: the flow revision and the

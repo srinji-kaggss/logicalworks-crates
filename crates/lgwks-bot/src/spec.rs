@@ -298,6 +298,8 @@ where
 
 // ── Live bot ───────────────────────────────────────────────────────────────
 
+#[cfg(feature = "ephemeral")]
+pub use crate::ecs::EphemeralError;
 /// A built bot: name, admitted capabilities, and the `bevy_ecs` world its
 /// chains execute in.
 ///
@@ -317,6 +319,8 @@ pub use crate::ecs::{
     AbandonReason, EcsBot as Bot, EcsBuilder as BotBuilder, EcsObserveBuilder as ObserveBuilder,
     EffectEvidence, EffectScope, PendingWork, RetryPolicy, TransitionHold, WorkId,
 };
+#[cfg(feature = "ephemeral")]
+pub use crate::effect::MintError;
 pub use crate::effect::{EffectIdentity, EffectKey};
 
 /// One `(condition, action)` tuple in a chain.

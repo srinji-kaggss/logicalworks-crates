@@ -8,6 +8,41 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### lgwks_bot Added
+
+- **`EffectScope::ephemeral()`, and a run identity a host can mint.** Building a
+  bot with no host, no persisted history and no flow document meant writing an
+  identity out by hand: a `RunId` and an `EnvironmentId` as literal hex, a
+  `FlowRevision` as a literal digest, a registered broker and an in-memory
+  journal, in that order, in every test and example. `EffectScope::ephemeral()`
+  mints the two identities from OS entropy, registers that environment, and
+  pairs them with a `MemoryJournal`.
+
+  It is a capability rather than a convenience because of what the journal
+  refuses: `MemoryJournal` reports `DurabilityPromise::Ephemeral`, and
+  `EffectJournal::admit_external_handoff` returns `JournalError::PromiseUnmet`
+  for it — so an effect that would leave the process fails at the boundary
+  instead of proceeding on a record that cannot outlive the process that wrote
+  it. The difference between this and "no journal" is that this one says so.
+
+  `RunId::mint()` and `EnvironmentId::mint()` are public for the same reason
+  from the durable side: the module has always said the run identity is
+  *generated* before the first admission, and until now the only way to generate
+  one was to supply hex. `ActionId` deliberately gains none — the crate already
+  derives it from a bot's structure, and a second way to make one value is the
+  thing the dependency and API doctrine both refuse. `FlowRevision` is a fixed
+  domain-separated constant in the ephemeral case, because an ephemeral run has
+  no flow document and minting a revision would assert a content change that did
+  not happen.
+- `MintError` and `EphemeralError`, both `#[non_exhaustive]` and both carrying
+  their cause rather than flattening it to a string.
+- Feature `ephemeral`, **on by default**, which turns on `lgwks_std/random`. It
+  authors no edge of its own: `getrandom` is owned by `lgwks_std` under
+  `contract/APPROVED.toml` and this is a feature of a dependency the crate
+  already has. `lgwks_std` enforces INV-RANDOM-ONE-SOURCE, which is why there is
+  no cheaper fallback here — a run id derived from a clock, a pid or a counter
+  is the collision that invariant exists to refuse.
+
 ### Repository Added
 
 - `scripts/check-std-first.py`, and a CI step that runs it. `lgwks-deps check`
