@@ -47,6 +47,12 @@ explicitly under that crate.
 - `Bot::resolve_effect` takes an `EffectKey` instead of a work id and a
   caller-supplied revision. `EffectKey` is now the settlement identity: `Bot::pending`
   hands one back, and evidence is compared by `ActionDigest` and `AttemptId`.
+- `RetryFacts::with_authority(bool)` is now
+  `RetryFacts::with_live_authority()`. Authority defaults to not live and the
+  refusing direction is the default, so `true` was the only setting a caller
+  could meaningfully pass: `with_authority(false)` spelled out the default under a
+  name that read like a choice, and the parameter made every call site decode
+  which way round the boolean went. Removing it removes the question.
 
 ### lgwks_bot Added
 
@@ -62,13 +68,17 @@ explicitly under that crate.
   which refused every `NotApplied` retry as `OutOfOrder`; and a crash after a
   landed effect left the run unable to continue past that entry at all.
 - `Debug` for the public surface. Every public type in the crate now implements
-  it except three macro-invoked families in `effect.rs` (`Id128`-generated ids,
-  `counter_role!`, `digest_role!`). Derived where a derive is the right
-  rendering, manual where it is not, with the reason on the impl.
-  `SemanticResolver` uses `finish_non_exhaustive` rather than acquiring an
-  `E: Debug` bound that no `Embedder` is required to satisfy. `Session` prints
-  counts rather than the transcript entry by entry, and the `bevy_ecs`-backed
-  types do not descend into a schedule that has no `Debug`.
+  it except the seven `*Resolver` companions rkyv generates for the three
+  macro-invoked families in `effect.rs` (`id_role!`, `counter_role!`,
+  `digest_role!`): `RunIdResolver` through `ActionDigestResolver`. The named
+  types and their `Archived*` companions do have it, so the
+  `#[rkyv(derive(Debug))]` attribute reaches the archived type and stops short of
+  the resolver. Derived where a derive is the right rendering, manual where it is
+  not, with the reason on the impl. `SemanticResolver` uses
+  `finish_non_exhaustive` rather than acquiring an `E: Debug` bound that no
+  `Embedder` is required to satisfy. `Session` prints counts rather than the
+  transcript entry by entry, and the `bevy_ecs`-backed types do not descend into
+  a schedule that has no `Debug`.
 - `#[must_use]` on `eval::{Changed, Below, Above}::new`, which their three
   sibling constructors already carried. `must_use_candidate` does not reach
   `-> Self` constructors, which is how the inconsistency survived a green build.
@@ -82,6 +92,24 @@ explicitly under that crate.
   the alias table is a `BTreeMap`, so a derived `Debug` prints it in key order
   and is stable across runs. Both now derive `Debug`, and both comments say what
   is true.
+- `#[must_use]` on `EcsBuilder::observe`, `EcsObserveBuilder::on` and
+  `EcsObserveBuilder::observe`. Each one consumes a builder and hands back the
+  next, so a discarded result silently drops every `on` declared up to that
+  point. A sweep of the crate's public surface found 103 methods returning
+  `Self`: 92 carry `#[must_use]`, and the 11 that do not are all `new`
+  constructors. `EcsObserveBuilder::on` was the only consuming builder without
+  it. The two `observe` methods return `EcsObserveBuilder<_>` rather than `Self`,
+  so a scan for `-> Self` does not see them, and neither of those carried it
+  either. `must_use_candidate` reaches none of the three, which is how they
+  survived a green build.
+
+### lgwks_bot Documentation
+
+- Five citations in `docs/guides/lgwks-bot/` were re-anchored to the lines this
+  change moved in `ecs.rs`. `getting-started.md` also credited the
+  `Observe::Output: PartialEq` requirement to `EcsBuilder::observe`, which
+  carries no such bound; it lands on `EcsObserveBuilder::observe`, the call that
+  closes a chain, and the citation now points at the bound.
 
 ## [lgwks_std 0.6.7 / lgwks_bot 0.5.0 / lgwks_deps 0.1.13] - 2026-09-21
 
