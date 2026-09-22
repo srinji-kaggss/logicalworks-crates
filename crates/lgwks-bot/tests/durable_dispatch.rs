@@ -2220,6 +2220,237 @@ fn an_unrelated_outcome_receipt_is_refused_without_reentering_the_effect() -> Te
     Ok(())
 }
 
+/// A journal whose reads can fail while its writes stay healthy.
+///
+/// The issue #123 counterexample is a transient storage-read error on
+/// `committed()` alone: the outcome is in the store, the write path is fine,
+/// and only the read that establishes the fact is unavailable.
+struct FlakyReadJournal {
+    store: Rc<RefCell<MemoryJournal>>,
+    /// When set, `committed` and `committed_entries` fail with `Storage`.
+    fail_reads: Rc<Cell<bool>>,
+}
+
+impl EffectJournal for FlakyReadJournal {
+    fn durability(&self) -> DurabilityPromise {
+        self.store.borrow().durability()
+    }
+
+    fn tail(&self) -> JournalPosition {
+        self.store.borrow().tail()
+    }
+
+    fn committed(&self) -> Result<Vec<EffectEvent>, JournalError> {
+        if self.fail_reads.get() {
+            return Err(JournalError::Storage(std::io::Error::other(
+                "transient read failure",
+            )));
+        }
+        EffectJournal::committed(&*self.store.borrow())
+    }
+
+    fn committed_entries(&self) -> Result<Vec<JournalEntry>, JournalError> {
+        if self.fail_reads.get() {
+            return Err(JournalError::Storage(std::io::Error::other(
+                "transient read failure",
+            )));
+        }
+        Ok(self.store.borrow().committed().to_vec())
+    }
+
+    fn compare_and_append(
+        &mut self,
+        expected_tail: JournalPosition,
+        event: &EffectEvent,
+    ) -> Result<DurableAck, JournalError> {
+        self.store
+            .borrow_mut()
+            .compare_and_append(expected_tail, event)
+    }
+}
+
+/// An unreadable journal is not an absent outcome (issue #123).
+///
+/// A settled and reconstructed bot, a transient `committed()`-only failure, and
+/// the same Applied evidence again: the answer must be a journal-read refusal
+/// with nothing mutated and no append, never `NoSuchWork`. Once reads come
+/// back, the same request is the idempotent duplicate it always was.
+#[test]
+fn a_transient_journal_read_failure_is_not_reported_as_no_such_work() -> TestResult {
+    let store = Rc::new(RefCell::new(MemoryJournal::new()));
+    let seen = Rc::new(Cell::new(0_u32));
+    let counted = Rc::new(Cell::new(0_u32));
+    let identity = identity()?;
+
+    let mut first = Bot::builder(NAME)
+        .observe(Shifting(Rc::clone(&seen)))
+        .on(always, Counts(Rc::clone(&counted)))
+        .with_effects(scope(identity, Rc::clone(&store))?)
+        .build(&GrantSet::empty())?;
+    assert_eq!(first.tick()?, 1, "the episode runs and settles Applied");
+    assert_eq!(counted.get(), 1);
+    drop(first);
+
+    let events = recorded(&store)?;
+    let key = events
+        .iter()
+        .find_map(|event| match *event {
+            EffectEvent::OutcomeObserved { key, .. } => Some(key),
+            _ => None,
+        })
+        .ok_or("the first episode recorded an outcome")?;
+    let appends_before = events.len();
+
+    let fail_reads = Rc::new(Cell::new(false));
+    let mut second = Bot::builder(NAME)
+        .observe(Shifting(Rc::clone(&seen)))
+        .on(always, Counts(Rc::clone(&counted)))
+        .with_effects(EffectScope::new(
+            identity,
+            broker(identity.environment())?,
+            Box::new(FlakyReadJournal {
+                store: Rc::clone(&store),
+                fail_reads: Rc::clone(&fail_reads),
+            }),
+        ))
+        .build(&GrantSet::empty())?;
+
+    // The transient failure starts after assembly: the counterexample is a
+    // read that becomes unavailable under an established identity and key.
+    fail_reads.set(true);
+    match second.resolve_effect(&key, EffectEvidence::Applied) {
+        Err(BotError::EffectRefused {
+            cause: DispatchError::Journal(_),
+        }) => {}
+        other => {
+            return Err(format!(
+                "an unreadable journal must be a journal-read refusal, never NoSuchWork: {other:?}"
+            )
+            .into());
+        }
+    }
+    assert_eq!(
+        recorded(&store)?.len(),
+        appends_before,
+        "a read failure appends nothing"
+    );
+    assert_eq!(
+        counted.get(),
+        1,
+        "a read failure never re-enters the action"
+    );
+    assert!(
+        second.pending().is_empty(),
+        "a read failure does not drop a held obligation or invent one"
+    );
+
+    // Reads come back. The same request is a legitimate idempotent duplicate.
+    fail_reads.set(false);
+    match second.resolve_effect(&key, EffectEvidence::Applied) {
+        Ok(()) => {}
+        other => {
+            return Err(format!(
+                "with reads restored, the repeat is an idempotent success: {other:?}"
+            )
+            .into());
+        }
+    }
+    assert_eq!(recorded(&store)?.len(), appends_before, "no second append");
+    assert_eq!(counted.get(), 1, "still no re-entry");
+    Ok(())
+}
+
+/// A readable journal with no such outcome is still `NoSuchWork` (issue #123).
+///
+/// The control that stops a blanket "always retryable" answer from passing: the
+/// two cases must stay distinguishable from outside the crate.
+#[test]
+fn a_readable_absent_outcome_is_still_no_such_work() -> TestResult {
+    let store = Rc::new(RefCell::new(MemoryJournal::new()));
+    let seen = Rc::new(Cell::new(0_u32));
+    let counted = Rc::new(Cell::new(0_u32));
+    let identity = identity()?;
+
+    let mut first = Bot::builder(NAME)
+        .observe(Shifting(Rc::clone(&seen)))
+        .on(always, Counts(Rc::clone(&counted)))
+        .with_effects(scope(identity, Rc::clone(&store))?)
+        .build(&GrantSet::empty())?;
+    assert_eq!(first.tick()?, 1);
+    drop(first);
+
+    let events = recorded(&store)?;
+    let landed = events
+        .iter()
+        .find_map(|event| match *event {
+            EffectEvent::OutcomeObserved { key, .. } => Some(key),
+            _ => None,
+        })
+        .ok_or("the first episode recorded an outcome")?;
+    // A key the journal never recorded an outcome for: same action, a later
+    // attempt. The store is readable throughout.
+    let never_recorded =
+        landed.with_attempt(landed.attempt().checked_next().ok_or("attempt overflow")?);
+
+    let mut second = Bot::builder(NAME)
+        .observe(Shifting(Rc::clone(&seen)))
+        .on(always, Counts(Rc::clone(&counted)))
+        .with_effects(scope(identity, Rc::clone(&store))?)
+        .build(&GrantSet::empty())?;
+
+    match second.resolve_effect(&never_recorded, EffectEvidence::Applied) {
+        Err(BotError::NoSuchWork { .. }) => {}
+        other => {
+            return Err(format!("a readable absent outcome is NoSuchWork, got {other:?}").into());
+        }
+    }
+    Ok(())
+}
+
+/// A readable outcome that contradicts the report is still `EvidenceContradicted`.
+#[test]
+fn a_readable_contradictory_outcome_is_still_contradicted() -> TestResult {
+    let store = Rc::new(RefCell::new(MemoryJournal::new()));
+    let seen = Rc::new(Cell::new(0_u32));
+    let counted = Rc::new(Cell::new(0_u32));
+    let identity = identity()?;
+
+    let mut first = Bot::builder(NAME)
+        .observe(Shifting(Rc::clone(&seen)))
+        .on(always, Counts(Rc::clone(&counted)))
+        .with_effects(scope(identity, Rc::clone(&store))?)
+        .build(&GrantSet::empty())?;
+    assert_eq!(first.tick()?, 1);
+    drop(first);
+
+    let key = recorded(&store)?
+        .iter()
+        .find_map(|event| match *event {
+            EffectEvent::OutcomeObserved { key, .. } => Some(key),
+            _ => None,
+        })
+        .ok_or("the first episode recorded an outcome")?;
+
+    let mut second = Bot::builder(NAME)
+        .observe(Shifting(Rc::clone(&seen)))
+        .on(always, Counts(Rc::clone(&counted)))
+        .with_effects(scope(identity, Rc::clone(&store))?)
+        .build(&GrantSet::empty())?;
+
+    match second.resolve_effect(&key, EffectEvidence::NotApplied) {
+        Err(BotError::EvidenceContradicted {
+            settled: EffectEvidence::Applied,
+            ..
+        }) => {}
+        other => {
+            return Err(
+                format!("a readable contradiction is EvidenceContradicted, got {other:?}").into(),
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Whether the named kind was appended for any key.
 fn journal_has(store: &Rc<RefCell<MemoryJournal>>, kind: EventKind) -> bool {
     let committed = EffectJournal::committed(&*store.borrow()).unwrap_or_default();
