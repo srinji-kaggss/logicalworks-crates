@@ -16,23 +16,23 @@ crates/lgwks-bot/src/cap.rs:202	pub struct Deficit {
 crates/lgwks-bot/src/cap.rs:288	pub fn to_grant_set(&self) -> GrantSet {
 crates/lgwks-bot/src/cap.rs:365	pub(crate) fn new(mut caps: Vec<Cap>) -> Self {
 crates/lgwks-bot/src/cap.rs:414	pub fn check(&self, required: &[Cap]) -> Result<(), BotError> {
-crates/lgwks-bot/src/ecs.rs:829	struct TickError(Option<BotError>);
-crates/lgwks-bot/src/ecs.rs:1021	const MAX_IN_FLIGHT_POLLS: usize = 32;
-crates/lgwks-bot/src/ecs.rs:2594	RetryClass::Safe if attempts < budget => EntryState::DefinitelyFailed { attempts, cause },
-crates/lgwks-bot/src/ecs.rs:2650	let mut first_error = None;
-crates/lgwks-bot/src/ecs.rs:2830	fn fire_plan(world: &mut World) {
-crates/lgwks-bot/src/ecs.rs:3060	Err(error) => {
-crates/lgwks-bot/src/ecs.rs:3071	steps.push(Step {
-crates/lgwks-bot/src/ecs.rs:3088	ambiguity_detection: LogLevel::Error,
-crates/lgwks-bot/src/ecs.rs:3170	pub fn world(&self) -> &World {
-crates/lgwks-bot/src/ecs.rs:3272	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:3383	pub fn tick(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:3522	let baseline = seen
-crates/lgwks-bot/src/ecs.rs:3575	async fn run_steps(
-crates/lgwks-bot/src/ecs.rs:4159	S::Output: PartialEq + 'static,
-crates/lgwks-bot/src/ecs.rs:4295	for chain in &chains {
-crates/lgwks-bot/src/ecs.rs:4296	shortages.extend(grants.uncovered(
-crates/lgwks-bot/src/ecs.rs:4312	world.insert_resource(Grants(grants.clone()));
+crates/lgwks-bot/src/ecs.rs:861	struct TickError(Option<BotError>);
+crates/lgwks-bot/src/ecs.rs:1056	const MAX_IN_FLIGHT_POLLS: usize = 32;
+crates/lgwks-bot/src/ecs.rs:2724	RetryClass::Safe if attempts < budget => EntryState::DefinitelyFailed { attempts, cause },
+crates/lgwks-bot/src/ecs.rs:2780	let mut first_error = None;
+crates/lgwks-bot/src/ecs.rs:2960	fn fire_plan(world: &mut World) {
+crates/lgwks-bot/src/ecs.rs:3190	Err(error) => {
+crates/lgwks-bot/src/ecs.rs:3183	steps.push(Step {
+crates/lgwks-bot/src/ecs.rs:3218	ambiguity_detection: LogLevel::Error,
+crates/lgwks-bot/src/ecs.rs:3300	pub fn world(&self) -> &World {
+crates/lgwks-bot/src/ecs.rs:3402	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs.rs:3513	pub fn tick(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs.rs:3652	let baseline = seen
+crates/lgwks-bot/src/ecs.rs:3705	async fn run_steps(
+crates/lgwks-bot/src/ecs.rs:4289	S::Output: PartialEq + InputIdentity + 'static,
+crates/lgwks-bot/src/ecs.rs:4427	for chain in &chains {
+crates/lgwks-bot/src/ecs.rs:4428	shortages.extend(grants.uncovered(
+crates/lgwks-bot/src/ecs.rs:4444	world.insert_resource(Grants(grants.clone()));
 crates/lgwks-bot/src/error.rs:106	/// handed may be the one that owns the runtime's driver. Parked, that
 crates/lgwks-bot/src/gate.rs:12	pub struct GrantSet {
 crates/lgwks-bot/src/gate.rs:44	pub fn grant(mut self, cap: Cap) -> Self {

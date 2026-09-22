@@ -43,7 +43,7 @@
 use core::fmt;
 use core::num::{NonZeroU64, NonZeroU128};
 
-use lgwks_std::hash::Digest;
+use lgwks_std::hash::{Digest, Hasher};
 use lgwks_std::wire::{AlignedVec, WireError};
 
 /// Why an [`Id128`] could not be parsed.
@@ -1307,5 +1307,101 @@ mod tests {
         assert!(rendered.contains("epoch 9"), "{rendered}");
         assert!(rendered.contains("env "), "{rendered}");
         Ok(())
+    }
+}
+
+/// How an admitted observation is named for the purpose of a dispatch digest.
+///
+/// A content identity, not an event number: the same value of the same type
+/// writes the same bytes (so a restart can retire work that already landed),
+/// and a different value writes different ones (so a restart cannot read new
+/// work as already applied). Two *events* with equal content must still be
+/// distinguishable — content equality is not event identity — so a caller that
+/// needs that puts the event id into the value and into this trait. See
+/// [`EventId`](crate::effect::EventId).
+///
+/// Every integer writes `to_le_bytes` of a fixed width, so a 32-bit and a
+/// 64-bit target derive the same identity (issue #101).
+pub trait InputIdentity {
+    /// Write this input's canonical identity bytes into `hasher`.
+    fn write_identity(&self, hasher: &mut Hasher);
+}
+
+/// Implement [`InputIdentity`] for a fixed-width integer via `to_le_bytes`.
+macro_rules! input_identity_int {
+    ($($t:ty),* $(,)?) => {$(
+        impl InputIdentity for $t {
+            fn write_identity(&self, hasher: &mut Hasher) {
+                hasher.update(&self.to_le_bytes());
+            }
+        }
+    )*};
+}
+
+input_identity_int!(u8, u16, u32, u64, i8, i16, i32, i64);
+
+impl InputIdentity for bool {
+    fn write_identity(&self, hasher: &mut Hasher) {
+        hasher.update(&[u8::from(*self)]);
+    }
+}
+
+impl InputIdentity for String {
+    fn write_identity(&self, hasher: &mut Hasher) {
+        let len = u64::try_from(self.len()).unwrap_or(u64::MAX);
+        hasher.update(&len.to_le_bytes());
+        hasher.update(self.as_bytes());
+    }
+}
+
+impl InputIdentity for &str {
+    fn write_identity(&self, hasher: &mut Hasher) {
+        let len = u64::try_from(self.len()).unwrap_or(u64::MAX);
+        hasher.update(&len.to_le_bytes());
+        hasher.update(self.as_bytes());
+    }
+}
+
+/// A value tagged with an event id, so two equal payloads stay two events.
+///
+/// The id is written first and is part of the identity: `EventId { id: 1,
+/// value: 5 }` and `EventId { id: 2, value: 5 }` are different admitted
+/// inputs even though the payloads compare equal. `PartialEq` includes the id
+/// for the same reason — the change filter is content equality, and two
+/// distinct events that compare equal would be collapsed into one revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct EventId<T> {
+    /// The caller's event identity. Distinct per event, including events that
+    /// carry equal payloads.
+    id: u64,
+    /// The payload.
+    value: T,
+}
+
+impl<T> EventId<T> {
+    /// Tag `value` as event `id`.
+    #[must_use]
+    pub const fn new(id: u64, value: T) -> Self {
+        Self { id, value }
+    }
+
+    /// The caller's event identity.
+    #[must_use]
+    pub const fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// The payload.
+    #[must_use]
+    pub const fn value(&self) -> &T {
+        &self.value
+    }
+}
+
+impl<T: InputIdentity> InputIdentity for EventId<T> {
+    fn write_identity(&self, hasher: &mut Hasher) {
+        hasher.update(&self.id.to_le_bytes());
+        self.value.write_identity(hasher);
     }
 }

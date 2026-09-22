@@ -43,7 +43,7 @@ use lgwks_bot::journal::{
     JournalPosition, MemoryJournal,
 };
 use lgwks_bot::spec::{Bot, EffectEvidence, EffectIdentity, EffectScope, TransitionHold};
-use lgwks_bot::{Auth, BotError, Cap, DispatchCertainty, Execute, GrantSet, Observe};
+use lgwks_bot::{Auth, BotError, Cap, DispatchCertainty, EventId, Execute, GrantSet, Observe};
 
 /// What a test reports when its precondition did not hold.
 ///
@@ -1112,4 +1112,178 @@ fn a_poll_failure_does_not_erase_a_recovered_unknown() -> TestResult {
     );
     assert_eq!(published.get(), 0);
     Ok(())
+}
+
+// ── Issue #101: admitted input identity ────────────────────────────────────
+
+/// A source the test can retarget to a new `(id, payload)` pair.
+///
+/// The id is part of `PartialEq` and of [`InputIdentity`], which is the point:
+/// two events with equal payloads must still be two events.
+struct Requests(Rc<RefCell<EventId<u32>>>);
+
+impl Observe for Requests {
+    type Output = EventId<u32>;
+
+    fn required_caps(&self) -> &[Cap] {
+        &[]
+    }
+
+    async fn poll(&self, call: (Auth, ())) -> Result<EventId<u32>, BotError> {
+        call.0.check(Observe::required_caps(self))?;
+        Ok(*self.0.borrow())
+    }
+
+    fn domain_id(&self) -> &str {
+        "test::requests"
+    }
+}
+
+/// An action that records every input it was entered with.
+struct Records(Rc<RefCell<Vec<EventId<u32>>>>);
+
+impl Execute for Records {
+    type Input = EventId<u32>;
+    type Output = ();
+
+    fn required_caps(&self) -> &[Cap] {
+        &[]
+    }
+
+    async fn execute_action(&self, call: (Auth, &EventId<u32>)) -> Result<(), BotError> {
+        call.0.check(Execute::required_caps(self))?;
+        self.0.borrow_mut().push(*call.1);
+        Ok(())
+    }
+
+    fn domain_id(&self) -> &str {
+        "test::records"
+    }
+}
+
+/// `true` for the payload half alone, so a new event id with the old payload
+/// still holds and a new payload does not.
+fn payload_is(seen: &EventId<u32>, want: u32) -> bool {
+    *seen.value() == want
+}
+
+/// A restarted bot must not read a *different* request as already applied.
+///
+/// Counterexample A in issue #101: process A observes request A, the action
+/// lands and is journaled `Applied`. The journal is rebuilt while the source
+/// now returns request B. A digest bound to the process-local `Revision`
+/// counter derives the same identity for both (both are revision 1 after a
+/// restart) and skips B. B must run.
+#[test]
+fn a_changed_request_after_reconstruction_is_not_skipped_as_applied() -> TestResult {
+    let store = Rc::new(RefCell::new(MemoryJournal::new()));
+    let seen = Rc::new(RefCell::new(EventId::new(1, 10)));
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let identity = identity()?;
+
+    let mut first = Bot::builder(NAME)
+        .observe(Requests(Rc::clone(&seen)))
+        .on(
+            |seen: &EventId<u32>| payload_is(seen, 10),
+            Records(Rc::clone(&log)),
+        )
+        .with_effects(scope(identity, Rc::clone(&store))?)
+        .build(&GrantSet::empty())?;
+    assert_eq!(first.tick()?, 1, "request A runs");
+    assert_eq!(*log.borrow(), vec![EventId::new(1, 10)]);
+
+    // A different request, with a different event id and a different payload.
+    // The condition is the same declaration as A's ("this payload"), so what
+    // is under test is the digest, not a second builder shape.
+    *seen.borrow_mut() = EventId::new(2, 20);
+    let mut second = Bot::builder(NAME)
+        .observe(Requests(Rc::clone(&seen)))
+        .on(
+            |seen: &EventId<u32>| payload_is(seen, 20),
+            Records(Rc::clone(&log)),
+        )
+        .with_effects(scope(identity, Rc::clone(&store))?)
+        .build(&GrantSet::empty())?;
+    assert_eq!(
+        second.tick()?,
+        1,
+        "request B runs; it was not silently omitted as already applied"
+    );
+    assert_eq!(
+        *log.borrow(),
+        vec![EventId::new(1, 10), EventId::new(2, 20)],
+        "and the receiver sees the exact values, in order"
+    );
+    Ok(())
+}
+
+/// Two events with equal payloads are two events.
+///
+/// Content equality is not event identity (issue #101). The id is part of
+/// `EventId`'s `InputIdentity` and its `PartialEq`, so neither the change
+/// filter nor the dispatch digest can collapse them.
+#[test]
+fn two_equal_payloads_with_distinct_event_ids_are_two_events() -> TestResult {
+    let store = Rc::new(RefCell::new(MemoryJournal::new()));
+    let seen = Rc::new(RefCell::new(EventId::new(1, 7)));
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let identity = identity()?;
+
+    let mut bot = Bot::builder(NAME)
+        .observe(Requests(Rc::clone(&seen)))
+        .on(|_v: &EventId<u32>| true, Records(Rc::clone(&log)))
+        .with_effects(scope(identity, Rc::clone(&store))?)
+        .build(&GrantSet::empty())?;
+
+    assert_eq!(bot.tick()?, 1, "event 1 runs");
+    *seen.borrow_mut() = EventId::new(2, 7);
+    assert_eq!(
+        bot.tick()?,
+        1,
+        "event 2 runs even though the payload is equal"
+    );
+    assert_eq!(
+        *log.borrow(),
+        vec![EventId::new(1, 7), EventId::new(2, 7)],
+        "two distinct events, both delivered"
+    );
+    Ok(())
+}
+
+/// A journal from another flow is refused at assembly.
+///
+/// The ownership identity is the whole of run + flow + environment, not the
+/// two fields assembly used to check (issue #101).
+#[test]
+fn a_journal_from_another_flow_is_refused() -> TestResult {
+    let store = Rc::new(RefCell::new(MemoryJournal::new()));
+    let seen = Rc::new(RefCell::new(EventId::new(1, 1)));
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mine = identity()?;
+
+    let mut first = Bot::builder(NAME)
+        .observe(Requests(Rc::clone(&seen)))
+        .on(|_v: &EventId<u32>| true, Records(Rc::clone(&log)))
+        .with_effects(scope(mine, Rc::clone(&store))?)
+        .build(&GrantSet::empty())?;
+    first.tick()?;
+    drop(first);
+
+    let other_flow = EffectIdentity::new(
+        mine.run(),
+        mine.environment(),
+        FlowRevision::from_tagged(
+            "blake3_256",
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        )?,
+    );
+    match Bot::builder(NAME)
+        .observe(Requests(Rc::clone(&seen)))
+        .on(|_v: &EventId<u32>| true, Records(Rc::clone(&log)))
+        .with_effects(scope(other_flow, Rc::clone(&store))?)
+        .build(&GrantSet::empty())
+    {
+        Err(BotError::ActionNotDeclared { .. }) => Ok(()),
+        other => Err(format!("expected a foreign-journal refusal, got {other:?}").into()),
+    }
 }
