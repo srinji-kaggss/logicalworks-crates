@@ -136,6 +136,54 @@ impl fmt::Display for DurabilityPromise {
     }
 }
 
+/// The durability grade an admitted attempt must retain through settlement.
+///
+/// This is deliberately a separate, wire-safe newtype rather than a bare
+/// integer in [`EffectEvent`]. An attempt's required grade is a durable
+/// protocol fact: recovery must validate the outcome receipt against the
+/// grade admitted before the effect crossed its irreversible boundary.
+#[repr(transparent)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    lgwks_std::wire::Archive,
+    lgwks_std::wire::Serialize,
+    lgwks_std::wire::Deserialize,
+)]
+#[rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
+pub struct RequiredDurability(u8);
+
+impl RequiredDurability {
+    /// Record `promise` as the grade this attempt requires at every durable
+    /// protocol transition.
+    #[must_use]
+    pub const fn new(promise: DurabilityPromise) -> Self {
+        Self(match promise {
+            DurabilityPromise::Ephemeral => 0,
+            DurabilityPromise::ProcessCrash => 1,
+            DurabilityPromise::PowerLoss => 2,
+        })
+    }
+
+    /// The promised grade represented by this admitted contract.
+    ///
+    /// An unrecognised archived byte is interpreted conservatively as
+    /// `ProcessCrash`; it must never downgrade a recovered external attempt
+    /// into an ephemeral one.
+    #[must_use]
+    pub const fn promise(self) -> DurabilityPromise {
+        match self.0 {
+            0 => DurabilityPromise::Ephemeral,
+            2 => DurabilityPromise::PowerLoss,
+            _ => DurabilityPromise::ProcessCrash,
+        }
+    }
+}
+
 /// Where a committed event sits in one run's journal.
 ///
 /// The pair of sequence and head is the whole point. A sequence alone says
@@ -334,7 +382,7 @@ impl EffectEvent {
     #[must_use]
     pub const fn key(self) -> EffectKey {
         match self {
-            Self::IntentAdmitted { key }
+            Self::IntentAdmitted { key, .. }
             | Self::DispatchPrepared { key }
             | Self::OutcomeObserved { key, .. }
             | Self::Verified { key, .. } => key,
@@ -438,6 +486,12 @@ pub enum JournalError {
         /// What the journal offers.
         offered: DurabilityPromise,
     },
+    /// The adapter cannot attest that an already-recorded outcome now meets
+    /// the requested durability grade.
+    ReceiptUnavailable {
+        /// What the caller needs before it can settle the attempt.
+        required: DurabilityPromise,
+    },
     /// The event cannot follow what is committed for that key.
     OutOfOrder {
         /// The attempt the refused event was about.
@@ -482,6 +536,10 @@ impl fmt::Display for JournalError {
             Self::PromiseUnmet { required, offered } => write!(
                 f,
                 "journal promises {offered}, which is below the {required} this needs"
+            ),
+            Self::ReceiptUnavailable { required } => write!(
+                f,
+                "journal cannot attest that the recorded outcome meets {required}"
             ),
             Self::OutOfOrder {
                 ref key,
@@ -614,6 +672,27 @@ pub trait EffectJournal {
         event: &EffectEvent,
     ) -> Result<DurableAck, JournalError>;
 
+    /// Confirm that an existing outcome record now meets `required`.
+    ///
+    /// An append can return a weak acknowledgment after it has already moved
+    /// the per-key ladder to `OutcomeObserved`. A retry cannot append that
+    /// outcome again, so an adapter that can flush, replicate, or otherwise
+    /// obtain a stronger receipt implements this method. The default refuses
+    /// rather than treating read-back of event bytes as a durability proof.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::ReceiptUnavailable`] when the adapter has no receipt
+    /// operation, or another journal error when it cannot obtain one.
+    fn confirm_outcome(
+        &mut self,
+        _key: EffectKey,
+        _evidence: EffectEvidence,
+        required: DurabilityPromise,
+    ) -> Result<DurableAck, JournalError> {
+        Err(JournalError::ReceiptUnavailable { required })
+    }
+
     /// Whether this journal may host an effect that has left the process.
     ///
     /// A journal that cannot survive its own writer dying must never be the
@@ -692,13 +771,19 @@ pub struct Attempt {
     key: EffectKey,
     /// What is known about it.
     status: AttemptStatus,
+    /// The durability grade admitted before this attempt was prepared.
+    required: RequiredDurability,
 }
 
 impl Attempt {
     /// Build an attempt record.
     #[must_use]
-    pub const fn new(key: EffectKey, status: AttemptStatus) -> Self {
-        Self { key, status }
+    pub const fn new(key: EffectKey, status: AttemptStatus, required: RequiredDurability) -> Self {
+        Self {
+            key,
+            status,
+            required,
+        }
     }
 
     /// The attempt.
@@ -711,6 +796,12 @@ impl Attempt {
     #[must_use]
     pub const fn status(&self) -> AttemptStatus {
         self.status
+    }
+
+    /// The durability grade the admitted attempt requires at settlement.
+    #[must_use]
+    pub const fn required(&self) -> RequiredDurability {
+        self.required
     }
 }
 
@@ -780,16 +871,18 @@ impl Recovered {
 pub fn recover<'a>(events: impl IntoIterator<Item = &'a EffectEvent>) -> Recovered {
     let mut recovered = Recovered::default();
     for event in events {
-        let status = match *event {
-            EffectEvent::IntentAdmitted { .. } => AttemptStatus::Prepared,
-            EffectEvent::DispatchPrepared { .. } => AttemptStatus::OutcomeUnknown,
+        let (status, admitted) = match *event {
+            EffectEvent::IntentAdmitted { required, .. } => {
+                (AttemptStatus::Prepared, Some(required))
+            }
+            EffectEvent::DispatchPrepared { .. } => (AttemptStatus::OutcomeUnknown, None),
             EffectEvent::OutcomeObserved { evidence, .. } => match evidence {
-                EffectEvidence::Applied => AttemptStatus::Applied,
-                EffectEvidence::NotApplied => AttemptStatus::NotApplied,
+                EffectEvidence::Applied => (AttemptStatus::Applied, None),
+                EffectEvidence::NotApplied => (AttemptStatus::NotApplied, None),
             },
             EffectEvent::Verified { verification, .. } => match verification.result() {
-                VerificationResult::Satisfied => AttemptStatus::Verified,
-                VerificationResult::NotSatisfied => AttemptStatus::Applied,
+                VerificationResult::Satisfied => (AttemptStatus::Verified, None),
+                VerificationResult::NotSatisfied => (AttemptStatus::Applied, None),
             },
         };
         let key = event.key();
@@ -798,8 +891,17 @@ pub fn recover<'a>(events: impl IntoIterator<Item = &'a EffectEvent>) -> Recover
             .iter_mut()
             .find(|attempt| attempt.key == key)
         {
-            Some(attempt) => attempt.status = status,
-            None => recovered.attempts.push(Attempt::new(key, status)),
+            Some(attempt) => {
+                attempt.status = status;
+                if let Some(required) = admitted {
+                    attempt.required = required;
+                }
+            }
+            None => recovered.attempts.push(Attempt::new(
+                key,
+                status,
+                admitted.unwrap_or(RequiredDurability::new(DurabilityPromise::ProcessCrash)),
+            )),
         }
     }
     recovered
@@ -1126,9 +1228,17 @@ mod tests {
         journal: &mut MemoryJournal,
         key: EffectKey,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        append(journal, EffectEvent::IntentAdmitted { key })?;
+        append(journal, admitted(key))?;
         append(journal, EffectEvent::DispatchPrepared { key })?;
         Ok(())
+    }
+
+    /// An intent admitted for a local test action.
+    fn admitted(key: EffectKey) -> EffectEvent {
+        EffectEvent::IntentAdmitted {
+            key,
+            required: RequiredDurability::new(DurabilityPromise::Ephemeral),
+        }
     }
 
     #[test]
@@ -1145,7 +1255,7 @@ mod tests {
         let key = key("1", "1")?;
         let mut journal = MemoryJournal::new();
         let genesis = journal.tail();
-        let ack = append(&mut journal, EffectEvent::IntentAdmitted { key })?;
+        let ack = append(&mut journal, admitted(key))?;
         assert_eq!(ack.position().sequence(), 1);
         assert_ne!(ack.position().head(), genesis.head());
         assert_eq!(journal.tail(), ack.position());
@@ -1156,7 +1266,7 @@ mod tests {
     fn the_acknowledgment_names_the_promise_that_was_claimed() -> TestResult {
         let key = key("1", "1")?;
         let mut journal = MemoryJournal::new();
-        let ack = append(&mut journal, EffectEvent::IntentAdmitted { key })?;
+        let ack = append(&mut journal, admitted(key))?;
         assert_eq!(ack.promise(), DurabilityPromise::Ephemeral);
         Ok(())
     }
@@ -1167,12 +1277,12 @@ mod tests {
         let second = other_key("1", "1")?;
 
         let mut forwards = MemoryJournal::new();
-        append(&mut forwards, EffectEvent::IntentAdmitted { key: first })?;
-        append(&mut forwards, EffectEvent::IntentAdmitted { key: second })?;
+        append(&mut forwards, admitted(first))?;
+        append(&mut forwards, admitted(second))?;
 
         let mut backwards = MemoryJournal::new();
-        append(&mut backwards, EffectEvent::IntentAdmitted { key: second })?;
-        append(&mut backwards, EffectEvent::IntentAdmitted { key: first })?;
+        append(&mut backwards, admitted(second))?;
+        append(&mut backwards, admitted(first))?;
 
         assert_eq!(forwards.tail().sequence(), backwards.tail().sequence());
         assert_ne!(forwards.tail().head(), backwards.tail().head());
@@ -1184,7 +1294,7 @@ mod tests {
         let key = key("1", "1")?;
         let mut journal = MemoryJournal::new();
         let genesis = journal.tail();
-        let committed = append(&mut journal, EffectEvent::IntentAdmitted { key })?;
+        let committed = append(&mut journal, admitted(key))?;
 
         let refused = journal.compare_and_append(genesis, &EffectEvent::DispatchPrepared { key });
         match refused {
@@ -1205,7 +1315,7 @@ mod tests {
         let mut journal = MemoryJournal::new();
         let both_saw = journal.tail();
 
-        let winner = journal.compare_and_append(both_saw, &EffectEvent::IntentAdmitted { key })?;
+        let winner = journal.compare_and_append(both_saw, &admitted(key))?;
 
         let loser = journal.compare_and_append(both_saw, &EffectEvent::DispatchPrepared { key });
         assert!(
@@ -1243,9 +1353,8 @@ mod tests {
     fn the_ladder_is_walked_once_per_key() -> TestResult {
         let key = key("1", "1")?;
         let mut journal = MemoryJournal::new();
-        append(&mut journal, EffectEvent::IntentAdmitted { key })?;
-        let refused =
-            journal.compare_and_append(journal.tail(), &EffectEvent::IntentAdmitted { key });
+        append(&mut journal, admitted(key))?;
+        let refused = journal.compare_and_append(journal.tail(), &admitted(key));
         assert!(
             matches!(
                 refused,
@@ -1367,7 +1476,7 @@ mod tests {
     fn an_admitted_intent_alone_is_not_uncertain() -> TestResult {
         let key = key("1", "1")?;
         let mut journal = MemoryJournal::new();
-        append(&mut journal, EffectEvent::IntentAdmitted { key })?;
+        append(&mut journal, admitted(key))?;
         assert_eq!(journal.recover().status(key), Some(AttemptStatus::Prepared));
         assert!(journal.recover().uncertain().is_empty());
         Ok(())
@@ -1530,7 +1639,7 @@ mod tests {
     #[test]
     fn an_event_encoding_carries_its_kind_and_its_key() -> TestResult {
         let key = key("1", "1")?;
-        let admitted = EffectEvent::IntentAdmitted { key }.to_bytes()?;
+        let admitted_bytes = admitted(key).to_bytes()?;
         let prepared = EffectEvent::DispatchPrepared { key }.to_bytes()?;
         let applied = EffectEvent::OutcomeObserved {
             key,
@@ -1543,7 +1652,7 @@ mod tests {
         }
         .to_bytes()?;
 
-        assert_ne!(admitted.as_slice(), prepared.as_slice());
+        assert_ne!(admitted_bytes.as_slice(), prepared.as_slice());
         assert_ne!(applied.as_slice(), not_applied.as_slice());
 
         // What the encoding says about the event is read back out of it. A
@@ -1551,7 +1660,7 @@ mod tests {
         // archived form is one width for every variant of a type, so comparing
         // lengths would not have caught it. Decoding does.
         for (bytes, event) in [
-            (admitted, EffectEvent::IntentAdmitted { key }),
+            (admitted_bytes, admitted(key)),
             (prepared, EffectEvent::DispatchPrepared { key }),
             (
                 applied,

@@ -498,7 +498,7 @@ pub(crate) fn prepare_dispatch(
 mod tests {
     use super::*;
     use crate::effect::{ActionDigest, ActionId, AttemptId, EnvironmentId, FlowRevision, RunId};
-    use crate::journal::{EffectEvidence, MemoryJournal};
+    use crate::journal::{DurabilityPromise, EffectEvidence, MemoryJournal, RequiredDurability};
     use std::collections::HashMap;
 
     const RUN: &str = "0102030405060708090a0b0c0d0e0f10";
@@ -542,7 +542,13 @@ mod tests {
         key: EffectKey,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let tail = journal.tail();
-        journal.compare_and_append(tail, &EffectEvent::IntentAdmitted { key })?;
+        journal.compare_and_append(
+            tail,
+            &EffectEvent::IntentAdmitted {
+                key,
+                required: RequiredDurability::new(DurabilityPromise::Ephemeral),
+            },
+        )?;
         Ok(())
     }
 

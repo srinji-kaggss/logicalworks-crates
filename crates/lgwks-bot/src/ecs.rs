@@ -196,7 +196,7 @@ use super::gate::GrantSet;
 use super::journal::MemoryJournal;
 use super::journal::{
     AttemptStatus, DurabilityPromise, DurableAck, EffectEvent, EffectJournal, EventKind,
-    JournalError, recover,
+    JournalError, RequiredDurability, recover,
 };
 use super::spec::{ChainEntry, Erased, ObserveAny, Witness, typed_entry};
 use super::verb::EffectLifetime;
@@ -537,6 +537,9 @@ struct Effects {
     /// rather than as a count because settling one has to name it, and an
     /// attempt that is only a number in a total cannot be named.
     unsettled: Vec<EffectKey>,
+    /// Recovered outcomes whose event exists but whose durability receipt has
+    /// not yet met the requirement admitted with the attempt.
+    recording: Vec<(EffectKey, EffectEvidence)>,
     /// Attempts whose effect is recorded as landed, by the key that landed.
     ///
     /// Written when a recovered attempt is settled `Applied`, and seeded at
@@ -572,6 +575,7 @@ impl Effects {
         Self {
             scope,
             unsettled: Vec::new(),
+            recording: Vec::new(),
             applied: Vec::new(),
             attempted: Vec::new(),
         }
@@ -626,11 +630,12 @@ impl Effects {
         // handoff path: a store that cannot outlive the process is refused here,
         // before `DispatchPrepared` exists for recovery to misread as a live
         // dispatch (issue #100).
-        let intent_ack = self.append(&EffectEvent::IntentAdmitted { key })?;
+        let required = RequiredDurability::new(required);
+        let intent_ack = self.append(&EffectEvent::IntentAdmitted { key, required })?;
         self.note_journal_attempt(key.action(), key.attempt());
-        if !intent_ack.promise().meets(required) {
+        if !intent_ack.promise().meets(required.promise()) {
             return Err(DispatchError::Journal(JournalError::PromiseUnmet {
-                required,
+                required: required.promise(),
                 offered: intent_ack.promise(),
             }));
         }
@@ -640,7 +645,7 @@ impl Effects {
         // The acknowledgment, not the advertisement. A journal that offers
         // less on this append than the handoff requires is refused even when
         // its `durability()` claimed enough.
-        if !ack.promise().meets(required) {
+        if !ack.promise().meets(required.promise()) {
             // Compensate: the handoff never left. Without this record recovery
             // folds the `DispatchPrepared` already committed as an unknown
             // outcome for a dispatch that did not happen. Best-effort: the
@@ -650,7 +655,7 @@ impl Effects {
                 evidence: EffectEvidence::NotApplied,
             });
             return Err(DispatchError::Journal(JournalError::PromiseUnmet {
-                required,
+                required: required.promise(),
                 offered: ack.promise(),
             }));
         }
@@ -712,6 +717,10 @@ impl Effects {
     /// nothing established that the bytes did not arrive.
     fn blocks(&self, action: ActionId) -> bool {
         self.unsettled.iter().any(|key| key.action() == action)
+            || self
+                .recording
+                .iter()
+                .any(|entry| entry.0.action() == action)
     }
 
     /// The unsettled key for `action`, when there is one.
@@ -719,6 +728,15 @@ impl Effects {
         self.unsettled
             .iter()
             .find(|key| key.action() == action)
+            .copied()
+    }
+
+    /// A recovered, known outcome still waiting for a sufficiently durable
+    /// receipt.
+    fn recording_for(&self, action: ActionId) -> Option<(EffectKey, EffectEvidence)> {
+        self.recording
+            .iter()
+            .find(|entry| entry.0.action() == action)
             .copied()
     }
 
@@ -782,6 +800,18 @@ impl Effects {
         Ok(())
     }
 
+    /// Upgrade the receipt for a recovered known outcome without re-entering
+    /// the effect that produced it.
+    fn settle_recording(
+        &mut self,
+        key: EffectKey,
+        evidence: EffectEvidence,
+    ) -> Result<(), JournalError> {
+        self.ensure_outcome(key, evidence)?;
+        self.recording.retain(|entry| entry.0 != key);
+        Ok(())
+    }
+
     /// Record an outcome for `key` if one is not already committed, and fold
     /// it into the in-memory applied set.
     ///
@@ -815,6 +845,67 @@ impl Effects {
             })
     }
 
+    /// The durability grade admitted for `key` before it could cross the
+    /// irreversible boundary.
+    ///
+    /// This is read from the journal rather than inferred from the currently
+    /// loaded action. A recovery process must honour the contract the original
+    /// process admitted, even when an action implementation is later changed.
+    fn required_for(&self, key: EffectKey) -> Result<DurabilityPromise, JournalError> {
+        self.scope
+            .journal()
+            .committed()?
+            .into_iter()
+            .find_map(|event| match event {
+                EffectEvent::IntentAdmitted {
+                    key: admitted,
+                    required,
+                } if admitted == key => Some(required.promise()),
+                _ => None,
+            })
+            .ok_or(JournalError::OutOfOrder {
+                key: Box::new(key),
+                expected: Some(EventKind::IntentAdmitted),
+                attempted: EventKind::OutcomeObserved,
+            })
+    }
+
+    /// Require the receipt for an outcome to meet the grade admitted for its
+    /// attempt. A weak append can have occupied the ladder already; the
+    /// journal's explicit receipt operation is the only safe retry in that
+    /// case.
+    fn confirm_outcome(
+        &mut self,
+        key: EffectKey,
+        evidence: EffectEvidence,
+        required: DurabilityPromise,
+        acknowledgment: DurableAck,
+    ) -> Result<(), JournalError> {
+        if acknowledgment.promise().meets(required) {
+            return Ok(());
+        }
+        let receipt = self
+            .scope
+            .journal_mut()
+            .confirm_outcome(key, evidence, required)?;
+        if receipt.promise().meets(required) {
+            Ok(())
+        } else {
+            Err(JournalError::PromiseUnmet {
+                required,
+                offered: receipt.promise(),
+            })
+        }
+    }
+
+    /// Fold a receipted outcome into the local state.
+    fn fold_outcome(&mut self, key: EffectKey, evidence: EffectEvidence) {
+        self.note_journal_attempt(key.action(), key.attempt());
+        if evidence == EffectEvidence::Applied && !self.applied.contains(&key) {
+            self.applied.push(key);
+        }
+    }
+
     /// Record an outcome for `key` if one is not already committed, and fold
     /// it into the in-memory applied set.
     ///
@@ -828,12 +919,11 @@ impl Effects {
         key: EffectKey,
         evidence: EffectEvidence,
     ) -> Result<(), JournalError> {
+        let required = self.required_for(key)?;
         match self.append(&EffectEvent::OutcomeObserved { key, evidence }) {
-            Ok(_ack) => {
-                self.note_journal_attempt(key.action(), key.attempt());
-                if evidence == EffectEvidence::Applied && !self.applied.contains(&key) {
-                    self.applied.push(key);
-                }
+            Ok(acknowledgment) => {
+                self.confirm_outcome(key, evidence, required, acknowledgment)?;
+                self.fold_outcome(key, evidence);
                 Ok(())
             }
             Err(JournalError::OutOfOrder { expected, .. })
@@ -845,10 +935,21 @@ impl Effects {
                 // contradictory `Applied` gets acknowledged (issue #106).
                 match self.outcome_for(&key) {
                     Some(recorded) if recorded == evidence => {
-                        self.note_journal_attempt(key.action(), key.attempt());
-                        if evidence == EffectEvidence::Applied && !self.applied.contains(&key) {
-                            self.applied.push(key);
+                        if required == DurabilityPromise::Ephemeral {
+                            self.fold_outcome(key, evidence);
+                            return Ok(());
                         }
+                        let receipt = self
+                            .scope
+                            .journal_mut()
+                            .confirm_outcome(key, evidence, required)?;
+                        if !receipt.promise().meets(required) {
+                            return Err(JournalError::PromiseUnmet {
+                                required,
+                                offered: receipt.promise(),
+                            });
+                        }
+                        self.fold_outcome(key, evidence);
                         Ok(())
                     }
                     _ => Err(JournalError::OutOfOrder {
@@ -2550,6 +2651,20 @@ impl Ledger {
                     });
                     continue;
                 }
+                if let Some((key, evidence)) = self
+                    .action_of(id)
+                    .and_then(|action| self.effects.recording_for(action))
+                {
+                    unresolved.push(PendingWork {
+                        id,
+                        key: Some(Box::new(key)),
+                        hold: TransitionHold::RecordingFailed {
+                            evidence,
+                            cause: "outcome receipt has not reached its admitted durability".into(),
+                        },
+                    });
+                    continue;
+                }
                 let Some(transition) = self.transitions.get(chain).and_then(Option::as_ref) else {
                     continue;
                 };
@@ -4017,6 +4132,24 @@ impl EcsBot {
                     cause: DispatchError::Journal(cause),
                 });
         }
+        let recording = self
+            .world
+            .non_send::<Ledger>()
+            .effects
+            .recording_for(key.action())
+            .is_some_and(|(held, recorded)| held == *key && recorded == evidence);
+        if recording {
+            return self
+                .world
+                .non_send_mut::<Ledger>()
+                .effects
+                .settle_recording(*key, evidence)
+                .map_err(|cause| BotError::EffectUnrecorded {
+                    key: Box::new(*key),
+                    evidence,
+                    cause: Box::new(DispatchError::Journal(cause)),
+                });
+        }
         match self
             .world
             .non_send::<Ledger>()
@@ -4463,13 +4596,45 @@ impl EcsBot {
                 AttemptStatus::OutcomeUnknown => ledger.effects.unsettled.push(key),
                 // The effect landed, and the record says so.
                 AttemptStatus::Applied | AttemptStatus::Verified => {
-                    ledger.effects.applied.push(key);
+                    let evidence = EffectEvidence::Applied;
+                    let required = attempt.required().promise();
+                    if required == DurabilityPromise::Ephemeral {
+                        ledger.effects.applied.push(key);
+                        continue;
+                    }
+                    match ledger
+                        .effects
+                        .scope
+                        .journal_mut()
+                        .confirm_outcome(key, evidence, required)
+                    {
+                        Ok(receipt) if receipt.promise().meets(required) => {
+                            ledger.effects.applied.push(key);
+                        }
+                        Ok(_) | Err(_) => ledger.effects.recording.push((key, evidence)),
+                    }
                 }
                 // Nothing to hold. `Prepared` means the intent was admitted and
                 // nothing was handed over, and `NotApplied` means exactly that
                 // the bytes did not arrive; both leave the entry free to be
                 // attempted again, under the next attempt identity.
-                AttemptStatus::Prepared | AttemptStatus::NotApplied => {}
+                AttemptStatus::Prepared => {}
+                AttemptStatus::NotApplied => {
+                    let evidence = EffectEvidence::NotApplied;
+                    let required = attempt.required().promise();
+                    if required == DurabilityPromise::Ephemeral {
+                        continue;
+                    }
+                    match ledger
+                        .effects
+                        .scope
+                        .journal_mut()
+                        .confirm_outcome(key, evidence, required)
+                    {
+                        Ok(receipt) if receipt.promise().meets(required) => {}
+                        Ok(_) | Err(_) => ledger.effects.recording.push((key, evidence)),
+                    }
+                }
             }
         }
         world.insert_non_send(Chains(chains));

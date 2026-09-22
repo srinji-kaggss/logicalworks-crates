@@ -164,10 +164,14 @@ behind live settlement, recovered settlement, and the post-effect recording
 retry; three appends are three chances to lose the `Applied` fold that lets a
 returning landed event retire instead of wedging as `Unrecorded`.
 
-The remaining named gap, tracked rather than papered over: a journal that
-**commits `OutcomeObserved` and then returns a transport error** leaves the
-caller holding an ambiguous write. The retry path is idempotent for the
-`OutOfOrder` shape and is not yet proven for the commit-then-error shape.
+An `OutcomeObserved` record is not sufficient evidence of settlement for an
+external effect. Its admitted durability grade travels with `IntentAdmitted`,
+and every outcome acknowledgement is checked against that grade. If a weak
+acknowledgement has already advanced the ladder, recovery holds the known
+outcome as `RecordingFailed`; it invokes the journal's explicit
+`confirm_outcome` receipt operation rather than treating `OutOfOrder` or event
+read-back as proof. That retry upgrades recording only and never re-enters the
+effect. An adapter that cannot issue such a receipt leaves the hold in place.
 
 ## Where the tests live
 
