@@ -1318,7 +1318,7 @@ mod tests {
 /// work as already applied). Two *events* with equal content must still be
 /// distinguishable — content equality is not event identity — so a caller that
 /// needs that puts the event id into the value and into this trait. See
-/// [`EventId`](crate::effect::EventId).
+/// [`EventId`].
 ///
 /// Every integer writes `to_le_bytes` of a fixed width, so a 32-bit and a
 /// 64-bit target derive the same identity (issue #101).
