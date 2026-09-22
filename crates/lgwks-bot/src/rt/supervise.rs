@@ -260,6 +260,8 @@ pub enum TaskOutcome {
     Completed {
         /// The task that ended.
         task: TaskId,
+        /// Process-tree cleanup evidence, when this was a supervised process.
+        cleanup: Option<CleanupReceipt>,
     },
     /// The body returned while cancellation was in force.
     ///
@@ -275,6 +277,8 @@ pub enum TaskOutcome {
     Cancelled {
         /// The task that ended.
         task: TaskId,
+        /// Process-tree cleanup evidence, when this was a supervised process.
+        cleanup: Option<CleanupReceipt>,
     },
     /// The runtime dropped the body before it finished.
     ///
@@ -325,7 +329,27 @@ pub enum TaskOutcome {
         /// [`ExitStatus::code`]`() == None` with a signal number, so a status
         /// that is present is not automatically a code.
         status: Option<ExitStatus>,
+        /// Process-tree cleanup evidence, when this was a supervised process.
+        cleanup: Option<CleanupReceipt>,
     },
+}
+
+/// Evidence about the owned process group after its leader ended or cancellation
+/// requested termination.
+///
+/// Unix process groups are weaker than a kernel job object: a descendant that
+/// deliberately creates a new session is outside this guarantee. `Pending`
+/// therefore remains a truthful result when the bounded drain could not prove
+/// that the original group disappeared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CleanupReceipt {
+    /// The group no longer exists after the bounded termination/drain.
+    CleanupConfirmed,
+    /// Termination was requested, but the bounded drain did not prove removal.
+    CleanupPending,
+    /// The operating system refused the termination request.
+    CleanupFailed,
 }
 
 impl TaskOutcome {
@@ -333,8 +357,8 @@ impl TaskOutcome {
     #[must_use]
     pub const fn task(&self) -> TaskId {
         match *self {
-            Self::Completed { task }
-            | Self::Cancelled { task }
+            Self::Completed { task, .. }
+            | Self::Cancelled { task, .. }
             | Self::Aborted { task }
             | Self::Failed { task, .. }
             | Self::Panicked { task, .. } => task,
@@ -385,6 +409,17 @@ impl TaskOutcome {
             | Self::Cancelled { .. }
             | Self::Aborted { .. }
             | Self::Panicked { .. } => None,
+        }
+    }
+
+    /// Process-tree cleanup evidence, when this outcome belongs to a process.
+    #[must_use]
+    pub const fn cleanup(&self) -> Option<CleanupReceipt> {
+        match *self {
+            Self::Completed { cleanup, .. }
+            | Self::Cancelled { cleanup, .. }
+            | Self::Failed { cleanup, .. } => cleanup,
+            Self::Aborted { .. } | Self::Panicked { .. } => None,
         }
     }
 
@@ -589,8 +624,20 @@ pub struct Supervisor {
 enum TaskEnd {
     /// The body ran to the end of its own work.
     Completed,
+    /// A supervised process exited and its process-group cleanup was checked.
+    #[cfg(feature = "process")]
+    CompletedWithCleanup {
+        /// Process-group cleanup evidence.
+        cleanup: CleanupReceipt,
+    },
     /// The body stopped because its token was cancelled.
     Cancelled,
+    /// A supervised process was cancelled and its process-group cleanup was checked.
+    #[cfg(feature = "process")]
+    CancelledWithCleanup {
+        /// Process-group cleanup evidence.
+        cleanup: CleanupReceipt,
+    },
     /// A supervised process ended without exiting successfully.
     ///
     /// Distinct from [`TaskEnd::Completed`] because the body cannot express it:
@@ -607,6 +654,8 @@ enum TaskEnd {
     Failed {
         /// The status the engine reported, if it reported one.
         status: Option<ExitStatus>,
+        /// Process-group cleanup evidence.
+        cleanup: CleanupReceipt,
     },
 }
 
@@ -652,6 +701,10 @@ const MAX_PANIC_MESSAGE_CHARS: usize = 512;
 /// it spends it on the shutdown path — the terminal one, where a delay is
 /// cheaper than a misreported outcome.
 const COOPERATIVE_DRAIN_GRACE: Duration = Duration::from_millis(50);
+
+/// Number of bounded group probes used after a leader exits.
+#[cfg(feature = "process")]
+const PROCESS_CLEANUP_ATTEMPTS: usize = 64;
 
 /// The in-flight ceiling [`Supervisor::default`] falls back to when the OS will
 /// not report a usable processor count.
@@ -951,21 +1004,21 @@ impl Supervisor {
         #[cfg(unix)]
         command.process_group(0);
         let child = start(command)?;
+        // Construct the guard before the child is placed in the async task. If
+        // the task is aborted before its first poll, this guard still owns the
+        // cleanup fallback for a process that native spawning already started.
+        let mut group = ProcessGroup::of(&child);
         Ok(self.place(permit, async move {
             let mut child = child;
-            let mut group = ProcessGroup::of(&child);
             match token.run_until_cancelled(child.wait()).await {
-                // The child was reaped, so its group is empty or already gone.
-                // The guard is disarmed before this frame can unwind: the OS
-                // may reissue a reaped id, and a stale group id signalled later
-                // would kill whatever inherited it.
                 Some(Ok(status)) => {
-                    group.disarm();
+                    let cleanup = group.cleanup().await;
                     if status.success() {
-                        TaskEnd::Completed
+                        TaskEnd::CompletedWithCleanup { cleanup }
                     } else {
                         TaskEnd::Failed {
                             status: Some(status),
+                            cleanup,
                         }
                     }
                 }
@@ -973,30 +1026,16 @@ impl Supervisor {
                 // the process is still running. The guard is left armed and the
                 // group is killed as the frame unwinds, rather than reporting a
                 // status nobody has.
-                Some(Err(_)) => TaskEnd::Failed { status: None },
+                Some(Err(_)) => TaskEnd::Failed {
+                    status: None,
+                    cleanup: group.cleanup().await,
+                },
                 // Cancelled. The group is killed **synchronously**, and the
                 // child is then dropped rather than reaped.
                 //
-                // The signal has been delivered by the time `kill` returns,
-                // which is the whole guarantee, and it is the reason the order
-                // is kill-then-reap rather than the other way round: reaping
-                // first would wait for a process that has no reason to exit on
-                // its own.
-                //
-                // The child is not awaited afterwards, and that is deliberate.
-                // The engine's `wait` needs a SIGCHLD round trip through its
-                // driver, and the supervisor's cooperative drain window is
-                // shorter than that by design, so the task would be aborted
-                // before it could report — a cancelled process would surface as
-                // `Aborted`, collapsing the distinction this path exists to
-                // preserve. Awaiting the reap buys nothing the signal did not
-                // already guarantee, and leaks nothing: dropping the child
-                // re-sends the kill through `kill_on_drop`, and the engine's
-                // orphan reaper waits on it from the signal handler.
                 None => {
-                    group.kill();
-                    group.disarm();
-                    TaskEnd::Cancelled
+                    let cleanup = group.cleanup().await;
+                    TaskEnd::CancelledWithCleanup { cleanup }
                 }
             }
         }))
@@ -1141,18 +1180,44 @@ impl Supervisor {
                 self.succeeded = self.succeeded.saturating_add(1);
                 self.identities
                     .remove(&raw)
-                    .map(|task| TaskOutcome::Completed { task })
+                    .map(|task| TaskOutcome::Completed {
+                        task,
+                        cleanup: None,
+                    })
+            }
+            #[cfg(feature = "process")]
+            Ok((_, TaskEnd::CompletedWithCleanup { cleanup })) => {
+                self.succeeded = self.succeeded.saturating_add(1);
+                self.identities
+                    .remove(&raw)
+                    .map(|task| TaskOutcome::Completed {
+                        task,
+                        cleanup: Some(cleanup),
+                    })
             }
             Ok((_, TaskEnd::Cancelled)) => {
                 self.cancelled = self.cancelled.saturating_add(1);
                 self.identities
                     .remove(&raw)
-                    .map(|task| TaskOutcome::Cancelled { task })
+                    .map(|task| TaskOutcome::Cancelled {
+                        task,
+                        cleanup: None,
+                    })
+            }
+            #[cfg(feature = "process")]
+            Ok((_, TaskEnd::CancelledWithCleanup { cleanup })) => {
+                self.cancelled = self.cancelled.saturating_add(1);
+                self.identities
+                    .remove(&raw)
+                    .map(|task| TaskOutcome::Cancelled {
+                        task,
+                        cleanup: Some(cleanup),
+                    })
             }
             // Gated with the variant and with the feature that produces it:
             // nothing else in this crate can report a non-zero process exit.
             #[cfg(feature = "process")]
-            Ok((_, TaskEnd::Failed { status })) => {
+            Ok((_, TaskEnd::Failed { status, cleanup })) => {
                 // Counted as its own kind rather than folded into `succeeded`:
                 // a process that exited 1 is work that did not do what it was
                 // asked, and a counter that cannot see the difference reports a
@@ -1161,7 +1226,11 @@ impl Supervisor {
                 self.failed = self.failed.saturating_add(1);
                 self.identities
                     .remove(&raw)
-                    .map(|task| TaskOutcome::Failed { task, status })
+                    .map(|task| TaskOutcome::Failed {
+                        task,
+                        status,
+                        cleanup: Some(cleanup),
+                    })
             }
             Err(error) if error.is_panic() => {
                 self.panicked = self.panicked.saturating_add(1);
@@ -1273,19 +1342,38 @@ impl ProcessGroup {
         Self { group, armed: true }
     }
 
-    /// Signal the whole group.
-    ///
-    /// The result is deliberately not used: this is called from [`Drop`] and
-    /// from the cancellation path, neither of which has anywhere to report it,
-    /// and a failure means the group has already gone or the OS refused the
-    /// signal. Neither case leaves a process running that this crate could have
-    /// stopped — `kill_on_drop(true)` independently covers the direct child,
-    /// and the group is what covers its children.
+    /// Terminate the group and probe until it disappears or the bounded drain
+    /// is exhausted. A successful signal is not treated as proof of cleanup.
+    async fn cleanup(&mut self) -> CleanupReceipt {
+        if self.group <= 0 {
+            return CleanupReceipt::CleanupFailed;
+        }
+        for attempt in 0..PROCESS_CLEANUP_ATTEMPTS {
+            match lgwks_std::process::kill_process_group(self.group) {
+                Ok(()) => {
+                    if attempt.saturating_add(1) < PROCESS_CLEANUP_ATTEMPTS {
+                        yield_now().await;
+                    }
+                }
+                Err(error)
+                    if error.kind() == io::ErrorKind::NotFound
+                        || error.raw_os_error() == Some(3) =>
+                {
+                    self.disarm();
+                    return CleanupReceipt::CleanupConfirmed;
+                }
+                Err(_) => return CleanupReceipt::CleanupFailed,
+            }
+        }
+        CleanupReceipt::CleanupPending
+    }
+
+    /// Signal the whole group as a drop-time safety fallback.
     fn kill(&self) {
         if self.group <= 0 {
             return;
         }
-        let _outcome: io::Result<()> = lgwks_std::process::kill_process_group(self.group);
+        let _outcome = lgwks_std::process::kill_process_group(self.group);
     }
 
     /// Mark the group as already gone, so [`Drop`] does not signal it.
