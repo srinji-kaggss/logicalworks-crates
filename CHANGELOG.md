@@ -26,6 +26,7 @@ explicitly under that crate.
 - `Weighted::try_new` is removed. It was an alias for `Weighted::new` with no
   callers anywhere in the workspace.
 
+
 ### lgwks_std Added
 
 - `Debug` for `Hasher` (reports bytes written), `Weighted` (reports the
@@ -33,6 +34,7 @@ explicitly under that crate.
   running / done / panicked / taken). All three were unprintable, so a consumer
   that wanted to log one wrote a wrapper that then had to change whenever the
   type did.
+
 
 ### lgwks_bot Breaking
 
@@ -47,8 +49,59 @@ explicitly under that crate.
 - `Bot::resolve_effect` takes an `EffectKey` instead of a work id and a
   caller-supplied revision. `EffectKey` is now the settlement identity: `Bot::pending`
   hands one back, and evidence is compared by `ActionDigest` and `AttemptId`.
+- `RetryFacts::with_authority(bool)` is now
+  `RetryFacts::with_live_authority()`. Authority defaults to not live and the
+  refusing direction is the default, so `true` was the only setting a caller
+  could meaningfully pass: `with_authority(false)` spelled out the default under a
+  name that read like a choice, and the parameter made every call site decode
+  which way round the boolean went. Removing it removes the question.
+
 
 ### lgwks_bot Added
+
+- **`EffectScope::ephemeral()`, and a run identity a host can mint.** Building a
+  bot with no host, no persisted history and no flow document meant writing an
+  identity out by hand: a `RunId` and an `EnvironmentId` as literal hex, a
+  `FlowRevision` as a literal digest, a registered broker and an in-memory
+  journal, in that order, in every test and example. `EffectScope::ephemeral()`
+  mints the two identities from OS entropy, registers that environment, and
+  pairs them with a `MemoryJournal`.
+
+  It is a capability rather than a convenience because of what the journal
+  refuses: `MemoryJournal` reports `DurabilityPromise::Ephemeral`, and
+  `EffectJournal::admit_external_handoff` returns `JournalError::PromiseUnmet`
+  for it — so an effect that would leave the process fails at the boundary
+  instead of proceeding on a record that cannot outlive the process that wrote
+  it. The difference between this and "no journal" is that this one says so.
+
+  `RunId::mint()` and `EnvironmentId::mint()` are public for the same reason
+  from the durable side: the module has always said the run identity is
+  *generated* before the first admission, and until now the only way to generate
+  one was to supply hex. `ActionId` deliberately gains none — the crate already
+  derives it from a bot's structure, and a second way to make one value is the
+  thing the dependency and API doctrine both refuse. `FlowRevision` is a fixed
+  domain-separated constant in the ephemeral case, because an ephemeral run has
+  no flow document and minting a revision would assert a content change that did
+  not happen.
+- `MintError` and `EphemeralError`, both `#[non_exhaustive]` and both carrying
+  their cause rather than flattening it to a string.
+- Feature `ephemeral`, **opt-in**, which turns on `lgwks_std/random`. It authors
+  no edge of its own: `getrandom` is owned by `lgwks_std` under
+  `contract/APPROVED.toml` and this is a feature of a dependency the crate
+  already has. `lgwks_std` enforces INV-RANDOM-ONE-SOURCE, which is why there is
+  no cheaper fallback here — a run id derived from a clock, a pid or a counter
+  is the collision that invariant exists to refuse.
+
+  It is not in the default set, and the reason is the target rather than the
+  cost. Minting needs OS entropy, `lgwks_std::random` is linux/macOS/windows
+  only and refuses the rest with a `compile_error!`, and this crate's default
+  feature set is built for `wasm32-wasip1` by the WASI boundary job. A
+  default-on `ephemeral` makes the default set fail to build on a target the
+  crate supports. `signal` is host-only in the same way and is default-off for
+  the same reason. `full` includes `ephemeral`, and the runner step tests
+  `--features full`, so the ephemeral tests execute in CI rather than only
+  compiling.
+
 
 - **Write-ahead dispatch.** `IntentAdmitted` and `DispatchPrepared` are committed
   to the journal before the effect leaves the process, and `Broker::revalidate`
@@ -62,16 +115,21 @@ explicitly under that crate.
   which refused every `NotApplied` retry as `OutOfOrder`; and a crash after a
   landed effect left the run unable to continue past that entry at all.
 - `Debug` for the public surface. Every public type in the crate now implements
-  it except three macro-invoked families in `effect.rs` (`Id128`-generated ids,
-  `counter_role!`, `digest_role!`). Derived where a derive is the right
-  rendering, manual where it is not, with the reason on the impl.
-  `SemanticResolver` uses `finish_non_exhaustive` rather than acquiring an
-  `E: Debug` bound that no `Embedder` is required to satisfy. `Session` prints
-  counts rather than the transcript entry by entry, and the `bevy_ecs`-backed
-  types do not descend into a schedule that has no `Debug`.
+  it except the seven `*Resolver` companions rkyv generates for the three
+  macro-invoked families in `effect.rs` (`id_role!`, `counter_role!`,
+  `digest_role!`): `RunIdResolver` through `ActionDigestResolver`. The named
+  types and their `Archived*` companions do have it, so the
+  `#[rkyv(derive(Debug))]` attribute reaches the archived type and stops short of
+  the resolver. Derived where a derive is the right rendering, manual where it is
+  not, with the reason on the impl. `SemanticResolver` uses
+  `finish_non_exhaustive` rather than acquiring an `E: Debug` bound that no
+  `Embedder` is required to satisfy. `Session` prints counts rather than the
+  transcript entry by entry, and the `bevy_ecs`-backed types do not descend into
+  a schedule that has no `Debug`.
 - `#[must_use]` on `eval::{Changed, Below, Above}::new`, which their three
   sibling constructors already carried. `must_use_candidate` does not reach
   `-> Self` constructors, which is how the inconsistency survived a green build.
+
 
 ### lgwks_bot Fixed
 
@@ -82,6 +140,67 @@ explicitly under that crate.
   the alias table is a `BTreeMap`, so a derived `Debug` prints it in key order
   and is stable across runs. Both now derive `Debug`, and both comments say what
   is true.
+- `#[must_use]` on `EcsBuilder::observe`, `EcsObserveBuilder::on` and
+  `EcsObserveBuilder::observe`. Each one consumes a builder and hands back the
+  next, so a discarded result silently drops every `on` declared up to that
+  point. A sweep of the crate's public surface found 103 methods returning
+  `Self`: 92 carry `#[must_use]`, and the 11 that do not are all `new`
+  constructors. `EcsObserveBuilder::on` was the only consuming builder without
+  it. The two `observe` methods return `EcsObserveBuilder<_>` rather than `Self`,
+  so a scan for `-> Self` does not see them, and neither of those carried it
+  either. `must_use_candidate` reaches none of the three, which is how they
+  survived a green build.
+
+
+### lgwks_bot Documentation
+
+- Five citations in `docs/guides/lgwks-bot/` were re-anchored to the lines this
+  change moved in `ecs.rs`. `getting-started.md` also credited the
+  `Observe::Output: PartialEq` requirement to `EcsBuilder::observe`, which
+  carries no such bound; it lands on `EcsObserveBuilder::observe`, the call that
+  closes a chain, and the citation now points at the bound.
+- The `ephemeral` scope grew `ecs.rs` by 113 lines and `spec.rs` by four, and the
+  guides cite both by line, so all twenty-four citations under them landed on
+  whatever now occupied the number. Nine were caught, having resolved to a
+  closing brace, a blank line or an empty `///`. The other fifteen resolved to a
+  plausible line that was not the one cited, which is the class the checker
+  deliberately does not judge. All twenty-four were re-anchored to the line they
+  named before the growth, matched by the text of that line rather than by the
+  numbers the offset would predict; the five whose text is not unique in the
+  file were confirmed by reading them.
+
+### Repository Added
+
+- `scripts/check-std-first.py`, and a CI step that runs it. `lgwks-deps check`
+  enforces the manifest half of the `std`-first rule and cannot see the other
+  half, which lives in the source: a `use` of a crate no manifest declares
+  (buildable only because something else in the graph re-exports it), and a
+  capability hand-rolled beside the `lgwks_std` module that already provides it.
+  Every crate reached past `std` and the four surfaces is reported with the
+  approval record behind it — owner, capability and the reason the approver
+  wrote — so `--justify` prints the answer to "why is this edge here" instead of
+  leaving it to a reviewer's memory.
+
+  It carries four written exemptions, each pinning the exempted line's text as
+  well as its number, because a `path:line` key alone would silently cover
+  whatever later occupied that line. A moved exemption is a `STALE EXEMPTION`
+  finding, not a silent yes.
+
+
+### Repository Changed
+
+- **CI runs the matrix once per change instead of twice.** `on.push` is scoped
+  to `main` now, because a pull request already runs all eleven jobs for its head
+  commit and the branch push ran every one of them again for the same tree. A
+  `concurrency` group supersedes a run on a branch that has been pushed again,
+  and never supersedes a run on `main`.
+- **The rustdoc gate is runnable outside CI.** `scripts/doc-lanes.sh` holds the
+  four lanes the Docs job runs, and the job, `AGENTS.md` and `docs/releasing.md`
+  all call it instead of restating the commands. Which links break depends on which features are on,
+  so the gate is four lanes and not one command, and none of them was reachable
+  from the `Checks that must pass` list, which named no doc build at all: a
+  broken intra-doc link is a warning rather than an error, so the crate built
+  green and the break surfaced only after the push.
 
 ### Repository Changed
 

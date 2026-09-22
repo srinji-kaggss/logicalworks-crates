@@ -64,10 +64,32 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --all -- --check
 cargo run -p lgwks_deps -- check .
 ./scripts/lgwks-std-package-smoke.sh
+./scripts/doc-lanes.sh
+python3 scripts/check-std-first.py
 ```
 
 `lgwks-deps check` is the first CI job. A green compile with an unregistered
 edge is a refused build, not a passing one.
+
+`./scripts/doc-lanes.sh` is the rustdoc gate, and it was the one check reachable
+only from CI. A broken intra-doc link is a warning rather than an error, so the
+build fails only under `RUSTDOCFLAGS='-D warnings'`, and *which* links break
+depends on which features are on. The script runs the four lanes the Docs job
+runs — every feature, no features, the default set, and each `lgwks_std` feature
+alone — and takes about a minute. Each lane has caught a break the other three
+could not see: `trace` linking to `json`, `retry` to `random`, `wire` to `json`.
+Pass `all-features`, `no-default-features`, `default` or `per-feature` to run
+one of them.
+
+`scripts/check-std-first.py` is the other half of the same rule, and it reads
+the source rather than the manifest. `lgwks-deps check` sees every authored
+edge; it cannot see a `use` of a crate nobody declared, which builds only
+because something else in the graph re-exports it, or a capability hand-rolled
+beside the `lgwks_std` module that already provides it. Every crate the source
+reaches past `std` and the four surfaces is printed with the record that
+approves it, so the answer to "why is this edge here" is in the output rather
+than in a reviewer's memory. Run it with `--justify` to see those records
+whether or not there is a finding.
 
 ## What the gate enforces
 

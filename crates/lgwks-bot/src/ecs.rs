@@ -183,12 +183,16 @@ use lgwks_std::hash::{Digest, Hasher};
 
 use super::broker::{Authority, Broker, DispatchError, prepare_dispatch};
 use super::cap::{Deficit, Demand, Shortage};
+#[cfg(feature = "ephemeral")]
+use super::effect::MintError;
 use super::effect::{
     ActionDigest, ActionId, AttemptId, EffectIdentity, EffectKey, EnvironmentEpoch, FlowRevision,
     Id128,
 };
 use super::error::{BotError, DispatchCertainty, Escaped, RetryClass};
 use super::gate::GrantSet;
+#[cfg(feature = "ephemeral")]
+use super::journal::MemoryJournal;
 use super::journal::{AttemptStatus, EffectEvent, EffectJournal, JournalError, recover};
 use super::spec::{ChainEntry, Erased, ObserveAny, Witness, typed_entry};
 use super::verb::{Evaluate, Execute, Observe};
@@ -306,6 +310,59 @@ pub struct EffectScope {
     journal: Box<dyn EffectJournal>,
 }
 
+/// Why an ephemeral scope could not be built.
+///
+/// Two arms, because building one crosses two independent refusals: the
+/// operating system's entropy source, and the broker's registration of the
+/// environment the identity was minted against. Neither converts into the
+/// other, and flattening them would name the wrong failure.
+#[cfg(feature = "ephemeral")]
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum EphemeralError {
+    /// A run or environment identifier could not be minted.
+    Mint(MintError),
+    /// The broker refused to register the minted environment.
+    ///
+    /// Unreachable through this constructor, which registers exactly one
+    /// freshly minted id into an empty broker, and present because
+    /// [`Broker::register`] has a refusal channel and this crate has no
+    /// `unwrap` to spend on a proof it cannot state to the compiler.
+    Broker(super::broker::BrokerError),
+}
+
+#[cfg(feature = "ephemeral")]
+impl fmt::Display for EphemeralError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `*self` and `ref`, for the reason `JournalError` gives: the patterns
+        // then carry the enum's own type and `pattern_type_mismatch` is
+        // satisfied without a dereference at each field.
+        match *self {
+            Self::Mint(ref cause) => write!(f, "could not mint an ephemeral identity: {cause}"),
+            Self::Broker(ref cause) => {
+                write!(f, "could not register the ephemeral environment: {cause}")
+            }
+        }
+    }
+}
+
+#[cfg(feature = "ephemeral")]
+impl std::error::Error for EphemeralError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match *self {
+            Self::Mint(ref cause) => Some(cause),
+            Self::Broker(ref cause) => Some(cause),
+        }
+    }
+}
+
+#[cfg(feature = "ephemeral")]
+impl From<MintError> for EphemeralError {
+    fn from(cause: MintError) -> Self {
+        Self::Mint(cause)
+    }
+}
+
 /// Printed as the journal's promise and position rather than as the journal.
 ///
 /// [`EffectJournal`] is an object-safe trait with no `Debug` bound, and adding
@@ -325,6 +382,17 @@ impl fmt::Debug for EffectScope {
 
 impl EffectScope {
     /// Record the identity, the fence and the journal a bot dispatches under.
+    ///
+    /// A caller with no host identity to supply — a test, an example, or work
+    /// whose effects stay in this process — wants `EffectScope::ephemeral()`
+    /// (feature `ephemeral`), which mints the identity and pairs it with an
+    /// in-memory journal. It is not a shorter spelling of this: the journal it
+    /// supplies is one [`EffectJournal::admit_external_handoff`] refuses, so the
+    /// two are different capabilities rather than two ways to do one.
+    ///
+    /// Spelled as a code span rather than a link because the method is behind
+    /// that feature, and a `--no-default-features` build has no item to link to
+    /// — which the rustdoc gate refuses rather than tolerating.
     #[must_use]
     pub fn new(identity: EffectIdentity, broker: Broker, journal: Box<dyn EffectJournal>) -> Self {
         Self {
@@ -332,6 +400,51 @@ impl EffectScope {
             broker,
             journal,
         }
+    }
+
+    /// A scope for a run whose effects never leave the process.
+    ///
+    /// The one constructor a caller reaches for when there is no host, no
+    /// persisted history and no flow document: a test, an example, or work
+    /// whose effects stay inside this process. It mints a fresh run and
+    /// environment from OS entropy, registers that environment, and pairs them
+    /// with an in-memory journal.
+    ///
+    /// **The scope is safe to hand to real code because the journal refuses to
+    /// be the record behind an external handoff.** [`MemoryJournal`] reports
+    /// [`DurabilityPromise::Ephemeral`], and
+    /// [`EffectJournal::admit_external_handoff`] returns
+    /// [`JournalError::PromiseUnmet`] for it — so a dispatch that would leave
+    /// the process fails at the boundary rather than proceeding on a record
+    /// that cannot survive the process it was written in. That refusal is what
+    /// makes this a capability rather than a testing shortcut: it is the
+    /// difference between "no journal" and "a journal that tells you it is not
+    /// enough".
+    ///
+    /// The three pieces [`EffectScope::new`] takes separately are still three
+    /// pieces — this supplies all three rather than fusing them, so a caller
+    /// that outgrows the ephemeral case can read each one back out
+    /// ([`identity`](Self::identity), [`broker`](Self::broker),
+    /// [`into_journal`](Self::into_journal)) and move to a durable journal
+    /// without rebuilding the identity.
+    ///
+    /// # Errors
+    ///
+    /// [`EphemeralError::Mint`] when the operating system's entropy source
+    /// could not be read, and [`EphemeralError::Broker`] if the broker refused
+    /// the minted environment.
+    ///
+    /// [`DurabilityPromise::Ephemeral`]: crate::journal::DurabilityPromise::Ephemeral
+    /// [`EffectJournal::admit_external_handoff`]: crate::journal::EffectJournal::admit_external_handoff
+    /// [`JournalError::PromiseUnmet`]: crate::journal::JournalError::PromiseUnmet
+    #[cfg(feature = "ephemeral")]
+    pub fn ephemeral() -> Result<Self, EphemeralError> {
+        let identity = EffectIdentity::ephemeral()?;
+        let mut broker = Broker::new();
+        broker
+            .register(identity.environment())
+            .map_err(EphemeralError::Broker)?;
+        Ok(Self::new(identity, broker, Box::new(MemoryJournal::new())))
     }
 
     /// The host's three run-level facts.
@@ -3514,6 +3627,7 @@ impl EcsBuilder {
     /// happens in [`EcsObserveBuilder::observe`] and
     /// [`EcsObserveBuilder::build`], which are the two points where the chain
     /// stops being a declaration and becomes a chain.
+    #[must_use]
     pub fn observe<S>(self, source: S) -> EcsObserveBuilder<S>
     where
         S: Observe,
@@ -3575,6 +3689,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
     /// next stage's input is a consequence of the previous one's output. A free
     /// parameter here is how this defect happened once, and it will happen again
     /// the first time a verb takes a type the chain does not determine.
+    #[must_use]
     pub fn on<C, A>(mut self, condition: C, action: A) -> Self
     where
         S::Output: 'static,
@@ -3598,6 +3713,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
     /// change detection, and a value that cannot be compared cannot be detected
     /// as changed. [`Bot::builder`](crate::Bot::builder) carries no such bound
     /// because its condition is re-evaluated every tick and needs no equality.
+    #[must_use]
     pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
     where
         S: 'static,
