@@ -23,3 +23,6 @@ proofs/.hol/
 # committed, runnable tools; importing one — which is how a checker's helpers
 # get exercised while it is being written — leaves a cache beside it.
 __pycache__/
+
+# local gate receipts: derived from a run, not tree content
+evidence/

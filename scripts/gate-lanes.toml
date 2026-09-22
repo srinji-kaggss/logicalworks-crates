@@ -1,0 +1,405 @@
+# The gate's lane table: the one definition of what the gate runs and where.
+#
+# `scripts/ci_local.py` executes the local lanes from here. `scripts/check-gate-parity.py`
+# asserts every lane that names a `ci_step` matches the step of that name in
+# `.github/workflows/ci.yml`, and that every gate step in ci.yml is claimed by a
+# lane. A second hand-copied command list drifts, and the drift is invisible
+# because each side still looks green on its own terms — which is exactly the
+# claim issue #127 refused.
+#
+# Fields
+#   id        stable lane name. The receipt and the tests refer to it.
+#   surfaces  "local", "ci", or "local ci". A lane is evidence only for the
+#             surfaces named here: a green local run never covers a `ci` lane,
+#             and the receipt lists every lane this surface did not cover.
+#   required  false only when the lane cannot apply on every host. An
+#             unavailable *required* lane is `blocked` and refuses the gate.
+#             An unavailable *optional* lane is `skip`, reported by name and
+#             never counted as `pass`.
+#   command   the exact shell command. Shared lanes carry the text here and CI
+#             runs the same string (or a prefix of it, when the CI step adds
+#             diagnostics), so the parity check can compare them.
+#   ci_step   the step `name:` in ci.yml that runs this lane. Required for any
+#             lane with "ci" in surfaces that runs as a named step.
+#   ci_job    the job `name:` in ci.yml for a lane that runs as unnamed `run:`
+#             steps of a whole job (the AppCUI matrix).
+#   builtin   instead of `command`, the name of a check implemented inside
+#             `ci_local.py`. Used for the scanners that must be unit-tested
+#             against fixture trees rather than shelled out. When such a lane
+#             runs in CI, the step is `python3 scripts/ci_local.py --lane <id>`.
+#   needs     prerequisites checked before the lane runs. A missing one makes a
+#             required lane `blocked` rather than silently absent.
+#             Recognised: `module:<python module>`, `script:<path>` (must exist
+#             and be executable), `bin:<name>` (must be on PATH).
+#   platforms Python `sys.platform` values this lane applies to. A host outside
+#             the list reports the lane `skip` (out of scope) rather than
+#             failing it. Omitted means every host.
+#   fast      true when the lane belongs to the `--fast` set.
+#   reason    why a lane is optional or platform-bound.
+
+[toolchain]
+rust = "1.98.0"
+
+# ── shared: one command, both surfaces ──────────────────────────────────────
+
+[[lane]]
+id = "lockfile"
+surfaces = "local ci"
+required = true
+fast = true
+command = "cargo metadata --locked --format-version 1 >/dev/null"
+ci_step = "Verify lockfile is up-to-date"
+
+[[lane]]
+id = "deps-register"
+surfaces = "local ci"
+required = true
+fast = true
+command = "cargo run --locked -p lgwks_deps --bin lgwks-deps -- check ."
+ci_step = "Enforce dependency edge ownership"
+
+[[lane]]
+id = "std-first"
+surfaces = "local ci"
+required = true
+fast = true
+command = "python3 scripts/check-std-first.py"
+ci_step = "Audit std-first and lgwks_std-first"
+
+[[lane]]
+id = "unwrap-scan"
+surfaces = "local ci"
+required = true
+fast = true
+builtin = "unwrap-scan"
+ci_step = "Forbid unwrap outside tests"
+
+[[lane]]
+id = "compile"
+surfaces = "local ci"
+required = true
+fast = true
+command = "cargo test --workspace --all-targets --locked --no-run"
+ci_step = "Build all workspace targets"
+
+[[lane]]
+id = "format"
+surfaces = "local ci"
+required = true
+fast = true
+command = "cargo fmt --all -- --check"
+ci_step = "Check formatting"
+
+[[lane]]
+id = "tests"
+surfaces = "local ci"
+required = true
+command = "cargo test --workspace --all-targets --locked"
+ci_step = "Run all workspace tests"
+
+[[lane]]
+id = "tests-bot-nodefault"
+surfaces = "local ci"
+required = true
+command = "cargo test -p lgwks_bot --all-targets --locked --no-default-features"
+ci_step = "Run lgwks-bot no-default-feature tests"
+
+[[lane]]
+id = "tests-std-full"
+surfaces = "local ci"
+required = true
+command = "cargo test -p lgwks_std --all-targets --locked --features full"
+ci_step = "Run lgwks-std full-feature tests"
+
+[[lane]]
+id = "tests-bot-full"
+surfaces = "local ci"
+required = true
+command = "cargo test -p lgwks_bot --all-targets --locked --features full"
+ci_step = "Run lgwks-bot async runner tests"
+
+[[lane]]
+id = "doc-tests"
+surfaces = "local ci"
+required = true
+command = "cargo test --workspace --doc --locked"
+ci_step = "Doc tests"
+
+[[lane]]
+id = "lint"
+surfaces = "local ci"
+required = true
+fast = true
+command = "cargo clippy --workspace --all-targets --locked -- -D warnings"
+ci_step = "Clippy all workspace targets"
+
+[[lane]]
+id = "docs-all-features"
+surfaces = "local ci"
+required = true
+command = "./scripts/doc-lanes.sh all-features"
+ci_step = "Doc build with broken-link denial"
+needs = ["script:scripts/doc-lanes.sh"]
+
+[[lane]]
+id = "llms-txt"
+surfaces = "local ci"
+required = true
+command = "python3 scripts/gen-llms-txt.py && git diff --exit-code -- llms.txt"
+ci_step = "llms.txt matches the documentation index"
+
+[[lane]]
+id = "doc-citations"
+surfaces = "local ci"
+required = true
+command = "python3 scripts/check-doc-citations.py"
+ci_step = "Documentation citations resolve"
+
+[[lane]]
+id = "contract-drift"
+surfaces = "local ci"
+required = true
+fast = true
+builtin = "contract-drift"
+ci_step = "Validate the dependency contract alignment"
+
+[[lane]]
+id = "package-smoke"
+surfaces = "local ci"
+required = true
+command = "./scripts/lgwks-std-package-smoke.sh"
+ci_step = "Run package smoke test"
+needs = ["script:scripts/lgwks-std-package-smoke.sh"]
+
+# ── shared feature sweeps ───────────────────────────────────────────────────
+# One command per lane, the same list CI runs. Local pays the wall-clock so a
+# green local run is evidence for the CI step of the same name.
+
+[[lane]]
+id = "clippy-feature-matrix"
+surfaces = "local ci"
+required = true
+command = """\
+cargo clippy --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --all-features -- -D warnings && \
+cargo clippy --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --all-features -- -D warnings && \
+cargo clippy --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --all-features -- -D warnings && \
+cargo clippy --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features tokio-full -- -D warnings\
+"""
+ci_step = "Clippy feature matrix"
+
+[[lane]]
+id = "clippy-nodefault"
+surfaces = "local ci"
+required = true
+command = """\
+cargo clippy --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --no-default-features -- -D warnings && \
+cargo clippy --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --no-default-features -- -D warnings && \
+cargo clippy --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --no-default-features -- -D warnings\
+"""
+ci_step = "Clippy no default features"
+
+[[lane]]
+id = "clippy-process-only"
+surfaces = "local ci"
+required = true
+command = "cargo clippy --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --no-default-features --features process -- -D warnings"
+ci_step = "Clippy process-only"
+
+[[lane]]
+id = "feat-std"
+surfaces = "local ci"
+required = true
+command = """\
+cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --no-default-features && \
+cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets && \
+cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features hash --no-default-features && \
+cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features pattern --no-default-features && \
+cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features json --no-default-features && \
+cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features wire --no-default-features && \
+cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features http --no-default-features && \
+cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features online --no-default-features && \
+cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features fs-raw --no-default-features && \
+cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --all-features\
+"""
+ci_step = "Check lgwks-std feature matrix"
+
+[[lane]]
+id = "feat-deps-base"
+surfaces = "local ci"
+required = true
+command = "cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets"
+ci_step = "Check lgwks-deps"
+
+[[lane]]
+id = "feat-deps-tokio"
+surfaces = "local ci"
+required = true
+command = "cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features tokio"
+ci_step = "Check lgwks-deps storefront engine feature"
+
+[[lane]]
+id = "feat-deps-gpui"
+surfaces = "local ci"
+required = true
+command = "cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features gpui"
+ci_step = "Check lgwks-deps GPUI storefront feature"
+
+[[lane]]
+id = "feat-deps-ml"
+surfaces = "local ci"
+required = true
+command = "cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features ml-candle,ml-tokenizers"
+ci_step = "Check lgwks-deps ML storefront features"
+
+[[lane]]
+id = "feat-bot"
+surfaces = "local ci"
+required = true
+command = """\
+cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --no-default-features && \
+cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets && \
+cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --features net,process,fs,signal && \
+cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --all-features\
+"""
+ci_step = "Check lgwks-bot async feature matrix"
+
+[[lane]]
+id = "feat-ast"
+surfaces = "local ci"
+required = true
+command = """\
+cargo check --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --no-default-features && \
+cargo check --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets && \
+cargo check --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --all-features\
+"""
+ci_step = "Check lgwks-ast feature matrix"
+
+[[lane]]
+id = "wasi-boundary"
+surfaces = "local ci"
+required = false
+command = """\
+rustup target add wasm32-wasip1 && \
+cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --target wasm32-wasip1 --features rt\
+"""
+ci_step = "Check lgwks-bot WASI runtime boundary"
+needs = ["bin:rustup"]
+reason = "needs rustup and the wasm32-wasip1 target; skip by name when either is absent"
+
+[[lane]]
+id = "grammar-matrix"
+surfaces = "ci"
+required = true
+command = """\
+cargo test --locked -p lgwks_ast --lib --no-default-features && \
+cargo test --locked -p lgwks_ast --lib && \
+for grammar in bash c cpp csharp css dart elixir go haskell hcl html java javascript json kotlin lua md nix php python ruby rust scala solidity swift tsx typescript yaml; do \
+  cargo test --locked -p lgwks_ast --lib --no-default-features --features lang-$grammar || exit 1; \
+done && \
+cargo test --locked -p lgwks_ast --lib --all-features\
+"""
+ci_step = "Execute the lgwks-ast grammar matrix"
+reason = "CI runs it as a bash loop that reports every grammar; local reports the lane as not covered rather than re-deriving the loop"
+
+[[lane]]
+id = "docs-nodefault"
+surfaces = "local ci"
+required = true
+command = "./scripts/doc-lanes.sh no-default-features"
+ci_step = "Doc build without default features"
+needs = ["script:scripts/doc-lanes.sh"]
+
+[[lane]]
+id = "docs-default"
+surfaces = "local ci"
+required = true
+command = "./scripts/doc-lanes.sh default"
+ci_step = "Doc build at the default feature set"
+needs = ["script:scripts/doc-lanes.sh"]
+
+[[lane]]
+id = "docs-per-feature"
+surfaces = "local ci"
+required = true
+command = "./scripts/doc-lanes.sh per-feature"
+ci_step = "Doc build for each lgwks-std feature alone"
+needs = ["script:scripts/doc-lanes.sh"]
+
+[[lane]]
+id = "docsrs-metadata"
+surfaces = "local ci"
+required = true
+builtin = "docsrs-metadata"
+ci_step = "docs.rs metadata names a buildable feature set"
+
+[[lane]]
+id = "readme-quickstart"
+surfaces = "local ci"
+required = true
+builtin = "readme-quickstart"
+ci_step = "Root README quickstart matches its compiled example"
+
+# ── local only ──────────────────────────────────────────────────────────────
+# Working-tree rules the editor hooks enforce on write. Re-checking them here
+# means a shell-authored or imported file cannot slip past by never passing
+# through the editor. `gate-parity` is the meta-lane: it asserts this manifest
+# and ci.yml still describe the same gate.
+
+[[lane]]
+id = "suppressions"
+surfaces = "local"
+required = true
+fast = true
+builtin = "suppressions"
+
+[[lane]]
+id = "artifacts"
+surfaces = "local"
+required = true
+fast = true
+builtin = "artifacts"
+
+[[lane]]
+id = "gate-parity"
+surfaces = "local"
+required = true
+fast = true
+command = "python3 scripts/check-gate-parity.py"
+needs = ["module:yaml"]
+
+# ── ci only, platform-bound ─────────────────────────────────────────────────
+# A local run never covers these. The receipt names them. On a host outside
+# `platforms` the lane is `skip` (out of scope), never `pass`.
+
+[[lane]]
+id = "appcui-native"
+surfaces = "ci"
+required = false
+command = """\
+cargo test --locked -p lgwks_deps --no-default-features --features appcui --lib && \
+cargo test --locked -p lgwks_deps --no-default-features --features appcui --doc && \
+cargo clippy --locked -p lgwks_deps --no-default-features --features appcui --all-targets -- -D warnings\
+"""
+ci_job = "AppCUI native storefront"
+platforms = ["linux", "darwin", "win32"]
+reason = "native storefront; three unnamed run steps, so it binds to the job name"
+
+[[lane]]
+id = "gpui-macos"
+surfaces = "local ci"
+required = false
+command = "cargo check --locked -p lgwks_deps --all-targets --features gpui"
+ci_step = "Check normal GPUI renderer feature"
+platforms = ["darwin"]
+needs = ["bin:xcodebuild"]
+reason = "needs the Xcode Metal toolchain"
+
+[[lane]]
+id = "candle-metal"
+surfaces = "local ci"
+required = false
+command = "cargo check --locked -p lgwks_deps --all-targets --features ml-candle-metal,ml-tokenizers"
+ci_step = "Check Candle Metal storefront features"
+platforms = ["darwin"]
+needs = ["bin:xcodebuild"]
+reason = "needs the Xcode Metal toolchain"
