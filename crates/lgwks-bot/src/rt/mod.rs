@@ -100,5 +100,3 @@ pub mod supervise;
 pub mod sync;
 #[cfg(feature = "time")]
 pub mod time;
-
-pub use runtime::{Builder, Handle, Runtime, block_on};

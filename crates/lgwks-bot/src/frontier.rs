@@ -167,6 +167,12 @@
 //! [`Resolved`]: crate::frontier::Resolved
 //! [`Resolved::DoesNotExist`]: crate::frontier::Resolved::DoesNotExist
 //! [`Resolved::Failed`]: crate::frontier::Resolved::Failed
+//! [`Frontier`]: crate::frontier::Frontier
+//! [`Frontier::admit`]: crate::frontier::Frontier::admit
+//! [`Frontier::complete`]: crate::frontier::Frontier::complete
+//! [`Frontier::next_admissible`]: crate::frontier::Frontier::next_admissible
+//! [`Frontier::observe_retry_after`]: crate::frontier::Frontier::observe_retry_after
+//! [`InFlightPermit`]: crate::frontier::InFlightPermit
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
