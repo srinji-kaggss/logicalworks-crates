@@ -2,7 +2,7 @@
 //!
 //! [`ProcessSpec`] is data: it records what the supervisor may run, but it is
 //! not an engine command and has no process-control methods. The only execution
-//! path is [`Supervisor::spawn_process`], which keeps the child and its process
+//! path is [`Supervisor::spawn_process`](crate::rt::supervise::Supervisor::spawn_process), which keeps the child and its process
 //! group under supervisor ownership.
 
 use std::ffi::{OsStr, OsString};
