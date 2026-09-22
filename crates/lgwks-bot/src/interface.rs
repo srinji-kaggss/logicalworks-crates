@@ -596,10 +596,7 @@ impl RecognitionVector {
         let mut next: Option<(usize, f64)> = None;
 
         for (index, candidate) in candidates.iter().enumerate() {
-            if candidate.frames != target.frames {
-                continue;
-            }
-            if !tags_compatible(target, candidate) {
+            if !is_eligible(target, candidate) {
                 continue;
             }
             let score = self.scorer.score(target, candidate);
@@ -644,9 +641,9 @@ impl RecognitionVector {
     /// Resolves a target by walking `ladder` strongest-first.
     ///
     /// A rung decides by its own anchor and by nothing else. Candidates that
-    /// offer a non-empty value of that kind and whose value equals the target's
-    /// are the rung's hits; the fingerprint supplies the score fields but does
-    /// not get to overrule the rung. The verdict:
+    /// are eligible, offer a non-empty value of that kind, and whose value
+    /// equals the target's are the rung's hits; the fingerprint supplies the
+    /// score fields but does not get to overrule the rung. The verdict:
     ///
     /// - **One hit** is [`Recognition::Resolved`]. A unique strong hit is the
     ///   ladder working, and its `index` is into `candidates`, not into the
@@ -657,9 +654,11 @@ impl RecognitionVector {
     ///   two elements that share an `id` are not disambiguated by the fact that
     ///   only one of them happens to say "Submit" today.
     /// - **No hits** falls through. A weaker fact gets its chance. The rung
-    ///   still contributes a sub-threshold `best_score` — how close the
+    ///   still contributes its measured `best_score` — how close the eligible
     ///   offerers came — so the final `Absent` is the strongest near-miss any
-    ///   rung observed rather than a bare zero.
+    ///   rung observed rather than a bare zero. A high-scoring candidate with
+    ///   the wrong anchor remains absent: the score is evidence, not an anchor
+    ///   match.
     ///
     /// A rung the target itself does not offer is skipped: there is nothing to
     /// match against, which is the same rule [`ElementFacts::anchor`] states
@@ -679,7 +678,9 @@ impl RecognitionVector {
             let hits: Vec<usize> = candidates
                 .iter()
                 .enumerate()
-                .filter(|entry| entry.1.anchor(*kind) == Some(wanted))
+                .filter(|entry| {
+                    is_eligible(target, entry.1) && entry.1.anchor(*kind) == Some(wanted)
+                })
                 .map(|(index, _)| index)
                 .collect();
 
@@ -687,11 +688,12 @@ impl RecognitionVector {
                 0 => {
                     let near_miss = candidates
                         .iter()
-                        .filter(|candidate| candidate.anchor(*kind).is_some())
+                        .filter(|candidate| {
+                            is_eligible(target, candidate) && candidate.anchor(*kind).is_some()
+                        })
                         .map(|candidate| self.scorer.score(target, candidate))
                         .fold(0.0_f64, f64::max);
                     if let Recognition::Absent { best_score: prior } = strongest_absent
-                        && near_miss < self.scorer.threshold()
                         && near_miss > prior
                     {
                         strongest_absent = Recognition::Absent {
@@ -729,6 +731,15 @@ impl RecognitionVector {
         }
         strongest_absent
     }
+}
+
+/// Whether a candidate belongs to the target's document and kind.
+///
+/// This is the single eligibility gate shared by flat recognition and every
+/// ladder rung. Similarity may rank eligible candidates, but it cannot grant
+/// ownership across a frame boundary or between incompatible elements.
+fn is_eligible(target: &ElementFacts, candidate: &ElementFacts) -> bool {
+    candidate.frames == target.frames && tags_compatible(target, candidate)
 }
 
 /// Whether two elements are the same kind of thing.
@@ -780,9 +791,15 @@ pub enum Recognition {
         /// The lead held over the runner-up.
         lead: f64,
     },
-    /// No candidate reached the threshold.
+    /// No candidate satisfied the recognizer's decision rule.
+    ///
+    /// Flat recognition uses this when no eligible candidate reaches the
+    /// fingerprint threshold. A ladder also uses it when eligible candidates
+    /// offer the wrong anchor; in that case `best_score` preserves the actual
+    /// fingerprint evidence even though the anchor verdict remains absent.
     Absent {
-        /// The highest score observed, which is below the threshold.
+        /// The highest fingerprint score observed for a candidate that did
+        /// not satisfy the recognizer's decision rule.
         best_score: f64,
     },
 }
