@@ -436,10 +436,16 @@ impl RetryFacts {
         }
     }
 
-    /// State whether authority for the target is live.
+    /// State that the caller still holds live authority for the target.
+    ///
+    /// There is no `false` case to express, so there is no argument to pass.
+    /// Authority defaults to not live, which means a `bool` here would offer a
+    /// toggle with exactly one meaningful setting and one that spelled out the
+    /// default — the shape a reader has to consult this doc comment to decode,
+    /// and the one that would let `with_authority(false)` look deliberate.
     #[must_use]
-    pub const fn with_authority(mut self, live: bool) -> Self {
-        self.authority_live = live;
+    pub const fn with_live_authority(mut self) -> Self {
+        self.authority_live = true;
         self
     }
 
@@ -578,7 +584,7 @@ mod tests {
             dispatched(DIGEST_HEX)?,
             payload()?,
         )
-        .with_authority(true)
+        .with_live_authority()
         .with_evidence(EffectEvidence::NotApplied))
     }
 
@@ -627,7 +633,7 @@ mod tests {
             dispatched(DIGEST_HEX)?,
             payload()?,
         )
-        .with_authority(true)
+        .with_live_authority()
         .with_evidence(EffectEvidence::NotApplied);
 
         assert_eq!(
@@ -649,7 +655,7 @@ mod tests {
             dispatched(DIGEST_HEX)?,
             payload()?,
         )
-        .with_authority(true)
+        .with_live_authority()
         .with_evidence(EffectEvidence::NotApplied);
         assert!(!retry_admissible(&facts).permits_retry());
         Ok(())
@@ -693,7 +699,7 @@ mod tests {
             dispatched(DIGEST_HEX)?,
             other_payload()?,
         )
-        .with_authority(true)
+        .with_live_authority()
         .with_evidence(EffectEvidence::NotApplied);
 
         assert_eq!(
@@ -712,7 +718,7 @@ mod tests {
             dispatched(DIGEST_HEX)?,
             payload()?,
         )
-        .with_authority(true);
+        .with_live_authority();
         assert_eq!(
             retry_admissible(&facts),
             RetryDecision::Refused(vec![RetryRefusal::NotProvenUndone])
@@ -732,7 +738,7 @@ mod tests {
             dispatched(DIGEST_HEX)?,
             payload()?,
         )
-        .with_authority(true)
+        .with_live_authority()
         .with_elapsed(Duration::from_secs(1));
 
         assert_eq!(
@@ -751,7 +757,7 @@ mod tests {
             dispatched(DIGEST_HEX)?,
             payload()?,
         )
-        .with_authority(true)
+        .with_live_authority()
         .with_contract(contract(Duration::from_secs(600), LateArrival::Applied)?)
         .with_elapsed(Duration::from_secs(30));
 
@@ -768,7 +774,7 @@ mod tests {
             dispatched(DIGEST_HEX)?,
             payload()?,
         )
-        .with_authority(true)
+        .with_live_authority()
         .with_contract(contract(Duration::from_secs(600), LateArrival::Applied)?)
         .with_elapsed(Duration::from_secs(601));
 
@@ -788,7 +794,7 @@ mod tests {
             dispatched(DIGEST_HEX)?,
             payload()?,
         )
-        .with_authority(true)
+        .with_live_authority()
         .with_contract(contract(
             Duration::from_secs(600),
             LateArrival::Unspecified,
@@ -812,7 +818,7 @@ mod tests {
             dispatched(DIGEST_HEX)?,
             payload()?,
         )
-        .with_authority(true)
+        .with_live_authority()
         .with_contract(contract(Duration::from_secs(600), LateArrival::Refused)?)
         .with_elapsed(Duration::from_secs(86_400));
 
@@ -829,7 +835,7 @@ mod tests {
             dispatched(DIGEST_HEX)?,
             payload()?,
         )
-        .with_authority(true)
+        .with_live_authority()
         .with_contract(DeduplicationContract::new(
             ActionId::from_hex(ACTION)?,
             other_payload()?,
@@ -854,7 +860,7 @@ mod tests {
             dispatched(DIGEST_HEX)?,
             payload()?,
         )
-        .with_authority(true)
+        .with_live_authority()
         .with_contract(DeduplicationContract::new(
             ActionId::from_hex(OTHER_ACTION)?,
             payload()?,
@@ -878,7 +884,7 @@ mod tests {
             dispatched(DIGEST_HEX)?,
             payload()?,
         )
-        .with_authority(true)
+        .with_live_authority()
         .with_evidence(EffectEvidence::NotApplied)
         .with_contract(contract(Duration::from_secs(600), LateArrival::Applied)?);
 
@@ -895,7 +901,7 @@ mod tests {
             dispatched(DIGEST_HEX)?,
             payload()?,
         )
-        .with_authority(true)
+        .with_live_authority()
         .with_evidence(EffectEvidence::Applied);
 
         assert_eq!(

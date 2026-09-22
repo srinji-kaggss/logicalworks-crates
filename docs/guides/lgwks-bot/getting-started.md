@@ -131,8 +131,9 @@ It prints `fired: 1, revisions: [2]`.
 can cross a trust boundary too; `call.0.check(self.required_caps())?` is what
 makes the proof load-bearing rather than decorative.
 
-`Observe::Output` must be `PartialEq`. `EcsBuilder::observe` requires it
-(`crates/lgwks-bot/src/ecs.rs:3517`), because the condition on this executor *is*
+`Observe::Output` must be `PartialEq`. `EcsObserveBuilder::observe` is where the
+requirement lands, on the call that closes a chain
+(`crates/lgwks-bot/src/ecs.rs:3607`), because the condition on this executor *is*
 bevy's change detection, and a value that cannot be compared cannot be detected
 as changed. `Observe::poll` is `async fn` returning a future that is
 deliberately not `Send` (`crates/lgwks-bot/src/verb.rs`), so a domain may hold
@@ -150,7 +151,7 @@ the `.on` calls.
 
 `build(&grants)` returns `Result<Bot, BotError>`. Two things make it fail:
 `GrantSet::admit` rejects a source or action whose `required_caps` the set does
-not cover (`crates/lgwks-bot/src/ecs.rs:3741`), and `Schedule::initialize` with
+not cover (`crates/lgwks-bot/src/ecs.rs:3744`), and `Schedule::initialize` with
 `ambiguity_detection: LogLevel::Error` rejects a schedule whose systems cannot be
 totally ordered (`crates/lgwks-bot/src/ecs.rs:2637`).
 

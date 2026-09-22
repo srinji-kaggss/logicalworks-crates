@@ -3514,6 +3514,7 @@ impl EcsBuilder {
     /// happens in [`EcsObserveBuilder::observe`] and
     /// [`EcsObserveBuilder::build`], which are the two points where the chain
     /// stops being a declaration and becomes a chain.
+    #[must_use]
     pub fn observe<S>(self, source: S) -> EcsObserveBuilder<S>
     where
         S: Observe,
@@ -3575,6 +3576,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
     /// next stage's input is a consequence of the previous one's output. A free
     /// parameter here is how this defect happened once, and it will happen again
     /// the first time a verb takes a type the chain does not determine.
+    #[must_use]
     pub fn on<C, A>(mut self, condition: C, action: A) -> Self
     where
         S::Output: 'static,
@@ -3598,6 +3600,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
     /// change detection, and a value that cannot be compared cannot be detected
     /// as changed. [`Bot::builder`](crate::Bot::builder) carries no such bound
     /// because its condition is re-evaluated every tick and needs no equality.
+    #[must_use]
     pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
     where
         S: 'static,
