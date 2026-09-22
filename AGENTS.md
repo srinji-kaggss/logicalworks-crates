@@ -66,6 +66,7 @@ cargo run -p lgwks_deps -- check .
 ./scripts/lgwks-std-package-smoke.sh
 ./scripts/doc-lanes.sh
 python3 scripts/check-std-first.py
+python3 scripts/check-doc-citations.py
 ```
 
 `lgwks-deps check` is the first CI job. A green compile with an unregistered
@@ -90,6 +91,12 @@ reaches past `std` and the four surfaces is printed with the record that
 approves it, so the answer to "why is this edge here" is in the output rather
 than in a reviewer's memory. Run it with `--justify` to see those records
 whether or not there is a finding.
+
+`python3 scripts/check-doc-citations.py` pins the text of every line a guide
+cites, so a citation that lands on another plausible line after a file grows is
+a failure rather than a green page pointing at unrelated code. `--update`
+records a legitimate move and prints every line whose text changed under a
+citation, which is the review.
 
 ## What the gate enforces
 
