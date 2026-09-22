@@ -315,12 +315,16 @@ explicitly under that crate.
   claiming an effect might be live. The write-ahead pair is committed first and
   the memory moves only after its acknowledgments are strong enough
   (`tests/durable_dispatch.rs::a_refused_handoff_leaves_no_unrecorded_barrier`).
-- A weak per-append acknowledgment is refused before `DispatchPrepared` is
-  committed. The intent append's ack is checked first, so a store that cannot
-  outlive the process cannot leave a ladder step recovery would fold as
-  `OutcomeUnknown` for a dispatch that never happened. If the `DispatchPrepared`
-  ack is the weak one, a compensating `NotApplied` is written
+- A weak per-append acknowledgment is refused before an external handoff can
+  run. A weak intent acknowledgment leaves nothing prepared. A weak
+  `DispatchPrepared` acknowledgment may already be committed, so the kernel
+  returns `PromiseUnmet` and recovery preserves `OutcomeUnknown` rather than
+  inventing `NotApplied`
   (`tests/durable_dispatch.rs::a_weak_ack_does_not_record_dispatch_prepared`).
+- Durable outcome settlement binds a receipt to the exact `OutcomeObserved`
+  position before releasing work. An unrelated or forged receipt holds
+  `RecordingFailed` and retries recording only; it never re-enters the action
+  (`tests/durable_dispatch.rs::an_unrelated_outcome_receipt_is_refused_without_reentering_the_effect`).
 - A ladder-complete `OutOfOrder` is idempotent success only when the *same*
   evidence is already recorded. `ensure_outcome` used to treat any such refusal
   as success without looking, so a contradictory `Applied` could be

@@ -1,11 +1,12 @@
 # Effect kernel architecture
 
-Status: **partly landed.** The journal ladder, recovery fold, and settlement
-unification are on `main` (#110, #111, #112). The recovered-unknown barrier
-(#113), admitted-input identity (#114), and external handoff admission (#115)
-are open against `main` and are marked *in flight* below. Process ownership
-(#117) and locator eligibility (#116) are separate surfaces and are not
-covered here.
+Status: **partly landed.** The journal ladder, recovery fold, settlement
+unification, recovered-unknown barrier, admitted-input identity, and external
+handoff admission are on `main` (#110–#115). The remaining release gate is
+[#109](https://github.com/srinji-kaggss/logicalworks-crates/issues/109): its
+real backing-store process-kill observations are still unrun. Process ownership
+(#117), locator eligibility (#116), and cross-controller fencing (#120) are
+separate surfaces and are not covered here.
 
 This page is for implementers and reviewers. The consumer-facing story is in
 [the guides](guides/lgwks-bot/index.md); the release gate that these
@@ -69,10 +70,10 @@ stateDiagram-v2
 `OutcomeUnknown` is the dangerous one. It is deliberately *not* `NotApplied`:
 nothing established that the bytes did not arrive, and assuming they did not
 is how a duplicate non-idempotent effect gets sent. An unknown is a barrier
-ahead of any later work on the same chain. *In flight (#113):* a recovered
-unknown must stay a barrier even when the chain's current condition is false,
-so a `Skip` for a blocked action `break`s rather than `skip()`s and a
-successor cannot run on the strength of "the predecessor is no longer active."
+ahead of any later work on the same chain. The recovered-unknown barrier stays
+in force even when the chain's current condition is false, so a `Skip` for a
+blocked action `break`s rather than `skip()`s and a successor cannot run on the
+strength of "the predecessor is no longer active."
 
 ## Settlement
 
@@ -113,7 +114,7 @@ must fail closed.
 flowchart TD
     A[begin_attempt] --> B[append IntentAdmitted]
     B --> C{intent ack meets required?}
-    C -->|no| D[PromptUnmet, nothing prepared]
+    C -->|no| D[PromiseUnmet, nothing prepared]
     C -->|yes| E[prepare_dispatch]
     E --> F[append DispatchPrepared]
     F --> G{dispatch ack meets required?}
@@ -169,8 +170,10 @@ append acknowledgement was weak. An adapter may issue an explicit outcome
 receipt, but the kernel accepts it only when positioned readback verifies that
 position contains the exact outcome; a receipt for genesis or a later,
 unrelated append is refused. Durable recovery keeps an unverifiable record as
-`RecordingFailed` and never re-enters its action. The v1 event wire contract
-deliberately remains unchanged.
+`RecordingFailed` and never re-enters its action. This verifies receipt/event
+binding within the adapter trust boundary; it is not a cryptographic or
+physical-storage durability proof. The v1 event wire contract deliberately
+remains unchanged.
 
 ## Where the tests live
 
@@ -179,9 +182,10 @@ deliberately remains unchanged.
 | Live settlement is journaled before acknowledged | `tests/durable_dispatch.rs::a_live_settlement_is_journaled_before_it_is_acknowledged` |
 | Recording failure does not become a refusal | `tests/durable_dispatch.rs` (issue #102 regressions) |
 | Fingerprint and value commit together | `tests/durable_dispatch.rs` (issue #100 regressions) |
-| Returning landed event retires | *in flight* #115 `a_returning_landed_event_is_retired_not_refused` |
-| No false `Unrecorded` barrier on refusal | *in flight* #115 `a_refused_handoff_leaves_no_unrecorded_barrier` |
-| Weak ack never records `DispatchPrepared` | *in flight* #115 `a_weak_ack_does_not_record_dispatch_prepared` |
+| Returning landed event retires | `tests/durable_dispatch.rs::a_returning_landed_event_is_retired_not_refused` |
+| No false `Unrecorded` barrier on refusal | `tests/durable_dispatch.rs::a_refused_handoff_leaves_no_unrecorded_barrier` |
+| Weak ack never records `DispatchPrepared` | `tests/durable_dispatch.rs::a_weak_ack_does_not_record_dispatch_prepared` |
+| An unrelated durable outcome receipt is refused without re-entering the action | `tests/durable_dispatch.rs::an_unrelated_outcome_receipt_is_refused_without_reentering_the_effect` |
 
 Acceptance falsifiers T09–T16 and T35 in
 [orchestration-acceptance.spec.md](orchestration-acceptance.spec.md) are the

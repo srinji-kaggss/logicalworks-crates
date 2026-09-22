@@ -238,18 +238,14 @@ own. The entry is held — reported through `Bot::pending()` as
 whatever the budget says — until the caller says what happened:
 
 ```rust,ignore
-// `work` and `revision` come from the `PendingWork` that `pending()` reported.
-bot.resolve_effect(work, revision, EffectEvidence::Applied)?;   // it happened: recorded, not replayed
-bot.resolve_effect(work, revision, EffectEvidence::NotApplied)?; // it did not: eligible again
+// `key` comes from the `PendingWork` that `pending()` reported.
+bot.resolve_effect(&key, EffectEvidence::Applied)?;    // it happened: recorded, not replayed
+bot.resolve_effect(&key, EffectEvidence::NotApplied)?; // it did not: eligible again
 ```
 
-The `revision` is the generation the evidence is about, and it is required rather
-than inferred. One chain holds one transition at a time, and a slot is reused by
-every generation over it, so `(chain, entry)` alone cannot distinguish a report
-about the attempt the caller was shown from one about the attempt that replaced
-it. A delayed report is what makes that dangerous rather than pedantic:
-`NotApplied` against the wrong generation makes an attempt nobody has accounted
-for eligible to run again.
+The key binds the run, flow, environment, action, attempt, and admitted input.
+It is required rather than inferred: a delayed report for a different attempt
+must not make an unaccounted-for effect eligible to run again.
 
 `resolve_effect` therefore distinguishes three refusals, and only the first of
 them means what it always meant:
@@ -258,17 +254,17 @@ them means what it always meant:
   condition was false, or it has not been reached. Accepting evidence for an
   entry that has an answer would let a caller believe an effect was acknowledged
   when nothing was.
-- `BotError::EvidenceSuperseded` — the chain holds a transition at a different
-  revision, so the work this evidence is about is gone. Nothing changed; re-read
-  `pending()` and report against the generation there now.
 - `BotError::EvidenceContradicted` — this generation's entry is already settled
   and the new evidence says the opposite. Nothing changed. Repeating the *same*
   evidence is not this: it succeeds idempotently.
 
-The ledger is in memory, so this is a report to the caller that owns the run, not
-durability: an effect left in doubt is owed an answer by whoever holds the bot,
-including across a restart. Delivering exactly-once across an external effect
-needs that intent stored outside the process.
+The live ledger is in memory, while recovery derives outstanding work from the
+journal. An ephemeral scope cannot promise crash durability; an external effect
+needs a journal acknowledgement that meets its declared durability grade.
+
+`TransitionHold::RecordingFailed` is different from `OutcomeUnknown`: the
+outcome is known, but its durable receipt could not be verified. Retrying that
+hold retries receipt/recording work only; it never re-enters the action.
 
 ## Not a failure: the adapter refused
 
