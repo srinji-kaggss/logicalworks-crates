@@ -124,8 +124,17 @@ fn nonzero_exit_does_not_fabricate_tree_cleanup() -> Result<(), Box<dyn std::err
         supervisor
             .spawn_process(command.arg("-c").arg(&script))
             .await?;
-        let child = pid(&child_file)
-            .await
+        // Block this executor thread after native spawn. The shell can fork and
+        // record its descendant, but the manager future cannot receive its first
+        // poll before shutdown is requested.
+        let blocked_until = std::time::Instant::now() + Duration::from_millis(25);
+        while std::time::Instant::now() < blocked_until {
+            std::hint::spin_loop();
+        }
+        let child = std::fs::read_to_string(&child_file)
+            .ok()
+            .map(|text| String::from(text.trim()))
+            .filter(|text| !text.is_empty())
             .ok_or_else(|| std::io::Error::other("descendant pid was not recorded"))?;
         let outcome = outcome(&mut supervisor).await?;
         Ok::<_, std::io::Error>((outcome, child))
