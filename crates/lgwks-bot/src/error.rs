@@ -38,7 +38,7 @@ use std::fmt;
 use super::broker::DispatchError;
 use super::cap::Deficit;
 use super::ecs::{EffectEvidence, PendingWork, WorkId};
-use super::effect::{ActionDigest, ActionId, AttemptId};
+use super::effect::{ActionDigest, ActionId, AttemptId, EffectKey};
 use super::session::{ResourceAxis, Terminal};
 
 /// Error from bot construction, admission, or execution.
@@ -601,6 +601,34 @@ pub enum BotError {
         /// Which half refused, and why.
         cause: DispatchError,
     },
+    /// The action ran and produced a known outcome; the journal refused to
+    /// record it.
+    ///
+    /// Distinct from [`EffectRefused`](Self::EffectRefused), which is a
+    /// *pre-dispatch* refusal: nothing left the process. This one is a
+    /// *post-effect* recording failure. The occurrence is already established
+    /// and travels on the error, so a controller never has to infer it. Only
+    /// the journal append is retryable; the action is never re-entered for a
+    /// recording failure, because re-entering it is how a known outcome becomes
+    /// a duplicate.
+    EffectUnrecorded {
+        /// The exact attempt identity the append was for.
+        ///
+        /// Boxed because `EffectKey` is 128 bytes and an error carrying one by
+        /// value makes every `Result` in the workspace pay for a case that is
+        /// refused before it changes anything — the same reason
+        /// `JournalError::OutOfOrder` boxes it.
+        key: Box<EffectKey>,
+        /// What the action did. `Applied` means the effect is live;
+        /// `NotApplied` means it definitely is not.
+        evidence: EffectEvidence,
+        /// Why the append was refused.
+        ///
+        /// Boxed with the key so this variant does not make `BotError` itself
+        /// large enough that every `Result<_, BotError>` in the workspace pays
+        /// `result_large_err`.
+        cause: Box<DispatchError>,
+    },
 }
 
 /// What a failed attempt establishes about the effect it was making.
@@ -644,6 +672,16 @@ pub enum DispatchCertainty {
     /// The attempt reached the peer, and whether it took effect is not knowable
     /// from the failure. A retry is a possible duplicate.
     Unsettled,
+    /// The effect definitely happened.
+    ///
+    /// Produced only by a post-effect recording failure
+    /// ([`BotError::EffectUnrecorded`]) whose evidence is
+    /// [`Applied`](EffectEvidence::Applied): the action returned success, so the
+    /// occurrence is a fact even though the journal has no record of it yet.
+    /// A retry of the *effect* is forbidden — that is how a known success
+    /// becomes a duplicate. Retrying the *append* is the repair, and it does not
+    /// go through this type's retry map.
+    Occurred,
 }
 
 impl DispatchCertainty {
@@ -651,7 +689,7 @@ impl DispatchCertainty {
     #[must_use]
     pub const fn retry_class(self) -> RetryClass {
         match self {
-            Self::Refused => RetryClass::Never,
+            Self::Refused | Self::Occurred => RetryClass::Never,
             Self::NotDelivered => RetryClass::Safe,
             Self::Unsettled => RetryClass::RequiresEvidence,
         }
@@ -695,6 +733,13 @@ impl BotError {
         match *self {
             Self::DomainError { certainty, .. } => certainty,
             Self::EffectIndeterminate { .. } => DispatchCertainty::Unsettled,
+            // The action ran and the outcome is a fact. Refused means "nothing
+            // left the process", and NotDelivered means "a retry is a retry" —
+            // both are lies about an effect that already returned.
+            Self::EffectUnrecorded { evidence, .. } => match evidence {
+                EffectEvidence::Applied => DispatchCertainty::Occurred,
+                EffectEvidence::NotApplied => DispatchCertainty::NotDelivered,
+            },
             _ => DispatchCertainty::Refused,
         }
     }
@@ -702,7 +747,15 @@ impl BotError {
     /// What this failure permits a caller to do about it.
     #[must_use]
     pub fn retry_class(&self) -> RetryClass {
-        self.dispatch_certainty().retry_class()
+        // A recording failure never re-enters the action, whatever the outcome
+        // was: the append is the only thing left to do, and it is not an effect
+        // attempt. `Never` here means "never dispatch again for this failure",
+        // not "abandon the entry" — `failure_state` maps this variant to a
+        // pending-record hold rather than to terminal abandonment.
+        match *self {
+            Self::EffectUnrecorded { .. } => RetryClass::Never,
+            _ => self.dispatch_certainty().retry_class(),
+        }
     }
 }
 
@@ -1152,6 +1205,17 @@ impl fmt::Display for BotError {
             // refusal from the journal's.
             Self::EffectRefused { ref cause } => {
                 write!(f, "nothing left the process: {cause}")
+            }
+            Self::EffectUnrecorded {
+                key: _,
+                evidence,
+                ref cause,
+            } => {
+                write!(
+                    f,
+                    "the effect is {evidence} and only its record is missing: {cause}. \
+                     Retry the journal append, not the action"
+                )
             }
         }
     }

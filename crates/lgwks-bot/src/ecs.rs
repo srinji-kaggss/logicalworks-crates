@@ -1088,6 +1088,14 @@ pub enum TransitionHold {
         /// Why the outcome could not be settled.
         cause: String,
     },
+    /// The action produced a known outcome and the journal refused to record
+    /// it. Only the append is retried; the action is never re-entered.
+    RecordingFailed {
+        /// What the action did — the occurrence is a fact.
+        evidence: EffectEvidence,
+        /// Why the last append was refused.
+        cause: String,
+    },
     /// Given up on, and reported rather than dropped.
     Abandoned {
         /// Why it was given up on.
@@ -1131,6 +1139,15 @@ impl fmt::Display for TransitionHold {
             } => write!(
                 f,
                 "may have happened: attempt {attempts} was indeterminate ({})",
+                Escaped(cause)
+            ),
+            Self::RecordingFailed {
+                evidence,
+                ref cause,
+            } => write!(
+                f,
+                "the effect is {evidence} and only its record is missing: {}. \
+                 The journal append is retried; the action is not",
                 Escaped(cause)
             ),
             Self::Abandoned { reason, ref cause } => match reason {
@@ -1372,6 +1389,23 @@ enum EntryState {
         /// Why the outcome could not be settled.
         cause: String,
     },
+    /// The action produced a known outcome and the journal refused to record
+    /// it ([`BotError::EffectUnrecorded`]).
+    ///
+    /// Held for an **append-only** retry. The action is never re-entered: the
+    /// occurrence is already a fact, and a second dispatch would turn that
+    /// fact into a duplicate. The key and the evidence travel with the state so
+    /// the next tick can write exactly the record that failed to land.
+    RecordingFailed {
+        /// The attempt identity the append is for.
+        key: EffectKey,
+        /// What the action did.
+        evidence: EffectEvidence,
+        /// Why the last append was refused.
+        cause: String,
+        /// Attempts made so far, including the one that produced the outcome.
+        attempts: u32,
+    },
     /// Given up on, and reported.
     Abandoned {
         /// Why.
@@ -1391,6 +1425,7 @@ impl EntryState {
                 | Self::Unrecorded
                 | Self::DefinitelyFailed { .. }
                 | Self::OutcomeUnknown { .. }
+                | Self::RecordingFailed { .. }
         )
     }
 
@@ -1420,6 +1455,14 @@ impl EntryState {
                 ref cause,
             } => Some(TransitionHold::OutcomeUnknown {
                 attempts,
+                cause: cause.clone(),
+            }),
+            Self::RecordingFailed {
+                ref evidence,
+                ref cause,
+                ..
+            } => Some(TransitionHold::RecordingFailed {
+                evidence: *evidence,
                 cause: cause.clone(),
             }),
             Self::Abandoned { reason, ref cause } => Some(TransitionHold::Abandoned {
@@ -1769,6 +1812,14 @@ impl Ledger {
     }
 
     /// The entry a [`WorkId`] names, when the ledger holds it.
+    fn entry_state(&self, id: WorkId) -> Option<&EntryState> {
+        self.transitions
+            .get(id.chain())
+            .and_then(Option::as_ref)
+            .and_then(|transition| transition.entries.get(id.entry()))
+    }
+
+    /// The entry a [`WorkId`] names, when the ledger holds it.
     fn entry_mut(&mut self, id: WorkId) -> Option<&mut EntryState> {
         self.transitions
             .get_mut(id.chain())
@@ -1899,6 +1950,79 @@ impl Ledger {
             return false;
         }
         *state = EntryState::Succeeded;
+        true
+    }
+
+    /// The key, evidence and attempt count of an entry held for an append-only
+    /// retry, when there is one.
+    fn recording_failed(
+        &self,
+        id: WorkId,
+    ) -> Option<(crate::effect::EffectKey, EffectEvidence, u32)> {
+        match *self.entry_state(id)? {
+            EntryState::RecordingFailed {
+                key,
+                evidence,
+                attempts,
+                ..
+            } => Some((key, evidence, attempts)),
+            _ => None,
+        }
+    }
+
+    /// Refresh a [`EntryState::RecordingFailed`] hold after another refused
+    /// append, without touching the action or the attempt identity.
+    fn hold_recording(&mut self, id: WorkId, evidence: EffectEvidence, error: &BotError) -> bool {
+        let Some(state) = self.entry_mut(id) else {
+            return false;
+        };
+        let EntryState::RecordingFailed {
+            ref mut cause,
+            evidence: ref mut held,
+            ..
+        } = *state
+        else {
+            return false;
+        };
+        *cause = error.to_string();
+        *held = evidence;
+        true
+    }
+
+    /// Close an entry whose outcome is known and whose record has now landed.
+    ///
+    /// `Applied` retires the entry. `NotApplied` leaves it eligible for a fresh
+    /// attempt under the budget — a new attempt is a response to "the effect
+    /// did not happen", not a retry of the recording failure.
+    fn finish_recording(
+        &mut self,
+        id: WorkId,
+        evidence: EffectEvidence,
+        attempts: u32,
+        budget: u32,
+    ) -> bool {
+        let Some(state) = self.entry_mut(id) else {
+            return false;
+        };
+        if !matches!(*state, EntryState::RecordingFailed { .. }) {
+            return false;
+        }
+        *state = match evidence {
+            EffectEvidence::Applied => EntryState::Succeeded,
+            EffectEvidence::NotApplied => {
+                if attempts < budget {
+                    EntryState::DefinitelyFailed {
+                        attempts,
+                        cause: "effect not applied; its record landed on retry".into(),
+                    }
+                } else {
+                    EntryState::Abandoned {
+                        reason: AbandonReason::AttemptsExhausted { attempts },
+                        cause: "effect not applied; its record landed on retry".into(),
+                    }
+                }
+            }
+        };
         true
     }
 
@@ -2329,6 +2453,23 @@ fn resume(
 /// The producer states what the failure establishes about the effect, the
 /// certainty carries it here, and this function is a total map over that.
 fn failure_state(error: &BotError, attempts: u32, budget: u32) -> EntryState {
+    // A post-effect recording failure is not a dispatch failure and is not
+    // abandoned: the occurrence is already known, and the only work left is the
+    // append. Mapped here rather than through `RetryClass` so `Never` keeps its
+    // meaning of "this failure will not change on a retry of the *action*".
+    if let BotError::EffectUnrecorded {
+        ref key,
+        ref evidence,
+        ref cause,
+    } = *error
+    {
+        return EntryState::RecordingFailed {
+            key: **key,
+            evidence: *evidence,
+            cause: cause.to_string(),
+            attempts,
+        };
+    }
     let cause = error.to_string();
     match error.retry_class() {
         // The effect definitely did not happen: a retry is a retry, and the
@@ -2755,6 +2896,9 @@ fn plan_chain(
             // Held: the effect may be live and only evidence settles that. A
             // later entry is not run ahead of it.
             EntryState::Unrecorded | EntryState::OutcomeUnknown { .. } => break,
+            // A known outcome whose record is missing is walked: the retry is
+            // an append, not a dispatch, and `run_chain` takes that path.
+            EntryState::RecordingFailed { .. } => {}
             EntryState::NotStarted | EntryState::DefinitelyFailed { .. } => {}
         }
 
@@ -3355,6 +3499,46 @@ impl EcsBot {
                 continue;
             }
 
+            // A known outcome whose record is missing: retry the append and
+            // never re-enter the action. This is the whole of issue #102's
+            // repair on the recovery side — the occurrence is already a fact,
+            // so a second dispatch would be a duplicate, and the only thing
+            // left to do is write the record that failed to land.
+            if let Some((key, evidence, attempts)) =
+                self.world.non_send::<Ledger>().recording_failed(work)
+            {
+                let result = self
+                    .world
+                    .non_send_mut::<Ledger>()
+                    .effects
+                    .append(&EffectEvent::OutcomeObserved { key, evidence });
+                match result {
+                    Ok(()) => {
+                        if self
+                            .world
+                            .non_send_mut::<Ledger>()
+                            .finish_recording(work, evidence, attempts, budget)
+                            && evidence == EffectEvidence::Applied
+                        {
+                            fired = fired.saturating_add(1);
+                        }
+                        continue;
+                    }
+                    Err(cause) => {
+                        let error = BotError::EffectUnrecorded {
+                            key: Box::new(key),
+                            evidence,
+                            cause: Box::new(DispatchError::Journal(cause)),
+                        };
+                        self.world
+                            .non_send_mut::<Ledger>()
+                            .hold_recording(work, evidence, &error);
+                        failure = Some(error);
+                        break;
+                    }
+                }
+            }
+
             // Two questions the ledger answers before anything is sent, and
             // they lead to different places. An action an acknowledgement has
             // retired for this generation is *done*, so the walk steps over it
@@ -3474,6 +3658,11 @@ impl EcsBot {
                         Some(EffectEvidence::NotApplied)
                     }
                     DispatchCertainty::Unsettled => None,
+                    // An action cannot report `Occurred` as its own failure —
+                    // that certainty belongs to a post-effect recording
+                    // failure. Nothing is appended for it, because the
+                    // substrate does not have the fact that arm would record.
+                    DispatchCertainty::Occurred => None,
                 },
             };
             if let Some(evidence) = observed
@@ -3483,8 +3672,15 @@ impl EcsBot {
                     .effects
                     .append(&EffectEvent::OutcomeObserved { key, evidence })
             {
-                let error = BotError::EffectRefused {
-                    cause: DispatchError::Journal(cause),
+                // Post-effect: the action already returned and `evidence` is a
+                // fact. This is a recording failure, not a pre-dispatch
+                // refusal — `EffectRefused` would tell a controller that
+                // nothing left the process and that it may replan, which
+                // duplicates a known outcome.
+                let error = BotError::EffectUnrecorded {
+                    key: Box::new(key),
+                    evidence,
+                    cause: Box::new(DispatchError::Journal(cause)),
                 };
                 self.world
                     .non_send_mut::<Ledger>()
@@ -4116,7 +4312,8 @@ mod tests {
     use super::*;
     use crate::cap::{Auth, Cap, Demand};
     use crate::effect::{EnvironmentId, RunId};
-    use crate::journal::MemoryJournal;
+    use crate::journal::{DurabilityPromise, DurableAck, JournalPosition, MemoryJournal};
+    use std::io;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -4654,6 +4851,333 @@ mod tests {
             broker,
             Box::new(MemoryJournal::new()),
         ))
+    }
+
+    /// A journal that can refuse appends by event kind, counting what it saw.
+    ///
+    /// Exists for issue #102's acceptance: an append failure *after* the action
+    /// ran must not be reported as a pre-dispatch refusal, and a retry of the
+    /// recording must not re-enter the action. Wrapping [`MemoryJournal`] keeps
+    /// the real ladder and chain checks underneath the injected fault.
+    struct SelectiveJournal {
+        inner: MemoryJournal,
+        refuse_intent: Rc<Cell<bool>>,
+        refuse_prepare: Rc<Cell<bool>>,
+        refuse_outcome: Rc<Cell<bool>>,
+        outcome_appends: Rc<Cell<usize>>,
+    }
+
+    impl SelectiveJournal {
+        fn new() -> Self {
+            Self {
+                inner: MemoryJournal::new(),
+                refuse_intent: Rc::new(Cell::new(false)),
+                refuse_prepare: Rc::new(Cell::new(false)),
+                refuse_outcome: Rc::new(Cell::new(false)),
+                outcome_appends: Rc::new(Cell::new(0)),
+            }
+        }
+
+        fn refuse_outcome(&self) -> Rc<Cell<bool>> {
+            Rc::clone(&self.refuse_outcome)
+        }
+
+        fn refuse_intent(&self) -> Rc<Cell<bool>> {
+            Rc::clone(&self.refuse_intent)
+        }
+
+        fn refuse_prepare(&self) -> Rc<Cell<bool>> {
+            Rc::clone(&self.refuse_prepare)
+        }
+
+        fn outcome_appends(&self) -> Rc<Cell<usize>> {
+            Rc::clone(&self.outcome_appends)
+        }
+    }
+
+    impl EffectJournal for SelectiveJournal {
+        fn durability(&self) -> DurabilityPromise {
+            self.inner.durability()
+        }
+
+        fn tail(&self) -> JournalPosition {
+            self.inner.tail()
+        }
+
+        fn committed(&self) -> Result<Vec<EffectEvent>, JournalError> {
+            // Qualified: `MemoryJournal` also has an inherent `committed` that
+            // returns its raw entries, and that one would win method resolution.
+            EffectJournal::committed(&self.inner)
+        }
+
+        fn compare_and_append(
+            &mut self,
+            expected_tail: JournalPosition,
+            event: &EffectEvent,
+        ) -> Result<DurableAck, JournalError> {
+            let refuse = match *event {
+                EffectEvent::IntentAdmitted { .. } => self.refuse_intent.get(),
+                EffectEvent::DispatchPrepared { .. } => self.refuse_prepare.get(),
+                EffectEvent::OutcomeObserved { .. } => {
+                    self.outcome_appends
+                        .set(self.outcome_appends.get().saturating_add(1));
+                    self.refuse_outcome.get()
+                }
+                EffectEvent::Verified { .. } => false,
+            };
+            if refuse {
+                return Err(JournalError::Storage(io::Error::other(
+                    "injected append refusal",
+                )));
+            }
+            self.inner.compare_and_append(expected_tail, event)
+        }
+    }
+
+    /// Build an effect scope over a caller-supplied journal.
+    fn test_effects_with(
+        journal: Box<dyn EffectJournal>,
+    ) -> Result<EffectScope, Box<dyn std::error::Error>> {
+        let environment = EnvironmentId::from_hex(TEST_ENV)?;
+        let mut broker = Broker::new();
+        broker.register(environment)?;
+        Ok(EffectScope::new(
+            EffectIdentity::new(
+                RunId::from_hex(TEST_RUN)?,
+                environment,
+                FlowRevision::from_tagged("blake3_256", TEST_FLOW)?,
+            ),
+            broker,
+            journal,
+        ))
+    }
+
+    /// A post-applied append failure is a recording failure with a known
+    /// occurrence — never a pre-dispatch refusal, and never a re-dispatch.
+    ///
+    /// Acceptance: the action's marker exists exactly once after recovery, the
+    /// returned certainty is `Occurred` (not `Refused`, not `NotDelivered`),
+    /// the entry is held as `RecordingFailed`, and the append retry does not
+    /// call the action again.
+    #[test]
+    fn a_post_applied_append_failure_is_a_recording_failure_not_a_refusal() -> TestResult {
+        let runs = Rc::new(Cell::new(0));
+        let journal = SelectiveJournal::new();
+        let refuse_outcome = journal.refuse_outcome();
+        let outcome_appends = journal.outcome_appends();
+        let mut bot = EcsBot::builder("unrecorded-applied")
+            .observe(Holds::new(200))
+            .on(|value: &u16| *value >= 200, Count(Rc::clone(&runs)))
+            .with_effects(test_effects_with(Box::new(journal))?)
+            .build(&net_grants())?;
+
+        refuse_outcome.set(true);
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(
+                    format!("a refused outcome append was reported as {fired} fired").into(),
+                );
+            }
+            Err(error) => {
+                assert!(
+                    matches!(error, BotError::EffectUnrecorded { .. }),
+                    "expected EffectUnrecorded, got {error:?}"
+                );
+                assert_eq!(
+                    error.dispatch_certainty(),
+                    DispatchCertainty::Occurred,
+                    "the effect happened: the certainty must not be Refused or NotDelivered"
+                );
+                assert_eq!(
+                    error.retry_class(),
+                    RetryClass::Never,
+                    "the action is never re-entered for a recording failure"
+                );
+            }
+        }
+        assert_eq!(runs.get(), 1, "the action ran exactly once");
+        assert_eq!(
+            outcome_appends.get(),
+            1,
+            "the outcome append was attempted once and refused"
+        );
+        assert!(
+            matches!(
+                first_hold(&bot),
+                Some(TransitionHold::RecordingFailed { .. })
+            ),
+            "the entry is held for an append-only retry: {:?}",
+            first_hold(&bot)
+        );
+
+        // Clear the fault. The recovery tick retries the *append* and must not
+        // call the action again.
+        refuse_outcome.set(false);
+        assert_eq!(
+            bot.tick()?,
+            1,
+            "the append lands and the recovered effect is counted as fired"
+        );
+        assert_eq!(
+            runs.get(),
+            1,
+            "a retry of recording must not re-enter the action"
+        );
+        assert_eq!(
+            outcome_appends.get(),
+            2,
+            "the outcome append was retried exactly once"
+        );
+        assert!(
+            bot.pending().is_empty(),
+            "the entry is resolved once its record lands: {:?}",
+            bot.pending()
+        );
+        Ok(())
+    }
+
+    /// The same split after a definitely-not-applied effect: the occurrence is
+    /// `NotApplied`, the error is still `EffectUnrecorded`, and the action is
+    /// still not re-entered while the record is missing.
+    #[test]
+    fn a_post_failure_append_failure_keeps_the_not_applied_fact() -> TestResult {
+        let runs = Rc::new(Cell::new(0));
+        let journal = SelectiveJournal::new();
+        let refuse_outcome = journal.refuse_outcome();
+        let mut bot = EcsBot::builder("unrecorded-not-applied")
+            .observe(Holds::new(200))
+            .on(|value: &u16| *value >= 200, Refuses(Rc::clone(&runs)))
+            .with_effects(test_effects_with(Box::new(journal))?)
+            .build(&net_grants())?;
+
+        refuse_outcome.set(true);
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(
+                    format!("a refused outcome append was reported as {fired} fired").into(),
+                );
+            }
+            Err(error) => {
+                assert!(
+                    matches!(
+                        error,
+                        BotError::EffectUnrecorded {
+                            evidence: EffectEvidence::NotApplied,
+                            ..
+                        }
+                    ),
+                    "expected EffectUnrecorded carrying NotApplied, got {error:?}"
+                );
+                assert_eq!(
+                    error.dispatch_certainty(),
+                    DispatchCertainty::NotDelivered,
+                    "the effect definitely did not happen"
+                );
+                assert_eq!(
+                    error.retry_class(),
+                    RetryClass::Never,
+                    "a recording failure never re-enters the action"
+                );
+            }
+        }
+        assert_eq!(runs.get(), 1, "the action ran exactly once");
+        assert!(
+            matches!(
+                first_hold(&bot),
+                Some(TransitionHold::RecordingFailed { .. })
+            ),
+            "the entry is held for an append-only retry: {:?}",
+            first_hold(&bot)
+        );
+
+        refuse_outcome.set(false);
+        // The append lands. The effect is known not-applied, so the entry
+        // becomes eligible for a *fresh* attempt under the budget — that is a
+        // response to "it did not happen", not a retry of the recording
+        // failure. It is still open work, so the tick reports it rather than
+        // claiming a clean finish.
+        match bot.tick() {
+            Ok(fired) => return Err(format!("an open entry was reported as {fired} fired").into()),
+            Err(error) => assert!(
+                matches!(error, BotError::PendingTransition { .. }),
+                "expected the still-open entry, got {error:?}"
+            ),
+        }
+        assert_eq!(
+            runs.get(),
+            1,
+            "the append retry must not re-enter the action"
+        );
+        assert!(
+            matches!(
+                first_hold(&bot),
+                Some(TransitionHold::Failed { attempts: 1, .. })
+            ),
+            "the entry is eligible again under the budget: {:?}",
+            first_hold(&bot)
+        );
+        Ok(())
+    }
+
+    /// Append failures *before* the action are still pre-dispatch refusals.
+    ///
+    /// The negative control for the two tests above: `Refused` is the right
+    /// answer when nothing left the process, and this is what keeps the new
+    /// variant from swallowing that case.
+    #[test]
+    fn an_append_failure_before_the_action_is_still_a_pre_dispatch_refusal() -> TestResult {
+        let runs = Rc::new(Cell::new(0));
+
+        // Before intent.
+        let journal = SelectiveJournal::new();
+        let refuse_intent = journal.refuse_intent();
+        let mut bot = EcsBot::builder("refuse-intent")
+            .observe(Holds::new(200))
+            .on(|value: &u16| *value >= 200, Count(Rc::clone(&runs)))
+            .with_effects(test_effects_with(Box::new(journal))?)
+            .build(&net_grants())?;
+        refuse_intent.set(true);
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(
+                    format!("a refused intent append was reported as {fired} fired").into(),
+                );
+            }
+            Err(error) => {
+                assert!(
+                    matches!(error, BotError::EffectRefused { .. }),
+                    "expected EffectRefused before intent, got {error:?}"
+                );
+                assert_eq!(error.dispatch_certainty(), DispatchCertainty::Refused);
+            }
+        }
+        assert_eq!(runs.get(), 0, "the action never ran");
+
+        // Before preparation.
+        let journal = SelectiveJournal::new();
+        let refuse_prepare = journal.refuse_prepare();
+        let mut bot = EcsBot::builder("refuse-prepare")
+            .observe(Holds::new(200))
+            .on(|value: &u16| *value >= 200, Count(Rc::clone(&runs)))
+            .with_effects(test_effects_with(Box::new(journal))?)
+            .build(&net_grants())?;
+        refuse_prepare.set(true);
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(
+                    format!("a refused prepare append was reported as {fired} fired").into(),
+                );
+            }
+            Err(error) => {
+                assert!(
+                    matches!(error, BotError::EffectRefused { .. }),
+                    "expected EffectRefused before preparation, got {error:?}"
+                );
+                assert_eq!(error.dispatch_certainty(), DispatchCertainty::Refused);
+            }
+        }
+        assert_eq!(runs.get(), 0, "the action never ran");
+        Ok(())
     }
 
     /// The sequence every test uses: two ticks of 200, two of 503, one of 200.
