@@ -793,11 +793,38 @@ impl Effects {
     /// integers, because the held key may have come from a process that is
     /// gone: the digest is what the record has, so the digest is what the
     /// question is asked in.
-    fn applied_in(&self, action: ActionId, chain: usize, entry: usize, input: [u8; 16]) -> bool {
+    fn applied_in(
+        &self,
+        action: ActionId,
+        chain: usize,
+        entry: usize,
+        input: [u8; 16],
+        event: bool,
+    ) -> bool {
         let digest = derive_action_digest(self.identity().flow(), chain, entry, &input);
+        if event {
+            // The identity names an event. A returning one is the same event
+            // again: a redelivery of work that already landed, and it retires
+            // however many other episodes came between (issue #101).
+            return self
+                .applied
+                .iter()
+                .any(|key| key.action() == action && key.digest() == digest);
+        }
+        // The identity names only content. A restart that still sees the value
+        // the last applied episode carried retires — that is the #101 property
+        // content identity exists for. A later transition *back* to it after a
+        // different value is a new episode of work and must run (issue #129):
+        // a `0 → 1 → 0` watch fires three times, not twice.
+        //
+        // "Latest for this action" is "latest for this entry": `ActionId` is
+        // derived from the bot name, the chain, the entry and the domain, so
+        // one entry has one action and one action has one entry.
         self.applied
             .iter()
-            .any(|key| key.action() == action && key.digest() == digest)
+            .rev()
+            .find(|key| key.action() == action)
+            .is_some_and(|key| key.digest() == digest)
     }
 
     /// The attempt the journal already records for `action`, when it names one.
@@ -1185,7 +1212,7 @@ struct EcsChain {
     same: fn(&dyn Any, &dyn Any) -> bool,
     /// The admitted-input identity of an erased binding, captured from
     /// `S::Output: InputIdentity` where the type was still a parameter.
-    identify: fn(&dyn Any) -> [u8; 16],
+    identify: fn(&dyn Any) -> AdmittedInput,
     /// The `(condition, action)` tuples, in declaration order.
     entries: Vec<ChainEntry>,
     /// What type this chain's source produces, taken where `S::Output` was
@@ -1309,6 +1336,25 @@ const MAX_IN_FLIGHT_POLLS: usize = 32;
 /// an unreadable value as unchanged would silently suppress an effect, and the
 /// failure mode this whole substrate is built to avoid is an effect that does
 /// not happen with nothing to show for it.
+/// The admitted-input identity of an observation, and how a returning one reads.
+///
+/// The two fields answer two different questions (issue #129). `identity` is
+/// the content identity a digest binds: the same value of the same type derives
+/// the same bytes (so a restart retires work that already landed), and a
+/// different value derives different ones (so a restart does not read new work
+/// as already applied). `event` says whether those bytes name an *event*
+/// rather than only content — see [`InputIdentity::names_an_event`].
+///
+/// Keeping them apart is what lets a state watch `0 → 1 → 0` fire three times
+/// while a redelivered [`EventId`](crate::effect::EventId) still retires.
+#[derive(Clone, Copy)]
+struct AdmittedInput {
+    /// The content identity a dispatch digest binds.
+    identity: [u8; 16],
+    /// Whether `identity` names an event rather than only content.
+    event: bool,
+}
+
 /// The admitted-input identity of an erased binding.
 ///
 /// A type-qualified content identity: the same value of the same type always
@@ -1318,7 +1364,7 @@ const MAX_IN_FLIGHT_POLLS: usize = 32;
 /// distinguishable, which is the caller's to express via
 /// [`EventId`](crate::effect::EventId) or their own [`InputIdentity`] impl —
 /// content equality alone is not event identity (issue #101).
-fn identify_output<S>(value: &dyn Any) -> [u8; 16]
+fn identify_output<S>(value: &dyn Any) -> AdmittedInput
 where
     S: Observe,
     S::Output: InputIdentity + 'static,
@@ -1326,19 +1372,28 @@ where
     let mut hasher = Hasher::new();
     hasher.update(OUTPUT_IDENTITY_DOMAIN);
     hasher.update(std::any::type_name::<S::Output>().as_bytes());
-    if let Some(typed) = value.downcast_ref::<S::Output>() {
-        typed.write_identity(&mut hasher);
-    } else {
-        // A downcast that fails means the binding is not what this chain
-        // claims. Hash the miss rather than returning a default: a constant
-        // identity would make every mismatched binding look like the same
-        // admitted input.
-        hasher.update(b"downcast-miss");
-    }
+    let event = match value.downcast_ref::<S::Output>() {
+        Some(typed) => {
+            typed.write_identity(&mut hasher);
+            typed.names_an_event()
+        }
+        None => {
+            // A downcast that fails means the binding is not what this chain
+            // claims. Hash the miss rather than returning a default: a constant
+            // identity would make every mismatched binding look like the same
+            // admitted input. Reported as content-only, so the stricter of the
+            // two retire readings applies and a mismatch is not quietly retired.
+            hasher.update(b"downcast-miss");
+            false
+        }
+    };
     let digest = hasher.finalize();
     let mut wide = [0_u8; 16];
     wide.copy_from_slice(&digest.as_bytes()[..16]);
-    wide
+    AdmittedInput {
+        identity: wide,
+        event,
+    }
 }
 
 /// Compare two erased outputs as `S::Output`.
@@ -1910,6 +1965,12 @@ struct Transition {
     /// (issue #101), so a restart that sees the same input retires work that
     /// already landed and a restart that sees a different one does not.
     input: [u8; 16],
+    /// Whether [`Self::input`] names an event rather than only content.
+    ///
+    /// Settled at admission from [`InputIdentity::names_an_event`] and carried
+    /// so a later retire check reads a returning identity the way the type
+    /// says to read it (issue #129).
+    event: bool,
     /// One state per entry of the chain, in declaration order.
     entries: Vec<EntryState>,
     /// What the ledger knows about the attempts made on each entry, for the
@@ -1977,10 +2038,11 @@ impl Transition {
     }
 
     /// A transition with every entry outstanding, bound to `value`.
-    fn opened(input: [u8; 16], revision: u64, entries: usize, value: Option<Erased>) -> Self {
+    fn opened(input: AdmittedInput, revision: u64, entries: usize, value: Option<Erased>) -> Self {
         Self {
             revision,
-            input,
+            input: input.identity,
+            event: input.event,
             entries: vec![EntryState::NotStarted; entries],
             attempts: vec![AttemptRecord::default(); entries],
             value,
@@ -1993,10 +2055,16 @@ impl Transition {
     /// given up on: those are terminal until evidence revives them, and
     /// carrying their record forward is what keeps a lost effect reported
     /// instead of silently dropped the moment the source moves.
-    fn resumed(input: [u8; 16], revision: u64, previous: &Self, value: Option<Erased>) -> Self {
+    fn resumed(
+        input: AdmittedInput,
+        revision: u64,
+        previous: &Self,
+        value: Option<Erased>,
+    ) -> Self {
         Self {
             revision,
-            input,
+            input: input.identity,
+            event: input.event,
             entries: previous
                 .entries
                 .iter()
@@ -2156,8 +2224,9 @@ impl Ledger {
     /// Used only when a binding cannot supply an [`InputIdentity`]. The
     /// watermark is seeded from the journal tail at assembly and only ever
     /// grows, so a restart cannot reissue a stamp an earlier process bound a
-    /// dispatch to (issue #101). An identified binding does not need it: its
-    /// content identity is already unique to the input.
+    /// dispatch to (issue #101). An identified binding supplies its content
+    /// identity instead; that identity is unique per distinct value, which is
+    /// not the same as unique per admitted episode (issue #129).
     fn mint_input(&mut self) -> [u8; 16] {
         let stamp = self.next_input;
         self.next_input = self.next_input.saturating_add(1);
@@ -2183,11 +2252,11 @@ impl Ledger {
     /// front of it: an `Applied` verdict retires its action for one generation
     /// and no other, so the comparison is between the acknowledgement's
     /// generation and this one.
-    fn generation(&self, chain: usize) -> Option<[u8; 16]> {
+    fn generation(&self, chain: usize) -> Option<([u8; 16], bool)> {
         self.transitions
             .get(chain)
             .and_then(Option::as_ref)
-            .map(|transition| transition.input)
+            .map(|transition| (transition.input, transition.event))
     }
 
     /// The entry an action is declared on, when the ledger has one.
@@ -2853,7 +2922,7 @@ fn revision_of(world: &World, chain: usize) -> u64 {
 /// it, and the slot being empty is not a loss — it is the record that the value
 /// is out on loan, which [`observe_fold`] reads back through the binding.
 /// The admitted-input identity of `value` for `chain`, or the fallback stamp.
-fn admitted_identity(world: &mut World, chain: usize, value: Option<&Erased>) -> [u8; 16] {
+fn admitted_identity(world: &mut World, chain: usize, value: Option<&Erased>) -> AdmittedInput {
     let identify = world
         .non_send::<Chains>()
         .0
@@ -2861,7 +2930,11 @@ fn admitted_identity(world: &mut World, chain: usize, value: Option<&Erased>) ->
         .map(|held| held.identify);
     match (identify, value) {
         (Some(identify), Some(value)) => identify(value.as_any()),
-        _ => world.non_send_mut::<Ledger>().mint_input(),
+        // A fallback stamp is content-free, so it can never name an event.
+        _ => AdmittedInput {
+            identity: world.non_send_mut::<Ledger>().mint_input(),
+            event: false,
+        },
     }
 }
 
@@ -3984,10 +4057,10 @@ impl EcsBot {
             // fact.
             if let Some(action) = self.world.non_send::<Ledger>().action_of(work) {
                 let ledger = self.world.non_send::<Ledger>();
-                if ledger.generation(step.chain).is_some_and(|input| {
+                if ledger.generation(step.chain).is_some_and(|(input, event)| {
                     ledger
                         .effects
-                        .applied_in(action, step.chain, step.entry, input)
+                        .applied_in(action, step.chain, step.entry, input, event)
                 }) {
                     // Retired, not merely stepped over. An entry whose effect
                     // landed owes nothing for this generation, and leaving it
@@ -7236,7 +7309,16 @@ mod tests {
                 .transitions
                 .first()
                 .and_then(Option::as_ref)
-                .map_or_else(|| derive_input_stamp(1), |held| held.input);
+                .map_or_else(
+                    || AdmittedInput {
+                        identity: derive_input_stamp(1),
+                        event: false,
+                    },
+                    |held| AdmittedInput {
+                        identity: held.input,
+                        event: held.event,
+                    },
+                );
             let mut transition = Transition::opened(input, revision, 1, Some(Erased::new(200_u16)));
             *transition
                 .entries

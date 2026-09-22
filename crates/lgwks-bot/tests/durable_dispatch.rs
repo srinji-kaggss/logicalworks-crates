@@ -1891,6 +1891,113 @@ fn a_returning_landed_event_is_retired_not_refused() -> TestResult {
     }
 }
 
+/// A state watch that returns to a value it already landed must run again.
+///
+/// Content identity retires a redelivery of the same *event*. A state watch
+/// `0 → 1 → 0` is not a redelivery: the third observation is a new episode of
+/// work that happens to carry content the first one carried. Reading it as a
+/// replay left the source stably at `0` while the receiver still held `1` — a
+/// notification watch silently loses its second outage (issue #129).
+///
+/// The event-tagged opposite is
+/// [`a_returning_landed_event_is_retired_not_refused`], which this test must
+/// not disturb.
+#[test]
+fn a_state_watch_that_returns_to_a_landed_value_runs_again() -> TestResult {
+    let store = Rc::new(RefCell::new(MemoryJournal::new()));
+    let seen = Rc::new(Cell::new(0_u32));
+    let counted = Rc::new(Cell::new(0_u32));
+    let identity = identity()?;
+
+    let mut bot = Bot::builder(NAME)
+        .observe(Shifting(Rc::clone(&seen)))
+        .on(always, Counts(Rc::clone(&counted)))
+        .with_effects(scope(identity, Rc::clone(&store))?)
+        .build(&GrantSet::empty())?;
+
+    assert_eq!(bot.tick()?, 1, "episode 1: value 0 is new work");
+    assert_eq!(counted.get(), 1, "the receiver saw 0");
+
+    seen.set(1);
+    assert_eq!(bot.tick()?, 1, "episode 2: value 1 is a movement");
+    assert_eq!(counted.get(), 2, "the receiver saw 1");
+
+    // Back to 0. This is a change from the committed state 1, not a transport
+    // redelivery of the first observation: no crash, no hash collision, no
+    // concurrent controller. The content is the same as episode 1's, which is
+    // exactly why content identity alone cannot be the retire test.
+    seen.set(0);
+    assert_eq!(
+        bot.tick()?,
+        1,
+        "episode 3: returning to 0 is a new episode, not a redelivery"
+    );
+    assert_eq!(
+        counted.get(),
+        3,
+        "dispatches [1, 1, 1], not [1, 1, 0]: the receiver must see 0 again"
+    );
+
+    let events = recorded(&store)?;
+    assert_eq!(
+        events.len(),
+        9,
+        "three full intent/prepare/outcome ladders, one per episode: {events:?}"
+    );
+    Ok(())
+}
+
+/// A reconstructed bot that still sees the last applied state retires rather
+/// than firing again.
+///
+/// The other half of the same distinction (issue #129): content identity is
+/// what keeps a restart from double-firing on a source that never moved. A new
+/// admission of the value the *last* applied episode carried is a resumption
+/// of that episode's work, not a fresh one. Only an intervening different
+/// value opens a new episode.
+#[test]
+fn a_reconstructed_bot_retires_an_unchanged_state_rather_than_firing_again() -> TestResult {
+    let store = Rc::new(RefCell::new(MemoryJournal::new()));
+    let seen = Rc::new(Cell::new(0_u32));
+    let counted = Rc::new(Cell::new(0_u32));
+    let identity = identity()?;
+
+    let mut first = Bot::builder(NAME)
+        .observe(Shifting(Rc::clone(&seen)))
+        .on(always, Counts(Rc::clone(&counted)))
+        .with_effects(scope(identity, Rc::clone(&store))?)
+        .build(&GrantSet::empty())?;
+    assert_eq!(first.tick()?, 1, "the first episode runs");
+    assert_eq!(counted.get(), 1);
+
+    // The restart. The source is exactly where the applied episode left it.
+    let mut second = Bot::builder(NAME)
+        .observe(Shifting(Rc::clone(&seen)))
+        .on(always, Counts(Rc::clone(&counted)))
+        .with_effects(scope(identity, Rc::clone(&store))?)
+        .build(&GrantSet::empty())?;
+    assert_eq!(
+        second.tick()?,
+        0,
+        "an unchanged source after reconstruction is work that already landed"
+    );
+    assert_eq!(
+        counted.get(),
+        1,
+        "no second delivery of the first episode: {counted:?}"
+    );
+
+    // A movement after the restart is still new work.
+    seen.set(7);
+    assert_eq!(
+        second.tick()?,
+        1,
+        "a real movement still runs after a restart"
+    );
+    assert_eq!(counted.get(), 2);
+    Ok(())
+}
+
 /// A journal wrapper that keeps a shared view of what landed.
 struct SharedJournal {
     store: Rc<RefCell<MemoryJournal>>,
