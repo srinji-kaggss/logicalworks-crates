@@ -8,6 +8,23 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### Repository Added
+
+- `scripts/check-std-first.py`, and a CI step that runs it. `lgwks-deps check`
+  enforces the manifest half of the `std`-first rule and cannot see the other
+  half, which lives in the source: a `use` of a crate no manifest declares
+  (buildable only because something else in the graph re-exports it), and a
+  capability hand-rolled beside the `lgwks_std` module that already provides it.
+  Every crate reached past `std` and the four surfaces is reported with the
+  approval record behind it — owner, capability and the reason the approver
+  wrote — so `--justify` prints the answer to "why is this edge here" instead of
+  leaving it to a reviewer's memory.
+
+  It carries four written exemptions, each pinning the exempted line's text as
+  well as its number, because a `path:line` key alone would silently cover
+  whatever later occupied that line. A moved exemption is a `STALE EXEMPTION`
+  finding, not a silent yes.
+
 ### lgwks_std Breaking
 
 - `BoundingBox::as_array` is now `to_array`. The method builds the four-element

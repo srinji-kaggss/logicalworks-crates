@@ -33,6 +33,12 @@ jobs:
           { echo 'Lockfile out of date: run cargo update --workspace and commit Cargo.lock' >&2; exit 1; }
       - name: Enforce dependency edge ownership
         run: cargo run --locked -p lgwks_deps --bin lgwks-deps -- check .
+      - name: Audit std-first and lgwks_std-first
+        # The manifest gate above sees every authored edge. This reads the
+        # source for the two failures a manifest cannot show: a `use` no
+        # manifest declares, and a capability hand-rolled beside the
+        # `lgwks_std` module that already provides it.
+        run: python3 scripts/check-std-first.py
       - name: Forbid unwrap outside tests
         # Safety bar: library code fails loud with typed errors or named
         # expects, never bare unwrap. Doc examples count as shipped surface.
