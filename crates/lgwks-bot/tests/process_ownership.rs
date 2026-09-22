@@ -34,8 +34,7 @@ impl PidDir {
             .map(|since| since.as_nanos())
             .unwrap_or(0);
         let seq = DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("lgwks-bot-ownership-{nanos}-{seq}-{name}"));
+        let path = std::env::temp_dir().join(format!("lgwks-bot-ownership-{nanos}-{seq}-{name}"));
         std::fs::create_dir_all(&path)?;
         Ok(Self(path))
     }
