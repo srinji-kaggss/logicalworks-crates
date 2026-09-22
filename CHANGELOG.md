@@ -167,6 +167,19 @@ explicitly under that crate.
 
 ### lgwks_bot Fixed
 
+- Observation fingerprints no longer commit before the values they describe.
+  `poll_sources` used to publish each source's digest as it polled, then
+  `observe_fold` committed payloads all-or-nothing; a failed sibling poll left
+  the successful sources' digests advanced over values the fold refused to
+  hold, and the next tick skipped that uncommitted work forever. Digests are
+  now staged in a per-tick `Candidates` map and published to `Fingerprints`
+  only when the fold admits every observation. An aborted fold discards the
+  candidates. `Fingerprints` also never leaves the world during a tick, so a
+  tick dropped mid-poll can no longer empty the map and permanently disable
+  caching. Regression tests cover the issue #99 acceptance list: a failed
+  sibling on first poll, a committed source that moves during a sibling
+  failure, several failed siblings, a held transition plus a newer candidate,
+  and cancellation during a source poll.
 - `interface::RecognitionVector` and `language::LanguageResolver` each carried a
   comment explaining why they were deliberately not `Debug`. The first stopped
   being true when `lgwks_std`'s `Weighted` gained an impl that reports
