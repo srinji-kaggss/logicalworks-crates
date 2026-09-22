@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use lgwks_bot::Runtime;
-use lgwks_bot::rt::process::Command;
+use lgwks_bot::rt::process::ProcessSpec;
 use lgwks_bot::rt::supervise::{Supervisor, TaskOutcome};
 use lgwks_bot::rt::time::{Instant, sleep};
 
@@ -109,10 +109,9 @@ fn zero_exit_does_not_fabricate_tree_cleanup() -> Result<(), Box<dyn std::error:
     let runtime = Runtime::new()?;
     let (outcome, child) = runtime.block_on(async {
         let mut supervisor = Supervisor::default();
-        let mut command = Command::new("sh");
-        supervisor
-            .spawn_process(command.arg("-c").arg(&script))
-            .await?;
+        let mut spec = ProcessSpec::new("sh");
+        spec.arg("-c").arg(&script);
+        supervisor.spawn_process(&spec).await?;
         let child = pid(&child_file)
             .await
             .ok_or_else(|| std::io::Error::other("descendant pid was not recorded"))?;
@@ -132,10 +131,9 @@ fn nonzero_exit_does_not_fabricate_tree_cleanup() -> Result<(), Box<dyn std::err
     let runtime = Runtime::new()?;
     let (outcome, child) = runtime.block_on(async {
         let mut supervisor = Supervisor::default();
-        let mut command = Command::new("sh");
-        supervisor
-            .spawn_process(command.arg("-c").arg(&script))
-            .await?;
+        let mut spec = ProcessSpec::new("sh");
+        spec.arg("-c").arg(&script);
+        supervisor.spawn_process(&spec).await?;
         // Block this executor thread after native spawn without yielding, so
         // the manager future cannot receive its first poll before shutdown is
         // requested. The shell still runs: it forks the descendant and records
@@ -173,10 +171,9 @@ fn cancellation_before_manager_task_poll_keeps_descendant_owned()
     let runtime = Runtime::new()?;
     let child = runtime.block_on(async {
         let mut supervisor = Supervisor::default();
-        let mut command = Command::new("sh");
-        supervisor
-            .spawn_process(command.arg("-c").arg(&script))
-            .await?;
+        let mut spec = ProcessSpec::new("sh");
+        spec.arg("-c").arg(&script);
+        supervisor.spawn_process(&spec).await?;
         let child = pid(&child_file)
             .await
             .ok_or_else(|| std::io::Error::other("descendant pid was not recorded"))?;

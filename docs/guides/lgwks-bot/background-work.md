@@ -78,20 +78,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## `Supervisor::spawn_process`: a child process nobody can abandon
 
-`Supervisor::spawn_process(command)` starts a child under the same in-flight
+`Supervisor::spawn_process(spec)` starts a child under the same in-flight
 ceiling as `spawn`, and returns a `TaskId` — not a `Child`
-(`crates/lgwks-bot/src/rt/supervise.rs:993`). `rt::process` re-exports `Command`
-so you can say what to run; it does not hand out a handle to what is running.
+(`crates/lgwks-bot/src/rt/supervise.rs:994`). `rt::process::ProcessSpec` lets
+you say what to run without exposing an executable engine handle.
 The task this places is the only owner the process has:
 
 ```rust
-use lgwks_bot::rt::process::Command;
+use lgwks_bot::rt::process::ProcessSpec;
 use lgwks_bot::rt::supervise::Supervisor;
 
 async fn deploy(supervisor: &mut Supervisor) -> std::io::Result<()> {
-    // `Command` describes; the supervisor starts, bounds, and owns.
-    let mut command = Command::new("sh");
-    supervisor.spawn_process(command.arg("-c").arg("make -j4")).await?;
+    // `ProcessSpec` describes; the supervisor starts, bounds, and owns.
+    let mut spec = ProcessSpec::new("sh");
+    spec.arg("-c").arg("make -j4");
+    supervisor.spawn_process(&spec).await?;
     Ok(())
 }
 ```
@@ -116,14 +117,14 @@ Three differences from a raw `Child`:
 ## `repeat`: a bound on iterations
 
 `repeat(&token, budget, body)` is the only loop the module asks you to write, and
-it cannot be written without a `Budget` (`crates/lgwks-bot/src/rt/supervise.rs:1458`).
+it cannot be written without a `Budget` (`crates/lgwks-bot/src/rt/supervise.rs:1473`).
 The variants are `Iterations(NonZeroU64)`, `For(Duration)`, and `Ongoing`.
 
 Two details that decide how tight your bound really is:
 
 - `Budget::For` checks its deadline between iterations, so a body that blocks for
   longer than the budget overruns it by one iteration
-  (`crates/lgwks-bot/src/rt/supervise.rs:1471`). Cancellation is not subject to
+  (`crates/lgwks-bot/src/rt/supervise.rs:1486`). Cancellation is not subject to
   that slack, because it interrupts the body itself.
 - Every iteration races the token rather than checking it between iterations.
   A cancel drops a body that is still awaiting, and the loop reports
@@ -181,7 +182,7 @@ not how quickly the OS tears the group down.
 
 **Cancellation drops a future. That is not the same as stopping a thread.** The
 implementation races each iteration with `token.run_until_cancelled(body(...))`
-(`crates/lgwks-bot/src/rt/supervise.rs:1494`), which drops the body's future. A
+(`crates/lgwks-bot/src/rt/supervise.rs:1509`), which drops the body's future. A
 body that is awaiting returns promptly. What happens to work a body handed to
 another thread is not established by the inspected source: `spawn_blocking`
 spawns an OS thread and offers no abort, and its documented bound is a thread per
@@ -214,7 +215,7 @@ and `spawn_blocking` are for a build with no async runtime. There is a
 
 ## What the tests exercise
 
-`crates/lgwks-bot/src/rt/supervise.rs:1514` runs the module's own tests under the
+`crates/lgwks-bot/src/rt/supervise.rs:1529` runs the module's own tests under the
 ordinary workspace test run. They cover an iteration budget stopping at its
 limit, an `Ongoing` budget stopping at a cancel, cancellation interrupting a body
 that is still awaiting, `try_spawn` refusing at the bound rather than growing,
