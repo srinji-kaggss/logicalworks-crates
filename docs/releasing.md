@@ -66,16 +66,21 @@ cargo clippy --locked --manifest-path crates/lgwks-bot/Cargo.toml  --all-targets
 cargo clippy --locked --manifest-path crates/lgwks-ast/Cargo.toml  --all-targets --all-features -- -D warnings
 cargo clippy --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features tokio-full -- -D warnings
 
-# docs, with the link denial the docs lane uses
-RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked -p lgwks_std --all-features
-RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked -p lgwks_bot --all-features
-RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked -p lgwks_ast --all-features
-RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked -p lgwks_deps --features tokio-full
+# docs, with the link denial the docs lane uses, in all four lanes
+./scripts/doc-lanes.sh
 
 # the two workspace gates
 cargo run -p lgwks_deps -- check .
 ./scripts/lgwks-std-package-smoke.sh
 ```
+
+The doc gate is one call rather than four commands because *which* intra-doc
+links break depends on which features are on. The script runs the four lanes the
+Docs job runs — every feature, no features, the default set, and each
+`lgwks_std` feature alone — and a link between two optional modules resolves
+under some of them and not others. `RUSTDOCFLAGS='-D warnings'` is what makes a
+broken link an error; without it the crate builds green and the break surfaces
+after the push.
 
 The **contract-drift** job is easy to miss and easy to trip: it cross-checks
 `crates/lgwks-std/Cargo.toml` against the bulleted list under

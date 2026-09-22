@@ -111,6 +111,21 @@ explicitly under that crate.
   carries no such bound; it lands on `EcsObserveBuilder::observe`, the call that
   closes a chain, and the citation now points at the bound.
 
+### Repository Changed
+
+- **CI runs the matrix once per change instead of twice.** `on.push` is scoped
+  to `main` now, because a pull request already runs all eleven jobs for its head
+  commit and the branch push ran every one of them again for the same tree. A
+  `concurrency` group supersedes a run on a branch that has been pushed again,
+  and never supersedes a run on `main`.
+- **The rustdoc gate is runnable outside CI.** `scripts/doc-lanes.sh` holds the
+  four lanes the Docs job runs, and the job, `AGENTS.md` and `docs/releasing.md`
+  all call it instead of restating the commands. Which links break depends on which features are on,
+  so the gate is four lanes and not one command, and none of them was reachable
+  from the `Checks that must pass` list, which named no doc build at all: a
+  broken intra-doc link is a warning rather than an error, so the crate built
+  green and the break surfaced only after the push.
+
 ## [lgwks_std 0.6.7 / lgwks_bot 0.5.0 / lgwks_deps 0.1.13] - 2026-09-21
 
 ### Proofs
