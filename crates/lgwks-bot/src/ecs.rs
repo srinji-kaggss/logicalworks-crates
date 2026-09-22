@@ -530,6 +530,11 @@ impl EffectScope {
 struct Effects {
     /// What the host declared.
     scope: EffectScope,
+    /// The committed position represented by this controller's recovery fold.
+    ///
+    /// This advances only from acknowledgements this controller accepted. A
+    /// fresh tail would launder another controller's writes into stale state.
+    tail: JournalPosition,
     /// Attempts the journal records as dispatched with no outcome, and which
     /// nothing has settled since.
     ///
@@ -587,9 +592,10 @@ struct RecordedOutcome {
 
 impl Effects {
     /// A scope with nothing recovered yet.
-    const fn new(scope: EffectScope) -> Self {
+    const fn new(scope: EffectScope, tail: JournalPosition) -> Self {
         Self {
             scope,
+            tail,
             unsettled: Vec::new(),
             recording: Vec::new(),
             requirements: Vec::new(),
@@ -656,7 +662,8 @@ impl Effects {
         // handoff path: a store that cannot outlive the process is refused here,
         // before `DispatchPrepared` exists for recovery to misread as a live
         // dispatch (issue #100).
-        let intent_ack = self.append(&EffectEvent::IntentAdmitted { key })?;
+        let intent = EffectEvent::IntentAdmitted { key };
+        let intent_ack = self.append(&intent)?;
         self.note_journal_attempt(key.action(), key.attempt());
         if !intent_ack.promise().meets(required) {
             return Err(DispatchError::Journal(JournalError::PromiseUnmet {
@@ -664,9 +671,11 @@ impl Effects {
                 offered: intent_ack.promise(),
             }));
         }
+        self.accept_position(&intent, intent_ack.position())?;
+        let expected_tail = self.tail;
         let scope = &mut self.scope;
         let (authority, ack) =
-            prepare_dispatch(&scope.broker, &mut *scope.journal, key)?.into_parts();
+            prepare_dispatch(&scope.broker, &mut *scope.journal, expected_tail, key)?.into_parts();
         // The acknowledgment, not the advertisement. A journal that offers
         // less on this append than the handoff requires is refused even when
         // its `durability()` claimed enough.
@@ -681,6 +690,7 @@ impl Effects {
                 offered: ack.promise(),
             }));
         }
+        self.accept_position(&EffectEvent::DispatchPrepared { key }, ack.position())?;
         self.requirements.push((key, required));
         Ok(authority)
     }
@@ -715,21 +725,45 @@ impl Effects {
         ))
     }
 
-    /// Append one fact, fencing on the tail this process believes is committed.
+    /// Append one fact, fencing on the tail represented by this controller's
+    /// recovery fold.
     ///
-    /// Read-then-append rather than a retained tail: a retained tail is state
-    /// this process would have to keep in step with every other writer, and the
-    /// journal's own compare-and-append is what refuses a stale belief. A
-    /// refusal here is a real one — another controller appended — and it is
-    /// reported rather than retried, because the caller's view of the run is
-    /// stale.
+    /// A refusal is never retried with a newly-read tail: another controller
+    /// may have created an unknown effect that this controller has not folded.
     ///
     /// # Errors
     ///
     /// Whatever the journal refuses.
     fn append(&mut self, event: &EffectEvent) -> Result<DurableAck, JournalError> {
-        let tail = self.scope.journal().tail();
-        self.scope.journal_mut().compare_and_append(tail, event)
+        self.scope
+            .journal_mut()
+            .compare_and_append(self.tail, event)
+    }
+
+    /// Advance the fold fence only after the journal confirms the exact
+    /// acknowledged position is still current. An adapter-supplied position is
+    /// not authority by itself.
+    fn accept_position(
+        &mut self,
+        event: &EffectEvent,
+        position: JournalPosition,
+    ) -> Result<(), JournalError> {
+        let expected = self.event_position(event)?;
+        if position != expected {
+            return Err(JournalError::ReceiptMismatch {
+                expected,
+                actual: position,
+            });
+        }
+        let actual = self.scope.journal().tail();
+        if actual != position {
+            return Err(JournalError::TailMismatch {
+                expected: position,
+                actual,
+            });
+        }
+        self.tail = position;
+        Ok(())
     }
 
     /// Whether an attempt on `action` is recorded as dispatched with no
@@ -830,21 +864,24 @@ impl Effects {
         key: EffectKey,
         evidence: EffectEvidence,
     ) -> Result<JournalPosition, JournalError> {
+        self.event_position(&EffectEvent::OutcomeObserved { key, evidence })
+    }
+
+    /// Return the recorded position only when it holds the exact event.
+    ///
+    /// A tail equality check alone proves only that *something* occupies the
+    /// acknowledged position. Binding the event prevents an adapter from
+    /// laundering a concurrent writer's tail into this controller's fold.
+    fn event_position(&self, expected: &EffectEvent) -> Result<JournalPosition, JournalError> {
         self.scope
             .journal()
             .committed_entries()?
             .into_iter()
-            .find_map(|entry| match *entry.event() {
-                EffectEvent::OutcomeObserved {
-                    key: observed,
-                    evidence: recorded,
-                } if observed == key && recorded == evidence => Some(entry.position()),
-                _ => None,
-            })
+            .find_map(|entry| (entry.event() == expected).then_some(entry.position()))
             .ok_or(JournalError::OutOfOrder {
-                key: Box::new(key),
-                expected: Some(EventKind::OutcomeObserved),
-                attempted: EventKind::OutcomeObserved,
+                key: Box::new(expected.key()),
+                expected: Some(expected.kind()),
+                attempted: expected.kind(),
             })
     }
 
@@ -980,9 +1017,32 @@ impl Effects {
             .find(|entry| entry.0 == key)
             .map(|entry| entry.1)
             .unwrap_or_else(|| self.scope.journal().durability());
+        let already_recorded = self.outcome_for(&key);
+        if let Some(recorded) = already_recorded {
+            if recorded != evidence {
+                return Err(JournalError::OutOfOrder {
+                    key: Box::new(key),
+                    expected: Some(EventKind::Verified),
+                    attempted: EventKind::OutcomeObserved,
+                });
+            }
+            if required == DurabilityPromise::Ephemeral {
+                self.accept_position(
+                    &EffectEvent::OutcomeObserved { key, evidence },
+                    self.outcome_position(key, evidence)?,
+                )?;
+                self.fold_outcome(key, evidence);
+                return Ok(());
+            }
+            return Err(JournalError::ReceiptUnavailable { required });
+        }
         match self.append(&EffectEvent::OutcomeObserved { key, evidence }) {
             Ok(acknowledgment) => {
                 self.confirm_outcome(key, evidence, required, acknowledgment)?;
+                self.accept_position(
+                    &EffectEvent::OutcomeObserved { key, evidence },
+                    self.outcome_position(key, evidence)?,
+                )?;
                 self.fold_outcome(key, evidence);
                 Ok(())
             }
@@ -996,6 +1056,10 @@ impl Effects {
                 match self.outcome_for(&key) {
                     Some(recorded) if recorded == evidence => {
                         if required == DurabilityPromise::Ephemeral {
+                            self.accept_position(
+                                &EffectEvent::OutcomeObserved { key, evidence },
+                                self.outcome_position(key, evidence)?,
+                            )?;
                             self.fold_outcome(key, evidence);
                             return Ok(());
                         }
@@ -4518,15 +4582,26 @@ impl EcsBot {
         // one — and it is refused here rather than ignored, because ignoring it
         // means dispatching an action whose earlier attempt the journal says
         // may be live.
-        let recovered = recover(
-            effects
-                .journal()
-                .committed()
-                .map_err(|cause| BotError::EffectRefused {
-                    cause: DispatchError::Journal(cause),
-                })?
-                .iter(),
-        );
+        let committed = effects
+            .journal()
+            .committed()
+            .map_err(|cause| BotError::EffectRefused {
+                cause: DispatchError::Journal(cause),
+            })?;
+        let tail = effects.journal().tail();
+        let recovered_events =
+            u64::try_from(committed.len()).map_err(|_| BotError::EffectRefused {
+                cause: DispatchError::Journal(JournalError::Exhausted),
+            })?;
+        if recovered_events != tail.sequence() {
+            return Err(BotError::EffectRefused {
+                cause: DispatchError::Journal(JournalError::SnapshotStale {
+                    recovered_events,
+                    committed_events: tail.sequence(),
+                }),
+            });
+        }
+        let recovered = recover(committed.iter());
         // The same admission gate `Bot::build` applies: a bot requiring a
         // capability it was not granted fails before it runs, not at tick.
         //
@@ -4599,11 +4674,8 @@ impl EcsBot {
         // The next admitted-input identity continues past whatever the journal
         // already holds, so a reconstructed bot cannot reissue a stamp an
         // earlier process bound a dispatch to (issue #101).
-        let next_input = {
-            let tail = effects.journal().tail();
-            tail.sequence().saturating_add(1)
-        };
-        let mut ledger = Ledger::new(actions, Effects::new(effects), next_input);
+        let next_input = tail.sequence().saturating_add(1);
+        let mut ledger = Ledger::new(actions, Effects::new(effects, tail), next_input);
         // Every attempt the journal names, folded in. Not only the uncertain
         // ones: an attempt whose outcome is recorded is a fact about this run
         // too, and the two things this loop derives from it are what let a

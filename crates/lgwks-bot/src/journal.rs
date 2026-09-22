@@ -431,6 +431,14 @@ pub enum JournalError {
         /// The tail the journal holds.
         actual: JournalPosition,
     },
+    /// Recovery folded one history, but the journal advanced before that
+    /// history could become the controller's append fence.
+    SnapshotStale {
+        /// Number of events recovery folded.
+        recovered_events: u64,
+        /// Number of events the journal reported afterwards.
+        committed_events: u64,
+    },
     /// The journal cannot promise the durability the caller requires.
     PromiseUnmet {
         /// What the caller needed.
@@ -491,6 +499,13 @@ impl fmt::Display for JournalError {
             Self::TailMismatch { expected, actual } => write!(
                 f,
                 "journal tail moved: expected {expected}, committed {actual}"
+            ),
+            Self::SnapshotStale {
+                recovered_events,
+                committed_events,
+            } => write!(
+                f,
+                "journal advanced during recovery: folded {recovered_events} events, committed {committed_events}"
             ),
             Self::PromiseUnmet { required, offered } => write!(
                 f,
@@ -617,11 +632,12 @@ pub trait EffectJournal {
 
     /// Every committed entry, including the position each event occupies.
     ///
-    /// An outcome receipt is meaningful only when the kernel can verify that
-    /// its position contains the exact `OutcomeObserved` fact being settled.
-    /// Adapters that cannot provide positioned readback must refuse receipt
-    /// upgrades rather than allowing an unbound acknowledgement to settle an
-    /// external effect.
+    /// An acknowledgement is meaningful only when positioned readback proves
+    /// it names the exact appended fact. A later tail can belong to another
+    /// controller and must never become this controller's append fence.
+    ///
+    /// Adapters that cannot provide positioned readback must refuse dispatch,
+    /// including local effects, rather than authorize an unbound append.
     fn committed_entries(&self) -> Result<Vec<JournalEntry>, JournalError> {
         Err(JournalError::ReceiptUnavailable {
             required: self.durability(),
