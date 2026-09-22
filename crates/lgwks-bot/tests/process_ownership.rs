@@ -21,8 +21,10 @@ struct PidDir(PathBuf);
 
 impl PidDir {
     fn new(name: &str) -> std::io::Result<Self> {
-        let path =
-            std::env::temp_dir().join(format!("lgwks-bot-ownership-{}-{name}", std::process::id()));
+        let suffix = lgwks_std::hex::encode(
+            lgwks_std::random::bytes::<16>().map_err(std::io::Error::other)?,
+        );
+        let path = std::env::temp_dir().join(format!("lgwks-bot-ownership-{suffix}-{name}"));
         std::fs::create_dir_all(&path)?;
         Ok(Self(path))
     }
