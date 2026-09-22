@@ -19,12 +19,23 @@ const BUDGET: Duration = Duration::from_secs(10);
 
 struct PidDir(PathBuf);
 
+/// Monotone per-process sequence, so two `PidDir`s in one test binary never
+/// share a path even if the clock does not move between them.
+static DIR_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl PidDir {
     fn new(name: &str) -> std::io::Result<Self> {
-        let suffix = lgwks_std::hex::encode(
-            lgwks_std::random::bytes::<16>().map_err(std::io::Error::other)?,
-        );
-        let path = std::env::temp_dir().join(format!("lgwks-bot-ownership-{suffix}-{name}"));
+        // Wall-clock nanos plus a monotone sequence. Not a process or thread id
+        // (both are reused by the OS) and not `lgwks_std::random` (that module
+        // is behind the `random`/`ephemeral` features, and the feature matrix
+        // builds this test without them).
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_nanos())
+            .unwrap_or(0);
+        let seq = DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("lgwks-bot-ownership-{nanos}-{seq}-{name}"));
         std::fs::create_dir_all(&path)?;
         Ok(Self(path))
     }
