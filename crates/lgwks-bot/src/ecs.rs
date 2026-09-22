@@ -856,8 +856,8 @@ struct Polled(Vec<Result<Option<Erased>, BotError>>);
 #[derive(Default)]
 struct Moved(Vec<bool>);
 
-/// The digest each source last reported when the tick actually polled it, one
-/// slot per chain.
+/// The digest each source last reported for an observation this process
+/// actually holds, one slot per chain.
 ///
 /// This is the whole of what the substrate remembers about a quiet source. It
 /// is `Copy`, it is 16 bytes, and it is the answer to the only question change
@@ -866,11 +866,29 @@ struct Moved(Vec<bool>);
 /// watched. No value, no box, no `dyn`, no drop.
 ///
 /// A slot is `None` for a source that does not implement
-/// [`Observe::fingerprint`](crate::verb::Observe::fingerprint), for one whose
-/// last poll failed, and for one that has never been polled. All three mean the
-/// same thing to the tick: it has no cheap answer and must poll.
+/// [`Observe::fingerprint`](crate::verb::Observe::fingerprint), and for one
+/// whose observation has never committed. Both mean the same thing to the tick:
+/// it has no cheap answer and must poll.
+///
+/// The map is **committed state**. A poll's digest is staged in [`Candidates`]
+/// and published here only when `observe_fold` admits the tick's observations.
+/// Writing a digest here before that commit is what let a failed sibling poll
+/// permanently suppress uncommitted work (issue #99): the cache claimed to hold
+/// a value the fold had refused. It never leaves the world during a tick, so a
+/// tick dropped mid-poll cannot empty the map and leave `get_mut` without a
+/// slot — the way an unresized map disabled fingerprint caching for good.
 #[derive(Default)]
 struct Fingerprints(Vec<Option<u128>>);
+
+/// Per-tick candidate digests, staged beside [`Polled`] and published to
+/// [`Fingerprints`] only when `observe_fold` commits.
+///
+/// Written by `poll_sources` for every chain that reports one, including the
+/// quiet ones (whose candidate equals what is already committed). Discarded
+/// wholesale when the fold aborts, which is what keeps a half-polled tick from
+/// teaching the cache anything about values it refused to hold.
+#[derive(Default)]
+struct Candidates(Vec<Option<u128>>);
 
 /// Which chains this tick must actually poll, one flag per chain.
 ///
@@ -2521,6 +2539,7 @@ fn observe_fold(world: &mut World) {
     }
     if let Some(error) = first_error {
         world.resource_mut::<TickError>().0 = Some(error);
+        discard_candidates(world);
         put_polled(world, polled);
         return;
     }
@@ -2555,6 +2574,7 @@ fn observe_fold(world: &mut World) {
         });
         if let Some(error) = mismatch {
             world.resource_mut::<TickError>().0 = Some(error);
+            discard_candidates(world);
             put_polled(world, polled);
             return;
         }
@@ -2619,6 +2639,39 @@ fn observe_fold(world: &mut World) {
         }
     }
     world.non_send_mut::<Moved>().0 = changed;
+    publish_candidates(world);
+}
+
+/// Publish staged digests to the committed map, once the fold has admitted
+/// every observation of the tick.
+///
+/// This is the only place [`Fingerprints`] advances. A digest written earlier
+/// describes a value the substrate does not hold, and a quiet tick then skips
+/// the work that would have produced it.
+fn publish_candidates(world: &mut World) {
+    let mut candidates = std::mem::take(&mut world.non_send_mut::<Candidates>().0);
+    {
+        let mut prints = world.non_send_mut::<Fingerprints>();
+        for (index, candidate) in candidates.iter().enumerate() {
+            if let Some(slot) = prints.0.get_mut(index) {
+                *slot = *candidate;
+            }
+        }
+    }
+    candidates.clear();
+    world.non_send_mut::<Candidates>().0 = candidates;
+}
+
+/// Drop staged digests without publishing them.
+///
+/// The fold refused this tick's observations, so the committed cache must not
+/// learn anything from the polls — not even for the sources that succeeded.
+/// The next tick re-polls every source whose digest has not already been
+/// committed: extra polls rather than dropped work.
+fn discard_candidates(world: &mut World) {
+    let mut candidates = std::mem::take(&mut world.non_send_mut::<Candidates>().0);
+    candidates.clear();
+    world.non_send_mut::<Candidates>().0 = candidates;
 }
 
 /// Put the staging buffer back, capacity and all.
@@ -3078,19 +3131,22 @@ impl EcsBot {
     pub async fn tick_async(&mut self) -> Result<usize, BotError> {
         self.begin_tick();
 
-        // The staging buffer is moved out, refilled and put back, so the
+        // The staging buffers are moved out, refilled and put back, so the
         // observation phase reuses one allocation across every tick rather than
-        // building a fresh vector per tick. It is taken rather than borrowed
+        // building a fresh vector per tick. They are taken rather than borrowed
         // because `poll_sources` borrows the world immutably across its awaits
         // and a mutable borrow of a resource cannot be held across them.
+        // [`Fingerprints`] is deliberately not taken: it is committed state, and
+        // a tick dropped mid-poll would otherwise drop the map and leave the
+        // next tick without slots to publish into.
         let mut polled = std::mem::take(&mut self.world.non_send_mut::<Polled>().0);
-        let mut prints = std::mem::take(&mut self.world.non_send_mut::<Fingerprints>().0);
+        let mut candidates = std::mem::take(&mut self.world.non_send_mut::<Candidates>().0);
         let mut polling = std::mem::take(&mut self.world.non_send_mut::<Polling>().0);
         polled.clear();
-        self.poll_sources(&mut polled, &mut prints, &mut polling)
+        self.poll_sources(&mut polled, &mut candidates, &mut polling)
             .await;
         self.world.non_send_mut::<Polled>().0 = polled;
-        self.world.non_send_mut::<Fingerprints>().0 = prints;
+        self.world.non_send_mut::<Candidates>().0 = candidates;
         self.world.non_send_mut::<Polling>().0 = polling;
 
         self.schedule.run(&mut self.world);
@@ -3250,13 +3306,14 @@ impl EcsBot {
     async fn poll_sources(
         &self,
         polled: &mut Vec<Result<Option<Erased>, BotError>>,
-        prints: &mut [Option<u128>],
+        candidates: &mut Vec<Option<u128>>,
         polling: &mut Vec<bool>,
     ) {
         let chains = self.world.non_send::<Chains>();
         let grants = self.world.resource::<Grants>();
         let seen = self.world.non_send::<Observed>();
         let ledger = self.world.non_send::<Ledger>();
+        let prints = self.world.non_send::<Fingerprints>();
 
         let count = chains.0.len();
         // Every chain starts out "unchanged". A chain that is polled overwrites
@@ -3281,15 +3338,23 @@ impl EcsBot {
         // that moved in between leaves a digest that no longer matches, and the
         // next tick polls again instead of skipping. The error is one redundant
         // poll, never a missed movement.
+        //
+        // The digest is staged in `candidates`, never written to
+        // [`Fingerprints`] here. Publishing it before `observe_fold` commits is
+        // the defect this split exists for: a failed sibling poll left the
+        // successful sources' digests advanced over values the fold refused to
+        // hold, and the next tick skipped them forever (issue #99).
         polling.clear();
         polling.resize(count, true);
+        candidates.clear();
+        candidates.resize(count, None);
         for (index, chain) in chains.0.iter().enumerate() {
             let now = chain.source.fingerprint();
             let quiet = matches!(
-                (now, prints.get(index).copied().flatten()),
+                (now, prints.0.get(index).copied().flatten()),
                 (Some(now), Some(then)) if now == then
             );
-            if let Some(slot) = prints.get_mut(index) {
+            if let Some(slot) = candidates.get_mut(index) {
                 *slot = now;
             }
             if let Some(flag) = polling.get_mut(index) {
@@ -3330,12 +3395,13 @@ impl EcsBot {
                 .zip(results)
             {
                 let index = index_of(offset);
-                // A poll that failed clears the digest, which is what makes the
-                // next tick ask again rather than skip the chain and swallow the
-                // failure. A source that errors therefore reports it every tick,
-                // exactly as it did before fingerprints existed.
+                // A failed poll drops its candidate. The committed digest is
+                // left alone: the fold will abort and discard every candidate,
+                // and a committed digest that never advanced is exactly the
+                // "we do not hold this yet" answer that makes the next tick
+                // poll again rather than skip uncommitted work.
                 if result.is_err()
-                    && let Some(slot) = prints.get_mut(index)
+                    && let Some(slot) = candidates.get_mut(index)
                 {
                     *slot = None;
                 }
@@ -4172,10 +4238,11 @@ impl EcsBot {
         // the same allocations. Nothing else writes them.
         world.insert_non_send(Moving::default());
         world.insert_non_send(Moved::default());
-        // One slot per chain, so the first tick has somewhere to record the
-        // digest each source reports. `None` throughout, which reads as "never
-        // polled" and sends every chain down the ordinary poll path.
+        // One slot per chain of committed digests, plus the per-tick staging
+        // map that may publish into them. `None` throughout, which reads as
+        // "never committed" and sends every chain down the ordinary poll path.
         world.insert_non_send(Fingerprints(vec![None; count]));
+        world.insert_non_send(Candidates::default());
         world.insert_non_send(Polling(Vec::new()));
         world.insert_non_send(Plan::default());
 
@@ -4238,7 +4305,9 @@ impl<S> core::fmt::Debug for EcsObserveBuilder<S> {
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
+    use std::future::Future;
     use std::rc::Rc;
+    use std::task::{Context, Poll, Waker};
 
     use super::*;
     use crate::cap::{Auth, Cap, Demand};
@@ -4401,6 +4470,124 @@ mod tests {
 
         fn domain_id(&self) -> &str {
             "test::exhausting"
+        }
+    }
+
+    /// A source with a digest that can fail on demand and counts its polls.
+    ///
+    /// The fingerprint is pure and answers even while `fail` is set, which is
+    /// the contract `Observe::fingerprint` states and the shape that makes the
+    /// sibling-poll bug reachable: the digest moves (or never committed), the
+    /// poll runs and fails, and a cache that published the digest early would
+    /// skip the source on every later tick.
+    struct Switched {
+        value: Rc<Cell<u16>>,
+        fail: Rc<Cell<bool>>,
+        polls: Rc<Cell<usize>>,
+        caps: Vec<Cap>,
+    }
+
+    impl Switched {
+        fn new(value: u16, fail: bool, polls: Rc<Cell<usize>>) -> Self {
+            Self {
+                value: Rc::new(Cell::new(value)),
+                fail: Rc::new(Cell::new(fail)),
+                polls,
+                caps: vec![Cap::net()],
+            }
+        }
+    }
+
+    impl Observe for Switched {
+        type Output = u16;
+
+        fn required_caps(&self) -> &[Cap] {
+            &self.caps
+        }
+
+        async fn poll(&self, call: (Auth, ())) -> Result<u16, BotError> {
+            call.0.check(&self.caps)?;
+            self.polls.set(self.polls.get().saturating_add(1));
+            if self.fail.get() {
+                return Err(BotError::DomainError {
+                    domain: "test::switched".into(),
+                    certainty: DispatchCertainty::NotDelivered,
+                    cause: "switch is off".into(),
+                });
+            }
+            Ok(self.value.get())
+        }
+
+        fn fingerprint(&self) -> Option<u128> {
+            // No digest while the switch is off: a source that cannot produce a
+            // value has none to offer a cheap key for, and `None` is the
+            // contract's "must poll" answer. A stable digest across a failure
+            // would let the cache skip the source and swallow the error.
+            if self.fail.get() {
+                None
+            } else {
+                Some(u128::from(self.value.get()))
+            }
+        }
+
+        fn domain_id(&self) -> &str {
+            "test::switched"
+        }
+    }
+
+    /// A source that returns `Pending` once and then answers, with a digest.
+    ///
+    /// Exists so a tick can be dropped mid-poll without hanging the test: the
+    /// first `poll` of the source's future parks, the caller drops the tick,
+    /// and the second tick finds the yield already spent and completes.
+    struct Yielding {
+        value: u16,
+        yielded: Rc<Cell<bool>>,
+        polls: Rc<Cell<usize>>,
+        caps: Vec<Cap>,
+    }
+
+    impl Yielding {
+        fn new(value: u16, yielded: Rc<Cell<bool>>, polls: Rc<Cell<usize>>) -> Self {
+            Self {
+                value,
+                yielded,
+                polls,
+                caps: vec![Cap::net()],
+            }
+        }
+    }
+
+    impl Observe for Yielding {
+        type Output = u16;
+
+        fn required_caps(&self) -> &[Cap] {
+            &self.caps
+        }
+
+        async fn poll(&self, call: (Auth, ())) -> Result<u16, BotError> {
+            call.0.check(&self.caps)?;
+            self.polls.set(self.polls.get().saturating_add(1));
+            let flag = Rc::clone(&self.yielded);
+            std::future::poll_fn(move |cx| {
+                if flag.get() {
+                    Poll::Ready(())
+                } else {
+                    flag.set(true);
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            })
+            .await;
+            Ok(self.value)
+        }
+
+        fn fingerprint(&self) -> Option<u128> {
+            Some(u128::from(self.value))
+        }
+
+        fn domain_id(&self) -> &str {
+            "test::yielding"
         }
     }
 
@@ -5310,6 +5497,352 @@ mod tests {
             counter.get(),
             0,
             "a failed poll fires nothing: the action must not have run"
+        );
+        Ok(())
+    }
+
+    /// A failed sibling poll must not teach the fingerprint cache about a
+    /// value the fold refused to hold.
+    ///
+    /// The counterexample, stated as issue #99 states it: A reports payload `1`
+    /// with digest `Some(1)` and B fails its first poll. The first tick fires
+    /// nothing under the all-or-nothing observation contract. Before the
+    /// repair A's digest was published anyway, so the second tick read A as
+    /// quiet and skipped it despite holding no committed payload — A's action
+    /// never ran unless A changed again.
+    #[test]
+    fn a_failed_sibling_does_not_publish_the_successful_sources_digest() -> TestResult {
+        let left_polls = Rc::new(Cell::new(0));
+        let right_polls = Rc::new(Cell::new(0));
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let left = Switched::new(1, false, Rc::clone(&left_polls));
+        let mid = Switched::new(9, true, Rc::clone(&right_polls));
+        let mid_fail = Rc::clone(&mid.fail);
+        let mut bot = EcsBot::builder("sibling")
+            .observe(left)
+            .on(|value: &u16| *value >= 1, Record(Rc::clone(&seen)))
+            .observe(mid)
+            .on(
+                |value: &u16| *value >= 9,
+                Record(Rc::new(RefCell::new(Vec::new()))),
+            )
+            .with_effects(test_effects()?)
+            .build(&net_grants())?;
+
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(format!("a failing sibling was reported as {fired} fired").into());
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::DomainError { .. }),
+                "expected the sibling's own error, got {error:?}"
+            ),
+        }
+        assert!(
+            seen.borrow().is_empty(),
+            "the failed fold must not commit A's payload"
+        );
+        assert_eq!(left_polls.get(), 1, "A was polled once on the first tick");
+        assert_eq!(right_polls.get(), 1, "and so was B");
+
+        mid_fail.set(false);
+        assert_eq!(bot.tick()?, 2, "both chains recover and both actions fire");
+        assert_eq!(
+            *seen.borrow(),
+            vec![1],
+            "A's uncommitted payload is committed on recovery, with 1 as its input"
+        );
+        assert_eq!(
+            left_polls.get(),
+            2,
+            "A is polled again: its digest must not have been published early"
+        );
+        assert_eq!(right_polls.get(), 2, "B recovers on a poll of its own");
+        Ok(())
+    }
+
+    /// The second half of issue #99's public scenario: a *previously committed*
+    /// value changes while a sibling fails, and the recovery must keep the
+    /// transition to the new value rather than the older committed one.
+    #[test]
+    fn a_committed_source_that_moves_during_a_sibling_failure_is_not_lost() -> TestResult {
+        let left_polls = Rc::new(Cell::new(0));
+        let right_polls = Rc::new(Cell::new(0));
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let left = Switched::new(0, false, Rc::clone(&left_polls));
+        let left_value = Rc::clone(&left.value);
+        let mid = Switched::new(9, false, Rc::clone(&right_polls));
+        let mid_fail = Rc::clone(&mid.fail);
+        let mut bot = EcsBot::builder("recovery")
+            .observe(left)
+            .on(|value: &u16| *value >= 1, Record(Rc::clone(&seen)))
+            .observe(mid)
+            .on(|_: &u16| true, Record(Rc::new(RefCell::new(Vec::new()))))
+            .with_effects(test_effects()?)
+            .build(&net_grants())?;
+
+        assert_eq!(bot.tick()?, 1, "the first tick commits A=0 and B=9");
+        assert_eq!(
+            *seen.borrow(),
+            Vec::<u16>::new(),
+            "A=0 does not meet its condition"
+        );
+        assert_eq!(left_polls.get(), 1);
+
+        left_value.set(1);
+        mid_fail.set(true);
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(format!("a failing sibling was reported as {fired} fired").into());
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::DomainError { .. }),
+                "expected the sibling's own error, got {error:?}"
+            ),
+        }
+        assert!(
+            seen.borrow().is_empty(),
+            "the failed fold must not commit A=1"
+        );
+
+        mid_fail.set(false);
+        assert_eq!(
+            bot.tick()?,
+            1,
+            "recovery commits A's move; B is unchanged and fires nothing"
+        );
+        assert_eq!(
+            *seen.borrow(),
+            vec![1],
+            "the transition to 1 is retained, not the older committed 0"
+        );
+        assert_eq!(
+            left_polls.get(),
+            3,
+            "A is polled on the failing tick and again on recovery"
+        );
+        Ok(())
+    }
+
+    /// Several siblings fail on one tick; every successful source must still
+    /// deliver its payload once the fold can commit.
+    #[test]
+    fn several_failed_siblings_do_not_suppress_the_sources_that_succeeded() -> TestResult {
+        let polls_left = Rc::new(Cell::new(0));
+        let polls_mid = Rc::new(Cell::new(0));
+        let polls_right = Rc::new(Cell::new(0));
+        let seen_left = Rc::new(RefCell::new(Vec::new()));
+        let seen_right = Rc::new(RefCell::new(Vec::new()));
+        let left = Switched::new(1, false, Rc::clone(&polls_left));
+        let mid = Switched::new(2, true, Rc::clone(&polls_mid));
+        let right = Switched::new(3, false, Rc::clone(&polls_right));
+        // A second failing source, so "the first error wins" is not the only
+        // thing the fold is being asked to survive.
+        let far = Switched::new(4, true, Rc::new(Cell::new(0)));
+        let mid_fail = Rc::clone(&mid.fail);
+        let far_fail = Rc::clone(&far.fail);
+        let mut bot = EcsBot::builder("multi-fail")
+            .observe(left)
+            .on(|value: &u16| *value >= 1, Record(Rc::clone(&seen_left)))
+            .observe(mid)
+            .on(|_: &u16| true, Record(Rc::new(RefCell::new(Vec::new()))))
+            .observe(right)
+            .on(|value: &u16| *value >= 3, Record(Rc::clone(&seen_right)))
+            .observe(far)
+            .on(|_: &u16| true, Record(Rc::new(RefCell::new(Vec::new()))))
+            .with_effects(test_effects()?)
+            .build(&net_grants())?;
+
+        if let Ok(fired) = bot.tick() {
+            return Err(format!("failed siblings were reported as {fired} fired").into());
+        }
+        assert!(
+            seen_left.borrow().is_empty(),
+            "nothing commits on a failed fold"
+        );
+        assert!(
+            seen_right.borrow().is_empty(),
+            "nothing commits on a failed fold"
+        );
+        assert_eq!(polls_left.get(), 1);
+        assert_eq!(polls_right.get(), 1);
+
+        mid_fail.set(false);
+        far_fail.set(false);
+        assert_eq!(bot.tick()?, 4, "every chain recovers and fires");
+        assert_eq!(*seen_left.borrow(), vec![1], "A delivers its payload");
+        assert_eq!(*seen_right.borrow(), vec![3], "C delivers its payload");
+        assert_eq!(
+            polls_left.get(),
+            2,
+            "A was re-polled after the aborted fold"
+        );
+        assert_eq!(
+            polls_right.get(),
+            2,
+            "C was re-polled after the aborted fold"
+        );
+        Ok(())
+    }
+
+    /// A tick dropped mid-poll must not disable fingerprint caching.
+    ///
+    /// The staging maps are taken out of the world for the poll. A dropped tick
+    /// used to take the committed map with it, leave the resource at its empty
+    /// default, and then `get_mut` found no slot for every later digest — so
+    /// caching was off for the rest of the process. Committed digests now never
+    /// leave the world, and the recovery tick must still publish into them.
+    #[test]
+    fn cancelling_a_poll_still_leaves_fingerprint_caching_working() -> TestResult {
+        let polls = Rc::new(Cell::new(0));
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let yielded = Rc::new(Cell::new(false));
+        let source = Yielding::new(200, Rc::clone(&yielded), Rc::clone(&polls));
+        let mut bot = EcsBot::builder("cancel")
+            .observe(source)
+            .on(|value: &u16| *value >= 200, Record(Rc::clone(&seen)))
+            .with_effects(test_effects()?)
+            .build(&net_grants())?;
+
+        // Drive the tick until the source parks, then drop it on the floor.
+        {
+            let mut tick = Box::pin(bot.tick_async());
+            let waker = Waker::noop();
+            let mut cx = Context::from_waker(waker);
+            match tick.as_mut().poll(&mut cx) {
+                Poll::Ready(_) => {
+                    return Err("the yielding source resolved before it was cancelled".into());
+                }
+                Poll::Pending => {}
+            }
+            drop(tick);
+        }
+        assert!(seen.borrow().is_empty(), "a cancelled tick commits nothing");
+
+        assert_eq!(bot.tick()?, 1, "the recovery tick completes and fires");
+        assert_eq!(*seen.borrow(), vec![200], "with the payload as its input");
+        assert_eq!(
+            polls.get(),
+            2,
+            "the source is polled once per tick across the cancel"
+        );
+
+        assert_eq!(bot.tick()?, 0, "and the next tick is quiet");
+        assert_eq!(
+            polls.get(),
+            2,
+            "fingerprint caching still works after a cancelled tick"
+        );
+        Ok(())
+    }
+
+    /// A retained transition keeps its immutable input across a sibling failure
+    /// that admits a newer candidate and then aborts.
+    ///
+    /// Acceptance case 4 of issue #99. The held entry is bound to the payload
+    /// it was opened under. A later tick moves the source and fails on a
+    /// sibling; the fold refuses that tick wholesale. After recovery the
+    /// binding must still be the older payload, and the newer value must not
+    /// have been folded into it — and must not have been lost either.
+    #[test]
+    fn a_held_transition_keeps_its_input_across_a_sibling_failure() -> TestResult {
+        let logs = Rc::new(RefCell::new(Vec::new()));
+        let mid_polls = Rc::new(Cell::new(0));
+        let mid = Switched::new(9, false, Rc::clone(&mid_polls));
+        let mid_fail = Rc::clone(&mid.fail);
+        let left = Holds::new(200);
+        let mut bot = EcsBot::builder("held-newer")
+            .observe(left)
+            .on(
+                |value: &u16| *value >= 200,
+                Flaky {
+                    remaining: Rc::new(Cell::new(1)),
+                    log: Rc::clone(&logs),
+                    kind: FlakyKind::Indeterminate,
+                },
+            )
+            .observe(mid)
+            .on(|_: &u16| true, Record(Rc::new(RefCell::new(Vec::new()))))
+            .with_effects(test_effects()?)
+            .build(&net_grants())?;
+
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(
+                    format!("an indeterminate effect was reported as {fired} fired").into(),
+                );
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::EffectIndeterminate { .. }),
+                "expected the action's own error, got {error:?}"
+            ),
+        }
+        assert_eq!(identities(&bot), vec![(0, 0)], "the held entry is named");
+        assert!(
+            matches!(
+                first_hold(&bot),
+                Some(TransitionHold::OutcomeUnknown { attempts: 1, .. })
+            ),
+            "the first tick holds the attempt: {:?}",
+            first_hold(&bot)
+        );
+        assert!(logs.borrow().is_empty(), "nothing was recorded yet");
+
+        // A sibling failure aborts the fold before any newer candidate can be
+        // admitted. The held entry is untouched: same identity, same hold.
+        mid_fail.set(true);
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(format!("a failing sibling was reported as {fired} fired").into());
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::DomainError { .. }),
+                "expected the sibling's own error, got {error:?}"
+            ),
+        }
+        assert_eq!(
+            identities(&bot),
+            vec![(0, 0)],
+            "the held entry survives an aborted fold"
+        );
+        assert!(
+            matches!(
+                first_hold(&bot),
+                Some(TransitionHold::OutcomeUnknown { attempts: 1, .. })
+            ),
+            "and is still held on the same attempt: {:?}",
+            first_hold(&bot)
+        );
+
+        // Recovery. The held entry is still not re-attempted without evidence,
+        // and the sibling's own work is what the tick is able to report.
+        mid_fail.set(false);
+        match bot.tick() {
+            Ok(_) => {}
+            Err(error) => assert!(
+                matches!(error, BotError::PendingTransition { .. }),
+                "the held entry is still outstanding, got {error:?}"
+            ),
+        }
+        assert!(
+            logs.borrow().is_empty(),
+            "a held effect is not attempted across a recovery without evidence"
+        );
+
+        // Evidence says it did not happen. The entry runs against the input it
+        // was bound to — `Holds` never moved, so the immutable input is 200 and
+        // there is no newer candidate that could have replaced it.
+        let held = bot
+            .pending()
+            .into_iter()
+            .find(|work| identity(work) == (0, 0))
+            .ok_or("the held entry disappeared from the report")?;
+        bot.resolve_effect(&held_key(&held)?, EffectEvidence::NotApplied)?;
+        assert_eq!(bot.tick()?, 1, "the entry runs once evidence authorises it");
+        assert_eq!(
+            *logs.borrow(),
+            vec![200],
+            "the retained transition's immutable input is the one it was opened under"
         );
         Ok(())
     }
