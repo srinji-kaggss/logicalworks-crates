@@ -79,6 +79,13 @@ explicitly under that crate.
 
 ### lgwks_bot Added
 
+- **`BotError::EffectUnrecorded`, `DispatchCertainty::Occurred`, and
+  `TransitionHold::RecordingFailed`.** A post-effect journal failure now
+  carries the exact `EffectKey` and the observed `Applied`/`NotApplied` fact
+  instead of being retyped as a pre-dispatch refusal. `Occurred` answers "the
+  effect definitely happened" — the arm `Refused` (nothing left the process)
+  and `NotDelivered` (a retry is a retry) both lied about. All three types are
+  `#[non_exhaustive]`, so this is additive.
 - **The locator ladder: `Anchor`, `Ladder`, and `RecognitionVector::recognize_with_ladder`.**
   A ladder is the search order `docs/general-bot-fold.md` §3.2 sequences as step
   4: stable `id`, then `data-testid`, then ARIA role, then visible text, then a
@@ -167,6 +174,17 @@ explicitly under that crate.
 
 ### lgwks_bot Fixed
 
+- A post-effect journal failure is no longer reported as a pre-dispatch
+  refusal and terminal abandonment. `run_chain` used to replace the action's
+  known outcome with `BotError::EffectRefused` when the `OutcomeObserved`
+  append failed, so `dispatch_certainty()` answered `Refused` and
+  `RetryClass::Never` became `Abandoned` — a controller that read that as
+  "safe to replan" would issue a new logical action and duplicate the
+  external operation. Execution outcome, persistence acknowledgment,
+  verification and cleanup are now separate dimensions: the entry is held as
+  `RecordingFailed` with its key and evidence, and a retry of the recording
+  never re-enters the action. Append failures *before* the action stay
+  `EffectRefused`, which is the negative control.
 - Observation fingerprints no longer commit before the values they describe.
   `poll_sources` used to publish each source's digest as it polled, then
   `observe_fold` committed payloads all-or-nothing; a failed sibling poll left
