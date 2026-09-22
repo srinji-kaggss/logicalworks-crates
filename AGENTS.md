@@ -1,5 +1,25 @@
 # AGENTS.md
 
+Four files are the governance surface, and each owns exactly one concern:
+
+| File | Concern |
+|---|---|
+| [`GOVERNANCE.md`](GOVERNANCE.md) | Authority, laws, gates, the completion ledger, and what is not claimed |
+| [`CODEBOOK.md`](CODEBOOK.md) | Code rules: lint contract, anti-slop invariants, API shape, tests |
+| [`WORKFLOW.md`](WORKFLOW.md) | Process: local CI, the delivery loop, evidence proportionality, agent economics |
+| `AGENTS.md` (this file) | **Dependency doctrine** — the narrower rule layered on `CODEBOOK.md` §10 |
+
+A second copy of a policy is a second policy, and the two drift. Do not
+duplicate these rules elsewhere; link here. Where this file and `CODEBOOK.md`
+conflict on a dependency question, this file wins.
+
+The gate is defined once in `scripts/gate-lanes.toml`. Run it with
+`./scripts/ci-local.sh`. `scripts/check-gate-parity.py` keeps
+`.github/workflows/ci.yml` in agreement with that table.
+
+---
+
+
 Read this before adding a dependency to any crate in this repository. The
 workspace compiles against `std` and `lgwks_std` first; every other edge is a
 registered decision, not an import line. The default answer to "can I add this
