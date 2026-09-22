@@ -126,18 +126,25 @@ fn nonzero_exit_does_not_fabricate_tree_cleanup() -> Result<(), Box<dyn std::err
         supervisor
             .spawn_process(command.arg("-c").arg(&script))
             .await?;
-        // Block this executor thread after native spawn. The shell can fork and
-        // record its descendant, but the manager future cannot receive its first
-        // poll before shutdown is requested.
-        let blocked_until = std::time::Instant::now() + Duration::from_millis(25);
-        while std::time::Instant::now() < blocked_until {
+        // Block this executor thread after native spawn without yielding, so
+        // the manager future cannot receive its first poll before shutdown is
+        // requested. The shell still runs: it forks the descendant and records
+        // the pid. Wait for that record with a deadline rather than a fixed
+        // pause, because a one-shot read after 25ms loses the race on a loaded
+        // machine and reports a missing descendant that is merely late.
+        let deadline = std::time::Instant::now() + BUDGET;
+        let child = loop {
+            if let Ok(text) = std::fs::read_to_string(&child_file) {
+                let text = text.trim();
+                if !text.is_empty() {
+                    break String::from(text);
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(std::io::Error::other("descendant pid was not recorded"));
+            }
             std::hint::spin_loop();
-        }
-        let child = std::fs::read_to_string(&child_file)
-            .ok()
-            .map(|text| String::from(text.trim()))
-            .filter(|text| !text.is_empty())
-            .ok_or_else(|| std::io::Error::other("descendant pid was not recorded"))?;
+        };
         let outcome = outcome(&mut supervisor).await?;
         Ok::<_, std::io::Error>((outcome, child))
     })?;
