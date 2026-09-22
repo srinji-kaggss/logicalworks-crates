@@ -174,6 +174,9 @@ explicitly under that crate.
 
 ### lgwks_bot Fixed
 
+- Process supervision now establishes its process-group guard before scheduling
+  the child and reports bounded descendant cleanup evidence instead of treating
+  the leader's exit as proof that the process tree is gone.
 - A post-effect journal failure is no longer reported as a pre-dispatch
   refusal and terminal abandonment. `run_chain` used to replace the action's
   known outcome with `BotError::EffectRefused` when the `OutcomeObserved`

@@ -7,10 +7,12 @@
 //!
 //! Running it is [`Supervisor::spawn_process`], and it is the only sanctioned
 //! path: a process started there is bounded by the supervisor's in-flight
-//! ceiling, killed — **as a whole process group**, so a shell cannot leave
-//! grandchildren behind — when the supervisor is dropped or the task is
-//! cancelled, and reported through the supervisor's terminal outcomes, so a
-//! process that exited non-zero is distinguishable from one that was cancelled.
+//! ceiling, terminated — **as a whole process group** — when the supervisor is
+//! dropped or the task is cancelled, and reported through the supervisor's
+//! terminal outcomes, so a process that exited non-zero is distinguishable from
+//! one that was cancelled. A Unix process group is not a kernel job object: a
+//! descendant that creates a new session can escape it, and the cleanup receipt
+//! reports that limitation rather than claiming universal tree containment.
 //!
 //! # The handle that is not here
 //!
