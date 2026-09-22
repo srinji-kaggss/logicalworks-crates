@@ -133,6 +133,14 @@ jobs:
           --all-targets --no-default-features -- -D warnings &&
           cargo clippy --locked --manifest-path crates/lgwks-ast/Cargo.toml
           --all-targets --no-default-features -- -D warnings
+      - name: Clippy process-only
+        # `process` alone is a supported consumer shape: a bot that starts
+        # children and nothing else. It was missing from the matrix, so a
+        # deadline path naming the `time` module compiled under `--all-features`
+        # and broke this build (issue #131).
+        run: >
+          cargo clippy --locked --manifest-path crates/lgwks-bot/Cargo.toml
+          --all-targets --no-default-features --features process -- -D warnings
 
   docs:
     name: Docs

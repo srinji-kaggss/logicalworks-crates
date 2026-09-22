@@ -43,7 +43,7 @@ net = ["io", "lgwks_deps/tokio-net"]
 # group-kill syscall (`contract/APPROVED.toml` records rustix under `lgwks_std`
 # with exactly this reason: killing a shell must reach its grandchildren, which
 # `Child::kill` cannot do); this enables it, and adds no dependency.
-process = ["io", "sync", "lgwks_std/process", "lgwks_deps/tokio-process"]
+process = ["io", "sync", "time", "lgwks_std/process", "lgwks_deps/tokio-process"]
 fs = ["io", "lgwks_deps/tokio-fs"]
 signal = ["rt", "lgwks_deps/tokio-signal"]
 # Minting a run identity needs an entropy source, and the estate has exactly

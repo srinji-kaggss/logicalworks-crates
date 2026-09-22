@@ -204,6 +204,12 @@ explicitly under that crate.
 
 ### lgwks_bot Fixed
 
+- `process` now enables `time`. `ProcessSpec`'s deadline is enforced with
+  `rt::time::timeout`, and `rt::time` is behind the `time` feature, so a
+  `--no-default-features --features process` build did not compile
+  (issue #131). The CI feature matrix now has a `Clippy process-only` lane
+  so that combination cannot rot again.
+
 - An ephemeral scope enforces its advertised external-effect refusal.
   `Effects::prepare` used to discard the `DispatchPrepared` acknowledgment as
   `_ack` and never called `admit_external_handoff`, so a local in-memory
