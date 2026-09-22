@@ -51,9 +51,9 @@ Actions run in declaration order, but deciding and doing are two systems. The
 `fire_plan` system walks the eligible work — a chain whose `Revision` moved opens
 a transition, and a chain with a transition outstanding is walked whether or not
 it moved — and records one ordered `Step` per condition that held
-(`crates/lgwks-bot/src/ecs.rs:3050`); the `run_steps` pass then awaits those steps
+(`crates/lgwks-bot/src/ecs.rs:2859`); the `run_steps` pass then awaits those steps
 on the caller's executor in exactly that order
-(`crates/lgwks-bot/src/ecs.rs:3554`). It breaks on the first failure and records
+(`crates/lgwks-bot/src/ecs.rs:3580`). It breaks on the first failure and records
 it, and there is no rollback:
 
 ```rust,ignore
@@ -325,6 +325,6 @@ in declaration order and `run_steps` runs them in that same order, parking the
 first failure it saw and reporting that one, while the chains behind the failing
 one still run and still record their work. `TickError` is a resource rather than
 a return value because an exclusive system returns `()` and cannot propagate
-(`crates/lgwks-bot/src/ecs.rs:829`); `tick` takes it after the schedule runs, and
+(`crates/lgwks-bot/src/ecs.rs:3388`); `tick` takes it after the schedule runs, and
 it takes precedence over the `PendingTransition` report because it carries the
 typed variant a retry classifier matches on.

@@ -16,23 +16,24 @@ crates/lgwks-bot/src/cap.rs:202	pub struct Deficit {
 crates/lgwks-bot/src/cap.rs:288	pub fn to_grant_set(&self) -> GrantSet {
 crates/lgwks-bot/src/cap.rs:365	pub(crate) fn new(mut caps: Vec<Cap>) -> Self {
 crates/lgwks-bot/src/cap.rs:414	pub fn check(&self, required: &[Cap]) -> Result<(), BotError> {
-crates/lgwks-bot/src/ecs.rs:829	struct TickError(Option<BotError>);
-crates/lgwks-bot/src/ecs.rs:1021	const MAX_IN_FLIGHT_POLLS: usize = 32;
-crates/lgwks-bot/src/ecs.rs:2597	RetryClass::Safe if attempts < budget => EntryState::DefinitelyFailed { attempts, cause },
-crates/lgwks-bot/src/ecs.rs:2653	let mut first_error = None;
-crates/lgwks-bot/src/ecs.rs:2833	fn fire_plan(world: &mut World) {
-crates/lgwks-bot/src/ecs.rs:3039	Err(error) => {
-crates/lgwks-bot/src/ecs.rs:3050	steps.push(Step {
-crates/lgwks-bot/src/ecs.rs:3067	ambiguity_detection: LogLevel::Error,
-crates/lgwks-bot/src/ecs.rs:3149	pub fn world(&self) -> &World {
-crates/lgwks-bot/src/ecs.rs:3251	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:3362	pub fn tick(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:3501	let baseline = seen
-crates/lgwks-bot/src/ecs.rs:3554	async fn run_steps(
-crates/lgwks-bot/src/ecs.rs:4124	S::Output: PartialEq + 'static,
-crates/lgwks-bot/src/ecs.rs:4260	for chain in &chains {
-crates/lgwks-bot/src/ecs.rs:4261	shortages.extend(grants.uncovered(
-crates/lgwks-bot/src/ecs.rs:4277	world.insert_resource(Grants(grants.clone()));
+crates/lgwks-bot/src/ecs.rs:1021	/// [`Step`]s alongside it are exactly the effects the walk reached before that
+crates/lgwks-bot/src/ecs.rs:2597	/// want three different answers. Reading the rendered `cause` to tell them apart
+crates/lgwks-bot/src/ecs.rs:2653	/// socket-backed source work: this system is a synchronous step, and a source
+crates/lgwks-bot/src/ecs.rs:2833	/// Fire, decide half: walk the eligible work of every chain, in declaration
+crates/lgwks-bot/src/ecs.rs:2859	fn fire_plan(world: &mut World) {
+crates/lgwks-bot/src/ecs.rs:3039	// The way past it is evidence: `NotApplied` revives the entry, and
+crates/lgwks-bot/src/ecs.rs:3067	// the effect: the entry stays where it is, this chain stops, and
+crates/lgwks-bot/src/ecs.rs:3149	/// `None` when the ledger is not in the world, which is the state after a
+crates/lgwks-bot/src/ecs.rs:3251	/// stands.
+crates/lgwks-bot/src/ecs.rs:3362	/// A verb that needs this crate's timer (`rt::time`) or a driver cannot run
+crates/lgwks-bot/src/ecs.rs:3388	pub fn tick(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs.rs:3501	(Some(now), Some(then)) if now == then
+crates/lgwks-bot/src/ecs.rs:3554	if let Some(slot) = polled.get_mut(index) {
+crates/lgwks-bot/src/ecs.rs:3580	async fn run_steps(
+crates/lgwks-bot/src/ecs.rs:4124	where
+crates/lgwks-bot/src/ecs.rs:4260	// record belongs to a different bot or a different revision of this
+crates/lgwks-bot/src/ecs.rs:4261	// one — and it is refused here rather than ignored, because ignoring it
+crates/lgwks-bot/src/ecs.rs:4277	// the domain that declared it. Admission that returned at the first one
 crates/lgwks-bot/src/error.rs:106	/// handed may be the one that owns the runtime's driver. Parked, that
 crates/lgwks-bot/src/gate.rs:12	pub struct GrantSet {
 crates/lgwks-bot/src/gate.rs:44	pub fn grant(mut self, cap: Cap) -> Self {

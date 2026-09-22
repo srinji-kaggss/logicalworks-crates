@@ -204,19 +204,20 @@ use super::verb::{Evaluate, Execute, Observe};
 /// A separator rather than a bare concatenation, because the fields hashed into
 /// an identity are variable-length strings and a run of them with no framing is
 /// a value two different bots can collide on.
-const ACTION_ID_DOMAIN: &[u8] = b"lgwks.bot.action-id.v1";
+const ACTION_ID_DOMAIN: &[u8] = b"lgwks.bot.action-id.v2";
 
 /// The domain separator for an [`ActionDigest`] derived from a bound generation.
-const ACTION_DIGEST_DOMAIN: &[u8] = b"lgwks.bot.action-digest.v1";
+const ACTION_DIGEST_DOMAIN: &[u8] = b"lgwks.bot.action-digest.v2";
 
 /// Hash a sequence of byte fields into the estate's content-identity digest.
 ///
-/// The fields are fed in order with no length prefix, which is sound only
-/// because every caller's fields are fixed-width or domain-separated; see the
-/// two derivation functions below.
+/// Each field is length-prefixed with its portable `u64` width before the bytes
+/// themselves, so distinct variable-length field splits cannot collide.
 fn hash_parts(parts: &[&[u8]]) -> Digest {
     let mut hasher = Hasher::new();
     for part in parts {
+        let length = u64::try_from(part.len()).unwrap_or(u64::MAX);
+        hasher.update(&length.to_le_bytes());
         hasher.update(part);
     }
     hasher.finalize()
@@ -749,7 +750,7 @@ impl Effects {
     ) -> Result<(), JournalError> {
         match self.append(&EffectEvent::OutcomeObserved { key, evidence }) {
             Ok(()) => {
-                if evidence == EffectEvidence::Applied {
+                if evidence == EffectEvidence::Applied && !self.applied.contains(&key) {
                     self.applied.push(key);
                 }
                 Ok(())
@@ -757,9 +758,34 @@ impl Effects {
             Err(JournalError::OutOfOrder { expected, .. })
                 if expected == Some(EventKind::Verified) || expected.is_none() =>
             {
-                Ok(())
+                match self.outcome_for(&key) {
+                    Some(recorded) if recorded == evidence => {
+                        if evidence == EffectEvidence::Applied && !self.applied.contains(&key) {
+                            self.applied.push(key);
+                        }
+                        Ok(())
+                    }
+                    _ => Err(JournalError::OutOfOrder {
+                        key: Box::new(key),
+                        expected,
+                        attempted: EventKind::OutcomeObserved,
+                    }),
+                }
             }
-            Err(cause) => Err(cause),
+            Err(cause) => {
+                // A journal may commit the event and lose the acknowledgment.
+                // Read-back turns that ambiguous transport failure into the same
+                // idempotent success as a retry that reaches the ladder fence.
+                match self.outcome_for(&key) {
+                    Some(recorded) if recorded == evidence => {
+                        if evidence == EffectEvidence::Applied && !self.applied.contains(&key) {
+                            self.applied.push(key);
+                        }
+                        Ok(())
+                    }
+                    _ => Err(cause),
+                }
+            }
         }
     }
 }
@@ -3631,7 +3657,7 @@ impl EcsBot {
                     .world
                     .non_send_mut::<Ledger>()
                     .effects
-                    .append(&EffectEvent::OutcomeObserved { key, evidence });
+                    .ensure_outcome(key, evidence);
                 match result {
                     Ok(()) => {
                         if self
@@ -5002,20 +5028,22 @@ mod tests {
     /// recording must not re-enter the action. Wrapping [`MemoryJournal`] keeps
     /// the real ladder and chain checks underneath the injected fault.
     struct SelectiveJournal {
-        inner: MemoryJournal,
+        inner: Rc<RefCell<MemoryJournal>>,
         refuse_intent: Rc<Cell<bool>>,
         refuse_prepare: Rc<Cell<bool>>,
         refuse_outcome: Rc<Cell<bool>>,
+        commit_then_error: Rc<Cell<bool>>,
         outcome_appends: Rc<Cell<usize>>,
     }
 
     impl SelectiveJournal {
         fn new() -> Self {
             Self {
-                inner: MemoryJournal::new(),
+                inner: Rc::new(RefCell::new(MemoryJournal::new())),
                 refuse_intent: Rc::new(Cell::new(false)),
                 refuse_prepare: Rc::new(Cell::new(false)),
                 refuse_outcome: Rc::new(Cell::new(false)),
+                commit_then_error: Rc::new(Cell::new(false)),
                 outcome_appends: Rc::new(Cell::new(0)),
             }
         }
@@ -5035,21 +5063,29 @@ mod tests {
         fn outcome_appends(&self) -> Rc<Cell<usize>> {
             Rc::clone(&self.outcome_appends)
         }
+
+        fn commit_then_error(&self) -> Rc<Cell<bool>> {
+            Rc::clone(&self.commit_then_error)
+        }
+
+        fn store(&self) -> Rc<RefCell<MemoryJournal>> {
+            Rc::clone(&self.inner)
+        }
     }
 
     impl EffectJournal for SelectiveJournal {
         fn durability(&self) -> DurabilityPromise {
-            self.inner.durability()
+            self.inner.borrow().durability()
         }
 
         fn tail(&self) -> JournalPosition {
-            self.inner.tail()
+            self.inner.borrow().tail()
         }
 
         fn committed(&self) -> Result<Vec<EffectEvent>, JournalError> {
             // Qualified: `MemoryJournal` also has an inherent `committed` that
             // returns its raw entries, and that one would win method resolution.
-            EffectJournal::committed(&self.inner)
+            EffectJournal::committed(&*self.inner.borrow())
         }
 
         fn compare_and_append(
@@ -5072,8 +5108,63 @@ mod tests {
                     "injected append refusal",
                 )));
             }
-            self.inner.compare_and_append(expected_tail, event)
+            let ack = self
+                .inner
+                .borrow_mut()
+                .compare_and_append(expected_tail, event)?;
+            if matches!(event, EffectEvent::OutcomeObserved { .. })
+                && self.commit_then_error.replace(false)
+            {
+                return Err(JournalError::Storage(io::Error::other(
+                    "injected post-commit append error",
+                )));
+            }
+            Ok(ack)
         }
+    }
+
+    #[test]
+    fn hash_parts_frames_distinct_variable_length_splits() -> TestResult {
+        let left = hash_parts(&[b"ab", b"c"]);
+        let right = hash_parts(&[b"a", b"bc"]);
+        assert_ne!(left, right, "distinct field splits must not collide");
+        assert_eq!(left, hash_parts(&[b"ab", b"c"]));
+        Ok(())
+    }
+
+    #[test]
+    fn an_ambiguous_commit_then_error_is_idempotent() -> TestResult {
+        let runs = Rc::new(Cell::new(0));
+        let journal = SelectiveJournal::new();
+        let commit_then_error = journal.commit_then_error();
+        let store = journal.store();
+        let mut bot = EcsBot::builder("ambiguous-commit")
+            .observe(Holds::new(200))
+            .on(|value: &u16| *value >= 200, Count(Rc::clone(&runs)))
+            .with_effects(test_effects_with(Box::new(journal))?)
+            .build(&net_grants())?;
+
+        commit_then_error.set(true);
+        match bot.tick() {
+            Err(BotError::EffectUnrecorded { .. }) => {}
+            other => return Err(format!("expected recording failure, got {other:?}").into()),
+        }
+        assert_eq!(runs.get(), 1);
+        let committed = EffectJournal::committed(&*store.borrow())?;
+        assert!(matches!(
+            committed.last(),
+            Some(EffectEvent::OutcomeObserved {
+                evidence: EffectEvidence::Applied,
+                ..
+            })
+        ));
+        let key = committed[0].key();
+        bot.resolve_effect(&key, EffectEvidence::Applied)?;
+
+        assert_eq!(bot.tick()?, 1);
+        assert_eq!(runs.get(), 1, "retry must not dispatch the action again");
+        assert!(bot.pending().is_empty());
+        Ok(())
     }
 
     /// Build an effect scope over a caller-supplied journal.
