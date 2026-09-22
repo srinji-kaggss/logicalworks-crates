@@ -1469,3 +1469,224 @@ fn an_ack_weaker_than_the_advertised_grade_is_refused() -> TestResult {
     assert!(!entered.get(), "the action did not run on a weak ack");
     Ok(())
 }
+
+// ── Red-team counterexamples: the same input must retire in-process ─────────
+
+/// A source that returns to a previously landed `EventId` must retire rather
+/// than refuse or re-enter.
+///
+/// The retire check is `Effects::applied_in`, which only knows what live
+/// settlement folded into `applied`. A raw `OutcomeObserved` append left that
+/// set empty, so the returning event minted `AttemptId::FIRST` again and the
+/// journal answered `OutOfOrder` after the entry was already marked
+/// `Unrecorded` — a false barrier instead of a retirement (issue #101).
+#[test]
+fn a_returning_landed_event_is_retired_not_refused() -> TestResult {
+    let store = Rc::new(RefCell::new(MemoryJournal::new()));
+    let seen = Rc::new(RefCell::new(EventId::new(1, 10)));
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let identity = identity()?;
+
+    let mut bot = Bot::builder(NAME)
+        .observe(Requests(Rc::clone(&seen)))
+        .on(|_seen: &EventId<u32>| true, Records(Rc::clone(&log)))
+        .with_effects(scope(identity, Rc::clone(&store))?)
+        .build(&GrantSet::empty())?;
+
+    assert_eq!(bot.tick()?, 1, "event 1 runs");
+    *seen.borrow_mut() = EventId::new(2, 20);
+    assert_eq!(bot.tick()?, 1, "event 2 runs");
+    assert_eq!(
+        *log.borrow(),
+        vec![EventId::new(1, 10), EventId::new(2, 20)]
+    );
+
+    // Event 1 returns with the same identity. It already landed, so it retires.
+    *seen.borrow_mut() = EventId::new(1, 10);
+    match bot.tick() {
+        Ok(fired) => {
+            assert_eq!(fired, 0, "event 1 must be retired, not re-dispatched");
+            assert_eq!(
+                *log.borrow(),
+                vec![EventId::new(1, 10), EventId::new(2, 20)],
+                "no second delivery of event 1"
+            );
+            Ok(())
+        }
+        Err(error) => Err(format!(
+            "expected retire/skip, got {error:?}; log={:?}",
+            log.borrow()
+        )
+        .into()),
+    }
+}
+
+/// A journal wrapper that keeps a shared view of what landed.
+struct SharedJournal {
+    store: Rc<RefCell<MemoryJournal>>,
+    /// What `admit_external_handoff` sees.
+    advertised: DurabilityPromise,
+    /// What every acknowledgment reports.
+    ack: DurabilityPromise,
+}
+
+impl EffectJournal for SharedJournal {
+    fn durability(&self) -> DurabilityPromise {
+        self.advertised
+    }
+
+    fn tail(&self) -> JournalPosition {
+        self.store.borrow().tail()
+    }
+
+    fn committed(&self) -> Result<Vec<EffectEvent>, JournalError> {
+        EffectJournal::committed(&*self.store.borrow())
+    }
+
+    fn compare_and_append(
+        &mut self,
+        expected_tail: JournalPosition,
+        event: &EffectEvent,
+    ) -> Result<DurableAck, JournalError> {
+        self.store
+            .borrow_mut()
+            .compare_and_append(expected_tail, event)?;
+        Ok(DurableAck::new(self.store.borrow().tail(), self.ack))
+    }
+}
+
+/// Whether the named kind was appended for any key.
+fn journal_has(store: &Rc<RefCell<MemoryJournal>>, kind: EventKind) -> bool {
+    let committed = EffectJournal::committed(&*store.borrow()).unwrap_or_default();
+    committed.iter().any(|event| event.kind() == kind)
+}
+
+/// A handoff refused before the action ran must not leave a false
+/// `Unrecorded` barrier, and a later tick must not treat the entry as
+/// "may be live" (issue #100).
+#[test]
+fn a_refused_handoff_leaves_no_unrecorded_barrier() -> TestResult {
+    let store = Rc::new(RefCell::new(MemoryJournal::new()));
+    let seen = Rc::new(RefCell::new(EventId::new(1, 1)));
+    let entered = Rc::new(Cell::new(false));
+    let identity = identity()?;
+    let environment = identity.environment();
+    let mut broker = Broker::new();
+    broker.register(environment)?;
+
+    let mut bot = Bot::builder(NAME)
+        .observe(Requests(Rc::clone(&seen)))
+        .on(
+            |_seen: &EventId<u32>| true,
+            ExternalMarker(Rc::clone(&entered)),
+        )
+        .with_effects(EffectScope::new(
+            identity,
+            broker,
+            Box::new(SharedJournal {
+                store: Rc::clone(&store),
+                advertised: DurabilityPromise::Ephemeral,
+                ack: DurabilityPromise::Ephemeral,
+            }),
+        ))
+        .build(&GrantSet::empty())?;
+
+    match bot.tick() {
+        Err(BotError::EffectRefused { .. }) => {}
+        other => return Err(format!("expected EffectRefused, got {other:?}").into()),
+    }
+    assert!(!entered.get(), "the action did not run");
+    // `MemoryJournal` advertises `Ephemeral`, so admission refuses before the
+    // intent is written. Nothing may be prepared either way.
+    assert!(
+        !journal_has(&store, EventKind::DispatchPrepared),
+        "a handoff that cannot outlive the process must not be prepared"
+    );
+
+    match bot.tick() {
+        Ok(_) => Ok(()),
+        Err(BotError::PendingTransition { work, outstanding }) => {
+            let hold = format!("{:?}", work.hold());
+            if hold.contains("Unrecorded")
+                || hold.contains("OutcomeUnknown")
+                || hold.contains("UnsettledByRecovery")
+            {
+                Err(format!(
+                    "false barrier after handoff refusal: hold={hold} outstanding={outstanding}"
+                )
+                .into())
+            } else {
+                // A real hold is allowed; a false "may be live" is not.
+                Ok(())
+            }
+        }
+        // Refusing again is the configuration error still being true. It is
+        // not the defect; the defect is a false unknown barrier.
+        Err(BotError::EffectRefused { .. }) => Ok(()),
+        Err(other) => Err(format!("unexpected second tick error: {other:?}").into()),
+    }
+}
+
+/// A weak per-append ack must be refused before `DispatchPrepared` is
+/// committed, so recovery cannot fold a dispatch that never happened as an
+/// unknown outcome (issue #100).
+#[test]
+fn a_weak_ack_does_not_record_dispatch_prepared() -> TestResult {
+    let store = Rc::new(RefCell::new(MemoryJournal::new()));
+    let seen = Rc::new(RefCell::new(EventId::new(1, 1)));
+    let entered = Rc::new(Cell::new(false));
+    let identity = identity()?;
+    let environment = identity.environment();
+    let mut broker = Broker::new();
+    broker.register(environment)?;
+
+    let mut bot = Bot::builder(NAME)
+        .observe(Requests(Rc::clone(&seen)))
+        .on(
+            |_seen: &EventId<u32>| true,
+            ExternalMarker(Rc::clone(&entered)),
+        )
+        .with_effects(EffectScope::new(
+            identity,
+            broker,
+            Box::new(SharedJournal {
+                store: Rc::clone(&store),
+                // Advertised as durable enough for an external handoff, but
+                // every acknowledgment comes back `Ephemeral`.
+                advertised: DurabilityPromise::ProcessCrash,
+                ack: DurabilityPromise::Ephemeral,
+            }),
+        ))
+        .build(&GrantSet::empty())?;
+
+    match bot.tick() {
+        Err(BotError::EffectRefused { .. }) => {}
+        other => return Err(format!("expected EffectRefused, got {other:?}").into()),
+    }
+    assert!(!entered.get(), "the action did not run on a weak ack");
+    assert!(
+        journal_has(&store, EventKind::IntentAdmitted),
+        "the intent is the write-ahead fact that was actually committed"
+    );
+    assert!(
+        !journal_has(&store, EventKind::DispatchPrepared),
+        "no DispatchPrepared for a handoff refused on its acknowledgment"
+    );
+
+    match bot.tick() {
+        Ok(_) => Ok(()),
+        Err(BotError::PendingTransition { work, .. }) => {
+            let hold = format!("{:?}", work.hold());
+            if hold.contains("Unrecorded")
+                || hold.contains("OutcomeUnknown")
+                || hold.contains("UnsettledByRecovery")
+            {
+                Err(format!("weak ack left a false unknown barrier: {hold}").into())
+            } else {
+                Ok(())
+            }
+        }
+        Err(BotError::EffectRefused { .. }) => Ok(()),
+        Err(other) => Err(format!("unexpected second tick error: {other:?}").into()),
+    }
+}

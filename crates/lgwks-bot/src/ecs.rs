@@ -195,7 +195,8 @@ use super::gate::GrantSet;
 #[cfg(feature = "ephemeral")]
 use super::journal::MemoryJournal;
 use super::journal::{
-    AttemptStatus, DurabilityPromise, EffectEvent, EffectJournal, EventKind, JournalError, recover,
+    AttemptStatus, DurabilityPromise, DurableAck, EffectEvent, EffectJournal, EventKind,
+    JournalError, recover,
 };
 use super::spec::{ChainEntry, Erased, ObserveAny, Witness, typed_entry};
 use super::verb::EffectLifetime;
@@ -621,6 +622,18 @@ impl Effects {
                 DurabilityPromise::ProcessCrash
             }
         };
+        // Intent first. Its acknowledgment is the first durability fact on the
+        // handoff path: a store that cannot outlive the process is refused here,
+        // before `DispatchPrepared` exists for recovery to misread as a live
+        // dispatch (issue #100).
+        let intent_ack = self.append(&EffectEvent::IntentAdmitted { key })?;
+        self.note_journal_attempt(key.action(), key.attempt());
+        if !intent_ack.promise().meets(required) {
+            return Err(DispatchError::Journal(JournalError::PromiseUnmet {
+                required,
+                offered: intent_ack.promise(),
+            }));
+        }
         let scope = &mut self.scope;
         let (authority, ack) =
             prepare_dispatch(&scope.broker, &mut *scope.journal, key)?.into_parts();
@@ -628,6 +641,14 @@ impl Effects {
         // less on this append than the handoff requires is refused even when
         // its `durability()` claimed enough.
         if !ack.promise().meets(required) {
+            // Compensate: the handoff never left. Without this record recovery
+            // folds the `DispatchPrepared` already committed as an unknown
+            // outcome for a dispatch that did not happen. Best-effort: the
+            // `PromiseUnmet` below is the report either way.
+            let _compensating = self.append(&EffectEvent::OutcomeObserved {
+                key,
+                evidence: EffectEvidence::NotApplied,
+            });
             return Err(DispatchError::Journal(JournalError::PromiseUnmet {
                 required,
                 offered: ack.promise(),
@@ -678,10 +699,9 @@ impl Effects {
     /// # Errors
     ///
     /// Whatever the journal refuses.
-    fn append(&mut self, event: &EffectEvent) -> Result<(), JournalError> {
+    fn append(&mut self, event: &EffectEvent) -> Result<DurableAck, JournalError> {
         let tail = self.scope.journal().tail();
-        self.scope.journal_mut().compare_and_append(tail, event)?;
-        Ok(())
+        self.scope.journal_mut().compare_and_append(tail, event)
     }
 
     /// Whether an attempt on `action` is recorded as dispatched with no
@@ -809,7 +829,8 @@ impl Effects {
         evidence: EffectEvidence,
     ) -> Result<(), JournalError> {
         match self.append(&EffectEvent::OutcomeObserved { key, evidence }) {
-            Ok(()) => {
+            Ok(_ack) => {
+                self.note_journal_attempt(key.action(), key.attempt());
                 if evidence == EffectEvidence::Applied {
                     self.applied.push(key);
                 }
@@ -818,7 +839,24 @@ impl Effects {
             Err(JournalError::OutOfOrder { expected, .. })
                 if expected == Some(EventKind::Verified) || expected.is_none() =>
             {
-                Ok(())
+                // Idempotent success only when the *same* evidence is already
+                // recorded. A ladder-complete `OutOfOrder` alone is not proof of
+                // which outcome landed, and treating it as success is how a
+                // contradictory `Applied` gets acknowledged (issue #106).
+                match self.outcome_for(&key) {
+                    Some(recorded) if recorded == evidence => {
+                        self.note_journal_attempt(key.action(), key.attempt());
+                        if evidence == EffectEvidence::Applied && !self.applied.contains(&key) {
+                            self.applied.push(key);
+                        }
+                        Ok(())
+                    }
+                    _ => Err(JournalError::OutOfOrder {
+                        key: Box::new(key),
+                        expected,
+                        attempted: EventKind::OutcomeObserved,
+                    }),
+                }
             }
             Err(cause) => Err(cause),
         }
@@ -2102,22 +2140,33 @@ impl Ledger {
                 None => AttemptId::FIRST,
             },
         };
-        record.begun = Some(attempt);
-        *state = EntryState::Unrecorded;
+        // Journal first, memory second. `record.begun` and `EntryState` are
+        // moved only after the write-ahead pair is committed and its
+        // acknowledgments are strong enough: a refusal before that point leaves
+        // the entry as it was, instead of a false `Unrecorded` barrier for a
+        // handoff that never left (issue #100).
         let input = transition.input;
         let key = self
             .effects
             .key(action, id.chain(), id.entry(), input, attempt)
             .ok_or(BotError::EffectUnsettled { action })?;
-        self.effects
-            .append(&EffectEvent::IntentAdmitted { key })
-            .map_err(|cause| BotError::EffectRefused {
-                cause: DispatchError::Journal(cause),
-            })?;
         let authority = self
             .effects
             .prepare(key, lifetime)
             .map_err(|cause| BotError::EffectRefused { cause })?;
+        let transition = self
+            .transitions
+            .get_mut(id.chain())
+            .and_then(Option::as_mut)
+            .ok_or_else(no_such_work)?;
+        let record = transition
+            .attempts
+            .get_mut(id.entry())
+            .ok_or_else(no_such_work)?;
+        record.begun = Some(attempt);
+        if let Some(state) = transition.entries.get_mut(id.entry()) {
+            *state = EntryState::Unrecorded;
+        }
         Ok((key, authority))
     }
 
@@ -2292,7 +2341,10 @@ impl Ledger {
         // from another run is not this ledger's to settle, and answering it with
         // any of the finer refusals would suggest the evidence nearly applied.
         let identity = self.effects.identity();
-        if key.run() != identity.run() || key.flow() != identity.flow() {
+        if key.run() != identity.run()
+            || key.flow() != identity.flow()
+            || key.environment() != identity.environment()
+        {
             return Settled::NoSuchWork { id: None };
         }
         let Some(transition) = self.transitions.get(id.chain()).and_then(Option::as_ref) else {
@@ -3829,7 +3881,7 @@ impl EcsBot {
                     .world
                     .non_send_mut::<Ledger>()
                     .effects
-                    .append(&EffectEvent::OutcomeObserved { key, evidence });
+                    .ensure_outcome(key, evidence);
                 match result {
                     Ok(()) => {
                         if self
@@ -4001,7 +4053,7 @@ impl EcsBot {
                     .world
                     .non_send_mut::<Ledger>()
                     .effects
-                    .append(&EffectEvent::OutcomeObserved { key, evidence })
+                    .ensure_outcome(key, evidence)
             {
                 // Post-effect: the action already returned and `evidence` is a
                 // fact. This is a recording failure, not a pre-dispatch
