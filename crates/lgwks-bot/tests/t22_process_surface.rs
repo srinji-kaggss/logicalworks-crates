@@ -18,13 +18,17 @@ use lgwks_bot::rt::time::{Instant, sleep};
 
 #[test]
 fn public_process_description_rejects_direct_execution() -> Result<(), Box<dyn std::error::Error>> {
-    let root = std::env::temp_dir().join(format!(
-        "lgwks-bot-t22-{}-{}",
-        std::process::id(),
-        std::thread::current()
-            .name()
-            .map_or_else(|| String::from("probe"), String::from)
-    ));
+    // Wall-clock nanos plus a monotone sequence. Not a process or thread id
+    // (both are reused by the OS) and not `lgwks_std::random` (that module is
+    // behind the `random`/`ephemeral` features, and the feature matrix builds
+    // this test without them).
+    static DIR_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos())
+        .unwrap_or(0);
+    let seq = DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!("lgwks-bot-t22-{nanos}-{seq}"));
     fs::create_dir_all(root.join("src"))?;
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     fs::write(
