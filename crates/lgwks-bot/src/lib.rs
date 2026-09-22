@@ -242,6 +242,7 @@ pub mod spec;
 pub mod verb;
 
 pub use cap::{Auth, Cap, Deficit, Demand, Shortage};
+pub use effect::{EventId, InputIdentity};
 pub use error::{BotError, DispatchCertainty, RetryClass};
 pub use gate::GrantSet;
 pub use language::{Alias, LanguageResolver};
@@ -260,6 +261,7 @@ pub use session::{
     VarType, Verdict,
 };
 pub use spec::{Bot, BotSpec};
+pub use verb::EffectLifetime;
 pub use verb::{Evaluate, Execute, Observe, Query};
 
 /// Wait for all of a set of futures, returning their outputs in input order.

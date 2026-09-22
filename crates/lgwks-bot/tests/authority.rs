@@ -45,7 +45,7 @@ use lgwks_bot::effect::{EnvironmentId, FlowRevision, RunId};
 use lgwks_bot::journal::MemoryJournal;
 use lgwks_bot::spec::{EffectIdentity, EffectScope};
 use lgwks_bot::verb::{Execute, Observe};
-use lgwks_bot::{Auth, Bot, BotError, Cap, GrantSet};
+use lgwks_bot::{Auth, Bot, BotError, Cap, EffectLifetime, GrantSet};
 
 /// What a test here reports when its precondition did not hold.
 ///
@@ -116,6 +116,10 @@ impl Execute for Count {
 
     fn required_caps(&self) -> &[Cap] {
         &[]
+    }
+
+    fn effect_lifetime(&self) -> EffectLifetime {
+        EffectLifetime::Local
     }
 
     async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {

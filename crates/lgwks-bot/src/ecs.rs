@@ -172,6 +172,7 @@ use std::num::{NonZeroU32, NonZeroU128};
 // `self` is load-bearing: the `Component` and `Resource` derives expand to
 // `bevy_ecs::…` paths, so the crate name has to be in scope at the use site even
 // though every edge in this crate is written through the `lgwks_deps` facade.
+use crate::effect::InputIdentity;
 use lgwks_deps::bevy_ecs::{
     self,
     prelude::{Changed, Component, Entity, Resource, World},
@@ -193,8 +194,12 @@ use super::error::{BotError, DispatchCertainty, Escaped, RetryClass};
 use super::gate::GrantSet;
 #[cfg(feature = "ephemeral")]
 use super::journal::MemoryJournal;
-use super::journal::{AttemptStatus, EffectEvent, EffectJournal, EventKind, JournalError, recover};
+use super::journal::{
+    AttemptStatus, DurabilityPromise, DurableAck, EffectEvent, EffectJournal, EventKind,
+    JournalError, recover,
+};
 use super::spec::{ChainEntry, Erased, ObserveAny, Witness, typed_entry};
+use super::verb::EffectLifetime;
 use super::verb::{Evaluate, Execute, Observe};
 
 // ── The effect path: identity, fencing, and the write-ahead record ─────────
@@ -204,22 +209,47 @@ use super::verb::{Evaluate, Execute, Observe};
 /// A separator rather than a bare concatenation, because the fields hashed into
 /// an identity are variable-length strings and a run of them with no framing is
 /// a value two different bots can collide on.
-const ACTION_ID_DOMAIN: &[u8] = b"lgwks.bot.action-id.v1";
+const ACTION_ID_DOMAIN: &[u8] = b"lgwks.bot.action-id.v2";
 
-/// The domain separator for an [`ActionDigest`] derived from a bound generation.
-const ACTION_DIGEST_DOMAIN: &[u8] = b"lgwks.bot.action-digest.v1";
+/// The domain separator for an [`ActionDigest`] derived from an admitted input.
+const ACTION_DIGEST_DOMAIN: &[u8] = b"lgwks.bot.action-digest.v2";
+
+/// The domain separator for an admitted input's content identity.
+const OUTPUT_IDENTITY_DOMAIN: &[u8] = b"lgwks.bot.input-identity.v1";
 
 /// Hash a sequence of byte fields into the estate's content-identity digest.
 ///
-/// The fields are fed in order with no length prefix, which is sound only
-/// because every caller's fields are fixed-width or domain-separated; see the
-/// two derivation functions below.
+/// Each field is length-prefixed with its `u64` little-endian width before the
+/// bytes themselves, so a variable-length name cannot slide into the next field
+/// and produce the same digest for a different parse. A domain separator
+/// identifies the format; it does not frame the fields inside it. Indices are
+/// always `u64::to_le_bytes` rather than `usize`, so a 32-bit and a 64-bit
+/// target derive the same identity for the same bot (issue #101).
 fn hash_parts(parts: &[&[u8]]) -> Digest {
     let mut hasher = Hasher::new();
     for part in parts {
+        let len = u64::try_from(part.len()).unwrap_or(u64::MAX);
+        hasher.update(&len.to_le_bytes());
         hasher.update(part);
     }
     hasher.finalize()
+}
+
+/// A `usize` index as a portable `u64`.
+///
+/// `usize::to_le_bytes` is 4 bytes on a 32-bit target and 8 on a 64-bit one,
+/// so the same bot derived different identities on each. Every index that
+/// enters a digest goes through here.
+fn portable_index(index: usize) -> u64 {
+    u64::try_from(index).unwrap_or(u64::MAX)
+}
+
+/// The fallback identity for a binding that cannot name itself.
+fn derive_input_stamp(stamp: u64) -> [u8; 16] {
+    let digest = hash_parts(&[b"lgwks.bot.input-stamp.v1", &stamp.to_le_bytes()]);
+    let mut wide = [0_u8; 16];
+    wide.copy_from_slice(&digest.as_bytes()[..16]);
+    wide
 }
 
 /// Fold a digest into a non-zero 128-bit identifier.
@@ -257,33 +287,39 @@ fn derive_action_id(bot: &str, chain: usize, entry: usize, domain: &str) -> Acti
     ActionId::new(id_from_digest(&hash_parts(&[
         ACTION_ID_DOMAIN,
         bot.as_bytes(),
-        &chain.to_le_bytes(),
-        &entry.to_le_bytes(),
+        &portable_index(chain).to_le_bytes(),
+        &portable_index(entry).to_le_bytes(),
         domain.as_bytes(),
     ])))
 }
 
-/// The exact generation of bound input one entry was dispatched from.
+/// The exact admitted input one entry was dispatched from.
 ///
 /// The ECS substrate has no payload bytes to hash: a transition's binding is an
-/// erased `Box<dyn Any>` and nothing here asks it to be `Hash`. What it does
-/// have is the *revision* — the monotonic marker a source moves, which is
-/// exactly when a transition re-binds — so the generation is what this digest
-/// binds. Two attempts within one revision share a digest, which is what makes
-/// a retry a retry; a new revision gets a new digest, which is what makes a
-/// delayed settlement refusable rather than merged.
+/// erased `Box<dyn Any>` and nothing here asks it to be `Hash`. Content
+/// equality is not event identity either — two distinct commands with the same
+/// payload must stay distinguishable — so the digest binds the *admitted input
+/// identity*: a monotonic stamp minted when the observation was admitted and
+/// continued across a restart from the journal's tail, not the process-local
+/// `Revision` counter, which reopens at 1 after every reconstruction (issue
+/// #101).
+///
+/// Two attempts within one admitted input share a digest, which is what makes
+/// a retry a retry. A new admission gets a new stamp even when the value is
+/// equal or the revision counter has wrapped back to 1, which is what stops a
+/// restarted bot from reading new work as already applied.
 fn derive_action_digest(
     flow: FlowRevision,
     chain: usize,
     entry: usize,
-    revision: u64,
+    input: &[u8; 16],
 ) -> ActionDigest {
     ActionDigest::new(hash_parts(&[
         ACTION_DIGEST_DOMAIN,
         flow.digest().as_bytes(),
-        &chain.to_le_bytes(),
-        &entry.to_le_bytes(),
-        &revision.to_le_bytes(),
+        &portable_index(chain).to_le_bytes(),
+        &portable_index(entry).to_le_bytes(),
+        input,
     ]))
 }
 
@@ -568,10 +604,56 @@ impl Effects {
     ///
     /// [`DispatchError::Broker`] when the environment refuses, and
     /// [`DispatchError::Journal`] when the append is refused.
-    fn prepare(&mut self, key: EffectKey) -> Result<Authority, DispatchError> {
+    fn prepare(
+        &mut self,
+        key: EffectKey,
+        lifetime: EffectLifetime,
+    ) -> Result<Authority, DispatchError> {
+        // The durability admission is on the actual handoff path, not a
+        // helper a test can call: an external effect must not leave on a
+        // record that cannot outlive the process (issue #100).
+        let required = match lifetime {
+            EffectLifetime::Local => DurabilityPromise::Ephemeral,
+            EffectLifetime::External => {
+                self.scope
+                    .journal()
+                    .admit_external_handoff()
+                    .map_err(DispatchError::Journal)?;
+                DurabilityPromise::ProcessCrash
+            }
+        };
+        // Intent first. Its acknowledgment is the first durability fact on the
+        // handoff path: a store that cannot outlive the process is refused here,
+        // before `DispatchPrepared` exists for recovery to misread as a live
+        // dispatch (issue #100).
+        let intent_ack = self.append(&EffectEvent::IntentAdmitted { key })?;
+        self.note_journal_attempt(key.action(), key.attempt());
+        if !intent_ack.promise().meets(required) {
+            return Err(DispatchError::Journal(JournalError::PromiseUnmet {
+                required,
+                offered: intent_ack.promise(),
+            }));
+        }
         let scope = &mut self.scope;
-        let (authority, _ack) =
+        let (authority, ack) =
             prepare_dispatch(&scope.broker, &mut *scope.journal, key)?.into_parts();
+        // The acknowledgment, not the advertisement. A journal that offers
+        // less on this append than the handoff requires is refused even when
+        // its `durability()` claimed enough.
+        if !ack.promise().meets(required) {
+            // Compensate: the handoff never left. Without this record recovery
+            // folds the `DispatchPrepared` already committed as an unknown
+            // outcome for a dispatch that did not happen. Best-effort: the
+            // `PromiseUnmet` below is the report either way.
+            let _compensating = self.append(&EffectEvent::OutcomeObserved {
+                key,
+                evidence: EffectEvidence::NotApplied,
+            });
+            return Err(DispatchError::Journal(JournalError::PromiseUnmet {
+                required,
+                offered: ack.promise(),
+            }));
+        }
         Ok(authority)
     }
 
@@ -594,13 +676,13 @@ impl Effects {
         action: ActionId,
         chain: usize,
         entry: usize,
-        revision: u64,
+        input: [u8; 16],
         attempt: AttemptId,
     ) -> Option<EffectKey> {
         Some(self.identity().key(
             action,
             attempt,
-            derive_action_digest(self.identity().flow(), chain, entry, revision),
+            derive_action_digest(self.identity().flow(), chain, entry, &input),
             self.epoch()?,
         ))
     }
@@ -617,10 +699,9 @@ impl Effects {
     /// # Errors
     ///
     /// Whatever the journal refuses.
-    fn append(&mut self, event: &EffectEvent) -> Result<(), JournalError> {
+    fn append(&mut self, event: &EffectEvent) -> Result<DurableAck, JournalError> {
         let tail = self.scope.journal().tail();
-        self.scope.journal_mut().compare_and_append(tail, event)?;
-        Ok(())
+        self.scope.journal_mut().compare_and_append(tail, event)
     }
 
     /// Whether an attempt on `action` is recorded as dispatched with no
@@ -649,8 +730,8 @@ impl Effects {
     /// integers, because the held key may have come from a process that is
     /// gone: the digest is what the record has, so the digest is what the
     /// question is asked in.
-    fn applied_in(&self, action: ActionId, chain: usize, entry: usize, revision: u64) -> bool {
-        let digest = derive_action_digest(self.identity().flow(), chain, entry, revision);
+    fn applied_in(&self, action: ActionId, chain: usize, entry: usize, input: [u8; 16]) -> bool {
+        let digest = derive_action_digest(self.identity().flow(), chain, entry, &input);
         self.applied
             .iter()
             .any(|key| key.action() == action && key.digest() == digest)
@@ -748,8 +829,9 @@ impl Effects {
         evidence: EffectEvidence,
     ) -> Result<(), JournalError> {
         match self.append(&EffectEvent::OutcomeObserved { key, evidence }) {
-            Ok(()) => {
-                if evidence == EffectEvidence::Applied {
+            Ok(_ack) => {
+                self.note_journal_attempt(key.action(), key.attempt());
+                if evidence == EffectEvidence::Applied && !self.applied.contains(&key) {
                     self.applied.push(key);
                 }
                 Ok(())
@@ -757,9 +839,33 @@ impl Effects {
             Err(JournalError::OutOfOrder { expected, .. })
                 if expected == Some(EventKind::Verified) || expected.is_none() =>
             {
-                Ok(())
+                // Idempotent success only when the *same* evidence is already
+                // recorded. A ladder-complete `OutOfOrder` alone is not proof of
+                // which outcome landed, and treating it as success is how a
+                // contradictory `Applied` gets acknowledged (issue #106).
+                match self.outcome_for(&key) {
+                    Some(recorded) if recorded == evidence => {
+                        self.note_journal_attempt(key.action(), key.attempt());
+                        if evidence == EffectEvidence::Applied && !self.applied.contains(&key) {
+                            self.applied.push(key);
+                        }
+                        Ok(())
+                    }
+                    _ => Err(JournalError::OutOfOrder {
+                        key: Box::new(key),
+                        expected,
+                        attempted: EventKind::OutcomeObserved,
+                    }),
+                }
             }
-            Err(cause) => Err(cause),
+            Err(cause) => {
+                // A journal may commit the event and lose the acknowledgment.
+                // Surface the ambiguous failure now: the caller is post-effect
+                // and must report `EffectUnrecorded`, not a clean settle. The
+                // *next* `ensure_outcome` for this key hits the ladder fence
+                // above, and that is where the read-back is idempotent success.
+                Err(cause)
+            }
         }
     }
 }
@@ -859,6 +965,9 @@ struct EcsChain {
     /// value again" from "a new value", and the erased `Box<dyn Any>` cannot
     /// answer that on its own.
     same: fn(&dyn Any, &dyn Any) -> bool,
+    /// The admitted-input identity of an erased binding, captured from
+    /// `S::Output: InputIdentity` where the type was still a parameter.
+    identify: fn(&dyn Any) -> [u8; 16],
     /// The `(condition, action)` tuples, in declaration order.
     entries: Vec<ChainEntry>,
     /// What type this chain's source produces, taken where `S::Output` was
@@ -1026,10 +1135,48 @@ const MAX_IN_FLIGHT_POLLS: usize = 32;
 /// an unreadable value as unchanged would silently suppress an effect, and the
 /// failure mode this whole substrate is built to avoid is an effect that does
 /// not happen with nothing to show for it.
+/// The admitted-input identity of an erased binding.
+///
+/// A type-qualified content identity: the same value of the same type always
+/// derives the same bytes (so a restart retires work that already landed), and
+/// a different value derives different ones (so a restart does not read new
+/// work as already applied). Two *events* with equal content must still be
+/// distinguishable, which is the caller's to express via
+/// [`EventId`](crate::effect::EventId) or their own [`InputIdentity`] impl —
+/// content equality alone is not event identity (issue #101).
+fn identify_output<S>(value: &dyn Any) -> [u8; 16]
+where
+    S: Observe,
+    S::Output: InputIdentity + 'static,
+{
+    let mut hasher = Hasher::new();
+    hasher.update(OUTPUT_IDENTITY_DOMAIN);
+    hasher.update(std::any::type_name::<S::Output>().as_bytes());
+    if let Some(typed) = value.downcast_ref::<S::Output>() {
+        typed.write_identity(&mut hasher);
+    } else {
+        // A downcast that fails means the binding is not what this chain
+        // claims. Hash the miss rather than returning a default: a constant
+        // identity would make every mismatched binding look like the same
+        // admitted input.
+        hasher.update(b"downcast-miss");
+    }
+    let digest = hasher.finalize();
+    let mut wide = [0_u8; 16];
+    wide.copy_from_slice(&digest.as_bytes()[..16]);
+    wide
+}
+
+/// Compare two erased outputs as `S::Output`.
+///
+/// A downcast that fails is reported as *different* rather than equal: treating
+/// an unreadable value as unchanged would silently suppress an effect, and the
+/// failure mode this whole substrate is built to avoid is an effect that does
+/// not happen with nothing to show for it.
 fn same_output<S>(left: &dyn Any, right: &dyn Any) -> bool
 where
     S: Observe + 'static,
-    S::Output: PartialEq + 'static,
+    S::Output: PartialEq + InputIdentity + 'static,
 {
     match (
         left.downcast_ref::<S::Output>(),
@@ -1578,8 +1725,17 @@ struct SettledAttempt {
 /// source never promised it for. The manual [`fmt::Debug`] below renders the
 /// binding as its presence, which is the part a reader of a log wants.
 struct Transition {
-    /// The revision that opened it.
+    /// The revision that opened it, for the caller-facing revision report.
+    ///
+    /// Not the digest input: this counter is process-local and reopens at 1
+    /// after every reconstruction. [`Self::input`] is what a digest binds.
     revision: u64,
+    /// The admitted input identity this transition is bound to.
+    ///
+    /// A content identity extracted from the observation when it was admitted
+    /// (issue #101), so a restart that sees the same input retires work that
+    /// already landed and a restart that sees a different one does not.
+    input: [u8; 16],
     /// One state per entry of the chain, in declaration order.
     entries: Vec<EntryState>,
     /// What the ledger knows about the attempts made on each entry, for the
@@ -1647,9 +1803,10 @@ impl Transition {
     }
 
     /// A transition with every entry outstanding, bound to `value`.
-    fn opened(revision: u64, entries: usize, value: Option<Erased>) -> Self {
+    fn opened(input: [u8; 16], revision: u64, entries: usize, value: Option<Erased>) -> Self {
         Self {
             revision,
+            input,
             entries: vec![EntryState::NotStarted; entries],
             attempts: vec![AttemptRecord::default(); entries],
             value,
@@ -1662,9 +1819,10 @@ impl Transition {
     /// given up on: those are terminal until evidence revives them, and
     /// carrying their record forward is what keeps a lost effect reported
     /// instead of silently dropped the moment the source moves.
-    fn resumed(revision: u64, previous: &Self, value: Option<Erased>) -> Self {
+    fn resumed(input: [u8; 16], revision: u64, previous: &Self, value: Option<Erased>) -> Self {
         Self {
             revision,
+            input,
             entries: previous
                 .entries
                 .iter()
@@ -1788,6 +1946,11 @@ enum Settled {
 struct Ledger {
     /// One live transition per chain, in declaration order.
     transitions: Vec<Option<Transition>>,
+    /// The next admitted-input identity to mint.
+    ///
+    /// Seeded from the journal tail so a reconstructed bot cannot reissue a
+    /// stamp an earlier process already bound a dispatch to.
+    next_input: u64,
     /// The action each entry of each chain runs, in declaration order.
     ///
     /// Derived once, at assembly, from the declarations — the bot's name, the
@@ -1805,12 +1968,26 @@ struct Ledger {
 impl Ledger {
     /// A ledger with one idle slot per chain, no work recorded, and the
     /// declared action identities indexed as the chains are.
-    fn new(actions: Vec<Vec<ActionId>>, effects: Effects) -> Self {
+    fn new(actions: Vec<Vec<ActionId>>, effects: Effects, next_input: u64) -> Self {
         Self {
             transitions: (0..actions.len()).map(|_| None).collect(),
             actions,
             effects,
+            next_input,
         }
+    }
+
+    /// Mint the fallback admitted-input identity.
+    ///
+    /// Used only when a binding cannot supply an [`InputIdentity`]. The
+    /// watermark is seeded from the journal tail at assembly and only ever
+    /// grows, so a restart cannot reissue a stamp an earlier process bound a
+    /// dispatch to (issue #101). An identified binding does not need it: its
+    /// content identity is already unique to the input.
+    fn mint_input(&mut self) -> [u8; 16] {
+        let stamp = self.next_input;
+        self.next_input = self.next_input.saturating_add(1);
+        derive_input_stamp(stamp)
     }
 
     /// The action one entry runs, when the ledger has that entry.
@@ -1832,11 +2009,11 @@ impl Ledger {
     /// front of it: an `Applied` verdict retires its action for one generation
     /// and no other, so the comparison is between the acknowledgement's
     /// generation and this one.
-    fn generation(&self, chain: usize) -> Option<u64> {
+    fn generation(&self, chain: usize) -> Option<[u8; 16]> {
         self.transitions
             .get(chain)
             .and_then(Option::as_ref)
-            .map(|transition| transition.revision)
+            .map(|transition| transition.input)
     }
 
     /// The entry an action is declared on, when the ledger has one.
@@ -1911,7 +2088,11 @@ impl Ledger {
     /// The warrant is handed back rather than consumed here because the handoff
     /// is the caller's: it runs after the payload the attempt acts on is in
     /// hand, and it presents the warrant at [`Broker::revalidate`] on the way in.
-    fn begin_attempt(&mut self, id: WorkId) -> Result<(EffectKey, Authority), BotError> {
+    fn begin_attempt(
+        &mut self,
+        id: WorkId,
+        lifetime: EffectLifetime,
+    ) -> Result<(EffectKey, Authority), BotError> {
         let no_such_work = || BotError::NoSuchWork { work: id };
         let action = self.action_of(id).ok_or_else(no_such_work)?;
         // Refused before anything is written, and refused for the reason
@@ -1966,22 +2147,33 @@ impl Ledger {
                 None => AttemptId::FIRST,
             },
         };
-        record.begun = Some(attempt);
-        *state = EntryState::Unrecorded;
-        let revision = transition.revision;
+        // Journal first, memory second. `record.begun` and `EntryState` are
+        // moved only after the write-ahead pair is committed and its
+        // acknowledgments are strong enough: a refusal before that point leaves
+        // the entry as it was, instead of a false `Unrecorded` barrier for a
+        // handoff that never left (issue #100).
+        let input = transition.input;
         let key = self
             .effects
-            .key(action, id.chain(), id.entry(), revision, attempt)
+            .key(action, id.chain(), id.entry(), input, attempt)
             .ok_or(BotError::EffectUnsettled { action })?;
-        self.effects
-            .append(&EffectEvent::IntentAdmitted { key })
-            .map_err(|cause| BotError::EffectRefused {
-                cause: DispatchError::Journal(cause),
-            })?;
         let authority = self
             .effects
-            .prepare(key)
+            .prepare(key, lifetime)
             .map_err(|cause| BotError::EffectRefused { cause })?;
+        let transition = self
+            .transitions
+            .get_mut(id.chain())
+            .and_then(Option::as_mut)
+            .ok_or_else(no_such_work)?;
+        let record = transition
+            .attempts
+            .get_mut(id.entry())
+            .ok_or_else(no_such_work)?;
+        record.begun = Some(attempt);
+        if let Some(state) = transition.entries.get_mut(id.entry()) {
+            *state = EntryState::Unrecorded;
+        }
         Ok((key, authority))
     }
 
@@ -2156,7 +2348,10 @@ impl Ledger {
         // from another run is not this ledger's to settle, and answering it with
         // any of the finer refusals would suggest the evidence nearly applied.
         let identity = self.effects.identity();
-        if key.run() != identity.run() || key.flow() != identity.flow() {
+        if key.run() != identity.run()
+            || key.flow() != identity.flow()
+            || key.environment() != identity.environment()
+        {
             return Settled::NoSuchWork { id: None };
         }
         let Some(transition) = self.transitions.get(id.chain()).and_then(Option::as_ref) else {
@@ -2165,8 +2360,7 @@ impl Ledger {
         // The binding first, before the attempt is even looked up: a key that
         // names the right action inside a generation that is gone is exactly the
         // case this exists to refuse.
-        let live =
-            derive_action_digest(identity.flow(), id.chain(), id.entry(), transition.revision);
+        let live = derive_action_digest(identity.flow(), id.chain(), id.entry(), &transition.input);
         if key.digest() != live {
             return Settled::Superseded { id, current: live };
         }
@@ -2345,7 +2539,7 @@ impl Ledger {
             self.action_of(id)?,
             chain,
             entry,
-            transition.revision,
+            transition.input,
             transition.attempt_of(entry)?,
         )
     }
@@ -2470,6 +2664,26 @@ fn revision_of(world: &World, chain: usize) -> u64 {
 /// once. Once a transition is bound to it, the transition is what speaks for
 /// it, and the slot being empty is not a loss — it is the record that the value
 /// is out on loan, which [`observe_fold`] reads back through the binding.
+/// The admitted-input identity of `value` for `chain`, or the fallback stamp.
+fn admitted_identity(world: &mut World, chain: usize, value: Option<&Erased>) -> [u8; 16] {
+    let identify = world
+        .non_send::<Chains>()
+        .0
+        .get(chain)
+        .map(|held| held.identify);
+    match (identify, value) {
+        (Some(identify), Some(value)) => identify(value.as_any()),
+        _ => world.non_send_mut::<Ledger>().mint_input(),
+    }
+}
+
+/// Move the newest observation for `chain` out of its slot.
+///
+/// Moved, not copied. A source's `Output` carries no `Clone` bound and this is
+/// the reason it does not need one: the value is not wanted in two places at
+/// once. Once a transition is bound to it, the transition is what speaks for
+/// it, and the slot being empty is not a loss — it is the record that the value
+/// is out on loan, which [`observe_fold`] reads back through the binding.
 fn take_observed(world: &mut World, chain: usize) -> Option<Erased> {
     let mut observed = world.non_send_mut::<Observed>();
     observed.0.get_mut(chain).and_then(Option::take)
@@ -2534,21 +2748,29 @@ fn resume(
         // when that observation has actually moved away from its binding, and
         // is otherwise kept exactly as it stands — abandonment record and all.
         Some(transition) if !admits(world, chain, transition.value.as_ref()) => Some(transition),
-        Some(transition) => Some(Transition::resumed(
-            revision_of(world, chain),
-            &transition,
-            take_observed(world, chain),
-        )),
+        Some(transition) => {
+            let value = take_observed(world, chain);
+            let input = admitted_identity(world, chain, value.as_ref());
+            Some(Transition::resumed(
+                input,
+                revision_of(world, chain),
+                &transition,
+                value,
+            ))
+        }
         None if moving => {
             let entries = world
                 .non_send::<Chains>()
                 .0
                 .get(chain)
                 .map_or(0, |chain| chain.entries.len());
+            let value = take_observed(world, chain);
+            let input = admitted_identity(world, chain, value.as_ref());
             Some(Transition::opened(
+                input,
                 revision_of(world, chain),
                 entries,
-                take_observed(world, chain),
+                value,
             ))
         }
         None => None,
@@ -3666,7 +3888,7 @@ impl EcsBot {
                     .world
                     .non_send_mut::<Ledger>()
                     .effects
-                    .append(&EffectEvent::OutcomeObserved { key, evidence });
+                    .ensure_outcome(key, evidence);
                 match result {
                     Ok(()) => {
                         if self
@@ -3705,10 +3927,10 @@ impl EcsBot {
             // fact.
             if let Some(action) = self.world.non_send::<Ledger>().action_of(work) {
                 let ledger = self.world.non_send::<Ledger>();
-                if ledger.generation(step.chain).is_some_and(|revision| {
+                if ledger.generation(step.chain).is_some_and(|input| {
                     ledger
                         .effects
-                        .applied_in(action, step.chain, step.entry, revision)
+                        .applied_in(action, step.chain, step.entry, input)
                 }) {
                     // Retired, not merely stepped over. An entry whose effect
                     // landed owes nothing for this generation, and leaving it
@@ -3735,7 +3957,20 @@ impl EcsBot {
             // beside it. The attempt a caller is handed and the attempt
             // settlement checks have to be one identity, and two derivations of
             // one identity are two identities the moment they disagree.
-            let (key, authority) = match self.world.non_send_mut::<Ledger>().begin_attempt(work) {
+            let lifetime = self
+                .world
+                .non_send::<Chains>()
+                .0
+                .get(step.chain)
+                .and_then(|chain| chain.entries.get(step.entry))
+                .map_or(EffectLifetime::External, |entry| {
+                    entry.action.effect_lifetime()
+                });
+            let (key, authority) = match self
+                .world
+                .non_send_mut::<Ledger>()
+                .begin_attempt(work, lifetime)
+            {
                 Ok(pair) => pair,
                 Err(error) => {
                     // The entry is not in a state an attempt can start from, or
@@ -3825,7 +4060,7 @@ impl EcsBot {
                     .world
                     .non_send_mut::<Ledger>()
                     .effects
-                    .append(&EffectEvent::OutcomeObserved { key, evidence })
+                    .ensure_outcome(key, evidence)
             {
                 // Post-effect: the action already returned and `evidence` is a
                 // fact. This is a recording failure, not a pre-dispatch
@@ -4156,7 +4391,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
     pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
     where
         S: 'static,
-        S::Output: PartialEq + 'static,
+        S::Output: PartialEq + InputIdentity + 'static,
         U: Observe,
     {
         // Destructured rather than moved field by field: taking `prior` by
@@ -4174,6 +4409,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
         prior.push(EcsChain {
             source: Box::new(previous),
             same: same_output::<S>,
+            identify: identify_output::<S>,
             witness: Witness::of::<S::Output>(),
             entries,
         });
@@ -4195,7 +4431,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
     pub fn build(self, grants: &GrantSet) -> Result<EcsBot, BotError>
     where
         S: 'static,
-        S::Output: PartialEq + 'static,
+        S::Output: PartialEq + InputIdentity + 'static,
     {
         let Self {
             name,
@@ -4208,6 +4444,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
         prior.push(EcsChain {
             source: Box::new(source),
             same: same_output::<S>,
+            identify: identify_output::<S>,
             witness: Witness::of::<S::Output>(),
             entries,
         });
@@ -4348,7 +4585,14 @@ impl EcsBot {
                     .collect()
             })
             .collect();
-        let mut ledger = Ledger::new(actions, Effects::new(effects));
+        // The next admitted-input identity continues past whatever the journal
+        // already holds, so a reconstructed bot cannot reissue a stamp an
+        // earlier process bound a dispatch to (issue #101).
+        let next_input = {
+            let tail = effects.journal().tail();
+            tail.sequence().saturating_add(1)
+        };
+        let mut ledger = Ledger::new(actions, Effects::new(effects), next_input);
         // Every attempt the journal names, folded in. Not only the uncertain
         // ones: an attempt whose outcome is recorded is a fact about this run
         // too, and the two things this loop derives from it are what let a
@@ -4368,11 +4612,17 @@ impl EcsBot {
                     action: key.action(),
                 });
             };
-            // The journal's key must name this run. A journal that holds keys
-            // from another run is the foreign-journal case one step finer: the
-            // action matches, and the run does not, and settling it here would
-            // acknowledge an attempt in a run this bot is not.
-            if key.run() != ledger.effects.identity().run() {
+            // The journal's key must name this run, this flow, and this
+            // environment. A journal that holds keys from any of the others is
+            // the foreign-journal case one step finer: the action matches, the
+            // ownership identity does not, and folding it in would dispatch an
+            // action whose earlier attempt belongs to a different bot (issue
+            // #101).
+            let identity = ledger.effects.identity();
+            if key.run() != identity.run()
+                || key.flow() != identity.flow()
+                || key.environment() != identity.environment()
+            {
                 return Err(BotError::ActionNotDeclared {
                     action: key.action(),
                 });
@@ -4779,6 +5029,10 @@ mod tests {
             &[]
         }
 
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
+        }
+
         async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
             call.0.check(&[])?;
             self.0.set(self.0.get().saturating_add(1));
@@ -4800,6 +5054,10 @@ mod tests {
 
         fn required_caps(&self) -> &[Cap] {
             &[]
+        }
+
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
         }
 
         async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
@@ -4837,6 +5095,10 @@ mod tests {
 
         fn required_caps(&self) -> &[Cap] {
             &[]
+        }
+
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
         }
 
         async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
@@ -4889,6 +5151,10 @@ mod tests {
 
         fn required_caps(&self) -> &[Cap] {
             &[]
+        }
+
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
         }
 
         async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
@@ -4968,6 +5234,10 @@ mod tests {
             &self.caps
         }
 
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
+        }
+
         async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
             call.0.check(&self.caps)?;
             Ok(())
@@ -5037,20 +5307,22 @@ mod tests {
     /// recording must not re-enter the action. Wrapping [`MemoryJournal`] keeps
     /// the real ladder and chain checks underneath the injected fault.
     struct SelectiveJournal {
-        inner: MemoryJournal,
+        inner: Rc<RefCell<MemoryJournal>>,
         refuse_intent: Rc<Cell<bool>>,
         refuse_prepare: Rc<Cell<bool>>,
         refuse_outcome: Rc<Cell<bool>>,
+        commit_then_error: Rc<Cell<bool>>,
         outcome_appends: Rc<Cell<usize>>,
     }
 
     impl SelectiveJournal {
         fn new() -> Self {
             Self {
-                inner: MemoryJournal::new(),
+                inner: Rc::new(RefCell::new(MemoryJournal::new())),
                 refuse_intent: Rc::new(Cell::new(false)),
                 refuse_prepare: Rc::new(Cell::new(false)),
                 refuse_outcome: Rc::new(Cell::new(false)),
+                commit_then_error: Rc::new(Cell::new(false)),
                 outcome_appends: Rc::new(Cell::new(0)),
             }
         }
@@ -5070,21 +5342,29 @@ mod tests {
         fn outcome_appends(&self) -> Rc<Cell<usize>> {
             Rc::clone(&self.outcome_appends)
         }
+
+        fn commit_then_error(&self) -> Rc<Cell<bool>> {
+            Rc::clone(&self.commit_then_error)
+        }
+
+        fn store(&self) -> Rc<RefCell<MemoryJournal>> {
+            Rc::clone(&self.inner)
+        }
     }
 
     impl EffectJournal for SelectiveJournal {
         fn durability(&self) -> DurabilityPromise {
-            self.inner.durability()
+            self.inner.borrow().durability()
         }
 
         fn tail(&self) -> JournalPosition {
-            self.inner.tail()
+            self.inner.borrow().tail()
         }
 
         fn committed(&self) -> Result<Vec<EffectEvent>, JournalError> {
             // Qualified: `MemoryJournal` also has an inherent `committed` that
             // returns its raw entries, and that one would win method resolution.
-            EffectJournal::committed(&self.inner)
+            EffectJournal::committed(&*self.inner.borrow())
         }
 
         fn compare_and_append(
@@ -5107,8 +5387,63 @@ mod tests {
                     "injected append refusal",
                 )));
             }
-            self.inner.compare_and_append(expected_tail, event)
+            let ack = self
+                .inner
+                .borrow_mut()
+                .compare_and_append(expected_tail, event)?;
+            if matches!(event, EffectEvent::OutcomeObserved { .. })
+                && self.commit_then_error.replace(false)
+            {
+                return Err(JournalError::Storage(io::Error::other(
+                    "injected post-commit append error",
+                )));
+            }
+            Ok(ack)
         }
+    }
+
+    #[test]
+    fn hash_parts_frames_distinct_variable_length_splits() -> TestResult {
+        let left = hash_parts(&[b"ab", b"c"]);
+        let right = hash_parts(&[b"a", b"bc"]);
+        assert_ne!(left, right, "distinct field splits must not collide");
+        assert_eq!(left, hash_parts(&[b"ab", b"c"]));
+        Ok(())
+    }
+
+    #[test]
+    fn an_ambiguous_commit_then_error_is_idempotent() -> TestResult {
+        let runs = Rc::new(Cell::new(0));
+        let journal = SelectiveJournal::new();
+        let commit_then_error = journal.commit_then_error();
+        let store = journal.store();
+        let mut bot = EcsBot::builder("ambiguous-commit")
+            .observe(Holds::new(200))
+            .on(|value: &u16| *value >= 200, Count(Rc::clone(&runs)))
+            .with_effects(test_effects_with(Box::new(journal))?)
+            .build(&net_grants())?;
+
+        commit_then_error.set(true);
+        match bot.tick() {
+            Err(BotError::EffectUnrecorded { .. }) => {}
+            other => return Err(format!("expected recording failure, got {other:?}").into()),
+        }
+        assert_eq!(runs.get(), 1);
+        let committed = EffectJournal::committed(&*store.borrow())?;
+        assert!(matches!(
+            committed.last(),
+            Some(EffectEvent::OutcomeObserved {
+                evidence: EffectEvidence::Applied,
+                ..
+            })
+        ));
+        let key = committed[0].key();
+        bot.resolve_effect(&key, EffectEvidence::Applied)?;
+
+        assert_eq!(bot.tick()?, 1);
+        assert_eq!(runs.get(), 1, "retry must not dispatch the action again");
+        assert!(bot.pending().is_empty());
+        Ok(())
     }
 
     /// Build an effect scope over a caller-supplied journal.
@@ -6693,7 +7028,17 @@ mod tests {
             // opened with nothing observed, which holds its entries rather than
             // evaluating them against a value nobody read — a real state, but
             // not this one.
-            let mut transition = Transition::opened(revision, 1, Some(Erased::new(200_u16)));
+            // The same admitted input the first tick bound: a fabricated
+            // stamp would mint a key the journal never recorded, and the
+            // later settlement would be about a different attempt entirely.
+            let input = bot
+                .world
+                .non_send::<Ledger>()
+                .transitions
+                .first()
+                .and_then(Option::as_ref)
+                .map_or_else(|| derive_input_stamp(1), |held| held.input);
+            let mut transition = Transition::opened(input, revision, 1, Some(Erased::new(200_u16)));
             *transition
                 .entries
                 .first_mut()
@@ -6747,6 +7092,44 @@ mod tests {
         bot.resolve_effect(&held_key(&held)?, EffectEvidence::NotApplied)?;
         assert_eq!(bot.tick()?, 1, "and then it runs");
         assert_eq!(*log.borrow(), vec![200, 200], "exactly once more");
+        Ok(())
+    }
+
+    #[test]
+    fn an_action_identity_is_framed_and_portable() -> TestResult {
+        // Two different parses that an unframed concatenation collapses:
+        // "ab"+"c" and "a"+"bc" are the same byte string with no lengths, and
+        // the same ActionId for two different declarations (issue #101).
+        let ab_c = derive_action_id("ab", 0, 0, "c");
+        let a_bc = derive_action_id("a", 0, 0, "bc");
+        assert_ne!(
+            ab_c, a_bc,
+            "length framing keeps \"ab\"+\"c\" apart from \"a\"+\"bc\""
+        );
+        // The index is u64 either way, so this is the 32-/64-bit vector in
+        // one target's clothes: the same declaration always derives the same
+        // identity, and a different position never does.
+        assert_eq!(
+            derive_action_id("bot", 2, 3, "dom"),
+            derive_action_id("bot", 2, 3, "dom")
+        );
+        assert_ne!(
+            derive_action_id("bot", 2, 3, "dom"),
+            derive_action_id("bot", 2, 3, "dom2"),
+            "a different domain is a different action"
+        );
+        assert_ne!(
+            derive_action_id("bot", 2, 3, "dom"),
+            derive_action_id("bot", 3, 2, "dom"),
+            "chain and entry do not commute"
+        );
+        // A variable-length name cannot slide into the next field: the old
+        // unframed hash gave these two the same digest.
+        assert_ne!(
+            derive_action_id("bot", 0, 0, "dom"),
+            derive_action_id("bo", 0, 0, "tdom"),
+            "length framing keeps \"bot\"+\"dom\" apart from \"bo\"+\"tdom\""
+        );
         Ok(())
     }
 
@@ -6935,6 +7318,10 @@ mod tests {
             &[]
         }
 
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
+        }
+
         async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
             call.0.check(&[])?;
             self.0.set(self.0.get().saturating_add(1));
@@ -6956,6 +7343,10 @@ mod tests {
 
         fn required_caps(&self) -> &[Cap] {
             &[]
+        }
+
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
         }
 
         async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {

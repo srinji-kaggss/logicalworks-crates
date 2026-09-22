@@ -42,6 +42,7 @@ use lgwks_bot::journal::MemoryJournal;
 use lgwks_bot::spec::{EffectIdentity, EffectScope};
 use lgwks_bot::{Auth, Bot, BotError, Cap, GrantSet};
 use lgwks_bot::verb::{Execute, Observe};
+use lgwks_bot::EffectLifetime;
 
 /// A source. `poll` runs each tick; the framework fires the chain only when the
 /// returned value differs from the previous tick's.
@@ -81,6 +82,14 @@ impl Execute for PageOnCall {
         call.0.check(self.required_caps())?;
         // your real effect goes here
         Ok(())
+    }
+
+    // This example runs on `MemoryJournal`, which only promises `Ephemeral`.
+    // A real external handoff (an email, a payment, a page) must stay on the
+    // default `EffectLifetime::External` so a journal that cannot outlive the
+    // process refuses it before it runs.
+    fn effect_lifetime(&self) -> EffectLifetime {
+        EffectLifetime::Local
     }
 
     fn domain_id(&self) -> &str {
