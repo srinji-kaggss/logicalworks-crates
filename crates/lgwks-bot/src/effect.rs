@@ -1325,6 +1325,28 @@ mod tests {
 pub trait InputIdentity {
     /// Write this input's canonical identity bytes into `hasher`.
     fn write_identity(&self, hasher: &mut Hasher);
+
+    /// Whether these identity bytes name an *event*, rather than only content.
+    ///
+    /// The two readings of a returning identity are different questions and
+    /// only one of them is right for a given type (issue #129).
+    ///
+    /// - `true` — the bytes name an event, so equal bytes mean the same event
+    ///   has come back. That is a redelivery of work that already landed, and
+    ///   it retires however many other episodes came between. [`EventId`] is
+    ///   this: its identity carries the caller's event id.
+    /// - `false` (the default) — the bytes name only content, so a state watch
+    ///   returning to a previous value is a *new* episode of work rather than a
+    ///   redelivery. It runs again. Only the value the last applied episode
+    ///   carried retires, which is what keeps a restart from double-firing on
+    ///   an unchanged source while a `0 → 1 → 0` watch still fires three times.
+    ///
+    /// Defaulting to `false` is deliberate: a type that has not claimed event
+    /// identity gets the state-transition semantics the watch contract
+    /// documents, and opting into `true` is a statement about the type.
+    fn names_an_event(&self) -> bool {
+        false
+    }
 }
 
 /// Implement [`InputIdentity`] for a fixed-width integer via `to_le_bytes`.
@@ -1403,5 +1425,11 @@ impl<T: InputIdentity> InputIdentity for EventId<T> {
     fn write_identity(&self, hasher: &mut Hasher) {
         hasher.update(&self.id.to_le_bytes());
         self.value.write_identity(hasher);
+    }
+
+    /// The id is written into the identity, so equal identity bytes really do
+    /// mean the same event. A returning one is a redelivery and retires.
+    fn names_an_event(&self) -> bool {
+        true
     }
 }
