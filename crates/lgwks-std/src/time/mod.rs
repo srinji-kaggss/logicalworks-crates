@@ -8,9 +8,15 @@ pub mod error;
 pub mod format;
 pub mod parse;
 
-pub use calendar::{civil_from_days, days_from_civil, days_in_month, is_leap};
+// `calendar` and `format` are public modules, so their items are reached as
+// `time::format::to_rfc3339`. Re-exporting them here as well made two names for
+// one thing, and nothing in the workspace used the short one. What stays is the
+// module's own pair — [`now_rfc3339`] and `parse_rfc3339`, format and parse —
+// plus the error `parse` returns, so a caller matching on that failure names it
+// without having to know which submodule defined it. `time::parse::parse_rfc3339`
+// would stutter, and the low-level calendar arithmetic is what the submodules
+// are for.
 pub use error::{Field, ParseError};
-pub use format::{from_unix_parts, to_rfc3339, unix_parts};
 pub use parse::parse_rfc3339;
 
 use std::time::SystemTime;
@@ -18,7 +24,7 @@ use std::time::SystemTime;
 /// Formats the current instant as an RFC 3339 UTC string.
 #[must_use]
 pub fn now_rfc3339() -> String {
-    to_rfc3339(SystemTime::now())
+    format::to_rfc3339(SystemTime::now())
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -26,6 +32,10 @@ pub fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The low-level halves are reached by their own path now, so these tests
+    // name the submodule they come from rather than leaning on a re-export.
+    use crate::time::calendar::{civil_from_days, days_from_civil};
+    use crate::time::format::{from_unix_parts, to_rfc3339};
     use std::time::{Duration, UNIX_EPOCH};
 
     fn at(secs: i64) -> SystemTime {

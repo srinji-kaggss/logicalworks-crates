@@ -10,6 +10,13 @@ explicitly under that crate.
 
 ### lgwks_std Breaking
 
+- `time` no longer re-exports the items of its `calendar` and `format`
+  submodules, so `time::to_rfc3339` is now `time::format::to_rfc3339` and
+  `time::civil_from_days` is `time::calendar::civil_from_days`. Both submodules
+  were already `pub`, so the re-export was a second name for the same item, and
+  nothing in the workspace used the short one. `time::parse_rfc3339` and
+  `time::ParseError` stay: they are the module's parse half and the error it
+  returns, and `time::parse::parse_rfc3339` would stutter.
 - `BoundingBox::as_array` is now `to_array`. The method builds the four-element
   array from four separate fields, so the call copies rather than reborrows and
   the `as_` prefix promised a cost it did not have. Same signature, same value.
@@ -36,6 +43,19 @@ explicitly under that crate.
 
 ### lgwks_bot Breaking
 
+- **The crate root stopped carrying three sets of aliases.** `lgwks_bot::gh`,
+  `lgwks_bot::net`, `lgwks_bot::fs` and six others named `domain`'s modules a
+  second time; `lgwks_bot::frontier::Frontier` and ten siblings repeated what
+  `pub mod frontier` already exposed; and `lgwks_bot::rt::Builder` was a third
+  path to a type the root already re-exported. Each was a name for something
+  already nameable one segment away, and the only user of the nine domain
+  aliases anywhere in the workspace was a single doctest. The paths are
+  `lgwks_bot::domain::gh`, `lgwks_bot::frontier::Frontier`, and either
+  `lgwks_bot::Builder` or `lgwks_bot::rt::runtime::Builder`.
+- `broker::prepare_dispatch` and `broker::Prepared` are `pub(crate)`. The only
+  caller is the dispatch path in `ecs`, a sibling module, which is what
+  `pub(crate)` is for. `Prepared::authority` and `Prepared::ack` are gone with
+  them: `into_parts` returns both halves, and it is what the caller uses.
 - **Effect dispatch is authorized and durable, and the scope is required.** Every
   `Bot` is built around an `EffectScope`: the run's `EffectIdentity` (which run
   this is, the `EnvironmentId` it acts on, and the `FlowRevision` it came from),
@@ -125,6 +145,14 @@ explicitly under that crate.
   from the `Checks that must pass` list, which named no doc build at all: a
   broken intra-doc link is a warning rather than an error, so the crate built
   green and the break surfaced only after the push.
+
+### Repository Fixed
+
+- `crates/lgwks-bot/src/domain/mod.rs` is deleted. It declared the nine domain
+  modules, but `lib.rs` declares `domain` as an inline module, so that file was
+  never in the module tree: the build's dep-info lists every `src/domain/*.rs`
+  and not it. It was a second copy of the module list that nothing compiled and
+  nothing kept in step.
 
 ## [lgwks_std 0.6.7 / lgwks_bot 0.5.0 / lgwks_deps 0.1.13] - 2026-09-21
 
