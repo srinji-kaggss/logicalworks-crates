@@ -8,6 +8,55 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### lgwks_std Breaking
+
+- `BoundingBox::as_array` is now `to_array`. The method builds the four-element
+  array from four separate fields, so the call copies rather than reborrows and
+  the `as_` prefix promised a cost it did not have. Same signature, same value.
+- `http::get_response` is now `http::get`, so the pair reads `get` / `get_with`
+  the way `post` / `post_with` already did.
+- `Uuid::from_bytes` is gone, replaced by `impl From<[u8; 16]> for Uuid`. The
+  behaviour is unchanged; the conversion is now reachable by a caller that
+  bounds on `From<[u8; 16]>` rather than on this crate's naming.
+- `Pattern::find_all` returns `impl Iterator<Item = Match<'_>>` and
+  `Pattern::split` returns `impl Iterator<Item = &str>`. Code that assigned the
+  result to a `Vec` needs a `.collect()`; code that only counted the matches,
+  took the first, or short-circuited no longer allocates one item per
+  occurrence.
+- `Weighted::try_new` is removed. It was an alias for `Weighted::new` with no
+  callers anywhere in the workspace.
+
+
+### lgwks_std Added
+
+- `Debug` for `Hasher` (reports bytes written), `Weighted` (reports the
+  composition rather than the components) and `task::JoinHandle` (reports
+  running / done / panicked / taken). All three were unprintable, so a consumer
+  that wanted to log one wrote a wrapper that then had to change whenever the
+  type did.
+
+
+### lgwks_bot Breaking
+
+- **Effect dispatch is authorized and durable, and the scope is required.** Every
+  `Bot` is built around an `EffectScope`: the run's `EffectIdentity` (which run
+  this is, the `EnvironmentId` it acts on, and the `FlowRevision` it came from),
+  the `Broker` that owns the environment's generation, and the `EffectJournal`
+  the dispatch is written to. Both builder entry points refuse to build without
+  one, as `BotError::IncompleteSpec { field: "effects" }`. An identity the caller
+  did not choose is one it cannot recover against, so there is no default and no
+  implicit in-memory scope.
+- `Bot::resolve_effect` takes an `EffectKey` instead of a work id and a
+  caller-supplied revision. `EffectKey` is now the settlement identity: `Bot::pending`
+  hands one back, and evidence is compared by `ActionDigest` and `AttemptId`.
+- `RetryFacts::with_authority(bool)` is now
+  `RetryFacts::with_live_authority()`. Authority defaults to not live and the
+  refusing direction is the default, so `true` was the only setting a caller
+  could meaningfully pass: `with_authority(false)` spelled out the default under a
+  name that read like a choice, and the parameter made every call site decode
+  which way round the boolean went. Removing it removes the question.
+
+
 ### lgwks_bot Added
 
 - **`EffectScope::ephemeral()`, and a run identity a host can mint.** Building a
@@ -43,70 +92,6 @@ explicitly under that crate.
   no cheaper fallback here — a run id derived from a clock, a pid or a counter
   is the collision that invariant exists to refuse.
 
-### Repository Added
-
-- `scripts/check-std-first.py`, and a CI step that runs it. `lgwks-deps check`
-  enforces the manifest half of the `std`-first rule and cannot see the other
-  half, which lives in the source: a `use` of a crate no manifest declares
-  (buildable only because something else in the graph re-exports it), and a
-  capability hand-rolled beside the `lgwks_std` module that already provides it.
-  Every crate reached past `std` and the four surfaces is reported with the
-  approval record behind it — owner, capability and the reason the approver
-  wrote — so `--justify` prints the answer to "why is this edge here" instead of
-  leaving it to a reviewer's memory.
-
-  It carries four written exemptions, each pinning the exempted line's text as
-  well as its number, because a `path:line` key alone would silently cover
-  whatever later occupied that line. A moved exemption is a `STALE EXEMPTION`
-  finding, not a silent yes.
-
-### lgwks_std Breaking
-
-- `BoundingBox::as_array` is now `to_array`. The method builds the four-element
-  array from four separate fields, so the call copies rather than reborrows and
-  the `as_` prefix promised a cost it did not have. Same signature, same value.
-- `http::get_response` is now `http::get`, so the pair reads `get` / `get_with`
-  the way `post` / `post_with` already did.
-- `Uuid::from_bytes` is gone, replaced by `impl From<[u8; 16]> for Uuid`. The
-  behaviour is unchanged; the conversion is now reachable by a caller that
-  bounds on `From<[u8; 16]>` rather than on this crate's naming.
-- `Pattern::find_all` returns `impl Iterator<Item = Match<'_>>` and
-  `Pattern::split` returns `impl Iterator<Item = &str>`. Code that assigned the
-  result to a `Vec` needs a `.collect()`; code that only counted the matches,
-  took the first, or short-circuited no longer allocates one item per
-  occurrence.
-- `Weighted::try_new` is removed. It was an alias for `Weighted::new` with no
-  callers anywhere in the workspace.
-
-### lgwks_std Added
-
-- `Debug` for `Hasher` (reports bytes written), `Weighted` (reports the
-  composition rather than the components) and `task::JoinHandle` (reports
-  running / done / panicked / taken). All three were unprintable, so a consumer
-  that wanted to log one wrote a wrapper that then had to change whenever the
-  type did.
-
-### lgwks_bot Breaking
-
-- **Effect dispatch is authorized and durable, and the scope is required.** Every
-  `Bot` is built around an `EffectScope`: the run's `EffectIdentity` (which run
-  this is, the `EnvironmentId` it acts on, and the `FlowRevision` it came from),
-  the `Broker` that owns the environment's generation, and the `EffectJournal`
-  the dispatch is written to. Both builder entry points refuse to build without
-  one, as `BotError::IncompleteSpec { field: "effects" }`. An identity the caller
-  did not choose is one it cannot recover against, so there is no default and no
-  implicit in-memory scope.
-- `Bot::resolve_effect` takes an `EffectKey` instead of a work id and a
-  caller-supplied revision. `EffectKey` is now the settlement identity: `Bot::pending`
-  hands one back, and evidence is compared by `ActionDigest` and `AttemptId`.
-- `RetryFacts::with_authority(bool)` is now
-  `RetryFacts::with_live_authority()`. Authority defaults to not live and the
-  refusing direction is the default, so `true` was the only setting a caller
-  could meaningfully pass: `with_authority(false)` spelled out the default under a
-  name that read like a choice, and the parameter made every call site decode
-  which way round the boolean went. Removing it removes the question.
-
-### lgwks_bot Added
 
 - **Write-ahead dispatch.** `IntentAdmitted` and `DispatchPrepared` are committed
   to the journal before the effect leaves the process, and `Broker::revalidate`
@@ -135,6 +120,7 @@ explicitly under that crate.
   sibling constructors already carried. `must_use_candidate` does not reach
   `-> Self` constructors, which is how the inconsistency survived a green build.
 
+
 ### lgwks_bot Fixed
 
 - `interface::RecognitionVector` and `language::LanguageResolver` each carried a
@@ -155,6 +141,7 @@ explicitly under that crate.
   either. `must_use_candidate` reaches none of the three, which is how they
   survived a green build.
 
+
 ### lgwks_bot Documentation
 
 - Five citations in `docs/guides/lgwks-bot/` were re-anchored to the lines this
@@ -162,6 +149,25 @@ explicitly under that crate.
   `Observe::Output: PartialEq` requirement to `EcsBuilder::observe`, which
   carries no such bound; it lands on `EcsObserveBuilder::observe`, the call that
   closes a chain, and the citation now points at the bound.
+
+
+### Repository Added
+
+- `scripts/check-std-first.py`, and a CI step that runs it. `lgwks-deps check`
+  enforces the manifest half of the `std`-first rule and cannot see the other
+  half, which lives in the source: a `use` of a crate no manifest declares
+  (buildable only because something else in the graph re-exports it), and a
+  capability hand-rolled beside the `lgwks_std` module that already provides it.
+  Every crate reached past `std` and the four surfaces is reported with the
+  approval record behind it — owner, capability and the reason the approver
+  wrote — so `--justify` prints the answer to "why is this edge here" instead of
+  leaving it to a reviewer's memory.
+
+  It carries four written exemptions, each pinning the exempted line's text as
+  well as its number, because a `path:line` key alone would silently cover
+  whatever later occupied that line. A moved exemption is a `STALE EXEMPTION`
+  finding, not a silent yes.
+
 
 ### Repository Changed
 
