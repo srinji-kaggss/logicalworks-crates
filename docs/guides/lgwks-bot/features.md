@@ -27,7 +27,8 @@ storefront, and `lgwks_deps` is the only crate in the workspace that authors a
 | `process` | `io`, `sync` | `rt::process`: `Command` — how to describe a child. Running one is `Supervisor::spawn_process` (`sync`), and it is the only way: `Child` and its pipes are deliberately not exported |
 | `fs` | `io` | `rt::fs`: an async filesystem, a blocking-threadpool wrapper |
 | `signal` | `rt` | `rt::signal`: OS signal streams. Compiled only on `unix` or `windows` (`crates/lgwks-bot/src/rt/mod.rs:96`) |
-| `full` | | `rt`, `time`, `sync`, `macros`, `io`, `net`, `process`, `fs`, `signal` |
+| `ephemeral` | | `EffectScope::ephemeral()`, `RunId::mint()`, `EnvironmentId::mint()`. Host-only: minting needs OS entropy, and `lgwks_std::random` is linux/macOS/windows only. Off by default for the same reason `signal` is — the default set is built for `wasm32-wasip1` |
+| `full` | | `rt`, `time`, `sync`, `macros`, `io`, `net`, `process`, `fs`, `signal`, `ephemeral` |
 
 The module gates are in `crates/lgwks-bot/src/rt/mod.rs:85`. `rt::supervise` and
 `rt::sync` are both behind `sync`, so disabling `sync` removes the supervisor as

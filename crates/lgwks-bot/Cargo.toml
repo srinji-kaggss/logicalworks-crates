@@ -46,7 +46,39 @@ net = ["io", "lgwks_deps/tokio-net"]
 process = ["io", "sync", "lgwks_std/process", "lgwks_deps/tokio-process"]
 fs = ["io", "lgwks_deps/tokio-fs"]
 signal = ["rt", "lgwks_deps/tokio-signal"]
-full = ["rt", "time", "sync", "macros", "io", "net", "process", "fs", "signal"]
+# Minting a run identity needs an entropy source, and the estate has exactly
+# one: `lgwks_std::random`, whose `random` feature is `getrandom` under
+# `lgwks_std`'s ownership. This crate authors no edge of its own — it turns on a
+# feature of a dependency it already has — which is what keeps the tree at one
+# entropy source rather than two. `lgwks_std`'s INV-RANDOM-ONE-SOURCE is the
+# reason there is no cheaper fallback here: a run id derived from a clock or a
+# counter is the shortcut that invariant exists to refuse.
+#
+# Not on by default, and the reason is the target rather than the cost. Minting
+# an identity needs OS entropy, `lgwks_std::random` is linux/macOS/windows only
+# and says so with a `compile_error!`, and this crate's *default* feature set is
+# built for `wasm32-wasip1` by the WASI boundary job. A default-on `ephemeral`
+# therefore makes the default set fail to build on a target the crate supports:
+# observed as `lgwks_std::random supports linux, macOS, and windows only`.
+#
+# This is the same shape as `signal`, which is also host-only, also not default,
+# and also gated in the source. What keeps it from rotting is that the gate
+# exercises it anyway: `full` includes it, and the runner step runs
+# `cargo test -p lgwks_bot --features full`, so `tests/ephemeral.rs` executes
+# rather than only compiling.
+ephemeral = ["lgwks_std/random"]
+full = [
+    "rt",
+    "time",
+    "sync",
+    "macros",
+    "io",
+    "net",
+    "process",
+    "fs",
+    "signal",
+    "ephemeral",
+]
 
 [dependencies]
 # `hash` is enabled for the decision receipt: the flow revision and the

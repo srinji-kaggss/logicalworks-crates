@@ -96,6 +96,58 @@ impl fmt::Display for IdError {
 
 impl std::error::Error for IdError {}
 
+/// Why a fresh identifier could not be minted from the operating system.
+///
+/// Two arms, and neither has a fallback. [`lgwks_std::random`] enforces
+/// INV-RANDOM-ONE-SOURCE, so a clock, a process id, a counter and a userspace
+/// PRNG are each explicitly not alternatives — an identifier derived from one of
+/// those is the collision this crate's identity model exists to make
+/// impossible. A caller that cannot reach entropy must fail.
+///
+/// `#[non_exhaustive]` for the same reason [`IdError`] is: a later revision can
+/// add a rejection reason without breaking a caller that matches these two.
+#[cfg(feature = "ephemeral")]
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum MintError {
+    /// The operating system's entropy source could not be read.
+    ///
+    /// Carried rather than flattened to a string, because `lgwks_std`'s
+    /// `EntropyError` names the backend that failed as a matchable value.
+    Entropy(lgwks_std::random::EntropyError),
+    /// The entropy source returned 128 zero bits.
+    ///
+    /// A probability of 2^-128 per call, and an error rather than a retry
+    /// because zero is both the id the wire schema excludes and the value a
+    /// zeroed or truncated buffer produces. A retry would silently paper over a
+    /// source that is returning zeros; this names it.
+    Zero,
+}
+
+#[cfg(feature = "ephemeral")]
+impl fmt::Display for MintError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The scrutinee is `*self` so each pattern's type is the enum's own
+        // rather than a reference to it, and the non-`Copy` payload is bound by
+        // `ref`. `clippy::pattern_type_mismatch` is forbidden in this workspace
+        // and this is the form it asks for, as in `JournalError`.
+        match *self {
+            Self::Entropy(ref cause) => write!(f, "could not mint an identifier: {cause}"),
+            Self::Zero => f.write_str("the entropy source returned the all-zero identifier"),
+        }
+    }
+}
+
+#[cfg(feature = "ephemeral")]
+impl std::error::Error for MintError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match *self {
+            Self::Entropy(ref cause) => Some(cause),
+            Self::Zero => None,
+        }
+    }
+}
+
 /// A 128-bit identifier that is never zero.
 ///
 /// The non-zero invariant is carried by [`NonZeroU128`] rather than checked at
@@ -164,6 +216,30 @@ impl Id128 {
     pub fn to_hex(self) -> String {
         lgwks_std::hex::encode(self.0.get().to_be_bytes())
     }
+
+    /// Mint a fresh identifier from the operating system's entropy source.
+    ///
+    /// Big-endian, 128 bits, from [`lgwks_std::random`] — the estate's one
+    /// CSPRNG backend. Distinctness is the entire property being bought: two
+    /// runs of the same flow have to be distinguishable, and a value derived
+    /// from a clock, a process id or a counter is exactly the kind that is not.
+    ///
+    /// # Errors
+    ///
+    /// [`MintError::Entropy`] when the source could not be read, and
+    /// [`MintError::Zero`] when it returned 128 zero bits.
+    ///
+    /// `pub(crate)` because a caller outside this crate has no reason to hold a
+    /// bare [`Id128`]: an identifier is meaningless without its role, and the
+    /// two roles that are minted expose their own.
+    #[cfg(feature = "ephemeral")]
+    pub(crate) fn mint() -> Result<Self, MintError> {
+        let raw = lgwks_std::random::bytes::<16>().map_err(MintError::Entropy)?;
+        match NonZeroU128::new(u128::from_be_bytes(raw)) {
+            Some(value) => Ok(Self(value)),
+            None => Err(MintError::Zero),
+        }
+    }
 }
 
 impl fmt::Display for Id128 {
@@ -211,6 +287,7 @@ macro_rules! id_role {
             pub const fn id(self) -> Id128 {
                 self.0
             }
+
         }
 
         impl fmt::Display for $name {
@@ -243,6 +320,56 @@ id_role! {
     /// operating system, so a settlement naming one can be delivered to a
     /// different process than the one it was about.
     EnvironmentId
+}
+
+/// A fresh run identity, minted from the operating system's entropy source.
+///
+/// Public, and on [`RunId`] rather than on the shared `id_role` macro,
+/// because the three roles do not share this: a run id is the one a host
+/// generates and persists before its first admission, and an [`ActionId`] is
+/// already derived from a bot's structure by `crate::ecs::derive_action_id`.
+/// A minting method on that role would be a second way to make one value, so
+/// the macro carries none and each role states its own.
+///
+/// # Errors
+///
+/// [`MintError::Entropy`] when the source could not be read, and
+/// [`MintError::Zero`] when it returned 128 zero bits.
+#[cfg(feature = "ephemeral")]
+impl RunId {
+    /// Mint a run identity no other run can share.
+    ///
+    /// # Errors
+    ///
+    /// [`MintError::Entropy`] when the operating system's entropy source could
+    /// not be read, and [`MintError::Zero`] when it returned 128 zero bits.
+    pub fn mint() -> Result<Self, MintError> {
+        Ok(Self(Id128::mint()?))
+    }
+}
+
+/// A fresh environment identity, minted from the operating system's entropy.
+///
+/// The host names the environment a run acts on; the broker is what creates
+/// it. A name that is not the process's own pid or display name is what stops a
+/// settlement from being delivered to a different process than the one it was
+/// about, and entropy is the only source for a name with that property.
+///
+/// # Errors
+///
+/// [`MintError::Entropy`] when the source could not be read, and
+/// [`MintError::Zero`] when it returned 128 zero bits.
+#[cfg(feature = "ephemeral")]
+impl EnvironmentId {
+    /// Mint an environment identity no other environment can share.
+    ///
+    /// # Errors
+    ///
+    /// [`MintError::Entropy`] when the operating system's entropy source could
+    /// not be read, and [`MintError::Zero`] when it returned 128 zero bits.
+    pub fn mint() -> Result<Self, MintError> {
+        Ok(Self(Id128::mint()?))
+    }
 }
 
 /// Why an [`AttemptId`] or [`EnvironmentEpoch`] could not be parsed.
@@ -804,6 +931,17 @@ pub struct EffectIdentity {
     flow: FlowRevision,
 }
 
+/// The flow revision an ephemeral run carries.
+///
+/// An ephemeral run has no flow document, so there is no revision to bind. This
+/// is a constant rather than a minted digest because minting one would be a
+/// false statement: a revision asserts the *content* of a flow, and inventing a
+/// fresh value per run would claim the content differed when there is none to
+/// differ. Domain-separated rather than 32 zero bytes so it cannot be confused
+/// with the digest of an empty document.
+#[cfg(feature = "ephemeral")]
+const EPHEMERAL_FLOW: &[u8] = b"lgwks.effect.v1.ephemeral-flow";
+
 impl EffectIdentity {
     /// Record the host's three run-level facts.
     #[must_use]
@@ -813,6 +951,43 @@ impl EffectIdentity {
             environment,
             flow,
         }
+    }
+
+    /// An identity for a run that persists nothing and has no flow document.
+    ///
+    /// The run and environment ids are **minted**, not defaulted: two calls
+    /// produce two distinguishable identities, which is the property a default
+    /// would destroy and the one thing this module refuses. OS entropy is the
+    /// only source for them, because a value derived from a clock or a counter
+    /// is not distinguishable across the restarts it has to survive.
+    ///
+    /// The flow revision is the one field this cannot mint, and the doc on
+    /// [`EPHEMERAL_FLOW`] says why. A caller that *has* a validated flow
+    /// document has a [`FlowRevision`] and belongs on [`EffectIdentity::new`] —
+    /// a run with a document is not an ephemeral run, and the environment
+    /// registered against this identity is what makes that distinction
+    /// enforceable rather than advisory.
+    ///
+    /// # Errors
+    ///
+    /// [`MintError::Entropy`] when the operating system's entropy source could
+    /// not be read, and [`MintError::Zero`] when it returned 128 zero bits.
+    ///
+    /// `pub(crate)`: the only caller is [`EffectScope::ephemeral`], and
+    /// ephemerality is a property of a *scope*, not of an identity. An identity
+    /// is three facts with no lifetime, so an "ephemeral" one held on its own is
+    /// half a construction — the caller who wants a fresh identity and a durable
+    /// journal has [`RunId::mint`], [`EnvironmentId::mint`] and
+    /// [`EffectIdentity::new`].
+    ///
+    /// [`EffectScope::ephemeral`]: crate::ecs::EffectScope::ephemeral
+    #[cfg(feature = "ephemeral")]
+    pub(crate) fn ephemeral() -> Result<Self, MintError> {
+        Ok(Self {
+            run: RunId::mint()?,
+            environment: EnvironmentId::mint()?,
+            flow: FlowRevision::new(lgwks_std::hash::blake3(EPHEMERAL_FLOW)),
+        })
     }
 
     /// The run.
@@ -891,6 +1066,25 @@ mod tests {
 
     fn nonzero(value: u64) -> Result<NonZeroU64, CounterError> {
         NonZeroU64::new(value).ok_or(CounterError::Zero)
+    }
+
+    /// The one `MintError` arm a test can reach, and only from in here: the
+    /// enum is `#[non_exhaustive]` so a caller outside has to write a wildcard
+    /// arm, which also means a caller outside cannot construct an arm to check
+    /// its rendering. `Entropy` needs the operating system to fail, so it is
+    /// covered by the type it carries rather than by a test.
+    #[cfg(feature = "ephemeral")]
+    #[test]
+    fn the_all_zero_mint_error_names_the_value_it_refused() {
+        let rendered = MintError::Zero.to_string();
+        assert!(
+            rendered.contains("all-zero"),
+            "an operator reading this cannot tell what was refused: {rendered}"
+        );
+        assert!(
+            std::error::Error::source(&MintError::Zero).is_none(),
+            "a refusal with no cause must not claim one"
+        );
     }
 
     fn key(attempt: u64, epoch: u64) -> Result<EffectKey, EffectKeyError> {

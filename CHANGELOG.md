@@ -26,6 +26,7 @@ explicitly under that crate.
 - `Weighted::try_new` is removed. It was an alias for `Weighted::new` with no
   callers anywhere in the workspace.
 
+
 ### lgwks_std Added
 
 - `Debug` for `Hasher` (reports bytes written), `Weighted` (reports the
@@ -33,6 +34,7 @@ explicitly under that crate.
   running / done / panicked / taken). All three were unprintable, so a consumer
   that wanted to log one wrote a wrapper that then had to change whenever the
   type did.
+
 
 ### lgwks_bot Breaking
 
@@ -54,7 +56,52 @@ explicitly under that crate.
   name that read like a choice, and the parameter made every call site decode
   which way round the boolean went. Removing it removes the question.
 
+
 ### lgwks_bot Added
+
+- **`EffectScope::ephemeral()`, and a run identity a host can mint.** Building a
+  bot with no host, no persisted history and no flow document meant writing an
+  identity out by hand: a `RunId` and an `EnvironmentId` as literal hex, a
+  `FlowRevision` as a literal digest, a registered broker and an in-memory
+  journal, in that order, in every test and example. `EffectScope::ephemeral()`
+  mints the two identities from OS entropy, registers that environment, and
+  pairs them with a `MemoryJournal`.
+
+  It is a capability rather than a convenience because of what the journal
+  refuses: `MemoryJournal` reports `DurabilityPromise::Ephemeral`, and
+  `EffectJournal::admit_external_handoff` returns `JournalError::PromiseUnmet`
+  for it — so an effect that would leave the process fails at the boundary
+  instead of proceeding on a record that cannot outlive the process that wrote
+  it. The difference between this and "no journal" is that this one says so.
+
+  `RunId::mint()` and `EnvironmentId::mint()` are public for the same reason
+  from the durable side: the module has always said the run identity is
+  *generated* before the first admission, and until now the only way to generate
+  one was to supply hex. `ActionId` deliberately gains none — the crate already
+  derives it from a bot's structure, and a second way to make one value is the
+  thing the dependency and API doctrine both refuse. `FlowRevision` is a fixed
+  domain-separated constant in the ephemeral case, because an ephemeral run has
+  no flow document and minting a revision would assert a content change that did
+  not happen.
+- `MintError` and `EphemeralError`, both `#[non_exhaustive]` and both carrying
+  their cause rather than flattening it to a string.
+- Feature `ephemeral`, **opt-in**, which turns on `lgwks_std/random`. It authors
+  no edge of its own: `getrandom` is owned by `lgwks_std` under
+  `contract/APPROVED.toml` and this is a feature of a dependency the crate
+  already has. `lgwks_std` enforces INV-RANDOM-ONE-SOURCE, which is why there is
+  no cheaper fallback here — a run id derived from a clock, a pid or a counter
+  is the collision that invariant exists to refuse.
+
+  It is not in the default set, and the reason is the target rather than the
+  cost. Minting needs OS entropy, `lgwks_std::random` is linux/macOS/windows
+  only and refuses the rest with a `compile_error!`, and this crate's default
+  feature set is built for `wasm32-wasip1` by the WASI boundary job. A
+  default-on `ephemeral` makes the default set fail to build on a target the
+  crate supports. `signal` is host-only in the same way and is default-off for
+  the same reason. `full` includes `ephemeral`, and the runner step tests
+  `--features full`, so the ephemeral tests execute in CI rather than only
+  compiling.
+
 
 - **Write-ahead dispatch.** `IntentAdmitted` and `DispatchPrepared` are committed
   to the journal before the effect leaves the process, and `Broker::revalidate`
@@ -83,6 +130,7 @@ explicitly under that crate.
   sibling constructors already carried. `must_use_candidate` does not reach
   `-> Self` constructors, which is how the inconsistency survived a green build.
 
+
 ### lgwks_bot Fixed
 
 - `interface::RecognitionVector` and `language::LanguageResolver` each carried a
@@ -103,6 +151,7 @@ explicitly under that crate.
   either. `must_use_candidate` reaches none of the three, which is how they
   survived a green build.
 
+
 ### lgwks_bot Documentation
 
 - Five citations in `docs/guides/lgwks-bot/` were re-anchored to the lines this
@@ -110,6 +159,33 @@ explicitly under that crate.
   `Observe::Output: PartialEq` requirement to `EcsBuilder::observe`, which
   carries no such bound; it lands on `EcsObserveBuilder::observe`, the call that
   closes a chain, and the citation now points at the bound.
+- The `ephemeral` scope grew `ecs.rs` by 113 lines and `spec.rs` by four, and the
+  guides cite both by line, so all twenty-four citations under them landed on
+  whatever now occupied the number. Nine were caught, having resolved to a
+  closing brace, a blank line or an empty `///`. The other fifteen resolved to a
+  plausible line that was not the one cited, which is the class the checker
+  deliberately does not judge. All twenty-four were re-anchored to the line they
+  named before the growth, matched by the text of that line rather than by the
+  numbers the offset would predict; the five whose text is not unique in the
+  file were confirmed by reading them.
+
+### Repository Added
+
+- `scripts/check-std-first.py`, and a CI step that runs it. `lgwks-deps check`
+  enforces the manifest half of the `std`-first rule and cannot see the other
+  half, which lives in the source: a `use` of a crate no manifest declares
+  (buildable only because something else in the graph re-exports it), and a
+  capability hand-rolled beside the `lgwks_std` module that already provides it.
+  Every crate reached past `std` and the four surfaces is reported with the
+  approval record behind it — owner, capability and the reason the approver
+  wrote — so `--justify` prints the answer to "why is this edge here" instead of
+  leaving it to a reviewer's memory.
+
+  It carries four written exemptions, each pinning the exempted line's text as
+  well as its number, because a `path:line` key alone would silently cover
+  whatever later occupied that line. A moved exemption is a `STALE EXEMPTION`
+  finding, not a silent yes.
+
 
 ### Repository Changed
 
