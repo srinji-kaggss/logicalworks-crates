@@ -930,11 +930,17 @@ impl Effects {
     /// The durable half of idempotent settlement: a repeat after reconstruction
     /// has no live `AttemptRecord` to consult, and answering `NoSuchWork` there
     /// is how the same evidence stops being a safe retry across a restart.
-    fn outcome_for(&self, key: &EffectKey) -> Option<EffectEvidence> {
-        self.scope
+    ///
+    /// # Errors
+    ///
+    /// Whatever the journal refuses when read. An unreadable journal is not an
+    /// absent outcome: collapsing the two is how a transient storage failure
+    /// becomes a terminal "this work never existed" (issue #123).
+    fn outcome_for(&self, key: &EffectKey) -> Result<Option<EffectEvidence>, JournalError> {
+        Ok(self
+            .scope
             .journal()
-            .committed()
-            .ok()?
+            .committed()?
             .iter()
             .find_map(|event| match *event {
                 EffectEvent::OutcomeObserved {
@@ -942,7 +948,7 @@ impl Effects {
                     evidence,
                 } if held == *key => Some(evidence),
                 _ => None,
-            })
+            }))
     }
 
     /// Require the receipt for an outcome to meet the grade admitted for its
@@ -1044,7 +1050,7 @@ impl Effects {
             .find(|entry| entry.0 == key)
             .map(|entry| entry.1)
             .unwrap_or_else(|| self.scope.journal().durability());
-        let already_recorded = self.outcome_for(&key);
+        let already_recorded = self.outcome_for(&key)?;
         if let Some(recorded) = already_recorded {
             if recorded != evidence {
                 return Err(JournalError::OutOfOrder {
@@ -1080,7 +1086,7 @@ impl Effects {
                 // recorded. A ladder-complete `OutOfOrder` alone is not proof of
                 // which outcome landed, and treating it as success is how a
                 // contradictory `Applied` gets acknowledged (issue #106).
-                match self.outcome_for(&key) {
+                match self.outcome_for(&key)? {
                     Some(recorded) if recorded == evidence => {
                         if required == DurabilityPromise::Ephemeral {
                             self.accept_position(
@@ -2583,9 +2589,13 @@ impl Ledger {
     /// `resolve_effect` runs this first so the settlement fact can be journaled
     /// before the entry is allowed to move: a live settle that only touched
     /// memory is resurrected by recovery as an unknown (issue #106).
-    fn classify_settlement(&self, key: &EffectKey, evidence: EffectEvidence) -> Settled {
+    fn classify_settlement(
+        &self,
+        key: &EffectKey,
+        evidence: EffectEvidence,
+    ) -> Result<Settled, JournalError> {
         let Some(id) = self.locate(key.action()) else {
-            return Settled::NoSuchWork { id: None };
+            return Ok(Settled::NoSuchWork { id: None });
         };
         // The run and the flow are the identity this ledger speaks for. A key
         // from another run is not this ledger's to settle, and answering it with
@@ -2595,7 +2605,7 @@ impl Ledger {
             || key.flow() != identity.flow()
             || key.environment() != identity.environment()
         {
-            return Settled::NoSuchWork { id: None };
+            return Ok(Settled::NoSuchWork { id: None });
         }
         let Some(transition) = self.transitions.get(id.chain()).and_then(Option::as_ref) else {
             return self.durable_or_missing(key, id, evidence);
@@ -2605,7 +2615,7 @@ impl Ledger {
         // case this exists to refuse.
         let live = derive_action_digest(identity.flow(), id.chain(), id.entry(), &transition.input);
         if key.digest() != live {
-            return Settled::Superseded { id, current: live };
+            return Ok(Settled::Superseded { id, current: live });
         }
         let Some(record) = transition.attempts.get(id.entry()).copied() else {
             return self.durable_or_missing(key, id, evidence);
@@ -2616,13 +2626,13 @@ impl Ledger {
         // be moved — an abandoned entry reopened by confirmation that its
         // effect did not land is exactly that — and answering `Duplicate`
         // before the move is how the reopen stops happening (issue #106).
-        if let Some(recorded) = self.effects.outcome_for(key)
+        if let Some(recorded) = self.effects.outcome_for(key)?
             && recorded != evidence
         {
-            return Settled::Contradicted {
+            return Ok(Settled::Contradicted {
                 id,
                 settled: recorded,
-            };
+            });
         }
         let settleable = matches!(
             transition.entries.get(id.entry()),
@@ -2653,12 +2663,12 @@ impl Ledger {
                 Some(previous)
                     if previous.attempt == key.attempt() && previous.evidence == evidence =>
                 {
-                    Settled::Duplicate
+                    Ok(Settled::Duplicate)
                 }
-                Some(previous) if previous.attempt == key.attempt() => Settled::Contradicted {
+                Some(previous) if previous.attempt == key.attempt() => Ok(Settled::Contradicted {
                     id,
                     settled: previous.evidence,
-                },
+                }),
                 Some(_) | None => self.durable_or_missing(key, id, evidence),
             };
         }
@@ -2679,16 +2689,16 @@ impl Ledger {
         // is unreachable; it is answered with the same refusal as an entry the
         // ledger does not hold rather than being asserted away.
         let Some(outstanding) = record.begun else {
-            return Settled::NoSuchWork { id: Some(id) };
+            return Ok(Settled::NoSuchWork { id: Some(id) });
         };
         if key.attempt() != outstanding {
-            return Settled::StaleAttempt {
+            return Ok(Settled::StaleAttempt {
                 id,
                 reported: key.attempt(),
                 outstanding,
-            };
+            });
         }
-        Settled::Decided
+        Ok(Settled::Decided)
     }
 
     /// The journal's answer when the live slot has none left to move.
@@ -2701,15 +2711,24 @@ impl Ledger {
     /// recorded is [`Settled::NoSuchWork`]. Answering `NoSuchWork` for a
     /// settlement the journal already holds is how the same evidence stops
     /// being a safe retry across a restart.
-    fn durable_or_missing(&self, key: &EffectKey, id: WorkId, evidence: EffectEvidence) -> Settled {
-        match self.effects.outcome_for(key) {
+    ///
+    /// A journal that cannot be read answers neither: the error is propagated
+    /// so an unreadable record is never recast as "the work never existed"
+    /// (issue #123).
+    fn durable_or_missing(
+        &self,
+        key: &EffectKey,
+        id: WorkId,
+        evidence: EffectEvidence,
+    ) -> Result<Settled, JournalError> {
+        Ok(match self.effects.outcome_for(key)? {
             Some(recorded) if recorded == evidence => Settled::Duplicate,
             Some(recorded) => Settled::Contradicted {
                 id,
                 settled: recorded,
             },
             None => Settled::NoSuchWork { id: Some(id) },
-        }
+        })
     }
 
     /// Apply a settlement [`classify_settlement`](Self::classify_settlement)
@@ -4345,12 +4364,19 @@ impl EcsBot {
             .non_send::<Ledger>()
             .classify_settlement(key, evidence)
         {
+            // A journal that could not be read is not a settlement fact and
+            // must not be reported as one. Nothing has been mutated: the call
+            // is a classification, and the caller may repeat it once reads
+            // come back (issue #123).
+            Err(cause) => Err(BotError::EffectRefused {
+                cause: DispatchError::Journal(cause),
+            }),
             // Both are success, and deliberately one arm after the journal
             // write: to the caller, a repeat that landed a second time is the
             // same fact as one that landed the first. The append happens
             // *before* either is acknowledged, so a restart cannot resurrect an
             // attempt this process already settled (issue #106).
-            verdict @ (Settled::Decided | Settled::Duplicate) => {
+            Ok(verdict @ (Settled::Decided | Settled::Duplicate)) => {
                 self.world
                     .non_send_mut::<Ledger>()
                     .effects
@@ -4367,27 +4393,27 @@ impl EcsBot {
                 }
                 Ok(())
             }
-            Settled::Superseded { id, current } => Err(BotError::EvidenceSuperseded {
+            Ok(Settled::Superseded { id, current }) => Err(BotError::EvidenceSuperseded {
                 work: id,
                 named: key.digest(),
                 current,
             }),
-            Settled::StaleAttempt {
+            Ok(Settled::StaleAttempt {
                 id,
                 reported,
                 outstanding,
-            } => Err(BotError::EvidenceStaleAttempt {
+            }) => Err(BotError::EvidenceStaleAttempt {
                 work: id,
                 reported,
                 outstanding,
             }),
-            Settled::Contradicted { id, settled } => Err(BotError::EvidenceContradicted {
+            Ok(Settled::Contradicted { id, settled }) => Err(BotError::EvidenceContradicted {
                 work: id,
                 settled,
                 submitted: evidence,
             }),
-            Settled::NoSuchWork { id: Some(id) } => Err(BotError::NoSuchWork { work: id }),
-            Settled::NoSuchWork { id: None } => Err(BotError::ActionNotDeclared {
+            Ok(Settled::NoSuchWork { id: Some(id) }) => Err(BotError::NoSuchWork { work: id }),
+            Ok(Settled::NoSuchWork { id: None }) => Err(BotError::ActionNotDeclared {
                 action: key.action(),
             }),
         }
