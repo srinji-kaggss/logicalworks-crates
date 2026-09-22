@@ -1555,6 +1555,132 @@ impl EffectJournal for SharedJournal {
     }
 }
 
+/// An external journal that commits an outcome before its receipt reaches the
+/// admitted grade, then can be upgraded without re-running the action.
+struct OutcomeReceiptJournal {
+    store: Rc<RefCell<MemoryJournal>>,
+    receipt: Rc<Cell<DurabilityPromise>>,
+}
+
+impl EffectJournal for OutcomeReceiptJournal {
+    fn durability(&self) -> DurabilityPromise {
+        DurabilityPromise::ProcessCrash
+    }
+
+    fn tail(&self) -> JournalPosition {
+        self.store.borrow().tail()
+    }
+
+    fn committed(&self) -> Result<Vec<EffectEvent>, JournalError> {
+        EffectJournal::committed(&*self.store.borrow())
+    }
+
+    fn compare_and_append(
+        &mut self,
+        expected_tail: JournalPosition,
+        event: &EffectEvent,
+    ) -> Result<DurableAck, JournalError> {
+        let acknowledgment = self
+            .store
+            .borrow_mut()
+            .compare_and_append(expected_tail, event)?;
+        let promise = if matches!(event, EffectEvent::OutcomeObserved { .. }) {
+            DurabilityPromise::Ephemeral
+        } else {
+            DurabilityPromise::ProcessCrash
+        };
+        Ok(DurableAck::new(acknowledgment.position(), promise))
+    }
+
+    fn confirm_outcome(
+        &mut self,
+        _key: EffectKey,
+        _evidence: EffectEvidence,
+        _required: DurabilityPromise,
+    ) -> Result<DurableAck, JournalError> {
+        Ok(DurableAck::new(
+            self.store.borrow().tail(),
+            self.receipt.get(),
+        ))
+    }
+}
+
+/// A receipt weaker than the admitted external durability holds the known
+/// outcome across restart; upgrading the receipt settles without a re-send.
+#[test]
+fn a_weak_outcome_receipt_holds_across_restart_without_reentering_the_effect() -> TestResult {
+    let store = Rc::new(RefCell::new(MemoryJournal::new()));
+    let receipt = Rc::new(Cell::new(DurabilityPromise::Ephemeral));
+    let seen = Rc::new(RefCell::new(EventId::new(1, 1)));
+    let entered = Rc::new(Cell::new(false));
+    let identity = identity()?;
+    let environment = identity.environment();
+    let mut run_broker = Broker::new();
+    run_broker.register(environment)?;
+
+    let mut bot = Bot::builder(NAME)
+        .observe(Requests(Rc::clone(&seen)))
+        .on(
+            |_seen: &EventId<u32>| true,
+            ExternalMarker(Rc::clone(&entered)),
+        )
+        .with_effects(EffectScope::new(
+            identity,
+            run_broker,
+            Box::new(OutcomeReceiptJournal {
+                store: Rc::clone(&store),
+                receipt: Rc::clone(&receipt),
+            }),
+        ))
+        .build(&GrantSet::empty())?;
+
+    assert!(matches!(bot.tick(), Err(BotError::EffectUnrecorded { .. })));
+    assert!(
+        entered.get(),
+        "the external action ran once before receipt failure"
+    );
+    drop(bot);
+
+    let mut recovered = Bot::builder(NAME)
+        .observe(Requests(Rc::clone(&seen)))
+        .on(
+            |_seen: &EventId<u32>| true,
+            ExternalMarker(Rc::clone(&entered)),
+        )
+        .with_effects(EffectScope::new(
+            identity,
+            broker(identity.environment())?,
+            Box::new(OutcomeReceiptJournal {
+                store,
+                receipt: Rc::clone(&receipt),
+            }),
+        ))
+        .build(&GrantSet::empty())?;
+
+    let held = recovered.pending();
+    assert_eq!(
+        held.len(),
+        1,
+        "the known outcome remains an append-only hold"
+    );
+    assert!(matches!(
+        held[0].hold(),
+        TransitionHold::RecordingFailed { .. }
+    ));
+    let key = held[0].key().ok_or("recovered receipt hold has a key")?;
+    receipt.set(DurabilityPromise::ProcessCrash);
+    recovered.resolve_effect(&key, EffectEvidence::Applied)?;
+    assert!(
+        recovered.pending().is_empty(),
+        "the upgraded receipt settles the hold"
+    );
+    assert!(
+        entered.get(),
+        "settlement did not need to re-enter the effect"
+    );
+    Ok(())
+}
+
 /// Whether the named kind was appended for any key.
 fn journal_has(store: &Rc<RefCell<MemoryJournal>>, kind: EventKind) -> bool {
     let committed = EffectJournal::committed(&*store.borrow()).unwrap_or_default();
