@@ -119,8 +119,8 @@ explicitly under that crate.
   `concurrency` group supersedes a run on a branch that has been pushed again,
   and never supersedes a run on `main`.
 - **The rustdoc gate is runnable outside CI.** `scripts/doc-lanes.sh` holds the
-  four lanes the Docs job runs, and the job and `AGENTS.md` both call it instead
-  of restating the commands. Which links break depends on which features are on,
+  four lanes the Docs job runs, and the job, `AGENTS.md` and `docs/releasing.md`
+  all call it instead of restating the commands. Which links break depends on which features are on,
   so the gate is four lanes and not one command, and none of them was reachable
   from the `Checks that must pass` list, which named no doc build at all: a
   broken intra-doc link is a warning rather than an error, so the crate built
