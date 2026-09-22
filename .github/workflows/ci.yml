@@ -29,7 +29,7 @@ jobs:
           components: clippy, rustfmt
       - name: Verify lockfile is up-to-date
         run: >
-          cargo metadata --locked >/dev/null ||
+          cargo metadata --locked --format-version 1 >/dev/null ||
           { echo 'Lockfile out of date: run cargo update --workspace and commit Cargo.lock' >&2; exit 1; }
       - name: Enforce dependency edge ownership
         run: cargo run --locked -p lgwks_deps --bin lgwks-deps -- check .
@@ -42,22 +42,7 @@ jobs:
       - name: Forbid unwrap outside tests
         # Safety bar: library code fails loud with typed errors or named
         # expects, never bare unwrap. Doc examples count as shipped surface.
-        run: |
-          set -eu
-          tmp="$(mktemp)"
-          trap 'rm -f "$tmp"' EXIT
-          grep -rn '\.unwrap()' crates/*/src --include='*.rs' > "$tmp" || true
-          fail=0
-          while IFS= read -r rec; do
-            loc="${rec%%:*}"; rest="${rec#*:}"; line="${rest%%:*}"
-            top="$(grep -n 'mod tests' "$loc" | head -1 | cut -d: -f1)"
-            if [ -z "$top" ] || [ "$line" -lt "$top" ]; then
-              echo "unwrap outside tests: $loc:$line" >&2
-              fail=1
-            fi
-          done < "$tmp"
-          [ "$fail" -eq 0 ] && echo "no unwrap outside tests"
-          exit "$fail"
+        run: python3 scripts/ci_local.py --lane unwrap-scan
       - name: Build all workspace targets
         run: cargo test --workspace --all-targets --locked --no-run
 
@@ -183,39 +168,7 @@ jobs:
         # what happened to lgwks_deps: `gpui` pulls `objc2`, which refuses to
         # compile off Apple targets. Build with the declared set so an
         # unbuildable declaration fails here instead of on docs.rs.
-        run: |
-          set -eu
-          python - <<'PY' > /tmp/docsrs_features.sh
-          import tomllib
-          from pathlib import Path
-
-          for manifest in sorted(Path("crates").glob("*/Cargo.toml")):
-              parsed = tomllib.loads(manifest.read_text(encoding="utf-8"))
-              # `[package.metadata.docs.rs]` parses as metadata["docs"]["rs"].
-              meta = (
-                  parsed.get("package", {})
-                  .get("metadata", {})
-                  .get("docs", {})
-                  .get("rs")
-              )
-              if meta is None:
-                  continue
-              name = parsed["package"]["name"]
-              if meta.get("all-features"):
-                  print(f"# {name}: all-features")
-                  print(f'cargo doc --no-deps --locked -p {name} --all-features')
-              else:
-                  feats = meta.get("features", [])
-                  joined = ",".join(feats)
-                  print(f"# {name}: {joined or '(defaults only)'}")
-                  if feats:
-                      print(f'cargo doc --no-deps --locked -p {name} --features {joined}')
-                  else:
-                      print(f'cargo doc --no-deps --locked -p {name}')
-          PY
-          cat /tmp/docsrs_features.sh
-          RUSTDOCFLAGS='-D warnings --cfg docsrs' sh -e /tmp/docsrs_features.sh
-
+        run: python3 scripts/ci_local.py --lane docsrs-metadata
       - name: llms.txt matches the documentation index
         # `llms.txt` is generated from the README's own tables by
         # `scripts/gen-llms-txt.py`. Regenerate and fail if the committed copy
@@ -238,43 +191,7 @@ jobs:
         # repository; the script names that exemption rather than guessing.
         run: python3 scripts/check-doc-citations.py
       - name: Root README quickstart matches its compiled example
-        run: |
-          python - <<'PY'
-          import re
-          from pathlib import Path
-
-          # README.md at the repository root is not a crate README, so nothing
-          # type-checks its code blocks; only crates/lgwks-bot/README.md is
-          # compiled, via include_str! in lib.rs. The quickstart is mirrored in
-          # an example that `cargo test --all-targets` does compile, and this
-          # keeps the two identical, so an API change breaks the build instead
-          # of silently invalidating the first code a new user copies.
-          readme = Path("README.md").read_text(encoding="utf-8")
-          section = readme.split("## Quickstart", 1)[1].split("\n## ", 1)[0]
-          blocks = re.findall(r"```rust\n(.*?)```", section, re.S)
-          if len(blocks) != 1:
-              raise SystemExit(
-                  f"expected one rust block under Quickstart, found {len(blocks)}"
-              )
-          readme_block = blocks[0].strip()
-
-          example = Path(
-              "crates/lgwks-bot/examples/quickstart.rs"
-          ).read_text(encoding="utf-8")
-          body = "\n".join(
-              line for line in example.split("\n") if not line.startswith("//!")
-          ).strip()
-
-          if readme_block != body:
-              raise SystemExit(
-                  "README quickstart drifted from "
-                  "crates/lgwks-bot/examples/quickstart.rs:\n"
-                  f"--- README.md ---\n{readme_block}\n"
-                  f"--- quickstart.rs ---\n{body}"
-              )
-          print("README quickstart matches the compiled example")
-          PY
-
+        run: python3 scripts/ci_local.py --lane readme-quickstart
   feature-matrix:
     name: lgwks-std feature matrix
     needs: [build]
@@ -415,85 +332,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Validate the dependency contract alignment
-        run: |
-          python - <<'PY'
-          import re
-          import tomllib
-          from pathlib import Path
-
-          manifest = Path("crates/lgwks-std/Cargo.toml")
-          readme = Path("crates/lgwks-std/README.md")
-
-          parsed = tomllib.loads(manifest.read_text(encoding="utf-8"))
-          manifest_deps = set(parsed["dependencies"].keys())
-
-          text = readme.read_text(encoding="utf-8")
-          marker = "## Dependency philosophy"
-          start = text.find(marker)
-          if start == -1:
-              raise SystemExit("README dependency philosophy section missing")
-
-          section = text[start:start + 1800]
-          readme_deps = set(re.findall(r"- \*\*([a-zA-Z0-9_-]+)\*\*", section))
-
-          missing_from_readme = sorted(manifest_deps - readme_deps)
-          missing_from_manifest = sorted(readme_deps - manifest_deps)
-          if missing_from_readme or missing_from_manifest:
-              raise SystemExit(
-                  f"Dependency contract drift detected. "
-                  f"missing_from_readme={missing_from_readme}, "
-                  f"missing_from_manifest={missing_from_manifest}"
-              )
-
-          package = parsed["package"]
-          if package["repository"] != "https://github.com/srinji-kaggss/logicalworks-crates":
-              raise SystemExit(
-                  f"Unexpected package repository URL: {package['repository']}"
-              )
-
-          # README version pins must track the manifests (stale copy-paste
-          # downgrades consumers on 0.x, where minors may break).
-          import re as _re
-
-          pins = {
-              "lgwks_std": tomllib.loads(
-                  Path("crates/lgwks-std/Cargo.toml").read_text(encoding="utf-8")
-              )["package"]["version"],
-              "lgwks_bot": tomllib.loads(
-                  Path("crates/lgwks-bot/Cargo.toml").read_text(encoding="utf-8")
-              )["package"]["version"],
-              "lgwks_ast": tomllib.loads(
-                  Path("crates/lgwks-ast/Cargo.toml").read_text(encoding="utf-8")
-              )["package"]["version"],
-              "lgwks_deps": tomllib.loads(
-                  Path("crates/lgwks-deps/Cargo.toml").read_text(encoding="utf-8")
-              )["package"]["version"],
-          }
-          md_files = [Path("README.md")] + sorted(Path("crates").glob("*/README.md"))
-          bad = []
-          for md in md_files:
-              text = md.read_text(encoding="utf-8")
-              for crate, version in pins.items():
-                  major, minor, *_ = version.split(".")
-                  for m in _re.finditer(
-                      rf"{crate}\s*=\s*(?:\{{\s*version\s*=\s*)?\"(\d+)\.(\d+)(?:\.(\d+))?\"",
-                      text,
-                  ):
-                      if (m.group(1), m.group(2)) != (major, minor):
-                          bad.append(f"{md}: {m.group(0)} (manifest is {version})")
-                  # Markdown table rows, as in the root README crate table:
-                  # | `lgwks_std` | 0.6.4 | [docs.rs](...) | ...
-                  for m in _re.finditer(
-                      rf"\|\s*`{crate}`\s*\|\s*(\d+)\.(\d+)(?:\.(\d+))?\s*\|",
-                      text,
-                  ):
-                      if (m.group(1), m.group(2)) != (major, minor):
-                          bad.append(f"{md}: {m.group(0)} (manifest is {version})")
-          if bad:
-              raise SystemExit("Stale README version pins:\n" + "\n".join(bad))
-          print("README version pins track the manifests")
-          PY
-
+        run: python3 scripts/ci_local.py --lane contract-drift
   package-smoke:
     name: lgwks-std package smoke-test
     needs: [build]
