@@ -36,11 +36,11 @@ use std::cell::{Cell, RefCell};
 use std::error::Error;
 use std::rc::Rc;
 
-use lgwks_bot::broker::Broker;
+use lgwks_bot::broker::{Broker, DispatchError};
 use lgwks_bot::effect::{EffectKey, EnvironmentId, FlowRevision, RunId};
 use lgwks_bot::journal::{
-    DurabilityPromise, DurableAck, EffectEvent, EffectJournal, EventKind, JournalError,
-    JournalPosition, MemoryJournal,
+    DurabilityPromise, DurableAck, EffectEvent, EffectJournal, EventKind, JournalEntry,
+    JournalError, JournalPosition, MemoryJournal,
 };
 use lgwks_bot::spec::{Bot, EffectEvidence, EffectIdentity, EffectScope, TransitionHold};
 use lgwks_bot::{
@@ -96,6 +96,10 @@ impl EffectJournal for ProbeJournal {
 
     fn committed(&self) -> Result<Vec<EffectEvent>, JournalError> {
         EffectJournal::committed(&*self.store.borrow())
+    }
+
+    fn committed_entries(&self) -> Result<Vec<JournalEntry>, JournalError> {
+        Ok(self.store.borrow().committed().to_vec())
     }
 
     fn compare_and_append(
@@ -1553,6 +1557,194 @@ impl EffectJournal for SharedJournal {
             .compare_and_append(expected_tail, event)?;
         Ok(DurableAck::new(self.store.borrow().tail(), self.ack))
     }
+}
+
+/// An external journal that returns a receipt for either the named outcome or
+/// an unrelated position, to exercise receipt identity verification.
+struct OutcomeReceiptJournal {
+    store: Rc<RefCell<MemoryJournal>>,
+    receipt: Rc<Cell<DurabilityPromise>>,
+    unrelated_receipt: Rc<Cell<bool>>,
+    unrelated_append_ack: Rc<Cell<bool>>,
+}
+
+impl EffectJournal for OutcomeReceiptJournal {
+    fn durability(&self) -> DurabilityPromise {
+        DurabilityPromise::ProcessCrash
+    }
+
+    fn tail(&self) -> JournalPosition {
+        self.store.borrow().tail()
+    }
+
+    fn committed(&self) -> Result<Vec<EffectEvent>, JournalError> {
+        EffectJournal::committed(&*self.store.borrow())
+    }
+
+    fn committed_entries(&self) -> Result<Vec<JournalEntry>, JournalError> {
+        Ok(self.store.borrow().committed().to_vec())
+    }
+
+    fn compare_and_append(
+        &mut self,
+        expected_tail: JournalPosition,
+        event: &EffectEvent,
+    ) -> Result<DurableAck, JournalError> {
+        let acknowledgment = self
+            .store
+            .borrow_mut()
+            .compare_and_append(expected_tail, event)?;
+        let promise = if matches!(event, EffectEvent::OutcomeObserved { .. }) {
+            DurabilityPromise::Ephemeral
+        } else {
+            DurabilityPromise::ProcessCrash
+        };
+        let position = if self.unrelated_append_ack.get()
+            && matches!(event, EffectEvent::OutcomeObserved { .. })
+        {
+            JournalPosition::genesis()
+        } else {
+            acknowledgment.position()
+        };
+        let promise = if self.unrelated_append_ack.get()
+            && matches!(event, EffectEvent::OutcomeObserved { .. })
+        {
+            DurabilityPromise::ProcessCrash
+        } else {
+            promise
+        };
+        Ok(DurableAck::new(position, promise))
+    }
+
+    fn confirm_outcome(
+        &mut self,
+        _key: EffectKey,
+        _evidence: EffectEvidence,
+        position: JournalPosition,
+        _required: DurabilityPromise,
+    ) -> Result<DurableAck, JournalError> {
+        Ok(DurableAck::new(
+            if self.unrelated_receipt.get() {
+                JournalPosition::genesis()
+            } else {
+                position
+            },
+            self.receipt.get(),
+        ))
+    }
+}
+
+/// One external action invocation.
+struct ExternalCount(Rc<Cell<usize>>);
+
+impl Execute for ExternalCount {
+    type Input = EventId<u32>;
+    type Output = ();
+
+    fn required_caps(&self) -> &[Cap] {
+        &[]
+    }
+
+    fn effect_lifetime(&self) -> EffectLifetime {
+        EffectLifetime::External
+    }
+
+    async fn execute_action(&self, call: (Auth, &EventId<u32>)) -> Result<Self::Output, BotError> {
+        call.0.check(Execute::required_caps(self))?;
+        self.0.set(self.0.get().saturating_add(1));
+        Ok(())
+    }
+
+    fn domain_id(&self) -> &str {
+        "test::external_count"
+    }
+}
+
+/// An unrelated durable receipt must not settle an outcome or authorize a
+/// recovered action to run again.
+#[test]
+fn an_unrelated_outcome_receipt_is_refused_without_reentering_the_effect() -> TestResult {
+    let store = Rc::new(RefCell::new(MemoryJournal::new()));
+    let receipt = Rc::new(Cell::new(DurabilityPromise::ProcessCrash));
+    let unrelated_receipt = Rc::new(Cell::new(true));
+    let unrelated_append_ack = Rc::new(Cell::new(true));
+    let seen = Rc::new(RefCell::new(EventId::new(1, 1)));
+    let entered = Rc::new(Cell::new(0));
+    let identity = identity()?;
+    let environment = identity.environment();
+    let mut run_broker = Broker::new();
+    run_broker.register(environment)?;
+
+    let mut bot = Bot::builder(NAME)
+        .observe(Requests(Rc::clone(&seen)))
+        .on(
+            |_seen: &EventId<u32>| true,
+            ExternalCount(Rc::clone(&entered)),
+        )
+        .with_effects(EffectScope::new(
+            identity,
+            run_broker,
+            Box::new(OutcomeReceiptJournal {
+                store: Rc::clone(&store),
+                receipt: Rc::clone(&receipt),
+                unrelated_receipt: Rc::clone(&unrelated_receipt),
+                unrelated_append_ack: Rc::clone(&unrelated_append_ack),
+            }),
+        ))
+        .build(&GrantSet::empty())?;
+
+    match bot.tick() {
+        Err(BotError::EffectUnrecorded { cause, .. }) => assert!(
+            matches!(
+                *cause,
+                DispatchError::Journal(JournalError::ReceiptMismatch { .. })
+            ),
+            "an unrelated receipt must be rejected as an identity mismatch, got {cause:?}"
+        ),
+        other => return Err(format!("expected receipted recording failure, got {other:?}").into()),
+    }
+    assert_eq!(entered.get(), 1, "the external action ran exactly once");
+    drop(bot);
+
+    let mut recovered = Bot::builder(NAME)
+        .observe(Requests(Rc::clone(&seen)))
+        .on(
+            |_seen: &EventId<u32>| true,
+            ExternalCount(Rc::clone(&entered)),
+        )
+        .with_effects(EffectScope::new(
+            identity,
+            broker(identity.environment())?,
+            Box::new(OutcomeReceiptJournal {
+                store,
+                receipt,
+                unrelated_receipt: Rc::clone(&unrelated_receipt),
+                unrelated_append_ack,
+            }),
+        ))
+        .build(&GrantSet::empty())?;
+
+    let held = recovered.pending();
+    assert_eq!(held.len(), 1, "the unverified durable outcome remains held");
+    assert!(matches!(
+        held[0].hold(),
+        TransitionHold::RecordingFailed { .. }
+    ));
+    let key = held[0]
+        .key()
+        .ok_or("the recovered receipt hold has a key")?;
+    unrelated_receipt.set(false);
+    recovered.resolve_effect(&key, EffectEvidence::Applied)?;
+    assert!(
+        recovered.pending().is_empty(),
+        "the bound receipt clears the hold"
+    );
+    assert_eq!(
+        entered.get(),
+        1,
+        "recovery did not re-enter the external action"
+    );
+    Ok(())
 }
 
 /// Whether the named kind was appended for any key.

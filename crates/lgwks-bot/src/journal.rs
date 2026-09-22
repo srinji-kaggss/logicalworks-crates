@@ -438,6 +438,19 @@ pub enum JournalError {
         /// What the journal offers.
         offered: DurabilityPromise,
     },
+    /// The adapter cannot attest that an already-recorded outcome now meets
+    /// the requested durability grade.
+    ReceiptUnavailable {
+        /// What the caller needs before it can settle the attempt.
+        required: DurabilityPromise,
+    },
+    /// A receipt names a different append than the outcome being settled.
+    ReceiptMismatch {
+        /// The committed outcome position the caller is settling.
+        expected: JournalPosition,
+        /// The position the adapter returned in its receipt.
+        actual: JournalPosition,
+    },
     /// The event cannot follow what is committed for that key.
     OutOfOrder {
         /// The attempt the refused event was about.
@@ -482,6 +495,14 @@ impl fmt::Display for JournalError {
             Self::PromiseUnmet { required, offered } => write!(
                 f,
                 "journal promises {offered}, which is below the {required} this needs"
+            ),
+            Self::ReceiptUnavailable { required } => write!(
+                f,
+                "journal cannot attest that the recorded outcome meets {required}"
+            ),
+            Self::ReceiptMismatch { expected, actual } => write!(
+                f,
+                "journal receipt names {actual}, not the outcome committed at {expected}"
             ),
             Self::OutOfOrder {
                 ref key,
@@ -594,6 +615,19 @@ pub trait EffectJournal {
     /// [`JournalError::Storage`] when the backing store refused to be read.
     fn committed(&self) -> Result<Vec<EffectEvent>, JournalError>;
 
+    /// Every committed entry, including the position each event occupies.
+    ///
+    /// An outcome receipt is meaningful only when the kernel can verify that
+    /// its position contains the exact `OutcomeObserved` fact being settled.
+    /// Adapters that cannot provide positioned readback must refuse receipt
+    /// upgrades rather than allowing an unbound acknowledgement to settle an
+    /// external effect.
+    fn committed_entries(&self) -> Result<Vec<JournalEntry>, JournalError> {
+        Err(JournalError::ReceiptUnavailable {
+            required: self.durability(),
+        })
+    }
+
     /// Append `event` if and only if `expected_tail` is still the committed
     /// tail.
     ///
@@ -613,6 +647,28 @@ pub trait EffectJournal {
         expected_tail: JournalPosition,
         event: &EffectEvent,
     ) -> Result<DurableAck, JournalError>;
+
+    /// Confirm that an existing outcome record now meets `required`.
+    ///
+    /// An append can return a weak acknowledgment after it has already moved
+    /// the per-key ladder to `OutcomeObserved`. A retry cannot append that
+    /// outcome again, so an adapter that can flush, replicate, or otherwise
+    /// obtain a stronger receipt implements this method. The default refuses
+    /// rather than treating read-back of event bytes as a durability proof.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::ReceiptUnavailable`] when the adapter has no receipt
+    /// operation, or another journal error when it cannot obtain one.
+    fn confirm_outcome(
+        &mut self,
+        _key: EffectKey,
+        _evidence: EffectEvidence,
+        _position: JournalPosition,
+        required: DurabilityPromise,
+    ) -> Result<DurableAck, JournalError> {
+        Err(JournalError::ReceiptUnavailable { required })
+    }
 
     /// Whether this journal may host an effect that has left the process.
     ///
@@ -1015,6 +1071,10 @@ impl EffectJournal for MemoryJournal {
     /// give back does not want.
     fn committed(&self) -> Result<Vec<EffectEvent>, JournalError> {
         Ok(self.events().copied().collect())
+    }
+
+    fn committed_entries(&self) -> Result<Vec<JournalEntry>, JournalError> {
+        Ok(self.committed.clone())
     }
 
     fn compare_and_append(

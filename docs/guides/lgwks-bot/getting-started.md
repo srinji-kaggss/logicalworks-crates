@@ -133,7 +133,7 @@ makes the proof load-bearing rather than decorative.
 
 `Observe::Output` must be `PartialEq`. `EcsObserveBuilder::observe` is where the
 requirement lands, on the call that closes a chain
-(`crates/lgwks-bot/src/ecs.rs:4151`), because the condition on this executor *is*
+(`crates/lgwks-bot/src/ecs.rs:4337`), because the condition on this executor *is*
 bevy's change detection, and a value that cannot be compared cannot be detected
 as changed. `Observe::poll` is `async fn` returning a future that is
 deliberately not `Send` (`crates/lgwks-bot/src/verb.rs`), so a domain may hold
@@ -146,14 +146,14 @@ it a `condition_id`.
 
 `Execute::execute_action` takes `(Auth, &Self::Input)`. The tick awaits each one
 before starting the next, in declaration order
-(`crates/lgwks-bot/src/ecs.rs:3622`), so the effects fire in the order you wrote
+(`crates/lgwks-bot/src/ecs.rs:3840`), so the effects fire in the order you wrote
 the `.on` calls.
 
 `build(&grants)` returns `Result<Bot, BotError>`. Two things make it fail:
 `GrantSet::admit` rejects a source or action whose `required_caps` the set does
-not cover (`crates/lgwks-bot/src/ecs.rs:4357`), and `Schedule::initialize` with
+not cover (`crates/lgwks-bot/src/ecs.rs:4543`), and `Schedule::initialize` with
 `ambiguity_detection: LogLevel::Error` rejects a schedule whose systems cannot be
-totally ordered (`crates/lgwks-bot/src/ecs.rs:3245`).
+totally ordered (`crates/lgwks-bot/src/ecs.rs:3413`).
 
 `Bot::tick` returns `Result<usize, BotError>`, where the `usize` is the number of
 actions that fired. The bot is `mut` because a tick advances its world. `tick`
@@ -165,7 +165,7 @@ thread the runtime is driving.
 ## Inspecting a bot
 
 Four accessors exist for tests and instrumentation, all read-only
-(`crates/lgwks-bot/src/ecs.rs:3298`):
+(`crates/lgwks-bot/src/ecs.rs:3468`):
 
 | Method | Returns |
 |---|---|
@@ -180,7 +180,7 @@ that "the source held still" really was a hold rather than a condition deciding
 not to fire.
 
 A source whose poll has never succeeded has no remembered value. On the next
-tick `observe_fold` treats it as changed (`crates/lgwks-bot/src/ecs.rs:2906`), so
+tick `observe_fold` treats it as changed (`crates/lgwks-bot/src/ecs.rs:3074`), so
 the condition is evaluated on the first poll even if the value never moves again.
 
 ## A bot with no chains
