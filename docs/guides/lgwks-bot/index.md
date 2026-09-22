@@ -26,7 +26,7 @@ each tick and runs the action on the ticks where the polled value moved. A
 condition that stays true does not re-fire, which is the difference between this
 and a timer that re-evaluates a predicate every interval.
 
-`Bot` is not a separate type with a separate implementation. `crates/lgwks-bot/src/spec.rs:318`
+`Bot` is not a separate type with a separate implementation. `crates/lgwks-bot/src/spec.rs:319`
 re-exports the ECS bot under the shorter name:
 
 ```rust
@@ -102,7 +102,7 @@ you to discover.
   a clone of the set it was admitted with. See [authority](authority.md).
 - **No spec materializer yet.** `BotSpec` validates a JSON document. There is no
   `Bot::from_spec`; you build through the builder chain, and
-  `crates/lgwks-bot/src/spec.rs:678` validates shape only. Unlike the entries
+  `crates/lgwks-bot/src/spec.rs:679` validates shape only. Unlike the entries
   around it, this one is scheduled work rather than a permanent limit: it is
   recorded as open in `experience/invariants/sdk.yaml`. Half of it exists —
   `DomainRegistry` and the `domains!` list, see [domains](domains.md) — and the

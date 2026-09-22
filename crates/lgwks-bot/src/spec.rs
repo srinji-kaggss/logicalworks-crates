@@ -33,6 +33,7 @@
 //!         call.0.check(&[])?;
 //!         Ok(())
 //!     }
+//!     fn effect_lifetime(&self) -> EffectLifetime { EffectLifetime::Local }
 //!     fn domain_id(&self) -> &str { "doc::ring" }
 //! }
 //!
