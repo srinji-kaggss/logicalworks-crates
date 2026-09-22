@@ -190,6 +190,9 @@ explicitly under that crate.
   `Settled::Duplicate`, the other evidence is `Settled::Contradicted`, and only
   a key the journal never recorded is `NoSuchWork`
   (`tests/durable_dispatch.rs::a_live_settlement_is_journaled_before_it_is_acknowledged`).
+- Locator ladder candidates now share the flat recognizer's frame and kind
+  eligibility gate, while anchor mismatches preserve measured fingerprint
+  evidence instead of reporting a falsified zero score.
 - A post-effect journal failure is no longer reported as a pre-dispatch
   refusal and terminal abandonment. `run_chain` used to replace the action's
   known outcome with `BotError::EffectRefused` when the `OutcomeObserved`
