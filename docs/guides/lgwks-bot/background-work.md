@@ -78,20 +78,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## `Supervisor::spawn_process`: a child process nobody can abandon
 
-`Supervisor::spawn_process(command)` starts a child under the same in-flight
+`Supervisor::spawn_process(spec)` starts a child under the same in-flight
 ceiling as `spawn`, and returns a `TaskId` — not a `Child`
-(`crates/lgwks-bot/src/rt/supervise.rs:939`). `rt::process` re-exports `Command`
-so you can say what to run; it does not hand out a handle to what is running.
+(`crates/lgwks-bot/src/rt/supervise.rs:941`). `rt::process::ProcessSpec` lets
+you say what to run without exposing an executable engine handle.
 The task this places is the only owner the process has:
 
 ```rust
-use lgwks_bot::rt::process::Command;
+use lgwks_bot::rt::process::ProcessSpec;
 use lgwks_bot::rt::supervise::Supervisor;
 
 async fn deploy(supervisor: &mut Supervisor) -> std::io::Result<()> {
-    // `Command` describes; the supervisor starts, bounds, and owns.
-    let mut command = Command::new("sh");
-    supervisor.spawn_process(command.arg("-c").arg("make -j4")).await?;
+    // `ProcessSpec` describes; the supervisor starts, bounds, and owns.
+    let mut spec = ProcessSpec::new("sh");
+    spec.arg("-c").arg("make -j4");
+    supervisor.spawn_process(&spec).await?;
     Ok(())
 }
 ```

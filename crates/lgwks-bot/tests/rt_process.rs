@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use lgwks_bot::Runtime;
-use lgwks_bot::rt::process::Command;
+use lgwks_bot::rt::process::ProcessSpec;
 use lgwks_bot::rt::supervise::{Supervisor, TaskOutcome};
 use lgwks_bot::rt::time::{Instant, sleep};
 
@@ -163,10 +163,9 @@ fn a_command_that_exits_zero_is_reported_completed() -> TestResult {
     let runtime = Runtime::new()?;
     let (outcome, succeeded, failed) = runtime.block_on(async {
         let mut supervisor = Supervisor::default();
-        let mut command = Command::new("sh");
-        supervisor
-            .spawn_process(command.arg("-c").arg("exit 0"))
-            .await?;
+        let mut command = ProcessSpec::new("sh");
+        command.arg("-c").arg("exit 0");
+        supervisor.spawn_process(&command).await?;
         let outcome = next_outcome(&mut supervisor, BUDGET)
             .await
             .map_err(std::io::Error::other)?;
@@ -187,10 +186,9 @@ fn a_non_zero_exit_is_reported_failed_with_its_status() -> TestResult {
     let runtime = Runtime::new()?;
     let (outcome, failed) = runtime.block_on(async {
         let mut supervisor = Supervisor::default();
-        let mut command = Command::new("sh");
-        supervisor
-            .spawn_process(command.arg("-c").arg("exit 3"))
-            .await?;
+        let mut command = ProcessSpec::new("sh");
+        command.arg("-c").arg("exit 3");
+        supervisor.spawn_process(&command).await?;
         let outcome = next_outcome(&mut supervisor, BUDGET)
             .await
             .map_err(std::io::Error::other)?;
@@ -231,9 +229,10 @@ fn a_cancelled_process_is_killed_with_its_grandchild() -> TestResult {
     let runtime = Runtime::new()?;
     let (outcomes, cancelled, failed) = runtime.block_on(async {
         let mut supervisor = Supervisor::default();
-        let mut command = Command::new("sh");
+        let mut command = ProcessSpec::new("sh");
+        command.arg("-c").arg(&script);
         supervisor
-            .spawn_process(command.arg("-c").arg(&script))
+            .spawn_process(&command)
             .await?;
 
         // Wait until the shell has recorded both pids: cancelling before that
@@ -291,7 +290,7 @@ fn a_command_that_cannot_start_reports_the_failure_to_the_caller() -> TestResult
     let error = runtime.block_on(async {
         let mut supervisor = Supervisor::default();
         supervisor
-            .spawn_process(&mut Command::new("/nonexistent/lgwks-bot-probe"))
+            .spawn_process(&ProcessSpec::new("/nonexistent/lgwks-bot-probe"))
             .await
             .err()
             .ok_or_else(|| std::io::Error::other("starting a missing program must fail"))
@@ -305,10 +304,9 @@ fn a_command_that_cannot_start_reports_the_failure_to_the_caller() -> TestResult
     // A failed start must not consume a slot: the supervisor still works.
     let outcome = runtime.block_on(async {
         let mut supervisor = Supervisor::default();
-        let mut command = Command::new("sh");
-        supervisor
-            .spawn_process(command.arg("-c").arg("exit 0"))
-            .await?;
+        let mut command = ProcessSpec::new("sh");
+        command.arg("-c").arg("exit 0");
+        supervisor.spawn_process(&command).await?;
         next_outcome(&mut supervisor, BUDGET)
             .await
             .map_err(std::io::Error::other)

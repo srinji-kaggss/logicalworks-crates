@@ -112,11 +112,11 @@ use lgwks_deps::tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use lgwks_deps::tokio::task::Id;
 
 #[cfg(feature = "process")]
-use lgwks_deps::tokio::process::Child;
+use lgwks_deps::tokio::process::{Child, Command};
 
 use super::cancel::CancellationToken;
 #[cfg(feature = "process")]
-use super::process::Command;
+use super::process::ProcessSpec;
 use super::task::{JoinSet, yield_now};
 
 /// Iterations one poll of [`repeat`] may complete before it hands the executor
@@ -905,25 +905,26 @@ impl Supervisor {
     /// into a sink it already owns — the supervisor owns the process, not the
     /// data.
     ///
-    /// # Why the command is borrowed
+    /// # Why the description is borrowed
     ///
-    /// The engine's builder methods (`arg`, `env`, `stdout`) all return
-    /// `&mut Command`, so a by-value parameter would refuse the ordinary call:
+    /// The description is data, not a running handle. Borrowing it lets the
+    /// supervisor build the private engine command while the caller retains the
+    /// auditable specification:
     ///
     /// ```no_run
-    /// # use lgwks_bot::rt::process::Command;
+    /// # use lgwks_bot::rt::process::ProcessSpec;
     /// # use lgwks_bot::rt::supervise::Supervisor;
     /// # async fn run() -> std::io::Result<()> {
     /// # let mut supervisor = Supervisor::default();
-    /// let mut command = Command::new("sh");
-    /// supervisor.spawn_process(command.arg("-c").arg("exit 0")).await?;
+    /// let mut spec = ProcessSpec::new("sh");
+    /// spec.arg("-c").arg("exit 0");
+    /// supervisor.spawn_process(&spec).await?;
     /// # Ok(())
     /// # }
     /// ```
     ///
-    /// A `&mut Command` accepts that chain directly, keeps the command owned by
-    /// the caller, and gives up nothing: the supervisor only starts what it is
-    /// handed, and a caller that wants to run the same command twice may.
+    /// The caller may retain and clone the description, but cannot start a child
+    /// or obtain a child handle from it.
     ///
     /// # Errors
     ///
@@ -937,29 +938,38 @@ impl Supervisor {
     /// swallow the condition. A refused start does not consume a slot: the
     /// permit is released when this function returns.
     #[cfg(feature = "process")]
-    pub async fn spawn_process(&mut self, command: &mut Command) -> io::Result<TaskId> {
+    pub async fn spawn_process(&mut self, spec: &ProcessSpec) -> io::Result<TaskId> {
         let Some(permit) = self.claim().await else {
             return Err(io::Error::other(
                 "lgwks_bot: the supervisor's in-flight semaphore was closed",
             ));
         };
         let token = self.child_token();
+        let deadline = spec.deadline_duration();
+        let mut command = Command::new(spec.program());
+        spec.configure(&mut command);
         // Two guarantees rather than one, because the group kill is a syscall
         // the platform may not have: `kill_on_drop` reaches the direct child
         // everywhere, and the group kill below reaches what that child spawned.
         command.kill_on_drop(true);
         #[cfg(unix)]
         command.process_group(0);
-        let child = start(command)?;
+        let child = start(&mut command)?;
         Ok(self.place(permit, async move {
             let mut child = child;
             let mut group = ProcessGroup::of(&child);
-            match token.run_until_cancelled(child.wait()).await {
+            let wait = async {
+                match deadline {
+                    Some(deadline) => crate::rt::time::timeout(deadline, child.wait()).await.ok(),
+                    None => Some(child.wait().await),
+                }
+            };
+            match token.run_until_cancelled(wait).await {
                 // The child was reaped, so its group is empty or already gone.
                 // The guard is disarmed before this frame can unwind: the OS
                 // may reissue a reaped id, and a stale group id signalled later
                 // would kill whatever inherited it.
-                Some(Ok(status)) => {
+                Some(Some(Ok(status))) => {
                     group.disarm();
                     if status.success() {
                         TaskEnd::Completed
@@ -973,7 +983,7 @@ impl Supervisor {
                 // the process is still running. The guard is left armed and the
                 // group is killed as the frame unwinds, rather than reporting a
                 // status nobody has.
-                Some(Err(_)) => TaskEnd::Failed { status: None },
+                Some(Some(Err(_))) | Some(None) => TaskEnd::Failed { status: None },
                 // Cancelled. The group is killed **synchronously**, and the
                 // child is then dropped rather than reaped.
                 //

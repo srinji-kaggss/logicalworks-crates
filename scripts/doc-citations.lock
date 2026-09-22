@@ -60,11 +60,11 @@ crates/lgwks-bot/src/rt/supervise.rs:92	//! permits inside a task this superviso
 crates/lgwks-bot/src/rt/supervise.rs:142	const YIELD_INTERVAL: u64 = 32;
 crates/lgwks-bot/src/rt/supervise.rs:653	/// cheaper than a misreported outcome.
 crates/lgwks-bot/src/rt/supervise.rs:694	pub fn new(max_in_flight: usize) -> Self {
-crates/lgwks-bot/src/rt/supervise.rs:939	#[cfg(feature = "process")]
-crates/lgwks-bot/src/rt/supervise.rs:1369	/// [`Supervisor::shutdown`].
-crates/lgwks-bot/src/rt/supervise.rs:1383	let deadline = match budget {
-crates/lgwks-bot/src/rt/supervise.rs:1406	match token.run_until_cancelled(body(iterations)).await {
-crates/lgwks-bot/src/rt/supervise.rs:1426	#[cfg(test)]
+crates/lgwks-bot/src/rt/supervise.rs:941	pub async fn spawn_process(&mut self, spec: &ProcessSpec) -> io::Result<TaskId> {
+crates/lgwks-bot/src/rt/supervise.rs:1369	/// cancellable token is observably cancelled even when the body never suspends:
+crates/lgwks-bot/src/rt/supervise.rs:1383	Fut: Future<Output = ()>,
+crates/lgwks-bot/src/rt/supervise.rs:1406	return Outcome::Cancelled { iterations };
+crates/lgwks-bot/src/rt/supervise.rs:1426	until_yield = until_yield.saturating_sub(1);
 crates/lgwks-bot/src/rt/task.rs:93	where
 crates/lgwks-bot/src/semantic.rs:13	//! This tier is consulted only when the lexicon returns [`Resolution::Absent`] —
 crates/lgwks-bot/src/semantic.rs:117	pub trait Embedder {
