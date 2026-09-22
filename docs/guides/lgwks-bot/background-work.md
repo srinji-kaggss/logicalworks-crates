@@ -164,7 +164,7 @@ runs, with no pooled thread between calls. The doc says the quiet part out loud:
 
 The tick does exactly that, on both adapters, because the wave loop lives in the
 `observe_fold` system rather than in either entry point. `MAX_IN_FLIGHT_POLLS`
-is 32 (`crates/lgwks-bot/src/ecs.rs:1187`), and `observe_fold` polls sources in
+is 32 (`crates/lgwks-bot/src/ecs.rs:1240`), and `observe_fold` polls sources in
 waves of that size, because a source poll may occupy one `spawn_blocking` thread.
 Chains beyond 32 are polled in additional waves, so the cap holds regardless of
 how many chains a spec declares.

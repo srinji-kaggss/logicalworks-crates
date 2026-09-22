@@ -21,7 +21,7 @@ use lgwks_bot::effect::{
 };
 use lgwks_bot::journal::{
     AttemptStatus, DurabilityPromise, EffectEvent, EffectEvidence, EffectJournal, JournalEntry,
-    JournalError, MemoryJournal, RequiredDurability, Verification, VerificationResult,
+    JournalError, MemoryJournal, Verification, VerificationResult,
 };
 
 const RUN: &str = "0102030405060708090a0b0c0d0e0f10";
@@ -62,13 +62,7 @@ fn admit_and_prepare(
     journal: &mut MemoryJournal,
     key: EffectKey,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    append(
-        journal,
-        EffectEvent::IntentAdmitted {
-            key,
-            required: RequiredDurability::new(DurabilityPromise::Ephemeral),
-        },
-    )?;
+    append(journal, EffectEvent::IntentAdmitted { key })?;
     append(journal, EffectEvent::DispatchPrepared { key })?;
     Ok(())
 }
@@ -158,21 +152,10 @@ fn e11_a_competing_controller_cannot_dispatch_from_a_stale_tail() -> TestResult 
     let controller_a = journal.tail();
     let controller_b = journal.tail();
 
-    journal.compare_and_append(
-        controller_a,
-        &EffectEvent::IntentAdmitted {
-            key: first,
-            required: RequiredDurability::new(DurabilityPromise::Ephemeral),
-        },
-    )?;
+    journal.compare_and_append(controller_a, &EffectEvent::IntentAdmitted { key: first })?;
 
-    let refused = journal.compare_and_append(
-        controller_b,
-        &EffectEvent::IntentAdmitted {
-            key: second,
-            required: RequiredDurability::new(DurabilityPromise::Ephemeral),
-        },
-    );
+    let refused =
+        journal.compare_and_append(controller_b, &EffectEvent::IntentAdmitted { key: second });
     match refused {
         Err(JournalError::TailMismatch { expected, actual }) => {
             assert_eq!(expected, controller_b);

@@ -117,7 +117,7 @@ flowchart TD
     C -->|yes| E[prepare_dispatch]
     E --> F[append DispatchPrepared]
     F --> G{dispatch ack meets required?}
-    G -->|no| H[compensating NotApplied, PromptUnmet]
+    G -->|no| H[PromiseUnmet, recovered as unknown]
     G -->|yes| I[authority returned, effect runs]
 ```
 
@@ -130,10 +130,10 @@ examples now do.
 
 `DurabilityPromise::meets` ranks `Ephemeral < ProcessCrash < PowerLoss`. An
 external handoff requires `ProcessCrash` or better on both the intent and the
-dispatch acknowledgment. *In flight (#115):* the refusal happens before
-`DispatchPrepared` is committed whenever the intent ack is already too weak,
-and a weak dispatch ack leaves a compensating `NotApplied` rather than a false
-`Unrecorded` barrier.
+dispatch acknowledgment. The refusal happens before `DispatchPrepared` is
+committed whenever the intent ack is already too weak. When a weak dispatch ack
+may already have committed, the kernel does not invent `NotApplied`; recovery
+holds the attempt unknown until evidence establishes its outcome.
 
 ## Identity
 
@@ -164,14 +164,13 @@ behind live settlement, recovered settlement, and the post-effect recording
 retry; three appends are three chances to lose the `Applied` fold that lets a
 returning landed event retire instead of wedging as `Unrecorded`.
 
-An `OutcomeObserved` record is not sufficient evidence of settlement for an
-external effect. Its admitted durability grade travels with `IntentAdmitted`,
-and every outcome acknowledgement is checked against that grade. If a weak
-acknowledgement has already advanced the ladder, recovery holds the known
-outcome as `RecordingFailed`; it invokes the journal's explicit
-`confirm_outcome` receipt operation rather than treating `OutOfOrder` or event
-read-back as proof. That retry upgrades recording only and never re-enters the
-effect. An adapter that cannot issue such a receipt leaves the hold in place.
+An `OutcomeObserved` record is not sufficient evidence of settlement when its
+append acknowledgement was weak. An adapter may issue an explicit outcome
+receipt, but the kernel accepts it only when positioned readback verifies that
+position contains the exact outcome; a receipt for genesis or a later,
+unrelated append is refused. Durable recovery keeps an unverifiable record as
+`RecordingFailed` and never re-enters its action. The v1 event wire contract
+deliberately remains unchanged.
 
 ## Where the tests live
 

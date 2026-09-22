@@ -36,7 +36,7 @@
 use crate::ecs::EffectEvidence;
 use crate::effect::EffectKey;
 
-use super::{RequiredDurability, Verification};
+use super::Verification;
 
 /// Whether the named predicate held.
 ///
@@ -90,9 +90,6 @@ pub enum EffectEvent {
         /// The attempt this fact is about.
         #[rkyv(attr(doc = "The attempt this fact is about."))]
         key: EffectKey,
-        /// Durability this attempt must retain through settlement.
-        #[rkyv(attr(doc = "Durability this attempt must retain through settlement."))]
-        required: RequiredDurability,
     },
     /// Authority was obtained and this exact attempt was prepared for handoff.
     ///
