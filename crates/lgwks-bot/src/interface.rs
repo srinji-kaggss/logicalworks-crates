@@ -143,6 +143,10 @@ pub struct ElementFacts {
     bounds: [f64; 4],
     /// The piercing path: frame indexes from the top document downwards.
     frames: Vec<usize>,
+    /// Locator anchors this element offers, in the order the snapshot reported
+    /// them. Carried rather than derived so the snapshot layer — the only part
+    /// that knows how a `data-testid` was found — decides what counts as one.
+    anchors: Vec<(Anchor, String)>,
 }
 
 impl ElementFacts {
@@ -161,6 +165,7 @@ impl ElementFacts {
             text: text.into(),
             bounds,
             frames: Vec::new(),
+            anchors: Vec::new(),
         }
     }
 
@@ -168,6 +173,18 @@ impl ElementFacts {
     #[must_use]
     pub fn with_identity(mut self, identity: Vec<String>) -> Self {
         self.identity = identity;
+        self
+    }
+
+    /// Returns the same facts with one more locator anchor.
+    ///
+    /// An empty value is stored as written and reads back as `None` from
+    /// [`Self::anchor`], so a snapshot that could not name the element's id
+    /// does not offer `Anchor::Id` rather than offering a blank one that every
+    /// other blank id would match.
+    #[must_use]
+    pub fn with_anchor(mut self, kind: Anchor, value: impl Into<String>) -> Self {
+        self.anchors.push((kind, value.into()));
         self
     }
 
@@ -212,6 +229,120 @@ impl ElementFacts {
     #[must_use]
     pub fn frames(&self) -> &[usize] {
         &self.frames
+    }
+
+    /// Returns the value of this element's first `kind` anchor, if it offers
+    /// one with a non-empty value.
+    #[must_use]
+    pub fn anchor(&self, kind: Anchor) -> Option<&str> {
+        self.anchors
+            .iter()
+            .find(|entry| entry.0 == kind && !entry.1.is_empty())
+            .map(|entry| entry.1.as_str())
+    }
+}
+
+/// One rung of a locator ladder: the kind of fact an anchor names.
+///
+/// The order is the one `docs/general-bot-fold.md` §3.2 takes from the
+/// described platform's generator: a stable `id`, then a `data-testid`, then
+/// the ARIA role (with its accessible name, which the snapshot layer folds into
+/// the value), then visible text, then a class path. Strongest first, because
+/// a class path is what survives least and is what a redeploy breaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Anchor {
+    /// A stable `id` attribute.
+    Id,
+    /// A `data-testid` or equivalent test hook.
+    TestId,
+    /// An ARIA role, optionally with its accessible name in the value.
+    Role,
+    /// The element's visible text.
+    Text,
+    /// A structural class or CSS path.
+    ClassPath,
+}
+
+impl Anchor {
+    /// Returns the rung's strength: lower is stronger.
+    ///
+    /// Explicit rather than a derived `Ord`, because a derived order puts the
+    /// strongest variant first or last depending on declaration order, and that
+    /// is a coin-flip a reader should not have to resolve.
+    #[must_use]
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::Id => 0,
+            Self::TestId => 1,
+            Self::Role => 2,
+            Self::Text => 3,
+            Self::ClassPath => 4,
+        }
+    }
+}
+
+impl PartialOrd for Anchor {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Anchor {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.rank().cmp(&other.rank())
+    }
+}
+
+/// Why a [`Ladder`] could not be constructed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LadderError {
+    /// No anchors were given. A ladder with no rungs is not a search order.
+    Empty,
+}
+
+impl fmt::Display for LadderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Empty => formatter.write_str("a locator ladder needs at least one anchor"),
+        }
+    }
+}
+
+impl std::error::Error for LadderError {}
+
+/// An ordered locator ladder: anchors, strongest first, deduplicated.
+///
+/// The walk is `RecognitionVector::recognize_with_ladder`. This type only owns
+/// the order, so a caller cannot construct a ladder whose "strongest" rung is
+/// whatever happened to be declared first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ladder {
+    /// Rungs, strongest first, each kind appearing once.
+    anchors: Vec<Anchor>,
+}
+
+impl Ladder {
+    /// Builds a ladder from any anchor list: sorted strongest-first and
+    /// deduplicated, or [`LadderError::Empty`] when nothing was given.
+    ///
+    /// Deduplicated because two `Anchor::Text` rungs in a row are one rung and
+    /// a repeated fall-through is a bug the walk should not have to notice.
+    pub fn new(anchors: impl IntoIterator<Item = Anchor>) -> Result<Self, LadderError> {
+        let mut sorted: Vec<Anchor> = anchors.into_iter().collect();
+        if sorted.is_empty() {
+            return Err(LadderError::Empty);
+        }
+        sorted.sort_unstable_by_key(|anchor| anchor.rank());
+        sorted.dedup();
+        Ok(Self { anchors: sorted })
+    }
+
+    /// Returns the rungs, strongest first.
+    #[must_use]
+    pub fn anchors(&self) -> &[Anchor] {
+        &self.anchors
     }
 }
 
@@ -508,6 +639,95 @@ impl RecognitionVector {
             };
         }
         Recognition::Resolved { index, score, lead }
+    }
+
+    /// Resolves a target by walking `ladder` strongest-first.
+    ///
+    /// A rung decides by its own anchor and by nothing else. Candidates that
+    /// offer a non-empty value of that kind and whose value equals the target's
+    /// are the rung's hits; the fingerprint supplies the score fields but does
+    /// not get to overrule the rung. The verdict:
+    ///
+    /// - **One hit** is [`Recognition::Resolved`]. A unique strong hit is the
+    ///   ladder working, and its `index` is into `candidates`, not into the
+    ///   rung's hit list.
+    /// - **Two or more hits** is [`Recognition::Ambiguous`], returned at once
+    ///   and **not** retried at a weaker rung. A weak anchor that succeeds
+    ///   where a strong one was ambiguous is a likely mis-match, not a recovery:
+    ///   two elements that share an `id` are not disambiguated by the fact that
+    ///   only one of them happens to say "Submit" today.
+    /// - **No hits** falls through. A weaker fact gets its chance. The rung
+    ///   still contributes a sub-threshold `best_score` — how close the
+    ///   offerers came — so the final `Absent` is the strongest near-miss any
+    ///   rung observed rather than a bare zero.
+    ///
+    /// A rung the target itself does not offer is skipped: there is nothing to
+    /// match against, which is the same rule [`ElementFacts::anchor`] states
+    /// for an empty value.
+    #[must_use]
+    pub fn recognize_with_ladder(
+        &self,
+        ladder: &Ladder,
+        target: &ElementFacts,
+        candidates: &[ElementFacts],
+    ) -> Recognition {
+        let mut strongest_absent = Recognition::Absent { best_score: 0.0 };
+        for kind in ladder.anchors() {
+            let Some(wanted) = target.anchor(*kind) else {
+                continue;
+            };
+            let hits: Vec<usize> = candidates
+                .iter()
+                .enumerate()
+                .filter(|entry| entry.1.anchor(*kind) == Some(wanted))
+                .map(|(index, _)| index)
+                .collect();
+
+            match hits.len() {
+                0 => {
+                    let near_miss = candidates
+                        .iter()
+                        .filter(|candidate| candidate.anchor(*kind).is_some())
+                        .map(|candidate| self.scorer.score(target, candidate))
+                        .fold(0.0_f64, f64::max);
+                    if let Recognition::Absent { best_score: prior } = strongest_absent
+                        && near_miss < self.scorer.threshold()
+                        && near_miss > prior
+                    {
+                        strongest_absent = Recognition::Absent {
+                            best_score: near_miss,
+                        };
+                    }
+                }
+                1 => {
+                    let index = hits[0];
+                    let score = self.scorer.score(target, &candidates[index]);
+                    return Recognition::Resolved {
+                        index,
+                        score,
+                        lead: score,
+                    };
+                }
+                _ => {
+                    let mut scored: Vec<(usize, f64)> = hits
+                        .iter()
+                        .map(|&index| (index, self.scorer.score(target, &candidates[index])))
+                        .collect();
+                    scored.sort_by(|left, right| {
+                        right.1.total_cmp(&left.1).then(left.0.cmp(&right.0))
+                    });
+                    let (best, score) = scored[0];
+                    let (runner_up, runner_up_score) = scored[1];
+                    return Recognition::Ambiguous {
+                        best,
+                        runner_up: Some(runner_up),
+                        score,
+                        lead: score - runner_up_score,
+                    };
+                }
+            }
+        }
+        strongest_absent
     }
 }
 
@@ -959,6 +1179,148 @@ mod tests {
         assert_close(vector.threshold(), FINGERPRINT_THRESHOLD);
         assert_close(vector.margin(), FINGERPRINT_MARGIN);
         assert_close(0.5 + 0.25 + 0.125 + 0.125, 1.0);
+        Ok(())
+    }
+
+    /// Builds facts offering one anchor value, plus the shared shell every
+    /// ladder test needs so the fingerprint can score at all.
+    fn anchored(tag: &str, kind: Anchor, value: &str, text: &str) -> ElementFacts {
+        ElementFacts::new(
+            tag,
+            "html > body > form > button",
+            text,
+            [0.5, 0.5, 0.1, 0.05],
+        )
+        .with_anchor(kind, value)
+        .with_identity(vec![format!("{kind:?}={value}")])
+    }
+
+    #[test]
+    fn an_empty_ladder_is_an_error() {
+        assert_eq!(Ladder::new([]), Err(LadderError::Empty));
+    }
+
+    #[test]
+    fn a_ladder_is_sorted_and_deduplicated_strongest_first() -> Result<(), LadderError> {
+        let ladder = Ladder::new([
+            Anchor::ClassPath,
+            Anchor::Id,
+            Anchor::Text,
+            Anchor::Id,
+            Anchor::TestId,
+        ])?;
+        assert_eq!(
+            ladder.anchors(),
+            &[Anchor::Id, Anchor::TestId, Anchor::Text, Anchor::ClassPath],
+            "input order must not decide rank, and a repeated rung is one rung"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_anchor_value_is_not_offered() {
+        let facts = anchored("button", Anchor::Id, "", "Submit");
+        assert_eq!(facts.anchor(Anchor::Id), None);
+        assert_eq!(facts.anchor(Anchor::TestId), None);
+    }
+
+    #[test]
+    fn a_unique_strong_anchor_resolves_at_the_first_rung() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let target = anchored("button", Anchor::Id, "submit", "Submit");
+        let other = anchored("button", Anchor::Id, "cancel", "Cancel");
+        let ladder = Ladder::new([Anchor::Id, Anchor::Text])?;
+        let recognition =
+            vector()?.recognize_with_ladder(&ladder, &target, &[other, target.clone()]);
+        assert!(
+            matches!(recognition, Recognition::Resolved { index: 1, .. }),
+            "the sole id match must resolve, got {recognition:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ambiguous_at_a_strong_anchor_is_not_retried_at_a_weak_one()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Two candidates share the target's id, so the strongest rung cannot
+        // separate them. Their texts differ, and the weaker text rung would
+        // pick one of them. That "recovery" is exactly what the walk must
+        // refuse: a weak anchor succeeding where a strong one was ambiguous is
+        // a likely mis-match, not a resolution.
+        let target = anchored("button", Anchor::Id, "submit", "Submit");
+        let twin = anchored("button", Anchor::Id, "submit", "Delete");
+        let ladder = Ladder::new([Anchor::Id, Anchor::Text])?;
+        let recognition =
+            vector()?.recognize_with_ladder(&ladder, &target, &[twin, target.clone()]);
+        assert!(
+            matches!(recognition, Recognition::Ambiguous { .. }),
+            "a strong-rung ambiguity must stand, got {recognition:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_ladder_falls_through_when_the_strong_anchor_is_absent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Neither element carries an id, so the first rung offers nobody. The
+        // test-id rung has exactly one match and must take the decision.
+        let target = anchored("button", Anchor::TestId, "checkout", "Submit");
+        let other = anchored("button", Anchor::TestId, "cancel", "Cancel");
+        let ladder = Ladder::new([Anchor::Id, Anchor::TestId])?;
+        let recognition =
+            vector()?.recognize_with_ladder(&ladder, &target, &[other, target.clone()]);
+        assert!(
+            matches!(recognition, Recognition::Resolved { index: 1, .. }),
+            "the fall-down must reach the test-id rung, got {recognition:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn every_rung_absent_reports_the_strongest_absent() -> Result<(), Box<dyn std::error::Error>> {
+        // Nothing matches on any rung. The return is the highest `best_score`
+        // any rung reached, so the caller can see how close the strongest
+        // evidence came rather than a bare zero.
+        let target = ElementFacts::new(
+            "button",
+            "html > body > form > button",
+            "Submit",
+            [0.5, 0.5, 0.1, 0.05],
+        )
+        .with_anchor(Anchor::Id, "submit")
+        .with_anchor(Anchor::ClassPath, "html > body > form > button");
+        let unrelated = ElementFacts::new(
+            "button",
+            "html > body > footer > button",
+            "Cancel",
+            [0.1, 0.9, 0.1, 0.05],
+        )
+        .with_anchor(Anchor::Id, "cancel")
+        .with_anchor(Anchor::ClassPath, "html > body > footer > button");
+        let ladder = Ladder::new([Anchor::Id, Anchor::ClassPath])?;
+        let recognition = vector()?.recognize_with_ladder(&ladder, &target, &[unrelated]);
+        assert!(
+            matches!(
+                recognition,
+                Recognition::Absent { best_score }
+                    if (0.0..FINGERPRINT_THRESHOLD).contains(&best_score)
+            ),
+            "absent must report a sub-threshold score, got {recognition:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_candidate_that_offers_no_matching_anchor_is_never_scored()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let target = anchored("button", Anchor::Id, "submit", "Submit");
+        let blank = bare("button", "html > body > form > button");
+        let ladder = Ladder::new([Anchor::Id])?;
+        assert_eq!(
+            vector()?.recognize_with_ladder(&ladder, &target, &[blank]),
+            Recognition::Absent { best_score: 0.0 },
+            "an id rung with nobody in it is a fall-through to a finished ladder"
+        );
         Ok(())
     }
 }

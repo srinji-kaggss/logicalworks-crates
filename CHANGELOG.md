@@ -79,6 +79,20 @@ explicitly under that crate.
 
 ### lgwks_bot Added
 
+- **The locator ladder: `Anchor`, `Ladder`, and `RecognitionVector::recognize_with_ladder`.**
+  A ladder is the search order `docs/general-bot-fold.md` §3.2 sequences as step
+  4: stable `id`, then `data-testid`, then ARIA role, then visible text, then a
+  class path. `ElementFacts` now carries the anchors a snapshot offers
+  (`with_anchor` / `anchor`), because a ladder that cannot be joined to its
+  candidates is a half-built path.
+
+  The walk decides by the rung's own anchor and by nothing else. One hit
+  resolves; two or more is `Ambiguous` and is **not** retried at a weaker rung —
+  two elements that share an `id` are not disambiguated by the fact that only
+  one of them happens to say "Submit" today. Zero hits falls through, and the
+  final `Absent` reports the strongest near-miss any rung observed rather than a
+  bare zero.
+
 - **`EffectScope::ephemeral()`, and a run identity a host can mint.** Building a
   bot with no host, no persisted history and no flow document meant writing an
   identity out by hand: a `RunId` and an `EnvironmentId` as literal hex, a

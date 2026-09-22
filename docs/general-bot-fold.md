@@ -123,7 +123,7 @@ The described platform generates, for each selected element, an ordered ladder �
 stable `id`, then `data-testid`, then ARIA role and accessible name, then visible
 text, then a class path — and falls back down it.
 
-This is the next slice and it is deliberately **not** in this change. A ladder
+This slice is landed (`interface.rs`, step 4 below). A ladder
 must be walked against candidates, which means each candidate must offer the
 anchors the ladder names; `ElementFacts` does not carry them yet, and shipping a
 ladder that cannot be joined to its candidates would be a half-built path of
@@ -495,8 +495,7 @@ exhausting it is a typed terminal outcome, not a silent stop.
 
 ## 6. Sequence
 
-Each step lands green and independently. Steps 1–3, 5 and 6 have landed; step 4
-is unblocked now.
+Each step lands green and independently. Steps 1–6 have landed. Next is 7.
 
 1. **The interface model.** ✅ Landed in this change: `interface.rs` —
    `ElementFacts`, the four recognition-vector components, `RecognitionVector`,
@@ -509,8 +508,14 @@ is unblocked now.
    `lgwks_std::similarity`. Consulted only where the lexicon returns `Absent`,
    so it cannot change a verdict the deterministic tiers already reached, and
    the model's identity is recorded with every decision it informs (§3.6).
-4. **The locator ladder.** `Anchor`, `Ladder`, and `recognize_with_ladder`, per
-   §3.2. Requires `ElementFacts` to carry the anchors a candidate offers.
+4. **The locator ladder.** ✅ Landed: `interface.rs` gains `Anchor`, `Ladder`,
+   `LadderError`, `ElementFacts::with_anchor` / `anchor`, and
+   `RecognitionVector::recognize_with_ladder`, per §3.2. A rung decides by its
+   own anchor value: one hit resolves, two or more is `Ambiguous` and stops the
+   walk (a weak rung may not "recover" a strong-rung ambiguity), zero hits falls
+   through and the final `Absent` carries the strongest near-miss any rung
+   scored. `Ladder::new` sorts strongest-first and deduplicates, and rejects an
+   empty list the way `Weighted` rejects an empty component set.
 5. **The missing typed outcomes.** Three of the same invariant. ✅ Landed:
    `Resolution::Degraded` (§3.6), the verdict a resolver returns when a
    dependency it needs is unavailable — without it, *nothing matched* and *we
