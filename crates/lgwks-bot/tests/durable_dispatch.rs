@@ -650,3 +650,109 @@ fn a_recovered_attempt_whose_effect_landed_is_retired_rather_than_sent_again() -
     );
     Ok(())
 }
+
+/// A live settlement is journaled before it is acknowledged, so a restart does
+/// not resurrect an attempt this process already settled.
+///
+/// The counterexample (issue #106): `Ledger::settle` used to mutate only
+/// in-memory state and return `Ok`, while the durable record still said
+/// `DispatchPrepared` with no outcome. Rebuilding then restored the old
+/// unknown and blocked the action again. The repair unifies live and recovered
+/// settlement through one `OutcomeObserved` append that happens *before*
+/// either is acknowledged.
+#[test]
+fn a_live_settlement_is_journaled_before_it_is_acknowledged() -> TestResult {
+    let store = Rc::new(RefCell::new(MemoryJournal::new()));
+    let entered = Rc::new(Cell::new(0));
+    let identity = identity()?;
+
+    let mut first = Bot::builder(NAME)
+        .observe(FixedSource)
+        .on(
+            is_value,
+            NeverSettles {
+                entered: Rc::clone(&entered),
+            },
+        )
+        .with_effects(scope(identity, Rc::clone(&store))?)
+        .build(&GrantSet::empty())?;
+
+    match first.tick() {
+        Err(BotError::EffectIndeterminate { .. }) => {}
+        other => {
+            return Err(format!("expected indeterminate, got {other:?}").into());
+        }
+    }
+    let at_rest = recorded(&store)?;
+    assert_eq!(
+        at_rest.len(),
+        2,
+        "intent and prepared dispatch: {at_rest:?}"
+    );
+    let key = at_rest[0].key();
+
+    let held = first.pending();
+    assert_eq!(held.len(), 1, "one live unknown: {held:?}");
+    assert_eq!(held[0].key(), Some(key));
+
+    // Live settlement. The call must write the fact down, not only move memory.
+    first
+        .resolve_effect(&key, EffectEvidence::Applied)
+        .map_err(|error| format!("live resolve failed: {error:?}"))?;
+    let after = recorded(&store)?;
+    assert_eq!(
+        after.len(),
+        3,
+        "the settlement is a committed event, not an in-memory ack: {after:?}"
+    );
+    assert!(
+        matches!(
+            after[2],
+            EffectEvent::OutcomeObserved {
+                evidence: EffectEvidence::Applied,
+                ..
+            }
+        ),
+        "the third event is the settlement fact: {:?}",
+        after[2]
+    );
+
+    // Reconstruct against the same journal. The settled attempt must not come
+    // back as an unknown.
+    let mut second = Bot::builder(NAME)
+        .observe(FixedSource)
+        .on(
+            is_value,
+            NeverSettles {
+                entered: Rc::clone(&entered),
+            },
+        )
+        .with_effects(scope(identity, Rc::clone(&store))?)
+        .build(&GrantSet::empty())?;
+
+    assert!(
+        second.pending().is_empty(),
+        "a journaled live settlement must not resurrect as an unknown: {:?}",
+        second.pending()
+    );
+    assert_eq!(
+        entered.get(),
+        1,
+        "and nothing may re-enter the action that already ran"
+    );
+
+    // A repeat of the same evidence is idempotent, before and after restart.
+    first
+        .resolve_effect(&key, EffectEvidence::Applied)
+        .map_err(|error| format!("repeat on first failed: {error:?}"))?;
+    second
+        .resolve_effect(&key, EffectEvidence::Applied)
+        .map_err(|error| format!("repeat on second failed: {error:?}"))?;
+    let final_events = recorded(&store)?;
+    assert_eq!(
+        final_events.len(),
+        3,
+        "a repeated settlement does not append twice: {final_events:?}"
+    );
+    Ok(())
+}
