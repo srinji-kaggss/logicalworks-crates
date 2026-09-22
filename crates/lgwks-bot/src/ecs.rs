@@ -1024,50 +1024,6 @@ struct Polled(Vec<Result<Option<Erased>, BotError>>);
 #[derive(Default)]
 struct Moved(Vec<bool>);
 
-/// The digest each source last reported for an observation this process
-/// actually holds, one slot per chain.
-///
-/// This is the whole of what the substrate remembers about a quiet source. It
-/// is `Copy`, it is 16 bytes, and it is the answer to the only question change
-/// detection ever asks — "is this the same as what I hold?" — which means a
-/// chain whose source offers a fingerprint needs nothing else stored to be
-/// watched. No value, no box, no `dyn`, no drop.
-///
-/// A slot is `None` for a source that does not implement
-/// [`Observe::fingerprint`](crate::verb::Observe::fingerprint), and for one
-/// whose observation has never committed. Both mean the same thing to the tick:
-/// it has no cheap answer and must poll.
-///
-/// The map is **committed state**. A poll's digest is staged in [`Candidates`]
-/// and published here only when `observe_fold` admits the tick's observations.
-/// Writing a digest here before that commit is what let a failed sibling poll
-/// permanently suppress uncommitted work (issue #99): the cache claimed to hold
-/// a value the fold had refused. It never leaves the world during a tick, so a
-/// tick dropped mid-poll cannot empty the map and leave `get_mut` without a
-/// slot — the way an unresized map disabled fingerprint caching for good.
-#[derive(Default)]
-struct Fingerprints(Vec<Option<u128>>);
-
-/// Per-tick candidate digests, staged beside [`Polled`] and published to
-/// [`Fingerprints`] only when `observe_fold` commits.
-///
-/// Written by `poll_sources` for every chain that reports one, including the
-/// quiet ones (whose candidate equals what is already committed). Discarded
-/// wholesale when the fold aborts, which is what keeps a half-polled tick from
-/// teaching the cache anything about values it refused to hold.
-#[derive(Default)]
-struct Candidates(Vec<Option<u128>>);
-
-/// Which chains this tick must actually poll, one flag per chain.
-///
-/// The third piece of per-tick scratch, and a resource for the same reason as
-/// the other two: the observation phase reads it twice — once to decide which
-/// futures to build, once to pair the results back — and a decision recomputed
-/// between those two points could differ from the one the futures were built
-/// from.
-#[derive(Default)]
-struct Polling(Vec<bool>);
-
 /// What the decision phase decided for one entry it reached.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Decision {
@@ -2878,7 +2834,6 @@ fn observe_fold(world: &mut World) {
     }
     if let Some(error) = first_error {
         world.resource_mut::<TickError>().0 = Some(error);
-        discard_candidates(world);
         put_polled(world, polled);
         return;
     }
@@ -2913,7 +2868,6 @@ fn observe_fold(world: &mut World) {
         });
         if let Some(error) = mismatch {
             world.resource_mut::<TickError>().0 = Some(error);
-            discard_candidates(world);
             put_polled(world, polled);
             return;
         }
@@ -2978,39 +2932,6 @@ fn observe_fold(world: &mut World) {
         }
     }
     world.non_send_mut::<Moved>().0 = changed;
-    publish_candidates(world);
-}
-
-/// Publish staged digests to the committed map, once the fold has admitted
-/// every observation of the tick.
-///
-/// This is the only place [`Fingerprints`] advances. A digest written earlier
-/// describes a value the substrate does not hold, and a quiet tick then skips
-/// the work that would have produced it.
-fn publish_candidates(world: &mut World) {
-    let mut candidates = std::mem::take(&mut world.non_send_mut::<Candidates>().0);
-    {
-        let mut prints = world.non_send_mut::<Fingerprints>();
-        for (index, candidate) in candidates.iter().enumerate() {
-            if let Some(slot) = prints.0.get_mut(index) {
-                *slot = *candidate;
-            }
-        }
-    }
-    candidates.clear();
-    world.non_send_mut::<Candidates>().0 = candidates;
-}
-
-/// Drop staged digests without publishing them.
-///
-/// The fold refused this tick's observations, so the committed cache must not
-/// learn anything from the polls — not even for the sources that succeeded.
-/// The next tick re-polls every source whose digest has not already been
-/// committed: extra polls rather than dropped work.
-fn discard_candidates(world: &mut World) {
-    let mut candidates = std::mem::take(&mut world.non_send_mut::<Candidates>().0);
-    candidates.clear();
-    world.non_send_mut::<Candidates>().0 = candidates;
 }
 
 /// Put the staging buffer back, capacity and all.
@@ -3499,18 +3420,10 @@ impl EcsBot {
         // building a fresh vector per tick. They are taken rather than borrowed
         // because `poll_sources` borrows the world immutably across its awaits
         // and a mutable borrow of a resource cannot be held across them.
-        // [`Fingerprints`] is deliberately not taken: it is committed state, and
-        // a tick dropped mid-poll would otherwise drop the map and leave the
-        // next tick without slots to publish into.
         let mut polled = std::mem::take(&mut self.world.non_send_mut::<Polled>().0);
-        let mut candidates = std::mem::take(&mut self.world.non_send_mut::<Candidates>().0);
-        let mut polling = std::mem::take(&mut self.world.non_send_mut::<Polling>().0);
         polled.clear();
-        self.poll_sources(&mut polled, &mut candidates, &mut polling)
-            .await;
+        self.poll_sources(&mut polled).await;
         self.world.non_send_mut::<Polled>().0 = polled;
-        self.world.non_send_mut::<Candidates>().0 = candidates;
-        self.world.non_send_mut::<Polling>().0 = polling;
 
         self.schedule.run(&mut self.world);
 
@@ -3647,127 +3560,39 @@ impl EcsBot {
     /// that owns it — so the source itself can answer "did I move?" against a
     /// concrete value, before anything is boxed. A source that returned
     /// `Ok(None)` did not move, and nothing is allocated for it.
-    /// # The lazy seam
-    ///
-    /// A chain is polled only when its source says there is something to poll
-    /// for. Where a source offers a [`fingerprint`](crate::verb::Observe::fingerprint)
-    /// equal to the one on record, the tick records the chain as unchanged and
-    /// **never calls `poll`** — so no value is produced, nothing is boxed, and
-    /// no future is built.
-    ///
-    /// The order matters and is the whole point: the decision is taken *before*
-    /// the future exists, not inside it. A check inside the future would still
-    /// have allocated the box that carries the future, which on a quiet tick is
-    /// the only thing there was to allocate. So the skip is a `filter` on the
-    /// iterator feeding `join_all_boxed`, and a skipped chain contributes no
-    /// allocation of any kind.
-    ///
-    /// `fingerprint` is therefore called twice for a chain that is polled: once
-    /// to decide, once to pair the results back to their chains. That is sound
-    /// because the method is required to be pure with respect to the value and
-    /// cheap — see its contract. A skipped chain is asked once.
-    async fn poll_sources(
-        &self,
-        polled: &mut Vec<Result<Option<Erased>, BotError>>,
-        candidates: &mut Vec<Option<u128>>,
-        polling: &mut Vec<bool>,
-    ) {
+    async fn poll_sources(&self, polled: &mut Vec<Result<Option<Erased>, BotError>>) {
         let chains = self.world.non_send::<Chains>();
         let grants = self.world.resource::<Grants>();
         let seen = self.world.non_send::<Observed>();
         let ledger = self.world.non_send::<Ledger>();
-        let prints = self.world.non_send::<Fingerprints>();
 
         let count = chains.0.len();
-        // Every chain starts out "unchanged". A chain that is polled overwrites
-        // its slot; one that is skipped keeps it, which is precisely the answer
-        // its source gave. Sizing here rather than pushing means a skipped
-        // chain costs one write and nothing else — no value, no box, no future.
         polled.clear();
         polled.resize_with(count, || Ok(None));
-
-        // The decision, taken once and before any future exists. `polling` is
-        // scratch like the rest: it is read by two passes that must agree, so it
-        // is computed once rather than asked twice.
-        //
-        // The digest is read here and **kept**, rather than read again after the
-        // poll. Reading it twice was the seam's whole overhead on a workload
-        // where nothing is ever skipped: `churn-64x1` moves every source every
-        // tick, so no chain is ever quiet and every chain paid a second virtual
-        // call for an answer it had already been given.
-        //
-        // Keeping the earlier digest is also the safe direction. It describes
-        // the source at or before the moment the value was taken, so a source
-        // that moved in between leaves a digest that no longer matches, and the
-        // next tick polls again instead of skipping. The error is one redundant
-        // poll, never a missed movement.
-        //
-        // The digest is staged in `candidates`, never written to
-        // [`Fingerprints`] here. Publishing it before `observe_fold` commits is
-        // the defect this split exists for: a failed sibling poll left the
-        // successful sources' digests advanced over values the fold refused to
-        // hold, and the next tick skipped them forever (issue #99).
-        polling.clear();
-        polling.resize(count, true);
-        candidates.clear();
-        candidates.resize(count, None);
-        for (index, chain) in chains.0.iter().enumerate() {
-            let now = chain.source.fingerprint();
-            let quiet = matches!(
-                (now, prints.0.get(index).copied().flatten()),
-                (Some(now), Some(then)) if now == then
-            );
-            if let Some(slot) = candidates.get_mut(index) {
-                *slot = now;
-            }
-            if let Some(flag) = polling.get_mut(index) {
-                *flag = !quiet;
-            }
-        }
 
         for (wave_index, wave) in chains.0.chunks(MAX_IN_FLIGHT_POLLS).enumerate() {
             let base = wave_index.saturating_mul(MAX_IN_FLIGHT_POLLS);
             let index_of = |offset: usize| base.saturating_add(offset);
-            let wanted = |offset: usize| polling.get(index_of(offset)).copied().unwrap_or(true);
 
-            let batch = lgwks_std::task::join_all_boxed(
-                wave.iter()
-                    .enumerate()
-                    .filter(|&(offset, _)| wanted(offset))
-                    .map(|(offset, chain)| {
-                        // `chunks` gives no index, so the chain's position is
-                        // the wave's start plus the offset within it. This is
-                        // the same index `Observed` and `Ledger` are keyed by,
-                        // which is what makes the baseline below the right one
-                        // to hand over.
-                        let index = index_of(offset);
-                        let baseline = seen
-                            .0
-                            .get(index)
-                            .and_then(|slot| slot.as_ref())
-                            .or_else(|| ledger.bound(index));
-                        chain.source.poll_any(&grants.0, baseline)
-                    }),
-            );
+            let batch =
+                lgwks_std::task::join_all_boxed(wave.iter().enumerate().map(|(offset, chain)| {
+                    // `chunks` gives no index, so the chain's position is
+                    // the wave's start plus the offset within it. This is
+                    // the same index `Observed` and `Ledger` are keyed by,
+                    // which is what makes the baseline below the right one
+                    // to hand over.
+                    let index = index_of(offset);
+                    let baseline = seen
+                        .0
+                        .get(index)
+                        .and_then(|slot| slot.as_ref())
+                        .or_else(|| ledger.bound(index));
+                    chain.source.poll_any(&grants.0, baseline)
+                }));
             let results = batch.await;
 
-            for ((offset, _), result) in wave
-                .iter()
-                .enumerate()
-                .filter(|&(offset, _)| wanted(offset))
-                .zip(results)
-            {
+            for ((offset, _), result) in wave.iter().enumerate().zip(results) {
                 let index = index_of(offset);
-                // A failed poll drops its candidate. The committed digest is
-                // left alone: the fold will abort and discard every candidate,
-                // and a committed digest that never advanced is exactly the
-                // "we do not hold this yet" answer that makes the next tick
-                // poll again rather than skip uncommitted work.
-                if result.is_err()
-                    && let Some(slot) = candidates.get_mut(index)
-                {
-                    *slot = None;
-                }
                 if let Some(slot) = polled.get_mut(index) {
                     *slot = result;
                 }
@@ -4665,12 +4490,6 @@ impl EcsBot {
         // the same allocations. Nothing else writes them.
         world.insert_non_send(Moving::default());
         world.insert_non_send(Moved::default());
-        // One slot per chain of committed digests, plus the per-tick staging
-        // map that may publish into them. `None` throughout, which reads as
-        // "never committed" and sends every chain down the ordinary poll path.
-        world.insert_non_send(Fingerprints(vec![None; count]));
-        world.insert_non_send(Candidates::default());
-        world.insert_non_send(Polling(Vec::new()));
         world.insert_non_send(Plan::default());
 
         let mut schedule = schedule();
@@ -5015,6 +4834,70 @@ mod tests {
 
         fn domain_id(&self) -> &str {
             "test::yielding"
+        }
+    }
+
+    /// A source whose poll deliberately spans two externally controlled state
+    /// changes. Its digest remains an honest read of the live value; the test
+    /// uses the pauses to place those reads around the A → B → A schedule.
+    struct AbaSource {
+        value: Rc<Cell<u16>>,
+        phase: Rc<Cell<u8>>,
+        polls: Rc<Cell<usize>>,
+        caps: Vec<Cap>,
+    }
+
+    impl AbaSource {
+        fn new(value: Rc<Cell<u16>>, phase: Rc<Cell<u8>>, polls: Rc<Cell<usize>>) -> Self {
+            Self {
+                value,
+                phase,
+                polls,
+                caps: vec![Cap::net()],
+            }
+        }
+    }
+
+    impl Observe for AbaSource {
+        type Output = u16;
+
+        fn required_caps(&self) -> &[Cap] {
+            &self.caps
+        }
+
+        async fn poll(&self, call: (Auth, ())) -> Result<u16, BotError> {
+            call.0.check(&self.caps)?;
+            self.polls.set(self.polls.get().saturating_add(1));
+            let value = Rc::clone(&self.value);
+            let phase = Rc::clone(&self.phase);
+            let captured = Rc::new(Cell::new(0));
+            let captured = std::future::poll_fn(move |cx| match phase.get() {
+                0 => {
+                    phase.set(1);
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+                1 => {
+                    captured.set(value.get());
+                    phase.set(2);
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+                _ => {
+                    phase.set(0);
+                    Poll::Ready(captured.get())
+                }
+            })
+            .await;
+            Ok(captured)
+        }
+
+        fn fingerprint(&self) -> Option<u128> {
+            Some(u128::from(self.value.get()))
+        }
+
+        fn domain_id(&self) -> &str {
+            "test::aba"
         }
     }
 
@@ -5786,16 +5669,11 @@ mod tests {
         Ok(())
     }
 
-    /// A source that offers a digest is not polled while the digest holds.
-    ///
-    /// This is the lazy seam, and the assertion is on the *poll count* rather
-    /// than on the effect count, because the effect count is already zero on a
-    /// quiet tick either way. What changed is that the tick no longer builds,
-    /// erases, boxes and drops a value in order to discover that nothing moved:
-    /// the source answers the equality question from a `u128` it already holds,
-    /// and `poll` — the only thing that produces a value — is never called.
+    /// A detached digest cannot prove that an async poll returned the same
+    /// snapshot. The bot must continue to poll until an observer can bind its
+    /// revision to the returned value in one operation.
     #[test]
-    fn a_source_that_reports_a_digest_is_not_polled_while_it_holds_still() -> TestResult {
+    fn a_source_with_a_detached_digest_is_polled_while_it_holds_still() -> TestResult {
         let polls = Rc::new(Cell::new(0));
         let counter = Rc::new(Cell::new(0));
         let mut bot = EcsBot::builder("lazy")
@@ -5804,11 +5682,7 @@ mod tests {
             .with_effects(test_effects()?)
             .build(&net_grants())?;
 
-        assert_eq!(
-            bot.tick()?,
-            1,
-            "the first tick has no digest to compare, so it polls"
-        );
+        assert_eq!(bot.tick()?, 1, "the first tick polls");
         assert_eq!(polls.get(), 1, "and polls exactly once");
 
         for tick in 0_u32..20 {
@@ -5821,23 +5695,67 @@ mod tests {
         }
         assert_eq!(
             polls.get(),
-            1,
-            "twenty quiet ticks must not produce a single value"
+            21,
+            "a detached digest cannot suppress a later async poll"
         );
         assert_eq!(counter.get(), 1, "and must not fire the effect again");
         Ok(())
     }
 
-    /// A digest that moves is a movement the tick must not miss.
+    /// An A → B → A source race must not leave B held while stable A is skipped.
     ///
-    /// The failure mode a fingerprint can introduce is the silent one: a source
-    /// that reports a stale digest makes the substrate skip a real change, and
-    /// nothing downstream ever notices, because the whole point of the skip is
-    /// that nothing downstream ran. So the seam is only as good as this test —
-    /// the digest moves, and the chain must fire on the tick it moves and poll
-    /// on every tick after it.
+    /// The first tick reads the legacy fingerprint at A, lets the observer
+    /// sample B, returns the live source to A, and only then admits B. The next
+    /// tick has to poll and deliver A. The retired cache used the earlier A
+    /// fingerprint for B, saw A as quiet on the next tick, and left B held.
     #[test]
-    fn a_digest_that_moves_is_polled_again_and_fires() -> TestResult {
+    fn a_detached_digest_cannot_suppress_the_final_stable_aba_state() -> TestResult {
+        let value = Rc::new(Cell::new(0));
+        let phase = Rc::new(Cell::new(0));
+        let polls = Rc::new(Cell::new(0));
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let mut bot = EcsBot::builder("aba")
+            .observe(AbaSource::new(
+                Rc::clone(&value),
+                Rc::clone(&phase),
+                Rc::clone(&polls),
+            ))
+            .on(|_: &u16| true, Record(Rc::clone(&seen)))
+            .with_effects(test_effects()?)
+            .build(&net_grants())?;
+
+        let mut tick = Box::pin(bot.tick_async());
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        if !matches!(tick.as_mut().poll(&mut cx), Poll::Pending) {
+            return Err("the first poll must pause before sampling B".into());
+        }
+        value.set(1);
+        if !matches!(tick.as_mut().poll(&mut cx), Poll::Pending) {
+            return Err("the source must pause after sampling B".into());
+        }
+        value.set(0);
+        match tick.as_mut().poll(&mut cx) {
+            Poll::Ready(Ok(fired)) => assert_eq!(fired, 1, "the sampled B action fires"),
+            Poll::Ready(Err(error)) => return Err(format!("the B tick failed: {error}").into()),
+            Poll::Pending => return Err("the third poll must admit the sampled B value".into()),
+        }
+        drop(tick);
+        assert_eq!(*seen.borrow(), vec![1], "the first tick delivers sampled B");
+
+        assert_eq!(bot.tick()?, 1, "the next tick must observe stable A");
+        assert_eq!(
+            *seen.borrow(),
+            vec![1, 0],
+            "stable A is delivered instead of being suppressed by B's stale digest"
+        );
+        assert_eq!(polls.get(), 2, "both B and the final stable A were polled");
+        Ok(())
+    }
+
+    /// Value comparison still avoids another effect when a source holds still.
+    #[test]
+    fn a_source_value_that_moves_is_polled_again_and_fires() -> TestResult {
         let polls = Rc::new(Cell::new(0));
         let counter = Rc::new(Cell::new(0));
         let source = Counted::new(200, Rc::clone(&polls));
@@ -5850,25 +5768,27 @@ mod tests {
 
         assert_eq!(bot.tick()?, 1, "the first value fires");
         assert_eq!(bot.tick()?, 0, "and holds");
-        assert_eq!(polls.get(), 1, "so the second tick does not poll");
+        assert_eq!(
+            polls.get(),
+            2,
+            "the second tick polls and compares its value"
+        );
 
         value.set(503);
         assert_eq!(bot.tick()?, 1, "the movement is seen, not skipped");
-        assert_eq!(polls.get(), 2, "and the tick paid for a value to see it");
+        assert_eq!(
+            polls.get(),
+            3,
+            "the tick paid for a value to see the movement"
+        );
 
         assert_eq!(bot.tick()?, 0, "and settles again");
-        assert_eq!(polls.get(), 2, "without polling");
+        assert_eq!(polls.get(), 4, "the stable value is polled and compared");
         assert_eq!(counter.get(), 2, "two movements, two effects");
         Ok(())
     }
 
-    /// A source with no digest is polled on every tick, exactly as before.
-    ///
-    /// The default is `None`, so this is not a special case in the code — it is
-    /// what every source written before the seam existed does. It is asserted
-    /// because "the old path is unchanged" is a claim the seam makes, and the
-    /// cost of the claim being false is every existing domain silently losing
-    /// its observations.
+    /// A source without a digest keeps the same value-comparison behavior.
     #[test]
     fn a_source_without_a_digest_is_polled_every_tick() -> TestResult {
         let counter = Rc::new(Cell::new(0));
@@ -5882,9 +5802,8 @@ mod tests {
         for _ in 0..5 {
             assert_eq!(bot.tick()?, 0);
         }
-        // `Holds` has no fingerprint, so every tick polls it — the effect still
-        // fires once, because the *value* is what decides the chain, and the
-        // value never moved.
+        // Every tick polls; the effect still fires once because the value did
+        // not move.
         assert_eq!(
             counter.get(),
             1,
@@ -6197,15 +6116,9 @@ mod tests {
         Ok(())
     }
 
-    /// A tick dropped mid-poll must not disable fingerprint caching.
-    ///
-    /// The staging maps are taken out of the world for the poll. A dropped tick
-    /// used to take the committed map with it, leave the resource at its empty
-    /// default, and then `get_mut` found no slot for every later digest — so
-    /// caching was off for the rest of the process. Committed digests now never
-    /// leave the world, and the recovery tick must still publish into them.
+    /// A tick dropped mid-poll leaves the next tick able to observe normally.
     #[test]
-    fn cancelling_a_poll_still_leaves_fingerprint_caching_working() -> TestResult {
+    fn cancelling_a_poll_leaves_the_next_observation_usable() -> TestResult {
         let polls = Rc::new(Cell::new(0));
         let seen = Rc::new(RefCell::new(Vec::new()));
         let yielded = Rc::new(Cell::new(false));
@@ -6239,12 +6152,8 @@ mod tests {
             "the source is polled once per tick across the cancel"
         );
 
-        assert_eq!(bot.tick()?, 0, "and the next tick is quiet");
-        assert_eq!(
-            polls.get(),
-            2,
-            "fingerprint caching still works after a cancelled tick"
-        );
+        assert_eq!(bot.tick()?, 0, "and the next tick compares the same value");
+        assert_eq!(polls.get(), 3, "the next tick polls after a cancellation");
         Ok(())
     }
 

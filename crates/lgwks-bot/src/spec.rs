@@ -448,15 +448,6 @@ pub(crate) trait ObserveAny {
     fn domain_id(&self) -> &str;
     /// Forwards to [`Observe::required_caps`](crate::verb::Observe::required_caps).
     fn required_caps(&self) -> &[Cap];
-    /// Forwards to [`Observe::fingerprint`](crate::verb::Observe::fingerprint).
-    ///
-    /// Erased alongside the rest of the source, and deliberately on the trait
-    /// rather than reached through a downcast: this is called once per chain per
-    /// tick on the hot path, and the whole point of it is that the tick can
-    /// answer "has it moved?" *without* constructing the value. A method that
-    /// required the concrete type to call would put the downcast back on the
-    /// path it exists to shorten.
-    fn fingerprint(&self) -> Option<u128>;
     /// Issue an [`Auth`] for the observer's own caps and poll it.
     ///
     /// Returns `Ok(None)` when the source produced a value **equal** to
@@ -507,10 +498,6 @@ where
 
     fn required_caps(&self) -> &[Cap] {
         super::verb::Observe::required_caps(self)
-    }
-
-    fn fingerprint(&self) -> Option<u128> {
-        super::verb::Observe::fingerprint(self)
     }
 
     fn poll_any<'a>(
