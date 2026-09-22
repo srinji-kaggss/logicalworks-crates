@@ -174,6 +174,16 @@ explicitly under that crate.
 
 ### lgwks_bot Breaking
 
+- `Execute::effect_lifetime` declares whether the action's effect reaches
+  outside this process. The default is `EffectLifetime::External`, the
+  conservative reading of an unclassified handoff: an action that is only
+  local says so. An ephemeral journal now refuses an external effect on the
+  actual dispatch path — `Effects::prepare` calls
+  `EffectJournal::admit_external_handoff` and checks the `DispatchPrepared`
+  acknowledgment's promise against what the handoff requires, instead of
+  discarding it. A journal that advertises `ProcessCrash` and acks `Ephemeral`
+  is refused. `MemoryJournal` stays `Ephemeral` and stays useful for
+  explicitly local work.
 - `Observe::Output` must implement the new `InputIdentity`, alongside the
   `PartialEq` it already needed. The dispatch digest used to bind the
   process-local `Revision` counter, which reopens at 1 after every
@@ -194,6 +204,12 @@ explicitly under that crate.
 
 ### lgwks_bot Fixed
 
+- An ephemeral scope enforces its advertised external-effect refusal.
+  `Effects::prepare` used to discard the `DispatchPrepared` acknowledgment as
+  `_ack` and never called `admit_external_handoff`, so a local in-memory
+  ladder admitted an effect that outlived the process. Durability admission is
+  now on the handoff path and the acknowledgment is checked, not the
+  advertisement (`tests/durable_dispatch.rs::an_ephemeral_scope_refuses_an_external_effect_before_it_runs`).
 - Action identities are length-framed and index-portable. `derive_action_id`
   used to concatenate `bot` and `domain` around `usize::to_le_bytes` with no
   length prefix, so `"ab"`+`"c"` and `"a"`+`"bc"` derived the same `ActionId`
@@ -277,7 +293,34 @@ explicitly under that crate.
   so a scan for `-> Self` does not see them, and neither of those carried it
   either. `must_use_candidate` reaches none of the three, which is how they
   survived a green build.
-
+- A returning landed event retires rather than refusing or re-entering. Live
+  `OutcomeObserved` is now written through `Effects::ensure_outcome`, which
+  folds `Applied` into the in-memory applied set, so `applied_in` can see it.
+  A raw append left that set empty: the same `EventId` came back after another
+  event, minted `AttemptId::FIRST` again, and the journal answered `OutOfOrder`
+  after the entry was already marked `Unrecorded` — a false barrier instead of
+  a retirement (`tests/durable_dispatch.rs::a_returning_landed_event_is_retired_not_refused`).
+- A handoff refused before the action ran no longer leaves a false
+  `Unrecorded` barrier. `begin_attempt` used to move `record.begun` and
+  `EntryState` before the journal writes, so a `PromiseUnmet` left the entry
+  claiming an effect might be live. The write-ahead pair is committed first and
+  the memory moves only after its acknowledgments are strong enough
+  (`tests/durable_dispatch.rs::a_refused_handoff_leaves_no_unrecorded_barrier`).
+- A weak per-append acknowledgment is refused before `DispatchPrepared` is
+  committed. The intent append's ack is checked first, so a store that cannot
+  outlive the process cannot leave a ladder step recovery would fold as
+  `OutcomeUnknown` for a dispatch that never happened. If the `DispatchPrepared`
+  ack is the weak one, a compensating `NotApplied` is written
+  (`tests/durable_dispatch.rs::a_weak_ack_does_not_record_dispatch_prepared`).
+- A ladder-complete `OutOfOrder` is idempotent success only when the *same*
+  evidence is already recorded. `ensure_outcome` used to treat any such refusal
+  as success without looking, so a contradictory `Applied` could be
+  acknowledged. `RecordingFailed` retries now go through the same
+  `ensure_outcome` write, which is what makes an ambiguous commit-then-error
+  retry land rather than loop.
+- `classify_settlement` checks the environment half of ownership identity, not
+  only run and flow. A key cloned from the pending key with a foreign
+  environment used to settle the live entry and journal the foreign key.
 
 ### lgwks_bot Documentation
 

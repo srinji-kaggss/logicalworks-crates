@@ -102,6 +102,23 @@ impl DurabilityPromise {
         matches!(self, Self::ProcessCrash | Self::PowerLoss)
     }
 
+    /// Whether this promise is at least as strong as `required`.
+    ///
+    /// A per-append acknowledgment is checked against the promise the handoff
+    /// needs, not against the journal's advertisement: a store that claims
+    /// `ProcessCrash` and acks `Ephemeral` is weaker than it says, and the
+    /// weaker fact is the one that matters (issue #100).
+    #[must_use]
+    pub const fn meets(self, required: Self) -> bool {
+        match (self, required) {
+            (_, Self::Ephemeral) => true,
+            (Self::ProcessCrash | Self::PowerLoss, Self::ProcessCrash) => true,
+            (Self::PowerLoss, Self::PowerLoss) => true,
+            (Self::Ephemeral, _) => false,
+            (Self::ProcessCrash, Self::PowerLoss) => false,
+        }
+    }
+
     /// The wire spelling.
     #[must_use]
     pub const fn as_str(self) -> &'static str {

@@ -49,7 +49,8 @@ use lgwks_bot::spec::{
     RetryPolicy, TransitionHold,
 };
 use lgwks_bot::{
-    Auth, Bot, BotError, Builder, Cap, DispatchCertainty, Execute, GrantSet, Observe, block_on,
+    Auth, Bot, BotError, Builder, Cap, DispatchCertainty, EffectLifetime, Execute, GrantSet,
+    Observe, block_on,
 };
 
 /// What a test reports when its precondition did not hold.
@@ -379,6 +380,10 @@ impl Execute for TimerAction {
         &[]
     }
 
+    fn effect_lifetime(&self) -> EffectLifetime {
+        EffectLifetime::Local
+    }
+
     async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
         call.0.check(Execute::required_caps(self))?;
         sleep(TIMER_DELAY).await;
@@ -405,6 +410,10 @@ impl Execute for YieldAction {
 
     fn required_caps(&self) -> &[Cap] {
         &[]
+    }
+
+    fn effect_lifetime(&self) -> EffectLifetime {
+        EffectLifetime::Local
     }
 
     async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
@@ -1098,6 +1107,10 @@ impl Execute for Doubtful {
         &[]
     }
 
+    fn effect_lifetime(&self) -> EffectLifetime {
+        EffectLifetime::Local
+    }
+
     async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
         call.0.check(Execute::required_caps(self))?;
         self.seen.borrow_mut().push(*call.1);
@@ -1415,6 +1428,10 @@ impl Execute for Refuses {
         &[]
     }
 
+    fn effect_lifetime(&self) -> EffectLifetime {
+        EffectLifetime::Local
+    }
+
     async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
         call.0.check(Execute::required_caps(self))?;
         self.attempts.set(self.attempts.get().saturating_add(1));
@@ -1442,6 +1459,10 @@ impl Execute for Noted {
 
     fn required_caps(&self) -> &[Cap] {
         &[]
+    }
+
+    fn effect_lifetime(&self) -> EffectLifetime {
+        EffectLifetime::Local
     }
 
     async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
@@ -1687,6 +1708,10 @@ impl Execute for Grudging {
 
     fn required_caps(&self) -> &[Cap] {
         &[]
+    }
+
+    fn effect_lifetime(&self) -> EffectLifetime {
+        EffectLifetime::Local
     }
 
     async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {

@@ -194,8 +194,12 @@ use super::error::{BotError, DispatchCertainty, Escaped, RetryClass};
 use super::gate::GrantSet;
 #[cfg(feature = "ephemeral")]
 use super::journal::MemoryJournal;
-use super::journal::{AttemptStatus, EffectEvent, EffectJournal, EventKind, JournalError, recover};
+use super::journal::{
+    AttemptStatus, DurabilityPromise, DurableAck, EffectEvent, EffectJournal, EventKind,
+    JournalError, recover,
+};
 use super::spec::{ChainEntry, Erased, ObserveAny, Witness, typed_entry};
+use super::verb::EffectLifetime;
 use super::verb::{Evaluate, Execute, Observe};
 
 // ── The effect path: identity, fencing, and the write-ahead record ─────────
@@ -600,10 +604,56 @@ impl Effects {
     ///
     /// [`DispatchError::Broker`] when the environment refuses, and
     /// [`DispatchError::Journal`] when the append is refused.
-    fn prepare(&mut self, key: EffectKey) -> Result<Authority, DispatchError> {
+    fn prepare(
+        &mut self,
+        key: EffectKey,
+        lifetime: EffectLifetime,
+    ) -> Result<Authority, DispatchError> {
+        // The durability admission is on the actual handoff path, not a
+        // helper a test can call: an external effect must not leave on a
+        // record that cannot outlive the process (issue #100).
+        let required = match lifetime {
+            EffectLifetime::Local => DurabilityPromise::Ephemeral,
+            EffectLifetime::External => {
+                self.scope
+                    .journal()
+                    .admit_external_handoff()
+                    .map_err(DispatchError::Journal)?;
+                DurabilityPromise::ProcessCrash
+            }
+        };
+        // Intent first. Its acknowledgment is the first durability fact on the
+        // handoff path: a store that cannot outlive the process is refused here,
+        // before `DispatchPrepared` exists for recovery to misread as a live
+        // dispatch (issue #100).
+        let intent_ack = self.append(&EffectEvent::IntentAdmitted { key })?;
+        self.note_journal_attempt(key.action(), key.attempt());
+        if !intent_ack.promise().meets(required) {
+            return Err(DispatchError::Journal(JournalError::PromiseUnmet {
+                required,
+                offered: intent_ack.promise(),
+            }));
+        }
         let scope = &mut self.scope;
-        let (authority, _ack) =
+        let (authority, ack) =
             prepare_dispatch(&scope.broker, &mut *scope.journal, key)?.into_parts();
+        // The acknowledgment, not the advertisement. A journal that offers
+        // less on this append than the handoff requires is refused even when
+        // its `durability()` claimed enough.
+        if !ack.promise().meets(required) {
+            // Compensate: the handoff never left. Without this record recovery
+            // folds the `DispatchPrepared` already committed as an unknown
+            // outcome for a dispatch that did not happen. Best-effort: the
+            // `PromiseUnmet` below is the report either way.
+            let _compensating = self.append(&EffectEvent::OutcomeObserved {
+                key,
+                evidence: EffectEvidence::NotApplied,
+            });
+            return Err(DispatchError::Journal(JournalError::PromiseUnmet {
+                required,
+                offered: ack.promise(),
+            }));
+        }
         Ok(authority)
     }
 
@@ -649,10 +699,9 @@ impl Effects {
     /// # Errors
     ///
     /// Whatever the journal refuses.
-    fn append(&mut self, event: &EffectEvent) -> Result<(), JournalError> {
+    fn append(&mut self, event: &EffectEvent) -> Result<DurableAck, JournalError> {
         let tail = self.scope.journal().tail();
-        self.scope.journal_mut().compare_and_append(tail, event)?;
-        Ok(())
+        self.scope.journal_mut().compare_and_append(tail, event)
     }
 
     /// Whether an attempt on `action` is recorded as dispatched with no
@@ -780,7 +829,8 @@ impl Effects {
         evidence: EffectEvidence,
     ) -> Result<(), JournalError> {
         match self.append(&EffectEvent::OutcomeObserved { key, evidence }) {
-            Ok(()) => {
+            Ok(_ack) => {
+                self.note_journal_attempt(key.action(), key.attempt());
                 if evidence == EffectEvidence::Applied && !self.applied.contains(&key) {
                     self.applied.push(key);
                 }
@@ -789,8 +839,13 @@ impl Effects {
             Err(JournalError::OutOfOrder { expected, .. })
                 if expected == Some(EventKind::Verified) || expected.is_none() =>
             {
+                // Idempotent success only when the *same* evidence is already
+                // recorded. A ladder-complete `OutOfOrder` alone is not proof of
+                // which outcome landed, and treating it as success is how a
+                // contradictory `Applied` gets acknowledged (issue #106).
                 match self.outcome_for(&key) {
                     Some(recorded) if recorded == evidence => {
+                        self.note_journal_attempt(key.action(), key.attempt());
                         if evidence == EffectEvidence::Applied && !self.applied.contains(&key) {
                             self.applied.push(key);
                         }
@@ -805,17 +860,11 @@ impl Effects {
             }
             Err(cause) => {
                 // A journal may commit the event and lose the acknowledgment.
-                // Read-back turns that ambiguous transport failure into the same
-                // idempotent success as a retry that reaches the ladder fence.
-                match self.outcome_for(&key) {
-                    Some(recorded) if recorded == evidence => {
-                        if evidence == EffectEvidence::Applied && !self.applied.contains(&key) {
-                            self.applied.push(key);
-                        }
-                        Ok(())
-                    }
-                    _ => Err(cause),
-                }
+                // Surface the ambiguous failure now: the caller is post-effect
+                // and must report `EffectUnrecorded`, not a clean settle. The
+                // *next* `ensure_outcome` for this key hits the ladder fence
+                // above, and that is where the read-back is idempotent success.
+                Err(cause)
             }
         }
     }
@@ -2039,7 +2088,11 @@ impl Ledger {
     /// The warrant is handed back rather than consumed here because the handoff
     /// is the caller's: it runs after the payload the attempt acts on is in
     /// hand, and it presents the warrant at [`Broker::revalidate`] on the way in.
-    fn begin_attempt(&mut self, id: WorkId) -> Result<(EffectKey, Authority), BotError> {
+    fn begin_attempt(
+        &mut self,
+        id: WorkId,
+        lifetime: EffectLifetime,
+    ) -> Result<(EffectKey, Authority), BotError> {
         let no_such_work = || BotError::NoSuchWork { work: id };
         let action = self.action_of(id).ok_or_else(no_such_work)?;
         // Refused before anything is written, and refused for the reason
@@ -2094,22 +2147,33 @@ impl Ledger {
                 None => AttemptId::FIRST,
             },
         };
-        record.begun = Some(attempt);
-        *state = EntryState::Unrecorded;
+        // Journal first, memory second. `record.begun` and `EntryState` are
+        // moved only after the write-ahead pair is committed and its
+        // acknowledgments are strong enough: a refusal before that point leaves
+        // the entry as it was, instead of a false `Unrecorded` barrier for a
+        // handoff that never left (issue #100).
         let input = transition.input;
         let key = self
             .effects
             .key(action, id.chain(), id.entry(), input, attempt)
             .ok_or(BotError::EffectUnsettled { action })?;
-        self.effects
-            .append(&EffectEvent::IntentAdmitted { key })
-            .map_err(|cause| BotError::EffectRefused {
-                cause: DispatchError::Journal(cause),
-            })?;
         let authority = self
             .effects
-            .prepare(key)
+            .prepare(key, lifetime)
             .map_err(|cause| BotError::EffectRefused { cause })?;
+        let transition = self
+            .transitions
+            .get_mut(id.chain())
+            .and_then(Option::as_mut)
+            .ok_or_else(no_such_work)?;
+        let record = transition
+            .attempts
+            .get_mut(id.entry())
+            .ok_or_else(no_such_work)?;
+        record.begun = Some(attempt);
+        if let Some(state) = transition.entries.get_mut(id.entry()) {
+            *state = EntryState::Unrecorded;
+        }
         Ok((key, authority))
     }
 
@@ -2284,7 +2348,10 @@ impl Ledger {
         // from another run is not this ledger's to settle, and answering it with
         // any of the finer refusals would suggest the evidence nearly applied.
         let identity = self.effects.identity();
-        if key.run() != identity.run() || key.flow() != identity.flow() {
+        if key.run() != identity.run()
+            || key.flow() != identity.flow()
+            || key.environment() != identity.environment()
+        {
             return Settled::NoSuchWork { id: None };
         }
         let Some(transition) = self.transitions.get(id.chain()).and_then(Option::as_ref) else {
@@ -3890,7 +3957,20 @@ impl EcsBot {
             // beside it. The attempt a caller is handed and the attempt
             // settlement checks have to be one identity, and two derivations of
             // one identity are two identities the moment they disagree.
-            let (key, authority) = match self.world.non_send_mut::<Ledger>().begin_attempt(work) {
+            let lifetime = self
+                .world
+                .non_send::<Chains>()
+                .0
+                .get(step.chain)
+                .and_then(|chain| chain.entries.get(step.entry))
+                .map_or(EffectLifetime::External, |entry| {
+                    entry.action.effect_lifetime()
+                });
+            let (key, authority) = match self
+                .world
+                .non_send_mut::<Ledger>()
+                .begin_attempt(work, lifetime)
+            {
                 Ok(pair) => pair,
                 Err(error) => {
                     // The entry is not in a state an attempt can start from, or
@@ -3980,7 +4060,7 @@ impl EcsBot {
                     .world
                     .non_send_mut::<Ledger>()
                     .effects
-                    .append(&EffectEvent::OutcomeObserved { key, evidence })
+                    .ensure_outcome(key, evidence)
             {
                 // Post-effect: the action already returned and `evidence` is a
                 // fact. This is a recording failure, not a pre-dispatch
@@ -4949,6 +5029,10 @@ mod tests {
             &[]
         }
 
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
+        }
+
         async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
             call.0.check(&[])?;
             self.0.set(self.0.get().saturating_add(1));
@@ -4970,6 +5054,10 @@ mod tests {
 
         fn required_caps(&self) -> &[Cap] {
             &[]
+        }
+
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
         }
 
         async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
@@ -5007,6 +5095,10 @@ mod tests {
 
         fn required_caps(&self) -> &[Cap] {
             &[]
+        }
+
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
         }
 
         async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
@@ -5059,6 +5151,10 @@ mod tests {
 
         fn required_caps(&self) -> &[Cap] {
             &[]
+        }
+
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
         }
 
         async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
@@ -5136,6 +5232,10 @@ mod tests {
 
         fn required_caps(&self) -> &[Cap] {
             &self.caps
+        }
+
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
         }
 
         async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
@@ -7218,6 +7318,10 @@ mod tests {
             &[]
         }
 
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
+        }
+
         async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
             call.0.check(&[])?;
             self.0.set(self.0.get().saturating_add(1));
@@ -7239,6 +7343,10 @@ mod tests {
 
         fn required_caps(&self) -> &[Cap] {
             &[]
+        }
+
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
         }
 
         async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {

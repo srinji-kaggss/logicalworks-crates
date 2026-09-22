@@ -16,23 +16,23 @@ crates/lgwks-bot/src/cap.rs:202	pub struct Deficit {
 crates/lgwks-bot/src/cap.rs:288	pub fn to_grant_set(&self) -> GrantSet {
 crates/lgwks-bot/src/cap.rs:365	pub(crate) fn new(mut caps: Vec<Cap>) -> Self {
 crates/lgwks-bot/src/cap.rs:414	pub fn check(&self, required: &[Cap]) -> Result<(), BotError> {
-crates/lgwks-bot/src/ecs.rs:886	struct TickError(Option<BotError>);
-crates/lgwks-bot/src/ecs.rs:1081	const MAX_IN_FLIGHT_POLLS: usize = 32;
-crates/lgwks-bot/src/ecs.rs:2749	RetryClass::Safe if attempts < budget => EntryState::DefinitelyFailed { attempts, cause },
-crates/lgwks-bot/src/ecs.rs:2805	let mut first_error = None;
-crates/lgwks-bot/src/ecs.rs:2985	fn fire_plan(world: &mut World) {
-crates/lgwks-bot/src/ecs.rs:3215	Err(error) => {
-crates/lgwks-bot/src/ecs.rs:3226	steps.push(Step {
-crates/lgwks-bot/src/ecs.rs:3243	ambiguity_detection: LogLevel::Error,
-crates/lgwks-bot/src/ecs.rs:3325	pub fn world(&self) -> &World {
-crates/lgwks-bot/src/ecs.rs:3427	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:3538	pub fn tick(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:3651	(Some(now), Some(then)) if now == then
-crates/lgwks-bot/src/ecs.rs:3730	async fn run_steps(
-crates/lgwks-bot/src/ecs.rs:4314	S::Output: PartialEq + InputIdentity + 'static,
-crates/lgwks-bot/src/ecs.rs:4452	for chain in &chains {
-crates/lgwks-bot/src/ecs.rs:4453	shortages.extend(grants.uncovered(
-crates/lgwks-bot/src/ecs.rs:4469	world.insert_resource(Grants(grants.clone()));
+crates/lgwks-bot/src/ecs.rs:935	struct TickError(Option<BotError>);
+crates/lgwks-bot/src/ecs.rs:1130	const MAX_IN_FLIGHT_POLLS: usize = 32;
+crates/lgwks-bot/src/ecs.rs:2816	RetryClass::Safe if attempts < budget => EntryState::DefinitelyFailed { attempts, cause },
+crates/lgwks-bot/src/ecs.rs:2872	let mut first_error = None;
+crates/lgwks-bot/src/ecs.rs:3052	fn fire_plan(world: &mut World) {
+crates/lgwks-bot/src/ecs.rs:3282	Err(error) => {
+crates/lgwks-bot/src/ecs.rs:3293	steps.push(Step {
+crates/lgwks-bot/src/ecs.rs:3310	ambiguity_detection: LogLevel::Error,
+crates/lgwks-bot/src/ecs.rs:3392	pub fn world(&self) -> &World {
+crates/lgwks-bot/src/ecs.rs:3494	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs.rs:3605	pub fn tick(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs.rs:3718	(Some(now), Some(then)) if now == then
+crates/lgwks-bot/src/ecs.rs:3797	async fn run_steps(
+crates/lgwks-bot/src/ecs.rs:4394	S::Output: PartialEq + InputIdentity + 'static,
+crates/lgwks-bot/src/ecs.rs:4532	for chain in &chains {
+crates/lgwks-bot/src/ecs.rs:4533	shortages.extend(grants.uncovered(
+crates/lgwks-bot/src/ecs.rs:4549	world.insert_resource(Grants(grants.clone()));
 crates/lgwks-bot/src/error.rs:106	/// handed may be the one that owns the runtime's driver. Parked, that
 crates/lgwks-bot/src/gate.rs:12	pub struct GrantSet {
 crates/lgwks-bot/src/gate.rs:44	pub fn grant(mut self, cap: Cap) -> Self {
@@ -95,9 +95,9 @@ crates/lgwks-bot/src/session.rs:2917	pub struct DecisionReceipt {
 crates/lgwks-bot/src/session.rs:3692	.ok_or(BotError::SessionBudgetExceeded {
 crates/lgwks-bot/src/session.rs:3848	fn record(&mut self, node_id: &str, role: &str, text: &str) -> Result<(), BotError> {
 crates/lgwks-bot/src/session.rs:3860	.saturating_add(role.len());
-crates/lgwks-bot/src/spec.rs:318	pub use crate::ecs::{
-crates/lgwks-bot/src/spec.rs:627	let auth: Auth = grants.issue(self.0.required_caps())?;
-crates/lgwks-bot/src/spec.rs:672	pub fn from_json(source: &str) -> Result<Self, BotError> {
+crates/lgwks-bot/src/spec.rs:319	pub use crate::ecs::{
+crates/lgwks-bot/src/spec.rs:634	let auth: Auth = grants.issue(self.0.required_caps())?;
+crates/lgwks-bot/src/spec.rs:679	pub fn from_json(source: &str) -> Result<Self, BotError> {
 crates/lgwks-deps/src/lib.rs:14	//! The same `lgwks-deps check` command is an explicit first job in local and
 crates/lgwks-deps/src/lib.rs:73	pub mod scan;
 crates/lgwks-deps/src/lib.rs:543	/// Audits the repository rooted at `root`, reading its lock file and register.

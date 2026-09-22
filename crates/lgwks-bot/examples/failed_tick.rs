@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use lgwks_bot::spec::{AbandonReason, TransitionHold};
-use lgwks_bot::{Auth, Bot, BotError, Cap, DispatchCertainty, Execute, GrantSet, Observe};
+use lgwks_bot::{
+    Auth, Bot, BotError, Cap, DispatchCertainty, EffectLifetime, Execute, GrantSet, Observe,
+};
 
 /// A source whose value the test drives by hand.
 struct Reading(Arc<AtomicU32>);
@@ -43,6 +45,10 @@ impl Execute for Count {
         &[]
     }
 
+    fn effect_lifetime(&self) -> EffectLifetime {
+        EffectLifetime::Local
+    }
+
     async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
         call.0.check(self.required_caps())?;
         self.0.fetch_add(1, Ordering::SeqCst);
@@ -63,6 +69,10 @@ impl Execute for Fail {
 
     fn required_caps(&self) -> &[Cap] {
         &[]
+    }
+
+    fn effect_lifetime(&self) -> EffectLifetime {
+        EffectLifetime::Local
     }
 
     async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
