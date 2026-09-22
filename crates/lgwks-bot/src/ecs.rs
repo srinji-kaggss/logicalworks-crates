@@ -172,6 +172,7 @@ use std::num::{NonZeroU32, NonZeroU128};
 // `self` is load-bearing: the `Component` and `Resource` derives expand to
 // `bevy_ecs::…` paths, so the crate name has to be in scope at the use site even
 // though every edge in this crate is written through the `lgwks_deps` facade.
+use crate::effect::InputIdentity;
 use lgwks_deps::bevy_ecs::{
     self,
     prelude::{Changed, Component, Entity, Resource, World},
@@ -206,21 +207,45 @@ use super::verb::{Evaluate, Execute, Observe};
 /// a value two different bots can collide on.
 const ACTION_ID_DOMAIN: &[u8] = b"lgwks.bot.action-id.v2";
 
-/// The domain separator for an [`ActionDigest`] derived from a bound generation.
+/// The domain separator for an [`ActionDigest`] derived from an admitted input.
 const ACTION_DIGEST_DOMAIN: &[u8] = b"lgwks.bot.action-digest.v2";
+
+/// The domain separator for an admitted input's content identity.
+const OUTPUT_IDENTITY_DOMAIN: &[u8] = b"lgwks.bot.input-identity.v1";
 
 /// Hash a sequence of byte fields into the estate's content-identity digest.
 ///
-/// Each field is length-prefixed with its portable `u64` width before the bytes
-/// themselves, so distinct variable-length field splits cannot collide.
+/// Each field is length-prefixed with its `u64` little-endian width before the
+/// bytes themselves, so a variable-length name cannot slide into the next field
+/// and produce the same digest for a different parse. A domain separator
+/// identifies the format; it does not frame the fields inside it. Indices are
+/// always `u64::to_le_bytes` rather than `usize`, so a 32-bit and a 64-bit
+/// target derive the same identity for the same bot (issue #101).
 fn hash_parts(parts: &[&[u8]]) -> Digest {
     let mut hasher = Hasher::new();
     for part in parts {
-        let length = u64::try_from(part.len()).unwrap_or(u64::MAX);
-        hasher.update(&length.to_le_bytes());
+        let len = u64::try_from(part.len()).unwrap_or(u64::MAX);
+        hasher.update(&len.to_le_bytes());
         hasher.update(part);
     }
     hasher.finalize()
+}
+
+/// A `usize` index as a portable `u64`.
+///
+/// `usize::to_le_bytes` is 4 bytes on a 32-bit target and 8 on a 64-bit one,
+/// so the same bot derived different identities on each. Every index that
+/// enters a digest goes through here.
+fn portable_index(index: usize) -> u64 {
+    u64::try_from(index).unwrap_or(u64::MAX)
+}
+
+/// The fallback identity for a binding that cannot name itself.
+fn derive_input_stamp(stamp: u64) -> [u8; 16] {
+    let digest = hash_parts(&[b"lgwks.bot.input-stamp.v1", &stamp.to_le_bytes()]);
+    let mut wide = [0_u8; 16];
+    wide.copy_from_slice(&digest.as_bytes()[..16]);
+    wide
 }
 
 /// Fold a digest into a non-zero 128-bit identifier.
@@ -258,33 +283,39 @@ fn derive_action_id(bot: &str, chain: usize, entry: usize, domain: &str) -> Acti
     ActionId::new(id_from_digest(&hash_parts(&[
         ACTION_ID_DOMAIN,
         bot.as_bytes(),
-        &chain.to_le_bytes(),
-        &entry.to_le_bytes(),
+        &portable_index(chain).to_le_bytes(),
+        &portable_index(entry).to_le_bytes(),
         domain.as_bytes(),
     ])))
 }
 
-/// The exact generation of bound input one entry was dispatched from.
+/// The exact admitted input one entry was dispatched from.
 ///
 /// The ECS substrate has no payload bytes to hash: a transition's binding is an
-/// erased `Box<dyn Any>` and nothing here asks it to be `Hash`. What it does
-/// have is the *revision* — the monotonic marker a source moves, which is
-/// exactly when a transition re-binds — so the generation is what this digest
-/// binds. Two attempts within one revision share a digest, which is what makes
-/// a retry a retry; a new revision gets a new digest, which is what makes a
-/// delayed settlement refusable rather than merged.
+/// erased `Box<dyn Any>` and nothing here asks it to be `Hash`. Content
+/// equality is not event identity either — two distinct commands with the same
+/// payload must stay distinguishable — so the digest binds the *admitted input
+/// identity*: a monotonic stamp minted when the observation was admitted and
+/// continued across a restart from the journal's tail, not the process-local
+/// `Revision` counter, which reopens at 1 after every reconstruction (issue
+/// #101).
+///
+/// Two attempts within one admitted input share a digest, which is what makes
+/// a retry a retry. A new admission gets a new stamp even when the value is
+/// equal or the revision counter has wrapped back to 1, which is what stops a
+/// restarted bot from reading new work as already applied.
 fn derive_action_digest(
     flow: FlowRevision,
     chain: usize,
     entry: usize,
-    revision: u64,
+    input: &[u8; 16],
 ) -> ActionDigest {
     ActionDigest::new(hash_parts(&[
         ACTION_DIGEST_DOMAIN,
         flow.digest().as_bytes(),
-        &chain.to_le_bytes(),
-        &entry.to_le_bytes(),
-        &revision.to_le_bytes(),
+        &portable_index(chain).to_le_bytes(),
+        &portable_index(entry).to_le_bytes(),
+        input,
     ]))
 }
 
@@ -595,13 +626,13 @@ impl Effects {
         action: ActionId,
         chain: usize,
         entry: usize,
-        revision: u64,
+        input: [u8; 16],
         attempt: AttemptId,
     ) -> Option<EffectKey> {
         Some(self.identity().key(
             action,
             attempt,
-            derive_action_digest(self.identity().flow(), chain, entry, revision),
+            derive_action_digest(self.identity().flow(), chain, entry, &input),
             self.epoch()?,
         ))
     }
@@ -650,8 +681,8 @@ impl Effects {
     /// integers, because the held key may have come from a process that is
     /// gone: the digest is what the record has, so the digest is what the
     /// question is asked in.
-    fn applied_in(&self, action: ActionId, chain: usize, entry: usize, revision: u64) -> bool {
-        let digest = derive_action_digest(self.identity().flow(), chain, entry, revision);
+    fn applied_in(&self, action: ActionId, chain: usize, entry: usize, input: [u8; 16]) -> bool {
+        let digest = derive_action_digest(self.identity().flow(), chain, entry, &input);
         self.applied
             .iter()
             .any(|key| key.action() == action && key.digest() == digest)
@@ -885,6 +916,9 @@ struct EcsChain {
     /// value again" from "a new value", and the erased `Box<dyn Any>` cannot
     /// answer that on its own.
     same: fn(&dyn Any, &dyn Any) -> bool,
+    /// The admitted-input identity of an erased binding, captured from
+    /// `S::Output: InputIdentity` where the type was still a parameter.
+    identify: fn(&dyn Any) -> [u8; 16],
     /// The `(condition, action)` tuples, in declaration order.
     entries: Vec<ChainEntry>,
     /// What type this chain's source produces, taken where `S::Output` was
@@ -1052,10 +1086,48 @@ const MAX_IN_FLIGHT_POLLS: usize = 32;
 /// an unreadable value as unchanged would silently suppress an effect, and the
 /// failure mode this whole substrate is built to avoid is an effect that does
 /// not happen with nothing to show for it.
+/// The admitted-input identity of an erased binding.
+///
+/// A type-qualified content identity: the same value of the same type always
+/// derives the same bytes (so a restart retires work that already landed), and
+/// a different value derives different ones (so a restart does not read new
+/// work as already applied). Two *events* with equal content must still be
+/// distinguishable, which is the caller's to express via
+/// [`EventId`](crate::effect::EventId) or their own [`InputIdentity`] impl —
+/// content equality alone is not event identity (issue #101).
+fn identify_output<S>(value: &dyn Any) -> [u8; 16]
+where
+    S: Observe,
+    S::Output: InputIdentity + 'static,
+{
+    let mut hasher = Hasher::new();
+    hasher.update(OUTPUT_IDENTITY_DOMAIN);
+    hasher.update(std::any::type_name::<S::Output>().as_bytes());
+    if let Some(typed) = value.downcast_ref::<S::Output>() {
+        typed.write_identity(&mut hasher);
+    } else {
+        // A downcast that fails means the binding is not what this chain
+        // claims. Hash the miss rather than returning a default: a constant
+        // identity would make every mismatched binding look like the same
+        // admitted input.
+        hasher.update(b"downcast-miss");
+    }
+    let digest = hasher.finalize();
+    let mut wide = [0_u8; 16];
+    wide.copy_from_slice(&digest.as_bytes()[..16]);
+    wide
+}
+
+/// Compare two erased outputs as `S::Output`.
+///
+/// A downcast that fails is reported as *different* rather than equal: treating
+/// an unreadable value as unchanged would silently suppress an effect, and the
+/// failure mode this whole substrate is built to avoid is an effect that does
+/// not happen with nothing to show for it.
 fn same_output<S>(left: &dyn Any, right: &dyn Any) -> bool
 where
     S: Observe + 'static,
-    S::Output: PartialEq + 'static,
+    S::Output: PartialEq + InputIdentity + 'static,
 {
     match (
         left.downcast_ref::<S::Output>(),
@@ -1604,8 +1676,17 @@ struct SettledAttempt {
 /// source never promised it for. The manual [`fmt::Debug`] below renders the
 /// binding as its presence, which is the part a reader of a log wants.
 struct Transition {
-    /// The revision that opened it.
+    /// The revision that opened it, for the caller-facing revision report.
+    ///
+    /// Not the digest input: this counter is process-local and reopens at 1
+    /// after every reconstruction. [`Self::input`] is what a digest binds.
     revision: u64,
+    /// The admitted input identity this transition is bound to.
+    ///
+    /// A content identity extracted from the observation when it was admitted
+    /// (issue #101), so a restart that sees the same input retires work that
+    /// already landed and a restart that sees a different one does not.
+    input: [u8; 16],
     /// One state per entry of the chain, in declaration order.
     entries: Vec<EntryState>,
     /// What the ledger knows about the attempts made on each entry, for the
@@ -1673,9 +1754,10 @@ impl Transition {
     }
 
     /// A transition with every entry outstanding, bound to `value`.
-    fn opened(revision: u64, entries: usize, value: Option<Erased>) -> Self {
+    fn opened(input: [u8; 16], revision: u64, entries: usize, value: Option<Erased>) -> Self {
         Self {
             revision,
+            input,
             entries: vec![EntryState::NotStarted; entries],
             attempts: vec![AttemptRecord::default(); entries],
             value,
@@ -1688,9 +1770,10 @@ impl Transition {
     /// given up on: those are terminal until evidence revives them, and
     /// carrying their record forward is what keeps a lost effect reported
     /// instead of silently dropped the moment the source moves.
-    fn resumed(revision: u64, previous: &Self, value: Option<Erased>) -> Self {
+    fn resumed(input: [u8; 16], revision: u64, previous: &Self, value: Option<Erased>) -> Self {
         Self {
             revision,
+            input,
             entries: previous
                 .entries
                 .iter()
@@ -1814,6 +1897,11 @@ enum Settled {
 struct Ledger {
     /// One live transition per chain, in declaration order.
     transitions: Vec<Option<Transition>>,
+    /// The next admitted-input identity to mint.
+    ///
+    /// Seeded from the journal tail so a reconstructed bot cannot reissue a
+    /// stamp an earlier process already bound a dispatch to.
+    next_input: u64,
     /// The action each entry of each chain runs, in declaration order.
     ///
     /// Derived once, at assembly, from the declarations — the bot's name, the
@@ -1831,12 +1919,26 @@ struct Ledger {
 impl Ledger {
     /// A ledger with one idle slot per chain, no work recorded, and the
     /// declared action identities indexed as the chains are.
-    fn new(actions: Vec<Vec<ActionId>>, effects: Effects) -> Self {
+    fn new(actions: Vec<Vec<ActionId>>, effects: Effects, next_input: u64) -> Self {
         Self {
             transitions: (0..actions.len()).map(|_| None).collect(),
             actions,
             effects,
+            next_input,
         }
+    }
+
+    /// Mint the fallback admitted-input identity.
+    ///
+    /// Used only when a binding cannot supply an [`InputIdentity`]. The
+    /// watermark is seeded from the journal tail at assembly and only ever
+    /// grows, so a restart cannot reissue a stamp an earlier process bound a
+    /// dispatch to (issue #101). An identified binding does not need it: its
+    /// content identity is already unique to the input.
+    fn mint_input(&mut self) -> [u8; 16] {
+        let stamp = self.next_input;
+        self.next_input = self.next_input.saturating_add(1);
+        derive_input_stamp(stamp)
     }
 
     /// The action one entry runs, when the ledger has that entry.
@@ -1858,11 +1960,11 @@ impl Ledger {
     /// front of it: an `Applied` verdict retires its action for one generation
     /// and no other, so the comparison is between the acknowledgement's
     /// generation and this one.
-    fn generation(&self, chain: usize) -> Option<u64> {
+    fn generation(&self, chain: usize) -> Option<[u8; 16]> {
         self.transitions
             .get(chain)
             .and_then(Option::as_ref)
-            .map(|transition| transition.revision)
+            .map(|transition| transition.input)
     }
 
     /// The entry an action is declared on, when the ledger has one.
@@ -1994,10 +2096,10 @@ impl Ledger {
         };
         record.begun = Some(attempt);
         *state = EntryState::Unrecorded;
-        let revision = transition.revision;
+        let input = transition.input;
         let key = self
             .effects
-            .key(action, id.chain(), id.entry(), revision, attempt)
+            .key(action, id.chain(), id.entry(), input, attempt)
             .ok_or(BotError::EffectUnsettled { action })?;
         self.effects
             .append(&EffectEvent::IntentAdmitted { key })
@@ -2191,8 +2293,7 @@ impl Ledger {
         // The binding first, before the attempt is even looked up: a key that
         // names the right action inside a generation that is gone is exactly the
         // case this exists to refuse.
-        let live =
-            derive_action_digest(identity.flow(), id.chain(), id.entry(), transition.revision);
+        let live = derive_action_digest(identity.flow(), id.chain(), id.entry(), &transition.input);
         if key.digest() != live {
             return Settled::Superseded { id, current: live };
         }
@@ -2371,12 +2472,16 @@ impl Ledger {
             self.action_of(id)?,
             chain,
             entry,
-            transition.revision,
+            transition.input,
             transition.attempt_of(entry)?,
         )
     }
 
-    /// The first entry that is unresolved, in `(chain, entry)` order.
+    /// Every entry that is still unresolved, in `(chain, entry)` order.
+    ///
+    /// One fold, and every report that used to disagree is rendered from it:
+    /// [`Self::first_unresolved`] is the first item, [`Self::pending`] is the
+    /// whole list, and [`Self::unresolved_count`] is its length.
     ///
     /// "Unresolved" is open *or* abandoned, and the second half is load-bearing.
     /// An abandoned entry asks nothing of the substrate — it will not be
@@ -2387,98 +2492,91 @@ impl Ledger {
     /// opposite of what the ledger held. It is also a prerequisite that is *not*
     /// satisfied, so the entries behind it are unresolved through it.
     ///
-    /// Taking the first in declaration order is deliberate: the abandonment is
-    /// the entry that explains every successor blocked behind it, so naming it
-    /// is naming the reason.
-    fn first_unresolved(&self, budget: u32) -> Option<PendingWork> {
-        for (chain, transition) in self.transitions.iter().enumerate() {
-            let Some(transition) = transition.as_ref() else {
-                continue;
-            };
-            for (entry, state) in transition.entries.iter().enumerate() {
-                if !(state.is_open() || state.is_abandoned()) {
-                    continue;
-                }
+    /// A recovered attempt nothing has settled is reported for its declared
+    /// work whether or not a transition exists: the barrier is durable and does
+    /// not wait for a poll, so a bot assembled against a journal that already
+    /// says the bytes may be live is stuck before its first observation (issue
+    /// #104). It is reported *instead of* the entry's own hold, because two
+    /// reports for one entry would read as two problems — and it is why the
+    /// three reports now agree: a skipped unknown used to produce `Ok` from
+    /// `tick` while `pending` still named it.
+    fn unresolved(&self, budget: u32) -> Vec<PendingWork> {
+        let mut unresolved = Vec::new();
+        for chain in 0..self.actions.len().max(self.transitions.len()) {
+            // The declared actions and the live transition can disagree in
+            // width: a world mutated behind the builder's back is a real
+            // state, and a scan that trusted only one of the two walked past
+            // work the other one holds.
+            let declared = self.actions.get(chain).map_or(0, Vec::len);
+            let held = self
+                .transitions
+                .get(chain)
+                .and_then(Option::as_ref)
+                .map_or(0, |transition| transition.entries.len());
+            for entry in 0..declared.max(held) {
                 let id = WorkId { chain, entry };
-                // A recovered attempt nothing has settled outranks the entry's
-                // own state in the report, because it is the reason the entry
-                // cannot move. Reported first, and reported *instead*: two
-                // reports for one entry would read as two problems.
                 if let Some(key) = self
                     .action_of(id)
                     .and_then(|action| self.effects.unsettled_for(action))
                 {
                     let action = key.action();
-                    return Some(PendingWork {
+                    unresolved.push(PendingWork {
                         id,
                         key: Some(Box::new(key)),
                         hold: TransitionHold::UnsettledByRecovery { action },
                     });
+                    continue;
+                }
+                let Some(transition) = self.transitions.get(chain).and_then(Option::as_ref) else {
+                    continue;
+                };
+                let Some(state) = transition.entries.get(entry) else {
+                    continue;
+                };
+                if !(state.is_open() || state.is_abandoned()) {
+                    continue;
                 }
                 // Unreachable in practice: an open or abandoned state always
                 // renders a hold.
                 let Some(hold) = state.hold(budget) else {
                     continue;
                 };
-                return Some(PendingWork {
+                unresolved.push(PendingWork {
                     id,
                     key: self.key_of(chain, entry, transition).map(Box::new),
                     hold,
                 });
             }
         }
-        None
+        unresolved
     }
 
-    /// Every entry that is not finished, in `(chain, entry)` order: open, or
-    /// given up on and still reported.
+    /// The first entry that is unresolved, in `(chain, entry)` order: the
+    /// abandonment in front of its successors, the recovered unknown in front
+    /// of a fresh attempt, the open entry itself otherwise. Taking the first
+    /// in declaration order is deliberate: the barrier is the entry that
+    /// explains every successor blocked behind it, so naming it is naming the
+    /// reason.
+    fn first_unresolved(&self, budget: u32) -> Option<PendingWork> {
+        self.unresolved(budget).into_iter().next()
+    }
+
+    /// Every entry that is not finished, in `(chain, entry)` order: open,
+    /// given up on and still reported, or held by a recovered unknown.
     fn pending(&self, budget: u32) -> Vec<PendingWork> {
-        let mut pending = Vec::new();
-        for (chain, transition) in self.transitions.iter().enumerate() {
-            let Some(transition) = transition.as_ref() else {
-                continue;
-            };
-            for (entry, state) in transition.entries.iter().enumerate() {
-                let id = WorkId { chain, entry };
-                if let Some(key) = self
-                    .action_of(id)
-                    .and_then(|action| self.effects.unsettled_for(action))
-                {
-                    let action = key.action();
-                    pending.push(PendingWork {
-                        id,
-                        key: Some(Box::new(key)),
-                        hold: TransitionHold::UnsettledByRecovery { action },
-                    });
-                    continue;
-                }
-                if let Some(hold) = state.hold(budget) {
-                    pending.push(PendingWork {
-                        id,
-                        key: self.key_of(chain, entry, transition).map(Box::new),
-                        hold,
-                    });
-                }
-            }
-        }
-        pending
+        self.unresolved(budget)
     }
 
-    /// How many entries are still unresolved, across every chain: open, or
-    /// abandoned and so still blocking whatever is behind them.
+    /// How many entries are still unresolved, across every chain.
     ///
     /// Counted the same way [`Self::first_unresolved`] scans, because the two
     /// are rendered together in [`BotError::PendingTransition`]: a count that
     /// omitted abandoned entries would report a non-zero entry alongside an
     /// "0 outstanding", which reads as the one thing the pair is there to rule
-    /// out — a chain that is somehow both stuck and finished.
-    fn unresolved_count(&self) -> usize {
-        self.transitions
-            .iter()
-            .flatten()
-            .flat_map(|transition| transition.entries.iter())
-            .filter(|state| state.is_open() || state.is_abandoned())
-            .count()
+    /// out — a chain that is somehow both stuck and finished. A recovered
+    /// unknown is counted for the same reason: it is what is holding the work.
+    fn unresolved_count(&self, budget: u32) -> usize {
+        self.unresolved(budget).len()
     }
 }
 
@@ -2490,6 +2588,26 @@ fn revision_of(world: &World, chain: usize) -> u64 {
         .get(chain)
         .and_then(|entity| world.get::<Revision>(*entity))
         .map_or(0, |revision| revision.0)
+}
+
+/// Move the newest observation for `chain` out of its slot.
+///
+/// Moved, not copied. A source's `Output` carries no `Clone` bound and this is
+/// the reason it does not need one: the value is not wanted in two places at
+/// once. Once a transition is bound to it, the transition is what speaks for
+/// it, and the slot being empty is not a loss — it is the record that the value
+/// is out on loan, which [`observe_fold`] reads back through the binding.
+/// The admitted-input identity of `value` for `chain`, or the fallback stamp.
+fn admitted_identity(world: &mut World, chain: usize, value: Option<&Erased>) -> [u8; 16] {
+    let identify = world
+        .non_send::<Chains>()
+        .0
+        .get(chain)
+        .map(|held| held.identify);
+    match (identify, value) {
+        (Some(identify), Some(value)) => identify(value.as_any()),
+        _ => world.non_send_mut::<Ledger>().mint_input(),
+    }
 }
 
 /// Move the newest observation for `chain` out of its slot.
@@ -2563,21 +2681,29 @@ fn resume(
         // when that observation has actually moved away from its binding, and
         // is otherwise kept exactly as it stands — abandonment record and all.
         Some(transition) if !admits(world, chain, transition.value.as_ref()) => Some(transition),
-        Some(transition) => Some(Transition::resumed(
-            revision_of(world, chain),
-            &transition,
-            take_observed(world, chain),
-        )),
+        Some(transition) => {
+            let value = take_observed(world, chain);
+            let input = admitted_identity(world, chain, value.as_ref());
+            Some(Transition::resumed(
+                input,
+                revision_of(world, chain),
+                &transition,
+                value,
+            ))
+        }
         None if moving => {
             let entries = world
                 .non_send::<Chains>()
                 .0
                 .get(chain)
                 .map_or(0, |chain| chain.entries.len());
+            let value = take_observed(world, chain);
+            let input = admitted_identity(world, chain, value.as_ref());
             Some(Transition::opened(
+                input,
                 revision_of(world, chain),
                 entries,
-                take_observed(world, chain),
+                value,
             ))
         }
         None => None,
@@ -2916,12 +3042,21 @@ fn fire_plan(world: &mut World) {
         // written by the driver, which is the only place that knows the outcome.
         {
             let chains = world.non_send::<Chains>();
+            let ledger = world.non_send::<Ledger>();
             if let (Some(chain), Some(value), Some(failure)) = (
                 chains.0.get(index),
                 transition.value.as_ref(),
                 failures.get_mut(index),
             ) {
-                plan_chain(chain, &transition, value, index, &mut steps, failure);
+                plan_chain(
+                    chain,
+                    &transition,
+                    value,
+                    index,
+                    ledger,
+                    &mut steps,
+                    failure,
+                );
             }
             // No chain, or a transition bound to nothing: the work is kept,
             // not discarded. A transition is opened only for a source that was
@@ -3012,6 +3147,7 @@ fn plan_chain(
     transition: &Transition,
     value: &Erased,
     index: usize,
+    ledger: &Ledger,
     steps: &mut Vec<Step>,
     failure: &mut Option<BotError>,
 ) {
@@ -3019,6 +3155,20 @@ fn plan_chain(
         let Some(state) = transition.entries.get(entry_index) else {
             continue;
         };
+        // A recovered unknown is a barrier *before* the condition is read.
+        // The current observation is not evidence that the earlier effect did
+        // not occur, so a false condition may not skip the entry and a true
+        // one may not re-enter it; either way the successor does not run
+        // (issue #104).
+        if ledger
+            .action_of(WorkId {
+                chain: index,
+                entry: entry_index,
+            })
+            .is_some_and(|action| ledger.effects.blocks(action))
+        {
+            break;
+        }
         match *state {
             // Decided, and the chain continues past it: an entry that ran, and
             // one whose condition was false. Both are facts about the entry that
@@ -3342,7 +3492,7 @@ impl EcsBot {
         match ledger.first_unresolved(budget) {
             Some(work) => Err(BotError::PendingTransition {
                 work,
-                outstanding: ledger.unresolved_count(),
+                outstanding: ledger.unresolved_count(budget),
             }),
             None => Ok(self.world.resource::<Fired>().0),
         }
@@ -3641,6 +3791,20 @@ impl EcsBot {
                 entry: step.entry,
             };
             if matches!(step.decision, Decision::Skip) {
+                // A Skip is the plan's answer to a false condition, and a
+                // recovered unknown outranks that answer: marking the entry
+                // `Skipped` is how the unknown got buried and its successor
+                // ran (issue #104). The chain stops instead, and the entry
+                // stays where it was.
+                let blocked = {
+                    let ledger = self.world.non_send::<Ledger>();
+                    ledger
+                        .action_of(work)
+                        .is_some_and(|action| ledger.effects.blocks(action))
+                };
+                if blocked {
+                    break;
+                }
                 self.world.non_send_mut::<Ledger>().skip(work);
                 continue;
             }
@@ -3696,10 +3860,10 @@ impl EcsBot {
             // fact.
             if let Some(action) = self.world.non_send::<Ledger>().action_of(work) {
                 let ledger = self.world.non_send::<Ledger>();
-                if ledger.generation(step.chain).is_some_and(|revision| {
+                if ledger.generation(step.chain).is_some_and(|input| {
                     ledger
                         .effects
-                        .applied_in(action, step.chain, step.entry, revision)
+                        .applied_in(action, step.chain, step.entry, input)
                 }) {
                     // Retired, not merely stepped over. An entry whose effect
                     // landed owes nothing for this generation, and leaving it
@@ -4147,7 +4311,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
     pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
     where
         S: 'static,
-        S::Output: PartialEq + 'static,
+        S::Output: PartialEq + InputIdentity + 'static,
         U: Observe,
     {
         // Destructured rather than moved field by field: taking `prior` by
@@ -4165,6 +4329,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
         prior.push(EcsChain {
             source: Box::new(previous),
             same: same_output::<S>,
+            identify: identify_output::<S>,
             witness: Witness::of::<S::Output>(),
             entries,
         });
@@ -4186,7 +4351,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
     pub fn build(self, grants: &GrantSet) -> Result<EcsBot, BotError>
     where
         S: 'static,
-        S::Output: PartialEq + 'static,
+        S::Output: PartialEq + InputIdentity + 'static,
     {
         let Self {
             name,
@@ -4199,6 +4364,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
         prior.push(EcsChain {
             source: Box::new(source),
             same: same_output::<S>,
+            identify: identify_output::<S>,
             witness: Witness::of::<S::Output>(),
             entries,
         });
@@ -4339,7 +4505,14 @@ impl EcsBot {
                     .collect()
             })
             .collect();
-        let mut ledger = Ledger::new(actions, Effects::new(effects));
+        // The next admitted-input identity continues past whatever the journal
+        // already holds, so a reconstructed bot cannot reissue a stamp an
+        // earlier process bound a dispatch to (issue #101).
+        let next_input = {
+            let tail = effects.journal().tail();
+            tail.sequence().saturating_add(1)
+        };
+        let mut ledger = Ledger::new(actions, Effects::new(effects), next_input);
         // Every attempt the journal names, folded in. Not only the uncertain
         // ones: an attempt whose outcome is recorded is a fact about this run
         // too, and the two things this loop derives from it are what let a
@@ -4359,11 +4532,17 @@ impl EcsBot {
                     action: key.action(),
                 });
             };
-            // The journal's key must name this run. A journal that holds keys
-            // from another run is the foreign-journal case one step finer: the
-            // action matches, and the run does not, and settling it here would
-            // acknowledge an attempt in a run this bot is not.
-            if key.run() != ledger.effects.identity().run() {
+            // The journal's key must name this run, this flow, and this
+            // environment. A journal that holds keys from any of the others is
+            // the foreign-journal case one step finer: the action matches, the
+            // ownership identity does not, and folding it in would dispatch an
+            // action whose earlier attempt belongs to a different bot (issue
+            // #101).
+            let identity = ledger.effects.identity();
+            if key.run() != identity.run()
+                || key.flow() != identity.flow()
+                || key.environment() != identity.environment()
+            {
                 return Err(BotError::ActionNotDeclared {
                     action: key.action(),
                 });
@@ -6749,7 +6928,17 @@ mod tests {
             // opened with nothing observed, which holds its entries rather than
             // evaluating them against a value nobody read — a real state, but
             // not this one.
-            let mut transition = Transition::opened(revision, 1, Some(Erased::new(200_u16)));
+            // The same admitted input the first tick bound: a fabricated
+            // stamp would mint a key the journal never recorded, and the
+            // later settlement would be about a different attempt entirely.
+            let input = bot
+                .world
+                .non_send::<Ledger>()
+                .transitions
+                .first()
+                .and_then(Option::as_ref)
+                .map_or_else(|| derive_input_stamp(1), |held| held.input);
+            let mut transition = Transition::opened(input, revision, 1, Some(Erased::new(200_u16)));
             *transition
                 .entries
                 .first_mut()
@@ -6803,6 +6992,75 @@ mod tests {
         bot.resolve_effect(&held_key(&held)?, EffectEvidence::NotApplied)?;
         assert_eq!(bot.tick()?, 1, "and then it runs");
         assert_eq!(*log.borrow(), vec![200, 200], "exactly once more");
+        Ok(())
+    }
+
+    #[test]
+    fn an_action_identity_is_framed_and_portable() -> TestResult {
+        // Two different parses that an unframed concatenation collapses:
+        // "ab"+"c" and "a"+"bc" are the same byte string with no lengths, and
+        // the same ActionId for two different declarations (issue #101).
+        let ab_c = derive_action_id("ab", 0, 0, "c");
+        let a_bc = derive_action_id("a", 0, 0, "bc");
+        assert_ne!(
+            ab_c, a_bc,
+            "length framing keeps \"ab\"+\"c\" apart from \"a\"+\"bc\""
+        );
+        // The index is u64 either way, so this is the 32-/64-bit vector in
+        // one target's clothes: the same declaration always derives the same
+        // identity, and a different position never does.
+        assert_eq!(
+            derive_action_id("bot", 2, 3, "dom"),
+            derive_action_id("bot", 2, 3, "dom")
+        );
+        assert_ne!(
+            derive_action_id("bot", 2, 3, "dom"),
+            derive_action_id("bot", 2, 3, "dom2"),
+            "a different domain is a different action"
+        );
+        assert_ne!(
+            derive_action_id("bot", 2, 3, "dom"),
+            derive_action_id("bot", 3, 2, "dom"),
+            "chain and entry do not commute"
+        );
+        // A variable-length name cannot slide into the next field: the old
+        // unframed hash gave these two the same digest.
+        assert_ne!(
+            derive_action_id("bot", 0, 0, "dom"),
+            derive_action_id("bo", 0, 0, "tdom"),
+            "length framing keeps \"bot\"+\"dom\" apart from \"bo\"+\"tdom\""
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_unattempted_false_condition_still_skips_and_lets_its_successor_run() -> TestResult {
+        // The control for issue #104's barrier: a false condition on an entry
+        // that was never attempted is still a legitimate `Skip`, and the
+        // successor still runs. The barrier exists for a *recovered unknown*,
+        // not for every false condition — without this test the repair could
+        // stop the chain at every skip and read as correct.
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut bot = EcsBot::builder("legitimate-skip")
+            .observe(Script::new(vec![200]))
+            .on(|value: &u16| *value < 200, Record(Rc::clone(&log)))
+            .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
+            .with_effects(test_effects()?)
+            .build(&net_grants())?;
+
+        assert_eq!(bot.tick()?, 1, "the successor ran behind a skipped entry");
+        assert_eq!(
+            *log.borrow(),
+            vec![200],
+            "exactly one action, the successor's: {:?}",
+            *log.borrow()
+        );
+        assert_eq!(bot.revisions(), vec![1], "the transition resolved");
+        assert!(
+            bot.pending().is_empty(),
+            "a skipped entry owes nothing: {:?}",
+            bot.pending()
+        );
         Ok(())
     }
 

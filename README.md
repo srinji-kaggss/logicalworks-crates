@@ -268,6 +268,7 @@ the rest of this table is design history and contributor policy.
 | [`docs/orchestration-acceptance.spec.md`](docs/orchestration-acceptance.spec.md) | The 36 proposed public-interface falsifiers, and the developer-experience and quality evaluation that would accept the facade. Every case unrun. |
 | [`docs/orchestration-evidence.md`](docs/orchestration-evidence.md) | The pinned source findings, the foundational Rust assessment, and the reference entries the orchestration specs are built on. |
 | [`docs/bot-on-ecs.md`](docs/bot-on-ecs.md) | Bot semantics on an ECS substrate, and what that mapping costs. |
+| [`docs/effect-kernel.md`](docs/effect-kernel.md) | The durable effect dispatch and recovery kernel: the journal ladder, the recovery fold, settlement unification, durability admission, and what one authority means. |
 | [`docs/bevy-admission.md`](docs/bevy-admission.md) | The Bevy ECS decision and the alternatives measured against it. |
 | [`docs/candle-admission.md`](docs/candle-admission.md) | ML inference admission: authority, transitive surface, verification. |
 | [`docs/appcui-admission.md`](docs/appcui-admission.md) | Native terminal UI admission: authority and verification. |

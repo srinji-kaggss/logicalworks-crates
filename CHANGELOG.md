@@ -172,8 +172,51 @@ explicitly under that crate.
   `-> Self` constructors, which is how the inconsistency survived a green build.
 
 
+### lgwks_bot Breaking
+
+- `Observe::Output` must implement the new `InputIdentity`, alongside the
+  `PartialEq` it already needed. The dispatch digest used to bind the
+  process-local `Revision` counter, which reopens at 1 after every
+  reconstruction, so a restarted bot read a *different* request as already
+  applied and silently omitted it. The digest now binds the admitted input's
+  content identity. `InputIdentity` is implemented for the fixed-width
+  integers, `bool`, `String` and `&str`; a caller whose output is something
+  else writes the identity bytes themselves. Two events with equal payloads
+  stay distinguishable by tagging them with `EventId`, whose id is part of
+  both `InputIdentity` and `PartialEq` — content equality is not event
+  identity.
+
+### lgwks_bot Added
+
+- `InputIdentity` and `EventId`. The first names an admitted observation for
+  the purpose of a dispatch digest; the second tags a payload with an event id
+  so two equal payloads are two events.
+
 ### lgwks_bot Fixed
 
+- Action identities are length-framed and index-portable. `derive_action_id`
+  used to concatenate `bot` and `domain` around `usize::to_le_bytes` with no
+  length prefix, so `"ab"`+`"c"` and `"a"`+`"bc"` derived the same `ActionId`
+  and a 32-bit and a 64-bit target derived different ones for the same bot.
+  Fields are now `u64`-width length-prefixed; the domain separators are
+  `action-id.v2` and `action-digest.v2`.
+- Assembly rejects a recovered key from another flow or another environment,
+  not only another run. Folding in a foreign journal is how a bot dispatches
+  an action whose earlier attempt belongs to a different document.
+- A recovered unknown is a barrier in front of a false condition, not
+  something a new observation can skip past. `plan_chain` used to evaluate
+  the current value first and emit `Decision::Skip` for an entry whose action
+  a journal already recorded as dispatched with no outcome; `run_chain`
+  marked that entry `Skipped` before it ever consulted `effects.blocks`, so
+  the successor ran and the tick could return `Ok` while `pending` still
+  named the unknown. A changed source is not evidence that the earlier
+  effect did not occur. The barrier is now checked before the condition, a
+  `Skip` that somehow reaches the walk for a blocked action stops the chain
+  instead of burying the hold, and `pending` / `first_unresolved` /
+  `unresolved_count` are one fold over the declared work — so a recovered
+  unknown is reported whether or not a transition exists, and the three
+  reports agree (`tests/durable_dispatch.rs::a_recovered_unknown_blocks_a_false_condition_and_its_successor`
+  and the unattempted false-condition control in `ecs::tests`).
 - Live settlement is journaled before it is acknowledged, and a repeat of the
   same evidence is idempotent across a restart. `Ledger::settle` used to move
   only in-memory state while `settle_recovered` appended `OutcomeObserved`, so
@@ -190,6 +233,9 @@ explicitly under that crate.
   `Settled::Duplicate`, the other evidence is `Settled::Contradicted`, and only
   a key the journal never recorded is `NoSuchWork`
   (`tests/durable_dispatch.rs::a_live_settlement_is_journaled_before_it_is_acknowledged`).
+- Locator ladder candidates now share the flat recognizer's frame and kind
+  eligibility gate, while anchor mismatches preserve measured fingerprint
+  evidence instead of reporting a falsified zero score.
 - A post-effect journal failure is no longer reported as a pre-dispatch
   refusal and terminal abandonment. `run_chain` used to replace the action's
   known outcome with `BotError::EffectRefused` when the `OutcomeObserved`
