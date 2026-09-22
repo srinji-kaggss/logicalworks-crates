@@ -8,7 +8,7 @@
 //! an action that takes exactly it, so a chain that cannot work does not build:
 //!
 //! ```rust
-//! use lgwks_bot::eval::Above;
+//! use lgwks_bot::domain::eval::Above;
 //! use lgwks_bot::{Auth, Bot, BotError, Cap, Evaluate, Execute, GrantSet, Observe};
 //!
 //! /// A source that reports a count.

@@ -147,8 +147,10 @@ pub mod cap;
 pub mod domain {
     //! Shipped automation domains.
     //!
-    //! Both paths are stable: `lgwks_bot::net` and `lgwks_bot::domain::net`
-    //! name the same module. Prefer the short path in new code.
+    //! One path, `lgwks_bot::domain::net`, rather than a second short alias at
+    //! the crate root. Nine generic words — `fs`, `net`, `sys`, `data` — read
+    //! like the standard library's at a call site that has not imported this
+    //! crate's prelude, and a second path is a second thing to keep stable.
     pub mod chat;
     pub mod data;
     pub mod eval;
@@ -241,15 +243,11 @@ pub mod verb;
 
 pub use cap::{Auth, Cap, Deficit, Demand, Shortage};
 pub use error::{BotError, DispatchCertainty, RetryClass};
-pub use frontier::{
-    Admission, CompletionError, ConstraintKey, DeferralKind, Frontier, InFlightPermit,
-    PolitenessError, PolitenessPolicy, RejectKind, Resolved, RulesState,
-};
 pub use gate::GrantSet;
 pub use language::{Alias, LanguageResolver};
 pub use registry::{Action, ActionCtor, DomainRegistry, Source, SourceCtor};
 #[cfg(feature = "rt")]
-pub use rt::{Builder, Handle, Runtime, block_on};
+pub use rt::runtime::{Builder, Handle, Runtime, block_on};
 pub use semantic::{Embedder, EmbedderIdentity, SemanticError, SemanticPolicy, SemanticResolver};
 pub use session::{
     AnswerDomain, AnswerRejection, ChoiceArm, CompiledTemplate, DecisionReceipt, DegradedReason,
@@ -281,13 +279,3 @@ pub use lgwks_deps::tokio::select;
 /// error. Re-exported from the `lgwks_deps` engine so callers never name `tokio`.
 #[cfg(all(feature = "rt", feature = "macros"))]
 pub use lgwks_deps::tokio::try_join;
-
-pub use domain::chat;
-pub use domain::data;
-pub use domain::eval;
-pub use domain::flow;
-pub use domain::fs;
-pub use domain::gh;
-pub use domain::net;
-pub use domain::notify;
-pub use domain::sys;

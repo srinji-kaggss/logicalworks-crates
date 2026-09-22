@@ -444,7 +444,7 @@ impl From<JournalError> for DispatchError {
 /// [`Broker::revalidate`] immediately before handing over, because a replacement
 /// landing in between would otherwise leave this preparation dispatchable.
 #[derive(Debug)]
-pub struct Prepared {
+pub(crate) struct Prepared {
     /// Authority for the environment generation the attempt was prepared
     /// against.
     authority: Authority,
@@ -453,21 +453,14 @@ pub struct Prepared {
 }
 
 impl Prepared {
-    /// Authority for the handoff.
-    #[must_use]
-    pub const fn authority(&self) -> &Authority {
-        &self.authority
-    }
-
-    /// The committed position of the `DispatchPrepared` append.
-    #[must_use]
-    pub const fn ack(&self) -> DurableAck {
-        self.ack
-    }
-
     /// Spend the preparation, taking the authority and the acknowledgment.
+    ///
+    /// This is the only way to read it. Borrowing accessors for the two fields
+    /// existed while the type was public and nothing outside this crate ever
+    /// called them; the one caller, the dispatch path in `ecs`, wants both
+    /// halves and consumes the preparation to get them.
     #[must_use]
-    pub fn into_parts(self) -> (Authority, DurableAck) {
+    pub(crate) fn into_parts(self) -> (Authority, DurableAck) {
         (self.authority, self.ack)
     }
 }
@@ -490,7 +483,7 @@ impl Prepared {
 /// [`DispatchError::Journal`] when the append is refused. The append is also
 /// where a second `DispatchPrepared` for one attempt is refused, so a retry that
 /// reuses an `AttemptId` fails here rather than dispatching twice.
-pub fn prepare_dispatch(
+pub(crate) fn prepare_dispatch(
     broker: &Broker,
     journal: &mut dyn EffectJournal,
     key: EffectKey,
@@ -768,9 +761,9 @@ mod tests {
         let mut journal = MemoryJournal::new();
         admitted(&mut journal, key)?;
 
-        let prepared = prepare_dispatch(&broker, &mut journal, key)?;
-        assert_eq!(prepared.authority().epoch(), first);
-        assert_eq!(prepared.ack().position(), journal.tail());
+        let (authority, ack) = prepare_dispatch(&broker, &mut journal, key)?.into_parts();
+        assert_eq!(authority.epoch(), first);
+        assert_eq!(ack.position(), journal.tail());
         assert_eq!(journal.committed().len(), 2);
         Ok(())
     }
