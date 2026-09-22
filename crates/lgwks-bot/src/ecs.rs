@@ -2350,7 +2350,11 @@ impl Ledger {
         )
     }
 
-    /// The first entry that is unresolved, in `(chain, entry)` order.
+    /// Every entry that is still unresolved, in `(chain, entry)` order.
+    ///
+    /// One fold, and every report that used to disagree is rendered from it:
+    /// [`Self::first_unresolved`] is the first item, [`Self::pending`] is the
+    /// whole list, and [`Self::unresolved_count`] is its length.
     ///
     /// "Unresolved" is open *or* abandoned, and the second half is load-bearing.
     /// An abandoned entry asks nothing of the substrate — it will not be
@@ -2361,98 +2365,91 @@ impl Ledger {
     /// opposite of what the ledger held. It is also a prerequisite that is *not*
     /// satisfied, so the entries behind it are unresolved through it.
     ///
-    /// Taking the first in declaration order is deliberate: the abandonment is
-    /// the entry that explains every successor blocked behind it, so naming it
-    /// is naming the reason.
-    fn first_unresolved(&self, budget: u32) -> Option<PendingWork> {
-        for (chain, transition) in self.transitions.iter().enumerate() {
-            let Some(transition) = transition.as_ref() else {
-                continue;
-            };
-            for (entry, state) in transition.entries.iter().enumerate() {
-                if !(state.is_open() || state.is_abandoned()) {
-                    continue;
-                }
+    /// A recovered attempt nothing has settled is reported for its declared
+    /// work whether or not a transition exists: the barrier is durable and does
+    /// not wait for a poll, so a bot assembled against a journal that already
+    /// says the bytes may be live is stuck before its first observation (issue
+    /// #104). It is reported *instead of* the entry's own hold, because two
+    /// reports for one entry would read as two problems — and it is why the
+    /// three reports now agree: a skipped unknown used to produce `Ok` from
+    /// `tick` while `pending` still named it.
+    fn unresolved(&self, budget: u32) -> Vec<PendingWork> {
+        let mut unresolved = Vec::new();
+        for chain in 0..self.actions.len().max(self.transitions.len()) {
+            // The declared actions and the live transition can disagree in
+            // width: a world mutated behind the builder's back is a real
+            // state, and a scan that trusted only one of the two walked past
+            // work the other one holds.
+            let declared = self.actions.get(chain).map_or(0, Vec::len);
+            let held = self
+                .transitions
+                .get(chain)
+                .and_then(Option::as_ref)
+                .map_or(0, |transition| transition.entries.len());
+            for entry in 0..declared.max(held) {
                 let id = WorkId { chain, entry };
-                // A recovered attempt nothing has settled outranks the entry's
-                // own state in the report, because it is the reason the entry
-                // cannot move. Reported first, and reported *instead*: two
-                // reports for one entry would read as two problems.
                 if let Some(key) = self
                     .action_of(id)
                     .and_then(|action| self.effects.unsettled_for(action))
                 {
                     let action = key.action();
-                    return Some(PendingWork {
+                    unresolved.push(PendingWork {
                         id,
                         key: Some(Box::new(key)),
                         hold: TransitionHold::UnsettledByRecovery { action },
                     });
+                    continue;
+                }
+                let Some(transition) = self.transitions.get(chain).and_then(Option::as_ref) else {
+                    continue;
+                };
+                let Some(state) = transition.entries.get(entry) else {
+                    continue;
+                };
+                if !(state.is_open() || state.is_abandoned()) {
+                    continue;
                 }
                 // Unreachable in practice: an open or abandoned state always
                 // renders a hold.
                 let Some(hold) = state.hold(budget) else {
                     continue;
                 };
-                return Some(PendingWork {
+                unresolved.push(PendingWork {
                     id,
                     key: self.key_of(chain, entry, transition).map(Box::new),
                     hold,
                 });
             }
         }
-        None
+        unresolved
     }
 
-    /// Every entry that is not finished, in `(chain, entry)` order: open, or
-    /// given up on and still reported.
+    /// The first entry that is unresolved, in `(chain, entry)` order: the
+    /// abandonment in front of its successors, the recovered unknown in front
+    /// of a fresh attempt, the open entry itself otherwise. Taking the first
+    /// in declaration order is deliberate: the barrier is the entry that
+    /// explains every successor blocked behind it, so naming it is naming the
+    /// reason.
+    fn first_unresolved(&self, budget: u32) -> Option<PendingWork> {
+        self.unresolved(budget).into_iter().next()
+    }
+
+    /// Every entry that is not finished, in `(chain, entry)` order: open,
+    /// given up on and still reported, or held by a recovered unknown.
     fn pending(&self, budget: u32) -> Vec<PendingWork> {
-        let mut pending = Vec::new();
-        for (chain, transition) in self.transitions.iter().enumerate() {
-            let Some(transition) = transition.as_ref() else {
-                continue;
-            };
-            for (entry, state) in transition.entries.iter().enumerate() {
-                let id = WorkId { chain, entry };
-                if let Some(key) = self
-                    .action_of(id)
-                    .and_then(|action| self.effects.unsettled_for(action))
-                {
-                    let action = key.action();
-                    pending.push(PendingWork {
-                        id,
-                        key: Some(Box::new(key)),
-                        hold: TransitionHold::UnsettledByRecovery { action },
-                    });
-                    continue;
-                }
-                if let Some(hold) = state.hold(budget) {
-                    pending.push(PendingWork {
-                        id,
-                        key: self.key_of(chain, entry, transition).map(Box::new),
-                        hold,
-                    });
-                }
-            }
-        }
-        pending
+        self.unresolved(budget)
     }
 
-    /// How many entries are still unresolved, across every chain: open, or
-    /// abandoned and so still blocking whatever is behind them.
+    /// How many entries are still unresolved, across every chain.
     ///
     /// Counted the same way [`Self::first_unresolved`] scans, because the two
     /// are rendered together in [`BotError::PendingTransition`]: a count that
     /// omitted abandoned entries would report a non-zero entry alongside an
     /// "0 outstanding", which reads as the one thing the pair is there to rule
-    /// out — a chain that is somehow both stuck and finished.
-    fn unresolved_count(&self) -> usize {
-        self.transitions
-            .iter()
-            .flatten()
-            .flat_map(|transition| transition.entries.iter())
-            .filter(|state| state.is_open() || state.is_abandoned())
-            .count()
+    /// out — a chain that is somehow both stuck and finished. A recovered
+    /// unknown is counted for the same reason: it is what is holding the work.
+    fn unresolved_count(&self, budget: u32) -> usize {
+        self.unresolved(budget).len()
     }
 }
 
@@ -2890,12 +2887,21 @@ fn fire_plan(world: &mut World) {
         // written by the driver, which is the only place that knows the outcome.
         {
             let chains = world.non_send::<Chains>();
+            let ledger = world.non_send::<Ledger>();
             if let (Some(chain), Some(value), Some(failure)) = (
                 chains.0.get(index),
                 transition.value.as_ref(),
                 failures.get_mut(index),
             ) {
-                plan_chain(chain, &transition, value, index, &mut steps, failure);
+                plan_chain(
+                    chain,
+                    &transition,
+                    value,
+                    index,
+                    ledger,
+                    &mut steps,
+                    failure,
+                );
             }
             // No chain, or a transition bound to nothing: the work is kept,
             // not discarded. A transition is opened only for a source that was
@@ -2986,6 +2992,7 @@ fn plan_chain(
     transition: &Transition,
     value: &Erased,
     index: usize,
+    ledger: &Ledger,
     steps: &mut Vec<Step>,
     failure: &mut Option<BotError>,
 ) {
@@ -2993,6 +3000,20 @@ fn plan_chain(
         let Some(state) = transition.entries.get(entry_index) else {
             continue;
         };
+        // A recovered unknown is a barrier *before* the condition is read.
+        // The current observation is not evidence that the earlier effect did
+        // not occur, so a false condition may not skip the entry and a true
+        // one may not re-enter it; either way the successor does not run
+        // (issue #104).
+        if ledger
+            .action_of(WorkId {
+                chain: index,
+                entry: entry_index,
+            })
+            .is_some_and(|action| ledger.effects.blocks(action))
+        {
+            break;
+        }
         match *state {
             // Decided, and the chain continues past it: an entry that ran, and
             // one whose condition was false. Both are facts about the entry that
@@ -3316,7 +3337,7 @@ impl EcsBot {
         match ledger.first_unresolved(budget) {
             Some(work) => Err(BotError::PendingTransition {
                 work,
-                outstanding: ledger.unresolved_count(),
+                outstanding: ledger.unresolved_count(budget),
             }),
             None => Ok(self.world.resource::<Fired>().0),
         }
@@ -3615,6 +3636,20 @@ impl EcsBot {
                 entry: step.entry,
             };
             if matches!(step.decision, Decision::Skip) {
+                // A Skip is the plan's answer to a false condition, and a
+                // recovered unknown outranks that answer: marking the entry
+                // `Skipped` is how the unknown got buried and its successor
+                // ran (issue #104). The chain stops instead, and the entry
+                // stays where it was.
+                let blocked = {
+                    let ledger = self.world.non_send::<Ledger>();
+                    ledger
+                        .action_of(work)
+                        .is_some_and(|action| ledger.effects.blocks(action))
+                };
+                if blocked {
+                    break;
+                }
                 self.world.non_send_mut::<Ledger>().skip(work);
                 continue;
             }
@@ -6712,6 +6747,37 @@ mod tests {
         bot.resolve_effect(&held_key(&held)?, EffectEvidence::NotApplied)?;
         assert_eq!(bot.tick()?, 1, "and then it runs");
         assert_eq!(*log.borrow(), vec![200, 200], "exactly once more");
+        Ok(())
+    }
+
+    #[test]
+    fn an_unattempted_false_condition_still_skips_and_lets_its_successor_run() -> TestResult {
+        // The control for issue #104's barrier: a false condition on an entry
+        // that was never attempted is still a legitimate `Skip`, and the
+        // successor still runs. The barrier exists for a *recovered unknown*,
+        // not for every false condition — without this test the repair could
+        // stop the chain at every skip and read as correct.
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut bot = EcsBot::builder("legitimate-skip")
+            .observe(Script::new(vec![200]))
+            .on(|value: &u16| *value < 200, Record(Rc::clone(&log)))
+            .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
+            .with_effects(test_effects()?)
+            .build(&net_grants())?;
+
+        assert_eq!(bot.tick()?, 1, "the successor ran behind a skipped entry");
+        assert_eq!(
+            *log.borrow(),
+            vec![200],
+            "exactly one action, the successor's: {:?}",
+            *log.borrow()
+        );
+        assert_eq!(bot.revisions(), vec![1], "the transition resolved");
+        assert!(
+            bot.pending().is_empty(),
+            "a skipped entry owes nothing: {:?}",
+            bot.pending()
+        );
         Ok(())
     }
 

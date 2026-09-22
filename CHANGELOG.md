@@ -174,6 +174,20 @@ explicitly under that crate.
 
 ### lgwks_bot Fixed
 
+- A recovered unknown is a barrier in front of a false condition, not
+  something a new observation can skip past. `plan_chain` used to evaluate
+  the current value first and emit `Decision::Skip` for an entry whose action
+  a journal already recorded as dispatched with no outcome; `run_chain`
+  marked that entry `Skipped` before it ever consulted `effects.blocks`, so
+  the successor ran and the tick could return `Ok` while `pending` still
+  named the unknown. A changed source is not evidence that the earlier
+  effect did not occur. The barrier is now checked before the condition, a
+  `Skip` that somehow reaches the walk for a blocked action stops the chain
+  instead of burying the hold, and `pending` / `first_unresolved` /
+  `unresolved_count` are one fold over the declared work — so a recovered
+  unknown is reported whether or not a transition exists, and the three
+  reports agree (`tests/durable_dispatch.rs::a_recovered_unknown_blocks_a_false_condition_and_its_successor`
+  and the unattempted false-condition control in `ecs::tests`).
 - Live settlement is journaled before it is acknowledged, and a repeat of the
   same evidence is idempotent across a restart. `Ledger::settle` used to move
   only in-memory state while `settle_recovered` appended `OutcomeObserved`, so
