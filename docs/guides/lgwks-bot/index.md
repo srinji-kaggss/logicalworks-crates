@@ -113,7 +113,9 @@ you to discover.
   `Runtime::block_on`.
 - **No exactly-once delivery.** An action that may have taken effect after its
   request was sent fails as `BotError::EffectIndeterminate`, and reconciling
-  that is your decision. See [failures](failures.md).
+  that is your decision. See [failures](failures.md). The durable dispatch and
+  recovery kernel behind that boundary is described for implementers in
+  [`docs/effect-kernel.md`](../../effect-kernel.md).
 
 ## Where to go next
 

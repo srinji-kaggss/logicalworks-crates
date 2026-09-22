@@ -1,8 +1,18 @@
 # Acceptance: simple authoring, complete orchestration
 
-Status: **proposed tests and release criteria; all new cases UNRUN in this
-specification change**. Tracker: [#87](https://github.com/srinji-kaggss/logicalworks-crates/issues/87).
+Status: **proposed tests and release criteria; the T01–T36 acceptance run is
+still UNRUN**. Tracker: [#87](https://github.com/srinji-kaggss/logicalworks-crates/issues/87),
+release gate [#109](https://github.com/srinji-kaggss/logicalworks-crates/issues/109).
 A passing existing workflow does not execute tests that have not been added.
+
+Candidate regressions now exist near T07, T09–T12, T14, T19 and T20, in
+`crates/lgwks-bot/tests/durable_dispatch.rs` and
+`crates/lgwks-bot/tests/process_ownership.rs`, and the design they enforce is
+described in [effect-kernel.md](effect-kernel.md). Those are unit and
+integration journeys against the public surface. They are not this
+specification's acceptance run: no row below is marked accepted, and the
+externally bounded subprocess and OS-containment evidence the rows require has
+not been collected. T21 and T22 remain without candidate tests.
 
 ## Evidence model
 
