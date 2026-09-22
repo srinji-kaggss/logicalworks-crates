@@ -149,7 +149,15 @@ explicitly under that crate.
   `Observe::Output: PartialEq` requirement to `EcsBuilder::observe`, which
   carries no such bound; it lands on `EcsObserveBuilder::observe`, the call that
   closes a chain, and the citation now points at the bound.
-
+- The `ephemeral` scope grew `ecs.rs` by 113 lines and `spec.rs` by four, and the
+  guides cite both by line, so all twenty-four citations under them landed on
+  whatever now occupied the number. Nine were caught, having resolved to a
+  closing brace, a blank line or an empty `///`. The other fifteen resolved to a
+  plausible line that was not the one cited, which is the class the checker
+  deliberately does not judge. All twenty-four were re-anchored to the line they
+  named before the growth, matched by the text of that line rather than by the
+  numbers the offset would predict; the five whose text is not unique in the
+  file were confirmed by reading them.
 
 ### Repository Added
 

@@ -26,7 +26,7 @@ each tick and runs the action on the ticks where the polled value moved. A
 condition that stays true does not re-fire, which is the difference between this
 and a timer that re-evaluates a predicate every interval.
 
-`Bot` is not a separate type with a separate implementation. `crates/lgwks-bot/src/spec.rs:316`
+`Bot` is not a separate type with a separate implementation. `crates/lgwks-bot/src/spec.rs:318`
 re-exports the ECS bot under the shorter name:
 
 ```rust
@@ -41,10 +41,10 @@ There is one execution path. `crates/lgwks-bot/Cargo.toml` states that
 "would mean nothing exercises it, the workspace gate never compiles it, and it
 rots into a second opinion nobody chose."
 
-`Bot::tick` is the synchronous adapter (`crates/lgwks-bot/src/ecs.rs:2929`): it
+`Bot::tick` is the synchronous adapter (`crates/lgwks-bot/src/ecs.rs:3042`): it
 drives the non-`Send` verb futures on a thread-parking executor, so there is
 nothing to await. `Bot::tick_async` is the same tick awaited on the caller's
-executor (`crates/lgwks-bot/src/ecs.rs:2821`), and it is the one to call from
+executor (`crates/lgwks-bot/src/ecs.rs:2934`), and it is the one to call from
 inside a runtime — `tick` refuses there with `BotError::TickInsideRuntime`
 rather than park the thread that owns the reactor. Do not write
 `bot.tick().await`; that is `tick` returning `usize`, then a `usize` that is not
@@ -102,7 +102,7 @@ you to discover.
   a clone of the set it was admitted with. See [authority](authority.md).
 - **No spec materializer yet.** `BotSpec` validates a JSON document. There is no
   `Bot::from_spec`; you build through the builder chain, and
-  `crates/lgwks-bot/src/spec.rs:668` validates shape only. Unlike the entries
+  `crates/lgwks-bot/src/spec.rs:672` validates shape only. Unlike the entries
   around it, this one is scheduled work rather than a permanent limit: it is
   recorded as open in `experience/invariants/sdk.yaml`. Half of it exists —
   `DomainRegistry` and the `domains!` list, see [domains](domains.md) — and the
