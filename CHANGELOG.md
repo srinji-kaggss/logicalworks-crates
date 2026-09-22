@@ -174,6 +174,22 @@ explicitly under that crate.
 
 ### lgwks_bot Fixed
 
+- Live settlement is journaled before it is acknowledged, and a repeat of the
+  same evidence is idempotent across a restart. `Ledger::settle` used to move
+  only in-memory state while `settle_recovered` appended `OutcomeObserved`, so
+  a process that settled an effect and then died left a journal that recorded
+  the dispatch and nothing else: the next bot held the attempt forever, and a
+  caller repeating the acknowledgement it had already given was told
+  `NoSuchWork`. Settlement is now one write (`Effects::ensure_outcome`) shared
+  by the live and recovered paths, decided by a read-only
+  `classify_settlement` and applied by `apply_settlement` only when the live
+  slot still needs moving — an abandoned entry reopened by confirmation that
+  its effect did not land is exactly that case, and answering `Duplicate`
+  before the move is how that reopen stopped happening. When the live slot has
+  nothing left to move, the journal's record answers: same evidence is
+  `Settled::Duplicate`, the other evidence is `Settled::Contradicted`, and only
+  a key the journal never recorded is `NoSuchWork`
+  (`tests/durable_dispatch.rs::a_live_settlement_is_journaled_before_it_is_acknowledged`).
 - Process supervision now establishes its process-group guard before scheduling
   the child and reports bounded descendant cleanup evidence instead of treating
   the leader's exit as proof that the process tree is gone.

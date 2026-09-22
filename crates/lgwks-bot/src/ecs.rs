@@ -193,7 +193,7 @@ use super::error::{BotError, DispatchCertainty, Escaped, RetryClass};
 use super::gate::GrantSet;
 #[cfg(feature = "ephemeral")]
 use super::journal::MemoryJournal;
-use super::journal::{AttemptStatus, EffectEvent, EffectJournal, JournalError, recover};
+use super::journal::{AttemptStatus, EffectEvent, EffectJournal, EventKind, JournalError, recover};
 use super::spec::{ChainEntry, Erased, ObserveAny, Witness, typed_entry};
 use super::verb::{Evaluate, Execute, Observe};
 
@@ -696,12 +696,71 @@ impl Effects {
         key: EffectKey,
         evidence: EffectEvidence,
     ) -> Result<(), JournalError> {
-        self.append(&EffectEvent::OutcomeObserved { key, evidence })?;
+        self.ensure_outcome(key, evidence)?;
         self.unsettled.retain(|held| *held != key);
-        if evidence == EffectEvidence::Applied {
-            self.applied.push(key);
-        }
         Ok(())
+    }
+
+    /// Record an outcome for `key` if one is not already committed, and fold
+    /// it into the in-memory applied set.
+    ///
+    /// Idempotent: a repeat of the same evidence does not append twice. The
+    /// ladder's next step after `OutcomeObserved` is `Verified`, so an
+    /// `OutOfOrder` that expected `Verified` (or nothing) means this exact
+    /// record is already in the journal and the call is a success. This is the
+    /// one settlement write, shared by the live and recovered paths so a
+    /// restart cannot resurrect an attempt a live resolve already settled.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the journal refuses, other than the idempotent repeat above.
+    /// The outcome already committed for `key`, when there is one.
+    ///
+    /// The durable half of idempotent settlement: a repeat after reconstruction
+    /// has no live `AttemptRecord` to consult, and answering `NoSuchWork` there
+    /// is how the same evidence stops being a safe retry across a restart.
+    fn outcome_for(&self, key: &EffectKey) -> Option<EffectEvidence> {
+        self.scope
+            .journal()
+            .committed()
+            .ok()?
+            .iter()
+            .find_map(|event| match *event {
+                EffectEvent::OutcomeObserved {
+                    key: held,
+                    evidence,
+                } if held == *key => Some(evidence),
+                _ => None,
+            })
+    }
+
+    /// Record an outcome for `key` if one is not already committed, and fold
+    /// it into the in-memory applied set.
+    ///
+    /// Idempotent: a repeat of the same evidence does not append twice.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the journal refuses, other than the idempotent repeat above.
+    fn ensure_outcome(
+        &mut self,
+        key: EffectKey,
+        evidence: EffectEvidence,
+    ) -> Result<(), JournalError> {
+        match self.append(&EffectEvent::OutcomeObserved { key, evidence }) {
+            Ok(()) => {
+                if evidence == EffectEvidence::Applied {
+                    self.applied.push(key);
+                }
+                Ok(())
+            }
+            Err(JournalError::OutOfOrder { expected, .. })
+                if expected == Some(EventKind::Verified) || expected.is_none() =>
+            {
+                Ok(())
+            }
+            Err(cause) => Err(cause),
+        }
     }
 }
 
@@ -2083,7 +2142,13 @@ impl Ledger {
     ///
     /// Returns a decision rather than a bool, because the answers lead a caller
     /// to different next actions and several of them are not errors.
-    fn settle(&mut self, key: &EffectKey, evidence: EffectEvidence) -> Settled {
+    /// Validate an evidence report without changing any state.
+    ///
+    /// The whole of [`settle`](Self::settle)'s decision, minus the mutation.
+    /// `resolve_effect` runs this first so the settlement fact can be journaled
+    /// before the entry is allowed to move: a live settle that only touched
+    /// memory is resurrected by recovery as an unknown (issue #106).
+    fn classify_settlement(&self, key: &EffectKey, evidence: EffectEvidence) -> Settled {
         let Some(id) = self.locate(key.action()) else {
             return Settled::NoSuchWork { id: None };
         };
@@ -2094,12 +2159,8 @@ impl Ledger {
         if key.run() != identity.run() || key.flow() != identity.flow() {
             return Settled::NoSuchWork { id: None };
         }
-        let Some(transition) = self
-            .transitions
-            .get_mut(id.chain())
-            .and_then(Option::as_mut)
-        else {
-            return Settled::NoSuchWork { id: Some(id) };
+        let Some(transition) = self.transitions.get(id.chain()).and_then(Option::as_ref) else {
+            return self.durable_or_missing(key, id, evidence);
         };
         // The binding first, before the attempt is even looked up: a key that
         // names the right action inside a generation that is gone is exactly the
@@ -2110,8 +2171,22 @@ impl Ledger {
             return Settled::Superseded { id, current: live };
         }
         let Some(record) = transition.attempts.get(id.entry()).copied() else {
-            return Settled::NoSuchWork { id: Some(id) };
+            return self.durable_or_missing(key, id, evidence);
         };
+        // The durable record is authoritative about *what the outcome is*. A
+        // mismatch is a contradiction whatever the live slot says. A match is
+        // deliberately not answered here: a live settleable slot still has to
+        // be moved — an abandoned entry reopened by confirmation that its
+        // effect did not land is exactly that — and answering `Duplicate`
+        // before the move is how the reopen stops happening (issue #106).
+        if let Some(recorded) = self.effects.outcome_for(key)
+            && recorded != evidence
+        {
+            return Settled::Contradicted {
+                id,
+                settled: recorded,
+            };
+        }
         let settleable = matches!(
             transition.entries.get(id.entry()),
             Some(
@@ -2147,7 +2222,7 @@ impl Ledger {
                     id,
                     settled: previous.evidence,
                 },
-                Some(_) | None => Settled::NoSuchWork { id: Some(id) },
+                Some(_) | None => self.durable_or_missing(key, id, evidence),
             };
         }
         // Then the attempt, and this is the half that the slot and the
@@ -2176,6 +2251,52 @@ impl Ledger {
                 outstanding,
             };
         }
+        Settled::Decided
+    }
+
+    /// The journal's answer when the live slot has none left to move.
+    ///
+    /// A reconstructed bot has no in-memory record to consult, and a caller
+    /// repeating an acknowledgement it never saw land has no live attempt
+    /// either. The durable fact is then the only answer (issue #106 scenario
+    /// 3): the same evidence twice is [`Settled::Duplicate`], the other
+    /// evidence is [`Settled::Contradicted`], and only a key the journal never
+    /// recorded is [`Settled::NoSuchWork`]. Answering `NoSuchWork` for a
+    /// settlement the journal already holds is how the same evidence stops
+    /// being a safe retry across a restart.
+    fn durable_or_missing(&self, key: &EffectKey, id: WorkId, evidence: EffectEvidence) -> Settled {
+        match self.effects.outcome_for(key) {
+            Some(recorded) if recorded == evidence => Settled::Duplicate,
+            Some(recorded) => Settled::Contradicted {
+                id,
+                settled: recorded,
+            },
+            None => Settled::NoSuchWork { id: Some(id) },
+        }
+    }
+
+    /// Apply a settlement [`classify_settlement`](Self::classify_settlement)
+    /// answered [`Decided`](Settled::Decided) for.
+    ///
+    /// Called only after the settlement fact is committed, so the entry never
+    /// moves on evidence the journal does not hold.
+    fn apply_settlement(&mut self, key: &EffectKey, evidence: EffectEvidence) {
+        let Some(id) = self.locate(key.action()) else {
+            return;
+        };
+        let Some(transition) = self
+            .transitions
+            .get_mut(id.chain())
+            .and_then(Option::as_mut)
+        else {
+            return;
+        };
+        let Some(record) = transition.attempts.get(id.entry()).copied() else {
+            return;
+        };
+        let Some(outstanding) = record.begun else {
+            return;
+        };
         let next = match evidence {
             EffectEvidence::Applied => EntryState::Succeeded,
             EffectEvidence::NotApplied => EntryState::NotStarted,
@@ -2194,7 +2315,6 @@ impl Ledger {
                 evidence,
             });
         }
-        Settled::Decided
     }
 
     /// The payload the chain's live transition is bound to, if it has one.
@@ -3802,11 +3922,33 @@ impl EcsBot {
                     cause: DispatchError::Journal(cause),
                 });
         }
-        match self.world.non_send_mut::<Ledger>().settle(key, evidence) {
-            // Both are success, and deliberately one arm: to the caller, a
-            // repeat that landed a second time is the same fact as one that
-            // landed the first.
-            Settled::Decided | Settled::Duplicate => Ok(()),
+        match self
+            .world
+            .non_send::<Ledger>()
+            .classify_settlement(key, evidence)
+        {
+            // Both are success, and deliberately one arm after the journal
+            // write: to the caller, a repeat that landed a second time is the
+            // same fact as one that landed the first. The append happens
+            // *before* either is acknowledged, so a restart cannot resurrect an
+            // attempt this process already settled (issue #106).
+            verdict @ (Settled::Decided | Settled::Duplicate) => {
+                self.world
+                    .non_send_mut::<Ledger>()
+                    .effects
+                    .ensure_outcome(*key, evidence)
+                    .map_err(|cause| BotError::EffectUnrecorded {
+                        key: Box::new(*key),
+                        evidence,
+                        cause: Box::new(DispatchError::Journal(cause)),
+                    })?;
+                if verdict == Settled::Decided {
+                    self.world
+                        .non_send_mut::<Ledger>()
+                        .apply_settlement(key, evidence);
+                }
+                Ok(())
+            }
             Settled::Superseded { id, current } => Err(BotError::EvidenceSuperseded {
                 work: id,
                 named: key.digest(),
@@ -6336,20 +6478,30 @@ mod tests {
             bot.pending()
         );
 
-        // Evidence about an entry that is not held is refused rather than
-        // silently accepted: a caller that thinks it acknowledged something
-        // needs to find out that it did not. The generation is still named
-        // here, and the refusal is still `NoSuchWork` rather than a generation
-        // complaint — the tick above resolved the transition and dropped its
-        // slot, so there is genuinely no held effect at this address. That
-        // distinction is the whole reason the two new refusals exist.
-        match bot.resolve_effect(&held_key(&held)?, EffectEvidence::Applied) {
-            Ok(()) => Err("evidence was accepted for an entry that is not held".into()),
+        // A repeat of the same evidence after the slot is gone is accepted
+        // idempotently. It used to be refused as `NoSuchWork`, and that is how
+        // the same acknowledgement stopped being a safe retry across a restart:
+        // a reconstructed bot has no live slot to consult, and the journal's
+        // record is the fact that answers (issue #106). Nothing moves a second
+        // time — the durable record is already there.
+        bot.resolve_effect(&held_key(&held)?, EffectEvidence::Applied)?;
+        // The other evidence is still a contradiction, and it is refused
+        // rather than silently replacing what was recorded. `NoSuchWork` is
+        // reserved for a key the journal never recorded; this one was, and the
+        // distinction is the whole reason the refusals are typed apart.
+        match bot.resolve_effect(&held_key(&held)?, EffectEvidence::NotApplied) {
+            Ok(()) => Err("contradicting evidence was accepted".into()),
             Err(error) => {
                 assert!(
-                    matches!(error, BotError::NoSuchWork { work } if work == held.id()),
-                    "expected NoSuchWork for {:?}, got {error:?}",
-                    held.id()
+                    matches!(
+                        error,
+                        BotError::EvidenceContradicted {
+                            settled: EffectEvidence::Applied,
+                            submitted: EffectEvidence::NotApplied,
+                            ..
+                        }
+                    ),
+                    "expected EvidenceContradicted, got {error:?}"
                 );
                 Ok(())
             }
@@ -6470,20 +6622,34 @@ mod tests {
         // outcome was recorded. The effect may be live, so the next tick holds
         // it — replaying it is the duplicate this state exists to prevent.
         //
-        // Constructed directly rather than by killing a tick: the ledger is the
-        // record of what happened, and this is what that record looks like when
-        // a tick's walk found the entry unrecorded. Nothing in the substrate
-        // produces the state and returns — the write sits immediately before the
-        // attempt and is overwritten by the outcome — which is why the record is
-        // exercised here rather than through an action.
+        // The journal is kept honest while the ledger is put into the state:
+        // the write-ahead (`IntentAdmitted`, `DispatchPrepared`) is committed
+        // by a real dispatch and the outcome append is refused underneath it,
+        // which is exactly the crash window this hold names. Fabricating
+        // `Unrecorded` over a key whose outcome the journal already holds
+        // would make the later `NotApplied` a contradiction rather than a
+        // settlement, and the journal is the fact that wins (issue #106).
         let log = Rc::new(RefCell::new(Vec::new()));
+        let journal = SelectiveJournal::new();
+        let refuse_outcome = journal.refuse_outcome();
+        refuse_outcome.set(true);
         let mut bot = EcsBot::builder("interrupted")
             .observe(Script::new(vec![200, 200, 200]))
             .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
-            .with_effects(test_effects()?)
+            .with_effects(test_effects_with(Box::new(journal))?)
             .build(&net_grants())?;
 
-        assert_eq!(bot.tick()?, 1, "the first tick runs the action");
+        match bot.tick() {
+            Ok(fired) => {
+                return Err(format!("a refused outcome append reported {fired} fired").into());
+            }
+            Err(error) => assert!(
+                matches!(error, BotError::EffectUnrecorded { .. }),
+                "expected the outcome append's own failure, got {error:?}"
+            ),
+        }
+        assert_eq!(*log.borrow(), vec![200], "the action ran once");
+        refuse_outcome.set(false);
         {
             let revision = *bot.revisions().first().ok_or("the source has a revision")?;
             // The payload is part of the record: a transition is bound to the
