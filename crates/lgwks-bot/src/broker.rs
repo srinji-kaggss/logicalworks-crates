@@ -48,7 +48,7 @@ use core::num::NonZeroU64;
 use std::collections::HashMap;
 
 use crate::effect::{EffectKey, EnvironmentEpoch, EnvironmentId};
-use crate::journal::{DurableAck, EffectEvent, EffectJournal, JournalError};
+use crate::journal::{DurableAck, EffectEvent, EffectJournal, JournalError, JournalPosition};
 
 /// What the broker knows about one environment.
 #[derive(Debug, Clone, Copy)]
@@ -486,11 +486,11 @@ impl Prepared {
 pub(crate) fn prepare_dispatch(
     broker: &Broker,
     journal: &mut dyn EffectJournal,
+    expected_tail: JournalPosition,
     key: EffectKey,
 ) -> Result<Prepared, DispatchError> {
     let authority = broker.authorize(key)?;
-    let tail = journal.tail();
-    let ack = journal.compare_and_append(tail, &EffectEvent::DispatchPrepared { key })?;
+    let ack = journal.compare_and_append(expected_tail, &EffectEvent::DispatchPrepared { key })?;
     Ok(Prepared { authority, ack })
 }
 
@@ -761,7 +761,8 @@ mod tests {
         let mut journal = MemoryJournal::new();
         admitted(&mut journal, key)?;
 
-        let (authority, ack) = prepare_dispatch(&broker, &mut journal, key)?.into_parts();
+        let tail = journal.tail();
+        let (authority, ack) = prepare_dispatch(&broker, &mut journal, tail, key)?.into_parts();
         assert_eq!(authority.epoch(), first);
         assert_eq!(ack.position(), journal.tail());
         assert_eq!(journal.committed().len(), 2);
@@ -779,7 +780,7 @@ mod tests {
 
         broker.replace(env()?)?;
 
-        let refused = prepare_dispatch(&broker, &mut journal, stale);
+        let refused = prepare_dispatch(&broker, &mut journal, before, stale);
         assert!(
             matches!(
                 refused,
@@ -800,10 +801,12 @@ mod tests {
         let mut journal = MemoryJournal::new();
         admitted(&mut journal, key)?;
 
-        let first_prepare = prepare_dispatch(&broker, &mut journal, key)?;
+        let tail = journal.tail();
+        let first_prepare = prepare_dispatch(&broker, &mut journal, tail, key)?;
         let spent = first_prepare.into_parts();
 
-        let refused = prepare_dispatch(&broker, &mut journal, key);
+        let tail = journal.tail();
+        let refused = prepare_dispatch(&broker, &mut journal, tail, key);
         assert!(
             matches!(
                 refused,
@@ -826,7 +829,8 @@ mod tests {
         // The environment would authorize this attempt: the generation is
         // current. The order still refuses it, because nothing was admitted.
         assert!(broker.authorize(key).is_ok());
-        let refused = prepare_dispatch(&broker, &mut journal, key);
+        let tail = journal.tail();
+        let refused = prepare_dispatch(&broker, &mut journal, tail, key);
         assert!(matches!(
             refused,
             Err(DispatchError::Journal(JournalError::OutOfOrder { .. }))
@@ -845,7 +849,8 @@ mod tests {
 
         // A second controller reads the tail before the first appends.
         let stale_tail = journal.tail();
-        prepare_dispatch(&broker, &mut journal, key)?;
+        let tail = journal.tail();
+        prepare_dispatch(&broker, &mut journal, tail, key)?;
 
         let late = journal.compare_and_append(
             stale_tail,

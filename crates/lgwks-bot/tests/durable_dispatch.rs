@@ -37,7 +37,7 @@ use std::error::Error;
 use std::rc::Rc;
 
 use lgwks_bot::broker::{Broker, DispatchError};
-use lgwks_bot::effect::{EffectKey, EnvironmentId, FlowRevision, RunId};
+use lgwks_bot::effect::{AttemptId, EffectKey, EnvironmentId, FlowRevision, RunId};
 use lgwks_bot::journal::{
     DurabilityPromise, DurableAck, EffectEvent, EffectJournal, EventKind, JournalEntry,
     JournalError, JournalPosition, MemoryJournal,
@@ -1159,6 +1159,372 @@ impl Observe for Requests {
     fn domain_id(&self) -> &str {
         "test::requests"
     }
+}
+
+/// The event-shaped counterpart of [`NeverSettles`].
+struct NeverSettlesEvent(Rc<Cell<u32>>);
+
+impl Execute for NeverSettlesEvent {
+    type Input = EventId<u32>;
+    type Output = ();
+
+    fn required_caps(&self) -> &[Cap] {
+        &[]
+    }
+
+    fn effect_lifetime(&self) -> EffectLifetime {
+        EffectLifetime::Local
+    }
+
+    async fn execute_action(&self, call: (Auth, &EventId<u32>)) -> Result<(), BotError> {
+        call.0.check(Execute::required_caps(self))?;
+        self.0.set(self.0.get().saturating_add(1));
+        Err(BotError::EffectIndeterminate {
+            domain: "test::stale-controller".to_owned(),
+            cause: "unknown".to_owned(),
+        })
+    }
+
+    fn domain_id(&self) -> &str {
+        "test::never-settles-event"
+    }
+}
+
+/// A shared journal that advances immediately after recovery reads its history.
+///
+/// This models the construction interleaving that an append fence alone cannot
+/// observe: another controller commits after `committed()` returns and before
+/// this controller adopts `tail()`. The adapter owns the one injected event so
+/// later tail reads are ordinary observations.
+struct SnapshotRaceJournal {
+    store: Rc<RefCell<MemoryJournal>>,
+    inject_on_tail: RefCell<Option<EffectEvent>>,
+}
+
+impl EffectJournal for SnapshotRaceJournal {
+    fn durability(&self) -> DurabilityPromise {
+        self.store.borrow().durability()
+    }
+
+    fn tail(&self) -> JournalPosition {
+        if let Some(event) = self.inject_on_tail.borrow_mut().take() {
+            let mut store = self.store.borrow_mut();
+            let expected = store.tail();
+            if store.compare_and_append(expected, &event).is_err() {
+                return expected;
+            }
+        }
+        self.store.borrow().tail()
+    }
+
+    fn committed(&self) -> Result<Vec<EffectEvent>, JournalError> {
+        EffectJournal::committed(&*self.store.borrow())
+    }
+
+    fn compare_and_append(
+        &mut self,
+        expected_tail: JournalPosition,
+        event: &EffectEvent,
+    ) -> Result<DurableAck, JournalError> {
+        self.store
+            .borrow_mut()
+            .compare_and_append(expected_tail, event)
+    }
+}
+
+fn snapshot_race_scope(
+    identity: EffectIdentity,
+    store: Rc<RefCell<MemoryJournal>>,
+    event: EffectEvent,
+) -> Result<EffectScope, Box<dyn Error>> {
+    Ok(EffectScope::new(
+        identity,
+        broker(identity.environment())?,
+        Box::new(SnapshotRaceJournal {
+            store,
+            inject_on_tail: RefCell::new(Some(event)),
+        }),
+    ))
+}
+
+/// A hostile adapter that appends a foreign unknown handoff, then returns that
+/// later position as the acknowledgment for the caller's intent.
+struct ForeignTailAckJournal {
+    store: Rc<RefCell<MemoryJournal>>,
+    forge_once: Cell<bool>,
+}
+
+impl EffectJournal for ForeignTailAckJournal {
+    fn durability(&self) -> DurabilityPromise {
+        self.store.borrow().durability()
+    }
+
+    fn tail(&self) -> JournalPosition {
+        self.store.borrow().tail()
+    }
+
+    fn committed(&self) -> Result<Vec<EffectEvent>, JournalError> {
+        EffectJournal::committed(&*self.store.borrow())
+    }
+
+    fn committed_entries(&self) -> Result<Vec<JournalEntry>, JournalError> {
+        Ok(self.store.borrow().committed().to_vec())
+    }
+
+    fn compare_and_append(
+        &mut self,
+        expected_tail: JournalPosition,
+        event: &EffectEvent,
+    ) -> Result<DurableAck, JournalError> {
+        let acknowledgment = self
+            .store
+            .borrow_mut()
+            .compare_and_append(expected_tail, event)?;
+        if self.forge_once.replace(false) && matches!(event, EffectEvent::IntentAdmitted { .. }) {
+            let foreign_key = event
+                .key()
+                .with_attempt(AttemptId::from_decimal("2").map_err(|_| JournalError::Exhausted)?);
+            let mut store = self.store.borrow_mut();
+            let tail = store.tail();
+            store.compare_and_append(tail, &EffectEvent::IntentAdmitted { key: foreign_key })?;
+            let tail = store.tail();
+            store.compare_and_append(tail, &EffectEvent::DispatchPrepared { key: foreign_key })?;
+            return Ok(DurableAck::new(store.tail(), acknowledgment.promise()));
+        }
+        Ok(acknowledgment)
+    }
+}
+
+/// A stale controller must not replace its recovery fold with a newly-read
+/// tail. Controller A records an unknown handoff, while controller B still
+/// holds the empty fold and observes a different input for the same action.
+/// B's append is fenced before its receiver can run (issue #120).
+#[test]
+fn a_stale_controller_cannot_dispatch_past_another_controllers_unknown_effect() -> TestResult {
+    let store = Rc::new(RefCell::new(MemoryJournal::new()));
+    let first_input = Rc::new(RefCell::new(EventId::new(1, 1)));
+    let second_input = Rc::new(RefCell::new(EventId::new(2, 2)));
+    let entered = Rc::new(Cell::new(0));
+    let identity = identity()?;
+
+    let mut first = Bot::builder(NAME)
+        .observe(Requests(Rc::clone(&first_input)))
+        .on(
+            |_seen: &EventId<u32>| true,
+            NeverSettlesEvent(Rc::clone(&entered)),
+        )
+        .with_effects(scope(identity, Rc::clone(&store))?)
+        .build(&GrantSet::empty())?;
+    let mut stale = Bot::builder(NAME)
+        .observe(Requests(second_input))
+        .on(
+            |_seen: &EventId<u32>| true,
+            NeverSettlesEvent(Rc::clone(&entered)),
+        )
+        .with_effects(scope(identity, Rc::clone(&store))?)
+        .build(&GrantSet::empty())?;
+
+    assert!(matches!(
+        first.tick(),
+        Err(BotError::EffectIndeterminate { .. })
+    ));
+    assert_eq!(entered.get(), 1, "the first controller entered once");
+
+    assert!(matches!(
+        stale.tick(),
+        Err(BotError::EffectRefused {
+            cause: DispatchError::Journal(JournalError::TailMismatch { .. })
+        })
+    ));
+    assert_eq!(
+        entered.get(),
+        1,
+        "the stale controller must not dispatch a distinct input past the unknown effect"
+    );
+    Ok(())
+}
+
+/// Assembly rejects a journal that advances between its recovery fold and
+/// retained append fence. Accepting that mixed snapshot would let the new bot
+/// treat the injected outcome as absent while appending after it (issue #120).
+#[test]
+fn assembly_refuses_a_tail_that_advanced_after_recovery() -> TestResult {
+    let store = Rc::new(RefCell::new(MemoryJournal::new()));
+    let entered = Rc::new(Cell::new(0));
+    let identity = identity()?;
+    let mut first = Bot::builder(NAME)
+        .observe(Requests(Rc::new(RefCell::new(EventId::new(1, 1)))))
+        .on(
+            |_seen: &EventId<u32>| true,
+            NeverSettlesEvent(Rc::clone(&entered)),
+        )
+        .with_effects(scope(identity, Rc::clone(&store))?)
+        .build(&GrantSet::empty())?;
+
+    assert!(matches!(
+        first.tick(),
+        Err(BotError::EffectIndeterminate { .. })
+    ));
+    let events = recorded(&store)?;
+    assert_eq!(
+        events.len(),
+        2,
+        "the unknown handoff has intent and prepare"
+    );
+    let key = events[0].key();
+
+    let result = Bot::builder(NAME)
+        .observe(Requests(Rc::new(RefCell::new(EventId::new(2, 2)))))
+        .on(
+            |_seen: &EventId<u32>| true,
+            NeverSettlesEvent(Rc::clone(&entered)),
+        )
+        .with_effects(snapshot_race_scope(
+            identity,
+            store,
+            EffectEvent::OutcomeObserved {
+                key,
+                evidence: EffectEvidence::NotApplied,
+            },
+        )?)
+        .build(&GrantSet::empty());
+
+    assert!(matches!(
+        result,
+        Err(BotError::EffectRefused {
+            cause: DispatchError::Journal(JournalError::SnapshotStale {
+                recovered_events: 2,
+                committed_events: 3,
+            }),
+        })
+    ));
+    assert_eq!(
+        entered.get(),
+        1,
+        "assembly must not dispatch while recovering"
+    );
+    Ok(())
+}
+
+/// A later tail is not an acknowledgement for this controller's intent. The
+/// foreign attempt is deliberately valid and unknown, so adopting its tail
+/// would permit this receiver to run past a fact it never folded (issue #120).
+#[test]
+fn a_forged_intent_acknowledgement_cannot_launder_a_foreign_unknown_effect() -> TestResult {
+    let store = Rc::new(RefCell::new(MemoryJournal::new()));
+    let entered = Rc::new(Cell::new(0));
+    let identity = identity()?;
+    let mut bot = Bot::builder(NAME)
+        .observe(Requests(Rc::new(RefCell::new(EventId::new(1, 1)))))
+        .on(
+            |_seen: &EventId<u32>| true,
+            NeverSettlesEvent(Rc::clone(&entered)),
+        )
+        .with_effects(EffectScope::new(
+            identity,
+            broker(identity.environment())?,
+            Box::new(ForeignTailAckJournal {
+                store,
+                forge_once: Cell::new(true),
+            }),
+        ))
+        .build(&GrantSet::empty())?;
+
+    assert!(matches!(
+        bot.tick(),
+        Err(BotError::EffectRefused {
+            cause: DispatchError::Journal(JournalError::ReceiptMismatch { .. })
+        })
+    ));
+    assert_eq!(
+        entered.get(),
+        0,
+        "a forged acknowledgement cannot reach the receiver"
+    );
+    Ok(())
+}
+
+/// Sequential ownership transfer still works: a settled handoff does not fence
+/// out the successor (issue #120 acceptance).
+///
+/// This is the positive control for the three refusals above. Without it a
+/// fence that rejected every second dispatch would pass them all. Controller A
+/// runs a definite effect to completion, so the journal holds intent, prepare
+/// and an `Applied` outcome rather than an unknown. Controller B is built over
+/// the same store *after* those events — its recovery fold is the advanced
+/// tail, not the empty one the stale controller held — and dispatches a
+/// different input for the same action. B's receiver runs.
+#[test]
+fn a_successor_dispatches_after_a_settled_handoff() -> TestResult {
+    let store = Rc::new(RefCell::new(MemoryJournal::new()));
+    let first_input = Rc::new(RefCell::new(EventId::new(1, 1)));
+    let second_input = Rc::new(RefCell::new(EventId::new(2, 2)));
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let identity = identity()?;
+
+    let mut first = Bot::builder(NAME)
+        .observe(Requests(Rc::clone(&first_input)))
+        .on(|_seen: &EventId<u32>| true, Records(Rc::clone(&log)))
+        .with_effects(scope(identity, Rc::clone(&store))?)
+        .build(&GrantSet::empty())?;
+    let fired = first.tick()?;
+    assert_eq!(fired, 1, "the first controller dispatched its one action");
+    assert_eq!(
+        log.borrow().as_slice(),
+        [EventId::new(1, 1)],
+        "the first receiver saw its input"
+    );
+    let after_first = recorded(&store)?;
+    assert_eq!(
+        after_first.len(),
+        3,
+        "intent, prepare, and a settled outcome: {after_first:?}"
+    );
+    assert!(
+        matches!(
+            after_first[2],
+            EffectEvent::OutcomeObserved {
+                evidence: EffectEvidence::Applied,
+                ..
+            }
+        ),
+        "a definite effect settles as applied, which is what makes this a transfer: {:?}",
+        after_first[2]
+    );
+    let first_key = after_first[0].key();
+
+    // The successor is built over the advanced journal, so its fold includes
+    // the settled attempt rather than remaining ignorant of it.
+    let mut successor = Bot::builder(NAME)
+        .observe(Requests(second_input))
+        .on(|_seen: &EventId<u32>| true, Records(Rc::clone(&log)))
+        .with_effects(scope(identity, Rc::clone(&store))?)
+        .build(&GrantSet::empty())?;
+    let fired = successor.tick()?;
+    assert_eq!(
+        fired, 1,
+        "a successor that folded the settled handoff is not fenced out"
+    );
+    assert_eq!(
+        log.borrow().as_slice(),
+        [EventId::new(1, 1), EventId::new(2, 2)],
+        "both receivers ran, in ownership order"
+    );
+    let after_second = recorded(&store)?;
+    assert_eq!(
+        after_second.len(),
+        6,
+        "the successor appended its own ladder: {after_second:?}"
+    );
+    assert_eq!(after_second[3].key(), after_second[4].key());
+    assert_eq!(after_second[4].key(), after_second[5].key());
+    assert_ne!(
+        after_second[3].key(),
+        first_key,
+        "a distinct input is a distinct key, which is what makes the stale-controller \
+         falsifier a real one and this transfer a real transfer"
+    );
+    Ok(())
 }
 
 /// An action that records every input it was entered with.

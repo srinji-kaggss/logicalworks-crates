@@ -16,21 +16,21 @@ crates/lgwks-bot/src/cap.rs:202	pub struct Deficit {
 crates/lgwks-bot/src/cap.rs:288	pub fn to_grant_set(&self) -> GrantSet {
 crates/lgwks-bot/src/cap.rs:365	pub(crate) fn new(mut caps: Vec<Cap>) -> Self {
 crates/lgwks-bot/src/cap.rs:414	pub fn check(&self, required: &[Cap]) -> Result<(), BotError> {
-crates/lgwks-bot/src/ecs.rs:1089	struct TickError(Option<BotError>);
-crates/lgwks-bot/src/ecs.rs:1240	const MAX_IN_FLIGHT_POLLS: usize = 32;
-crates/lgwks-bot/src/ecs.rs:2940	RetryClass::Safe if attempts < budget => EntryState::DefinitelyFailed { attempts, cause },
-crates/lgwks-bot/src/ecs.rs:2996	let mut first_error = None;
-crates/lgwks-bot/src/ecs.rs:3074	.is_some_and(|value| {
-crates/lgwks-bot/src/ecs.rs:3141	fn fire_plan(world: &mut World) {
-crates/lgwks-bot/src/ecs.rs:3361	match entry.condition.check_any(value) {
-crates/lgwks-bot/src/ecs.rs:3413	.initialize(world)
-crates/lgwks-bot/src/ecs.rs:3468	pub fn name(&self) -> &str {
-crates/lgwks-bot/src/ecs.rs:3583	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:3686	pub fn tick(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:3840	async fn run_chain(
-crates/lgwks-bot/src/ecs.rs:4337	impl<S: Observe> EcsObserveBuilder<S> {
-crates/lgwks-bot/src/ecs.rs:4543	for chain in &chains {
-crates/lgwks-bot/src/ecs.rs:4560	world.insert_resource(Grants(grants.clone()));
+crates/lgwks-bot/src/ecs.rs:1153	struct TickError(Option<BotError>);
+crates/lgwks-bot/src/ecs.rs:1304	const MAX_IN_FLIGHT_POLLS: usize = 32;
+crates/lgwks-bot/src/ecs.rs:3015	RetryClass::Never => EntryState::Abandoned {
+crates/lgwks-bot/src/ecs.rs:3060	let mut first_error = None;
+crates/lgwks-bot/src/ecs.rs:3138	.is_some_and(|value| {
+crates/lgwks-bot/src/ecs.rs:3205	fn fire_plan(world: &mut World) {
+crates/lgwks-bot/src/ecs.rs:3425	match entry.condition.check_any(value) {
+crates/lgwks-bot/src/ecs.rs:3477	.initialize(world)
+crates/lgwks-bot/src/ecs.rs:3532	pub fn name(&self) -> &str {
+crates/lgwks-bot/src/ecs.rs:3647	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs.rs:3750	pub fn tick(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs.rs:3854	async fn run_steps(
+crates/lgwks-bot/src/ecs.rs:4466	pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
+crates/lgwks-bot/src/ecs.rs:4618	for chain in &chains {
+crates/lgwks-bot/src/ecs.rs:4635	world.insert_resource(Grants(grants.clone()));
 crates/lgwks-bot/src/error.rs:106	/// handed may be the one that owns the runtime's driver. Parked, that
 crates/lgwks-bot/src/gate.rs:12	pub struct GrantSet {
 crates/lgwks-bot/src/gate.rs:44	pub fn grant(mut self, cap: Cap) -> Self {
