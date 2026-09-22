@@ -649,6 +649,7 @@ What no commercial product and no research system has is **the conjunction**:
 | Layer | The piece no one else has |
 |---|---|
 | Observation | `ElementRef` minted **only** from a resolved three-way verdict, so a healed element has no type-level path into execution |
+| Effect | The `Execute` postcondition is read from the **system of record**, not the screen — because in five of seven silent-write fault classes the screen is *correct* |
 | Authority | Argument-bound, default-deny dispatch on top of a sole-constructor grant, with intersection-only composition and leases instead of revocation |
 | Sink bounding | The **DOM field as an addressable authorization object** — the one gap the sweep found genuinely unmapped |
 | Flow | A validator bound to the named soundness triple, with modal invariants monitored rather than asserted |
