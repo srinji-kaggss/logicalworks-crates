@@ -242,6 +242,7 @@ pub mod spec;
 pub mod verb;
 
 pub use cap::{Auth, Cap, Deficit, Demand, Shortage};
+pub use effect::{EventId, InputIdentity};
 pub use error::{BotError, DispatchCertainty, RetryClass};
 pub use gate::GrantSet;
 pub use language::{Alias, LanguageResolver};
