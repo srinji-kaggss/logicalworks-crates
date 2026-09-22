@@ -1444,6 +1444,89 @@ fn a_forged_intent_acknowledgement_cannot_launder_a_foreign_unknown_effect() -> 
     Ok(())
 }
 
+/// Sequential ownership transfer still works: a settled handoff does not fence
+/// out the successor (issue #120 acceptance).
+///
+/// This is the positive control for the three refusals above. Without it a
+/// fence that rejected every second dispatch would pass them all. Controller A
+/// runs a definite effect to completion, so the journal holds intent, prepare
+/// and an `Applied` outcome rather than an unknown. Controller B is built over
+/// the same store *after* those events — its recovery fold is the advanced
+/// tail, not the empty one the stale controller held — and dispatches a
+/// different input for the same action. B's receiver runs.
+#[test]
+fn a_successor_dispatches_after_a_settled_handoff() -> TestResult {
+    let store = Rc::new(RefCell::new(MemoryJournal::new()));
+    let first_input = Rc::new(RefCell::new(EventId::new(1, 1)));
+    let second_input = Rc::new(RefCell::new(EventId::new(2, 2)));
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let identity = identity()?;
+
+    let mut first = Bot::builder(NAME)
+        .observe(Requests(Rc::clone(&first_input)))
+        .on(|_seen: &EventId<u32>| true, Records(Rc::clone(&log)))
+        .with_effects(scope(identity, Rc::clone(&store))?)
+        .build(&GrantSet::empty())?;
+    let fired = first.tick()?;
+    assert_eq!(fired, 1, "the first controller dispatched its one action");
+    assert_eq!(
+        log.borrow().as_slice(),
+        [EventId::new(1, 1)],
+        "the first receiver saw its input"
+    );
+    let after_first = recorded(&store)?;
+    assert_eq!(
+        after_first.len(),
+        3,
+        "intent, prepare, and a settled outcome: {after_first:?}"
+    );
+    assert!(
+        matches!(
+            after_first[2],
+            EffectEvent::OutcomeObserved {
+                evidence: EffectEvidence::Applied,
+                ..
+            }
+        ),
+        "a definite effect settles as applied, which is what makes this a transfer: {:?}",
+        after_first[2]
+    );
+    let first_key = after_first[0].key();
+
+    // The successor is built over the advanced journal, so its fold includes
+    // the settled attempt rather than remaining ignorant of it.
+    let mut successor = Bot::builder(NAME)
+        .observe(Requests(second_input))
+        .on(|_seen: &EventId<u32>| true, Records(Rc::clone(&log)))
+        .with_effects(scope(identity, Rc::clone(&store))?)
+        .build(&GrantSet::empty())?;
+    let fired = successor.tick()?;
+    assert_eq!(
+        fired, 1,
+        "a successor that folded the settled handoff is not fenced out"
+    );
+    assert_eq!(
+        log.borrow().as_slice(),
+        [EventId::new(1, 1), EventId::new(2, 2)],
+        "both receivers ran, in ownership order"
+    );
+    let after_second = recorded(&store)?;
+    assert_eq!(
+        after_second.len(),
+        6,
+        "the successor appended its own ladder: {after_second:?}"
+    );
+    assert_eq!(after_second[3].key(), after_second[4].key());
+    assert_eq!(after_second[4].key(), after_second[5].key());
+    assert_ne!(
+        after_second[3].key(),
+        first_key,
+        "a distinct input is a distinct key, which is what makes the stale-controller \
+         falsifier a real one and this transfer a real transfer"
+    );
+    Ok(())
+}
+
 /// An action that records every input it was entered with.
 struct Records(Rc<RefCell<Vec<EventId<u32>>>>);
 
