@@ -1,7 +1,19 @@
 name: ci
 on:
+  # A pull request already runs this matrix for its head commit, so triggering
+  # on every branch push ran all eleven jobs a second time for the same tree.
+  # A branch is covered by its pull request; `main` is covered here, after the
+  # merge that put it there.
   push:
+    branches: [main]
   pull_request:
+
+# Supersede rather than duplicate. Two `pull_request` events in one group are
+# the same branch pushed twice, so the older run is cancelled. A run on `main`
+# never is: that run is the record of what shipped.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.ref_name != 'main' }}
 
 jobs:
   build:
@@ -128,64 +140,27 @@ jobs:
         with:
           toolchain: "1.98.0"
       - name: Doc build with broken-link denial
-        # Per-crate (gpui excluded: it needs the Xcode Metal toolchain and is
-        # covered by the gpui-macos job, not ubuntu lanes).
-        run: >
-          RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
-          -p lgwks_std --all-features &&
-          RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
-          -p lgwks_bot --all-features &&
-          RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
-          -p lgwks_ast --all-features &&
-          RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
-          -p lgwks_deps --features tokio-full
+        # Every feature on, per crate (gpui excluded: it needs the Xcode Metal
+        # toolchain and is covered by the gpui-macos job, not ubuntu lanes).
+        # `scripts/doc-lanes.sh` holds the commands and the reason for each
+        # lane, so this job and a contributor run the same four of them.
+        run: ./scripts/doc-lanes.sh all-features
       - name: Doc build without default features
-        # lgwks_std is included because a module in `core` that links to a
-        # feature-gated module resolves under `--all-features` and breaks here.
-        # retry linked to `random` and only this lane could see it.
-        run: >
-          RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
-          --manifest-path crates/lgwks-std/Cargo.toml --no-default-features &&
-          RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
-          --manifest-path crates/lgwks-bot/Cargo.toml --no-default-features &&
-          RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
-          --manifest-path crates/lgwks-ast/Cargo.toml --no-default-features
+        # No features on. A module in `core` that links to a feature-gated
+        # module resolves under `--all-features` and breaks here.
+        run: ./scripts/doc-lanes.sh no-default-features
       - name: Doc build at the default feature set
-        # The two lanes above are both boundary cases a consumer never selects.
-        # `default` is the one `cargo add lgwks_std` actually hands them, and
-        # neither lane builds it: `--all-features` resolves a link into a gated
-        # module, and `--no-default-features` does not compile the module that
-        # holds the link. A link from a default-on module to a default-off one
-        # is therefore invisible to both. `trace` (default-on) linked to `json`
-        # (default-off) and every consumer saw the break; the repository did
-        # not.
-        run: >
-          RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked -p lgwks_std &&
-          RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked -p lgwks_bot &&
-          RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked -p lgwks_ast
+        # The set `cargo add lgwks_std` hands a consumer, which neither boundary
+        # lane builds: `--all-features` resolves a link into a gated module, and
+        # `--no-default-features` does not compile the module holding the link,
+        # so a default-on to default-off link is invisible to both.
+        run: ./scripts/doc-lanes.sh default
       - name: Doc build for each lgwks-std feature alone
-        # The lane above catches a link from a default-on module to a
-        # default-off one. This catches the general case: a link between two
-        # optional modules where neither implies the other, so every
-        # combination of `--all-features` and `--no-default-features` resolves
-        # it. `wire` linked to `json` and only this lane can see it. Each
-        # feature is documented alone, so every gated module is documented
-        # while every module it does not pull in is genuinely absent.
-        run: |
-          set -eu
-          features=$(python3 - <<'PY'
-          import tomllib
-          parsed = tomllib.load(open("crates/lgwks-std/Cargo.toml", "rb"))
-          names = [n for n in parsed["features"] if n not in ("default", "full")]
-          print(" ".join(sorted(names)))
-          PY
-          )
-          echo "lgwks-std features: $features"
-          for feature in $features; do
-            echo "--- $feature"
-            RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked \
-              -p lgwks_std --no-default-features --features "$feature"
-          done
+        # The general case: a link between two optional modules where neither
+        # implies the other resolves under both boundary lanes. Each feature is
+        # documented alone, so every gated module is documented while every
+        # module it does not pull in is genuinely absent.
+        run: ./scripts/doc-lanes.sh per-feature
       - name: docs.rs metadata names a buildable feature set
         # docs.rs builds with whatever `[package.metadata.docs.rs]` declares,
         # and a failure there is invisible from the repository: the crate page
