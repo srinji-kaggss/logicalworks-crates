@@ -1,0 +1,106 @@
+# The line each documentation citation points at, as it read when a person last
+# checked that it supports the sentence citing it.
+#
+# One entry per cited line: `<source path>:<line>` TAB `<the line, stripped>`.
+# Generated and checked by `scripts/check-doc-citations.py`; regenerate with
+# `--update`, and read the diff. A line whose text changes here is a line under
+# a citation that moved, and re-anchoring is confirming each one still supports
+# its claim rather than rewriting the entry to match.
+Cargo.toml:113	print_stderr = "forbid"
+Cargo.toml:114	print_stdout = "forbid"
+crates/lgwks-ast/src/lib.rs:54	//! The two bounds are not interchangeable. [`MAX_SOURCE_BYTES`] bounds the
+crates/lgwks-bot/src/cap.rs:15	//! before acting. This stops confused-deputy calls and accidental ungated
+crates/lgwks-bot/src/cap.rs:53	pub const NET: &str = "bot.net";
+crates/lgwks-bot/src/cap.rs:64	pub fn new(name: impl Into<Cow<'static, str>>) -> Self {
+crates/lgwks-bot/src/cap.rs:202	pub struct Deficit {
+crates/lgwks-bot/src/cap.rs:288	pub fn to_grant_set(&self) -> GrantSet {
+crates/lgwks-bot/src/cap.rs:365	pub(crate) fn new(mut caps: Vec<Cap>) -> Self {
+crates/lgwks-bot/src/cap.rs:414	pub fn check(&self, required: &[Cap]) -> Result<(), BotError> {
+crates/lgwks-bot/src/ecs.rs:770	struct TickError(Option<BotError>);
+crates/lgwks-bot/src/ecs.rs:944	const MAX_IN_FLIGHT_POLLS: usize = 32;
+crates/lgwks-bot/src/ecs.rs:2318	RetryClass::Safe if attempts < budget => EntryState::DefinitelyFailed { attempts, cause },
+crates/lgwks-bot/src/ecs.rs:2374	let mut first_error = None;
+crates/lgwks-bot/src/ecs.rs:2519	fn fire_plan(world: &mut World) {
+crates/lgwks-bot/src/ecs.rs:2722	Err(error) => {
+crates/lgwks-bot/src/ecs.rs:2733	steps.push(Step {
+crates/lgwks-bot/src/ecs.rs:2750	ambiguity_detection: LogLevel::Error,
+crates/lgwks-bot/src/ecs.rs:2832	pub fn world(&self) -> &World {
+crates/lgwks-bot/src/ecs.rs:2934	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs.rs:3042	pub fn tick(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs.rs:3172	let baseline = seen
+crates/lgwks-bot/src/ecs.rs:3224	async fn run_steps(
+crates/lgwks-bot/src/ecs.rs:3720	S::Output: PartialEq + 'static,
+crates/lgwks-bot/src/ecs.rs:3856	for chain in &chains {
+crates/lgwks-bot/src/ecs.rs:3857	shortages.extend(grants.uncovered(
+crates/lgwks-bot/src/ecs.rs:3873	world.insert_resource(Grants(grants.clone()));
+crates/lgwks-bot/src/error.rs:106	/// handed may be the one that owns the runtime's driver. Parked, that
+crates/lgwks-bot/src/gate.rs:12	pub struct GrantSet {
+crates/lgwks-bot/src/gate.rs:44	pub fn grant(mut self, cap: Cap) -> Self {
+crates/lgwks-bot/src/gate.rs:63	pub fn uncovered(&self, required: &[Cap], demand: &Demand) -> Vec<Shortage> {
+crates/lgwks-bot/src/gate.rs:73	pub fn admit(&self, required: &[Cap]) -> Result<(), BotError> {
+crates/lgwks-bot/src/gate.rs:88	pub fn issue(&self, required: &[Cap]) -> Result<Auth, BotError> {
+crates/lgwks-bot/src/language.rs:1	//! Language understanding: turning what a person actually typed into a choice.
+crates/lgwks-bot/src/language.rs:76	pub const MAX_UTTERANCE_CHARS: usize = 512;
+crates/lgwks-bot/src/language.rs:85	pub const MATCH_THRESHOLD: f64 = 0.55;
+crates/lgwks-bot/src/language.rs:88	pub const MATCH_MARGIN: f64 = 0.08;
+crates/lgwks-bot/src/language.rs:283	fn winning_tier(mut scored: Vec<(usize, MatchTier, f64)>) -> Vec<(usize, MatchTier, f64)> {
+crates/lgwks-bot/src/language.rs:384	pub struct Alias {
+crates/lgwks-bot/src/language.rs:465	decide(&scored, MATCH_THRESHOLD, margin)
+crates/lgwks-bot/src/language.rs:580	pub fn with_aliases(aliases: Vec<Alias>) -> Self {
+crates/lgwks-bot/src/language.rs:603	pub fn learn(&mut self, question: &str, utterance: &str, option: &str) -> Option<Alias> {
+crates/lgwks-bot/src/language.rs:616	pub fn forget(&mut self, question: &str, utterance: &str) -> Option<Alias> {
+crates/lgwks-bot/src/language.rs:641	pub fn aliases(&self) -> Vec<Alias> {
+crates/lgwks-bot/src/rt/mod.rs:75	//! This is not a scheduler with realtime guarantees. Future completion order
+crates/lgwks-bot/src/rt/mod.rs:85	#[cfg(feature = "sync")]
+crates/lgwks-bot/src/rt/mod.rs:96	pub mod signal;
+crates/lgwks-bot/src/rt/runtime.rs:102	let mut builder = lgwks_deps::tokio::runtime::Builder::new_current_thread();
+crates/lgwks-bot/src/rt/runtime.rs:105	if self.worker_threads.is_some() && workers.get() > MAX_WORKER_THREADS {
+crates/lgwks-bot/src/rt/supervise.rs:9	//! # Why a task cannot leak
+crates/lgwks-bot/src/rt/supervise.rs:92	//! permits inside a task this supervisor owns can deadlock with itself. The
+crates/lgwks-bot/src/rt/supervise.rs:142	const YIELD_INTERVAL: u64 = 32;
+crates/lgwks-bot/src/rt/supervise.rs:653	/// cheaper than a misreported outcome.
+crates/lgwks-bot/src/rt/supervise.rs:694	pub fn new(max_in_flight: usize) -> Self {
+crates/lgwks-bot/src/rt/supervise.rs:939	#[cfg(feature = "process")]
+crates/lgwks-bot/src/rt/supervise.rs:1369	/// [`Supervisor::shutdown`].
+crates/lgwks-bot/src/rt/supervise.rs:1383	let deadline = match budget {
+crates/lgwks-bot/src/rt/supervise.rs:1406	match token.run_until_cancelled(body(iterations)).await {
+crates/lgwks-bot/src/rt/supervise.rs:1426	#[cfg(test)]
+crates/lgwks-bot/src/rt/task.rs:93	where
+crates/lgwks-bot/src/semantic.rs:13	//! This tier is consulted only when the lexicon returns [`Resolution::Absent`] —
+crates/lgwks-bot/src/semantic.rs:117	pub trait Embedder {
+crates/lgwks-bot/src/semantic.rs:350	pub const DEFAULT: Self = Self {
+crates/lgwks-bot/src/session.rs:1	//! Validated declarative guidance flows and a synchronous session runner.
+crates/lgwks-bot/src/session.rs:64	pub const MAX_UTTERANCE_BYTES: usize = 8_192;
+crates/lgwks-bot/src/session.rs:374	pub const fn answer_domain(&self) -> AnswerDomain {
+crates/lgwks-bot/src/session.rs:414	pub fn decode_answer(&self, answer: &str) -> Result<Value, AnswerRejection> {
+crates/lgwks-bot/src/session.rs:468	pub(crate) fn decode_integer(raw: &str) -> Option<i64> {
+crates/lgwks-bot/src/session.rs:565	pub enum Predicate {
+crates/lgwks-bot/src/session.rs:636	pub enum NodeKind {
+crates/lgwks-bot/src/session.rs:743	pub enum Disposition {
+crates/lgwks-bot/src/session.rs:770	pub struct EffectLedger {
+crates/lgwks-bot/src/session.rs:918	pub fn outcome(&self, effects: EffectLedger) -> Outcome {
+crates/lgwks-bot/src/session.rs:991	pub struct FlowSpec {
+crates/lgwks-bot/src/session.rs:1059	pub fn from_json(source: &str) -> Result<Self, BotError> {
+crates/lgwks-bot/src/session.rs:1092	pub fn from_ron(source: &str) -> Result<Self, BotError> {
+crates/lgwks-bot/src/session.rs:1523	return Err(BotError::ConflictingTerminalDeclaration {
+crates/lgwks-bot/src/session.rs:1596	return Err(BotError::AskOptionNotAssignable {
+crates/lgwks-bot/src/session.rs:2408	pub struct Question<'a> {
+crates/lgwks-bot/src/session.rs:2554	fn resolve(&self, utterance: &str, question: &Question<'_>) -> Verdict;
+crates/lgwks-bot/src/session.rs:2628	pub struct Provenance {
+crates/lgwks-bot/src/session.rs:2726	pub enum MatchTier {
+crates/lgwks-bot/src/session.rs:2745	pub enum DegradedReason {
+crates/lgwks-bot/src/session.rs:2844	StaleAlias {
+crates/lgwks-bot/src/session.rs:2870	Degraded {
+crates/lgwks-bot/src/session.rs:2917	pub struct DecisionReceipt {
+crates/lgwks-bot/src/session.rs:3692	.ok_or(BotError::SessionBudgetExceeded {
+crates/lgwks-bot/src/session.rs:3848	fn record(&mut self, node_id: &str, role: &str, text: &str) -> Result<(), BotError> {
+crates/lgwks-bot/src/session.rs:3860	.saturating_add(role.len());
+crates/lgwks-bot/src/spec.rs:318	pub use crate::ecs::{
+crates/lgwks-bot/src/spec.rs:627	let auth: Auth = grants.issue(self.0.required_caps())?;
+crates/lgwks-bot/src/spec.rs:672	pub fn from_json(source: &str) -> Result<Self, BotError> {
+crates/lgwks-deps/src/lib.rs:14	//! The same `lgwks-deps check` command is an explicit first job in local and
+crates/lgwks-deps/src/lib.rs:73	pub mod scan;
+crates/lgwks-deps/src/lib.rs:543	/// Audits the repository rooted at `root`, reading its lock file and register.
+crates/lgwks-std/src/task.rs:265	/// Run `job` on a dedicated OS thread and return a future for its result.
+crates/lgwks-std/src/trace.rs:47	pub use tracing::{self, Level};
+docs/guidance-runner-spec.md:193	`review`.

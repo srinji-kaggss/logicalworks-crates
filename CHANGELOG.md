@@ -222,6 +222,20 @@ explicitly under that crate.
   broken intra-doc link is a warning rather than an error, so the crate built
   green and the break surfaced only after the push.
 
+### Repository Changed
+
+- **A citation that moves is now a failure rather than a silent pass.**
+  `scripts/check-doc-citations.py` pins the text of every cited line in
+  `scripts/doc-citations.lock`, so a citation whose line no longer holds what it
+  was pinned to fails the Docs job. The check before this one rejected only a
+  citation that landed on a bare delimiter, which is a floor: on 2026-09-21
+  `ecs.rs` grew by 1,070 lines, and 22 of the 25 citations under it kept
+  resolving onto unrelated code while CI reported green. Demonstrated on a copy
+  of this tree with `cap.rs` grown by one line: the previous check exits 0 with
+  "107 citations resolve", this one exits 1 and names all seven that moved.
+  `--update` rewrites the lock and prints every line whose text changed under a
+  citation and which page cites it, so the review is the diff.
+
 ### Repository Fixed
 
 - `crates/lgwks-bot/src/domain/mod.rs` is deleted. It declared the nine domain
