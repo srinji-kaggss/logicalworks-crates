@@ -43,7 +43,9 @@ use lgwks_bot::journal::{
     JournalPosition, MemoryJournal,
 };
 use lgwks_bot::spec::{Bot, EffectEvidence, EffectIdentity, EffectScope, TransitionHold};
-use lgwks_bot::{Auth, BotError, Cap, DispatchCertainty, EventId, Execute, GrantSet, Observe};
+use lgwks_bot::{
+    Auth, BotError, Cap, DispatchCertainty, EffectLifetime, EventId, Execute, GrantSet, Observe,
+};
 
 /// What a test reports when its precondition did not hold.
 ///
@@ -216,6 +218,10 @@ impl Execute for NoteWhatIsRecorded {
         &[]
     }
 
+    fn effect_lifetime(&self) -> EffectLifetime {
+        EffectLifetime::Local
+    }
+
     async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
         call.0.check(Execute::required_caps(self))?;
         let journal = self.store.borrow();
@@ -249,6 +255,10 @@ impl Execute for NeverSettles {
         &[]
     }
 
+    fn effect_lifetime(&self) -> EffectLifetime {
+        EffectLifetime::Local
+    }
+
     async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
         call.0.check(Execute::required_caps(self))?;
         self.entered.set(self.entered.get().saturating_add(1));
@@ -275,6 +285,10 @@ impl Execute for AlwaysLands {
 
     fn required_caps(&self) -> &[Cap] {
         &[]
+    }
+
+    fn effect_lifetime(&self) -> EffectLifetime {
+        EffectLifetime::Local
     }
 
     async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
@@ -819,6 +833,10 @@ impl Execute for Counts {
         &[]
     }
 
+    fn effect_lifetime(&self) -> EffectLifetime {
+        EffectLifetime::Local
+    }
+
     async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
         call.0.check(Execute::required_caps(self))?;
         self.0.set(self.0.get().saturating_add(1));
@@ -1150,6 +1168,10 @@ impl Execute for Records {
         &[]
     }
 
+    fn effect_lifetime(&self) -> EffectLifetime {
+        EffectLifetime::Local
+    }
+
     async fn execute_action(&self, call: (Auth, &EventId<u32>)) -> Result<(), BotError> {
         call.0.check(Execute::required_caps(self))?;
         self.0.borrow_mut().push(*call.1);
@@ -1286,4 +1308,164 @@ fn a_journal_from_another_flow_is_refused() -> TestResult {
         Err(BotError::ActionNotDeclared { .. }) => Ok(()),
         other => Err(format!("expected a foreign-journal refusal, got {other:?}").into()),
     }
+}
+
+// ── Issue #100: external handoff is admitted on the real path ──────────────
+
+/// An action that would leave the process, and records whether it was entered.
+struct ExternalMarker(Rc<Cell<bool>>);
+
+impl Execute for ExternalMarker {
+    type Input = EventId<u32>;
+    type Output = ();
+
+    fn required_caps(&self) -> &[Cap] {
+        &[]
+    }
+
+    // The default is already `External`; stated so the test's subject is
+    // visible at the declaration rather than inferred from a missing override.
+    fn effect_lifetime(&self) -> EffectLifetime {
+        EffectLifetime::External
+    }
+
+    async fn execute_action(&self, call: (Auth, &EventId<u32>)) -> Result<(), BotError> {
+        call.0.check(Execute::required_caps(self))?;
+        self.0.set(true);
+        Ok(())
+    }
+
+    fn domain_id(&self) -> &str {
+        "test::external_marker"
+    }
+}
+
+/// A journal that advertises `ProcessCrash` and then acks `Ephemeral`.
+///
+/// The advertisement is not what the handoff is checked against: the
+/// acknowledgment is (issue #100).
+struct WeakAckJournal {
+    inner: MemoryJournal,
+}
+
+impl EffectJournal for WeakAckJournal {
+    fn durability(&self) -> DurabilityPromise {
+        DurabilityPromise::ProcessCrash
+    }
+
+    fn tail(&self) -> JournalPosition {
+        self.inner.tail()
+    }
+
+    fn committed(&self) -> Result<Vec<EffectEvent>, JournalError> {
+        EffectJournal::committed(&self.inner)
+    }
+
+    fn compare_and_append(
+        &mut self,
+        expected_tail: JournalPosition,
+        event: &EffectEvent,
+    ) -> Result<DurableAck, JournalError> {
+        self.inner.compare_and_append(expected_tail, event)?;
+        Ok(DurableAck::new(
+            self.inner.tail(),
+            DurabilityPromise::Ephemeral,
+        ))
+    }
+}
+
+/// An ephemeral scope refuses an external effect before the action runs.
+///
+/// The counterexample in issue #100: the in-memory ladder accepted the two
+/// write-ahead events and the adapter was entered, so its filesystem effect
+/// outlived the process despite the advertised refusal. The refusal is now on
+/// the handoff path, and the marker is the receiver that must never appear.
+#[test]
+fn an_ephemeral_scope_refuses_an_external_effect_before_it_runs() -> TestResult {
+    let store = Rc::new(RefCell::new(MemoryJournal::new()));
+    let seen = Rc::new(RefCell::new(EventId::new(1, 1)));
+    let entered = Rc::new(Cell::new(false));
+    let identity = identity()?;
+
+    let mut bot = Bot::builder(NAME)
+        .observe(Requests(Rc::clone(&seen)))
+        .on(
+            |_seen: &EventId<u32>| true,
+            ExternalMarker(Rc::clone(&entered)),
+        )
+        .with_effects(scope(identity, store)?)
+        .build(&GrantSet::empty())?;
+
+    match bot.tick() {
+        Err(BotError::EffectRefused { .. }) => {}
+        other => {
+            return Err(format!("expected a handoff refusal, got {other:?}").into());
+        }
+    }
+    assert!(
+        !entered.get(),
+        "the external action must not be entered when the journal cannot outlive the process"
+    );
+    Ok(())
+}
+
+/// A local effect still runs on an ephemeral scope.
+///
+/// The other half of the contract: `MemoryJournal` stays useful for explicitly
+/// local work (issue #100).
+#[test]
+fn an_ephemeral_scope_runs_a_local_effect() -> TestResult {
+    let store = Rc::new(RefCell::new(MemoryJournal::new()));
+    let seen = Rc::new(RefCell::new(EventId::new(1, 1)));
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let identity = identity()?;
+
+    let mut bot = Bot::builder(NAME)
+        .observe(Requests(Rc::clone(&seen)))
+        .on(|_seen: &EventId<u32>| true, Records(Rc::clone(&log)))
+        .with_effects(scope(identity, store)?)
+        .build(&GrantSet::empty())?;
+
+    assert_eq!(bot.tick()?, 1, "a declared-local action runs");
+    assert_eq!(*log.borrow(), vec![EventId::new(1, 1)]);
+    Ok(())
+}
+
+/// A journal whose acknowledgment is weaker than its advertisement is refused.
+///
+/// The handoff checks the per-append promise, not `durability()`: a store that
+/// claims `ProcessCrash` and acks `Ephemeral` is weaker than it says (issue
+/// #100).
+#[test]
+fn an_ack_weaker_than_the_advertised_grade_is_refused() -> TestResult {
+    let seen = Rc::new(RefCell::new(EventId::new(1, 1)));
+    let entered = Rc::new(Cell::new(false));
+    let identity = identity()?;
+    let environment = identity.environment();
+    let mut broker = Broker::new();
+    broker.register(environment)?;
+
+    let mut bot = Bot::builder(NAME)
+        .observe(Requests(Rc::clone(&seen)))
+        .on(
+            |_seen: &EventId<u32>| true,
+            ExternalMarker(Rc::clone(&entered)),
+        )
+        .with_effects(EffectScope::new(
+            identity,
+            broker,
+            Box::new(WeakAckJournal {
+                inner: MemoryJournal::new(),
+            }),
+        ))
+        .build(&GrantSet::empty())?;
+
+    match bot.tick() {
+        Err(BotError::EffectRefused { .. }) => {}
+        other => {
+            return Err(format!("expected the weak ack to be refused, got {other:?}").into());
+        }
+    }
+    assert!(!entered.get(), "the action did not run on a weak ack");
+    Ok(())
 }

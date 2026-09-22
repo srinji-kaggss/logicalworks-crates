@@ -194,8 +194,11 @@ use super::error::{BotError, DispatchCertainty, Escaped, RetryClass};
 use super::gate::GrantSet;
 #[cfg(feature = "ephemeral")]
 use super::journal::MemoryJournal;
-use super::journal::{AttemptStatus, EffectEvent, EffectJournal, EventKind, JournalError, recover};
+use super::journal::{
+    AttemptStatus, DurabilityPromise, EffectEvent, EffectJournal, EventKind, JournalError, recover,
+};
 use super::spec::{ChainEntry, Erased, ObserveAny, Witness, typed_entry};
+use super::verb::EffectLifetime;
 use super::verb::{Evaluate, Execute, Observe};
 
 // ── The effect path: identity, fencing, and the write-ahead record ─────────
@@ -600,10 +603,36 @@ impl Effects {
     ///
     /// [`DispatchError::Broker`] when the environment refuses, and
     /// [`DispatchError::Journal`] when the append is refused.
-    fn prepare(&mut self, key: EffectKey) -> Result<Authority, DispatchError> {
+    fn prepare(
+        &mut self,
+        key: EffectKey,
+        lifetime: EffectLifetime,
+    ) -> Result<Authority, DispatchError> {
+        // The durability admission is on the actual handoff path, not a
+        // helper a test can call: an external effect must not leave on a
+        // record that cannot outlive the process (issue #100).
+        let required = match lifetime {
+            EffectLifetime::Local => DurabilityPromise::Ephemeral,
+            EffectLifetime::External => {
+                self.scope
+                    .journal()
+                    .admit_external_handoff()
+                    .map_err(DispatchError::Journal)?;
+                DurabilityPromise::ProcessCrash
+            }
+        };
         let scope = &mut self.scope;
-        let (authority, _ack) =
+        let (authority, ack) =
             prepare_dispatch(&scope.broker, &mut *scope.journal, key)?.into_parts();
+        // The acknowledgment, not the advertisement. A journal that offers
+        // less on this append than the handoff requires is refused even when
+        // its `durability()` claimed enough.
+        if !ack.promise().meets(required) {
+            return Err(DispatchError::Journal(JournalError::PromiseUnmet {
+                required,
+                offered: ack.promise(),
+            }));
+        }
         Ok(authority)
     }
 
@@ -2014,7 +2043,11 @@ impl Ledger {
     /// The warrant is handed back rather than consumed here because the handoff
     /// is the caller's: it runs after the payload the attempt acts on is in
     /// hand, and it presents the warrant at [`Broker::revalidate`] on the way in.
-    fn begin_attempt(&mut self, id: WorkId) -> Result<(EffectKey, Authority), BotError> {
+    fn begin_attempt(
+        &mut self,
+        id: WorkId,
+        lifetime: EffectLifetime,
+    ) -> Result<(EffectKey, Authority), BotError> {
         let no_such_work = || BotError::NoSuchWork { work: id };
         let action = self.action_of(id).ok_or_else(no_such_work)?;
         // Refused before anything is written, and refused for the reason
@@ -2083,7 +2116,7 @@ impl Ledger {
             })?;
         let authority = self
             .effects
-            .prepare(key)
+            .prepare(key, lifetime)
             .map_err(|cause| BotError::EffectRefused { cause })?;
         Ok((key, authority))
     }
@@ -3865,7 +3898,20 @@ impl EcsBot {
             // beside it. The attempt a caller is handed and the attempt
             // settlement checks have to be one identity, and two derivations of
             // one identity are two identities the moment they disagree.
-            let (key, authority) = match self.world.non_send_mut::<Ledger>().begin_attempt(work) {
+            let lifetime = self
+                .world
+                .non_send::<Chains>()
+                .0
+                .get(step.chain)
+                .and_then(|chain| chain.entries.get(step.entry))
+                .map_or(EffectLifetime::External, |entry| {
+                    entry.action.effect_lifetime()
+                });
+            let (key, authority) = match self
+                .world
+                .non_send_mut::<Ledger>()
+                .begin_attempt(work, lifetime)
+            {
                 Ok(pair) => pair,
                 Err(error) => {
                     // The entry is not in a state an attempt can start from, or
@@ -4924,6 +4970,10 @@ mod tests {
             &[]
         }
 
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
+        }
+
         async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
             call.0.check(&[])?;
             self.0.set(self.0.get().saturating_add(1));
@@ -4945,6 +4995,10 @@ mod tests {
 
         fn required_caps(&self) -> &[Cap] {
             &[]
+        }
+
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
         }
 
         async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
@@ -4982,6 +5036,10 @@ mod tests {
 
         fn required_caps(&self) -> &[Cap] {
             &[]
+        }
+
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
         }
 
         async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
@@ -5034,6 +5092,10 @@ mod tests {
 
         fn required_caps(&self) -> &[Cap] {
             &[]
+        }
+
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
         }
 
         async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
@@ -5111,6 +5173,10 @@ mod tests {
 
         fn required_caps(&self) -> &[Cap] {
             &self.caps
+        }
+
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
         }
 
         async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
@@ -7128,6 +7194,10 @@ mod tests {
             &[]
         }
 
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
+        }
+
         async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
             call.0.check(&[])?;
             self.0.set(self.0.get().saturating_add(1));
@@ -7149,6 +7219,10 @@ mod tests {
 
         fn required_caps(&self) -> &[Cap] {
             &[]
+        }
+
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
         }
 
         async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {

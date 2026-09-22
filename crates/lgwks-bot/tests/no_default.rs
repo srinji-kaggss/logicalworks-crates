@@ -22,7 +22,7 @@ use lgwks_bot::broker::Broker;
 use lgwks_bot::effect::{EnvironmentId, FlowRevision, RunId};
 use lgwks_bot::journal::MemoryJournal;
 use lgwks_bot::spec::{ActionSpec, ChainSpec, EffectIdentity, EffectScope};
-use lgwks_bot::{Auth, Bot, BotError, BotSpec, Cap, Execute, GrantSet, Observe};
+use lgwks_bot::{Auth, Bot, BotError, BotSpec, Cap, EffectLifetime, Execute, GrantSet, Observe};
 
 /// The tests here cross `json::Error` and `BotError`, so they report
 /// `Box<dyn Error>` and propagate each with `?`. A scope that cannot be built
@@ -99,6 +99,10 @@ impl Execute for YieldAction {
 
     fn required_caps(&self) -> &[Cap] {
         &[]
+    }
+
+    fn effect_lifetime(&self) -> EffectLifetime {
+        EffectLifetime::Local
     }
 
     async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {

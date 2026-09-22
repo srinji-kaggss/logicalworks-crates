@@ -9,7 +9,7 @@
 //!
 //! ```rust
 //! use lgwks_bot::domain::eval::Above;
-//! use lgwks_bot::{Auth, Bot, BotError, Cap, Evaluate, Execute, GrantSet, Observe};
+//! use lgwks_bot::{EffectLifetime, Auth, Bot, BotError, Cap, Evaluate, Execute, GrantSet, Observe};
 //!
 //! /// A source that reports a count.
 //! struct Clock;
@@ -556,6 +556,8 @@ pub(crate) trait EvaluateAny {
 pub(crate) trait ExecuteAny {
     /// Forwards to [`Execute::required_caps`](crate::verb::Execute::required_caps).
     fn required_caps(&self) -> &[Cap];
+    /// Forwards to [`Execute::effect_lifetime`](crate::verb::Execute::effect_lifetime).
+    fn effect_lifetime(&self) -> crate::verb::EffectLifetime;
     /// Forwards to [`Execute::domain_id`](crate::verb::Execute::domain_id).
     ///
     /// Erased alongside the input and output, and needed here for the same
@@ -614,6 +616,10 @@ where
 
     fn domain_id(&self) -> &str {
         self.0.domain_id()
+    }
+
+    fn effect_lifetime(&self) -> crate::verb::EffectLifetime {
+        self.0.effect_lifetime()
     }
 
     fn run_any<'a>(
@@ -837,6 +843,10 @@ mod tests {
         fn required_caps(&self) -> &[Cap] {
             &[]
         }
+
+        fn effect_lifetime(&self) -> crate::verb::EffectLifetime {
+            crate::verb::EffectLifetime::Local
+        }
         async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
             call.0.check(crate::verb::Execute::required_caps(self))?;
             self.0.fetch_add(1, Ordering::SeqCst);
@@ -967,6 +977,10 @@ mod tests {
             fn required_caps(&self) -> &[Cap] {
                 &[]
             }
+
+            fn effect_lifetime(&self) -> crate::verb::EffectLifetime {
+                crate::verb::EffectLifetime::Local
+            }
             async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
                 call.0.check(crate::verb::Execute::required_caps(self))?;
                 Ok(())
@@ -1051,6 +1065,10 @@ mod tests {
             fn required_caps(&self) -> &[Cap] {
                 &[]
             }
+
+            fn effect_lifetime(&self) -> crate::verb::EffectLifetime {
+                crate::verb::EffectLifetime::Local
+            }
             async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
                 call.0.check(crate::verb::Execute::required_caps(self))?;
                 Ok(())
@@ -1101,6 +1119,10 @@ mod tests {
             fn required_caps(&self) -> &[Cap] {
                 &[]
             }
+
+            fn effect_lifetime(&self) -> crate::verb::EffectLifetime {
+                crate::verb::EffectLifetime::Local
+            }
             async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
                 call.0.check(crate::verb::Execute::required_caps(self))?;
                 Ok(())
@@ -1148,6 +1170,10 @@ mod tests {
             type Output = ();
             fn required_caps(&self) -> &[Cap] {
                 &[]
+            }
+
+            fn effect_lifetime(&self) -> crate::verb::EffectLifetime {
+                crate::verb::EffectLifetime::Local
             }
             async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
                 call.0.check(crate::verb::Execute::required_caps(self))?;

@@ -5,7 +5,9 @@
 //! binary declares is the list it runs — no more and no fewer — and that a
 //! document naming something outside it is refused with the name it used.
 
-use lgwks_bot::{Action, Auth, BotError, Cap, DomainRegistry, Execute, Observe, Source, domains};
+use lgwks_bot::{
+    Action, Auth, BotError, Cap, DomainRegistry, EffectLifetime, Execute, Observe, Source, domains,
+};
 
 /// A source whose identity is fixed, so a test can tell it was built.
 struct Repository;
@@ -60,6 +62,10 @@ impl Execute for SlackNotify {
 
     fn required_caps(&self) -> &[Cap] {
         &[]
+    }
+
+    fn effect_lifetime(&self) -> EffectLifetime {
+        EffectLifetime::Local
     }
 
     async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {

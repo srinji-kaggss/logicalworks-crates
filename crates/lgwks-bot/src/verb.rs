@@ -123,6 +123,31 @@ where
 ///
 /// Takes an `(Auth, input)` tuple: the proof must cover
 /// [`required_caps`](Execute::required_caps) or `execute_action` denies before
+/// Whether the effect an action models reaches outside this process.
+///
+/// The distinction an ephemeral journal exists to enforce: a local effect is
+/// gone with the process, and an external one outlives it. An adapter that
+/// does not declare is treated as [`Self::External`] — the conservative
+/// default, because an unclassified handoff is exactly the one that must not
+/// be allowed to leave on a record that cannot survive the writer (issue
+/// #100).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EffectLifetime {
+    /// Local to this process. An ephemeral journal may host it.
+    Local,
+    /// Reaches a receiver outside this process: a file, a socket, a queue.
+    /// Requires a journal that survives the writer dying, and the
+    /// `DispatchPrepared` acknowledgment has to say so.
+    External,
+}
+
+/// Perform a side effect. Capability-gated. The callable surface, the
+/// `action` half of the `(condition, action)` tuple, invoked as
+/// [`Execute::execute_action`].
+///
+/// Takes an `(Auth, input)` tuple: the proof must cover
+/// [`required_caps`](Execute::required_caps) or `execute_action` denies before
 /// acting.
 pub trait Execute {
     /// Input to the action.
@@ -133,6 +158,15 @@ pub trait Execute {
     /// Capabilities this action requires. Checked at `Bot::build()`, and
     /// proven per call by the `Auth` half of the tuple.
     fn required_caps(&self) -> &[Cap];
+
+    /// Whether the effect this action models reaches outside this process.
+    ///
+    /// Defaults to [`EffectLifetime::External`]. An action that is only local
+    /// says so; an action that does not is refused at the handoff rather than
+    /// admitted on a record that cannot outlive the process.
+    fn effect_lifetime(&self) -> EffectLifetime {
+        EffectLifetime::External
+    }
 
     /// Perform the effect this action models, after `call.0` proves the
     /// required caps. Awaited by `Bot::tick` in chain order; blocking work

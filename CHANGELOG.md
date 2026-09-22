@@ -174,6 +174,16 @@ explicitly under that crate.
 
 ### lgwks_bot Breaking
 
+- `Execute::effect_lifetime` declares whether the action's effect reaches
+  outside this process. The default is `EffectLifetime::External`, the
+  conservative reading of an unclassified handoff: an action that is only
+  local says so. An ephemeral journal now refuses an external effect on the
+  actual dispatch path — `Effects::prepare` calls
+  `EffectJournal::admit_external_handoff` and checks the `DispatchPrepared`
+  acknowledgment's promise against what the handoff requires, instead of
+  discarding it. A journal that advertises `ProcessCrash` and acks `Ephemeral`
+  is refused. `MemoryJournal` stays `Ephemeral` and stays useful for
+  explicitly local work.
 - `Observe::Output` must implement the new `InputIdentity`, alongside the
   `PartialEq` it already needed. The dispatch digest used to bind the
   process-local `Revision` counter, which reopens at 1 after every
@@ -194,6 +204,12 @@ explicitly under that crate.
 
 ### lgwks_bot Fixed
 
+- An ephemeral scope enforces its advertised external-effect refusal.
+  `Effects::prepare` used to discard the `DispatchPrepared` acknowledgment as
+  `_ack` and never called `admit_external_handoff`, so a local in-memory
+  ladder admitted an effect that outlived the process. Durability admission is
+  now on the handoff path and the acknowledgment is checked, not the
+  advertisement (`tests/durable_dispatch.rs::an_ephemeral_scope_refuses_an_external_effect_before_it_runs`).
 - Action identities are length-framed and index-portable. `derive_action_id`
   used to concatenate `bot` and `domain` around `usize::to_le_bytes` with no
   length prefix, so `"ab"`+`"c"` and `"a"`+`"bc"` derived the same `ActionId`
