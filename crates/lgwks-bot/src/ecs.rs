@@ -215,7 +215,12 @@ const ACTION_ID_DOMAIN: &[u8] = b"lgwks.bot.action-id.v2";
 const ACTION_DIGEST_DOMAIN: &[u8] = b"lgwks.bot.action-digest.v2";
 
 /// The domain separator for an admitted input's content identity.
-const OUTPUT_IDENTITY_DOMAIN: &[u8] = b"lgwks.bot.input-identity.v1";
+///
+/// `v2` replaced the `v1` stream, which hashed the compiler-provided
+/// `type_name` of the output type. `type_name` is diagnostic and unstable
+/// across toolchains, so `v2` binds the [`InputIdentity::SCHEMA_ID`] instead
+/// and the two streams are different identities by construction (issue #118).
+const OUTPUT_IDENTITY_DOMAIN: &[u8] = b"lgwks.bot.input-identity.v2";
 
 /// Hash a sequence of byte fields into the estate's content-identity digest.
 ///
@@ -228,9 +233,9 @@ const OUTPUT_IDENTITY_DOMAIN: &[u8] = b"lgwks.bot.input-identity.v1";
 fn hash_parts(parts: &[&[u8]]) -> Digest {
     let mut hasher = Hasher::new();
     for part in parts {
-        let len = u64::try_from(part.len()).unwrap_or(u64::MAX);
-        hasher.update(&len.to_le_bytes());
-        hasher.update(part);
+        // Length-framed: a stream over several variable-length parts must
+        // depend on the parts, not only on their concatenation (issue #118).
+        hasher.write_framed(part);
     }
     hasher.finalize()
 }
@@ -912,19 +917,6 @@ impl Effects {
             })
     }
 
-    /// Record an outcome for `key` if one is not already committed, and fold
-    /// it into the in-memory applied set.
-    ///
-    /// Idempotent: a repeat of the same evidence does not append twice. The
-    /// ladder's next step after `OutcomeObserved` is `Verified`, so an
-    /// `OutOfOrder` that expected `Verified` (or nothing) means this exact
-    /// record is already in the journal and the call is a success. This is the
-    /// one settlement write, shared by the live and recovered paths so a
-    /// restart cannot resurrect an attempt a live resolve already settled.
-    ///
-    /// # Errors
-    ///
-    /// Whatever the journal refuses, other than the idempotent repeat above.
     /// The outcome already committed for `key`, when there is one.
     ///
     /// The durable half of idempotent settlement: a repeat after reconstruction
@@ -1004,12 +996,21 @@ impl Effects {
     /// Verify a previously committed outcome before recovery treats it as
     /// settled. A durable adapter must provide positioned readback; otherwise
     /// the action remains blocked rather than being re-entered.
+    ///
+    /// An ephemeral journal skips the receipt operation: readback is the
+    /// strongest proof its grade can offer, and the default
+    /// [`EffectJournal::confirm_outcome`] refuses exactly because readback
+    /// bytes prove nothing about survival. For a journal that promises to
+    /// survive anything, the record must be attested, not merely present.
     fn confirm_recorded_outcome(
         &mut self,
         key: EffectKey,
         evidence: EffectEvidence,
     ) -> Result<(), JournalError> {
         let required = self.scope.journal().durability();
+        if required == DurabilityPromise::Ephemeral {
+            return Ok(());
+        }
         let position = self.outcome_position(key, evidence)?;
         let receipt = self
             .scope
@@ -1031,10 +1032,51 @@ impl Effects {
         }
     }
 
+    /// Settle an outcome the journal already holds.
+    ///
+    /// The committed record is the fact; what is left is the receipt the
+    /// attempt was admitted under. The journal's own grade must meet it — a
+    /// weaker store is refused rather than settled below the grade the
+    /// dispatch was admitted with — and a store that grades itself above
+    /// ephemeral must re-attest through its receipt operation, because
+    /// readback proves only that bytes are present, not that they will
+    /// survive what the grade promises.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::ReceiptUnavailable`] when the journal's grade is below
+    /// `required` or it has no receipt operation, and whatever the readback or
+    /// the receipt operation refuses.
+    fn settle_committed_outcome(
+        &mut self,
+        key: EffectKey,
+        evidence: EffectEvidence,
+        required: DurabilityPromise,
+    ) -> Result<(), JournalError> {
+        let offered = self.scope.journal().durability();
+        if !offered.meets(required) {
+            return Err(JournalError::ReceiptUnavailable { required });
+        }
+        if offered != DurabilityPromise::Ephemeral {
+            self.confirm_recorded_outcome(key, evidence)?;
+        }
+        self.accept_position(
+            &EffectEvent::OutcomeObserved { key, evidence },
+            self.outcome_position(key, evidence)?,
+        )?;
+        self.fold_outcome(key, evidence);
+        Ok(())
+    }
+
     /// Record an outcome for `key` if one is not already committed, and fold
     /// it into the in-memory applied set.
     ///
-    /// Idempotent: a repeat of the same evidence does not append twice.
+    /// Idempotent: a repeat of the same evidence does not append twice. The
+    /// ladder's next step after `OutcomeObserved` is `Verified`, so an
+    /// `OutOfOrder` that expected `Verified` (or nothing) means this exact
+    /// record is already in the journal and the call is a success. This is the
+    /// one settlement write, shared by the live and recovered paths so a
+    /// restart cannot resurrect an attempt a live resolve already settled.
     ///
     /// # Errors
     ///
@@ -1050,8 +1092,7 @@ impl Effects {
             .find(|entry| entry.0 == key)
             .map(|entry| entry.1)
             .unwrap_or_else(|| self.scope.journal().durability());
-        let already_recorded = self.outcome_for(&key)?;
-        if let Some(recorded) = already_recorded {
+        if let Some(recorded) = self.outcome_for(&key)? {
             if recorded != evidence {
                 return Err(JournalError::OutOfOrder {
                     key: Box::new(key),
@@ -1059,15 +1100,11 @@ impl Effects {
                     attempted: EventKind::OutcomeObserved,
                 });
             }
-            if required == DurabilityPromise::Ephemeral {
-                self.accept_position(
-                    &EffectEvent::OutcomeObserved { key, evidence },
-                    self.outcome_position(key, evidence)?,
-                )?;
-                self.fold_outcome(key, evidence);
-                return Ok(());
-            }
-            return Err(JournalError::ReceiptUnavailable { required });
+            // The record is already in the journal. The only open question is
+            // the receipt: the original append's acknowledgment is not in hand
+            // on this path, so the journal's own receipt operation is what
+            // settles a graded attempt (issue #118).
+            return self.settle_committed_outcome(key, evidence, required);
         }
         match self.append(&EffectEvent::OutcomeObserved { key, evidence }) {
             Ok(acknowledgment) => {
@@ -1088,19 +1125,11 @@ impl Effects {
                 // contradictory `Applied` gets acknowledged (issue #106).
                 match self.outcome_for(&key)? {
                     Some(recorded) if recorded == evidence => {
-                        if required == DurabilityPromise::Ephemeral {
-                            self.accept_position(
-                                &EffectEvent::OutcomeObserved { key, evidence },
-                                self.outcome_position(key, evidence)?,
-                            )?;
-                            self.fold_outcome(key, evidence);
-                            return Ok(());
-                        }
-                        // The original append acknowledgement is unavailable
-                        // after an out-of-order retry. Do not mint a generic
-                        // replacement receipt: without the original position
-                        // it cannot be bound to this outcome.
-                        Err(JournalError::ReceiptUnavailable { required })
+                        // The original append acknowledgment is unavailable
+                        // after an out-of-order retry. The journal's receipt
+                        // operation, not a minted replacement, is what
+                        // settles a graded attempt.
+                        self.settle_committed_outcome(key, evidence, required)
                     }
                     _ => Err(JournalError::OutOfOrder {
                         key: Box::new(key),
@@ -1109,12 +1138,31 @@ impl Effects {
                     }),
                 }
             }
+            Err(cause @ JournalError::OutcomeUnknown { .. }) => {
+                // The store may hold the event; the reply was lost. Read back
+                // before anything else: a matching record means the effect and
+                // its record both landed, and the attempt settles instead of
+                // reporting an ambiguity the next retry can never resolve.
+                match self.outcome_for(&key)? {
+                    Some(recorded) if recorded == evidence => {
+                        self.settle_committed_outcome(key, evidence, required)
+                    }
+                    Some(_) => Err(JournalError::OutOfOrder {
+                        key: Box::new(key),
+                        expected: Some(EventKind::Verified),
+                        attempted: EventKind::OutcomeObserved,
+                    }),
+                    // Nothing landed. The ambiguous failure is the honest
+                    // report: the caller is post-effect and must surface
+                    // `EffectUnrecorded` with `Occurred` certainty, and a
+                    // recovery pass reconciles from the journal's own replay.
+                    None => Err(cause),
+                }
+            }
             Err(cause) => {
-                // A journal may commit the event and lose the acknowledgment.
-                // Surface the ambiguous failure now: the caller is post-effect
-                // and must report `EffectUnrecorded`, not a clean settle. The
-                // *next* `ensure_outcome` for this key hits the ladder fence
-                // above, and that is where the read-back is idempotent success.
+                // A refusal that left the journal unchanged. Surface it now:
+                // the caller is post-effect and must report `EffectUnrecorded`,
+                // not a clean settle.
                 Err(cause)
             }
         }
@@ -1376,8 +1424,9 @@ where
     S::Output: InputIdentity + 'static,
 {
     let mut hasher = Hasher::new();
-    hasher.update(OUTPUT_IDENTITY_DOMAIN);
-    hasher.update(std::any::type_name::<S::Output>().as_bytes());
+    hasher
+        .write_framed(OUTPUT_IDENTITY_DOMAIN)
+        .write_framed(<S::Output as InputIdentity>::SCHEMA_ID);
     let event = match value.downcast_ref::<S::Output>() {
         Some(typed) => {
             typed.write_identity(&mut hasher);
@@ -1389,7 +1438,7 @@ where
             // identity would make every mismatched binding look like the same
             // admitted input. Reported as content-only, so the stricter of the
             // two retire readings applies and a mismatch is not quietly retired.
-            hasher.update(b"downcast-miss");
+            hasher.write_framed(b"downcast-miss");
             false
         }
     };
@@ -4941,6 +4990,7 @@ mod tests {
     use std::task::{Context, Poll, Waker};
 
     use super::*;
+    use crate::EventId;
     use crate::cap::{Auth, Cap, Demand};
     use crate::effect::{EnvironmentId, RunId};
     use crate::journal::{DurabilityPromise, DurableAck, JournalPosition, MemoryJournal};
@@ -5666,9 +5716,12 @@ mod tests {
             if matches!(event, EffectEvent::OutcomeObserved { .. })
                 && self.commit_then_error.replace(false)
             {
-                return Err(JournalError::Storage(io::Error::other(
-                    "injected post-commit append error",
-                )));
+                // Conforming ambiguity: the event is in the store and the
+                // reply is lost. `Storage` would claim the journal is
+                // unchanged, which the committed event below contradicts.
+                return Err(JournalError::OutcomeUnknown {
+                    cause: io::Error::other("injected post-commit lost reply"),
+                });
             }
             Ok(ack)
         }
@@ -5696,10 +5749,10 @@ mod tests {
             .build(&net_grants())?;
 
         commit_then_error.set(true);
-        match bot.tick() {
-            Err(BotError::EffectUnrecorded { .. }) => {}
-            other => return Err(format!("expected recording failure, got {other:?}").into()),
-        }
+        // The reply is lost, but the readback finds the record and the tick
+        // settles in the same breath: an effect whose record is provably in
+        // the journal is settled work, not an ambiguity to stall on.
+        assert_eq!(bot.tick()?, 1);
         assert_eq!(runs.get(), 1);
         let committed = EffectJournal::committed(&*store.borrow())?;
         assert!(matches!(
@@ -5709,11 +5762,190 @@ mod tests {
                 ..
             })
         ));
+        // A public repeat of the same evidence is the same fact, not a
+        // refusal: the journal answers it from the committed record.
         let key = committed[0].key();
         bot.resolve_effect(&key, EffectEvidence::Applied)?;
 
-        assert_eq!(bot.tick()?, 1);
+        assert_eq!(bot.tick()?, 0);
         assert_eq!(runs.get(), 1, "retry must not dispatch the action again");
+        assert!(bot.pending().is_empty());
+        Ok(())
+    }
+
+    /// A journal that grades itself durable and can attest a committed
+    /// outcome through its receipt operation — the shape a file-backed
+    /// adapter has.
+    ///
+    /// Two one-shot faults cover the two halves of the
+    /// [`JournalError::OutcomeUnknown`] contract: commit-then-lost-reply
+    /// (the record is in the store, the caller settles by readback and
+    /// receipt) and unknown-without-commit (nothing landed, the caller
+    /// reports the occurrence and the retry re-appends — which is safe
+    /// precisely because the readback, not hope, authorized it).
+    /// [`Self::confirm_outcome`] is the receipt half: it attests only an
+    /// outcome that is actually in the store, at the position the caller
+    /// names.
+    struct DurableConfirmingJournal {
+        inner: Rc<RefCell<MemoryJournal>>,
+        /// One-shot: commit the next outcome append and lose its reply.
+        ambiguous_once: Rc<Cell<bool>>,
+        /// One-shot: the next outcome append reports an unknown outcome
+        /// without committing anything.
+        unknown_once: Rc<Cell<bool>>,
+    }
+
+    impl DurableConfirmingJournal {
+        fn new() -> Self {
+            Self {
+                inner: Rc::new(RefCell::new(MemoryJournal::new())),
+                ambiguous_once: Rc::new(Cell::new(false)),
+                unknown_once: Rc::new(Cell::new(false)),
+            }
+        }
+
+        fn ambiguous_once(&self) -> Rc<Cell<bool>> {
+            Rc::clone(&self.ambiguous_once)
+        }
+
+        fn unknown_once(&self) -> Rc<Cell<bool>> {
+            Rc::clone(&self.unknown_once)
+        }
+
+        fn store(&self) -> Rc<RefCell<MemoryJournal>> {
+            Rc::clone(&self.inner)
+        }
+    }
+
+    impl EffectJournal for DurableConfirmingJournal {
+        fn durability(&self) -> DurabilityPromise {
+            DurabilityPromise::ProcessCrash
+        }
+
+        fn tail(&self) -> JournalPosition {
+            self.inner.borrow().tail()
+        }
+
+        fn committed(&self) -> Result<Vec<EffectEvent>, JournalError> {
+            EffectJournal::committed(&*self.inner.borrow())
+        }
+
+        fn committed_entries(&self) -> Result<Vec<crate::journal::JournalEntry>, JournalError> {
+            Ok(self.inner.borrow().committed().to_vec())
+        }
+
+        fn compare_and_append(
+            &mut self,
+            expected_tail: JournalPosition,
+            event: &EffectEvent,
+        ) -> Result<DurableAck, JournalError> {
+            if matches!(event, EffectEvent::OutcomeObserved { .. }) && self.unknown_once.take() {
+                return Err(JournalError::OutcomeUnknown {
+                    cause: io::Error::other("injected unknown outcome, nothing written"),
+                });
+            }
+            let ack = self
+                .inner
+                .borrow_mut()
+                .compare_and_append(expected_tail, event)?;
+            if matches!(event, EffectEvent::OutcomeObserved { .. }) && self.ambiguous_once.take() {
+                return Err(JournalError::OutcomeUnknown {
+                    cause: io::Error::other("injected lost reply"),
+                });
+            }
+            Ok(ack)
+        }
+
+        fn confirm_outcome(
+            &mut self,
+            key: crate::effect::EffectKey,
+            evidence: EffectEvidence,
+            position: JournalPosition,
+            required: DurabilityPromise,
+        ) -> Result<DurableAck, JournalError> {
+            let held = EffectJournal::committed(&*self.inner.borrow())?.iter().any(
+                |event| matches!(*event, EffectEvent::OutcomeObserved { key: held, evidence: held_evidence }
+                        if held == key && held_evidence == evidence),
+            );
+            if !held {
+                return Err(JournalError::ReceiptUnavailable { required });
+            }
+            Ok(DurableAck::new(position, self.durability()))
+        }
+    }
+
+    #[test]
+    fn a_durable_retry_after_a_lost_reply_settles_instead_of_stalling() -> TestResult {
+        let runs = Rc::new(Cell::new(0));
+        let journal = DurableConfirmingJournal::new();
+        let ambiguous_once = journal.ambiguous_once();
+        let store = journal.store();
+        let mut bot = EcsBot::builder("lost-reply")
+            .observe(Holds::new(200))
+            .on(|value: &u16| *value >= 200, Count(Rc::clone(&runs)))
+            .with_effects(test_effects_with(Box::new(journal))?)
+            .build(&net_grants())?;
+
+        // Half one: the record landed, the reply did not. The readback finds
+        // it, the journal attests its grade, and the tick settles in the same
+        // breath — a receipt the journal can produce is not a reason to
+        // stall, and never a reason to re-enter the action.
+        ambiguous_once.set(true);
+        assert_eq!(bot.tick()?, 1);
+        assert_eq!(runs.get(), 1);
+        let committed = EffectJournal::committed(&*store.borrow())?;
+        assert!(
+            matches!(
+                committed.last(),
+                Some(EffectEvent::OutcomeObserved {
+                    evidence: EffectEvidence::Applied,
+                    ..
+                })
+            ),
+            "the store must hold the outcome whose reply was lost"
+        );
+        assert!(bot.pending().is_empty());
+
+        // Half two: an unknown outcome where nothing landed. The readback
+        // proves absence, the caller reports the occurrence, and the retry
+        // re-appends — readback authorized it, the ladder stands behind it.
+        // A separate bot: half one's `Applied` settlement retired that
+        // generation, and a retired generation is owed no second append.
+        let runs = Rc::new(Cell::new(0));
+        let journal = DurableConfirmingJournal::new();
+        let unknown_once = journal.unknown_once();
+        let store = journal.store();
+        let mut bot = EcsBot::builder("unknown-refused")
+            .observe(Holds::new(200))
+            .on(|value: &u16| *value >= 200, Count(Rc::clone(&runs)))
+            .with_effects(test_effects_with(Box::new(journal))?)
+            .build(&net_grants())?;
+
+        unknown_once.set(true);
+        match bot.tick() {
+            Err(error @ BotError::EffectUnrecorded { .. }) => {
+                assert_eq!(
+                    error.dispatch_certainty(),
+                    DispatchCertainty::Occurred,
+                    "the effect happened; only its record's reply was lost: {error:?}"
+                );
+            }
+            other => return Err(format!("expected a lost reply, got {other:?}").into()),
+        }
+        assert_eq!(runs.get(), 1);
+        let committed = EffectJournal::committed(&*store.borrow())?;
+        assert!(
+            !committed
+                .iter()
+                .any(|event| matches!(event, EffectEvent::OutcomeObserved { .. })),
+            "an unknown outcome without a commit must leave the ladder free"
+        );
+        assert_eq!(
+            bot.tick()?,
+            1,
+            "the record lands on the recovery tick and counts as fired"
+        );
+        assert_eq!(runs.get(), 1, "a lost reply must never re-run the action");
         assert!(bot.pending().is_empty());
         Ok(())
     }
@@ -7851,5 +8083,287 @@ mod tests {
             first_hold(&bot)
         );
         Ok(())
+    }
+
+    // ── admitted-input identity framing ─────────────────────────────────────
+
+    /// Two output types whose `type_name`s share a prefix, the pair the
+    /// identity scheme must keep apart (issue #118).
+    ///
+    /// `PrefixProbeTail`'s type name is `PrefixProbe`'s name plus `b"Tail"`,
+    /// and `PrefixProbe` writes that same suffix at the head of its identity
+    /// bytes, so an unframed `name || bytes` stream would collide byte for
+    /// byte. Under the declared-schema scheme they are distinct because their
+    /// authors declared distinct schema ids — the name games cannot reach the
+    /// digest any more.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct PrefixProbe;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct PrefixProbeTail;
+
+    /// The byte difference between the two type names above.
+    const PREFIX_PROBE_SUFFIX: &[u8] = b"Tail";
+
+    impl InputIdentity for PrefixProbe {
+        const SCHEMA_ID: &'static [u8] = b"lgwks.bot.schema.v1.test-prefix-probe";
+
+        fn write_identity(&self, hasher: &mut Hasher) {
+            hasher.update(PREFIX_PROBE_SUFFIX);
+            hasher.update(b"payload");
+        }
+    }
+
+    impl InputIdentity for PrefixProbeTail {
+        const SCHEMA_ID: &'static [u8] = b"lgwks.bot.schema.v1.test-prefix-probe-tail";
+
+        fn write_identity(&self, hasher: &mut Hasher) {
+            hasher.update(b"payload");
+        }
+    }
+
+    /// A second schema of a type whose identity bytes are byte-for-byte
+    /// identical to [`PrefixProbe`]'s — the control that proves the schema
+    /// id, not the bytes, separates the two.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct PrefixProbeNextSchema;
+
+    impl InputIdentity for PrefixProbeNextSchema {
+        const SCHEMA_ID: &'static [u8] = b"lgwks.bot.schema.v2.test-prefix-probe";
+
+        fn write_identity(&self, hasher: &mut Hasher) {
+            hasher.update(PREFIX_PROBE_SUFFIX);
+            hasher.update(b"payload");
+        }
+    }
+
+    struct PrefixSource;
+
+    impl Observe for PrefixSource {
+        type Output = PrefixProbe;
+
+        fn required_caps(&self) -> &[Cap] {
+            &[]
+        }
+
+        async fn poll(&self, _call: (Auth, ())) -> Result<PrefixProbe, BotError> {
+            unreachable!("identity fixtures are never polled")
+        }
+
+        fn domain_id(&self) -> &str {
+            "test::prefix_probe"
+        }
+    }
+
+    struct PrefixTailSource;
+
+    impl Observe for PrefixTailSource {
+        type Output = PrefixProbeTail;
+
+        fn required_caps(&self) -> &[Cap] {
+            &[]
+        }
+
+        async fn poll(&self, _call: (Auth, ())) -> Result<PrefixProbeTail, BotError> {
+            unreachable!("identity fixtures are never polled")
+        }
+
+        fn domain_id(&self) -> &str {
+            "test::prefix_probe_tail"
+        }
+    }
+
+    struct PrefixNextSchemaSource;
+
+    impl Observe for PrefixNextSchemaSource {
+        type Output = PrefixProbeNextSchema;
+
+        fn required_caps(&self) -> &[Cap] {
+            &[]
+        }
+
+        async fn poll(&self, _call: (Auth, ())) -> Result<PrefixProbeNextSchema, BotError> {
+            unreachable!("identity fixtures are never polled")
+        }
+
+        fn domain_id(&self) -> &str {
+            "test::prefix_probe_next"
+        }
+    }
+
+    /// A `String`-valued source for the identity known-answer vectors.
+    struct Words;
+
+    impl Observe for Words {
+        type Output = String;
+
+        fn required_caps(&self) -> &[Cap] {
+            &[]
+        }
+
+        async fn poll(&self, _call: (Auth, ())) -> Result<String, BotError> {
+            unreachable!("identity fixtures are never polled")
+        }
+
+        fn domain_id(&self) -> &str {
+            "test::words"
+        }
+    }
+
+    /// An [`EventId`]-valued source for the identity known-answer vectors.
+    struct Ticks;
+
+    impl Observe for Ticks {
+        type Output = EventId<u64>;
+
+        fn required_caps(&self) -> &[Cap] {
+            &[]
+        }
+
+        async fn poll(&self, _call: (Auth, ())) -> Result<EventId<u64>, BotError> {
+            unreachable!("identity fixtures are never polled")
+        }
+
+        fn domain_id(&self) -> &str {
+            "test::ticks"
+        }
+    }
+
+    /// A payload whose identity bytes are identical to `u64`'s — the control
+    /// that proves the inner schema id, not the bytes, keeps two wrapper
+    /// types apart.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct AltTick(u64);
+
+    impl InputIdentity for AltTick {
+        const SCHEMA_ID: &'static [u8] = b"lgwks.bot.schema.v1.test-alt-tick";
+
+        fn write_identity(&self, hasher: &mut Hasher) {
+            hasher.update(&self.0.to_le_bytes());
+        }
+    }
+
+    struct TicksAlt;
+
+    impl Observe for TicksAlt {
+        type Output = EventId<AltTick>;
+
+        fn required_caps(&self) -> &[Cap] {
+            &[]
+        }
+
+        async fn poll(&self, _call: (Auth, ())) -> Result<EventId<AltTick>, BotError> {
+            unreachable!("identity fixtures are never polled")
+        }
+
+        fn domain_id(&self) -> &str {
+            "test::ticks_alt"
+        }
+    }
+
+    #[test]
+    fn two_output_types_sharing_a_name_prefix_hash_two_identities() {
+        let plain = identify_output::<PrefixSource>(&PrefixProbe);
+        let tail = identify_output::<PrefixTailSource>(&PrefixProbeTail);
+        assert_ne!(
+            plain.identity, tail.identity,
+            "the declared schema ids must separate the pair their name and \
+             byte streams would collide"
+        );
+    }
+
+    #[test]
+    fn a_schema_bump_moves_the_identity_of_identical_bytes() {
+        // The declared migration boundary: same identity bytes under a
+        // different schema id are different admitted inputs. A recovered
+        // journal from the old schema therefore derives a different dispatch
+        // digest and is refused as superseded rather than folded.
+        let current = identify_output::<PrefixSource>(&PrefixProbe);
+        let next = identify_output::<PrefixNextSchemaSource>(&PrefixProbeNextSchema);
+        assert_ne!(current.identity, next.identity);
+    }
+
+    #[test]
+    fn the_same_output_hashes_one_identity_every_time() {
+        let first = identify_output::<Script>(&7_u16);
+        let second = identify_output::<Script>(&7_u16);
+        assert_eq!(first.identity, second.identity);
+        assert_eq!(first.event, second.event);
+    }
+
+    #[test]
+    fn a_downcast_miss_still_names_the_binding_it_refused() {
+        let hit = identify_output::<Script>(&7_u16);
+        let miss = identify_output::<Script>(&1_000_u32);
+        assert_ne!(
+            hit.identity, miss.identity,
+            "a missed downcast must not read as an admission of the value"
+        );
+    }
+
+    #[test]
+    fn the_same_event_twice_and_two_events_hash_as_documented() {
+        let redelivery = identify_output::<Ticks>(&EventId::new(5_u64, 7_u64));
+        let again = identify_output::<Ticks>(&EventId::new(5_u64, 7_u64));
+        assert_eq!(
+            redelivery.identity, again.identity,
+            "the same event id over the same payload is one event"
+        );
+        assert!(redelivery.event, "EventId names an event");
+
+        let other_id = identify_output::<Ticks>(&EventId::new(6_u64, 7_u64));
+        assert_ne!(redelivery.identity, other_id.identity);
+
+        // The payload's schema rides inside the wrapper's stream, so equal
+        // ids over identical written bytes from different payload types stay
+        // distinct.
+        let other_payload = identify_output::<TicksAlt>(&EventId::new(5_u64, AltTick(7_u64)));
+        assert_ne!(redelivery.identity, other_payload.identity);
+    }
+
+    /// Known-answer vectors for the `v2` identity scheme (issue #118).
+    ///
+    /// Each vector pins the exact 16-byte identity a stream must produce from
+    /// its declared parts: domain, schema id, identity bytes. A toolchain,
+    /// module path or crate rename cannot move these values — the stream
+    /// contains none of them — so any change here is a deliberate scheme
+    /// change, and the vector is what refuses it.
+    #[test]
+    fn identity_known_answer_vectors_hold() {
+        let hex = |identity: [u8; 16]| {
+            identity
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+
+        let u16_seven = hex(identify_output::<Script>(&7_u16).identity);
+        assert_eq!(
+            u16_seven, "878e8add50e816abdbb0901de9ed7788",
+            "the u16 vector moved: the v2 identity scheme changed"
+        );
+
+        let str_value = identify_output::<Words>(&String::from("settle")).identity;
+        assert_eq!(
+            hex(str_value),
+            "174d75182e8e31c49374da2f22e0b353",
+            "the string vector moved: the v2 identity scheme changed"
+        );
+
+        let event = identify_output::<Ticks>(&EventId::new(9_u64, true)).identity;
+        assert_eq!(
+            hex(event),
+            "f4d5d8a77b9fed69dd1474cf0620348a",
+            "the event-id vector moved: the v2 identity scheme changed"
+        );
+
+        // A refused binding has its own vector: the miss names the schema it
+        // refused, and the value it refused is deliberately absent.
+        let miss = identify_output::<Script>(&1_000_u32).identity;
+        assert_eq!(
+            hex(miss),
+            "f2e18c137ba6e62e78f672c22c02bc66",
+            "the refused-binding vector moved: the v2 identity scheme changed"
+        );
     }
 }

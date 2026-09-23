@@ -620,13 +620,19 @@ impl EffectJournal for FileJournal {
         // may have left a prefix of the frame on the disk, so the handle
         // poisons itself rather than keep appending on a view it can no
         // longer vouch for.
+        //
+        // Both failures are `OutcomeUnknown`, not `Storage`: the frame may be
+        // fully on the disk with only its reply lost. The caller reconciles by
+        // readback — a reopen replays what the file actually holds — and never
+        // by re-appending, because a re-append of a frame that did land would
+        // branch the chain this fence exists to keep linear.
         if let Err(error) = self.file.write_all(&frame) {
             self.write_failed = true;
-            return Err(JournalError::Storage(error));
+            return Err(JournalError::OutcomeUnknown { cause: error });
         }
         if let Err(error) = self.file.sync_all() {
             self.write_failed = true;
-            return Err(JournalError::Storage(error));
+            return Err(JournalError::OutcomeUnknown { cause: error });
         }
 
         self.committed.push(JournalEntry::new(position, *event));

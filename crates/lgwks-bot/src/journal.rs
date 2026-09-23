@@ -485,8 +485,31 @@ pub enum JournalError {
     /// because a wrapped sequence would make two positions compare equal and
     /// defeat the guard the position exists to provide.
     Exhausted,
-    /// The backing store refused the append.
+    /// The backing store refused the append before the event could be written.
+    ///
+    /// The journal is unchanged: the event is not committed, and a retry may
+    /// re-append. Named apart from [`Self::OutcomeUnknown`] so a caller can
+    /// tell "nothing landed, try again" from "something may have landed,
+    /// read back" without knowing the adapter.
     Storage(io::Error),
+    /// The append may have committed, and the acknowledgment was lost.
+    ///
+    /// This is the reply a real store produces when bytes reach the disk and
+    /// the confirmation does not reach the caller: a write that fails part
+    /// way, a sync whose result never arrives. The committed state of the
+    /// event is *unknown* — it may be in the store, it may not — and the
+    /// contract for a caller is reconciliation by readback, never a blind
+    /// re-append: re-appending an event that did land is how an effect gets
+    /// executed twice on the strength of a lost reply.
+    ///
+    /// An adapter returns this only for its own append's uncertain outcome.
+    /// Every other refusal — a stale tail, a ladder violation, a store that
+    /// refused before touching the log — leaves the journal unchanged and is
+    /// reported as its own variant.
+    OutcomeUnknown {
+        /// The store error the reply was lost behind, when there was one.
+        cause: io::Error,
+    },
     /// The event could not be encoded for the chain.
     ///
     /// Not a caller error and not reachable by anything the caller controls:
@@ -559,6 +582,11 @@ impl fmt::Display for JournalError {
             Self::Storage(ref cause) => {
                 write!(f, "journal storage refused the append: {cause}")
             }
+            Self::OutcomeUnknown { ref cause } => write!(
+                f,
+                "journal append may have committed, acknowledgment lost: {cause}; \
+                 reconcile by readback rather than re-appending"
+            ),
             Self::Encoding(ref cause) => {
                 write!(
                     f,
@@ -576,6 +604,7 @@ impl std::error::Error for JournalError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match *self {
             Self::Storage(ref cause) => Some(cause),
+            Self::OutcomeUnknown { ref cause } => Some(cause),
             Self::Encoding(ref cause) => Some(cause),
             Self::Corrupt(ref cause) => Some(cause),
             _ => None,
@@ -673,15 +702,31 @@ pub trait EffectJournal {
     ///
     /// The `&mut self` receiver fences writers within one process; the tail
     /// check fences writers across processes, which is the case that actually
-    /// happens. A refusal leaves the journal unchanged.
+    /// happens.
+    ///
+    /// The outcome is one of exactly three things, and an adapter must say
+    /// which:
+    ///
+    /// - `Ok(ack)` — the event is committed at `ack.position` under
+    ///   `ack.promise`.
+    /// - `Err` of [`JournalError::TailMismatch`], [`JournalError::OutOfOrder`],
+    ///   [`JournalError::Exhausted`], [`JournalError::Encoding`] or
+    ///   [`JournalError::Storage`] — the event is *not* committed and the
+    ///   journal is unchanged. A retry may re-append.
+    /// - `Err(JournalError::OutcomeUnknown)` — the event *may* be committed
+    ///   and the acknowledgment was lost. A caller reconciles by readback and
+    ///   must not re-append: re-appending an event that did land is how an
+    ///   effect gets executed twice on the strength of a lost reply.
     ///
     /// # Errors
     ///
     /// [`JournalError::TailMismatch`] when another writer appended,
     /// [`JournalError::OutOfOrder`] when the event cannot follow what is
     /// committed for its key, [`JournalError::Exhausted`] when the position
-    /// space is spent, and [`JournalError::Storage`] when the backing store
-    /// refused.
+    /// space is spent, [`JournalError::Storage`] when the backing store
+    /// refused before the event was written, and
+    /// [`JournalError::OutcomeUnknown`] when the event may have committed and
+    /// the acknowledgment was lost.
     fn compare_and_append(
         &mut self,
         expected_tail: JournalPosition,
