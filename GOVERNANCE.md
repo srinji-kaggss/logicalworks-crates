@@ -118,6 +118,7 @@ diverged from the lane table.
 | Lint | `cargo clippy --workspace --all-targets --locked -- -D warnings` | any warning |
 | Format | `cargo fmt --all -- --check` | any diff |
 | Doc build | `RUSTDOCFLAGS='-D warnings' cargo doc --no-deps` | broken link or warning |
+| Requirements | `python3 scripts/check-requirements.py` | normative sentence changed with no Supersession log entry |
 | Unwrap scan | no `.unwrap()` outside `mod tests` | any production unwrap |
 | Package smoke | `./scripts/lgwks-std-package-smoke.sh` | smoke failure |
 | Docs.rs metadata | declared feature set must build | unbuildable declaration |
@@ -153,8 +154,9 @@ release process; a release cut is a Director action.
 
 ## 4. Change control for governance
 
-`GOVERNANCE.md`, `CODEBOOK.md`, `WORKFLOW.md`, and `AGENTS.md` are the governance
-surface. Changing them is a governance change and follows these rules:
+`GOVERNANCE.md`, `CODEBOOK.md`, `WORKFLOW.md`, `AGENTS.md`, `INVARIANTS.md`,
+and `REQUIREMENTS.md` are the governance surface. Changing them is a
+governance change and follows these rules:
 
 1. A governance change ships in its own commit, separate from the semantic change
    it describes, unless the two are inseparable.
@@ -177,6 +179,31 @@ surface. Changing them is a governance change and follows these rules:
 
 Newest first. Each entry names what changed, the receipts, and what it does
 **not** claim.
+
+### 2026-09-23 — Requirements spine, bot durability fixes, readiness
+
+- **Requirements spine.** `REQUIREMENTS.md` (R1–R13, immutable, superseded
+  never edited), `scripts/check-requirements.py`, and
+  `scripts/requirements.lock` land as governance as code, wired into
+  `scripts/gate-lanes.toml` (`requirements` lane) and the `contract-drift`
+  CI job. `INVARIANTS.md` is tracked as the short enforced rule list.
+- Merged PRs
+  [#112](https://github.com/srinji-kaggss/logicalworks-crates/pull/112)
+  through [#140](https://github.com/srinji-kaggss/logicalworks-crates/pull/140)
+  after the #88–#111 ledger line:
+  #112 journal-before-acknowledge, #113 recovered-unknown barrier, #114
+  dispatch-digest-to-admitted-input, #115 real-dispatch-path handoff, #116
+  locator-ladder eligibility, #117 descendant process cleanup, #121 effect
+  kernel architecture, #124 red-team leftovers, #125 four-file suite and
+  lane parity, #128 non-executable process descriptions, #132
+  enable-time deadline, #138 edge-identity watch, #139 read-failure-is-error,
+  #140 nine-axis readiness and RPA case.
+- The bot invariants INV-BOT-1..11 already name these defects; INV-GOV-1
+  (gate defined once) and INV-GOV-2 (requirements superseded, never edited)
+  are added in this change.
+
+**Does not claim:** hosted CI reproduction of the new lane; crash-kill
+evidence for R10; Frontier/Performance matched comparison.
 
 ### 2026-09-21 — Governance suite and local CI (this change)
 

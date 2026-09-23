@@ -57,4 +57,6 @@ Development index. Every link below resolves against `main` as it stood when thi
 ## Optional
 
 - [AGENTS.md](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/AGENTS.md) — How to add a dependency to this repository
+- [REQUIREMENTS.md](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/REQUIREMENTS.md) — Immutable product requirements, superseded never edited
+- [INVARIANTS.md](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/INVARIANTS.md) — Short enforced rule list for this repository
 - [contract/APPROVED.toml](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/contract/APPROVED.toml) — Every approved external edge, and its owner

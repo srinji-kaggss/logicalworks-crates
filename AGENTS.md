@@ -1,12 +1,16 @@
 # AGENTS.md
 
-Four files are the governance surface, and each owns exactly one concern:
+> **Read `INVARIANTS.md` before the first edit.** It is the short, enforced list of this repo's domain rules; this file is the long-form context.
+
+Six files are the governance surface, and each owns exactly one concern:
 
 | File | Concern |
 |---|---|
 | [`GOVERNANCE.md`](GOVERNANCE.md) | Authority, laws, gates, the completion ledger, and what is not claimed |
 | [`CODEBOOK.md`](CODEBOOK.md) | Code rules: lint contract, anti-slop invariants, API shape, tests |
 | [`WORKFLOW.md`](WORKFLOW.md) | Process: local CI, the delivery loop, evidence proportionality, agent economics |
+| [`INVARIANTS.md`](INVARIANTS.md) | Short enforced rule list, read before the first edit |
+| [`REQUIREMENTS.md`](REQUIREMENTS.md) | Immutable product requirements, superseded never edited |
 | `AGENTS.md` (this file) | **Dependency doctrine** — the narrower rule layered on `CODEBOOK.md` §10 |
 
 A second copy of a policy is a second policy, and the two drift. Do not
@@ -87,6 +91,7 @@ cargo run -p lgwks_deps -- check .
 ./scripts/doc-lanes.sh
 python3 scripts/check-std-first.py
 python3 scripts/check-doc-citations.py
+python3 scripts/check-requirements.py
 ```
 
 `lgwks-deps check` is the first CI job. A green compile with an unregistered

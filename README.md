@@ -226,7 +226,7 @@ loop stops without waiting on a body that will never observe the cancellation.
 | Rust source lint scan (zero-gate detectors) | `lgwks_deps` | `scan` (default for CLI) |
 | Raw `tokio` engine without the bot facade | `lgwks_deps` | `tokio*` with `default-features = false` |
 | GPU desktop UI (Zed's GPUI) | `lgwks_deps` | `gpui` with `default-features = false` |
-| Native terminal UI (AppCUI) | `lgwks_deps` | `appcui` with `default-features = false`, version 0.1.10 or newer |
+| Native terminal UI (AppCUI) | `lgwks_deps` | `appcui` with `default-features = false`, version =0.5.1 per `contract/APPROVED.toml` |
 
 Three behaviours are worth knowing before you depend on them, and each is
 documented where it applies. `online` is feature-gated and is not part of
@@ -297,6 +297,8 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --all -- --check
 cargo run -p lgwks_deps -- check .
 ./scripts/lgwks-std-package-smoke.sh
+python3 scripts/check-doc-citations.py
+python3 scripts/check-requirements.py
 ```
 
 ## Contributing
