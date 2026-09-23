@@ -385,9 +385,22 @@ const NOT_AUTHORITY_CLAIMS: [(&str, &str); 1] = [(
 /// lockfile or an image is neither.
 const TEXT_EXTENSIONS: [&str; 8] = ["md", "rs", "toml", "txt", "json", "yml", "yaml", "sh"];
 
-/// Directory names the walk never descends into. `vendor` is third-party,
-/// `target` is derived, `.git` is history.
-const SKIPPED_DIRECTORIES: [&str; 3] = ["target", "vendor", ".git"];
+/// Directory names the walk never descends into.
+///
+/// `vendor` is third-party, `target` is derived, `.git` is history, and
+/// `graphify-out`, `.codegraph` and `.lgwks` are derived artifacts — the same
+/// set the repository's artifact law refuses to commit. Without them the
+/// scan's verdict would depend on whether the machine happened to hold a
+/// knowledge-graph export whose node labels quote this file's own test names,
+/// which is how a guard green in CI fails on a developer's machine.
+const SKIPPED_DIRECTORIES: [&str; 6] = [
+    "target",
+    "vendor",
+    ".git",
+    "graphify-out",
+    ".codegraph",
+    ".lgwks",
+];
 
 /// How far below the repository root the walk descends.
 const MAX_DEPTH: u8 = 6;

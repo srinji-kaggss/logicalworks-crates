@@ -262,10 +262,12 @@ and
 `tests/durable_dispatch.rs::a_reconstructed_bot_retires_an_unchanged_state_rather_than_firing_again`.
 Either regressing refutes R10.
 
-**Status.** `partial`, measured against an in-memory journal, **unmeasured
-against a real store under a real process kill**.
-[#109](https://github.com/srinji-kaggss/logicalworks-crates/issues/109) holds
-the eight external observations and none has been run.
+**Status.** `partial`, measured against an in-memory journal and — for the five
+journal-ladder observations, #100 #101 #102 #104 and #106 — measured against a
+real file-backed store under a real process kill
+(`tests/durable_crash_observation.rs`). [#109](https://github.com/srinji-kaggss/logicalworks-crates/issues/109)
+holds the eight external observations; the remaining three (#99, #107 T21/T22,
+#108) have not been run.
 
 ### R11. Bounds are declared at construction.
 

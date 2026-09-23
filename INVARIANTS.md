@@ -70,3 +70,11 @@ Each of these was a shipped defect. Treat the list as the spec.
 
 - For INV-BOT-1..10: which crash/recovery test exercises each one? The ones without a
   named test are where the next regression will come from.
+- Partial answer, 2026-09-23: INV-BOT-2, INV-BOT-3, INV-BOT-4 and the
+  journal-before-acknowledge half of INV-BOT-1 are exercised under a real
+  process kill against a real file store by
+  `tests/durable_crash_observation.rs` (rows #100, #101, #102, #104, #106 of
+  the #109 register). The still-unnamed remainder — INV-BOT-5's poll path
+  under a real store (#99), INV-BOT-9's descendant tree (#107 T21/T22), and
+  INV-BOT-10's real frame (#108) — is where the next regression will come
+  from.
