@@ -41,6 +41,18 @@ impl PartialEq for Digest {
 impl Eq for Digest {}
 
 impl Digest {
+    /// Rebuild a digest from its raw 32 bytes, the inverse of
+    /// [`Digest::as_bytes`].
+    ///
+    /// Public because a durable record stores digest bytes — a journal's
+    /// chain heads, a receipt's commitment — and re-deriving the value they
+    /// committed to means reading them back. Without this, every such reader
+    /// would need a digest type of its own beside the estate's.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     /// The raw 32-byte digest.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; 32] {

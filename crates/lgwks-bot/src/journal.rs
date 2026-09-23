@@ -64,6 +64,13 @@ pub use wire_form::{
     ArchivedEffectEvent, ArchivedVerificationResult, EffectEvent, VerificationResult,
 };
 
+mod file;
+
+/// The file-backed journal, re-exported from the private `file` module beside
+/// the in-memory one: the trait's second shipped adapter, and the one whose
+/// promises a process kill can check.
+pub use file::{Corruption, CorruptionKind, FileJournal};
+
 /// The domain separator hashed into the genesis position.
 ///
 /// A chain has to start somewhere, and "started from 32 zero bytes" is a value
@@ -487,6 +494,19 @@ pub enum JournalError {
     /// rather than folded into [`Self::Storage`] because nothing was stored —
     /// the append is refused before the journal is touched at all.
     Encoding(WireError),
+    /// The journal's committed bytes do not re-derive the history they claim.
+    ///
+    /// This is not an interrupted append — an interrupted append is a torn
+    /// tail, and a torn tail was never acknowledged, so repairing it costs
+    /// nothing. This is committed bytes that no longer mean what the chain
+    /// says: bit rot, or a hand on the file. It is refused rather than
+    /// trimmed, because the record may have been acknowledged, and an
+    /// acknowledgment the journal quietly rewrites is not a record.
+    ///
+    /// Boxed for the same reason [`Self::OutOfOrder`] boxes its key: an error
+    /// carrying the payload by value would make every `Result` in this module
+    /// pay for a case that is refused before it changes anything.
+    Corrupt(Box<Corruption>),
 }
 
 impl fmt::Display for JournalError {
@@ -545,6 +565,9 @@ impl fmt::Display for JournalError {
                     "journal could not encode the event for the chain: {cause}"
                 )
             }
+            Self::Corrupt(ref corruption) => {
+                write!(f, "journal refused its own committed bytes: {corruption}")
+            }
         }
     }
 }
@@ -554,6 +577,7 @@ impl std::error::Error for JournalError {
         match *self {
             Self::Storage(ref cause) => Some(cause),
             Self::Encoding(ref cause) => Some(cause),
+            Self::Corrupt(ref cause) => Some(cause),
             _ => None,
         }
     }
