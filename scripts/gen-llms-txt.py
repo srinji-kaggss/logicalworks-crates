@@ -193,6 +193,8 @@ def main() -> int:
         ("CHANGELOG.md", "Per-release changes across all four crates"),
         ("SECURITY.md", "Attack surface, reporting process, and advisories assessed"),
         ("AGENTS.md", "How to add a dependency to this repository"),
+        ("REQUIREMENTS.md", "Immutable product requirements, superseded never edited"),
+        ("INVARIANTS.md", "Short enforced rule list for this repository"),
         ("contract/APPROVED.toml", "Every approved external edge, and its owner"),
     ]
     remaining = [(target, description) for target, description in optional if target not in indexed]

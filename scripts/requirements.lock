@@ -1,0 +1,22 @@
+# The normative sentence of each product requirement, as it read when a person
+# last decided it. `REQUIREMENTS.md` is superseded, never edited, so this lock
+# is the memory the gate checks an edit against.
+#
+# One entry per requirement: `R<id>` TAB `<sha256, first 12 hex>` TAB
+# `<the normative sentence, whitespace-collapsed>`.
+# Generated and checked by `scripts/check-requirements.py`. A changed digest
+# with no Supersession log entry naming that id is refused; record the
+# supersession first, then `--update`.
+R1	344f6d8acd78	A developer MUST supply typed work and its logic and receive a result. The contract MUST own reaping, readiness polling, retry ownership, duplicate-effect suppression, cancellation, continuation persistence, and reporting.
+R2	85501f1aa54a	Combining two or more tasks MUST require no new queue, supervisor, retry controller or reporting subsystem, and the composed unit MUST report as one.
+R3	79eef2317639	Ordinary work MUST run in the calling process with no VM and no runtime constructed for it.
+R4	aa8b789bfa76	A VM or runtime MUST be invoked only when the developer declares cardinality `N` for parallel work, or opts the work onto a blocking compute lane. A workload MUST NOT escalate on a heuristic.
+R5	72a0bc54312f	Moving work to a runtime or a compute lane MUST NOT hand the caller a droppable handle. The escalated unit MUST return a result and a report, and the contract MUST still own the bounds, the cancellation and the record.
+R6	33cd1a9cc30e	The ordinary non-AI task MUST need no model client, no agent persona and no remote service.
+R7	cacc2363f556	Polling, change detection and the reaction that follows MUST be substrate. An agent MUST call them rather than reimplement them.
+R8	cbbdacd43e7d	Untrusted code MUST be analysed in process over its structure. It MUST NOT be executed in order to be inspected.
+R9	174b137f3495	No effect MUST fire without a grant minted by the one issuer, carried on the call and checked on the call.
+R10	1fe97a9d4949	After a loss, absent, contradicted, superseded and unreadable MUST be four distinct answers. An unknown outcome MUST be a barrier and MUST NOT be auto-replayed. A read failure MUST NOT be reported as absence.
+R11	b1a2700cbe27	Every queue, channel, fan-out, loop and retry MUST have a bound stated where it is built. Work MUST NOT be fire-and-forget. A loop MUST NOT spin without a bound or a cancellation branch.
+R12	41d646877f4b	Every class of real-world mess this product claims to survive MUST be named in a finite register, and each row MUST be judged handled or declared out of scope with a reason. An unlisted class MUST be a defect in the register, not a silent pass. A release MUST NOT claim readiness with a row unjudged.
+R13	cb08fa6b6472	A readiness or performance claim MUST name the axis it addresses, the gate it is measured against, and whether its evidence is measured, proved, argued or unmeasured. Losses MUST be published at the same volume as wins. Exclusions MUST be named with their direction of bias.

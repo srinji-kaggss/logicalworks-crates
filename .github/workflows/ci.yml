@@ -333,6 +333,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate the dependency contract alignment
         run: python3 scripts/ci_local.py --lane contract-drift
+      - name: Requirements sentences unedited without supersession
+        run: python3 scripts/check-requirements.py
   package-smoke:
     name: lgwks-std package smoke-test
     needs: [build]

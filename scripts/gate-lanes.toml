@@ -164,6 +164,14 @@ builtin = "contract-drift"
 ci_step = "Validate the dependency contract alignment"
 
 [[lane]]
+id = "requirements"
+surfaces = "local ci"
+required = true
+fast = true
+command = "python3 scripts/check-requirements.py"
+ci_step = "Requirements sentences unedited without supersession"
+
+[[lane]]
 id = "package-smoke"
 surfaces = "local ci"
 required = true
