@@ -279,6 +279,7 @@ the rest of this table is design history and contributor policy.
 | [`docs/estate-asset-inventory.md`](docs/estate-asset-inventory.md) | The adjacent repositories searched before any of it was written, what was taken, and what was deliberately left behind. |
 | [`docs/frontier.md`](docs/frontier.md) | The state of the art across the nine areas this bot competes in, with measured anchors and the design decision each forces. |
 | [`docs/framework-comparison.md`](docs/framework-comparison.md) | Why the field looks the same, the four axes it actually differs on, and the axis nobody occupies. |
+| [`docs/production-readiness.md`](docs/production-readiness.md) | Nine-axis production readiness of `lgwks_bot`, the case that it replaces non-AI automation and RPA, and the rows that currently fail their own gate. |
 | [`docs/releasing.md`](docs/releasing.md) | The release process. |
 | [`CHANGELOG.md`](CHANGELOG.md) | Per-release changes across all four crates. |
 | [`SECURITY.md`](SECURITY.md) | Attack surface, reporting process, and advisories assessed. |

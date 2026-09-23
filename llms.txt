@@ -49,6 +49,7 @@ Development index. Every link below resolves against `main` as it stood when thi
 - [Adjacent asset inventory](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/estate-asset-inventory.md) — The adjacent repositories searched before any of it was written, what was taken, and what was deliberately left behind.
 - [Frontier definition](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/frontier.md) — The state of the art across the nine areas this bot competes in, with measured anchors and the design decision each forces.
 - [Framework comparison](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/framework-comparison.md) — Why the field looks the same, the four axes it actually differs on, and the axis nobody occupies.
+- [Production readiness of `lgwks_bot`, and why it replaces non-AI automation](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/production-readiness.md) — Nine-axis production readiness of `lgwks_bot`, the case that it replaces non-AI automation and RPA, and the rows that currently fail their own gate.
 - [Releasing](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/releasing.md) — The release process.
 - [Changelog](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/CHANGELOG.md) — Per-release changes across all four crates.
 - [Security policy](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/SECURITY.md) — Attack surface, reporting process, and advisories assessed.
