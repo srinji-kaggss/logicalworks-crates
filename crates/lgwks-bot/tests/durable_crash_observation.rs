@@ -30,6 +30,31 @@
 use std::process::Child;
 use std::time::Duration;
 
+/// Owns the probe child and kills it, reaping it, however the test ends.
+///
+/// A test that returns early, or panics, between the spawn and the kill must
+/// not leave a live child behind: the guard's drop is the backstop the
+/// harness itself can forget. `take` hands the child to the kill harness,
+/// which then owns the kill and the reap, so the guard drops empty and no
+/// path kills twice.
+struct ProbeGuard(Option<Child>);
+
+impl ProbeGuard {
+    /// Hand the child to the kill harness.
+    fn take(&mut self) -> Option<Child> {
+        self.0.take()
+    }
+}
+
+impl Drop for ProbeGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            drop(child.kill());
+            drop(child.wait());
+        }
+    }
+}
+
 use lgwks_bot::effect::{
     ActionDigest, ActionId, AttemptId, EffectKey, EnvironmentEpoch, EnvironmentId, FlowRevision,
     Id128, RunId,
@@ -48,6 +73,23 @@ const DIGEST_B: &str = "efeeedecebeae9e8e7e6e5e4e3e2e1e0dfdedddcdbdad9d8d7d6d5d4
 const PREDICATE: &str = "4142434445464748494a4b4c4d4e4f50";
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+/// Removes a test's scratch directory when the test ends, however it ends.
+///
+/// The guard is best effort: a scratch directory the system refuses to remove
+/// is litter, not a failed observation, so the error is dropped rather than
+/// allowed to mask the test's own verdict.
+struct TempGuard(std::path::PathBuf);
+
+impl Drop for TempGuard {
+    fn drop(&mut self) {
+        if self.0.is_dir() {
+            drop(std::fs::remove_dir_all(&self.0));
+        } else {
+            drop(std::fs::remove_file(&self.0));
+        }
+    }
+}
 
 /// One ladder rung, counted from one, in the order the journal enforces.
 const RUNG_PREPARED: usize = 2;
@@ -209,15 +251,17 @@ fn spawn_probe(
     journal_path: &std::path::Path,
     marker_path: &std::path::Path,
     events: usize,
-) -> Result<Child, Box<dyn std::error::Error>> {
+) -> Result<ProbeGuard, Box<dyn std::error::Error>> {
     let executable = std::env::current_exe()?;
-    Ok(std::process::Command::new(executable)
-        .args([test_name, "--exact", "--nocapture"])
-        .env(PROBE_ENV, "1")
-        .env(PROBE_JOURNAL, journal_path)
-        .env(PROBE_EVENTS, events.to_string())
-        .env(PROBE_MARKER, marker_path)
-        .spawn()?)
+    Ok(ProbeGuard(Some(
+        std::process::Command::new(executable)
+            .args([test_name, "--exact", "--nocapture"])
+            .env(PROBE_ENV, "1")
+            .env(PROBE_JOURNAL, journal_path)
+            .env(PROBE_EVENTS, events.to_string())
+            .env(PROBE_MARKER, marker_path)
+            .spawn()?,
+    )))
 }
 
 /// Wait until the probe's marker exists — its proof that every append was
@@ -227,9 +271,12 @@ fn spawn_probe(
 /// flushing. Everything the child wrote that is not on the disk is gone, and
 /// everything that claimed to be durable had better be there.
 fn kill_after_marker(
-    mut child: Child,
+    mut guard: ProbeGuard,
     marker: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut child) = guard.take() else {
+        return Err("the probe child was already gone before the kill".into());
+    };
     for _ in 0..2_000 {
         if marker.exists() {
             child.kill()?;
@@ -256,6 +303,7 @@ fn a_settlement_recorded_before_a_real_kill_is_the_recovered_answer() -> TestRes
         return probe_body();
     }
     let dir = scratch("settlement")?;
+    let _guard = TempGuard(dir.clone());
     let journal_path = dir.join("journal.log");
     let marker = dir.join("marker");
 
@@ -311,6 +359,7 @@ fn a_kill_between_prepare_and_outcome_recovers_a_barrier_not_an_answer() -> Test
         return probe_body();
     }
     let dir = scratch("barrier")?;
+    let _guard = TempGuard(dir.clone());
     let journal_path = dir.join("journal.log");
     let marker = dir.join("marker");
 
@@ -365,6 +414,7 @@ fn a_restart_with_a_new_digest_cannot_fold_into_a_completed_attempt() -> TestRes
         return probe_body();
     }
     let dir = scratch("identity")?;
+    let _guard = TempGuard(dir.clone());
     let journal_path = dir.join("journal.log");
     let marker = dir.join("marker");
 
@@ -404,6 +454,7 @@ fn an_external_marker_appears_only_after_the_durable_ack() -> TestResult {
         return probe_body();
     }
     let dir = scratch("handoff")?;
+    let _guard = TempGuard(dir.clone());
     let journal_path = dir.join("journal.log");
     // For this row the marker is not scaffolding: it is the external effect
     // the row is about — an artifact on the disk, outside the dying process.
@@ -450,6 +501,7 @@ fn an_external_marker_appears_only_after_the_durable_ack() -> TestResult {
 #[test]
 fn a_settlement_followed_by_a_failed_recording_append_is_still_the_settlement() -> TestResult {
     let dir = scratch("recording")?;
+    let _guard = TempGuard(dir.clone());
     let journal_path = dir.join("journal.log");
 
     let mut journal = FileJournal::open(&journal_path)?;
@@ -480,6 +532,7 @@ fn a_settlement_followed_by_a_failed_recording_append_is_still_the_settlement() 
 #[test]
 fn a_torn_final_frame_is_repaired_and_never_replayed() -> TestResult {
     let dir = scratch("torn")?;
+    let _guard = TempGuard(dir.clone());
     let journal_path = dir.join("journal.log");
 
     let mut journal = FileJournal::open(&journal_path)?;
@@ -527,6 +580,7 @@ fn a_torn_final_frame_is_repaired_and_never_replayed() -> TestResult {
 #[test]
 fn a_tampered_committed_frame_is_refused_rather_than_trimmed() -> TestResult {
     let dir = scratch("tamper")?;
+    let _guard = TempGuard(dir.clone());
     let journal_path = dir.join("journal.log");
 
     let mut journal = FileJournal::open(&journal_path)?;
@@ -562,6 +616,7 @@ fn a_tampered_committed_frame_is_refused_rather_than_trimmed() -> TestResult {
 #[test]
 fn the_file_journal_recovers_exactly_what_the_memory_journal_recovers() -> TestResult {
     let dir = scratch("parity")?;
+    let _guard = TempGuard(dir.clone());
     let journal_path = dir.join("journal.log");
 
     let mut file_journal = FileJournal::open(&journal_path)?;

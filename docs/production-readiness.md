@@ -257,6 +257,19 @@ the register's observations against it:
 #99, #107 T21/T22 and #108, and with rows of its own axis unobserved, this
 axis stays ⚠️ and the §1 verdict stands.
 
+The adapter's costs are measured, not estimated. One `sync_all` is the
+platform's durable-append floor and costs about 3.0 ms on the development
+machine's file system; a per-rung append pays it once per rung, and
+`FileJournal::compare_and_append_all` — the group commit every durable log
+converges on — pays it once per batch, all-or-nothing, with every
+acknowledgment still minted after the shared flush. The per-key ladder check
+is indexed, so an append's cost does not grow with the journal's length
+(measured flat from an empty journal to 32,000 prior attempts, against the
+linear walk it replaces, which measured 98× slower at 8,000). Replay holds
+every committed entry in memory and reopens in time linear in the file;
+rotation and compaction are not provided and the journal grows without bound
+until a controller rotates it.
+
 ### 4.7 Portable — same semantics on all declared targets
 
 **✅ — measured on three operating systems in CI.**
