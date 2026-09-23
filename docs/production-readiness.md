@@ -257,9 +257,11 @@ the register's observations against it:
 #99, #107 T21/T22 and #108, and with rows of its own axis unobserved, this
 axis stays ⚠️ and the §1 verdict stands.
 
-The adapter's costs are measured, not estimated. One `sync_all` is the
-platform's durable-append floor and costs about 3.0 ms on the development
-machine's file system; a per-rung append pays it once per rung, and
+The adapter's costs are measured, not estimated: a throwaway release-mode
+probe (since deleted) timed each path on the development machine's file
+system, and the numbers with their method are recorded in the pull-request
+evidence rather than gated in the tree. One `sync_all` is the platform's
+durable-append floor and costs about 3.0 ms there; a per-rung append pays it once per rung, and
 `FileJournal::compare_and_append_all` — the group commit every durable log
 converges on — pays it once per batch, all-or-nothing, with every
 acknowledgment still minted after the shared flush. The per-key ladder check

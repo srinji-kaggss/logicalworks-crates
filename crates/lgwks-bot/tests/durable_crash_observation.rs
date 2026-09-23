@@ -280,7 +280,19 @@ fn kill_after_marker(
     for _ in 0..2_000 {
         if marker.exists() {
             child.kill()?;
-            child.wait()?;
+            let status = child.wait()?;
+            // The kill, not an earlier failure, must be what ended the
+            // child: a probe that died on its own after writing the marker
+            // would make this observation a courtesy, not a kill.
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt as _;
+                assert_eq!(
+                    status.signal(),
+                    Some(9),
+                    "the probe must have been killed, not exited: {status}"
+                );
+            }
             return Ok(());
         }
         if let Some(status) = child.try_wait()? {

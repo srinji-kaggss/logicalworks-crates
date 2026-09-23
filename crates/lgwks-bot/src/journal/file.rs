@@ -16,18 +16,19 @@
 //! than recomputed on faith, which is what separates the two failure shapes
 //! a file can be found in after a crash:
 //!
-//! - A **torn tail** — a partial length, an implausible length, or a short
-//!   body at the end of the file — is an append that was interrupted before
-//!   it could be acknowledged. It was never anyone's answer, so opening
-//!   truncates back to the last whole frame and says so via
+//! - A **torn tail** — a partial length prefix, or a short body or head at
+//!   the end of the file — is an append that was interrupted before it could
+//!   be acknowledged. A write leaves only a prefix of its bytes, so a torn
+//!   tail is always a prefix cut short; it was never anyone's answer, so
+//!   opening truncates back to the last whole frame and says so via
 //!   [`FileJournal::torn_tail_repaired`]. This is the same disposition etcd's
 //!   WAL gives a torn final record.
-//! - A **lying frame** — a payload that does not decode, or a stored head
-//!   that does not follow from the events before it — is committed bytes that
-//!   no longer mean what the chain says. It is refused with
-//!   [`JournalError::Corrupt`], never trimmed, because the frame may have
-//!   been acknowledged, and an acknowledgment the journal quietly rewrites
-//!   is not a record.
+//! - A **lying frame** — a length prefix no writer of this journal can have
+//!   completed, a payload that does not decode, or a stored head that does
+//!   not follow from the events before it — is committed bytes that no longer
+//!   mean what the chain says. It is refused with [`JournalError::Corrupt`],
+//!   never trimmed, because the frame may have been acknowledged, and an
+//!   acknowledgment the journal quietly rewrites is not a record.
 //!
 //! # Bounds
 //!
@@ -44,8 +45,11 @@
 //! that no longer matches the file is refused. What no std-only adapter can
 //! provide is mutual exclusion between two live writers, because the platform's
 //! advisory locks are outside `std`; concurrent controllers on one file remain
-//! a caller obligation, and the stored heads make any interleaving they
-//! produce detectable on the next open rather than silently accepted.
+//! a caller obligation. The stored heads make any interleaving they produce
+//! detectable on the next open rather than silently accepted, and detection
+//! here is permanent: [`JournalError::Corrupt`] is never trimmed and no tool
+//! in this module rewrites refused bytes, so a bricked file stays bricked
+//! until an operator takes it in hand.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -62,8 +66,9 @@ use lgwks_std::wire::{WireError, from_bytes};
 /// The largest frame this journal will read or write.
 ///
 /// Events are a key, a verdict and a digest; a real frame is a few hundred
-/// bytes. A length field beyond this bound is not an event, it is the debris
-/// of an interrupted write, and it is treated as a torn tail.
+/// bytes. A length field beyond this bound does not name a frame this
+/// journal writes, so a complete prefix carrying one is refused as rot; a
+/// partial prefix is a torn tail.
 const MAX_FRAME_BYTES: usize = 64 * 1024;
 
 /// The byte width of a stored chain head.
@@ -82,6 +87,11 @@ const LENGTH_BYTES: usize = 4;
 pub enum CorruptionKind {
     /// The frame's bytes do not decode to an event.
     Undecodable,
+    /// The frame's length prefix cannot be true of any frame this journal
+    /// writes. A killed writer leaves only a prefix of its bytes, so a
+    /// complete prefix that names an impossible frame is rot or a hand,
+    /// never an interrupted append.
+    Framed,
     /// The stored head does not follow from the events before it.
     Chain(ChainBreak),
 }
@@ -92,6 +102,9 @@ impl CorruptionKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Undecodable => "the frame's bytes do not decode to an event",
+            Self::Framed => {
+                "the frame's length prefix cannot be true of any frame this journal writes"
+            }
             Self::Chain(_) => "the stored head does not follow from the events before it",
         }
     }
@@ -172,7 +185,15 @@ fn scan(
         }
         let payload_len = usize::try_from(u32::from_be_bytes(prefix)).unwrap_or(usize::MAX);
         if payload_len == 0 || payload_len > MAX_FRAME_BYTES {
-            return Ok((entries, ScanStop::Torn(offset)));
+            // A complete prefix that names an impossible frame is not a torn
+            // append: a write leaves only a prefix of its bytes, so the
+            // length a writer did complete is the length it intended, and
+            // that is always a frame this journal writes. Refuse, never
+            // trim: the bytes after this point may be acknowledged.
+            return Err(JournalError::Corrupt(Box::new(Corruption::new(
+                index,
+                CorruptionKind::Framed,
+            ))));
         }
         let mut payload = vec![0u8; payload_len];
         if reader.read_exact(&mut payload).is_err() {
@@ -265,6 +286,10 @@ pub struct FileJournal {
     ladder: HashMap<crate::effect::EffectKey, EventKind>,
     /// Byte length of the acknowledged prefix on disk.
     disk_len: u64,
+    /// Whether a write of this handle failed after bytes may have reached
+    /// the disk. The handle's view can no longer be trusted against the
+    /// file's, so appends are refused until a reopen replays the truth.
+    write_failed: bool,
     /// Whether open repaired a torn tail to get here.
     torn_tail_repaired: bool,
 }
@@ -331,6 +356,7 @@ impl FileJournal {
             committed: entries,
             ladder,
             disk_len: acked_len,
+            write_failed: false,
             torn_tail_repaired,
         })
     }
@@ -364,16 +390,19 @@ impl FileJournal {
     /// Append a whole batch of events for one `sync_all`, the group commit
     /// every durable log converges on: one flush pays for many records.
     ///
-    /// The batch is all-or-nothing. Every rung is checked first — fence,
-    /// ladder, frame bound — against the view the batch itself builds, and a
-    /// batch in which any rung would be refused writes nothing and returns
-    /// that refusal. When the checks pass, the frames go out in one
+    /// Every rung is checked first — fence, ladder, frame bound — against
+    /// the view the batch itself builds, and a batch in which any rung would
+    /// be refused writes nothing and returns that refusal: validation is
+    /// all-or-nothing. When the checks pass, the frames go out in one
     /// `write_all` and one `sync_all`, and only then are the acknowledgments
     /// minted, so each one carries the same earned promise
     /// [`DurabilityPromise::ProcessCrash`] a single append's does. Nothing is
     /// weakened: a kill between the sync and the return costs the whole
     /// batch, exactly as a kill between the sync and the return of any one
-    /// append would cost that append.
+    /// append would cost that append. A write that fails mid-way may leave
+    /// an unacknowledged prefix of the batch on the disk; the handle refuses
+    /// further appends, and the next open repairs the prefix as a torn tail
+    /// — the same disposition a killed writer's bytes get.
     ///
     /// A controller that records several rungs of one attempt in a single
     /// turn pays one flush instead of one per rung: measured on this
@@ -382,17 +411,25 @@ impl FileJournal {
     ///
     /// # Errors
     ///
-    /// Every [`JournalError`] a single append can produce; the offending
-    /// rung's refusal is returned and no bytes are written.
+    /// Every [`JournalError`] a single append can produce. A rung's refusal
+    /// is returned and no bytes are written; a [`JournalError::Storage`]
+    /// failure of the write itself may have written a prefix, which no
+    /// acknowledgment names and the next open repairs.
     pub fn compare_and_append_all(
         &mut self,
         events: &[EffectEvent],
     ) -> Result<Vec<DurableAck>, JournalError> {
-        if events.is_empty() {
-            return Ok(Vec::new());
+        // The staleness fence runs once for the batch, ahead of everything
+        // including the empty case: a stale handle answers for itself, not
+        // with an empty success. Between the checks and the single write
+        // this controller holds the file's only moving part.
+        if self.write_failed {
+            return Err(JournalError::Storage(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "a previous append failed while writing; the file may hold \
+                 unacknowledged bytes, reopen to replay",
+            )));
         }
-        // The staleness fence runs once for the batch: between the checks and
-        // the single write this controller holds the file's only moving part.
         let on_disk = self.file.metadata().map_err(JournalError::Storage)?.len();
         if on_disk != self.disk_len {
             return Err(JournalError::Storage(std::io::Error::new(
@@ -400,11 +437,15 @@ impl FileJournal {
                 "the journal file moved under this controller; reopen before appending",
             )));
         }
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
 
         // Validate and frame every rung against the evolving view before any
-        // byte moves: the committed ladder for keys already on the disk, the
-        // staged kinds for keys this batch is itself climbing. Nothing here
-        // mutates the journal.
+        // byte moves: the staged kinds for keys this batch is itself climbing
+        // take precedence, because they are the newest fact about the key,
+        // and the committed ladder serves keys the batch has not touched
+        // yet. Nothing here mutates the journal.
         let mut position = self.tail();
         let mut staged: HashMap<crate::effect::EffectKey, EventKind> = HashMap::new();
         let mut frames = Vec::new();
@@ -413,7 +454,7 @@ impl FileJournal {
             let key = event.key();
             let attempted = event.kind();
             let expected =
-                next_allowed_of(self.ladder.get(&key).or_else(|| staged.get(&key)).copied());
+                next_allowed_of(staged.get(&key).or_else(|| self.ladder.get(&key)).copied());
             if expected != Some(attempted) {
                 return Err(JournalError::OutOfOrder {
                     key: Box::new(key),
@@ -525,7 +566,17 @@ impl EffectJournal for FileJournal {
         }
         // The staleness fence: the file on the disk must still be exactly the
         // prefix this controller holds, or the controller's view is stale and
-        // its append would branch the chain.
+        // its append would branch the chain. A write this handle already
+        // failed mid-way counts as stale by definition: bytes may be on the
+        // disk that no acknowledgment names, and only a reopen replays the
+        // truth.
+        if self.write_failed {
+            return Err(JournalError::Storage(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "a previous append failed while writing; the file may hold \
+                 unacknowledged bytes, reopen to replay",
+            )));
+        }
         let on_disk = self.file.metadata().map_err(JournalError::Storage)?.len();
         if on_disk != self.disk_len {
             return Err(JournalError::Storage(std::io::Error::new(
@@ -565,9 +616,18 @@ impl EffectJournal for FileJournal {
 
         // The write and the sync happen before the acknowledgment: after this
         // returns, the bytes are through the file system, and a kill of this
-        // process cannot take the fact back out of the file.
-        self.file.write_all(&frame).map_err(JournalError::Storage)?;
-        self.file.sync_all().map_err(JournalError::Storage)?;
+        // process cannot take the fact back out of the file. A failure here
+        // may have left a prefix of the frame on the disk, so the handle
+        // poisons itself rather than keep appending on a view it can no
+        // longer vouch for.
+        if let Err(error) = self.file.write_all(&frame) {
+            self.write_failed = true;
+            return Err(JournalError::Storage(error));
+        }
+        if let Err(error) = self.file.sync_all() {
+            self.write_failed = true;
+            return Err(JournalError::Storage(error));
+        }
 
         self.committed.push(JournalEntry::new(position, *event));
         self.ladder.insert(key, attempted);
@@ -771,13 +831,43 @@ mod tests {
             "a refused batch commits nothing"
         );
         drop(journal);
-        let reopened = FileJournal::open(&path)?;
+        let mut reopened = FileJournal::open(&path)?;
         assert_eq!(
             reopened.committed()?.len(),
             before,
             "and the file carries none of it"
         );
+
+        // An empty batch is still behind the fence: a handle whose file
+        // moved under it answers with the staleness refusal, not with an
+        // empty success. `reopened` was opened before the foreign write, so
+        // its view is the stale one.
+        {
+            use std::io::Write as _;
+            let mut other = std::fs::OpenOptions::new().append(true).open(&path)?;
+            other.write_all(&[0x00, 0x00, 0x00])?;
+            other.sync_all()?;
+        }
+        let empty = reopened.compare_and_append_all(&[]);
+        assert!(
+            matches!(empty, Err(JournalError::Storage(_))),
+            "a stale handle must not answer an empty batch with success"
+        );
         Ok(())
+    }
+
+    /// A key for attempt `n`, so a frame count can be built without
+    /// tripping the ladder's one-climb-per-key rule.
+    fn attempt_key(n: u64) -> Result<crate::effect::EffectKey, Box<dyn std::error::Error>> {
+        Ok(crate::effect::EffectKey::new(
+            RunId::from_hex(RUN)?,
+            ActionId::from_hex(ACTION)?,
+            AttemptId::from_decimal(&n.to_string())?,
+            FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
+            ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
+            EnvironmentId::from_hex(ENV)?,
+            EnvironmentEpoch::from_decimal("1")?,
+        ))
     }
 
     /// A second key, so a batch can fail on its own rung.
@@ -791,6 +881,33 @@ mod tests {
             EnvironmentId::from_hex(ENV)?,
             EnvironmentEpoch::from_decimal("1")?,
         ))
+    }
+
+    #[test]
+    fn a_batch_climbs_a_key_the_disk_already_knows() -> TestResult {
+        let path = scratch("batch-committed");
+        let _guard = TempGuard(path.clone());
+        let key = key()?;
+        let mut journal = FileJournal::open(&path)?;
+        // One rung committed by ordinary appends.
+        journal.compare_and_append(journal.tail(), &EffectEvent::IntentAdmitted { key })?;
+
+        // A batch that continues that same key's climb: the staged kinds must
+        // follow the committed ladder, not be shadowed by it.
+        let acks = journal.compare_and_append_all(&[
+            EffectEvent::DispatchPrepared { key },
+            EffectEvent::OutcomeObserved {
+                key,
+                evidence: EffectEvidence::Applied,
+            },
+        ])?;
+        assert_eq!(acks.len(), 2, "both rungs acknowledged");
+        assert_eq!(
+            journal.recover().status(key),
+            Some(AttemptStatus::Applied),
+            "the batch continued the committed ladder"
+        );
+        Ok(())
     }
 
     #[test]
@@ -870,6 +987,61 @@ mod tests {
                 })
             ),
             "a file-backed journal must not claim power-loss durability"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_rotted_length_prefix_is_refused_and_nothing_is_trimmed() -> TestResult {
+        let path = scratch("length-rot");
+        let _guard = TempGuard(path.clone());
+        {
+            let mut journal = FileJournal::open(&path)?;
+            for attempt in 1u64..=3 {
+                let attempt_key_n = attempt_key(attempt)?;
+                journal.compare_and_append(
+                    journal.tail(),
+                    &EffectEvent::IntentAdmitted { key: attempt_key_n },
+                )?;
+            }
+        }
+        let before = std::fs::metadata(&path)?.len();
+        assert!(before > 3, "three frames are on the disk");
+
+        // Rot in the second frame's length prefix: a complete prefix that no
+        // torn write of this journal can produce, because a write only ever
+        // leaves a prefix of the bytes it intended. A plausible writer cannot
+        // have written this; only rot or a hand can have.
+        let mut bytes = std::fs::read(&path)?;
+        let first_len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let len_bytes = u32::try_from(LENGTH_BYTES).unwrap_or(u32::MAX);
+        let head_bytes = u32::try_from(HEAD_BYTES).unwrap_or(u32::MAX);
+        let second = usize::try_from(
+            first_len
+                .saturating_add(len_bytes)
+                .saturating_add(head_bytes),
+        )
+        .unwrap_or(bytes.len());
+        if second < bytes.len() {
+            bytes[second] ^= 0x40;
+        }
+        std::fs::write(&path, &bytes)?;
+
+        match FileJournal::open(&path) {
+            Err(JournalError::Corrupt(corruption)) => {
+                assert_eq!(corruption.at(), 1, "the rotted frame is named");
+                assert!(
+                    matches!(corruption.kind(), CorruptionKind::Framed),
+                    "the refusal names the framing, not the contents"
+                );
+            }
+            Err(other) => return Err(format!("expected a corruption refusal, got {other}").into()),
+            Ok(_) => return Err("a rotted length prefix must not reopen as a journal".into()),
+        }
+        assert_eq!(
+            std::fs::metadata(&path)?.len(),
+            before,
+            "refused bytes are never trimmed"
         );
         Ok(())
     }
