@@ -25,10 +25,15 @@ numbers.
 **This does not currently pass its own release gate.** Issue
 [#109](https://github.com/srinji-kaggss/logicalworks-crates/issues/109) holds
 eight invariants. The code for most of them has landed and is unit-tested
-against an in-memory journal. **Not one of the eight has had its external
-observation run** — no real store, no real process kill, no real network
-partition. A green unit suite over `MemoryJournal` is evidence that the design
-is implemented. It is not evidence that a bot survives its own machine dying.
+against an in-memory journal. As of `tests/durable_crash_observation.rs`,
+**five of the eight have had their external observation run**: the journal-
+ladder rows (#100, #101, #102, #104, #106) were driven against a real
+file-backed journal, killed mid-ladder with a real `SIGKILL`, restarted, and
+the recovered answer asserted against the one the design names. Three remain
+unrun — #99 (the ECS poll path under a real store), #107 T21/T22 (a real
+descendant tree), #108 (a real frame) — and a green observation of the
+ladder is not a green observation of the machine: the verdict below stands
+until every row has one and the mess rows of §4.4 close.
 
 Stated plainly: you can ship this today for attended, inspectable automation
 where a human is watching and can intervene. You cannot ship it yet for the
@@ -226,12 +231,31 @@ Landed and unit-tested against `MemoryJournal`:
 - an acknowledged outcome that cannot be upgraded by a weaker promise (`#119`)
 
 **Every one of those was proved on a journal that lives in process memory.**
-Issue #109's register is explicit: *"No row's external observation has been
-executed."* The required observations are a real backing store, a real process
-kill mid-ladder, a restart, and an assertion that the recovered answer is the
-one the design says.
+Now five of them have been proved on one that does not. `FileJournal`
+(`journal/file.rs`) is a real store: a length-framed file whose appends are
+written and `sync_all`-ed before the acknowledgment is minted, whose stored
+chain heads make a tampered frame a refusal rather than a trim, and whose torn
+tail — an append a killed writer never finished — is truncated on open
+because it was never acknowledged. `tests/durable_crash_observation.rs` runs
+the register's observations against it:
 
-Until that run exists, this axis is ⚠️ and the §1 verdict stands.
+- **#106**: a child process walked a key to `OutcomeObserved(Applied)`, was
+  `SIGKILL`-ed, and the restarted journal recovered `Applied`; a duplicate
+  settlement is refused out-of-order; a new key climbs fresh.
+- **#102 / #104**: a child killed between `DispatchPrepared` and any outcome
+  recovered `OutcomeUnknown`, named in `uncertain()`, never `NotApplied`;
+  evidence appended after the restart settled it without a resend. A
+  settlement followed by a torn (failed) recording append still recovers the
+  settlement.
+- **#101**: after the kill, a re-admission under a changed digest is a second
+  identity with a fresh ladder — `recover()` reports both, never one.
+- **#100**: the external marker exists only after the durable ack, and the
+  real store admits the handoff its promise earns (`ProcessCrash`, honestly
+  below `PowerLoss`).
+
+`Until that run exists` no longer describes these rows. It still describes
+#99, #107 T21/T22 and #108, and with rows of its own axis unobserved, this
+axis stays ⚠️ and the §1 verdict stands.
 
 ### 4.7 Portable — same semantics on all declared targets
 
@@ -376,10 +400,12 @@ world mess is one of the seven covered rows in §4.4.
 
 To change the verdict, in the order that matters:
 
-1. **Run #109's eight external observations** against a real backing store with
-   a real process kill. This is the difference between "the design is
-   implemented" and "the bot survives its own machine dying." Nothing else in
-   this list matters until this runs.
+1. **Finish #109's eight external observations.** Five are run
+   (`tests/durable_crash_observation.rs`): the journal-ladder rows now have a
+   real store, a real kill, a restart and the designed answer. #99, #107
+   T21/T22 and #108 still need theirs, and the difference they measure — "the
+   bot survives its own machine dying" — is still open. Nothing else in this
+   list matters until all eight have run.
 2. **Close the Generalized rows marked ❌ in §4.4.** Focus steal, torn reads,
    clock skew, credential expiry, locale, concurrent editors, selector drift.
    This is the long pole and the reason RPA is hard.
