@@ -568,8 +568,8 @@ fn run_bounded(
         .unwrap_or_else(std::time::Instant::now);
     // The only waiter, and it always stops: each quantum either observes
     // the exit, fires the deadline, or finds a capture file past budget.
-    // File sizes only grow while the child lives, so a stat past budget is
-    // never revoked by a later one.
+    // File sizes only grow while the child lives, so a stat past budget
+    // stands against every later one.
     let outcome = loop {
         match child.try_wait().map_err(MetadataError::Spawn)? {
             Some(status) => break Ok(status),
