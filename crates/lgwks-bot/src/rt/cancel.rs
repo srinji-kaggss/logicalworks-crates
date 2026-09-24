@@ -235,14 +235,23 @@ impl Drop for Inner {
     fn drop(&mut self) {
         let mut next = self.parent.take();
         while let Some(node) = next {
-            match Arc::try_unwrap(node) {
+            match Arc::into_inner(node) {
                 // Sole owner: detach the next link and let this node drop as a
                 // leaf, immediately rather than on the way out of a deep stack.
-                Ok(mut inner) => next = inner.parent.take(),
+                Some(mut inner) => next = inner.parent.take(),
                 // Another handle still owns this node, so nothing below it can
                 // be freed yet and the chain stays alive through that handle.
-                // Dropping the `Err` here only decrements the count.
-                Err(_still_shared) => return,
+                //
+                // `into_inner` rather than `try_unwrap` is load-bearing here.
+                // A failed `try_unwrap` hands back the `Arc` in its `Err`, and
+                // that returned handle drops inside this frame; if the other
+                // owner releases between the failed unwrap and that drop, the
+                // returned handle *is* the last one, and this destructor
+                // re-enters on another thread's stack despite looking flat.
+                // `into_inner` makes the consume-or-leave decision atomically
+                // and on `None` holds no handle at all, so this loop can never
+                // drop an `Arc` it did not fully own going in.
+                None => return,
             }
         }
     }
@@ -445,6 +454,7 @@ mod tests {
     use crate::rt::runtime::block_on;
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
     use std::task::{Context, Waker};
     use std::time::Duration;
@@ -725,6 +735,117 @@ mod tests {
             });
             assert_eq!(outcome, StackFailure::Finished, "depth {depth}");
         }
+    }
+
+    #[test]
+    fn a_deep_chain_dropped_while_other_owners_release_concurrently_flattens_without_nesting() {
+        // The adversarial shape behind `Arc::into_inner`: one thread walks the
+        // ancestry flat while other threads release sibling handles into the
+        // same tree, so the consume-or-leave decision runs against a count
+        // that is falling as it is read. A failed `try_unwrap` holds the
+        // `Arc` in its `Err` and drops it inside the walk; a release landing
+        // in that window makes the walked node last-owner and re-enters this
+        // destructor. `into_inner`'s `None` arm holds nothing, so no schedule
+        // can nest the walk.
+        //
+        // The window is two instructions wide and cannot be landed on demand
+        // from outside the function, so this is a hammer, not a deterministic
+        // repro: deep chains, a small stack for the walk, and whole short
+        // chains born and destroyed concurrently with it. The property
+        // asserted is the one that matters — the flatten finishes on that
+        // stack with every node freed — under exactly the concurrent
+        // destruction the official `Arc` docs single out.
+        const CHURN_THREADS: usize = 4;
+        const CHURN_STACK: usize = 256 * 1024;
+
+        let outcome = on_a_stack(SMALL_STACK, move || {
+            let root = CancellationToken::new();
+            let weak_root = Arc::downgrade(&root.inner);
+            let mut leaf = root.clone();
+            for _ in 0..2048 {
+                leaf = leaf.child_token();
+            }
+            let weak_leaf = Arc::downgrade(&leaf.inner);
+
+            // Journeys that derive and release sibling chains for as long as
+            // the door is open: every round touches the shared root count and
+            // drops a whole short chain concurrently with the flatten below.
+            // These run on threads of their own rather than through
+            // [`on_a_stack`] because that harness blocks its caller, and the
+            // walker below has to keep running; every handle is retained and
+            // joined from this scope, and a thread the OS refused is recorded
+            // as the failure it is rather than skipped.
+            let door = Arc::new(AtomicBool::new(false));
+            let refused = Arc::new(AtomicUsize::new(0));
+            let mut churn = Vec::new();
+            let mut churn_rounds = Vec::new();
+            for _ in 0..CHURN_THREADS {
+                let root = root.clone();
+                let door = Arc::clone(&door);
+                let rounds = Arc::new(AtomicUsize::new(0));
+                churn_rounds.push(Arc::clone(&rounds));
+                let refused = Arc::clone(&refused);
+                let thread = std::thread::Builder::new()
+                    .name(String::from("cancellation-churn"))
+                    .stack_size(CHURN_STACK)
+                    .spawn(move || {
+                        while !door.load(Ordering::Relaxed) {
+                            let child = root.child_token();
+                            drop(child);
+                            rounds.fetch_add(1, Ordering::Relaxed);
+                        }
+                    });
+                match thread {
+                    Ok(handle) => churn.push(handle),
+                    Err(_refused) => {
+                        refused.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+            assert_eq!(
+                refused.load(Ordering::Relaxed),
+                0,
+                "the OS refused a churn thread; the hammer needs all of them"
+            );
+
+            // The walk itself: the leaf's ancestry frees iteratively while
+            // the churn above is mid-release against the same tree.
+            drop(leaf);
+            assert!(
+                weak_leaf.upgrade().is_none(),
+                "the flattened leaf must be freed even under concurrent release"
+            );
+            assert!(
+                weak_root.upgrade().is_some(),
+                "the root is still held by this frame and by the churn threads"
+            );
+
+            door.store(true, Ordering::Relaxed);
+            for handle in churn {
+                // The join outcome is asserted, not discarded: a churn thread
+                // that panicked is a failed hammer, not a quiet pass.
+                assert!(
+                    handle.join().is_ok(),
+                    "a churn thread panicked; the hammer is invalid"
+                );
+            }
+            for (index, rounds) in churn_rounds.iter().enumerate() {
+                assert!(
+                    rounds.load(Ordering::Relaxed) > 0,
+                    "churn thread {index} ran no rounds"
+                );
+            }
+
+            // The root's own flatten runs after every other owner is gone, so
+            // it is the single-owner walk; the churn must not have retained
+            // any node under it.
+            drop(root);
+            assert!(
+                weak_root.upgrade().is_none(),
+                "the root and its ancestry must be freed once the last handle goes"
+            );
+        });
+        assert_eq!(outcome, StackFailure::Finished);
     }
 
     #[test]
