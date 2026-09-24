@@ -516,13 +516,18 @@ fn a_settlement_followed_by_a_failed_recording_append_is_still_the_settlement() 
     let _guard = TempGuard(dir.clone());
     let journal_path = dir.join("journal.log");
 
-    let mut journal = FileJournal::open(&journal_path)?;
+    // The writer's handle is scoped: the fence is exclusive, so the reopen
+    // below must not race a live first handle.
     let this_key = key("1", DIGEST_A)?;
-    walk_ladder(&mut journal, this_key, RUNG_APPLIED)?;
+    {
+        let mut journal = FileJournal::open(&journal_path)?;
+        walk_ladder(&mut journal, this_key, RUNG_APPLIED)?;
 
-    // The recording failure: the next append dies mid-write. On a real store
-    // that is a torn final frame — bytes after the last acknowledged record.
-    tear_tail(&journal_path, &[0x00, 0x00, 0x00])?;
+        // The recording failure: the next append dies mid-write. On a real
+        // store that is a torn final frame — bytes after the last
+        // acknowledged record.
+        tear_tail(&journal_path, &[0x00, 0x00, 0x00])?;
+    }
 
     let reopened = FileJournal::open(&journal_path)?;
     assert!(
@@ -547,14 +552,19 @@ fn a_torn_final_frame_is_repaired_and_never_replayed() -> TestResult {
     let _guard = TempGuard(dir.clone());
     let journal_path = dir.join("journal.log");
 
-    let mut journal = FileJournal::open(&journal_path)?;
+    // The writer's handle is scoped: the fence is exclusive, so the reopen
+    // below must not race a live first handle.
     let this_key = key("1", DIGEST_A)?;
-    walk_ladder(&mut journal, this_key, RUNG_PREPARED)?;
-    let acked_len = std::fs::metadata(&journal_path)?.len();
+    let acked_len;
+    {
+        let mut journal = FileJournal::open(&journal_path)?;
+        walk_ladder(&mut journal, this_key, RUNG_PREPARED)?;
+        acked_len = std::fs::metadata(&journal_path)?.len();
 
-    // A kill mid-append leaves a partial frame. Both shapes a torn write
-    // produces: a truncated frame body, and a truncated length prefix.
-    tear_tail(&journal_path, &[0x00, 0x00, 0x01, 0x9f, 0xde, 0xad])?;
+        // A kill mid-append leaves a partial frame. Both shapes a torn write
+        // produces: a truncated frame body, and a truncated length prefix.
+        tear_tail(&journal_path, &[0x00, 0x00, 0x01, 0x9f, 0xde, 0xad])?;
+    }
 
     let mut reopened = FileJournal::open(&journal_path)?;
     assert!(reopened.torn_tail_repaired());
@@ -595,21 +605,26 @@ fn a_tampered_committed_frame_is_refused_rather_than_trimmed() -> TestResult {
     let _guard = TempGuard(dir.clone());
     let journal_path = dir.join("journal.log");
 
-    let mut journal = FileJournal::open(&journal_path)?;
-    let this_key = key("1", DIGEST_A)?;
-    walk_ladder(&mut journal, this_key, RUNG_APPLIED)?;
+    // The writer's handle is scoped: the fence is exclusive, so the refused
+    // reopen below must not race a live first handle.
+    {
+        let mut journal = FileJournal::open(&journal_path)?;
+        let this_key = key("1", DIGEST_A)?;
+        walk_ladder(&mut journal, this_key, RUNG_APPLIED)?;
 
-    // Flip one payload byte inside the last frame. This is not an interrupted
-    // append; it is committed bytes that no longer mean what the chain says.
-    let mut bytes = std::fs::read(&journal_path)?;
-    let first_len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-    assert!(
-        first_len > 16,
-        "the first frame carries a real event, so the framing is real"
-    );
-    let last = bytes.len() - 1;
-    bytes[last] ^= 0x01;
-    std::fs::write(&journal_path, &bytes)?;
+        // Flip one payload byte inside the last frame. This is not an
+        // interrupted append; it is committed bytes that no longer mean what
+        // the chain says.
+        let mut bytes = std::fs::read(&journal_path)?;
+        let first_len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        assert!(
+            first_len > 16,
+            "the first frame carries a real event, so the framing is real"
+        );
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+        std::fs::write(&journal_path, &bytes)?;
+    }
 
     match FileJournal::open(&journal_path) {
         Err(JournalError::Corrupt(corruption)) => {

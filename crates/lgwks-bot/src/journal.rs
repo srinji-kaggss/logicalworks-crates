@@ -485,6 +485,25 @@ pub enum JournalError {
     /// because a wrapped sequence would make two positions compare equal and
     /// defeat the guard the position exists to provide.
     Exhausted,
+    /// Another writer holds the journal file's exclusive fence.
+    ///
+    /// The refusal carries the path because the fix is about *when* to open,
+    /// not what to fix: wait for the holder to finish or die, then reopen.
+    /// Appending under a second unfenced handle would let two controllers
+    /// acknowledge histories that cannot replay as one chain, so this is
+    /// refused before a single byte of the file is read — the replay and the
+    /// torn-tail repair are the owner's alone.
+    ///
+    /// The fence is the operating system's advisory file lock: it binds
+    /// cooperating writers that go through this constructor, and it is
+    /// released by the kernel when the holder closes the file or dies. It is
+    /// not containment against a writer that never asks for the lock, and it
+    /// does not coordinate writers on other hosts — a distributed lease is a
+    /// different mechanism.
+    Locked {
+        /// Where the contended journal lives.
+        path: String,
+    },
     /// The backing store refused the append before the event could be written.
     ///
     /// The journal is unchanged: the event is not committed, and a retry may
@@ -579,6 +598,11 @@ impl fmt::Display for JournalError {
                 ),
             },
             Self::Exhausted => f.write_str("journal position exhausted"),
+            Self::Locked { ref path } => write!(
+                f,
+                "journal at {path} is held by another writer; \
+                 wait for the holder to finish, then reopen"
+            ),
             Self::Storage(ref cause) => {
                 write!(f, "journal storage refused the append: {cause}")
             }
