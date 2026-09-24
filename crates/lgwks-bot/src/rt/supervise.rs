@@ -2064,6 +2064,8 @@ mod tests {
     use super::CleanupOwners;
     #[cfg(all(not(unix), feature = "process"))]
     use super::ProcessSpec;
+    #[cfg(all(unix, feature = "process"))]
+    use super::SupervisorCancelled;
     use super::{
         Budget, MAX_PANIC_MESSAGE_CHARS, Outcome, Supervisor, TaskId, TaskOutcome, TrySpawnRefusal,
         repeat, truncate_panic_message,
@@ -2944,6 +2946,130 @@ mod tests {
                 "no body may be constructed after cancellation, slot or not"
             );
             assert_eq!(supervisor.stats().spawned, 1, "only the occupier ran");
+        });
+    }
+
+    #[test]
+    fn a_cancelled_supervisor_with_a_full_pool_refuses_without_constructing() {
+        block_on(async {
+            // The pool is full *and* the supervisor is cancelled. The wait
+            // must not park: cancellation is checked before the pool, so the
+            // refusal returns while the occupier still holds the only slot,
+            // and the constructor never runs. Without any cancellation
+            // fence this parks forever and the test never finishes.
+            let mut supervisor = Supervisor::new(1);
+            let gate = Arc::new(AtomicBool::new(false));
+            let done = Arc::new(AtomicBool::new(false));
+            supervisor
+                .spawn({
+                    let gate = Arc::clone(&gate);
+                    let done = Arc::clone(&done);
+                    move |_token| async move {
+                        while !gate.load(Ordering::Relaxed) {
+                            yield_now().await;
+                        }
+                        done.store(true, Ordering::Relaxed);
+                    }
+                })
+                .await;
+            supervisor.cancel();
+
+            let built = Arc::new(AtomicU64::new(0));
+            let refused_before = supervisor.stats().refused;
+            supervisor
+                .spawn({
+                    let built = Arc::clone(&built);
+                    move |_token| {
+                        built.fetch_add(1, Ordering::Relaxed);
+                        async {}
+                    }
+                })
+                .await;
+            assert_eq!(
+                built.load(Ordering::Relaxed),
+                0,
+                "no body may be constructed for a cancelled supervisor, full pool or not"
+            );
+            assert_eq!(
+                supervisor.stats().refused,
+                refused_before + 1,
+                "the waiting-spawn refusal must be counted"
+            );
+            assert_eq!(supervisor.stats().spawned, 1, "only the occupier ran");
+
+            gate.store(true, Ordering::Relaxed);
+            for _ in 0..256 {
+                if done.load(Ordering::Relaxed) {
+                    break;
+                }
+                yield_now().await;
+            }
+        });
+    }
+
+    /// Cancellation closes the native fork, not just the async placement:
+    /// after it, `spawn_process` names cancellation and no child runs, so
+    /// the first instruction of a refused command does not execute (issue
+    /// #143 R11). Unix only, like the spawn path itself.
+    #[cfg(all(unix, feature = "process"))]
+    #[test]
+    fn a_cancelled_supervisor_starts_no_process() {
+        use super::ProcessSpec;
+
+        block_on(async {
+            // Nanos plus a monotone sequence: not a pid (reused by the OS).
+            static MARK_SEQ: AtomicU64 = AtomicU64::new(0);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|since| since.as_nanos())
+                .unwrap_or(0);
+            let seq = MARK_SEQ.fetch_add(1, Ordering::Relaxed);
+            let marker = std::env::temp_dir().join(format!("lgwks-bot-cancel-{nanos}-{seq}.mark"));
+
+            let mut supervisor = Supervisor::new(2);
+            supervisor.cancel();
+            let spawned_before = supervisor.stats().spawned;
+            let refused_before = supervisor.stats().refused;
+
+            let mut spec = ProcessSpec::new("sh");
+            spec.arg("-c").arg(format!("touch {}", marker.display()));
+            let refusal = supervisor.spawn_process(&spec).await;
+            assert!(
+                refusal.is_err(),
+                "a cancelled supervisor must not start the process it was asked for"
+            );
+            assert!(
+                refusal
+                    .as_ref()
+                    .err()
+                    .and_then(std::io::Error::get_ref)
+                    .and_then(|cause| cause.downcast_ref::<SupervisorCancelled>())
+                    .is_some(),
+                "the refusal must name cancellation, got {refusal:?}"
+            );
+            assert_eq!(
+                supervisor.stats().spawned,
+                spawned_before,
+                "no process may be placed after cancellation"
+            );
+            assert_eq!(
+                supervisor.stats().refused,
+                refused_before + 1,
+                "the process refusal must be counted"
+            );
+            assert!(
+                !marker.exists(),
+                "no child ran: the marker {} must be absent",
+                marker.display()
+            );
+            // The absence above is the assertion; the removal only avoids
+            // litter, and either outcome leaves the path gone.
+            let removed = std::fs::remove_file(&marker);
+            assert!(
+                removed.is_ok() || !marker.exists(),
+                "the marker path must be gone: {}",
+                marker.display()
+            );
         });
     }
 
