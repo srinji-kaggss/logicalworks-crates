@@ -753,13 +753,7 @@ impl Effects {
         event: &EffectEvent,
         position: JournalPosition,
     ) -> Result<(), JournalError> {
-        let expected = self.event_position(event)?;
-        if position != expected {
-            return Err(JournalError::ReceiptMismatch {
-                expected,
-                actual: position,
-            });
-        }
+        self.event_position(event, position)?;
         let actual = self.scope.journal().tail();
         if actual != position {
             return Err(JournalError::TailMismatch {
@@ -896,25 +890,50 @@ impl Effects {
         key: EffectKey,
         evidence: EffectEvidence,
     ) -> Result<JournalPosition, JournalError> {
-        self.event_position(&EffectEvent::OutcomeObserved { key, evidence })
+        let event = EffectEvent::OutcomeObserved { key, evidence };
+        let Some((position, recorded)) = self.scope.journal().outcome_at(key)? else {
+            return Err(JournalError::OutOfOrder {
+                key: Box::new(key),
+                expected: Some(EventKind::OutcomeObserved),
+                attempted: EventKind::OutcomeObserved,
+            });
+        };
+        if recorded != evidence {
+            return Err(JournalError::OutOfOrder {
+                key: Box::new(key),
+                expected: Some(EventKind::Verified),
+                attempted: EventKind::OutcomeObserved,
+            });
+        }
+        self.event_position(&event, position)?;
+        Ok(position)
     }
 
-    /// Return the recorded position only when it holds the exact event.
+    /// Require the acknowledged position to hold the exact event.
     ///
     /// A tail equality check alone proves only that *something* occupies the
     /// acknowledged position. Binding the event prevents an adapter from
     /// laundering a concurrent writer's tail into this controller's fold.
-    fn event_position(&self, expected: &EffectEvent) -> Result<JournalPosition, JournalError> {
-        self.scope
-            .journal()
-            .committed_entries()?
-            .into_iter()
-            .find_map(|entry| (entry.event() == expected).then_some(entry.position()))
-            .ok_or(JournalError::OutOfOrder {
+    fn event_position(
+        &self,
+        expected: &EffectEvent,
+        position: JournalPosition,
+    ) -> Result<(), JournalError> {
+        let Some(entry) = self.scope.journal().committed_entry(position)? else {
+            return Err(JournalError::OutOfOrder {
                 key: Box::new(expected.key()),
                 expected: Some(expected.kind()),
                 attempted: expected.kind(),
-            })
+            });
+        };
+        if entry.event() != expected {
+            return Err(JournalError::EntryMismatch {
+                position,
+                expected: Box::new(*expected),
+                actual: Box::new(*entry.event()),
+            });
+        }
+        Ok(())
     }
 
     /// The outcome already committed for `key`, when there is one.
@@ -932,21 +951,18 @@ impl Effects {
         Ok(self
             .scope
             .journal()
-            .committed()?
-            .iter()
-            .find_map(|event| match *event {
-                EffectEvent::OutcomeObserved {
-                    key: held,
-                    evidence,
-                } if held == *key => Some(evidence),
-                _ => None,
-            }))
+            .outcome_at(*key)?
+            .map(|(_, evidence)| evidence))
     }
 
     /// Require the receipt for an outcome to meet the grade admitted for its
     /// attempt. A weak append can have occupied the ladder already; the
     /// journal's explicit receipt operation is the only safe retry in that
     /// case.
+    ///
+    /// The receipt binds to the keyed outcome, not to whatever the
+    /// acknowledgment names: an ack for a position that holds no outcome for
+    /// this key is a [`JournalError::ReceiptMismatch`], never an acceptance.
     fn confirm_outcome(
         &mut self,
         key: EffectKey,
@@ -5770,6 +5786,94 @@ mod tests {
         assert_eq!(bot.tick()?, 0);
         assert_eq!(runs.get(), 1, "retry must not dispatch the action again");
         assert!(bot.pending().is_empty());
+        Ok(())
+    }
+
+    /// A journal whose positioned readback answers with a different event
+    /// than the one the controller acknowledged: the shape a concurrent
+    /// writer's tail swap has at the readback seam.
+    struct SwappedEntryJournal {
+        inner: MemoryJournal,
+        swap: EffectEvent,
+    }
+
+    impl EffectJournal for SwappedEntryJournal {
+        fn durability(&self) -> DurabilityPromise {
+            self.inner.durability()
+        }
+
+        fn tail(&self) -> JournalPosition {
+            self.inner.tail()
+        }
+
+        fn committed(&self) -> Result<Vec<EffectEvent>, JournalError> {
+            EffectJournal::committed(&self.inner)
+        }
+
+        fn committed_entries(&self) -> Result<Vec<crate::journal::JournalEntry>, JournalError> {
+            Ok(self.inner.committed().to_vec())
+        }
+
+        fn committed_entry(
+            &self,
+            position: JournalPosition,
+        ) -> Result<Option<crate::journal::JournalEntry>, JournalError> {
+            Ok(Some(crate::journal::JournalEntry::new(position, self.swap)))
+        }
+
+        fn compare_and_append(
+            &mut self,
+            expected_tail: JournalPosition,
+            event: &EffectEvent,
+        ) -> Result<DurableAck, JournalError> {
+            self.inner.compare_and_append(expected_tail, event)
+        }
+    }
+
+    /// A positioned readback that holds a different event is a mismatch,
+    /// never an acknowledgement: binding the event to the position stops an
+    /// adapter from laundering a concurrent writer's tail into this
+    /// controller's fold (R05 wrong-event control; #122 item 2).
+    #[test]
+    fn a_position_holding_a_different_event_is_a_mismatch_not_an_acknowledgement() -> TestResult {
+        let key = EffectKey::new(
+            RunId::from_hex(TEST_RUN)?,
+            crate::effect::ActionId::from_hex("1112131415161718191a1b1c1d1e1f20")?,
+            crate::effect::AttemptId::from_decimal("1")?,
+            crate::effect::FlowRevision::from_tagged("blake3_256", TEST_FLOW)?,
+            crate::effect::ActionDigest::from_tagged(
+                "blake3_256",
+                "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeffe0e1e2e3e4e5e6e7e8e9eaebecedeeef",
+            )?,
+            EnvironmentId::from_hex(TEST_ENV)?,
+            crate::effect::EnvironmentEpoch::from_decimal("1")?,
+        );
+        let admitted = EffectEvent::IntentAdmitted { key };
+        let mut backing = MemoryJournal::new();
+        let ack = backing.compare_and_append(backing.tail(), &admitted)?;
+        let swapped = EffectEvent::DispatchPrepared { key };
+        let scope = test_effects_with(Box::new(SwappedEntryJournal {
+            inner: backing,
+            swap: swapped,
+        }))?;
+        let mut effects = Effects::new(scope, ack.position());
+        match effects.accept_position(&admitted, ack.position()) {
+            Err(JournalError::EntryMismatch {
+                position,
+                expected,
+                actual,
+            }) => {
+                assert_eq!(position, ack.position());
+                assert_eq!(*expected, admitted);
+                assert_eq!(*actual, swapped);
+            }
+            other => {
+                return Err(format!(
+                    "a swapped positioned entry must be EntryMismatch, got {other:?}"
+                )
+                .into());
+            }
+        }
         Ok(())
     }
 

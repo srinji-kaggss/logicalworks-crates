@@ -411,6 +411,8 @@ pub struct FileJournal {
     /// The last kind recorded per key, the append fence's index, so an
     /// append's ladder check does not walk the replayed history.
     ladder: HashMap<crate::effect::EffectKey, EventKind>,
+    /// Latest outcome record and position per attempt, built during replay.
+    outcomes: HashMap<crate::effect::EffectKey, (JournalPosition, EffectEvidence)>,
     /// Byte length of the acknowledged prefix on disk.
     disk_len: u64,
     /// Whether a write of this handle failed after bytes may have reached
@@ -522,12 +524,19 @@ impl FileJournal {
             .iter()
             .map(|entry| (entry.event().key(), entry.event().kind()))
             .collect();
+        let mut outcomes = HashMap::new();
+        for entry in &entries {
+            if let EffectEvent::OutcomeObserved { key, evidence } = *entry.event() {
+                outcomes.insert(key, (entry.position(), evidence));
+            }
+        }
 
         Ok(Self {
             path,
             file,
             committed: entries,
             ladder,
+            outcomes,
             disk_len: acked_len,
             write_failed: false,
             torn_tail_repaired,
@@ -700,6 +709,9 @@ impl FileJournal {
             let (position, frame_len) = *entry;
             self.committed.push(JournalEntry::new(position, *event));
             self.ladder.insert(event.key(), event.kind());
+            if let EffectEvent::OutcomeObserved { key, evidence } = *event {
+                self.outcomes.insert(key, (position, evidence));
+            }
             self.disk_len = self
                 .disk_len
                 .saturating_add(u64::try_from(frame_len).unwrap_or(u64::MAX));
@@ -727,6 +739,31 @@ impl EffectJournal for FileJournal {
 
     fn committed_entries(&self) -> Result<Vec<JournalEntry>, JournalError> {
         Ok(self.committed.clone())
+    }
+
+    fn committed_entry(
+        &self,
+        position: JournalPosition,
+    ) -> Result<Option<JournalEntry>, JournalError> {
+        let Some(index) = position
+            .sequence()
+            .checked_sub(1)
+            .and_then(|n| usize::try_from(n).ok())
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .committed
+            .get(index)
+            .copied()
+            .filter(|entry| entry.position() == position))
+    }
+
+    fn outcome_at(
+        &self,
+        key: crate::effect::EffectKey,
+    ) -> Result<Option<(JournalPosition, EffectEvidence)>, JournalError> {
+        Ok(self.outcomes.get(&key).copied())
     }
 
     /// Append one event at `expected_tail`, or refuse.
@@ -822,6 +859,9 @@ impl EffectJournal for FileJournal {
 
         self.committed.push(JournalEntry::new(position, *event));
         self.ladder.insert(key, attempted);
+        if let EffectEvent::OutcomeObserved { evidence, .. } = *event {
+            self.outcomes.insert(key, (position, evidence));
+        }
         self.disk_len = self
             .disk_len
             .saturating_add(u64::try_from(frame.len()).unwrap_or(u64::MAX));
@@ -1181,6 +1221,41 @@ mod tests {
                 })
             ),
             "a file-backed journal must not claim power-loss durability"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_reopened_journal_answers_the_latest_outcome_by_key() -> TestResult {
+        let path = scratch("outcome-index");
+        let _guard = TempGuard(path.clone());
+        let key = key()?;
+        let mut journal = FileJournal::open(&path)?;
+        journal.compare_and_append(journal.tail(), &EffectEvent::IntentAdmitted { key })?;
+        journal.compare_and_append(journal.tail(), &EffectEvent::DispatchPrepared { key })?;
+        let outcome = EffectEvent::OutcomeObserved {
+            key,
+            evidence: EffectEvidence::Applied,
+        };
+        let ack = journal.compare_and_append(journal.tail(), &outcome)?;
+        assert_eq!(
+            journal.outcome_at(key)?,
+            Some((ack.position(), EffectEvidence::Applied)),
+            "the live index answers the committed outcome without scanning history"
+        );
+        drop(journal);
+        let reopened = FileJournal::open(&path)?;
+        assert_eq!(
+            reopened.outcome_at(key)?,
+            Some((ack.position(), EffectEvidence::Applied)),
+            "the replay rebuilds the outcome index, so a restart keeps it"
+        );
+        assert_eq!(
+            reopened
+                .committed_entry(ack.position())?
+                .map(|entry| *entry.event()),
+            Some(outcome),
+            "the acknowledged position still holds the exact outcome"
         );
         Ok(())
     }
