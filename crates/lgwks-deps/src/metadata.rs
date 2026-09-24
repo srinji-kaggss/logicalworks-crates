@@ -482,11 +482,18 @@ fn poll_quantum() {
 
 /// Runs one subprocess to completion under a deadline and output budgets.
 ///
-/// The child is spawned with piped streams; when the deadline passes it is
-/// killed and reaped before this returns, and when a stream exceeds its
-/// budget the same kill-and-reap refuses with [`MetadataError::OutputTooLarge`]
-/// instead of retaining the flood. A refusal carries no partial graph: the
-/// gate reports the failure rather than decoding a prefix of it.
+/// The child writes to two capture files, never to pipes: a flood cannot
+/// block the child on a full pipe, and no reader thread can be held open by
+/// a grandchild that inherited a descriptor. Each poll quantum stats both
+/// files, and the first one past budget kills and reaps before returning
+/// [`MetadataError::OutputTooLarge`]; the deadline does the same with
+/// [`MetadataError::Timeout`]. A refusal carries no partial graph: the gate
+/// reports the failure rather than decoding a prefix of it.
+///
+/// The kill targets the direct child. An orphaned grandchild keeps whatever
+/// capture file it inherited until it exits, but it cannot stall this call:
+/// every path ends at the deadline, and the files are unlinked before
+/// returning.
 fn run_bounded(
     program: &str,
     args: &[OsString],
@@ -494,88 +501,132 @@ fn run_bounded(
     timeout: Duration,
     stream_cap: usize,
 ) -> Result<BoundedOutput, MetadataError> {
+    use std::fs::File;
+    use std::io::Read as _;
     use std::process::Stdio;
 
-    /// Drain one pipe into a capped buffer. The readers run on scoped
-    /// threads, so they are joined before this returns instead of
-    /// outliving it; the child is always reaped on the main thread first,
-    /// which closes the pipes the readers may be blocked in.
-    fn drain(mut pipe: impl std::io::Read, stream_cap: usize) -> (Vec<u8>, bool) {
-        let mut kept = Vec::new();
-        let mut chunk = [0_u8; 8192];
-        loop {
-            let read = match pipe.read(&mut chunk) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => n,
-            };
-            if kept.len().saturating_add(read) > stream_cap {
-                return (kept, true);
-            }
-            kept.extend_from_slice(&chunk[..read]);
-        }
-        (kept, false)
+    /// One capture file: created empty, unlinked on every return path.
+    /// Nanos plus process id plus a monotone sequence: not a thread id or
+    /// a counter alone, both of which a second process could reuse.
+    fn capture(name: &str) -> Result<(PathBuf, File), MetadataError> {
+        static CAPTURE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_nanos())
+            .unwrap_or(0);
+        let seq = CAPTURE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "lgwks-deps-{name}-{pid}-{nanos}-{seq}.capture",
+            pid = std::process::id()
+        ));
+        let file = File::create(&path).map_err(MetadataError::Spawn)?;
+        Ok((path, file))
     }
 
+    /// Best-effort unlink: the capture files must not outlive the call, and
+    /// a file already gone (or never created) is the desired end state.
+    fn unlink(path: &Path) {
+        if std::fs::remove_file(path).is_err() {
+            // Already gone; absence is what every path wants.
+        }
+    }
+
+    /// Read at most one byte past budget: anything longer is an overflow,
+    /// and the retained bytes are dropped with the Vec, never decoded.
+    fn read_capped(path: &Path, stream_cap: usize) -> Result<(Vec<u8>, bool), MetadataError> {
+        let limit = u64::try_from(stream_cap).unwrap_or(u64::MAX);
+        let file = File::open(path).map_err(MetadataError::Spawn)?;
+        let mut kept = Vec::new();
+        file.take(limit.saturating_add(1))
+            .read_to_end(&mut kept)
+            .map_err(MetadataError::Spawn)?;
+        let overflow = kept.len() > stream_cap;
+        Ok((kept, overflow))
+    }
+
+    let (stdout_path, stdout_file) = capture("stdout")?;
+    let (stderr_path, stderr_file) = capture("stderr")?;
     let mut child = Command::new(program)
         .args(args)
         .current_dir(dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file))
         .spawn()
-        .map_err(MetadataError::Spawn)?;
+        .map_err(|error| {
+            unlink(&stdout_path);
+            unlink(&stderr_path);
+            MetadataError::Spawn(error)
+        })?;
     let deadline = std::time::Instant::now()
         .checked_add(timeout)
         .unwrap_or_else(std::time::Instant::now);
-    let outcome = std::thread::scope(|scope| {
-        let stdout = child
-            .stdout
-            .take()
-            .map(|pipe| scope.spawn(move || drain(pipe, stream_cap)));
-        let stderr = child
-            .stderr
-            .take()
-            .map(|pipe| scope.spawn(move || drain(pipe, stream_cap)));
-        // Poll for exit; a flood that fills both pipes blocks the child,
-        // which is why the deadline fires rather than the drain: either way
-        // this loop is the only waiter and it always stops. The exit answer
-        // leaves the scope first so no child borrow overlaps the reader
-        // handles joined below.
-        let exit = loop {
-            match child.try_wait().map_err(MetadataError::Spawn)? {
-                Some(status) => break Ok(status),
-                None if std::time::Instant::now() >= deadline => {
-                    // Best effort: the child may have exited between the
-                    // poll and the kill, in which case there is nothing to
-                    // signal and the reap below collects it.
+    // The only waiter, and it always stops: each quantum either observes
+    // the exit, fires the deadline, or finds a capture file past budget.
+    // File sizes only grow while the child lives, so a stat past budget is
+    // never revoked by a later one.
+    let outcome = loop {
+        match child.try_wait().map_err(MetadataError::Spawn)? {
+            Some(status) => break Ok(status),
+            None if std::time::Instant::now() >= deadline => {
+                // Best effort: the child may have exited between the
+                // poll and the kill, in which case there is nothing to
+                // signal and the reap below collects it.
+                if child.kill().is_err() {
+                    // Already gone; the reap below is still required.
+                }
+                break Err(MetadataError::Timeout { after: timeout });
+            }
+            None => {
+                let limit = u64::try_from(stream_cap).unwrap_or(u64::MAX);
+                let over = |path: &Path| {
+                    std::fs::metadata(path)
+                        .ok()
+                        .is_some_and(|sized| sized.len() > limit)
+                };
+                // The kill targets the direct child; an orphaned grandchild
+                // keeps its capture file, but the size check already fired
+                // and the files are unlinked before returning either way.
+                if over(&stdout_path) {
                     if child.kill().is_err() {
                         // Already gone; the reap below is still required.
                     }
-                    break Err(MetadataError::Timeout { after: timeout });
+                    break Err(MetadataError::OutputTooLarge {
+                        stream: "stdout",
+                        limit: stream_cap,
+                    });
                 }
-                None => poll_quantum(),
+                if over(&stderr_path) {
+                    if child.kill().is_err() {
+                        // Already gone; the reap below is still required.
+                    }
+                    break Err(MetadataError::OutputTooLarge {
+                        stream: "stderr",
+                        limit: stream_cap,
+                    });
+                }
+                poll_quantum();
             }
-        };
-        // A dead reader leaves its stream unknown, which refuses in the same
-        // direction as an overflow rather than decoding a prefix as a graph.
-        let unknown = (Vec::new(), true);
-        let join = |handle: Option<std::thread::ScopedJoinHandle<'_, (Vec<u8>, bool)>>| {
-            handle
-                .map(|joined| joined.join().unwrap_or_else(|_| unknown.clone()))
-                .unwrap_or_default()
-        };
-        exit.map(|status| (status, join(stdout), join(stderr)))
-    });
-    // Reaped exactly once, on every path: natural exit, timeout kill, or a
-    // drain that already saw EOF. `wait` after `kill` returns the death;
-    // `wait` after natural exit collects it. The readers joined at scope
-    // exit first: the pipes only stay open while an unreaped child lives.
-    // A reap error here would mean the single owner lost its child without
-    // waiting, which this shape makes unrepresentable; the branch records
-    // the impossibility rather than inventing a recovery.
+        }
+    };
+    // Reaped exactly once, on every path. A reap error here would mean the
+    // single owner lost its child without waiting, which this shape makes
+    // unrepresentable; the branch records the impossibility rather than
+    // inventing a recovery.
     if child.wait().is_err() {
         // Unreachable: no second waiter exists.
     }
-    let (status, (stdout, stdout_overflow), (stderr, stderr_overflow)) = outcome?;
+    let status = match outcome {
+        Err(refusal) => {
+            unlink(&stdout_path);
+            unlink(&stderr_path);
+            return Err(refusal);
+        }
+        Ok(status) => status,
+    };
+    let (stdout, stdout_overflow) = read_capped(&stdout_path, stream_cap)?;
+    let (stderr, stderr_overflow) = read_capped(&stderr_path, stream_cap)?;
+    unlink(&stdout_path);
+    unlink(&stderr_path);
     if stdout_overflow {
         return Err(MetadataError::OutputTooLarge {
             stream: "stdout",
@@ -896,7 +947,15 @@ mod tests {
     /// where the test compiles.
     #[cfg(unix)]
     fn sleeper() -> (&'static str, Vec<OsString>) {
-        ("sh", vec![OsString::from("-c"), OsString::from("sleep 10")])
+        // Background-plus-wait, not a bare sleep: the shell forks a
+        // grandchild that inherits the capture files, which is the shape
+        // that held pipes open and defeated a pipe-based design on hosted
+        // CI. Killing the direct child must still end the call at the
+        // deadline even with the grandchild's descriptors open.
+        (
+            "sh",
+            vec![OsString::from("-c"), OsString::from("sleep 10 & wait")],
+        )
     }
 
     #[cfg(not(unix))]
