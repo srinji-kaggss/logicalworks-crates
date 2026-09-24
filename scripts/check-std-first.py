@@ -180,11 +180,11 @@ EXEMPT: dict[str, tuple[str, str]] = {
         "runtime did not create; the thread is joined on the same line, so "
         "nothing is leaked, and the file already carries an `#[expect]` saying so",
     ),
-    "crates/lgwks-bot/tests/rt_process.rs:139": (
+    "crates/lgwks-bot/tests/rt_process.rs:140": (
         'let path = std::env::temp_dir().join(format!("lgwks-bot-{}-{name}", std::process::id()));',
         "a scratch directory name, not an identity: the per-test `name` argument "
         "is what keeps two tests apart, and the pid only namespaces the directory "
-        "under the temp root",
+        "under the temp root (re-anchored after PidDir extraction moved the line)",
     ),
     "crates/lgwks-deps/src/vendor.rs:391": (
         "std::process::id(),",
