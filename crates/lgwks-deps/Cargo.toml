@@ -78,7 +78,7 @@ bevy-state = ["bevy-ecs", "dep:bevy_state"]
 process-group-probe = ["dep:nix", "nix/signal"]
 
 [dependencies]
-lgwks_std = { workspace = true, features = ["json", "random"] }
+lgwks_std = { workspace = true, features = ["json"] }
 syn = { version = "2", features = ["full", "visit", "parsing"], optional = true }
 proc-macro2 = { version = "1", features = ["span-locations"], optional = true }
 gpui = { version = "0.2", optional = true }
@@ -111,6 +111,15 @@ tokenizers = { version = "0.23", optional = true }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread"], optional = true }
+# Capture-file distinguishers need OS entropy, and the estate has exactly one
+# source: `lgwks_std::random` (INV-RANDOM-ONE-SOURCE). That module refuses wasm
+# with a `compile_error!`, and the WASI boundary job builds this crate for
+# `wasm32-wasip1`, so the feature rides the same host-only target gate as
+# tokio above rather than the unconditional edge: the wasm build names its
+# capture files from a clock and a sequence under exclusive creation instead.
+# This adds no edge of its own — a feature of a dependency already held —
+# which keeps the tree at one entropy source rather than two.
+lgwks_std = { workspace = true, features = ["random"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31.3", default-features = false, optional = true }

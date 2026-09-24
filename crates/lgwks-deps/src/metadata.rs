@@ -193,7 +193,10 @@ pub enum MetadataError {
     },
     /// OS entropy could not be read, so no capture file could be named.
     /// Cargo was never started: without a distinguisher the call refuses
-    /// rather than risk a predictable capture path.
+    /// rather than risk a predictable capture path. Host-only: wasm has no
+    /// entropy source (`lgwks_std::random` refuses the target), and the
+    /// wasm distinguisher below cannot fail this way.
+    #[cfg(not(target_family = "wasm"))]
     Entropy(lgwks_std::random::EntropyError),
 }
 
@@ -223,6 +226,7 @@ impl fmt::Display for MetadataError {
                 f,
                 "cargo metadata {stream} exceeded {limit} bytes: child killed and reaped"
             ),
+            #[cfg(not(target_family = "wasm"))]
             Self::Entropy(ref error) => write!(
                 f,
                 "cargo metadata capture file has no distinguisher: {error}"
@@ -239,6 +243,7 @@ impl std::error::Error for MetadataError {
             Self::Spawn(ref error) => Some(error),
             Self::Root { ref cause, .. } => Some(cause),
             Self::Json(ref error) => Some(error),
+            #[cfg(not(target_family = "wasm"))]
             Self::Entropy(ref error) => Some(error),
             Self::Cargo(_)
             | Self::Schema(_)
@@ -464,6 +469,10 @@ const METADATA_TIMEOUT: Duration = Duration::from_secs(120);
 /// kilobytes, so a flooding Cargo is killed and reaped instead of retaining
 /// unbounded output (issue #143 R14).
 const METADATA_STREAM_CAP: usize = 8 * 1024 * 1024;
+/// Exclusive-create attempts per capture file: each attempt draws a fresh
+/// distinguisher, so this bound is never reached by chance, only by a
+/// broken clock or a hostile temp dir, both of which refuse (issue #143 R14).
+const CAPTURE_ATTEMPTS: usize = 16;
 
 /// A reaped child's exit status with its bounded output.
 struct BoundedOutput {
@@ -514,19 +523,59 @@ fn run_bounded(
     use std::io::Read as _;
     use std::process::Stdio;
 
-    /// One capture file: created empty, unlinked on every return path. The
-    /// distinguisher is 128 bits of OS entropy (`lgwks_std::random`, the one
-    /// source INV-RANDOM-ONE-SOURCE allows): a process id or a clock would be
-    /// reused by the OS and could name another call's file. An entropy
-    /// refusal names no file and starts no child; the call ends here.
+    /// One capture file: created empty and exclusive, unlinked on every
+    /// return path. Creation uses `create_new`, so even a distinguisher
+    /// collision is a retried name, never another call's file truncated.
     fn capture(name: &str) -> Result<(PathBuf, File), MetadataError> {
-        let distinguisher = lgwks_std::random::bytes::<16>().map_err(MetadataError::Entropy)?;
-        let path = std::env::temp_dir().join(format!(
-            "lgwks-deps-{name}-{distinguisher}.capture",
-            distinguisher = lgwks_std::hex::encode(distinguisher),
-        ));
-        let file = File::create(&path).map_err(MetadataError::Spawn)?;
-        Ok((path, file))
+        use std::io::ErrorKind;
+        // Bounded: each attempt draws a fresh distinguisher, so exhaustion
+        // is a refusal shape, not a spin.
+        for _ in 0..CAPTURE_ATTEMPTS {
+            let path = std::env::temp_dir().join(format!(
+                "lgwks-deps-{name}-{distinguisher}.capture",
+                distinguisher = distinguisher()?,
+            ));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => return Ok((path, file)),
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(MetadataError::Spawn(error)),
+            }
+        }
+        Err(MetadataError::Spawn(std::io::Error::from(
+            ErrorKind::AlreadyExists,
+        )))
+    }
+
+    /// Names one capture file: 128 bits of OS entropy (`lgwks_std::random`,
+    /// the one source INV-RANDOM-ONE-SOURCE allows). A process id or a clock
+    /// would be reused by the OS and could name another call's file. An
+    /// entropy refusal names no file and starts no child; the call ends here.
+    #[cfg(not(target_family = "wasm"))]
+    fn distinguisher() -> Result<String, MetadataError> {
+        lgwks_std::random::bytes::<16>()
+            .map(lgwks_std::hex::encode)
+            .map_err(MetadataError::Entropy)
+    }
+
+    /// wasm has no entropy source: `lgwks_std::random` refuses the target
+    /// with a `compile_error!`, and the WASI boundary job builds this crate
+    /// for `wasm32-wasip1`. Nanos plus a monotone sequence name the file,
+    /// and `create_new` above is what makes that safe: a repeated name is
+    /// retried, never opened. Spawning cannot succeed on this target anyway,
+    /// so these files only ever live until the `Spawn` refusal unlinks them.
+    #[cfg(target_family = "wasm")]
+    fn distinguisher() -> Result<String, MetadataError> {
+        static CAPTURE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_nanos())
+            .unwrap_or(0);
+        let seq = CAPTURE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(format!("{nanos}-{seq}"))
     }
 
     /// Best-effort unlink: the capture files must not outlive the call, and
