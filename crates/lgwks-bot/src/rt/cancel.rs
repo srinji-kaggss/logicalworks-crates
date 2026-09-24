@@ -808,6 +808,25 @@ mod tests {
                 "the OS refused a churn thread; the hammer needs all of them"
             );
 
+            // The hammer is only valid once every churn thread has
+            // demonstrably run: on a loaded scheduler the walk below can
+            // finish before a spawned thread's first release, and then the
+            // concurrent destruction this test claims to cover never
+            // happens. The walk starts after observed churn, not after
+            // successful spawning.
+            let mut spins = 0u32;
+            while churn_rounds
+                .iter()
+                .any(|rounds| rounds.load(Ordering::Relaxed) == 0)
+            {
+                std::thread::yield_now();
+                spins += 1;
+                assert!(
+                    spins < 10_000_000,
+                    "churn threads never ran; the hammer is invalid"
+                );
+            }
+
             // The walk itself: the leaf's ancestry frees iteratively while
             // the churn above is mid-release against the same tree.
             drop(leaf);
