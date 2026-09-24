@@ -40,6 +40,7 @@
 //! [`EffectJournal::admit_external_handoff`]: crate::journal::EffectJournal::admit_external_handoff
 
 use core::fmt;
+use std::collections::HashMap;
 use std::io;
 
 use lgwks_std::hash::{Digest, Hasher, blake3};
@@ -466,6 +467,16 @@ pub enum JournalError {
         /// The position the adapter returned in its receipt.
         actual: JournalPosition,
     },
+    /// The position exists, but it contains a different event than the one
+    /// the caller is trying to acknowledge.
+    EntryMismatch {
+        /// The exact committed position inspected.
+        position: JournalPosition,
+        /// The event the caller expected there.
+        expected: Box<EffectEvent>,
+        /// The event the adapter returned at that position.
+        actual: Box<EffectEvent>,
+    },
     /// The event cannot follow what is committed for that key.
     OutOfOrder {
         /// The attempt the refused event was about.
@@ -485,8 +496,50 @@ pub enum JournalError {
     /// because a wrapped sequence would make two positions compare equal and
     /// defeat the guard the position exists to provide.
     Exhausted,
-    /// The backing store refused the append.
+    /// Another writer holds the journal file's exclusive fence.
+    ///
+    /// The refusal carries the path because the fix is about *when* to open,
+    /// not what to fix: wait for the holder to finish or die, then reopen.
+    /// Appending under a second unfenced handle would let two controllers
+    /// acknowledge histories that cannot replay as one chain, so this is
+    /// refused before a single byte of the file is read — the replay and the
+    /// torn-tail repair are the owner's alone.
+    ///
+    /// The fence is the operating system's advisory file lock: it binds
+    /// cooperating writers that go through this constructor, and it is
+    /// released by the kernel when the holder closes the file or dies. It is
+    /// not containment against a writer that never asks for the lock, and it
+    /// does not coordinate writers on other hosts — a distributed lease is a
+    /// different mechanism.
+    Locked {
+        /// Where the contended journal lives.
+        path: String,
+    },
+    /// The backing store refused the append before the event could be written.
+    ///
+    /// The journal is unchanged: the event is not committed, and a retry may
+    /// re-append. Named apart from [`Self::OutcomeUnknown`] so a caller can
+    /// tell "nothing landed, try again" from "something may have landed,
+    /// read back" without knowing the adapter.
     Storage(io::Error),
+    /// The append may have committed, and the acknowledgment was lost.
+    ///
+    /// This is the reply a real store produces when bytes reach the disk and
+    /// the confirmation does not reach the caller: a write that fails part
+    /// way, a sync whose result never arrives. The committed state of the
+    /// event is *unknown* — it may be in the store, it may not — and the
+    /// contract for a caller is reconciliation by readback, never a blind
+    /// re-append: re-appending an event that did land is how an effect gets
+    /// executed twice on the strength of a lost reply.
+    ///
+    /// An adapter returns this only for its own append's uncertain outcome.
+    /// Every other refusal — a stale tail, a ladder violation, a store that
+    /// refused before touching the log — leaves the journal unchanged and is
+    /// reported as its own variant.
+    OutcomeUnknown {
+        /// The store error the reply was lost behind, when there was one.
+        cause: io::Error,
+    },
     /// The event could not be encoded for the chain.
     ///
     /// Not a caller error and not reachable by anything the caller controls:
@@ -539,6 +592,14 @@ impl fmt::Display for JournalError {
                 f,
                 "journal receipt names {actual}, not the outcome committed at {expected}"
             ),
+            Self::EntryMismatch {
+                position,
+                ref expected,
+                ref actual,
+            } => write!(
+                f,
+                "journal entry at {position} is {actual}, not the acknowledged {expected}"
+            ),
             Self::OutOfOrder {
                 ref key,
                 expected,
@@ -556,9 +617,19 @@ impl fmt::Display for JournalError {
                 ),
             },
             Self::Exhausted => f.write_str("journal position exhausted"),
+            Self::Locked { ref path } => write!(
+                f,
+                "journal at {path} is held by another writer; \
+                 wait for the holder to finish, then reopen"
+            ),
             Self::Storage(ref cause) => {
                 write!(f, "journal storage refused the append: {cause}")
             }
+            Self::OutcomeUnknown { ref cause } => write!(
+                f,
+                "journal append may have committed, acknowledgment lost: {cause}; \
+                 reconcile by readback rather than re-appending"
+            ),
             Self::Encoding(ref cause) => {
                 write!(
                     f,
@@ -576,6 +647,7 @@ impl std::error::Error for JournalError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match *self {
             Self::Storage(ref cause) => Some(cause),
+            Self::OutcomeUnknown { ref cause } => Some(cause),
             Self::Encoding(ref cause) => Some(cause),
             Self::Corrupt(ref cause) => Some(cause),
             _ => None,
@@ -668,20 +740,75 @@ pub trait EffectJournal {
         })
     }
 
+    /// Read one position-bound entry without returning the whole committed
+    /// history.
+    ///
+    /// The default preserves correctness for external adapters while providing
+    /// a migration path; shipped journals override it with sequence-indexed
+    /// access. Callers still compare the returned event with the exact event
+    /// they acknowledged, because position alone is not event identity.
+    fn committed_entry(
+        &self,
+        position: JournalPosition,
+    ) -> Result<Option<JournalEntry>, JournalError> {
+        Ok(self
+            .committed_entries()?
+            .into_iter()
+            .find(|entry| entry.position() == position))
+    }
+
+    /// Find the latest committed outcome for one attempt, with its position.
+    ///
+    /// This default is a compatibility path for external adapters. Shipped
+    /// journals maintain a keyed index so repeated reconciliation does not
+    /// clone and scan all historical events.
+    fn outcome_at(
+        &self,
+        key: EffectKey,
+    ) -> Result<Option<(JournalPosition, EffectEvidence)>, JournalError> {
+        Ok(self
+            .committed_entries()?
+            .into_iter()
+            .rev()
+            .find_map(|entry| match *entry.event() {
+                EffectEvent::OutcomeObserved {
+                    key: held,
+                    evidence,
+                } if held == key => Some((entry.position(), evidence)),
+                _ => None,
+            }))
+    }
+
     /// Append `event` if and only if `expected_tail` is still the committed
     /// tail.
     ///
     /// The `&mut self` receiver fences writers within one process; the tail
     /// check fences writers across processes, which is the case that actually
-    /// happens. A refusal leaves the journal unchanged.
+    /// happens.
+    ///
+    /// The outcome is one of exactly three things, and an adapter must say
+    /// which:
+    ///
+    /// - `Ok(ack)` — the event is committed at `ack.position` under
+    ///   `ack.promise`.
+    /// - `Err` of [`JournalError::TailMismatch`], [`JournalError::OutOfOrder`],
+    ///   [`JournalError::Exhausted`], [`JournalError::Encoding`] or
+    ///   [`JournalError::Storage`] — the event is *not* committed and the
+    ///   journal is unchanged. A retry may re-append.
+    /// - `Err(JournalError::OutcomeUnknown)` — the event *may* be committed
+    ///   and the acknowledgment was lost. A caller reconciles by readback and
+    ///   must not re-append: re-appending an event that did land is how an
+    ///   effect gets executed twice on the strength of a lost reply.
     ///
     /// # Errors
     ///
     /// [`JournalError::TailMismatch`] when another writer appended,
     /// [`JournalError::OutOfOrder`] when the event cannot follow what is
     /// committed for its key, [`JournalError::Exhausted`] when the position
-    /// space is spent, and [`JournalError::Storage`] when the backing store
-    /// refused.
+    /// space is spent, [`JournalError::Storage`] when the backing store
+    /// refused before the event was written, and
+    /// [`JournalError::OutcomeUnknown`] when the event may have committed and
+    /// the acknowledgment was lost.
     fn compare_and_append(
         &mut self,
         expected_tail: JournalPosition,
@@ -820,6 +947,8 @@ impl Attempt {
 pub struct Recovered {
     /// One entry per key, in admission order.
     attempts: Vec<Attempt>,
+    /// Direct lookup by key while preserving `attempts` as the report order.
+    index: HashMap<EffectKey, usize>,
 }
 
 impl Recovered {
@@ -827,9 +956,9 @@ impl Recovered {
     /// it.
     #[must_use]
     pub fn status(&self, key: EffectKey) -> Option<AttemptStatus> {
-        self.attempts
-            .iter()
-            .find(|attempt| attempt.key == key)
+        self.index
+            .get(&key)
+            .and_then(|index| self.attempts.get(*index))
             .map(|attempt| attempt.status)
     }
 
@@ -889,13 +1018,17 @@ pub fn recover<'a>(events: impl IntoIterator<Item = &'a EffectEvent>) -> Recover
             },
         };
         let key = event.key();
-        match recovered
-            .attempts
-            .iter_mut()
-            .find(|attempt| attempt.key == key)
-        {
-            Some(attempt) => attempt.status = status,
-            None => recovered.attempts.push(Attempt::new(key, status)),
+        match recovered.index.get(&key).copied() {
+            Some(index) => {
+                if let Some(attempt) = recovered.attempts.get_mut(index) {
+                    attempt.status = status;
+                }
+            }
+            None => {
+                let index = recovered.attempts.len();
+                recovered.attempts.push(Attempt::new(key, status));
+                recovered.index.insert(key, index);
+            }
         }
     }
     recovered
@@ -1049,6 +1182,8 @@ pub struct MemoryJournal {
     /// against 8,000 prior attempts, which is the O(n²) a long-lived bot
     /// would grind against. The index makes the ladder check constant.
     ladder: std::collections::HashMap<EffectKey, EventKind>,
+    /// Latest durable outcome and its exact position per attempt.
+    outcomes: std::collections::HashMap<EffectKey, (JournalPosition, EffectEvidence)>,
 }
 
 impl Default for MemoryJournal {
@@ -1064,6 +1199,7 @@ impl MemoryJournal {
         Self {
             committed: Vec::new(),
             ladder: std::collections::HashMap::new(),
+            outcomes: std::collections::HashMap::new(),
         }
     }
 
@@ -1122,6 +1258,31 @@ impl EffectJournal for MemoryJournal {
         Ok(self.committed.clone())
     }
 
+    fn committed_entry(
+        &self,
+        position: JournalPosition,
+    ) -> Result<Option<JournalEntry>, JournalError> {
+        let Some(index) = position
+            .sequence()
+            .checked_sub(1)
+            .and_then(|n| usize::try_from(n).ok())
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .committed
+            .get(index)
+            .copied()
+            .filter(|entry| entry.position() == position))
+    }
+
+    fn outcome_at(
+        &self,
+        key: EffectKey,
+    ) -> Result<Option<(JournalPosition, EffectEvidence)>, JournalError> {
+        Ok(self.outcomes.get(&key).copied())
+    }
+
     fn compare_and_append(
         &mut self,
         expected_tail: JournalPosition,
@@ -1154,6 +1315,9 @@ impl EffectJournal for MemoryJournal {
         };
         self.committed.push(JournalEntry::new(position, *event));
         self.ladder.insert(key, attempted);
+        if let EffectEvent::OutcomeObserved { evidence, .. } = *event {
+            self.outcomes.insert(key, (position, evidence));
+        }
         Ok(DurableAck::new(position, self.durability()))
     }
 }
@@ -1264,6 +1428,31 @@ mod tests {
         let mut journal = MemoryJournal::new();
         let ack = append(&mut journal, EffectEvent::IntentAdmitted { key })?;
         assert_eq!(ack.promise(), DurabilityPromise::Ephemeral);
+        Ok(())
+    }
+
+    #[test]
+    fn positioned_readback_resolves_one_exact_sequence_and_head() -> TestResult {
+        let key = key("1", "1")?;
+        let mut journal = MemoryJournal::new();
+        let ack = append(&mut journal, EffectEvent::IntentAdmitted { key })?;
+        let entries = EffectJournal::committed_entries(&journal)?;
+        let expected = entries.first().copied().ok_or("committed entry missing")?;
+
+        assert_eq!(
+            journal.committed_entry(ack.position())?,
+            Some(expected),
+            "the acknowledged position returns its exact committed entry"
+        );
+        let wrong_head = JournalPosition {
+            sequence: ack.position().sequence(),
+            head: blake3(b"not the committed head"),
+        };
+        assert_eq!(
+            journal.committed_entry(wrong_head)?,
+            None,
+            "a matching sequence cannot authorize a different history head"
+        );
         Ok(())
     }
 

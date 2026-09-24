@@ -222,3 +222,196 @@ fn the_registry_lists_what_it_declares_in_order() {
         "the action list is not what was declared"
     );
 }
+
+/// A second source type registered under [`Repository`]'s identifier, so a
+/// duplicate declaration cannot be mistaken for one constructor listed twice:
+/// the two would behave differently if either were silently picked.
+struct RepositoryV2;
+
+impl RepositoryV2 {
+    /// Build one from the `target` its spec names, delegating to keep the
+    /// fixture small; the type, not the behavior, is what the duplicate tests
+    /// observe.
+    fn from_target(target: &str) -> Result<Source, BotError> {
+        Repository::from_target(target)
+    }
+}
+
+impl Observe for RepositoryV2 {
+    type Output = u32;
+
+    fn required_caps(&self) -> &[Cap] {
+        &[]
+    }
+
+    async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+        call.0.check(&[])?;
+        Ok(0)
+    }
+
+    fn domain_id(&self) -> &str {
+        "github::repository"
+    }
+}
+
+domains! {
+    /// Two source types share one identifier. If the registry admits this,
+    /// dispatch depends on declaration order and no spec can name the
+    /// ambiguity.
+    pub DUPLICATE_SOURCES {
+        observe {
+            "github::repository" => Repository::from_target,
+            "github::repository" => RepositoryV2::from_target,
+        }
+        execute {}
+    }
+}
+
+domains! {
+    /// The same duplicate pair, declared in the opposite order.
+    pub REVERSED_DUPLICATES {
+        observe {
+            "github::repository" => RepositoryV2::from_target,
+            "github::repository" => Repository::from_target,
+        }
+        execute {}
+    }
+}
+
+domains! {
+    /// Two actions share one identifier: the action half of the same defect.
+    pub DUPLICATE_ACTIONS {
+        observe {}
+        execute {
+            "notify::slack" => SlackNotify::from_target,
+            "notify::slack" => SlackNotify::from_target,
+        }
+    }
+}
+
+domains! {
+    /// One identifier used once per role: a domain that observes a repository
+    /// and also acts on one is one domain with two roles, not a collision.
+    pub MIXED_ROLES {
+        observe {
+            "shared::domain" => Repository::from_target,
+        }
+        execute {
+            "shared::domain" => SlackNotify::from_target,
+        }
+    }
+}
+
+#[test]
+fn a_duplicate_source_identifier_is_refused_with_both_positions() {
+    let refusal = DUPLICATE_SOURCES.build_source("github::repository", "owner/repo");
+    assert!(
+        matches!(
+            refusal,
+            Err(BotError::DuplicateDomain {
+                role,
+                first: 0,
+                second: 1,
+                ..
+            }) if role == "source"
+        ),
+        "a duplicated source id built instead of refusing: {refusal:?}"
+    );
+    assert_eq!(
+        refusal.err().map(|error| error.to_string()),
+        Some("duplicate source domain github::repository declared at positions 0 and 1".to_owned()),
+        "the refusal did not name the identifier and both positions"
+    );
+}
+
+#[test]
+fn a_duplicate_action_identifier_is_refused_the_same_way() {
+    let refusal = DUPLICATE_ACTIONS.build_action("notify::slack", "#deploys");
+    assert!(
+        matches!(
+            refusal,
+            Err(BotError::DuplicateDomain {
+                role,
+                first: 0,
+                second: 1,
+                ..
+            }) if role == "action"
+        ),
+        "a duplicated action id built instead of refusing: {refusal:?}"
+    );
+}
+
+#[test]
+fn refusal_is_independent_of_declaration_order() {
+    // The reversed registry must refuse identically: if the refusal depended
+    // on order, reordering declarations would silently alternate behavior.
+    // The rendered message carries the identifier, the role and both
+    // positions, so equal renderings mean equal refusals.
+    let reversed = REVERSED_DUPLICATES
+        .build_source("github::repository", "owner/repo")
+        .err()
+        .map(|error| error.to_string());
+    let declared = DUPLICATE_SOURCES
+        .build_source("github::repository", "owner/repo")
+        .err()
+        .map(|error| error.to_string());
+    assert_eq!(
+        reversed, declared,
+        "the refusal changed with declaration order"
+    );
+    assert!(
+        reversed.is_some(),
+        "a duplicated registry stopped refusing once reversed"
+    );
+}
+
+#[test]
+fn one_identifier_across_both_roles_remains_valid() {
+    assert!(
+        matches!(MIXED_ROLES.validate(), Ok(())),
+        "a cross-role id was refused: {:?}",
+        MIXED_ROLES.validate()
+    );
+    let source = MIXED_ROLES.build_source("shared::domain", "owner/repo");
+    // The registry key and the adapter's self-declared identity are
+    // independent: `Repository` is registered here under "shared::domain" and
+    // still names itself "github::repository" once built. What matters is
+    // that the build succeeds under a key that also names an action.
+    assert!(
+        matches!(source, Ok(ref built) if built.domain_id() == "github::repository"),
+        "the cross-role source did not build: {source:?}"
+    );
+    let action = MIXED_ROLES.build_action("shared::domain", "#deploys");
+    assert!(
+        action.is_ok(),
+        "the cross-role action did not build: {action:?}"
+    );
+}
+
+#[test]
+fn validate_names_the_first_duplicate_pair_and_passes_clean_lists() {
+    assert!(
+        matches!(NOTHING.validate(), Ok(())),
+        "the empty registry did not validate: {:?}",
+        NOTHING.validate()
+    );
+    assert!(
+        matches!(TEST_DOMAINS.validate(), Ok(())),
+        "a registry with distinct ids did not validate: {:?}",
+        TEST_DOMAINS.validate()
+    );
+    // Only the first pair is reported; the count, not the pair, is what the
+    // caller repairs first.
+    assert!(
+        matches!(
+            DUPLICATE_SOURCES.validate(),
+            Err(BotError::DuplicateDomain {
+                first: 0,
+                second: 1,
+                ..
+            })
+        ),
+        "validate did not name the duplicate pair: {:?}",
+        DUPLICATE_SOURCES.validate()
+    );
+}

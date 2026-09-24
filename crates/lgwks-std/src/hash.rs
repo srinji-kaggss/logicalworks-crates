@@ -180,6 +180,25 @@ impl Hasher {
         self
     }
 
+    /// Feed one variable-length byte string into the hasher under a length
+    /// prefix.
+    ///
+    /// A stream built from concatenated parts is ambiguous at the boundaries:
+    /// `("ab", "c")` and `("a", "bc")` feed the same bytes. The `u64`
+    /// little-endian length prefix makes each part self-delimiting, so the
+    /// digest of a framed stream depends on the parts, not only on their
+    /// concatenation. Anything hashed from more than one variable-length
+    /// field — an identity, a canonical record, a digest over a structure —
+    /// should feed its parts through this rather than through [`Self::update`].
+    ///
+    /// Returns `&mut Self` so calls chain, for the same reason `update` does.
+    pub fn write_framed(&mut self, data: &[u8]) -> &mut Self {
+        let len = u64::try_from(data.len()).unwrap_or(u64::MAX);
+        self.0.update(&len.to_le_bytes());
+        self.0.update(data);
+        self
+    }
+
     /// Finalize and return the digest.
     ///
     /// Borrows rather than consumes, so a caller can keep feeding the same
@@ -230,6 +249,28 @@ mod tests {
         hasher.update(b"hello ");
         hasher.update(b"world");
         assert_eq!(hasher.finalize(), oneshot);
+    }
+
+    #[test]
+    fn framing_separates_splits_concatenation_conflates() {
+        // The ambiguity framing exists to remove: unframed, both splits feed
+        // the same bytes. Framed, each split is its own digest.
+        let mut unframed_left = Hasher::new();
+        unframed_left.update(b"ab").update(b"c");
+        let mut unframed_right = Hasher::new();
+        unframed_right.update(b"a").update(b"bc");
+        assert_eq!(unframed_left.finalize(), unframed_right.finalize());
+
+        let mut framed_left = Hasher::new();
+        framed_left.write_framed(b"ab").write_framed(b"c");
+        let mut framed_right = Hasher::new();
+        framed_right.write_framed(b"a").write_framed(b"bc");
+        assert_ne!(framed_left.finalize(), framed_right.finalize());
+
+        // And framed streams remain deterministic.
+        let mut repeat = Hasher::new();
+        repeat.write_framed(b"ab").write_framed(b"c");
+        assert_eq!(framed_left.finalize(), repeat.finalize());
     }
 
     #[test]

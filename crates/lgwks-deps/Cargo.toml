@@ -74,6 +74,8 @@ bevy-ecs = ["dep:bevy_ecs"]
 bevy-app = ["bevy-ecs", "dep:bevy_app"]
 bevy-time = ["bevy-ecs", "dep:bevy_time"]
 bevy-state = ["bevy-ecs", "dep:bevy_state"]
+# Safe signal-zero process-group observation for bounded native cleanup.
+process-group-probe = ["dep:nix", "nix/signal"]
 
 [dependencies]
 lgwks_std = { workspace = true, features = ["json"] }
@@ -110,6 +112,9 @@ tokenizers = { version = "0.23", optional = true }
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread"], optional = true }
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31.3", default-features = false, optional = true }
+
 [[bin]]
 name = "lgwks-deps"
 path = "src/main.rs"
@@ -129,5 +134,5 @@ workspace = true
 # so this crate had no rendered documentation at all. This list is the set the
 # CI doc and clippy lanes already verify on Linux; the platform-bound features
 # are covered by the per-platform jobs instead.
-features = ["tokio-full", "appcui"]
+features = ["tokio-full", "appcui", "process-group-probe"]
 rustdoc-args = ["--cfg", "docsrs"]

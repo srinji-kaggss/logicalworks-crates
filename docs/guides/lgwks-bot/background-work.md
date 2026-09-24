@@ -9,7 +9,7 @@ for a blocking call. The units differ, and so do the guarantees.
 `rt::supervise::Supervisor` (feature `sync`) owns a set of background tasks and
 stops them when it goes away. `Supervisor::new(max_in_flight)` takes the ceiling,
 clamps it into `1..=Semaphore::MAX_PERMITS`, and offers no argument that produces
-an unbounded supervisor (`crates/lgwks-bot/src/rt/supervise.rs:747`).
+an unbounded supervisor (`crates/lgwks-bot/src/rt/supervise.rs:863`).
 `Supervisor::default()` is the constructor for the caller who has no opinion: it
 discovers the ceiling from `std::thread::available_parallelism`, so the safe
 default is the *first* thing that resolves rather than something to remember to
@@ -22,7 +22,7 @@ Four properties, all in the module documentation
   there is nothing to leak.
 - `spawn` awaits a permit before it spawns, so waiting is real backpressure and
   not buffering. The pending work is your own collection.
-- `try_spawn` refuses at the ceiling with `AtCapacity` and counts the refusal in
+- `try_spawn` refuses at the ceiling with `TrySpawnRefusal::AtCapacity` and counts the refusal in
   `Stats::refused`, instead of growing.
 - `Drop` cancels the token and aborts the set. There is no `close()` to forget.
 
@@ -80,7 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `Supervisor::spawn_process(spec)` starts a child under the same in-flight
 ceiling as `spawn`, and returns a `TaskId` — not a `Child`
-(`crates/lgwks-bot/src/rt/supervise.rs:994`). `rt::process::ProcessSpec` lets
+(`crates/lgwks-bot/src/rt/supervise.rs:1138`). `rt::process::ProcessSpec` lets
 you say what to run without exposing an executable engine handle.
 The task this places is the only owner the process has:
 
@@ -99,12 +99,14 @@ async fn deploy(supervisor: &mut Supervisor) -> std::io::Result<()> {
 
 Three differences from a raw `Child`:
 
-- **The whole process group is killed, not the child.** A shell started this way
+- **On Unix, the whole process group is killed, not just the child.** A shell started this way
   can spawn a pipeline, and `Child::kill` reaches only the shell — its
   grandchildren keep running with nobody holding their handles. The kill is
   `killpg` on the child's own group (`lgwks_std::process::kill_process_group`),
-  and it lands both when the task is cancelled and when the supervisor is dropped
-  or aborted.
+  while the unreaped leader pins that group id. A later signal-zero probe can
+  verify absence without signalling a potentially reused id. Other targets
+  refuse `spawn_process` with `Unsupported`; direct-child cleanup is not
+  advertised as process-group containment.
 - **Starting can fail, and the caller is told.** An `io::Error` comes back when
   the program does not exist or is not executable; a failed start does not
   consume a slot.
@@ -113,25 +115,33 @@ Three differences from a raw `Child`:
   kill this supervisor ordered is `TaskOutcome::Cancelled`. `Stats::failed`
   counts the middle one separately, so a bot whose command fails is not reported
   as a healthy one.
+- **Pending cleanup keeps its capacity.** If the bounded termination pass cannot
+  prove absence, the group identity and permit transfer to a supervisor-owned
+  cleanup entry. `Supervisor::reap` and `next_report` make bounded observations;
+  only an absent group produces `TaskOutcome::CleanupSettled` and releases the
+  permit. After `shutdown`, retain its report while cleanup is pending, call
+  `ShutdownReport::reap_pending_cleanups` to observe again, then consume outcomes.
+  `ShutdownReport::into_outcomes` returns the report in `Err` rather than
+  discarding pending ownership.
 
 ## `repeat`: a bound on iterations
 
 `repeat(&token, budget, body)` is the only loop the module asks you to write, and
-it cannot be written without a `Budget` (`crates/lgwks-bot/src/rt/supervise.rs:1473`).
+it cannot be written without a `Budget` (`crates/lgwks-bot/src/rt/supervise.rs:2001`).
 The variants are `Iterations(NonZeroU64)`, `For(Duration)`, and `Ongoing`.
 
 Two details that decide how tight your bound really is:
 
 - `Budget::For` checks its deadline between iterations, so a body that blocks for
   longer than the budget overruns it by one iteration
-  (`crates/lgwks-bot/src/rt/supervise.rs:1486`). Cancellation is not subject to
+  (`crates/lgwks-bot/src/rt/supervise.rs:2014`). Cancellation is not subject to
   that slack, because it interrupts the body itself.
 - Every iteration races the token rather than checking it between iterations.
   A cancel drops a body that is still awaiting, and the loop reports
   `Outcome::Cancelled` rather than `Outcome::Exhausted`, so a completed run is
   distinguishable from an interrupted one.
 - The loop also yields the executor every `YIELD_INTERVAL` iterations
-  (`crates/lgwks-bot/src/rt/supervise.rs:142`), which is what keeps a body whose
+  (`crates/lgwks-bot/src/rt/supervise.rs:144`), which is what keeps a body whose
   future is ready on its first poll from turning the whole loop into one
   uninterruptible poll. Without it a cancel ordered by another task could not be
   delivered until the budget ran out, and on a current-thread runtime the
@@ -145,7 +155,7 @@ owns the token ends.
 
 `rt::task::join_all_bounded(limit, futures)` (feature `sync`) spawns and awaits
 at most `limit` tasks at once, spawning the next pending input as each completes
-(`crates/lgwks-bot/src/rt/task.rs:93`). Result `i` is the output of input `i`,
+(`crates/lgwks-bot/src/rt/task.rs:170`). Result `i` is the output of input `i`,
 whichever completes first, which is the property `JoinSet::join_next` does not
 give you.
 
@@ -164,7 +174,7 @@ runs, with no pooled thread between calls. The doc says the quiet part out loud:
 
 The tick does exactly that, on both adapters, because the wave loop lives in the
 `observe_fold` system rather than in either entry point. `MAX_IN_FLIGHT_POLLS`
-is 32 (`crates/lgwks-bot/src/ecs.rs:1337`), and `observe_fold` polls sources in
+is 32 (`crates/lgwks-bot/src/ecs.rs:1401`), and `observe_fold` polls sources in
 waves of that size, because a source poll may occupy one `spawn_blocking` thread.
 Chains beyond 32 are polled in additional waves, so the cap holds regardless of
 how many chains a spec declares.
@@ -182,7 +192,7 @@ not how quickly the OS tears the group down.
 
 **Cancellation drops a future. That is not the same as stopping a thread.** The
 implementation races each iteration with `token.run_until_cancelled(body(...))`
-(`crates/lgwks-bot/src/rt/supervise.rs:1509`), which drops the body's future. A
+(`crates/lgwks-bot/src/rt/supervise.rs:2037`), which drops the body's future. A
 body that is awaiting returns promptly. What happens to work a body handed to
 another thread is not established by the inspected source: `spawn_blocking`
 spawns an OS thread and offers no abort, and its documented bound is a thread per
@@ -205,7 +215,7 @@ The grace is time and not a count of yields, which matters on a multi-threaded
 runtime: `yield_now` only reschedules the yielding task, so it cannot give a body
 parked on another worker the thread wakeup its return actually needs, and a
 counted grace reported cancelled work as aborted
-(`crates/lgwks-bot/src/rt/supervise.rs:695`). A body that returns is settled the
+(`crates/lgwks-bot/src/rt/supervise.rs:819`). A body that returns is settled the
 moment it does, so the grace is a ceiling on the wait and not a cost charged to
 every shutdown.
 
@@ -215,7 +225,7 @@ and `spawn_blocking` are for a build with no async runtime. There is a
 
 ## What the tests exercise
 
-`crates/lgwks-bot/src/rt/supervise.rs:1529` runs the module's own tests under the
+`crates/lgwks-bot/src/rt/supervise.rs:2062` runs the module's own tests under the
 ordinary workspace test run. They cover an iteration budget stopping at its
 limit, an `Ongoing` budget stopping at a cancel, cancellation interrupting a body
 that is still awaiting, `try_spawn` refusing at the bound rather than growing,

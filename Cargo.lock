@@ -4207,6 +4207,7 @@ dependencies = [
  "candle-transformers",
  "gpui",
  "lgwks_std",
+ "nix 0.31.3",
  "proc-macro2",
  "syn 2.0.119",
  "tokenizers 0.23.2",

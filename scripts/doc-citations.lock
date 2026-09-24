@@ -16,22 +16,22 @@ crates/lgwks-bot/src/cap.rs:202	pub struct Deficit {
 crates/lgwks-bot/src/cap.rs:288	pub fn to_grant_set(&self) -> GrantSet {
 crates/lgwks-bot/src/cap.rs:365	pub(crate) fn new(mut caps: Vec<Cap>) -> Self {
 crates/lgwks-bot/src/cap.rs:414	pub fn check(&self, required: &[Cap]) -> Result<(), BotError> {
-crates/lgwks-bot/src/ecs.rs:1186	struct TickError(Option<BotError>);
-crates/lgwks-bot/src/ecs.rs:1337	const MAX_IN_FLIGHT_POLLS: usize = 32;
-crates/lgwks-bot/src/ecs.rs:3107	RetryClass::Never => EntryState::Abandoned {
-crates/lgwks-bot/src/ecs.rs:3152	let mut first_error = None;
-crates/lgwks-bot/src/ecs.rs:3230	.is_some_and(|value| {
-crates/lgwks-bot/src/ecs.rs:3297	fn fire_plan(world: &mut World) {
-crates/lgwks-bot/src/ecs.rs:3517	match entry.condition.check_any(value) {
-crates/lgwks-bot/src/ecs.rs:3569	.initialize(world)
-crates/lgwks-bot/src/ecs.rs:3624	pub fn name(&self) -> &str {
-crates/lgwks-bot/src/ecs.rs:3739	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:3842	pub fn tick(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:3946	async fn run_steps(
-crates/lgwks-bot/src/ecs.rs:4565	pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
-crates/lgwks-bot/src/ecs.rs:4717	for chain in &chains {
-crates/lgwks-bot/src/ecs.rs:4734	world.insert_resource(Grants(grants.clone()));
-crates/lgwks-bot/src/error.rs:106	/// handed may be the one that owns the runtime's driver. Parked, that
+crates/lgwks-bot/src/ecs.rs:1250	struct TickError(Option<BotError>);
+crates/lgwks-bot/src/ecs.rs:1401	const MAX_IN_FLIGHT_POLLS: usize = 32;
+crates/lgwks-bot/src/ecs.rs:3172	RetryClass::Never => EntryState::Abandoned {
+crates/lgwks-bot/src/ecs.rs:3217	let mut first_error = None;
+crates/lgwks-bot/src/ecs.rs:3295	.is_some_and(|value| {
+crates/lgwks-bot/src/ecs.rs:3362	fn fire_plan(world: &mut World) {
+crates/lgwks-bot/src/ecs.rs:3582	match entry.condition.check_any(value) {
+crates/lgwks-bot/src/ecs.rs:3634	.initialize(world)
+crates/lgwks-bot/src/ecs.rs:3689	pub fn name(&self) -> &str {
+crates/lgwks-bot/src/ecs.rs:3804	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs.rs:3907	pub fn tick(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs.rs:4011	async fn run_steps(
+crates/lgwks-bot/src/ecs.rs:4630	pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
+crates/lgwks-bot/src/ecs.rs:4782	for chain in &chains {
+crates/lgwks-bot/src/ecs.rs:4799	world.insert_resource(Grants(grants.clone()));
+crates/lgwks-bot/src/error.rs:125	/// handed may be the one that owns the runtime's driver. Parked, that
 crates/lgwks-bot/src/gate.rs:12	pub struct GrantSet {
 crates/lgwks-bot/src/gate.rs:44	pub fn grant(mut self, cap: Cap) -> Self {
 crates/lgwks-bot/src/gate.rs:63	pub fn uncovered(&self, required: &[Cap], demand: &Demand) -> Vec<Shortage> {
@@ -55,15 +55,15 @@ crates/lgwks-bot/src/rt/runtime.rs:102	let mut builder = lgwks_deps::tokio::runt
 crates/lgwks-bot/src/rt/runtime.rs:105	if self.worker_threads.is_some() && workers.get() > MAX_WORKER_THREADS {
 crates/lgwks-bot/src/rt/supervise.rs:9	//! # Why a task cannot leak
 crates/lgwks-bot/src/rt/supervise.rs:92	//! permits inside a task this supervisor owns can deadlock with itself. The
-crates/lgwks-bot/src/rt/supervise.rs:142	const YIELD_INTERVAL: u64 = 32;
-crates/lgwks-bot/src/rt/supervise.rs:695	/// silent: a cancelled body is reported as an *aborted* one, which is the exact
-crates/lgwks-bot/src/rt/supervise.rs:747	pub fn new(max_in_flight: usize) -> Self {
-crates/lgwks-bot/src/rt/supervise.rs:994	pub async fn spawn_process(&mut self, spec: &ProcessSpec) -> io::Result<TaskId> {
-crates/lgwks-bot/src/rt/supervise.rs:1473	pub async fn repeat<F, Fut>(token: &CancellationToken, budget: Budget, mut body: F) -> Outcome
-crates/lgwks-bot/src/rt/supervise.rs:1486	let deadline = match budget {
-crates/lgwks-bot/src/rt/supervise.rs:1509	match token.run_until_cancelled(body(iterations)).await {
-crates/lgwks-bot/src/rt/supervise.rs:1529	#[cfg(test)]
-crates/lgwks-bot/src/rt/task.rs:93	where
+crates/lgwks-bot/src/rt/supervise.rs:144	const YIELD_INTERVAL: u64 = 32;
+crates/lgwks-bot/src/rt/supervise.rs:819	const COOPERATIVE_DRAIN_GRACE: Duration = Duration::from_millis(50);
+crates/lgwks-bot/src/rt/supervise.rs:863	pub fn new(max_in_flight: usize) -> Self {
+crates/lgwks-bot/src/rt/supervise.rs:1138	pub async fn spawn_process(&mut self, spec: &ProcessSpec) -> io::Result<TaskId> {
+crates/lgwks-bot/src/rt/supervise.rs:2001	pub async fn repeat<F, Fut>(token: &CancellationToken, budget: Budget, mut body: F) -> Outcome
+crates/lgwks-bot/src/rt/supervise.rs:2014	let deadline = match budget {
+crates/lgwks-bot/src/rt/supervise.rs:2037	match token.run_until_cancelled(body(iterations)).await {
+crates/lgwks-bot/src/rt/supervise.rs:2062	mod tests {
+crates/lgwks-bot/src/rt/task.rs:170	where
 crates/lgwks-bot/src/semantic.rs:13	//! This tier is consulted only when the lexicon returns [`Resolution::Absent`] —
 crates/lgwks-bot/src/semantic.rs:117	pub trait Embedder {
 crates/lgwks-bot/src/semantic.rs:350	pub const DEFAULT: Self = Self {
@@ -96,9 +96,9 @@ crates/lgwks-bot/src/session.rs:3860	.saturating_add(role.len());
 crates/lgwks-bot/src/spec.rs:319	pub use crate::ecs::{
 crates/lgwks-bot/src/spec.rs:621	let auth: Auth = grants.issue(self.0.required_caps())?;
 crates/lgwks-bot/src/spec.rs:666	pub fn from_json(source: &str) -> Result<Self, BotError> {
-crates/lgwks-deps/src/lib.rs:14	//! The same `lgwks-deps check` command is an explicit first job in local and
-crates/lgwks-deps/src/lib.rs:73	pub mod scan;
-crates/lgwks-deps/src/lib.rs:543	/// Audits the repository rooted at `root`, reading its lock file and register.
+crates/lgwks-deps/src/lib.rs:15	//! remote CI. It reads `cargo metadata --no-deps`, not the transitive lockfile
+crates/lgwks-deps/src/lib.rs:76	pub mod scan;
+crates/lgwks-deps/src/lib.rs:547	pub fn check_dependencies(root: &Path) -> Result<(Contract, Vec<Refusal>), GateError> {
 crates/lgwks-std/src/task.rs:265	/// Run `job` on a dedicated OS thread and return a future for its result.
 crates/lgwks-std/src/trace.rs:47	pub use tracing::{self, Level};
 docs/guidance-runner-spec.md:193	`review`.

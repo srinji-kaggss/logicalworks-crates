@@ -1409,6 +1409,8 @@ fn assembly_refuses_a_tail_that_advanced_after_recovery() -> TestResult {
 /// A later tail is not an acknowledgement for this controller's intent. The
 /// foreign attempt is deliberately valid and unknown, so adopting its tail
 /// would permit this receiver to run past a fact it never folded (issue #120).
+/// The forged position holds the foreign attempt's event, so the refusal is
+/// an entry mismatch at that position, not a missing event.
 #[test]
 fn a_forged_intent_acknowledgement_cannot_launder_a_foreign_unknown_effect() -> TestResult {
     let store = Rc::new(RefCell::new(MemoryJournal::new()));
@@ -1433,7 +1435,7 @@ fn a_forged_intent_acknowledgement_cannot_launder_a_foreign_unknown_effect() -> 
     assert!(matches!(
         bot.tick(),
         Err(BotError::EffectRefused {
-            cause: DispatchError::Journal(JournalError::ReceiptMismatch { .. })
+            cause: DispatchError::Journal(JournalError::EntryMismatch { .. })
         })
     ));
     assert_eq!(
