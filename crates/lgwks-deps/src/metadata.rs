@@ -5,9 +5,11 @@
 //! including inactive optional dependencies, so this module is the source of
 //! truth for INV-DEP-EDGE-OWNED.
 
+use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use lgwks_std::json::Deserialize;
 
@@ -174,6 +176,28 @@ pub enum MetadataError {
     Json(lgwks_std::json::Error),
     /// Cargo returned an internally inconsistent field.
     Schema(String),
+    /// Cargo did not finish before the deadline. The child was killed and
+    /// reaped: no survivor, no partial graph.
+    Timeout {
+        /// The deadline that fired.
+        after: Duration,
+    },
+    /// One of Cargo's output streams exceeded its byte budget. The child was
+    /// killed and reaped; the retained prefix is dropped, never decoded as
+    /// a graph.
+    OutputTooLarge {
+        /// Which stream overflowed: `stdout` or `stderr`.
+        stream: &'static str,
+        /// The per-stream budget in bytes.
+        limit: usize,
+    },
+    /// OS entropy could not be read, so no capture file could be named.
+    /// Cargo was never started: without a distinguisher the call refuses
+    /// rather than risk a predictable capture path. Host-only: wasm has no
+    /// entropy source (`lgwks_std::random` refuses the target), and the
+    /// wasm distinguisher below cannot fail this way.
+    #[cfg(not(target_family = "wasm"))]
+    Entropy(lgwks_std::random::EntropyError),
 }
 
 impl fmt::Display for MetadataError {
@@ -194,6 +218,19 @@ impl fmt::Display for MetadataError {
             Self::Cargo(ref error) => write!(f, "cargo metadata refused: {error}"),
             Self::Json(ref error) => write!(f, "cargo metadata JSON: {error}"),
             Self::Schema(ref error) => write!(f, "cargo metadata schema: {error}"),
+            Self::Timeout { after } => write!(
+                f,
+                "cargo metadata timed out after {after:?}: child killed and reaped"
+            ),
+            Self::OutputTooLarge { stream, limit } => write!(
+                f,
+                "cargo metadata {stream} exceeded {limit} bytes: child killed and reaped"
+            ),
+            #[cfg(not(target_family = "wasm"))]
+            Self::Entropy(ref error) => write!(
+                f,
+                "cargo metadata capture file has no distinguisher: {error}"
+            ),
         }
     }
 }
@@ -206,7 +243,12 @@ impl std::error::Error for MetadataError {
             Self::Spawn(ref error) => Some(error),
             Self::Root { ref cause, .. } => Some(cause),
             Self::Json(ref error) => Some(error),
-            Self::Cargo(_) | Self::Schema(_) => None,
+            #[cfg(not(target_family = "wasm"))]
+            Self::Entropy(ref error) => Some(error),
+            Self::Cargo(_)
+            | Self::Schema(_)
+            | Self::Timeout { .. }
+            | Self::OutputTooLarge { .. } => None,
         }
     }
 }
@@ -418,6 +460,247 @@ fn direct_edges(metadata: CargoMetadata) -> Result<Vec<DirectEdge>, MetadataErro
     Ok(edges)
 }
 
+/// Elapsed-deadline budget for the Cargo subprocess: `cargo metadata` on
+/// this workspace answers in about a second, so a healthy run never notices
+/// the 120s ceiling, while a hung Cargo is killed and reaped instead of
+/// hanging the gate (issue #143 R14).
+const METADATA_TIMEOUT: Duration = Duration::from_secs(120);
+/// Per-stream byte budget for the Cargo subprocess: real answers are tens of
+/// kilobytes, so a flooding Cargo is killed and reaped instead of retaining
+/// unbounded output (issue #143 R14).
+const METADATA_STREAM_CAP: usize = 8 * 1024 * 1024;
+/// Exclusive-create attempts per capture file: each attempt draws a fresh
+/// distinguisher, so this bound is never reached by chance, only by a
+/// broken clock or a hostile temp dir, both of which refuse (issue #143 R14).
+const CAPTURE_ATTEMPTS: usize = 16;
+
+/// A reaped child's exit status with its bounded output.
+struct BoundedOutput {
+    /// What the child exited with; a non-zero status is Cargo's refusal.
+    status: std::process::ExitStatus,
+    /// At most the per-stream budget of stdout bytes.
+    stdout: Vec<u8>,
+    /// At most the per-stream budget of stderr bytes.
+    stderr: Vec<u8>,
+}
+
+/// One deadline-poll quantum.
+///
+/// The suppression is the narrow exception for the `deny` API ban: no
+/// replacement exists for parking a synchronous gate-library thread between
+/// child polls, the 5ms quantum bounds deadline overshoot, and the poll loop
+/// is the only waiter so it always stops.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "no async runtime exists in this sync library; the bounded poll quantum is the deadline mechanism, not reactor blocking"
+)]
+fn poll_quantum() {
+    std::thread::sleep(Duration::from_millis(5));
+}
+
+/// Runs one subprocess to completion under a deadline and output budgets.
+///
+/// The child writes to two capture files, never to pipes: a flood cannot
+/// block the child on a full pipe, and no reader thread can be held open by
+/// a grandchild that inherited a descriptor. Each poll quantum stats both
+/// files, and the first one past budget kills and reaps before returning
+/// [`MetadataError::OutputTooLarge`]; the deadline does the same with
+/// [`MetadataError::Timeout`]. A refusal carries no partial graph: the gate
+/// reports the failure rather than decoding a prefix of it.
+///
+/// The kill targets the direct child. An orphaned grandchild keeps whatever
+/// capture file it inherited until it exits, but it cannot stall this call:
+/// every path ends at the deadline, and the files are unlinked before
+/// returning.
+fn run_bounded(
+    program: &str,
+    args: &[OsString],
+    dir: &Path,
+    timeout: Duration,
+    stream_cap: usize,
+) -> Result<BoundedOutput, MetadataError> {
+    use std::fs::File;
+    use std::io::Read as _;
+    use std::process::Stdio;
+
+    /// One capture file: created empty and exclusive, unlinked on every
+    /// return path. Creation uses `create_new`, so even a distinguisher
+    /// collision is a retried name, never another call's file truncated.
+    fn capture(name: &str) -> Result<(PathBuf, File), MetadataError> {
+        use std::io::ErrorKind;
+        // Bounded: each attempt draws a fresh distinguisher, so exhaustion
+        // is a refusal shape, not a spin.
+        for _ in 0..CAPTURE_ATTEMPTS {
+            let path = std::env::temp_dir().join(format!(
+                "lgwks-deps-{name}-{distinguisher}.capture",
+                distinguisher = distinguisher()?,
+            ));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => return Ok((path, file)),
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(MetadataError::Spawn(error)),
+            }
+        }
+        Err(MetadataError::Spawn(std::io::Error::from(
+            ErrorKind::AlreadyExists,
+        )))
+    }
+
+    /// Names one capture file: 128 bits of OS entropy (`lgwks_std::random`,
+    /// the one source INV-RANDOM-ONE-SOURCE allows). A process id or a clock
+    /// would be reused by the OS and could name another call's file. An
+    /// entropy refusal names no file and starts no child; the call ends here.
+    #[cfg(not(target_family = "wasm"))]
+    fn distinguisher() -> Result<String, MetadataError> {
+        lgwks_std::random::bytes::<16>()
+            .map(lgwks_std::hex::encode)
+            .map_err(MetadataError::Entropy)
+    }
+
+    /// wasm has no entropy source: `lgwks_std::random` refuses the target
+    /// with a `compile_error!`, and the WASI boundary job builds this crate
+    /// for `wasm32-wasip1`. Nanos plus a monotone sequence name the file,
+    /// and `create_new` above is what makes that safe: a repeated name is
+    /// retried, never opened. Spawning cannot succeed on this target anyway,
+    /// so these files only ever live until the `Spawn` refusal unlinks them.
+    #[cfg(target_family = "wasm")]
+    fn distinguisher() -> Result<String, MetadataError> {
+        static CAPTURE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_nanos())
+            .unwrap_or(0);
+        let seq = CAPTURE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(format!("{nanos}-{seq}"))
+    }
+
+    /// Best-effort unlink: the capture files must not outlive the call, and
+    /// a file already gone (or never created) is the desired end state.
+    fn unlink(path: &Path) {
+        if std::fs::remove_file(path).is_err() {
+            // Already gone; absence is what every path wants.
+        }
+    }
+
+    /// Read at most one byte past budget: anything longer is an overflow,
+    /// and the retained bytes are dropped with the Vec, never decoded.
+    fn read_capped(path: &Path, stream_cap: usize) -> Result<(Vec<u8>, bool), MetadataError> {
+        let limit = u64::try_from(stream_cap).unwrap_or(u64::MAX);
+        let file = File::open(path).map_err(MetadataError::Spawn)?;
+        let mut kept = Vec::new();
+        file.take(limit.saturating_add(1))
+            .read_to_end(&mut kept)
+            .map_err(MetadataError::Spawn)?;
+        let overflow = kept.len() > stream_cap;
+        Ok((kept, overflow))
+    }
+
+    let (stdout_path, stdout_file) = capture("stdout")?;
+    let (stderr_path, stderr_file) = capture("stderr")?;
+    let mut child = Command::new(program)
+        .args(args)
+        .current_dir(dir)
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file))
+        .spawn()
+        .map_err(|error| {
+            unlink(&stdout_path);
+            unlink(&stderr_path);
+            MetadataError::Spawn(error)
+        })?;
+    let deadline = std::time::Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(std::time::Instant::now);
+    // The only waiter, and it always stops: each quantum either observes
+    // the exit, fires the deadline, or finds a capture file past budget.
+    // File sizes only grow while the child lives, so a stat past budget
+    // stands against every later one.
+    let outcome = loop {
+        match child.try_wait().map_err(MetadataError::Spawn)? {
+            Some(status) => break Ok(status),
+            None if std::time::Instant::now() >= deadline => {
+                // Best effort: the child may have exited between the
+                // poll and the kill, in which case there is nothing to
+                // signal and the reap below collects it.
+                if child.kill().is_err() {
+                    // Already gone; the reap below is still required.
+                }
+                break Err(MetadataError::Timeout { after: timeout });
+            }
+            None => {
+                let limit = u64::try_from(stream_cap).unwrap_or(u64::MAX);
+                let over = |path: &Path| {
+                    std::fs::metadata(path)
+                        .ok()
+                        .is_some_and(|sized| sized.len() > limit)
+                };
+                // The kill targets the direct child; an orphaned grandchild
+                // keeps its capture file, but the size check already fired
+                // and the files are unlinked before returning either way.
+                if over(&stdout_path) {
+                    if child.kill().is_err() {
+                        // Already gone; the reap below is still required.
+                    }
+                    break Err(MetadataError::OutputTooLarge {
+                        stream: "stdout",
+                        limit: stream_cap,
+                    });
+                }
+                if over(&stderr_path) {
+                    if child.kill().is_err() {
+                        // Already gone; the reap below is still required.
+                    }
+                    break Err(MetadataError::OutputTooLarge {
+                        stream: "stderr",
+                        limit: stream_cap,
+                    });
+                }
+                poll_quantum();
+            }
+        }
+    };
+    // Reaped exactly once, on every path. A reap error here would mean the
+    // single owner lost its child without waiting, which this shape makes
+    // unrepresentable; the branch records the impossibility rather than
+    // inventing a recovery.
+    if child.wait().is_err() {
+        // Unreachable: no second waiter exists.
+    }
+    let status = match outcome {
+        Err(refusal) => {
+            unlink(&stdout_path);
+            unlink(&stderr_path);
+            return Err(refusal);
+        }
+        Ok(status) => status,
+    };
+    let (stdout, stdout_overflow) = read_capped(&stdout_path, stream_cap)?;
+    let (stderr, stderr_overflow) = read_capped(&stderr_path, stream_cap)?;
+    unlink(&stdout_path);
+    unlink(&stderr_path);
+    if stdout_overflow {
+        return Err(MetadataError::OutputTooLarge {
+            stream: "stdout",
+            limit: stream_cap,
+        });
+    }
+    if stderr_overflow {
+        return Err(MetadataError::OutputTooLarge {
+            stream: "stderr",
+            limit: stream_cap,
+        });
+    }
+    Ok(BoundedOutput {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 /// Runs locked Cargo metadata and decodes the supported response shape.
 ///
 /// The manifest path is made absolute before Cargo is started. `--manifest-path`
@@ -428,19 +711,21 @@ fn direct_edges(metadata: CargoMetadata) -> Result<Vec<DirectEdge>, MetadataErro
 /// that refusal rather than on the rule it meant to exercise.
 fn read_metadata(root: &Path) -> Result<CargoMetadata, MetadataError> {
     let manifest = manifest_path(root)?;
-    let output = Command::new("cargo")
-        .args([
-            "metadata",
-            "--locked",
-            "--no-deps",
-            "--format-version",
-            "1",
-            "--manifest-path",
-        ])
-        .arg(manifest)
-        .current_dir(root)
-        .output()
-        .map_err(MetadataError::Spawn)?;
+    let output = run_bounded(
+        "cargo",
+        &[
+            OsString::from("metadata"),
+            OsString::from("--locked"),
+            OsString::from("--no-deps"),
+            OsString::from("--format-version"),
+            OsString::from("1"),
+            OsString::from("--manifest-path"),
+            manifest.into_os_string(),
+        ],
+        root,
+        METADATA_TIMEOUT,
+        METADATA_STREAM_CAP,
+    )?;
     if !output.status.success() {
         return Err(MetadataError::Cargo(
             String::from_utf8_lossy(&output.stderr).trim().to_owned(),
@@ -707,6 +992,198 @@ mod tests {
         assert_eq!(
             lexical_join(Path::new("/repo/app"), "/repo/helper"),
             Some(PathBuf::from("/repo/helper"))
+        );
+        Ok(())
+    }
+
+    /// A controllable stand-in for the `cargo` subprocess: sleep, flood, or
+    /// emit, with no network, no lockfile, and no toolchain beyond the
+    /// platform shell. `cfg`, not runtime detection: the command must exist
+    /// where the test compiles.
+    #[cfg(unix)]
+    fn sleeper() -> (&'static str, Vec<OsString>) {
+        // Background-plus-wait, not a bare sleep: the shell forks a
+        // grandchild that inherits the capture files, which is the shape
+        // that held pipes open and defeated a pipe-based design on hosted
+        // CI. Killing the direct child must still end the call at the
+        // deadline even with the grandchild's descriptors open.
+        (
+            "sh",
+            vec![OsString::from("-c"), OsString::from("sleep 10 & wait")],
+        )
+    }
+
+    #[cfg(not(unix))]
+    fn sleeper() -> (&'static str, Vec<OsString>) {
+        (
+            "powershell",
+            vec![
+                OsString::from("-NoProfile"),
+                OsString::from("-Command"),
+                OsString::from("Start-Sleep -Seconds 10"),
+            ],
+        )
+    }
+
+    #[cfg(unix)]
+    fn stdout_flood() -> (&'static str, Vec<OsString>) {
+        (
+            "sh",
+            vec![
+                OsString::from("-c"),
+                OsString::from("head -c 2000000 /dev/zero"),
+            ],
+        )
+    }
+
+    #[cfg(not(unix))]
+    fn stdout_flood() -> (&'static str, Vec<OsString>) {
+        (
+            "powershell",
+            vec![
+                OsString::from("-NoProfile"),
+                OsString::from("-Command"),
+                OsString::from("Write-Output ('x' * 2000000)"),
+            ],
+        )
+    }
+
+    #[cfg(unix)]
+    fn stderr_flood() -> (&'static str, Vec<OsString>) {
+        (
+            "sh",
+            vec![
+                OsString::from("-c"),
+                OsString::from("head -c 2000000 /dev/zero >&2"),
+            ],
+        )
+    }
+
+    #[cfg(not(unix))]
+    fn stderr_flood() -> (&'static str, Vec<OsString>) {
+        (
+            "powershell",
+            vec![
+                OsString::from("-NoProfile"),
+                OsString::from("-Command"),
+                OsString::from("[Console]::Error.Write(('x' * 2000000) -join '')"),
+            ],
+        )
+    }
+
+    #[cfg(unix)]
+    fn small_answer() -> (&'static str, Vec<OsString>) {
+        (
+            "sh",
+            vec![
+                OsString::from("-c"),
+                OsString::from("printf '{\"ok\":true}'"),
+            ],
+        )
+    }
+
+    #[cfg(not(unix))]
+    fn small_answer() -> (&'static str, Vec<OsString>) {
+        (
+            "powershell",
+            vec![
+                OsString::from("-NoProfile"),
+                OsString::from("-Command"),
+                OsString::from("Write-Output '{\"ok\":true}'"),
+            ],
+        )
+    }
+
+    /// A hung Cargo must be killed by the deadline, not waited out, and the
+    /// refusal must name the deadline rather than decoding a partial graph
+    /// (issue #143 R14).
+    #[test]
+    fn a_hung_subprocess_is_killed_by_the_deadline() -> TestResult {
+        let (program, args) = sleeper();
+        let timeout = Duration::from_millis(500);
+        let started = std::time::Instant::now();
+        let refused = run_bounded(program, &args, Path::new("."), timeout, 1024 * 1024);
+        let elapsed = started.elapsed();
+        match refused {
+            Err(MetadataError::Timeout { after }) => assert_eq!(after, timeout),
+            Err(other) => return Err(format!("expected a timeout refusal, got {other}").into()),
+            Ok(_) => return Err("a hung child must not report success".into()),
+        }
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the deadline must kill the 10s sleeper, took {elapsed:?}"
+        );
+        Ok(())
+    }
+
+    /// A flooding stdout is refused past its budget instead of retained.
+    #[test]
+    fn a_flooding_stdout_is_refused_past_its_budget() -> TestResult {
+        let (program, args) = stdout_flood();
+        let refused = run_bounded(
+            program,
+            &args,
+            Path::new("."),
+            Duration::from_secs(30),
+            32 * 1024,
+        );
+        match refused {
+            Err(MetadataError::OutputTooLarge { stream, limit }) => {
+                assert_eq!(stream, "stdout");
+                assert_eq!(limit, 32 * 1024);
+            }
+            Err(other) => {
+                return Err(format!("expected an output-budget refusal, got {other}").into());
+            }
+            Ok(_) => return Err("a 2MB flood must not report success".into()),
+        }
+        Ok(())
+    }
+
+    /// A flooding stderr is refused past its budget instead of retained.
+    #[test]
+    fn a_flooding_stderr_is_refused_past_its_budget() -> TestResult {
+        let (program, args) = stderr_flood();
+        let refused = run_bounded(
+            program,
+            &args,
+            Path::new("."),
+            Duration::from_secs(30),
+            32 * 1024,
+        );
+        match refused {
+            Err(MetadataError::OutputTooLarge { stream, limit }) => {
+                assert_eq!(stream, "stderr");
+                assert_eq!(limit, 32 * 1024);
+            }
+            Err(other) => {
+                return Err(format!("expected an output-budget refusal, got {other}").into());
+            }
+            Ok(_) => return Err("a 2MB flood must not report success".into()),
+        }
+        Ok(())
+    }
+
+    /// The control: a small healthy answer passes through unchanged.
+    #[test]
+    fn a_small_answer_passes_through_unchanged() -> TestResult {
+        let (program, args) = small_answer();
+        let output = run_bounded(
+            program,
+            &args,
+            Path::new("."),
+            Duration::from_secs(30),
+            32 * 1024,
+        )?;
+        assert!(
+            output.status.success(),
+            "the probe command must succeed: {:?}",
+            output.status
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("{\"ok\":true}"),
+            "the probe bytes must survive: {:?}",
+            String::from_utf8_lossy(&output.stdout)
         );
         Ok(())
     }
