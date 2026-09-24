@@ -55,7 +55,84 @@
 //! added trap that the handle's type could not even be named at the call site —
 //! so it is gone for the same reason: nothing may be started that nothing owns.
 
-pub use lgwks_deps::tokio::task::{AbortHandle, JoinError, JoinSet, yield_now};
+use lgwks_deps::tokio::task::Id;
+pub use lgwks_deps::tokio::task::{AbortHandle, JoinError, yield_now};
+use std::future::Future;
+
+/// A task owner with a deliberately narrow API.
+///
+/// The engine's raw `JoinSet` also exposes `detach_all`, which removes tasks
+/// without aborting them. This wrapper does not: every task remains owned by
+/// this set until joined, aborted, or the set is dropped (which aborts its
+/// remaining tasks). Blocking and local tasks are likewise absent; blocking
+/// work needs an explicit non-preemptible owner, not a method on this async
+/// owner.
+pub struct JoinSet<T> {
+    /// The engine set kept private so callers cannot detach its tasks.
+    inner: lgwks_deps::tokio::task::JoinSet<T>,
+}
+
+impl<T: Send + 'static> JoinSet<T> {
+    /// Create an empty task owner.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: lgwks_deps::tokio::task::JoinSet::new(),
+        }
+    }
+
+    /// Start one `Send` task owned by this set and return its abort handle.
+    pub fn spawn<F>(&mut self, future: F) -> AbortHandle
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: 'static,
+    {
+        self.inner.spawn(future)
+    }
+
+    /// Join the next completed task, in completion order.
+    pub async fn join_next(&mut self) -> Option<Result<T, JoinError>> {
+        self.inner.join_next().await
+    }
+
+    /// Join the next completed task and include its engine task identity.
+    pub async fn join_next_with_id(&mut self) -> Option<Result<(Id, T), JoinError>> {
+        self.inner.join_next_with_id().await
+    }
+
+    /// Join a completed task if one is ready, without waiting.
+    pub fn try_join_next(&mut self) -> Option<Result<T, JoinError>> {
+        self.inner.try_join_next()
+    }
+
+    /// Join a completed task and include its engine identity if one is ready.
+    pub fn try_join_next_with_id(&mut self) -> Option<Result<(Id, T), JoinError>> {
+        self.inner.try_join_next_with_id()
+    }
+
+    /// Request cancellation of every task still owned by this set.
+    pub fn abort_all(&mut self) {
+        self.inner.abort_all();
+    }
+
+    /// Whether the set currently owns no tasks.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Number of tasks currently owned by the set.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+}
+
+impl<T: Send + 'static> Default for JoinSet<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Run `futures` with at most `limit` in flight at once, returning their
 /// outputs in input order.
