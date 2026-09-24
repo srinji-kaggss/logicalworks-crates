@@ -5,9 +5,11 @@
 //! including inactive optional dependencies, so this module is the source of
 //! truth for INV-DEP-EDGE-OWNED.
 
+use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use lgwks_std::json::Deserialize;
 
@@ -174,6 +176,21 @@ pub enum MetadataError {
     Json(lgwks_std::json::Error),
     /// Cargo returned an internally inconsistent field.
     Schema(String),
+    /// Cargo did not finish before the deadline. The child was killed and
+    /// reaped: no survivor, no partial graph.
+    Timeout {
+        /// The deadline that fired.
+        after: Duration,
+    },
+    /// One of Cargo's output streams exceeded its byte budget. The child was
+    /// killed and reaped; the retained prefix is dropped, never decoded as
+    /// a graph.
+    OutputTooLarge {
+        /// Which stream overflowed: `stdout` or `stderr`.
+        stream: &'static str,
+        /// The per-stream budget in bytes.
+        limit: usize,
+    },
 }
 
 impl fmt::Display for MetadataError {
@@ -194,6 +211,14 @@ impl fmt::Display for MetadataError {
             Self::Cargo(ref error) => write!(f, "cargo metadata refused: {error}"),
             Self::Json(ref error) => write!(f, "cargo metadata JSON: {error}"),
             Self::Schema(ref error) => write!(f, "cargo metadata schema: {error}"),
+            Self::Timeout { after } => write!(
+                f,
+                "cargo metadata timed out after {after:?}: child killed and reaped"
+            ),
+            Self::OutputTooLarge { stream, limit } => write!(
+                f,
+                "cargo metadata {stream} exceeded {limit} bytes: child killed and reaped"
+            ),
         }
     }
 }
@@ -206,7 +231,10 @@ impl std::error::Error for MetadataError {
             Self::Spawn(ref error) => Some(error),
             Self::Root { ref cause, .. } => Some(cause),
             Self::Json(ref error) => Some(error),
-            Self::Cargo(_) | Self::Schema(_) => None,
+            Self::Cargo(_)
+            | Self::Schema(_)
+            | Self::Timeout { .. }
+            | Self::OutputTooLarge { .. } => None,
         }
     }
 }
@@ -418,6 +446,155 @@ fn direct_edges(metadata: CargoMetadata) -> Result<Vec<DirectEdge>, MetadataErro
     Ok(edges)
 }
 
+/// Elapsed-deadline budget for the Cargo subprocess: `cargo metadata` on
+/// this workspace answers in about a second, so a healthy run never notices
+/// the 120s ceiling, while a hung Cargo is killed and reaped instead of
+/// hanging the gate (issue #143 R14).
+const METADATA_TIMEOUT: Duration = Duration::from_secs(120);
+/// Per-stream byte budget for the Cargo subprocess: real answers are tens of
+/// kilobytes, so a flooding Cargo is killed and reaped instead of retaining
+/// unbounded output (issue #143 R14).
+const METADATA_STREAM_CAP: usize = 8 * 1024 * 1024;
+
+/// A reaped child's exit status with its bounded output.
+struct BoundedOutput {
+    /// What the child exited with; a non-zero status is Cargo's refusal.
+    status: std::process::ExitStatus,
+    /// At most the per-stream budget of stdout bytes.
+    stdout: Vec<u8>,
+    /// At most the per-stream budget of stderr bytes.
+    stderr: Vec<u8>,
+}
+
+/// One deadline-poll quantum.
+///
+/// The suppression is the narrow exception for the `deny` API ban: no
+/// replacement exists for parking a synchronous gate-library thread between
+/// child polls, the 5ms quantum bounds deadline overshoot, and the poll loop
+/// is the only waiter so it always stops.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "no async runtime exists in this sync library; the bounded poll quantum is the deadline mechanism, not reactor blocking"
+)]
+fn poll_quantum() {
+    std::thread::sleep(Duration::from_millis(5));
+}
+
+/// Runs one subprocess to completion under a deadline and output budgets.
+///
+/// The child is spawned with piped streams; when the deadline passes it is
+/// killed and reaped before this returns, and when a stream exceeds its
+/// budget the same kill-and-reap refuses with [`MetadataError::OutputTooLarge`]
+/// instead of retaining the flood. A refusal carries no partial graph: the
+/// gate reports the failure rather than decoding a prefix of it.
+fn run_bounded(
+    program: &str,
+    args: &[OsString],
+    dir: &Path,
+    timeout: Duration,
+    stream_cap: usize,
+) -> Result<BoundedOutput, MetadataError> {
+    use std::process::Stdio;
+
+    /// Drain one pipe into a capped buffer. The readers run on scoped
+    /// threads, so they are joined before this returns instead of
+    /// outliving it; the child is always reaped on the main thread first,
+    /// which closes the pipes the readers may be blocked in.
+    fn drain(mut pipe: impl std::io::Read, stream_cap: usize) -> (Vec<u8>, bool) {
+        let mut kept = Vec::new();
+        let mut chunk = [0_u8; 8192];
+        loop {
+            let read = match pipe.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            if kept.len().saturating_add(read) > stream_cap {
+                return (kept, true);
+            }
+            kept.extend_from_slice(&chunk[..read]);
+        }
+        (kept, false)
+    }
+
+    let mut child = Command::new(program)
+        .args(args)
+        .current_dir(dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(MetadataError::Spawn)?;
+    let deadline = std::time::Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(std::time::Instant::now);
+    let outcome = std::thread::scope(|scope| {
+        let stdout = child
+            .stdout
+            .take()
+            .map(|pipe| scope.spawn(move || drain(pipe, stream_cap)));
+        let stderr = child
+            .stderr
+            .take()
+            .map(|pipe| scope.spawn(move || drain(pipe, stream_cap)));
+        // Poll for exit; a flood that fills both pipes blocks the child,
+        // which is why the deadline fires rather than the drain: either way
+        // this loop is the only waiter and it always stops. The exit answer
+        // leaves the scope first so no child borrow overlaps the reader
+        // handles joined below.
+        let exit = loop {
+            match child.try_wait().map_err(MetadataError::Spawn)? {
+                Some(status) => break Ok(status),
+                None if std::time::Instant::now() >= deadline => {
+                    // Best effort: the child may have exited between the
+                    // poll and the kill, in which case there is nothing to
+                    // signal and the reap below collects it.
+                    if child.kill().is_err() {
+                        // Already gone; the reap below is still required.
+                    }
+                    break Err(MetadataError::Timeout { after: timeout });
+                }
+                None => poll_quantum(),
+            }
+        };
+        // A dead reader leaves its stream unknown, which refuses in the same
+        // direction as an overflow rather than decoding a prefix as a graph.
+        let unknown = (Vec::new(), true);
+        let join = |handle: Option<std::thread::ScopedJoinHandle<'_, (Vec<u8>, bool)>>| {
+            handle
+                .map(|joined| joined.join().unwrap_or_else(|_| unknown.clone()))
+                .unwrap_or_default()
+        };
+        exit.map(|status| (status, join(stdout), join(stderr)))
+    });
+    // Reaped exactly once, on every path: natural exit, timeout kill, or a
+    // drain that already saw EOF. `wait` after `kill` returns the death;
+    // `wait` after natural exit collects it. The readers joined at scope
+    // exit first: the pipes only stay open while an unreaped child lives.
+    // A reap error here would mean the single owner lost its child without
+    // waiting, which this shape makes unrepresentable; the branch records
+    // the impossibility rather than inventing a recovery.
+    if child.wait().is_err() {
+        // Unreachable: no second waiter exists.
+    }
+    let (status, (stdout, stdout_overflow), (stderr, stderr_overflow)) = outcome?;
+    if stdout_overflow {
+        return Err(MetadataError::OutputTooLarge {
+            stream: "stdout",
+            limit: stream_cap,
+        });
+    }
+    if stderr_overflow {
+        return Err(MetadataError::OutputTooLarge {
+            stream: "stderr",
+            limit: stream_cap,
+        });
+    }
+    Ok(BoundedOutput {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 /// Runs locked Cargo metadata and decodes the supported response shape.
 ///
 /// The manifest path is made absolute before Cargo is started. `--manifest-path`
@@ -428,19 +605,21 @@ fn direct_edges(metadata: CargoMetadata) -> Result<Vec<DirectEdge>, MetadataErro
 /// that refusal rather than on the rule it meant to exercise.
 fn read_metadata(root: &Path) -> Result<CargoMetadata, MetadataError> {
     let manifest = manifest_path(root)?;
-    let output = Command::new("cargo")
-        .args([
-            "metadata",
-            "--locked",
-            "--no-deps",
-            "--format-version",
-            "1",
-            "--manifest-path",
-        ])
-        .arg(manifest)
-        .current_dir(root)
-        .output()
-        .map_err(MetadataError::Spawn)?;
+    let output = run_bounded(
+        "cargo",
+        &[
+            OsString::from("metadata"),
+            OsString::from("--locked"),
+            OsString::from("--no-deps"),
+            OsString::from("--format-version"),
+            OsString::from("1"),
+            OsString::from("--manifest-path"),
+            manifest.into_os_string(),
+        ],
+        root,
+        METADATA_TIMEOUT,
+        METADATA_STREAM_CAP,
+    )?;
     if !output.status.success() {
         return Err(MetadataError::Cargo(
             String::from_utf8_lossy(&output.stderr).trim().to_owned(),
@@ -707,6 +886,190 @@ mod tests {
         assert_eq!(
             lexical_join(Path::new("/repo/app"), "/repo/helper"),
             Some(PathBuf::from("/repo/helper"))
+        );
+        Ok(())
+    }
+
+    /// A controllable stand-in for the `cargo` subprocess: sleep, flood, or
+    /// emit, with no network, no lockfile, and no toolchain beyond the
+    /// platform shell. `cfg`, not runtime detection: the command must exist
+    /// where the test compiles.
+    #[cfg(unix)]
+    fn sleeper() -> (&'static str, Vec<OsString>) {
+        ("sh", vec![OsString::from("-c"), OsString::from("sleep 10")])
+    }
+
+    #[cfg(not(unix))]
+    fn sleeper() -> (&'static str, Vec<OsString>) {
+        (
+            "powershell",
+            vec![
+                OsString::from("-NoProfile"),
+                OsString::from("-Command"),
+                OsString::from("Start-Sleep -Seconds 10"),
+            ],
+        )
+    }
+
+    #[cfg(unix)]
+    fn stdout_flood() -> (&'static str, Vec<OsString>) {
+        (
+            "sh",
+            vec![
+                OsString::from("-c"),
+                OsString::from("head -c 2000000 /dev/zero"),
+            ],
+        )
+    }
+
+    #[cfg(not(unix))]
+    fn stdout_flood() -> (&'static str, Vec<OsString>) {
+        (
+            "powershell",
+            vec![
+                OsString::from("-NoProfile"),
+                OsString::from("-Command"),
+                OsString::from("Write-Output ('x' * 2000000)"),
+            ],
+        )
+    }
+
+    #[cfg(unix)]
+    fn stderr_flood() -> (&'static str, Vec<OsString>) {
+        (
+            "sh",
+            vec![
+                OsString::from("-c"),
+                OsString::from("head -c 2000000 /dev/zero >&2"),
+            ],
+        )
+    }
+
+    #[cfg(not(unix))]
+    fn stderr_flood() -> (&'static str, Vec<OsString>) {
+        (
+            "powershell",
+            vec![
+                OsString::from("-NoProfile"),
+                OsString::from("-Command"),
+                OsString::from("[Console]::Error.Write(('x' * 2000000) -join '')"),
+            ],
+        )
+    }
+
+    #[cfg(unix)]
+    fn small_answer() -> (&'static str, Vec<OsString>) {
+        (
+            "sh",
+            vec![
+                OsString::from("-c"),
+                OsString::from("printf '{\"ok\":true}'"),
+            ],
+        )
+    }
+
+    #[cfg(not(unix))]
+    fn small_answer() -> (&'static str, Vec<OsString>) {
+        (
+            "powershell",
+            vec![
+                OsString::from("-NoProfile"),
+                OsString::from("-Command"),
+                OsString::from("Write-Output '{\"ok\":true}'"),
+            ],
+        )
+    }
+
+    /// A hung Cargo must be killed by the deadline, not waited out, and the
+    /// refusal must name the deadline rather than decoding a partial graph
+    /// (issue #143 R14).
+    #[test]
+    fn a_hung_subprocess_is_killed_by_the_deadline() -> TestResult {
+        let (program, args) = sleeper();
+        let timeout = Duration::from_millis(500);
+        let started = std::time::Instant::now();
+        let refused = run_bounded(program, &args, Path::new("."), timeout, 1024 * 1024);
+        let elapsed = started.elapsed();
+        match refused {
+            Err(MetadataError::Timeout { after }) => assert_eq!(after, timeout),
+            Err(other) => return Err(format!("expected a timeout refusal, got {other}").into()),
+            Ok(_) => return Err("a hung child must not report success".into()),
+        }
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the deadline must kill the 10s sleeper, took {elapsed:?}"
+        );
+        Ok(())
+    }
+
+    /// A flooding stdout is refused past its budget instead of retained.
+    #[test]
+    fn a_flooding_stdout_is_refused_past_its_budget() -> TestResult {
+        let (program, args) = stdout_flood();
+        let refused = run_bounded(
+            program,
+            &args,
+            Path::new("."),
+            Duration::from_secs(30),
+            32 * 1024,
+        );
+        match refused {
+            Err(MetadataError::OutputTooLarge { stream, limit }) => {
+                assert_eq!(stream, "stdout");
+                assert_eq!(limit, 32 * 1024);
+            }
+            Err(other) => {
+                return Err(format!("expected an output-budget refusal, got {other}").into());
+            }
+            Ok(_) => return Err("a 2MB flood must not report success".into()),
+        }
+        Ok(())
+    }
+
+    /// A flooding stderr is refused past its budget instead of retained.
+    #[test]
+    fn a_flooding_stderr_is_refused_past_its_budget() -> TestResult {
+        let (program, args) = stderr_flood();
+        let refused = run_bounded(
+            program,
+            &args,
+            Path::new("."),
+            Duration::from_secs(30),
+            32 * 1024,
+        );
+        match refused {
+            Err(MetadataError::OutputTooLarge { stream, limit }) => {
+                assert_eq!(stream, "stderr");
+                assert_eq!(limit, 32 * 1024);
+            }
+            Err(other) => {
+                return Err(format!("expected an output-budget refusal, got {other}").into());
+            }
+            Ok(_) => return Err("a 2MB flood must not report success".into()),
+        }
+        Ok(())
+    }
+
+    /// The control: a small healthy answer passes through unchanged.
+    #[test]
+    fn a_small_answer_passes_through_unchanged() -> TestResult {
+        let (program, args) = small_answer();
+        let output = run_bounded(
+            program,
+            &args,
+            Path::new("."),
+            Duration::from_secs(30),
+            32 * 1024,
+        )?;
+        assert!(
+            output.status.success(),
+            "the probe command must succeed: {:?}",
+            output.status
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("{\"ok\":true}"),
+            "the probe bytes must survive: {:?}",
+            String::from_utf8_lossy(&output.stdout)
         );
         Ok(())
     }

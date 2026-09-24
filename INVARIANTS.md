@@ -27,6 +27,10 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
   directory is a workspace member's; sharing a member's name is not
   membership, and an unlocatable path fails closed to external. · why: #143
   R13 · enforced by: `lgwks_deps::metadata::tests`, `lgwks-deps check .`
+- **INV-DEP-8** Cargo metadata runs under a deadline with per-stream byte
+  budgets; a hung or flooding child is killed and reaped, and a collection
+  failure is a refusal, never an empty graph. · why: #143 R14 · enforced by:
+  `lgwks_deps::metadata::tests`
 
 ## lgwks_bot — durable execution
 
