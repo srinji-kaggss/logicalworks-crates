@@ -78,7 +78,7 @@ bevy-state = ["bevy-ecs", "dep:bevy_state"]
 process-group-probe = ["dep:nix", "nix/signal"]
 
 [dependencies]
-lgwks_std = { workspace = true, features = ["json"] }
+lgwks_std = { workspace = true, features = ["json", "random"] }
 syn = { version = "2", features = ["full", "visit", "parsing"], optional = true }
 proc-macro2 = { version = "1", features = ["span-locations"], optional = true }
 gpui = { version = "0.2", optional = true }

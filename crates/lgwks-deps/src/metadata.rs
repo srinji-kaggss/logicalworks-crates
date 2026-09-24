@@ -191,6 +191,10 @@ pub enum MetadataError {
         /// The per-stream budget in bytes.
         limit: usize,
     },
+    /// OS entropy could not be read, so no capture file could be named.
+    /// Cargo was never started: without a distinguisher the call refuses
+    /// rather than risk a predictable capture path.
+    Entropy(lgwks_std::random::EntropyError),
 }
 
 impl fmt::Display for MetadataError {
@@ -219,6 +223,10 @@ impl fmt::Display for MetadataError {
                 f,
                 "cargo metadata {stream} exceeded {limit} bytes: child killed and reaped"
             ),
+            Self::Entropy(ref error) => write!(
+                f,
+                "cargo metadata capture file has no distinguisher: {error}"
+            ),
         }
     }
 }
@@ -231,6 +239,7 @@ impl std::error::Error for MetadataError {
             Self::Spawn(ref error) => Some(error),
             Self::Root { ref cause, .. } => Some(cause),
             Self::Json(ref error) => Some(error),
+            Self::Entropy(ref error) => Some(error),
             Self::Cargo(_)
             | Self::Schema(_)
             | Self::Timeout { .. }
@@ -505,19 +514,16 @@ fn run_bounded(
     use std::io::Read as _;
     use std::process::Stdio;
 
-    /// One capture file: created empty, unlinked on every return path.
-    /// Nanos plus process id plus a monotone sequence: not a thread id or
-    /// a counter alone, both of which a second process could reuse.
+    /// One capture file: created empty, unlinked on every return path. The
+    /// distinguisher is 128 bits of OS entropy (`lgwks_std::random`, the one
+    /// source INV-RANDOM-ONE-SOURCE allows): a process id or a clock would be
+    /// reused by the OS and could name another call's file. An entropy
+    /// refusal names no file and starts no child; the call ends here.
     fn capture(name: &str) -> Result<(PathBuf, File), MetadataError> {
-        static CAPTURE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|since| since.as_nanos())
-            .unwrap_or(0);
-        let seq = CAPTURE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let distinguisher = lgwks_std::random::bytes::<16>().map_err(MetadataError::Entropy)?;
         let path = std::env::temp_dir().join(format!(
-            "lgwks-deps-{name}-{pid}-{nanos}-{seq}.capture",
-            pid = std::process::id()
+            "lgwks-deps-{name}-{distinguisher}.capture",
+            distinguisher = lgwks_std::hex::encode(distinguisher),
         ));
         let file = File::create(&path).map_err(MetadataError::Spawn)?;
         Ok((path, file))
