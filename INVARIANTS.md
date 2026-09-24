@@ -23,6 +23,10 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
 - **INV-DEP-6** `lgwks_std::random` is feature-gated; code built in the feature
   matrix must not assume it. Test identities use nanos + `AtomicU64`. · enforced by:
   feature-matrix CI
+- **INV-DEP-7** A path dependency is internal only when its resolved manifest
+  directory is a workspace member's; sharing a member's name is not
+  membership, and an unlocatable path fails closed to external. · why: #143
+  R13 · enforced by: `lgwks_deps::metadata::tests`, `lgwks-deps check .`
 
 ## lgwks_bot — durable execution
 

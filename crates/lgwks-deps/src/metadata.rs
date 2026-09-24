@@ -121,9 +121,12 @@ impl DependencySource {
 /// consumer constructing these.
 ///
 /// `workspace` and `source` are derived, not independent: `workspace` is true
-/// only for an edge with no `source` key whose target name is a workspace
-/// member, and `source` separates a registry package from a path copy that
-/// happens to share its name.
+/// only for an edge with no `source` key whose manifest-relative `path`
+/// resolves into a workspace member's manifest directory, and `source`
+/// separates a registry package from a path copy that happens to share its
+/// name. A path edge Cargo cannot locate — no `path` key, no declaring
+/// manifest directory, or an escape past the root — is external, never
+/// internal by name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DirectEdge {
@@ -265,8 +268,9 @@ struct CargoDependency {
     /// Whether the manifest marks the edge optional. An optional edge is still
     /// audited: it is authored, even when the feature is off.
     optional: bool,
-    /// Manifest path for a filesystem dependency, relative to the declaring
-    /// package. Present only when `source` is absent.
+    /// Manifest path for a filesystem dependency, as Cargo reports it:
+    /// absolute in current Cargo, resolved against the declaring package's
+    /// directory when relative. Present only when `source` is absent.
     path: Option<String>,
 }
 
@@ -301,32 +305,95 @@ pub fn parse(text: &str) -> Result<Vec<DirectEdge>, MetadataError> {
     direct_edges(metadata)
 }
 
+/// Joins a manifest-relative dependency path to its declaring directory.
+///
+/// Purely lexical: `..` pops one component and `.` vanishes, so the answer
+/// cannot change between classification and audit the way a filesystem probe
+/// could. Cargo currently reports path keys absolute; an absolute key is
+/// normalized on its own rather than joined. Returns `None` when the path
+/// escapes the filesystem root it is resolved against — an unlocatable
+/// target fails closed to external rather than guessing a membership.
+fn lexical_join(base: &Path, relative: &str) -> Option<PathBuf> {
+    use std::path::Component;
+    let key = Path::new(relative);
+    // Cargo path keys use `/` on every platform, and `Path::is_absolute`
+    // answers for the host: a leading slash is absolute even where the host
+    // would call it drive-relative (Windows), so the test is syntactic.
+    let standalone = key.is_absolute() || relative.starts_with('/');
+    let mut joined = if standalone {
+        PathBuf::new()
+    } else {
+        base.to_path_buf()
+    };
+    for component in key.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir if standalone => {
+                joined.push(component.as_os_str());
+            }
+            Component::Prefix(_) | Component::RootDir | Component::CurDir => {}
+            Component::ParentDir => {
+                if !joined.pop() {
+                    return None;
+                }
+            }
+            Component::Normal(part) => joined.push(part),
+        }
+    }
+    Some(joined)
+}
+
 /// Extracts direct edges from one decoded Cargo metadata response.
+///
+/// Workspace membership is bound to the target's resolved directory, not its
+/// name: an outside path package that shares a member's name is external
+/// (issue #143 R13). The dependency declaration carries only the name and the
+/// manifest-relative path, so the path is joined to the declaring package's
+/// manifest directory and normalized lexically — no filesystem access, so a
+/// hostile tree cannot change the answer between classification and audit.
+/// Anything unresolvable fails closed to external.
 fn direct_edges(metadata: CargoMetadata) -> Result<Vec<DirectEdge>, MetadataError> {
     let members: std::collections::BTreeSet<&str> = metadata
         .workspace_members
         .iter()
         .map(String::as_str)
         .collect();
-    let member_names: std::collections::BTreeSet<&str> = metadata
+    let member_packages: Vec<&CargoPackage> = metadata
         .packages
         .iter()
         .filter(|package| members.contains(package.id.as_str()))
-        .map(|package| package.name.as_str())
         .collect();
-    let member_repositories: std::collections::BTreeMap<&str, Option<&str>> = metadata
-        .packages
+    let member_dirs: std::collections::BTreeMap<PathBuf, (&str, Option<&str>)> = member_packages
         .iter()
-        .filter(|package| members.contains(package.id.as_str()))
-        .map(|package| (package.name.as_str(), package.repository.as_deref()))
+        .filter_map(|package| {
+            let dir = Path::new(package.manifest_path.as_deref()?)
+                .parent()?
+                .to_path_buf();
+            Some((dir, (package.name.as_str(), package.repository.as_deref())))
+        })
+        .collect();
+    let declaring_dirs: std::collections::BTreeMap<&str, PathBuf> = member_packages
+        .iter()
+        .filter_map(|package| {
+            let dir = Path::new(package.manifest_path.as_deref()?)
+                .parent()?
+                .to_path_buf();
+            Some((package.id.as_str(), dir))
+        })
         .collect();
     let mut edges = Vec::new();
-    for package in metadata
-        .packages
-        .iter()
-        .filter(|package| members.contains(package.id.as_str()))
-    {
+    for package in member_packages {
+        let declaring = declaring_dirs.get(package.id.as_str());
         for dependency in &package.dependencies {
+            let member = match (
+                dependency.source.as_deref(),
+                dependency.path.as_deref(),
+                declaring,
+            ) {
+                (None, Some(path), Some(dir)) => {
+                    lexical_join(dir, path).and_then(|target| member_dirs.get(&target).copied())
+                }
+                _ => None,
+            };
             edges.push(DirectEdge {
                 consumer: package.name.clone(),
                 package: dependency.name.clone(),
@@ -334,11 +401,9 @@ fn direct_edges(metadata: CargoMetadata) -> Result<Vec<DirectEdge>, MetadataErro
                 kind: DependencyKind::from_cargo(dependency.kind.as_deref())?,
                 source: source(dependency)?,
                 optional: dependency.optional,
-                workspace: dependency.source.is_none()
-                    && member_names.contains(dependency.name.as_str()),
-                target_repository: member_repositories
-                    .get(dependency.name.as_str())
-                    .and_then(|repository| *repository)
+                workspace: member.is_some(),
+                target_repository: member
+                    .and_then(|(_, repository)| repository)
                     .map(str::to_owned),
             });
         }
@@ -548,6 +613,129 @@ mod tests {
           "workspace_members": ["path+file:///repo#app@0.1.0"]
         }"#;
         assert!(parse(input)?.is_empty());
+        Ok(())
+    }
+
+    /// An outside path package sharing a member's name is not that member
+    /// (issue #143 R13).
+    ///
+    /// `app` depends on a `helper` that lives outside the workspace while the
+    /// workspace has its own member also called `helper`. Name membership
+    /// alone would mark the outside edge internal and let `audit_direct`
+    /// skip external admission for it — a gate bypass. The edge must be
+    /// external, carry its path source, and inherit no member repository.
+    #[test]
+    fn an_outside_path_package_with_a_member_name_is_not_a_member() -> TestResult {
+        let input = r#"{
+          "packages": [
+            {"id":"path+file:///repo#app@0.1.0","name":"app","repository":null,
+             "manifest_path":"/repo/Cargo.toml",
+             "dependencies":[
+               {"name":"helper","source":null,"req":"*","kind":null,"optional":false,"path":"../outside/helper"}
+             ]},
+            {"id":"path+file:///repo/helper#helper@0.1.0","name":"helper",
+             "repository":"https://example.invalid/helper",
+             "manifest_path":"/repo/helper/Cargo.toml","dependencies":[]},
+            {"id":"path+file:///outside/helper#helper@0.2.0","name":"helper",
+             "repository":null,
+             "manifest_path":"/outside/helper/Cargo.toml","dependencies":[]}
+          ],
+          "workspace_members": ["path+file:///repo#app@0.1.0","path+file:///repo/helper#helper@0.1.0"]
+        }"#;
+        let edges = parse(input)?;
+        assert_eq!(edges.len(), 1);
+        let edge = &edges[0];
+        assert_eq!(edge.consumer, "app");
+        assert_eq!(edge.package, "helper");
+        assert!(
+            !edge.workspace,
+            "an outside path target must not inherit membership from its name"
+        );
+        assert_eq!(
+            edge.source,
+            DependencySource::Path("../outside/helper".to_owned())
+        );
+        assert_eq!(
+            edge.target_repository, None,
+            "an outside target must not inherit the member's repository"
+        );
+        Ok(())
+    }
+
+    /// The positive control: a path edge that resolves into a member's
+    /// directory stays internal and keeps that member's repository.
+    #[test]
+    fn a_path_edge_resolving_into_a_member_directory_is_a_member() -> TestResult {
+        let input = r#"{
+          "packages": [
+            {"id":"path+file:///repo#app@0.1.0","name":"app","repository":null,
+             "manifest_path":"/repo/Cargo.toml",
+             "dependencies":[
+               {"name":"helper","source":null,"req":"*","kind":null,"optional":false,"path":"helper"}
+             ]},
+            {"id":"path+file:///repo/helper#helper@0.1.0","name":"helper",
+             "repository":"https://example.invalid/helper",
+             "manifest_path":"/repo/helper/Cargo.toml","dependencies":[]}
+          ],
+          "workspace_members": ["path+file:///repo#app@0.1.0","path+file:///repo/helper#helper@0.1.0"]
+        }"#;
+        let edges = parse(input)?;
+        assert_eq!(edges.len(), 1);
+        let edge = &edges[0];
+        assert!(
+            edge.workspace,
+            "a path target inside a member directory is that member"
+        );
+        assert_eq!(
+            edge.target_repository,
+            Some("https://example.invalid/helper".to_owned())
+        );
+        Ok(())
+    }
+
+    /// A relative path that escapes the root it resolves against has no
+    /// location to compare: the join refuses rather than naming a directory
+    /// outside the filesystem.
+    #[test]
+    fn a_path_escaping_its_root_has_no_join() -> TestResult {
+        assert_eq!(
+            lexical_join(Path::new("/repo"), "sub/../helper"),
+            Some(PathBuf::from("/repo/helper"))
+        );
+        assert_eq!(lexical_join(Path::new("/repo"), "../../escape"), None);
+        // Cargo currently reports path keys absolute: the key stands alone.
+        assert_eq!(
+            lexical_join(Path::new("/repo/app"), "/repo/helper"),
+            Some(PathBuf::from("/repo/helper"))
+        );
+        Ok(())
+    }
+
+    /// Fail closed when the declaring package has no manifest directory to
+    /// resolve against: a path edge Cargo cannot locate is external, never
+    /// internal by name.
+    #[test]
+    fn a_path_edge_without_a_locatable_declarer_is_external() -> TestResult {
+        let input = r#"{
+          "packages": [
+            {"id":"path+file:///repo#app@0.1.0","name":"app","repository":null,
+             "manifest_path":null,
+             "dependencies":[
+               {"name":"helper","source":null,"req":"*","kind":null,"optional":false,"path":"helper"}
+             ]},
+            {"id":"path+file:///repo/helper#helper@0.1.0","name":"helper",
+             "repository":"https://example.invalid/helper",
+             "manifest_path":"/repo/helper/Cargo.toml","dependencies":[]}
+          ],
+          "workspace_members": ["path+file:///repo#app@0.1.0","path+file:///repo/helper#helper@0.1.0"]
+        }"#;
+        let edges = parse(input)?;
+        assert_eq!(edges.len(), 1);
+        assert!(
+            !edges[0].workspace,
+            "an unresolvable path target must fail closed to external"
+        );
+        assert_eq!(edges[0].target_repository, None);
         Ok(())
     }
 }
