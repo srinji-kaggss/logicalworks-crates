@@ -16,6 +16,7 @@
 //! test therefore records both pids and asserts that **both** are gone, which is
 //! the property `contract/APPROVED.toml` records rustix for.
 #![cfg(all(
+    unix,
     feature = "rt",
     feature = "time",
     feature = "sync",
@@ -248,11 +249,10 @@ fn a_cancelled_process_is_killed_with_its_grandchild() -> TestResult {
 
         // Shutdown cancels the token, which is the path under test: the task
         // observes it, kills the group, and reports Cancelled.
-        let report = supervisor.shutdown().await;
+        let mut report = supervisor.shutdown().await;
         let stats = report.stats();
         let cancelled = stats.cancelled;
         let failed = stats.failed;
-        let outcomes = report.into_outcomes();
 
         for pid in [&shell, &grandchild] {
             if !wait_until_gone(pid, BUDGET).await {
@@ -262,24 +262,89 @@ fn a_cancelled_process_is_killed_with_its_grandchild() -> TestResult {
                 )));
             }
         }
+        let Some(deadline) = Instant::now().checked_add(BUDGET) else {
+            return Err(std::io::Error::other("cleanup deadline overflowed"));
+        };
+        while report.pending_cleanup_count() > 0 && Instant::now() < deadline {
+            report.reap_pending_cleanups();
+            if report.pending_cleanup_count() > 0 {
+                sleep(POLL_INTERVAL).await;
+            }
+        }
+        if report.pending_cleanup_count() > 0 {
+            return Err(std::io::Error::other(format!(
+                "{} process-group cleanup owners remained pending after the observed pids exited",
+                report.pending_cleanup_count()
+            )));
+        }
+        let outcomes = report
+            .into_outcomes()
+            .map_err(|_| std::io::Error::other("process cleanup remained pending after shutdown"))?;
         Ok::<_, std::io::Error>((outcomes, cancelled, failed))
     })?;
 
-    assert_eq!(
-        outcomes.len(),
-        1,
-        "shutdown must report exactly the one process it owned: {outcomes:?}"
-    );
+    let task_outcome = outcomes
+        .iter()
+        .find(|outcome| !matches!(outcome, TaskOutcome::CleanupSettled { .. }));
+    let cleanup_receipt = outcomes
+        .iter()
+        .find(|outcome| matches!(outcome, TaskOutcome::CleanupSettled { .. }));
+    let Some(task_outcome) = task_outcome else {
+        return Err(std::io::Error::other(format!("missing task report: {outcomes:?}")).into());
+    };
     assert!(
-        outcomes
-            .iter()
-            .all(|outcome| matches!(outcome, TaskOutcome::Cancelled { .. })),
-        "a process this supervisor stopped is cancelled, not failed: {outcomes:?}"
+        matches!(task_outcome, TaskOutcome::Cancelled { .. }),
+        "a process this supervisor stopped is cancelled, not failed: {task_outcome:?}"
     );
+    match (task_outcome.cleanup(), cleanup_receipt) {
+        (Some(lgwks_bot::rt::supervise::CleanupReceipt::CleanupConfirmed), None) => {
+            assert_eq!(outcomes.len(), 1, "immediate proof needs no later receipt");
+        }
+        (Some(_), Some(receipt)) => {
+            assert_eq!(outcomes.len(), 2, "pending cleanup needs one later receipt");
+            assert_eq!(task_outcome.task(), receipt.task());
+            assert_eq!(
+                receipt.cleanup(),
+                Some(lgwks_bot::rt::supervise::CleanupReceipt::CleanupConfirmed),
+                "only observed group absence may emit the terminal receipt"
+            );
+        }
+        _ => {
+            return Err(std::io::Error::other(format!(
+                "cleanup must be confirmed immediately or by one later receipt: {outcomes:?}"
+            ))
+            .into());
+        }
+    }
     assert_eq!(cancelled, 1, "the cancellation counter must see it");
     assert_eq!(
         failed, 0,
         "a kill this supervisor ordered is not a process failure"
+    );
+    Ok(())
+}
+
+#[test]
+fn process_deadline_terminates_the_child_and_reports_its_cleanup() -> TestResult {
+    let runtime = Runtime::new()?;
+    let outcome = runtime.block_on(async {
+        let mut supervisor = Supervisor::default();
+        let mut spec = ProcessSpec::new("sh");
+        spec.arg("-c").arg("sleep 30");
+        spec.deadline(Duration::from_millis(10));
+        supervisor
+            .spawn_process(&spec)
+            .await
+            .map_err(|error| error.to_string())?;
+        next_outcome(&mut supervisor, BUDGET).await
+    })?;
+    assert!(
+        matches!(outcome, TaskOutcome::Failed { status: None, .. }),
+        "deadline expiration remains a failed, status-unknown outcome: {outcome:?}"
+    );
+    assert!(
+        outcome.cleanup().is_some(),
+        "the real process path must report its cleanup receipt"
     );
     Ok(())
 }

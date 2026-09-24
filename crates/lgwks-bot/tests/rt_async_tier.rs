@@ -716,8 +716,10 @@ fn a_cancelled_body_is_reported_cancelled_on_a_multi_threaded_runtime() -> TestR
             lgwks_bot::rt::task::yield_now().await;
         }
         let report = supervisor.shutdown().await;
-        report.into_outcomes()
-    });
+        report
+            .into_outcomes()
+            .map_err(|_| std::io::Error::other("non-process task unexpectedly retained cleanup"))
+    })?;
     assert!(
         outcomes
             .iter()

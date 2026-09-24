@@ -68,6 +68,9 @@ pub mod invariants;
 pub mod lock;
 /// Cargo metadata edges: who authored which external dependency.
 pub mod metadata;
+/// Safe process-group existence observation for the supervised process facade.
+#[cfg(feature = "process-group-probe")]
+pub mod process_group;
 /// Rust source scan: the zero-gate detectors behind `lgwks-deps scan` (feature `scan`).
 #[cfg(feature = "scan")]
 pub mod scan;

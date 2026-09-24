@@ -1,6 +1,7 @@
 //! T22's negative proof: a public process description must not be executable.
 
 #![cfg(all(
+    unix,
     feature = "rt",
     feature = "time",
     feature = "sync",

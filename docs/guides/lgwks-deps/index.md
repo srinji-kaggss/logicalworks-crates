@@ -27,15 +27,16 @@ a runtime library has no use for it.
 | Embedding `check_dependencies`, leaner | `cargo add lgwks_deps --no-default-features` | no |
 | Choosing a third-party stack | `cargo add lgwks_deps --no-default-features --features tokio` | no |
 
-`scan` gates one module (`crates/lgwks-deps/src/lib.rs:73`) and the CLI's source
+`scan` gates one module (`crates/lgwks-deps/src/lib.rs:76`) and the CLI's source
 detectors, and nothing else. `check_dependencies` is not behind it: the embed
 example further down runs against a `default-features = false` build. If you are
 here for the storefront, disable defaults and select the engine you want.
 
 ## Storefront features
 
-Each feature re-exports the upstream crate, so you never declare it directly.
-`cargo add tokio` and `cargo add gpui` are refused by the gate as second edges.
+Each feature exposes its reviewed upstream capability through the storefront, so
+you never declare it directly. `cargo add tokio` and `cargo add gpui` are refused
+by the gate as second edges.
 
 | Feature | Re-exports | Default |
 |---|---|---|
@@ -45,6 +46,7 @@ Each feature re-exports the upstream crate, so you never declare it directly.
 | `ml-candle` | `candle_core`, `candle_nn`, `candle_transformers` | off |
 | `ml-candle-metal` | as `ml-candle`, plus Candle's macOS Metal backend | off |
 | `ml-tokenizers` | `lgwks_deps::tokenizers` | off |
+| `process-group-probe` | `lgwks_deps::process_group::exists` | off |
 | `scan` | the gate's Rust source detectors | on |
 
 ```toml
@@ -78,7 +80,7 @@ lgwks-deps scan [PATH]...       # source detectors, one verdict binary
 
 `check` reads `cargo metadata --no-deps` rather than the transitive lockfile
 closure, because only metadata preserves which package authored an edge
-(`crates/lgwks-deps/src/lib.rs:14`). It refuses in both directions: an approval
+(`crates/lgwks-deps/src/lib.rs:15`). It refuses in both directions: an approval
 with no authored Cargo edge is stale authority, and an authored edge with no
 approval is unregistered.
 
@@ -105,7 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 `check_dependencies(root)` returns `Result<(Contract, Vec<Refusal>), GateError>`
-(`crates/lgwks-deps/src/lib.rs:543`). An empty refusal list is a pass. A
+(`crates/lgwks-deps/src/lib.rs:547`). An empty refusal list is a pass. A
 `GateError` is a different thing from a refusal: the module documentation lists
 a missing register, unparseable metadata, an unparseable register, and an
 unreadable lock file as errors, and all four are fail-closed, because "a gate

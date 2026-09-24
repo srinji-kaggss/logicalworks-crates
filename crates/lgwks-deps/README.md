@@ -26,9 +26,9 @@ dependency graph.
 
 ## Storefront
 
-Each feature re-exports the upstream crate, so a consumer never declares it
-directly. Do not run `cargo add tokio` or `cargo add gpui`; `lgwks-deps check`
-refuses the second edge.
+Each feature exposes a reviewed upstream capability through the storefront, so
+a consumer never declares it directly. Do not run `cargo add tokio` or
+`cargo add gpui`; `lgwks-deps check` refuses the second edge.
 
 | Feature | Re-exports | Notes |
 |---|---|---|
@@ -38,6 +38,7 @@ refuses the second edge.
 | `ml-candle` | `candle_core`, `candle_nn`, `candle_transformers` | ML inference: tensor compute and transformer models. |
 | `ml-candle-metal` | as `ml-candle`, plus Candle's macOS Metal backend | |
 | `ml-tokenizers` | `lgwks_deps::tokenizers` | The matching tokenizer stack. |
+| `process-group-probe` | `lgwks_deps::process_group::exists` | Safe, non-mutating signal-zero observation for Unix process-group cleanup. |
 | `scan` (default) | — | The gate's Rust source detectors. The one reviewed default-on feature. |
 
 The ML features are default-off, so the default `scan` build compiles none of

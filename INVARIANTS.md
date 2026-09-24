@@ -51,6 +51,18 @@ Each of these was a shipped defect. Treat the list as the spec.
   path; locator ladder eligibility is enforced. · why: fff9d335 (#115), da0a3471 (#116)
 - **INV-BOT-11** Builders that can be dropped unused are `#[must_use]` and state their
   authority. · why: bb2ee99f (#94)
+- **INV-BOT-12** A supervised Unix process-group signal is sent only while its
+  unreaped leader pins the group id; the supervisor holds the native-task
+  permit through the bounded termination attempt and never signals that numeric
+  id after reaping. · why: #143 R09/R10 identity-reuse and ownerless-cleanup
+  findings · enforced by: `tests/process_ownership.rs`, `tests/rt_process.rs`,
+  and `rt::supervise::tests`
+- **INV-BOT-13** Cleanup that remains pending after its process task ends transfers
+  its group identity and admission permit to the supervisor's bounded cleanup
+  owner; present/error observations retain both, and only observed absence may
+  release capacity and emit an attributed terminal receipt. · why: #143 R10
+  ownerless-cleanup finding · enforced by: `rt::supervise::tests` and
+  `tests/rt_process.rs`
 
 ## Docs
 

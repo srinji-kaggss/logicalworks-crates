@@ -101,6 +101,8 @@ use std::future::Future;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::process::ExitStatus;
 use std::sync::Arc;
+#[cfg(all(unix, feature = "process"))]
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 // Only the supervised process reports an `io::Error`; a build without the
@@ -111,14 +113,13 @@ use std::io;
 use lgwks_deps::tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use lgwks_deps::tokio::task::Id;
 
-#[cfg(feature = "process")]
+#[cfg(all(unix, feature = "process"))]
 use lgwks_deps::tokio::process::{Child, Command};
 
 use super::cancel::CancellationToken;
 #[cfg(feature = "process")]
 use super::process::ProcessSpec;
 use super::task::{JoinSet, yield_now};
-use std::task::Poll;
 
 /// Iterations one poll of [`repeat`] may complete before it hands the executor
 /// back.
@@ -369,6 +370,14 @@ pub enum TaskOutcome {
         /// Process-tree cleanup evidence, when this was a supervised process.
         cleanup: Option<CleanupReceipt>,
     },
+    /// A retained process-group cleanup owner later proved the group absent.
+    #[cfg(all(unix, feature = "process"))]
+    CleanupSettled {
+        /// The process task whose cleanup obligation was settled.
+        task: TaskId,
+        /// Terminal cleanup evidence.
+        cleanup: CleanupReceipt,
+    },
 }
 
 /// Evidence about the owned process group after its leader ended or cancellation
@@ -376,14 +385,16 @@ pub enum TaskOutcome {
 ///
 /// Unix process groups are weaker than a kernel job object: a descendant that
 /// deliberately creates a new session is outside this guarantee. `Pending`
-/// therefore remains a truthful result when the bounded drain could not prove
-/// that the original group disappeared.
+/// therefore remains a truthful result when SIGKILL was delivered while the
+/// unreaped leader pinned the group id, but this supervisor could not prove
+/// that every member had disappeared before its bounded drain ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CleanupReceipt {
     /// The group no longer exists after the bounded termination/drain.
     CleanupConfirmed,
-    /// Termination was requested, but the bounded drain did not prove removal.
+    /// SIGKILL was delivered while the unreaped leader pinned the group id,
+    /// but the bounded drain did not prove removal.
     CleanupPending,
     /// The operating system refused the termination request.
     CleanupFailed,
@@ -399,6 +410,8 @@ impl TaskOutcome {
             | Self::Aborted { task }
             | Self::Failed { task, .. }
             | Self::Panicked { task, .. } => task,
+            #[cfg(all(unix, feature = "process"))]
+            Self::CleanupSettled { task, .. } => task,
         }
     }
 
@@ -409,7 +422,14 @@ impl TaskOutcome {
     /// as "the task did its work".
     #[must_use]
     pub const fn is_success(&self) -> bool {
-        matches!(self, Self::Completed { .. })
+        #[cfg(all(unix, feature = "process"))]
+        {
+            matches!(self, Self::Completed { .. } | Self::CleanupSettled { .. })
+        }
+        #[cfg(not(all(unix, feature = "process")))]
+        {
+            matches!(self, Self::Completed { .. })
+        }
     }
 
     /// Whether the body panicked.
@@ -446,6 +466,8 @@ impl TaskOutcome {
             | Self::Cancelled { .. }
             | Self::Aborted { .. }
             | Self::Panicked { .. } => None,
+            #[cfg(all(unix, feature = "process"))]
+            Self::CleanupSettled { .. } => None,
         }
     }
 
@@ -457,6 +479,8 @@ impl TaskOutcome {
             | Self::Cancelled { cleanup, .. }
             | Self::Failed { cleanup, .. } => cleanup,
             Self::Aborted { .. } | Self::Panicked { .. } => None,
+            #[cfg(all(unix, feature = "process"))]
+            Self::CleanupSettled { cleanup, .. } => Some(cleanup),
         }
     }
 
@@ -479,6 +503,8 @@ impl TaskOutcome {
             | Self::Cancelled { .. }
             | Self::Aborted { .. }
             | Self::Failed { .. } => None,
+            #[cfg(all(unix, feature = "process"))]
+            Self::CleanupSettled { .. } => None,
         }
     }
 }
@@ -496,6 +522,9 @@ pub struct ShutdownReport {
     outcomes: Vec<TaskOutcome>,
     /// The supervisor's counters at the moment it finished draining.
     stats: Stats,
+    /// Keeps transferred cleanup obligations and their leases alive.
+    #[cfg(all(unix, feature = "process"))]
+    cleanup_owners: Arc<CleanupOwners>,
 }
 
 impl ShutdownReport {
@@ -505,10 +534,15 @@ impl ShutdownReport {
         &self.outcomes
     }
 
-    /// Consume the report and return its outcomes.
-    #[must_use]
-    pub fn into_outcomes(self) -> Vec<TaskOutcome> {
-        self.outcomes
+    /// Consume the report only when no cleanup owner remains. On `Err`, the
+    /// returned report still owns every pending cleanup lease and can be polled
+    /// with `reap_pending_cleanups`.
+    pub fn into_outcomes(self) -> Result<Vec<TaskOutcome>, Self> {
+        #[cfg(all(unix, feature = "process"))]
+        if self.pending_cleanup_count() > 0 {
+            return Err(self);
+        }
+        Ok(self.outcomes)
     }
 
     /// The supervisor's counters at the moment it finished draining.
@@ -531,7 +565,22 @@ impl ShutdownReport {
     /// task stopped.
     #[must_use]
     pub fn is_clean(&self) -> bool {
-        self.outcomes.iter().all(TaskOutcome::is_success)
+        self.outcomes.iter().all(|outcome| {
+            outcome.is_success()
+                && !matches!(
+                    outcome.cleanup(),
+                    Some(CleanupReceipt::CleanupPending | CleanupReceipt::CleanupFailed)
+                )
+        }) && {
+            #[cfg(all(unix, feature = "process"))]
+            {
+                self.pending_cleanup_count() == 0
+            }
+            #[cfg(not(all(unix, feature = "process")))]
+            {
+                true
+            }
+        }
     }
 
     /// Every supervised process that did not exit successfully, in completion
@@ -545,6 +594,33 @@ impl ShutdownReport {
         self.outcomes
             .iter()
             .filter(|outcome| outcome.is_process_failure())
+    }
+
+    /// Number of cleanup obligations still charged to the process capacity.
+    #[cfg(all(unix, feature = "process"))]
+    #[must_use]
+    pub fn pending_cleanup_count(&self) -> usize {
+        self.cleanup_owners.pending_count()
+    }
+
+    /// Make one bounded observation pass over cleanup obligations retained by
+    /// this report. Each returned outcome is a terminal absence receipt.
+    #[cfg(all(unix, feature = "process"))]
+    pub fn reap_pending_cleanups(&mut self) -> usize {
+        self.reap_pending_cleanups_with(&NATIVE_GROUP_OBSERVER)
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    /// Injected-observer seam for deterministic cleanup-owner tests.
+    fn reap_pending_cleanups_with(&mut self, observer: &dyn GroupObserver) -> usize {
+        let settled = self.cleanup_owners.drive(observer, |_| false);
+        let count = settled.len();
+        self.outcomes
+            .extend(settled.into_iter().map(|task| TaskOutcome::CleanupSettled {
+                task,
+                cleanup: CleanupReceipt::CleanupConfirmed,
+            }));
+        count
     }
 }
 
@@ -619,6 +695,9 @@ pub struct Supervisor {
     /// The in-flight ceiling. Shared with the tasks, each of which holds one
     /// permit for its lifetime and releases it on completion or abort.
     permits: Arc<Semaphore>,
+    /// Process cleanup obligations transferred from terminal or aborted tasks.
+    #[cfg(all(unix, feature = "process"))]
+    cleanup_owners: Arc<CleanupOwners>,
     /// Maps the engine's task id to this module's, for the one path that cannot
     /// carry a [`TaskId`] in the value: a terminal `JoinError`, which is the
     /// error case and therefore has no value to carry it. Entries are removed
@@ -740,7 +819,7 @@ const MAX_PANIC_MESSAGE_CHARS: usize = 512;
 const COOPERATIVE_DRAIN_GRACE: Duration = Duration::from_millis(50);
 
 /// Number of bounded group probes used after a leader exits.
-#[cfg(feature = "process")]
+#[cfg(all(unix, feature = "process"))]
 const PROCESS_CLEANUP_ATTEMPTS: usize = 64;
 
 /// The in-flight ceiling [`Supervisor::default`] falls back to when the OS will
@@ -787,6 +866,8 @@ impl Supervisor {
             token: CancellationToken::new(),
             set: JoinSet::new(),
             permits: Arc::new(Semaphore::new(bound)),
+            #[cfg(all(unix, feature = "process"))]
+            cleanup_owners: Arc::new(CleanupOwners::default()),
             identities: BTreeMap::new(),
             reports: VecDeque::new(),
             report_cap: bound,
@@ -843,12 +924,22 @@ impl Supervisor {
         }
     }
 
+    /// Number of retained Unix process-group cleanup obligations still charged
+    /// to this supervisor's in-flight capacity.
+    #[cfg(all(unix, feature = "process"))]
+    #[must_use]
+    pub fn pending_cleanup_count(&self) -> usize {
+        self.cleanup_owners.pending_count()
+    }
+
     /// The oldest terminal outcome this supervisor has not yet handed over.
     ///
     /// `None` means every task that has ended has been reported and read. A
     /// caller that reads this in a loop holds no history at all, which is how
     /// the cap in [`Stats::reports_dropped`] is kept from ever being reached.
     pub fn next_report(&mut self) -> Option<TaskOutcome> {
+        #[cfg(all(unix, feature = "process"))]
+        self.refresh_cleanup_owners();
         self.reports.pop_front()
     }
 
@@ -869,6 +960,8 @@ impl Supervisor {
             self.absorb(joined, Retention::Capped);
             reaped = reaped.saturating_add(1);
         }
+        #[cfg(all(unix, feature = "process"))]
+        self.refresh_cleanup_owners();
         reaped
     }
 
@@ -1041,14 +1134,14 @@ impl Supervisor {
     /// `forbid`-level lint rules out the panic and a silent `return` would
     /// swallow the condition. A refused start does not consume a slot: the
     /// permit is released when this function returns.
-    #[cfg(feature = "process")]
+    #[cfg(all(unix, feature = "process"))]
     pub async fn spawn_process(&mut self, spec: &ProcessSpec) -> io::Result<TaskId> {
         let Some(permit) = self.claim().await else {
             // The fence inside `claim` answered for capacity and for
             // cancellation alike; name which world refused, so a cancelled
             // supervisor's caller does not read this as a platform failure.
             if self.token.is_cancelled() {
-                return Err(io::Error::new(io::ErrorKind::Other, SupervisorCancelled));
+                return Err(io::Error::other(SupervisorCancelled));
             }
             return Err(io::Error::other(
                 "lgwks_bot: the supervisor's in-flight semaphore was closed",
@@ -1060,7 +1153,7 @@ impl Supervisor {
         // refusal is counted.
         if self.token.is_cancelled() {
             self.refused = self.refused.saturating_add(1);
-            return Err(io::Error::new(io::ErrorKind::Other, SupervisorCancelled));
+            return Err(io::Error::other(SupervisorCancelled));
         }
         let token = self.child_token();
         let deadline = spec.deadline_duration();
@@ -1076,49 +1169,90 @@ impl Supervisor {
         // Construct the guard before the child is placed in the async task. If
         // the task is aborted before its first poll, this guard still owns the
         // cleanup fallback for a process that native spawning already started.
-        let mut group = ProcessGroup::of(&child);
-        Ok(self.place(permit, async move {
+        let task = self.allocate_task_id();
+        let mut group = ProcessGroup::of(&child, task, permit, Arc::clone(&self.cleanup_owners));
+        Ok(self.place_owned(task, async move {
             let mut child = child;
-            let wait = async {
-                match deadline {
-                    Some(deadline) => crate::rt::time::timeout(deadline, child.wait()).await.ok(),
-                    None => Some(child.wait().await),
-                }
-            };
-            match token.run_until_cancelled(wait).await {
-                // The child was reaped, so its group is empty or already gone.
-                // Disarm before cleanup and before this frame can unwind: the
-                // OS may reissue a reaped id, and a stale group id signalled
-                // later would kill whatever inherited it.
-                Some(Some(Ok(status))) => {
-                    group.disarm();
-                    let cleanup = group.cleanup().await;
-                    if status.success() {
-                        TaskEnd::CompletedWithCleanup { cleanup }
-                    } else {
+            let (observation, _observed_status) =
+                observe_child_without_reaping(&child, deadline, &token).await;
+
+            // The signal phase runs while `child` is still waitable. On Unix,
+            // `waitid(WNOWAIT)` observed its exit without releasing the leader
+            // pid; on cancellation/deadline the direct child is still owned and
+            // unreaped. Thus every signal sent by cleanup is to a group whose
+            // numeric id cannot yet have been reused.
+            let mut cleanup = group.cleanup().await;
+            if matches!(cleanup, CleanupReceipt::CleanupFailed)
+                && !matches!(observation, ProcessObservation::Exited)
+            {
+                // Do not wait on a child whose group signal could not be
+                // delivered. The owned child is dropped immediately after this
+                // return, and `kill_on_drop` remains the direct-child fallback.
+                drop(group);
+                return match observation {
+                    ProcessObservation::Cancelled => TaskEnd::CancelledWithCleanup { cleanup },
+                    ProcessObservation::Deadline | ProcessObservation::Unobservable => {
                         TaskEnd::Failed {
-                            status: Some(status),
+                            status: None,
                             cleanup,
                         }
                     }
+                    ProcessObservation::Exited => TaskEnd::Failed {
+                        status: None,
+                        cleanup,
+                    },
+                };
+            }
+            let status = if matches!(cleanup, CleanupReceipt::CleanupFailed) {
+                // Keep the leader unreaped while the armed guard makes its
+                // final synchronous kill attempt. The receipt reports the
+                // syscall failure; dropping the child then relinquishes it to
+                // the platform's orphan reaper rather than signalling a stale
+                // numeric group id.
+                drop(group);
+                child.wait().await.ok()
+            } else {
+                let status = child.wait().await.ok();
+                group.mark_reaped();
+                if matches!(cleanup, CleanupReceipt::CleanupPending) {
+                    cleanup = group.confirm_absence().await;
                 }
-                // The wait itself failed, so this supervisor cannot say whether
-                // the process is still running. The guard is left armed and the
-                // group is killed as the frame unwinds, rather than reporting a
-                // status nobody has.
-                Some(Some(Err(_))) | Some(None) => TaskEnd::Failed {
-                    status: None,
-                    cleanup: group.cleanup().await,
+                status
+            };
+
+            // Group signals end before the reap. A Pending cleanup remains in
+            // this task through the bounded post-reap, signal-zero probe.
+            match observation {
+                ProcessObservation::Exited => match status {
+                    Some(status) if status.success() => TaskEnd::CompletedWithCleanup { cleanup },
+                    Some(status) => TaskEnd::Failed {
+                        status: Some(status),
+                        cleanup,
+                    },
+                    None => TaskEnd::Failed {
+                        status: None,
+                        cleanup,
+                    },
                 },
-                // Cancelled. The group is killed **synchronously**, and the
-                // child is then dropped rather than reaped.
-                //
-                None => {
-                    let cleanup = group.cleanup().await;
-                    TaskEnd::CancelledWithCleanup { cleanup }
+                ProcessObservation::Cancelled => TaskEnd::CancelledWithCleanup { cleanup },
+                ProcessObservation::Deadline | ProcessObservation::Unobservable => {
+                    TaskEnd::Failed {
+                        status: None,
+                        cleanup,
+                    }
                 }
             }
         }))
+    }
+
+    /// Process-group containment is unavailable on non-Unix targets.
+    #[cfg(all(not(unix), feature = "process"))]
+    pub async fn spawn_process(&mut self, spec: &ProcessSpec) -> io::Result<TaskId> {
+        let _ = spec;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "lgwks_bot: supervised process-group cleanup is Unix-only",
+        ))
     }
 
     /// Cancel every task, wait for the set to drain, and return what it
@@ -1175,9 +1309,16 @@ impl Supervisor {
         while let Some(joined) = self.set.join_next_with_id().await {
             self.absorb(joined, Retention::Draining);
         }
+        #[cfg(all(unix, feature = "process"))]
+        self.refresh_cleanup_owners();
         let stats = self.stats();
         let outcomes: Vec<TaskOutcome> = self.reports.drain(..).collect();
-        ShutdownReport { outcomes, stats }
+        ShutdownReport {
+            outcomes,
+            stats,
+            #[cfg(all(unix, feature = "process"))]
+            cleanup_owners: Arc::clone(&self.cleanup_owners),
+        }
     }
 
     /// Take a permit, waiting for one if the bound is reached, and reap first.
@@ -1196,47 +1337,33 @@ impl Supervisor {
             self.refused = self.refused.saturating_add(1);
             return None;
         }
-        self.reap();
-        let token = &self.token;
-        let refused = &mut self.refused;
-        let mut cancelled = Box::pin(token.cancelled());
-        let mut acquire = Box::pin(Arc::clone(&self.permits).acquire_owned());
-        std::future::poll_fn(move |context| {
-            // Cancellation is polled first on every wake. A pool that frees a
-            // slot in the same wake as a cancel answers `Cancelled` here: the
-            // permit exists, but the supervisor it would be handed to does not
-            // admit anymore.
-            if cancelled.as_mut().poll(context).is_ready() {
-                *refused = refused.saturating_add(1);
-                return Poll::Ready(None);
-            }
-            match acquire.as_mut().poll(context) {
-                // The recheck at the owned admission point: the cancel can
-                // land between the wake that delivered the permit and this
-                // line. Anything admitted here is work the supervisor owns —
-                // the decision is this read, not the caller's check before
-                // the call.
-                Poll::Ready(outcome) => {
-                    if token.is_cancelled() {
-                        *refused = refused.saturating_add(1);
-                        return Poll::Ready(None);
-                    }
-                    match outcome {
-                        Ok(permit) => Poll::Ready(Some(permit)),
-                        // Unreachable: this supervisor never closes its
-                        // semaphore, and `forbid(expect_used)` rules out the
-                        // assert. Counting it as a refusal keeps the failure
-                        // observable instead of silently swallowed.
-                        Err(_) => {
-                            *refused = refused.saturating_add(1);
-                            Poll::Ready(None)
-                        }
-                    }
+        loop {
+            self.reap();
+            let token = &self.token;
+            let acquire = Arc::clone(&self.permits).acquire_owned();
+            match token
+                .run_until_cancelled(crate::rt::time::timeout(
+                    Duration::from_millis(100),
+                    acquire,
+                ))
+                .await
+            {
+                None => {
+                    self.refused = self.refused.saturating_add(1);
+                    return None;
                 }
-                Poll::Pending => Poll::Pending,
+                Some(Ok(Ok(permit))) if !self.token.is_cancelled() => return Some(permit),
+                Some(Ok(Ok(_))) => {
+                    self.refused = self.refused.saturating_add(1);
+                    return None;
+                }
+                Some(Ok(Err(_))) => {
+                    self.refused = self.refused.saturating_add(1);
+                    return None;
+                }
+                Some(Err(_)) => {}
             }
-        })
-        .await
+        }
     }
 
     /// The non-blocking counterpart of [`Supervisor::claim`].
@@ -1278,15 +1405,48 @@ impl Supervisor {
     where
         Fut: Future<Output = TaskEnd> + Send + 'static,
     {
-        let task = TaskId(self.next_task);
-        self.next_task = self.next_task.saturating_add(1);
-        self.spawned = self.spawned.saturating_add(1);
-        let handle = self.set.spawn(async move {
+        let task = self.allocate_task_id();
+        self.place_owned(task, async move {
             let _permit = permit;
             future.await
         });
+        task
+    }
+
+    /// Place a future whose native owner already holds the admission permit.
+    fn place_owned<Fut>(&mut self, task: TaskId, future: Fut) -> TaskId
+    where
+        Fut: Future<Output = TaskEnd> + Send + 'static,
+    {
+        self.spawned = self.spawned.saturating_add(1);
+        let handle = self.set.spawn(future);
         self.identities.insert(handle.id(), task);
         task
+    }
+
+    /// Allocate the stable id before constructing a resource-owning future.
+    fn allocate_task_id(&mut self) -> TaskId {
+        let task = TaskId(self.next_task);
+        self.next_task = self.next_task.saturating_add(1);
+        task
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    /// Refresh retained owners and append terminal receipts when report capacity
+    /// allows it.
+    fn refresh_cleanup_owners(&mut self) {
+        for task in self.cleanup_owners.drive(&NATIVE_GROUP_OBSERVER, |task| {
+            self.identities.values().any(|live| *live == task)
+        }) {
+            if self.reports.len() < self.report_cap {
+                self.reports.push_back(TaskOutcome::CleanupSettled {
+                    task,
+                    cleanup: CleanupReceipt::CleanupConfirmed,
+                });
+            } else {
+                self.reports_dropped = self.reports_dropped.saturating_add(1);
+            }
+        }
     }
 
     /// Turn one join result into a counted, retained terminal outcome.
@@ -1421,7 +1581,7 @@ impl Drop for Supervisor {
 /// exception — if the entry is ever retargeted or lifted, this `expect` becomes
 /// unfulfilled and this line is revisited rather than silently continuing to be
 /// exempt.
-#[cfg(feature = "process")]
+#[cfg(all(unix, feature = "process"))]
 #[expect(
     clippy::disallowed_methods,
     reason = "the engine's Command has no other way to start a child; this is the single call Supervisor::spawn_process wraps, and it is not reachable from outside this module"
@@ -1438,33 +1598,230 @@ fn start(command: &mut Command) -> io::Result<Child> {
 /// running with nobody holding their handles. Signalling the *group* is what
 /// makes "stop the process" mean the whole tree.
 ///
-/// The guard is armed when the group is created and disarmed the instant the
-/// child is reaped, because a reaped process id can be reissued by the OS and a
-/// stale group id signalled later would kill whatever inherited it. Because the
-/// guard lives in the task's own frame, it fires on every way that task can
-/// stop — cancellation, abort, or the supervisor being dropped — which is why
-/// the kill does not depend on [`Drop`] for [`Supervisor`] knowing anything
-/// about processes.
-#[cfg(feature = "process")]
-struct ProcessGroup {
+/// The guard is armed when the group is created. It may signal only while the
+/// leader is unreaped; after reaping, it uses signal-zero observation only.
+/// The owner holds the process permit through the bounded absence observation.
+#[cfg(all(unix, feature = "process"))]
+struct ProcessGroup<'ops> {
     /// The group id, or `0` when the engine could not report the child's id.
     ///
     /// Zero is *refused* by `kill_process_group` rather than read as "this
     /// process's own group", so an unreadable id can never signal the
     /// supervisor's own process group.
     group: i32,
+    /// Attribution for a later cleanup receipt.
+    task: TaskId,
+    /// The process admission lease, transferred to `owners` if cleanup remains.
+    permit: Option<OwnedSemaphorePermit>,
+    /// Supervisor-owned destination for unresolved cleanup.
+    owners: Arc<CleanupOwners>,
     /// Whether a kill is still owed to the group.
     armed: bool,
+    /// Whether the leader has been reaped and the numeric id released.
+    leader_reaped: bool,
+    /// The process-group signalling boundary, injectable for regression tests.
+    signaller: &'ops dyn GroupSignaller,
+    /// Non-mutating group existence boundary, injectable for regression tests.
+    observer: &'ops dyn GroupObserver,
+}
+
+/// One process-group signalling operation.
+#[cfg(all(unix, feature = "process"))]
+trait GroupSignaller: Sync {
+    /// Send SIGKILL to `group`.
+    fn signal(&self, group: i32) -> io::Result<()>;
+}
+
+/// One non-mutating process-group existence observation.
+#[cfg(all(unix, feature = "process"))]
+trait GroupObserver: Sync {
+    /// Return whether `group` currently names a process group.
+    fn exists(&self, group: i32) -> io::Result<bool>;
+}
+
+/// A cleanup obligation retained after its original task ends.
+#[cfg(all(unix, feature = "process"))]
+struct PendingCleanup {
+    /// Stable task attribution.
+    task: TaskId,
+    /// Process-group id, used only for non-mutating existence observation.
+    group: i32,
+    /// Capacity remains charged until terminal absence is observed.
+    _permit: OwnedSemaphorePermit,
+    /// Absence was observed before its task's terminal report was joined.
+    absence_observed: bool,
+}
+
+/// Bounded owners for groups whose leader task could not prove cleanup.
+/// Each entry owns its process permit, so retained obligations stay charged to
+/// the configured native-resource ceiling.
+#[cfg(all(unix, feature = "process"))]
+#[derive(Default)]
+struct CleanupOwners {
+    /// Owners retained under the in-flight semaphore ceiling.
+    pending: Mutex<Vec<PendingCleanup>>,
+}
+
+#[cfg(all(unix, feature = "process"))]
+impl CleanupOwners {
+    /// Transfer a live task's lease and cleanup obligation to this registry.
+    fn register(&self, task: TaskId, group: i32, permit: OwnedSemaphorePermit) {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(PendingCleanup {
+                task,
+                group,
+                _permit: permit,
+                absence_observed: false,
+            });
+    }
+
+    /// Count currently retained obligations.
+    fn pending_count(&self) -> usize {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    /// Probe each owner once; present or unobservable groups keep their lease.
+    fn drive(
+        &self,
+        observer: &dyn GroupObserver,
+        task_is_live: impl Fn(TaskId) -> bool,
+    ) -> Vec<TaskId> {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut retained = Vec::with_capacity(pending.len());
+        let mut settled = Vec::new();
+        for mut owner in pending.drain(..) {
+            let absent =
+                owner.absence_observed || matches!(observer.exists(owner.group), Ok(false));
+            if absent {
+                if task_is_live(owner.task) {
+                    owner.absence_observed = true;
+                    retained.push(owner);
+                } else {
+                    settled.push(owner.task);
+                }
+            } else {
+                retained.push(owner);
+            }
+        }
+        *pending = retained;
+        settled
+    }
+}
+
+#[cfg(all(unix, feature = "process"))]
+impl fmt::Debug for CleanupOwners {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CleanupOwners")
+            .field("pending", &self.pending_count())
+            .finish()
+    }
 }
 
 #[cfg(feature = "process")]
-impl ProcessGroup {
+/// The production process-group syscall adapter.
+#[cfg(all(unix, feature = "process"))]
+struct NativeGroupSignaller;
+
+#[cfg(all(unix, feature = "process"))]
+impl GroupSignaller for NativeGroupSignaller {
+    fn signal(&self, group: i32) -> io::Result<()> {
+        lgwks_std::process::kill_process_group(group)
+    }
+}
+
+#[cfg(all(unix, feature = "process"))]
+/// The production signal-zero process-group observer.
+struct NativeGroupObserver;
+
+#[cfg(all(unix, feature = "process"))]
+impl GroupObserver for NativeGroupObserver {
+    fn exists(&self, group: i32) -> io::Result<bool> {
+        lgwks_deps::process_group::exists(group)
+    }
+}
+
+#[cfg(feature = "process")]
+/// One static production adapter, so task futures hold no borrowed runtime state.
+#[cfg(all(unix, feature = "process"))]
+static NATIVE_GROUP_SIGNALLER: NativeGroupSignaller = NativeGroupSignaller;
+
+#[cfg(all(unix, feature = "process"))]
+/// The static observer used by process-group cleanup.
+static NATIVE_GROUP_OBSERVER: NativeGroupObserver = NativeGroupObserver;
+
+/// What happened while observing a supervised child without releasing its pid.
+#[derive(Clone, Copy)]
+#[cfg(all(unix, feature = "process"))]
+enum ProcessObservation {
+    /// The child exited; the status is retrieved after cleanup on Unix.
+    Exited,
+    /// The supervisor's cancellation token was set.
+    Cancelled,
+    /// The process deadline elapsed before an exit was observed.
+    Deadline,
+    /// The platform could not perform non-reaping exit observation.
+    Unobservable,
+}
+
+/// Poll the child's exit state without reaping it, keeping its pid allocated
+/// until the process-group termination phase is complete.
+#[cfg(all(unix, feature = "process"))]
+async fn observe_child_without_reaping(
+    child: &Child,
+    deadline: Option<Duration>,
+    token: &CancellationToken,
+) -> (ProcessObservation, Option<ExitStatus>) {
+    let Some(raw_pid) = child.id() else {
+        return (ProcessObservation::Unobservable, None);
+    };
+    let Ok(pid) = i32::try_from(raw_pid) else {
+        return (ProcessObservation::Unobservable, None);
+    };
+    let deadline = deadline.and_then(|duration| Instant::now().checked_add(duration));
+    loop {
+        if token.is_cancelled() {
+            return (ProcessObservation::Cancelled, None);
+        }
+        if deadline.is_some_and(|at| Instant::now() >= at) {
+            return (ProcessObservation::Deadline, None);
+        }
+        match lgwks_std::process::child_has_exited_without_reaping(pid) {
+            Ok(true) => return (ProcessObservation::Exited, None),
+            Ok(false) => {}
+            Err(_) => return (ProcessObservation::Unobservable, None),
+        }
+        if token
+            .run_until_cancelled(crate::rt::time::sleep(Duration::from_millis(5)))
+            .await
+            .is_none()
+        {
+            return (ProcessObservation::Cancelled, None);
+        }
+    }
+}
+
+#[cfg(all(unix, feature = "process"))]
+impl<'ops> ProcessGroup<'ops> {
     /// The process group of `child`, armed.
     ///
     /// The id is read before the child is awaited: an unreaped child still has
     /// its id, and a group leader's group id is its own pid, which is what
     /// `process_group(0)` arranged when the command was built.
-    fn of(child: &Child) -> Self {
+    fn of(
+        child: &Child,
+        task: TaskId,
+        permit: OwnedSemaphorePermit,
+        owners: Arc<CleanupOwners>,
+    ) -> ProcessGroup<'static> {
         let group = match child.id() {
             // `try_from` rather than `as`: the workspace forbids a truncating
             // cast, and an id that does not fit an `i32` is not a group this
@@ -1472,18 +1829,32 @@ impl ProcessGroup {
             Some(id) => i32::try_from(id).unwrap_or(0),
             None => 0,
         };
-        Self { group, armed: true }
+        ProcessGroup {
+            group,
+            task,
+            permit: Some(permit),
+            owners,
+            armed: true,
+            leader_reaped: false,
+            signaller: &NATIVE_GROUP_SIGNALLER,
+            observer: &NATIVE_GROUP_OBSERVER,
+        }
     }
 
     /// Terminate the group and probe until it disappears or the bounded drain
     /// is exhausted. A successful signal is not treated as proof of cleanup.
     async fn cleanup(&mut self) -> CleanupReceipt {
+        if self.leader_reaped {
+            return CleanupReceipt::CleanupFailed;
+        }
         if self.group <= 0 {
             return CleanupReceipt::CleanupFailed;
         }
+        let mut signalled = false;
         for attempt in 0..PROCESS_CLEANUP_ATTEMPTS {
-            match lgwks_std::process::kill_process_group(self.group) {
+            match self.signaller.signal(self.group) {
                 Ok(()) => {
+                    signalled = true;
                     if attempt.saturating_add(1) < PROCESS_CLEANUP_ATTEMPTS {
                         yield_now().await;
                     }
@@ -1498,33 +1869,72 @@ impl ProcessGroup {
                 Err(_) => return CleanupReceipt::CleanupFailed,
             }
         }
+        // Every signal above ran while the leader still pinned this id. Keep
+        // the caller in this task: after reaping it performs only the harmless
+        // signal-zero probe, retaining its task permit meanwhile.
+        if signalled {
+            CleanupReceipt::CleanupPending
+        } else {
+            CleanupReceipt::CleanupFailed
+        }
+    }
+
+    /// Confirm process-group absence after `child.wait()` has released the pid.
+    ///
+    /// The observer sends no signal; a reused identifier can therefore never
+    /// cause this supervisor to affect an unrelated group. Errors and a still
+    /// present group consume the same bounded observation budget and remain
+    /// `Pending` rather than being promoted to proof of absence.
+    async fn confirm_absence(&mut self) -> CleanupReceipt {
+        if !self.leader_reaped || self.group <= 0 {
+            return CleanupReceipt::CleanupFailed;
+        }
+        for attempt in 0..PROCESS_CLEANUP_ATTEMPTS {
+            if let Ok(false) = self.observer.exists(self.group) {
+                self.disarm();
+                return CleanupReceipt::CleanupConfirmed;
+            }
+            if attempt.saturating_add(1) < PROCESS_CLEANUP_ATTEMPTS {
+                yield_now().await;
+            }
+        }
         CleanupReceipt::CleanupPending
     }
 
     /// Signal the whole group as a drop-time safety fallback.
     fn kill(&self) {
-        if self.group <= 0 {
+        if self.leader_reaped || self.group <= 0 {
             return;
         }
-        let _outcome = lgwks_std::process::kill_process_group(self.group);
+        let _outcome = self.signaller.signal(self.group);
     }
 
     /// Mark the group as already gone, so [`Drop`] does not signal it.
     fn disarm(&mut self) {
         self.armed = false;
     }
+
+    /// Record that reaping released the group leader's numeric id.
+    fn mark_reaped(&mut self) {
+        self.leader_reaped = true;
+    }
 }
 
-#[cfg(feature = "process")]
-impl Drop for ProcessGroup {
+#[cfg(all(unix, feature = "process"))]
+impl Drop for ProcessGroup<'_> {
     /// Kill the group if a kill is still owed to it.
     ///
     /// This is the last line of the guarantee, and it is deliberately
     /// synchronous: a task aborted before it reached its own kill still takes
     /// its process group with it as its frame unwinds.
     fn drop(&mut self) {
-        if self.armed {
-            self.kill();
+        if self.armed && self.group > 0 {
+            if !self.leader_reaped {
+                self.kill();
+            }
+            if let Some(permit) = self.permit.take() {
+                self.owners.register(self.task, self.group, permit);
+            }
         }
     }
 }
@@ -1650,18 +2060,39 @@ where
     reason = "the `Debug` impl appended below is deliberately last; see its comment for why it cannot precede this module"
 )]
 mod tests {
+    #[cfg(all(unix, feature = "process"))]
+    use super::CleanupOwners;
+    #[cfg(all(not(unix), feature = "process"))]
+    use super::ProcessSpec;
     use super::{
         Budget, MAX_PANIC_MESSAGE_CHARS, Outcome, Supervisor, TaskId, TaskOutcome, TrySpawnRefusal,
         repeat, truncate_panic_message,
     };
+    #[cfg(feature = "process")]
+    use super::{CleanupReceipt, GroupObserver, GroupSignaller, ProcessGroup};
     use crate::rt::cancel::CancellationToken;
     use crate::rt::runtime::block_on;
     use crate::rt::task::yield_now;
     use std::future::pending;
     use std::num::NonZeroU64;
     use std::sync::Arc;
+    #[cfg(feature = "process")]
+    use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::Duration;
+
+    #[cfg(all(not(unix), feature = "process"))]
+    #[test]
+    fn non_unix_process_group_spawn_is_refused_as_unsupported() {
+        let mut supervisor = Supervisor::new(1);
+        let result = block_on(supervisor.spawn_process(&ProcessSpec::new("unused")));
+        assert_eq!(
+            result.as_ref().err().map(std::io::Error::kind),
+            Some(std::io::ErrorKind::Unsupported),
+            "non-Unix callers receive an explicit safe refusal before starting a process"
+        );
+        assert_eq!(supervisor.stats().spawned, 0);
+    }
 
     /// Panic on the calling task, carrying `message` as the payload.
     ///
@@ -1682,6 +2113,320 @@ mod tests {
             Some(limit) => Budget::Iterations(limit),
             None => Budget::Ongoing,
         }
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    struct RecordingGroupSignaller {
+        calls: AtomicUsize,
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    impl GroupSignaller for RecordingGroupSignaller {
+        fn signal(&self, _group: i32) -> std::io::Result<()> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    struct SequenceGroupObserver {
+        calls: AtomicUsize,
+        present_before_absent: usize,
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    impl GroupObserver for SequenceGroupObserver {
+        fn exists(&self, _group: i32) -> std::io::Result<bool> {
+            let call = self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(call < self.present_before_absent)
+        }
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    struct FailingGroupObserver;
+
+    #[cfg(all(unix, feature = "process"))]
+    impl GroupObserver for FailingGroupObserver {
+        fn exists(&self, _group: i32) -> std::io::Result<bool> {
+            Err(std::io::Error::other("injected observation failure"))
+        }
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    fn test_lease() -> Option<lgwks_deps::tokio::sync::OwnedSemaphorePermit> {
+        Arc::new(lgwks_deps::tokio::sync::Semaphore::new(1))
+            .try_acquire_owned()
+            .ok()
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    #[test]
+    fn a_reaped_or_recycled_group_id_is_never_signalled() {
+        let signaller = RecordingGroupSignaller {
+            calls: AtomicUsize::new(0),
+        };
+        let observer = SequenceGroupObserver {
+            calls: AtomicUsize::new(0),
+            present_before_absent: 0,
+        };
+        let mut group = ProcessGroup {
+            group: 42,
+            task: TaskId(0),
+            permit: test_lease(),
+            owners: Arc::new(CleanupOwners::default()),
+            armed: true,
+            leader_reaped: true,
+            signaller: &signaller,
+            observer: &observer,
+        };
+        assert_eq!(
+            block_on(group.cleanup()),
+            CleanupReceipt::CleanupFailed,
+            "the stale identity is refused rather than signalled"
+        );
+        drop(group);
+        assert_eq!(
+            signaller.calls.load(Ordering::Relaxed),
+            0,
+            "cleanup and Drop must not signal after the owner has reaped the leader"
+        );
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    #[test]
+    fn bounded_group_termination_keeps_cleanup_owned_until_absence_is_observed() {
+        let signaller = RecordingGroupSignaller {
+            calls: AtomicUsize::new(0),
+        };
+        let observer = SequenceGroupObserver {
+            calls: AtomicUsize::new(0),
+            present_before_absent: 1,
+        };
+        let mut group = ProcessGroup {
+            group: 42,
+            task: TaskId(0),
+            permit: test_lease(),
+            owners: Arc::new(CleanupOwners::default()),
+            armed: true,
+            leader_reaped: false,
+            signaller: &signaller,
+            observer: &observer,
+        };
+        assert_eq!(
+            block_on(group.cleanup()),
+            CleanupReceipt::CleanupPending,
+            "the bounded termination receipt must not claim observed absence"
+        );
+        let before_reap = signaller.calls.load(Ordering::Relaxed);
+        assert_eq!(
+            before_reap, 64,
+            "the bounded pinned phase must signal each configured attempt"
+        );
+        assert!(
+            group.armed,
+            "exhausting the signal budget is not proof that the group disappeared"
+        );
+        group.mark_reaped();
+        assert_eq!(
+            block_on(group.confirm_absence()),
+            CleanupReceipt::CleanupConfirmed,
+            "a signal-zero probe after reaping observes eventual group absence"
+        );
+        assert_eq!(observer.calls.load(Ordering::Relaxed), 2);
+        drop(group);
+        assert_eq!(
+            signaller.calls.load(Ordering::Relaxed),
+            before_reap,
+            "no signal may follow reaping and release of the numeric id"
+        );
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    #[test]
+    fn pending_cleanup_owner_keeps_its_permit_until_later_absence_receipt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::CleanupOwners;
+        use lgwks_deps::tokio::sync::Semaphore;
+
+        let semaphore = Arc::new(Semaphore::new(1));
+        let Some(permit) = Arc::clone(&semaphore).try_acquire_owned().ok() else {
+            return Err("the test semaphore started without its one permit".into());
+        };
+        let owners = Arc::new(CleanupOwners::default());
+        let task = TaskId(9);
+        let cleanup_observer = SequenceGroupObserver {
+            calls: AtomicUsize::new(0),
+            present_before_absent: usize::MAX,
+        };
+        let signaller = RecordingGroupSignaller {
+            calls: AtomicUsize::new(0),
+        };
+        let mut group = ProcessGroup {
+            group: 42,
+            task,
+            armed: true,
+            leader_reaped: false,
+            permit: Some(permit),
+            owners: Arc::clone(&owners),
+            signaller: &signaller,
+            observer: &cleanup_observer,
+        };
+
+        assert_eq!(
+            block_on(group.cleanup()),
+            CleanupReceipt::CleanupPending,
+            "exhausting bounded signal attempts remains pending"
+        );
+        group.mark_reaped();
+        assert_eq!(
+            block_on(group.confirm_absence()),
+            CleanupReceipt::CleanupPending,
+            "a bounded post-reap pass cannot claim absence"
+        );
+        let later_observer = SequenceGroupObserver {
+            calls: AtomicUsize::new(0),
+            present_before_absent: 1,
+        };
+        drop(group);
+        assert_eq!(
+            semaphore.available_permits(),
+            0,
+            "dropping a pending task-local guard must transfer, not release, its lease"
+        );
+        assert_eq!(owners.pending_count(), 1, "cleanup remains owned");
+        assert!(
+            owners.drive(&FailingGroupObserver, |_| false).is_empty(),
+            "an observation error cannot release cleanup ownership"
+        );
+        assert_eq!(semaphore.available_permits(), 0);
+        assert!(
+            owners.drive(&later_observer, |_| false).is_empty(),
+            "a still-present group cannot produce a terminal receipt"
+        );
+        assert_eq!(semaphore.available_permits(), 0);
+        assert!(
+            owners
+                .drive(&later_observer, |candidate| candidate == task)
+                .is_empty(),
+            "absence before the task report must retain attribution and capacity"
+        );
+        assert_eq!(semaphore.available_permits(), 0);
+        let settled = owners.drive(&later_observer, |_| false);
+        assert_eq!(
+            settled,
+            vec![task],
+            "later absence is attributed to its task"
+        );
+        assert_eq!(
+            semaphore.available_permits(),
+            1,
+            "terminal proof releases capacity"
+        );
+        assert_eq!(owners.pending_count(), 0);
+        assert_eq!(signaller.calls.load(Ordering::Relaxed), 64);
+        Ok(())
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    #[test]
+    fn cleanup_failed_transfers_its_lease_until_absence_is_observed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::CleanupOwners;
+        use lgwks_deps::tokio::sync::Semaphore;
+
+        let semaphore = Arc::new(Semaphore::new(1));
+        let Some(permit) = Arc::clone(&semaphore).try_acquire_owned().ok() else {
+            return Err("the test semaphore started without its one permit".into());
+        };
+        let owners = Arc::new(CleanupOwners::default());
+        let task = TaskId(10);
+        let observer = SequenceGroupObserver {
+            calls: AtomicUsize::new(0),
+            present_before_absent: 0,
+        };
+        let signaller = RecordingGroupSignaller {
+            calls: AtomicUsize::new(0),
+        };
+        let mut group = ProcessGroup {
+            group: 43,
+            task,
+            armed: true,
+            leader_reaped: true,
+            permit: Some(permit),
+            owners: Arc::clone(&owners),
+            signaller: &signaller,
+            observer: &observer,
+        };
+
+        assert_eq!(
+            block_on(group.cleanup()),
+            CleanupReceipt::CleanupFailed,
+            "a guard whose leader was reaped cannot signal a possibly reused id"
+        );
+        drop(group);
+        assert_eq!(owners.pending_count(), 1, "failed cleanup remains owned");
+        assert_eq!(semaphore.available_permits(), 0);
+        assert_eq!(owners.drive(&observer, |_| false), vec![task]);
+        assert_eq!(semaphore.available_permits(), 1);
+        assert_eq!(signaller.calls.load(Ordering::Relaxed), 0);
+        Ok(())
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    #[test]
+    fn shutdown_report_keeps_pending_cleanup_and_emits_later_terminal_receipt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use lgwks_deps::tokio::sync::Semaphore;
+
+        let semaphore = Arc::new(Semaphore::new(1));
+        let Some(permit) = Arc::clone(&semaphore).try_acquire_owned().ok() else {
+            return Err("the test semaphore started without its one permit".into());
+        };
+        let task = TaskId(11);
+        let report = block_on(Supervisor::new(1).shutdown());
+        report.cleanup_owners.register(task, 44, permit);
+        assert_eq!(report.pending_cleanup_count(), 1);
+        assert!(
+            !report.is_clean(),
+            "an unresolved native resource is not clean"
+        );
+        let Err(mut report) = report.into_outcomes() else {
+            return Err("into_outcomes consumed a report with pending cleanup".into());
+        };
+        assert_eq!(
+            report.pending_cleanup_count(),
+            1,
+            "Err must retain ownership"
+        );
+        assert_eq!(semaphore.available_permits(), 0);
+
+        assert_eq!(
+            report.reap_pending_cleanups_with(&FailingGroupObserver),
+            0,
+            "an observer error is not a terminal receipt"
+        );
+        let observer = SequenceGroupObserver {
+            calls: AtomicUsize::new(0),
+            present_before_absent: 1,
+        };
+        assert_eq!(report.reap_pending_cleanups_with(&observer), 0);
+        assert_eq!(report.pending_cleanup_count(), 1);
+        assert_eq!(report.reap_pending_cleanups_with(&observer), 1);
+        assert_eq!(report.pending_cleanup_count(), 0);
+        assert_eq!(semaphore.available_permits(), 1);
+        assert!(report.is_clean());
+        let outcomes = match report.into_outcomes() {
+            Ok(outcomes) => outcomes,
+            Err(_) => return Err("settled cleanup report remained unavailable".into()),
+        };
+        assert_eq!(
+            outcomes,
+            vec![TaskOutcome::CleanupSettled {
+                task,
+                cleanup: CleanupReceipt::CleanupConfirmed,
+            }]
+        );
+        Ok(())
     }
 
     /// Drive the current task until nothing the supervisor started is still

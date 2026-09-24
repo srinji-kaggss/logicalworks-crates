@@ -1,6 +1,7 @@
 //! Regressions for process ownership across leader exit and task cancellation.
 
 #![cfg(all(
+    unix,
     feature = "rt",
     feature = "time",
     feature = "sync",
