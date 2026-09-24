@@ -83,6 +83,25 @@ pub enum BotError {
         /// The identifier the spec named, spelled as the spec spelled it.
         domain: String,
     },
+    /// The registry declares one identifier twice within a single role.
+    ///
+    /// A duplicate would make dispatch depend on declaration order: the first
+    /// constructor would silently win and a spec would have no way to name the
+    /// ambiguity. The registry therefore refuses to build anything until the
+    /// lists are distinct — see [`crate::DomainRegistry::validate`]. An
+    /// identifier may still appear once as a source and once as an action: a
+    /// domain that observes a repository and also acts on one is one domain
+    /// with two roles, not a collision.
+    DuplicateDomain {
+        /// The identifier declared twice, spelled as the declaration spelled it.
+        domain: String,
+        /// Which declaration list holds the pair: `"source"` or `"action"`.
+        role: &'static str,
+        /// The first declaration position, zero-based.
+        first: usize,
+        /// The second declaration position, zero-based.
+        second: usize,
+    },
     /// The serialized spec exceeds [`crate::spec::MAX_SPEC_BYTES`]. The bound is
     /// defensive: it stops a hostile or runaway manifest from allocating
     /// without limit before any validation runs.
@@ -879,6 +898,16 @@ impl fmt::Display for BotError {
             Self::UnregisteredDomain { ref domain } => {
                 write!(f, "unregistered domain: {}", Escaped(domain))
             }
+            Self::DuplicateDomain {
+                ref domain,
+                role,
+                first,
+                second,
+            } => write!(
+                f,
+                "duplicate {role} domain {} declared at positions {first} and {second}",
+                Escaped(domain)
+            ),
             Self::SpecTooLarge { bytes, limit } => {
                 write!(f, "bot spec is {bytes} bytes, over the {limit}-byte limit")
             }

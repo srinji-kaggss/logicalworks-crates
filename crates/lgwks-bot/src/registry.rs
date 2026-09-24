@@ -212,12 +212,47 @@ impl DomainRegistry {
         find(self.actions, domain_id)
     }
 
+    /// Refuse a registry that declares one identifier twice within a role.
+    ///
+    /// Admission is fallible rather than a `const` assertion because the
+    /// workspace forbids panics, and it lives on the registry rather than the
+    /// macro so a hand-assembled [`DomainRegistry::new`] call is checked the
+    /// same way as a `domains!` declaration. The two roles are checked
+    /// independently: one identifier appearing once as a source and once as an
+    /// action is one domain with two roles, not a duplicate. When a list does
+    /// hold a pair, the first one is named with both positions; a caller
+    /// repairs it and revalidates.
+    ///
+    /// Every build goes through this check, so a broken registry refuses all
+    /// construction — the alternative, letting the first declaration win,
+    /// would make dispatch depend on declaration order.
+    pub fn validate(&self) -> Result<(), BotError> {
+        if let Some((first, second)) = first_duplicate(self.sources) {
+            return Err(BotError::DuplicateDomain {
+                domain: self.sources[first].0.to_owned(),
+                role: "source",
+                first,
+                second,
+            });
+        }
+        if let Some((first, second)) = first_duplicate(self.actions) {
+            return Err(BotError::DuplicateDomain {
+                domain: self.actions[first].0.to_owned(),
+                role: "action",
+                first,
+                second,
+            });
+        }
+        Ok(())
+    }
+
     /// Build the source a spec names, or refuse with the identifier.
     ///
     /// The refusal is typed rather than an `Option` because reaching it means
     /// the spec named a domain this binary cannot run, and a caller that has to
     /// report that should not also have to invent the wording.
     pub fn build_source(&self, domain_id: &str, target: &str) -> Result<Source, BotError> {
+        self.validate()?;
         match self.source(domain_id) {
             Some(ctor) => ctor(target),
             None => Err(BotError::UnregisteredDomain {
@@ -228,6 +263,7 @@ impl DomainRegistry {
 
     /// Build the action a spec names, or refuse with the identifier.
     pub fn build_action(&self, domain_id: &str, target: &str) -> Result<Action, BotError> {
+        self.validate()?;
         match self.action(domain_id) {
             Some(ctor) => ctor(target),
             None => Err(BotError::UnregisteredDomain {
@@ -274,6 +310,21 @@ fn find<T: Copy>(entries: &[(&'static str, T)], domain_id: &str) -> Option<T> {
         }
     }
     found
+}
+
+/// The positions of the first identifier declared twice in one list, or `None`
+/// when the list is distinct. Quadratic in a list of a handful of entries —
+/// the check runs once per build, not per tick — and written with comparisons
+/// rather than index arithmetic, which the workspace lints forbid.
+fn first_duplicate<T: PartialEq>(entries: &[(&'static str, T)]) -> Option<(usize, usize)> {
+    for (first, &(registered, _)) in entries.iter().enumerate() {
+        for (second, &(other, _)) in entries.iter().enumerate() {
+            if second > first && other == registered {
+                return Some((first, second));
+            }
+        }
+    }
+    None
 }
 
 /// Declare the domains a binary can run, in one place.
