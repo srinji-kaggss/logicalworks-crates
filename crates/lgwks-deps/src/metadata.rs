@@ -316,14 +316,18 @@ pub fn parse(text: &str) -> Result<Vec<DirectEdge>, MetadataError> {
 fn lexical_join(base: &Path, relative: &str) -> Option<PathBuf> {
     use std::path::Component;
     let key = Path::new(relative);
-    let mut joined = if key.is_absolute() {
+    // Cargo path keys use `/` on every platform, and `Path::is_absolute`
+    // answers for the host: a leading slash is absolute even where the host
+    // would call it drive-relative (Windows), so the test is syntactic.
+    let standalone = key.is_absolute() || relative.starts_with('/');
+    let mut joined = if standalone {
         PathBuf::new()
     } else {
         base.to_path_buf()
     };
     for component in key.components() {
         match component {
-            Component::Prefix(_) | Component::RootDir if key.is_absolute() => {
+            Component::Prefix(_) | Component::RootDir if standalone => {
                 joined.push(component.as_os_str());
             }
             Component::Prefix(_) | Component::RootDir | Component::CurDir => {}
