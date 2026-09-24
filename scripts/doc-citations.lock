@@ -55,14 +55,14 @@ crates/lgwks-bot/src/rt/runtime.rs:102	let mut builder = lgwks_deps::tokio::runt
 crates/lgwks-bot/src/rt/runtime.rs:105	if self.worker_threads.is_some() && workers.get() > MAX_WORKER_THREADS {
 crates/lgwks-bot/src/rt/supervise.rs:9	//! # Why a task cannot leak
 crates/lgwks-bot/src/rt/supervise.rs:92	//! permits inside a task this supervisor owns can deadlock with itself. The
-crates/lgwks-bot/src/rt/supervise.rs:142	const YIELD_INTERVAL: u64 = 32;
-crates/lgwks-bot/src/rt/supervise.rs:695	/// silent: a cancelled body is reported as an *aborted* one, which is the exact
-crates/lgwks-bot/src/rt/supervise.rs:747	pub fn new(max_in_flight: usize) -> Self {
-crates/lgwks-bot/src/rt/supervise.rs:994	pub async fn spawn_process(&mut self, spec: &ProcessSpec) -> io::Result<TaskId> {
-crates/lgwks-bot/src/rt/supervise.rs:1473	pub async fn repeat<F, Fut>(token: &CancellationToken, budget: Budget, mut body: F) -> Outcome
-crates/lgwks-bot/src/rt/supervise.rs:1486	let deadline = match budget {
-crates/lgwks-bot/src/rt/supervise.rs:1509	match token.run_until_cancelled(body(iterations)).await {
-crates/lgwks-bot/src/rt/supervise.rs:1529	#[cfg(test)]
+crates/lgwks-bot/src/rt/supervise.rs:143	const YIELD_INTERVAL: u64 = 32;
+crates/lgwks-bot/src/rt/supervise.rs:731	/// silent: a cancelled body is reported as an *aborted* one, which is the exact
+crates/lgwks-bot/src/rt/supervise.rs:783	pub fn new(max_in_flight: usize) -> Self {
+crates/lgwks-bot/src/rt/supervise.rs:1044	pub async fn spawn_process(&mut self, spec: &ProcessSpec) -> io::Result<TaskId> {
+crates/lgwks-bot/src/rt/supervise.rs:1590	pub async fn repeat<F, Fut>(token: &CancellationToken, budget: Budget, mut body: F) -> Outcome
+crates/lgwks-bot/src/rt/supervise.rs:1603	let deadline = match budget {
+crates/lgwks-bot/src/rt/supervise.rs:1626	match token.run_until_cancelled(body(iterations)).await {
+crates/lgwks-bot/src/rt/supervise.rs:1646	#[cfg(test)]
 crates/lgwks-bot/src/rt/task.rs:93	where
 crates/lgwks-bot/src/semantic.rs:13	//! This tier is consulted only when the lexicon returns [`Resolution::Absent`] —
 crates/lgwks-bot/src/semantic.rs:117	pub trait Embedder {

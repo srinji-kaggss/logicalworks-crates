@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use lgwks_bot::Runtime;
 use lgwks_bot::rt::process::ProcessSpec;
-use lgwks_bot::rt::supervise::{Supervisor, TaskOutcome};
+use lgwks_bot::rt::supervise::{Supervisor, SupervisorCancelled, TaskOutcome};
 use lgwks_bot::rt::time::{Instant, sleep};
 
 const BUDGET: Duration = Duration::from_secs(10);
@@ -99,6 +99,41 @@ async fn gone(pid: &str) -> bool {
         sleep(Duration::from_millis(5)).await;
     }
     !is_alive(pid)
+}
+
+#[test]
+fn cancel_before_spawn_process_refuses_without_starting_the_command()
+-> Result<(), Box<dyn std::error::Error>> {
+    // The fence sits between the permit and the fork. A supervisor that
+    // checked cancellation only after admission would return an error *and*
+    // have started the command — the marker below would exist even though the
+    // call failed. The refusal must come first: no process, no first
+    // instruction, and the error names the cancellation rather than looking
+    // like a platform failure.
+    let dir = PidDir::new("fenced")?;
+    let marker = dir.file("marker");
+    let script = format!("echo started > {}", marker.display());
+    let runtime = Runtime::new()?;
+    runtime.block_on(async {
+        let mut supervisor = Supervisor::default();
+        supervisor.cancel();
+        let mut spec = ProcessSpec::new("sh");
+        spec.arg("-c").arg(&script);
+        let refused = supervisor.spawn_process(&spec).await;
+        assert!(
+            refused.is_err_and(|error| {
+                error
+                    .get_ref()
+                    .is_some_and(|payload| payload.is::<SupervisorCancelled>())
+            }),
+            "the refusal must be the typed cancellation, not a platform failure"
+        );
+        assert!(
+            !marker.exists(),
+            "a refused command must not have run its first instruction"
+        );
+    });
+    Ok(())
 }
 
 #[test]

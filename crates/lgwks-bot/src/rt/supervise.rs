@@ -118,6 +118,7 @@ use super::cancel::CancellationToken;
 #[cfg(feature = "process")]
 use super::process::ProcessSpec;
 use super::task::{JoinSet, yield_now};
+use std::task::Poll;
 
 /// Iterations one poll of [`repeat`] may complete before it hands the executor
 /// back.
@@ -197,22 +198,58 @@ impl Outcome {
     }
 }
 
-/// Returned by [`Supervisor::try_spawn`] when the in-flight bound is reached.
+/// Why [`Supervisor::try_spawn`] did not start the work it was handed.
 ///
-/// The refusal is counted in [`Stats::refused`]. A caller that inspects neither
-/// this value nor the counter has an unbounded producer and a bounded consumer,
-/// which is a decision to drop work rather than a decision to grow memory.
+/// The two refusals name different worlds: `AtCapacity` means the supervisor
+/// is healthy and full, and the caller should decide between waiting and
+/// dropping; `Cancelled` means the supervisor has stopped admitting, and the
+/// work should go somewhere else entirely. A refusal is counted in
+/// [`Stats::refused`] either way. A caller that inspects neither this value
+/// nor the counter has an unbounded producer and a bounded consumer, which is
+/// a decision to drop work rather than a decision to grow memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct AtCapacity;
+pub enum TrySpawnRefusal {
+    /// Every slot is taken.
+    AtCapacity,
+    /// The supervisor has been cancelled and admits no new work.
+    Cancelled,
+}
 
-impl fmt::Display for AtCapacity {
+impl fmt::Display for TrySpawnRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("the supervisor is at its in-flight bound")
+        // `*self` rather than matching through the reference: the workspace
+        // refuses `clippy::pattern_type_mismatch`, which reads a `Self::`
+        // pattern against `&Self` as one.
+        match *self {
+            Self::AtCapacity => formatter.write_str("the supervisor is at its in-flight bound"),
+            Self::Cancelled => {
+                formatter.write_str("the supervisor is cancelled and admits no new work")
+            }
+        }
     }
 }
 
-impl std::error::Error for AtCapacity {}
+impl std::error::Error for TrySpawnRefusal {}
+
+/// The error inside the [`std::io::Error`] that `Supervisor::spawn_process`
+/// (behind the `process` feature) returns when the supervisor has been
+/// cancelled and admits no process.
+///
+/// Recover it with `io::Error::downcast_ref::<SupervisorCancelled>()`; the
+/// wrapper is an [`std::io::Error`] because the operation's other failure
+/// mode — the platform refusing to start the command — already is one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SupervisorCancelled;
+
+impl fmt::Display for SupervisorCancelled {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("the supervisor is cancelled and admits no new process")
+    }
+}
+
+impl std::error::Error for SupervisorCancelled {}
 
 /// Stable identity of one task a [`Supervisor`] started.
 ///
@@ -850,6 +887,9 @@ impl Supervisor {
         F: FnOnce(CancellationToken) -> Fut,
         Fut: Future<Output = ()> + Send + 'static,
     {
+        // The fence lives in `claim`, which is why the constructor below is
+        // safe to call: a cancelled supervisor never returns a permit, so the
+        // body handed to it is never built. The refusal is counted there.
         let Some(permit) = self.claim().await else {
             return;
         };
@@ -869,21 +909,32 @@ impl Supervisor {
             }
         });
     }
-    /// Place `body` on this supervisor, refusing if the bound is reached.
+    /// Place `body` on this supervisor, refusing if the bound is reached or
+    /// the supervisor is cancelled.
     ///
     /// The non-blocking counterpart to [`Supervisor::spawn`]. A refusal is a
-    /// value, not a silent drop.
+    /// value, not a silent drop, and the two refusals name different worlds:
+    /// [`TrySpawnRefusal::AtCapacity`] is a healthy supervisor that is full,
+    /// while [`TrySpawnRefusal::Cancelled`] is a supervisor that has stopped
+    /// admitting. Either way the body constructor has not run when the refusal
+    /// is returned.
     ///
     /// # Errors
     ///
-    /// [`AtCapacity`] when every slot is taken.
-    pub fn try_spawn<F, Fut>(&mut self, body: F) -> Result<(), AtCapacity>
+    /// [`TrySpawnRefusal::AtCapacity`] when every slot is taken;
+    /// [`TrySpawnRefusal::Cancelled`] once the supervisor has been cancelled.
+    pub fn try_spawn<F, Fut>(&mut self, body: F) -> Result<(), TrySpawnRefusal>
     where
         F: FnOnce(CancellationToken) -> Fut,
         Fut: Future<Output = ()> + Send + 'static,
     {
         let Some(permit) = self.claim_now() else {
-            return Err(AtCapacity);
+            // `claim_now` counted the refusal; which world refused is the one
+            // fact the counter cannot carry, so it is read here for the type.
+            if self.token.is_cancelled() {
+                return Err(TrySpawnRefusal::Cancelled);
+            }
+            return Err(TrySpawnRefusal::AtCapacity);
         };
         let token = self.child_token();
         let future = body(token.clone());
@@ -993,10 +1044,24 @@ impl Supervisor {
     #[cfg(feature = "process")]
     pub async fn spawn_process(&mut self, spec: &ProcessSpec) -> io::Result<TaskId> {
         let Some(permit) = self.claim().await else {
+            // The fence inside `claim` answered for capacity and for
+            // cancellation alike; name which world refused, so a cancelled
+            // supervisor's caller does not read this as a platform failure.
+            if self.token.is_cancelled() {
+                return Err(io::Error::new(io::ErrorKind::Other, SupervisorCancelled));
+            }
             return Err(io::Error::other(
                 "lgwks_bot: the supervisor's in-flight semaphore was closed",
             ));
         };
+        // The recheck at the owned admission point, before the command is
+        // built: a cancelled supervisor never forks, so the first instruction
+        // of a refused command does not run. The permit drops here and the
+        // refusal is counted.
+        if self.token.is_cancelled() {
+            self.refused = self.refused.saturating_add(1);
+            return Err(io::Error::new(io::ErrorKind::Other, SupervisorCancelled));
+        }
         let token = self.child_token();
         let deadline = spec.deadline_duration();
         let mut command = Command::new(spec.program());
@@ -1117,27 +1182,80 @@ impl Supervisor {
 
     /// Take a permit, waiting for one if the bound is reached, and reap first.
     ///
-    /// `None` is a refusal, already counted: the semaphore is never closed by
-    /// this module, so the only reachable refusal is a saturated one.
+    /// `None` is a refusal, already counted. A cancelled supervisor refuses
+    /// before the wait, during the wait, and at the moment a permit lands:
+    /// cancellation is the terminal admission state, and a slot freeing after
+    /// it is not an admission offer. The poll below races the permit against
+    /// the token, and reads cancellation first on every wake, so the race
+    /// between "a slot freed" and "the supervisor was cancelled" is decided
+    /// for cancellation on ties.
     async fn claim(&mut self) -> Option<OwnedSemaphorePermit> {
-        self.reap();
-        match Arc::clone(&self.permits).acquire_owned().await {
-            Ok(permit) => Some(permit),
-            // Unreachable: this supervisor never closes its semaphore, and
-            // `forbid(expect_used)` rules out the assert. Counting it as a
-            // refusal keeps the failure observable instead of silently
-            // swallowed, which a bare `return` would be.
-            Err(_) => {
-                self.refused = self.refused.saturating_add(1);
-                None
-            }
+        // The gate before the wait: a cancelled supervisor never parks on a
+        // full pool, because there is nothing it would do with a slot.
+        if self.token.is_cancelled() {
+            self.refused = self.refused.saturating_add(1);
+            return None;
         }
+        self.reap();
+        let token = &self.token;
+        let refused = &mut self.refused;
+        let mut cancelled = Box::pin(token.cancelled());
+        let mut acquire = Box::pin(Arc::clone(&self.permits).acquire_owned());
+        std::future::poll_fn(move |context| {
+            // Cancellation is polled first on every wake. A pool that frees a
+            // slot in the same wake as a cancel answers `Cancelled` here: the
+            // permit exists, but the supervisor it would be handed to does not
+            // admit anymore.
+            if cancelled.as_mut().poll(context).is_ready() {
+                *refused = refused.saturating_add(1);
+                return Poll::Ready(None);
+            }
+            match acquire.as_mut().poll(context) {
+                // The recheck at the owned admission point: the cancel can
+                // land between the wake that delivered the permit and this
+                // line. Anything admitted here is work the supervisor owns —
+                // the decision is this read, not the caller's check before
+                // the call.
+                Poll::Ready(outcome) => {
+                    if token.is_cancelled() {
+                        *refused = refused.saturating_add(1);
+                        return Poll::Ready(None);
+                    }
+                    match outcome {
+                        Ok(permit) => Poll::Ready(Some(permit)),
+                        // Unreachable: this supervisor never closes its
+                        // semaphore, and `forbid(expect_used)` rules out the
+                        // assert. Counting it as a refusal keeps the failure
+                        // observable instead of silently swallowed.
+                        Err(_) => {
+                            *refused = refused.saturating_add(1);
+                            Poll::Ready(None)
+                        }
+                    }
+                }
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await
     }
 
     /// The non-blocking counterpart of [`Supervisor::claim`].
+    ///
+    /// Cancellation is checked before the pool and again on the permit, so a
+    /// cancelled supervisor refuses even when the pool has room.
     fn claim_now(&mut self) -> Option<OwnedSemaphorePermit> {
+        if self.token.is_cancelled() {
+            self.refused = self.refused.saturating_add(1);
+            return None;
+        }
         self.reap();
-        match Arc::clone(&self.permits).try_acquire_owned() {
+        let acquired = Arc::clone(&self.permits).try_acquire_owned();
+        if self.token.is_cancelled() {
+            // The permit, if it landed, drops here: refusal wins the race.
+            self.refused = self.refused.saturating_add(1);
+            return None;
+        }
+        match acquired {
             Ok(permit) => Some(permit),
             Err(_) => {
                 self.refused = self.refused.saturating_add(1);
@@ -1533,7 +1651,7 @@ where
 )]
 mod tests {
     use super::{
-        AtCapacity, Budget, MAX_PANIC_MESSAGE_CHARS, Outcome, Supervisor, TaskId, TaskOutcome,
+        Budget, MAX_PANIC_MESSAGE_CHARS, Outcome, Supervisor, TaskId, TaskOutcome, TrySpawnRefusal,
         repeat, truncate_panic_message,
     };
     use crate::rt::cancel::CancellationToken;
@@ -1542,7 +1660,7 @@ mod tests {
     use std::future::pending;
     use std::num::NonZeroU64;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::Duration;
 
     /// Panic on the calling task, carrying `message` as the payload.
@@ -1966,6 +2084,125 @@ mod tests {
     }
 
     #[test]
+    fn a_cancelled_supervisor_refuses_admission_without_constructing_the_body() {
+        block_on(async {
+            // Cancellation is the terminal admission state: after it, no body
+            // constructor runs and no slot is taken, on either spawn path. The
+            // constructor is the observable, not the body: a body that writes a
+            // marker or takes a lock would prove the old behavior, where the
+            // constructor ran before anything looked at the token.
+            let mut supervisor = Supervisor::new(2);
+            supervisor.cancel();
+
+            let built = Arc::new(AtomicU64::new(0));
+            supervisor
+                .spawn({
+                    let built = Arc::clone(&built);
+                    move |_token| {
+                        built.fetch_add(1, Ordering::Relaxed);
+                        async {}
+                    }
+                })
+                .await;
+            let stats = supervisor.stats();
+            assert_eq!(
+                built.load(Ordering::Relaxed),
+                0,
+                "a cancelled supervisor must never construct the body it refuses"
+            );
+            assert_eq!(stats.spawned, 0, "a refused spawn must not be placed");
+            assert_eq!(
+                stats.refused, 1,
+                "the waiting-spawn refusal must be counted"
+            );
+
+            let built_now = Arc::new(AtomicU64::new(0));
+            let refused = supervisor.try_spawn({
+                let built_now = Arc::clone(&built_now);
+                move |_token| {
+                    built_now.fetch_add(1, Ordering::Relaxed);
+                    async {}
+                }
+            });
+            assert_eq!(
+                refused,
+                Err(TrySpawnRefusal::Cancelled),
+                "the immediate path must name cancellation, not capacity"
+            );
+            assert_eq!(
+                built_now.load(Ordering::Relaxed),
+                0,
+                "the immediate path must also refuse before the constructor"
+            );
+            assert_eq!(supervisor.stats().refused, 2, "both refusals counted");
+        });
+    }
+
+    #[test]
+    fn cancellation_closes_admission_even_after_a_slot_frees() {
+        block_on(async {
+            // The order is the point: cancel first, then let the only slot
+            // free. A supervisor that checks capacity but not cancellation
+            // admits at the freeing of the slot — the constructor below runs
+            // and the counter moves. The fence must refuse at the owned
+            // admission point regardless of what the pool is doing.
+            let mut supervisor = Supervisor::new(1);
+            let gate = Arc::new(AtomicBool::new(false));
+            let done = Arc::new(AtomicBool::new(false));
+            supervisor
+                .spawn({
+                    let gate = Arc::clone(&gate);
+                    let done = Arc::clone(&done);
+                    move |_token| async move {
+                        while !gate.load(Ordering::Relaxed) {
+                            yield_now().await;
+                        }
+                        done.store(true, Ordering::Relaxed);
+                    }
+                })
+                .await;
+            supervisor.cancel();
+            gate.store(true, Ordering::Relaxed);
+            // Let the occupier finish and its permit return to the pool: the
+            // body's own flag says it ran to its end, and the yields give the
+            // wrapper around it — which holds the permit — the polls it needs
+            // to complete behind it. The supervisor's counters are not the
+            // signal here: a cancelled supervisor stops reaping, but the
+            // permit lives in the task wrapper, not in the counters.
+            for _ in 0..256 {
+                if done.load(Ordering::Relaxed) {
+                    break;
+                }
+                yield_now().await;
+            }
+            assert!(
+                done.load(Ordering::Relaxed),
+                "the occupier must have ended before the admission attempt"
+            );
+
+            let built = Arc::new(AtomicU64::new(0));
+            let refused = supervisor.try_spawn({
+                let built = Arc::clone(&built);
+                move |_token| {
+                    built.fetch_add(1, Ordering::Relaxed);
+                    async {}
+                }
+            });
+            assert_eq!(
+                refused,
+                Err(TrySpawnRefusal::Cancelled),
+                "a freed slot is not an admission offer after cancellation"
+            );
+            assert_eq!(
+                built.load(Ordering::Relaxed),
+                0,
+                "no body may be constructed after cancellation, slot or not"
+            );
+            assert_eq!(supervisor.stats().spawned, 1, "only the occupier ran");
+        });
+    }
+
+    #[test]
     fn try_spawn_refuses_at_the_bound_instead_of_growing() {
         block_on(async {
             // The single slot is held by a body that never resolves, so the
@@ -1978,7 +2215,7 @@ mod tests {
             let refused = supervisor.try_spawn(|_token| async {});
             assert_eq!(
                 refused,
-                Err(AtCapacity),
+                Err(TrySpawnRefusal::AtCapacity),
                 "a second spawn past the bound must be refused, not queued"
             );
             let stats = supervisor.stats();
@@ -2320,7 +2557,7 @@ mod tests {
             );
             assert_eq!(
                 supervisor.try_spawn(|_token| async {}),
-                Err(AtCapacity),
+                Err(TrySpawnRefusal::AtCapacity),
                 "the premise: the bound is genuinely reached"
             );
             let report = supervisor.shutdown().await;

@@ -9,7 +9,7 @@ for a blocking call. The units differ, and so do the guarantees.
 `rt::supervise::Supervisor` (feature `sync`) owns a set of background tasks and
 stops them when it goes away. `Supervisor::new(max_in_flight)` takes the ceiling,
 clamps it into `1..=Semaphore::MAX_PERMITS`, and offers no argument that produces
-an unbounded supervisor (`crates/lgwks-bot/src/rt/supervise.rs:747`).
+an unbounded supervisor (`crates/lgwks-bot/src/rt/supervise.rs:783`).
 `Supervisor::default()` is the constructor for the caller who has no opinion: it
 discovers the ceiling from `std::thread::available_parallelism`, so the safe
 default is the *first* thing that resolves rather than something to remember to
@@ -22,7 +22,7 @@ Four properties, all in the module documentation
   there is nothing to leak.
 - `spawn` awaits a permit before it spawns, so waiting is real backpressure and
   not buffering. The pending work is your own collection.
-- `try_spawn` refuses at the ceiling with `AtCapacity` and counts the refusal in
+- `try_spawn` refuses at the ceiling with `TrySpawnRefusal::AtCapacity` and counts the refusal in
   `Stats::refused`, instead of growing.
 - `Drop` cancels the token and aborts the set. There is no `close()` to forget.
 
@@ -80,7 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `Supervisor::spawn_process(spec)` starts a child under the same in-flight
 ceiling as `spawn`, and returns a `TaskId` — not a `Child`
-(`crates/lgwks-bot/src/rt/supervise.rs:994`). `rt::process::ProcessSpec` lets
+(`crates/lgwks-bot/src/rt/supervise.rs:1044`). `rt::process::ProcessSpec` lets
 you say what to run without exposing an executable engine handle.
 The task this places is the only owner the process has:
 
@@ -117,21 +117,21 @@ Three differences from a raw `Child`:
 ## `repeat`: a bound on iterations
 
 `repeat(&token, budget, body)` is the only loop the module asks you to write, and
-it cannot be written without a `Budget` (`crates/lgwks-bot/src/rt/supervise.rs:1473`).
+it cannot be written without a `Budget` (`crates/lgwks-bot/src/rt/supervise.rs:1590`).
 The variants are `Iterations(NonZeroU64)`, `For(Duration)`, and `Ongoing`.
 
 Two details that decide how tight your bound really is:
 
 - `Budget::For` checks its deadline between iterations, so a body that blocks for
   longer than the budget overruns it by one iteration
-  (`crates/lgwks-bot/src/rt/supervise.rs:1486`). Cancellation is not subject to
+  (`crates/lgwks-bot/src/rt/supervise.rs:1603`). Cancellation is not subject to
   that slack, because it interrupts the body itself.
 - Every iteration races the token rather than checking it between iterations.
   A cancel drops a body that is still awaiting, and the loop reports
   `Outcome::Cancelled` rather than `Outcome::Exhausted`, so a completed run is
   distinguishable from an interrupted one.
 - The loop also yields the executor every `YIELD_INTERVAL` iterations
-  (`crates/lgwks-bot/src/rt/supervise.rs:142`), which is what keeps a body whose
+  (`crates/lgwks-bot/src/rt/supervise.rs:143`), which is what keeps a body whose
   future is ready on its first poll from turning the whole loop into one
   uninterruptible poll. Without it a cancel ordered by another task could not be
   delivered until the budget ran out, and on a current-thread runtime the
@@ -182,7 +182,7 @@ not how quickly the OS tears the group down.
 
 **Cancellation drops a future. That is not the same as stopping a thread.** The
 implementation races each iteration with `token.run_until_cancelled(body(...))`
-(`crates/lgwks-bot/src/rt/supervise.rs:1509`), which drops the body's future. A
+(`crates/lgwks-bot/src/rt/supervise.rs:1626`), which drops the body's future. A
 body that is awaiting returns promptly. What happens to work a body handed to
 another thread is not established by the inspected source: `spawn_blocking`
 spawns an OS thread and offers no abort, and its documented bound is a thread per
@@ -205,7 +205,7 @@ The grace is time and not a count of yields, which matters on a multi-threaded
 runtime: `yield_now` only reschedules the yielding task, so it cannot give a body
 parked on another worker the thread wakeup its return actually needs, and a
 counted grace reported cancelled work as aborted
-(`crates/lgwks-bot/src/rt/supervise.rs:695`). A body that returns is settled the
+(`crates/lgwks-bot/src/rt/supervise.rs:731`). A body that returns is settled the
 moment it does, so the grace is a ceiling on the wait and not a cost charged to
 every shutdown.
 
@@ -215,7 +215,7 @@ and `spawn_blocking` are for a build with no async runtime. There is a
 
 ## What the tests exercise
 
-`crates/lgwks-bot/src/rt/supervise.rs:1529` runs the module's own tests under the
+`crates/lgwks-bot/src/rt/supervise.rs:1646` runs the module's own tests under the
 ordinary workspace test run. They cover an iteration budget stopping at its
 limit, an `Ongoing` budget stopping at a cancel, cancellation interrupting a body
 that is still awaiting, `try_spawn` refusing at the bound rather than growing,
