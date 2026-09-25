@@ -79,12 +79,24 @@ pub struct WalkOmission {
 #[non_exhaustive]
 pub struct WalkReport {
     /// Every entry the policy admitted, in walk order.
-    pub entries: Vec<PathBuf>,
+    entries: Vec<PathBuf>,
     /// Every place the walk came back short, in walk order.
-    pub omissions: Vec<WalkOmission>,
+    omissions: Vec<WalkOmission>,
 }
 
 impl WalkReport {
+    /// Every entry the policy admitted, in walk order.
+    #[must_use]
+    pub fn entries(&self) -> &[PathBuf] {
+        &self.entries
+    }
+
+    /// Every place the walk came back short, in walk order.
+    #[must_use]
+    pub fn omissions(&self) -> &[WalkOmission] {
+        &self.omissions
+    }
+
     /// Whether the walk covered the whole tree: no omissions recorded.
     #[must_use]
     pub fn is_complete(&self) -> bool {
@@ -748,16 +760,16 @@ mod tests {
         let report = walk_dir_tolerant(locked_parent(&locked)?, &WalkOptions::default())?;
         unlock(&locked)?;
         assert!(
-            report.entries.iter().any(|path| path.ends_with("ok.txt")),
+            report.entries().iter().any(|path| path.ends_with("ok.txt")),
             "readable entries must survive an unlistable sibling"
         );
         assert!(
             !report.is_complete(),
             "one omission must mark the report incomplete"
         );
-        assert_eq!(report.omissions.len(), 1);
-        assert_eq!(report.omissions[0].stage, OmissionStage::ReadEntries);
-        assert_eq!(report.omissions[0].path, locked);
+        assert_eq!(report.omissions().len(), 1);
+        assert_eq!(report.omissions()[0].stage, OmissionStage::ReadEntries);
+        assert_eq!(report.omissions()[0].path, locked);
         Ok(())
     }
 
@@ -766,7 +778,7 @@ mod tests {
         let tmp = tmp_tree()?;
         let strict = walk_dir(tmp.path().join("a"), &WalkOptions::default())?;
         let report = walk_dir_tolerant(tmp.path().join("a"), &WalkOptions::default())?;
-        assert_eq!(report.entries, strict);
+        assert_eq!(report.entries(), strict);
         assert!(report.is_complete());
         Ok(())
     }
@@ -801,19 +813,19 @@ mod tests {
 
         let report = walk_dir_tolerant(tmp.path(), &WalkOptions::default())?;
         assert_eq!(
-            report.entries.len(),
+            report.entries().len(),
             0,
             "the unproved target is not reported"
         );
         assert_eq!(
-            report.omissions.len(),
+            report.omissions().len(),
             1,
             "the unread target is visible once"
         );
-        assert_eq!(report.omissions[0].path, link);
-        assert_eq!(report.omissions[0].stage, OmissionStage::SymlinkTarget);
+        assert_eq!(report.omissions()[0].path, link);
+        assert_eq!(report.omissions()[0].stage, OmissionStage::SymlinkTarget);
         assert_eq!(
-            report.omissions[0].error.kind(),
+            report.omissions()[0].error.kind(),
             std::io::ErrorKind::NotFound
         );
         assert!(!report.is_complete());
