@@ -79,6 +79,21 @@ pub use file::{Corruption, CorruptionKind, FileJournal};
 /// head cannot be mistaken for the hash of an empty or zeroed event.
 const GENESIS_DOMAIN: &[u8] = b"lgwks.journal.v1.genesis";
 
+/// Hard ceiling on events retained by either shipped journal adapter.
+///
+/// The full history remains available; once this count is reached, new events
+/// are refused rather than deleting facts needed to resolve an effect or
+/// deduplicate a retry. The journal path is full until its owner performs an
+/// explicitly safe handoff to a distinct run and journal; this adapter does not
+/// compact or rotate it automatically.
+pub const MAX_JOURNAL_EVENTS: usize = 100_000;
+
+/// Hard ceiling on encoded frame bytes retained by either shipped adapter.
+///
+/// The memory adapter applies the same logical-frame accounting even though it
+/// retains entries and indexes rather than framed byte buffers.
+pub const MAX_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
+
 /// What a journal can promise about an append that it has acknowledged.
 ///
 /// Ordered from weakest to strongest, and compared by that order: a caller that
@@ -210,6 +225,16 @@ pub enum EventKind {
     OutcomeObserved,
     /// A named predicate was evaluated and produced a result.
     Verified,
+}
+
+/// Which journal resource reached its hard admission ceiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum JournalLimitKind {
+    /// Number of retained events.
+    Events,
+    /// Encoded frame bytes admitted to the journal history.
+    Bytes,
 }
 
 impl EventKind {
@@ -496,6 +521,18 @@ pub enum JournalError {
     /// because a wrapped sequence would make two positions compare equal and
     /// defeat the guard the position exists to provide.
     Exhausted,
+    /// Appending or opening would exceed a shipped journal's hard history cap.
+    ///
+    /// The refusal is non-destructive: committed and unresolved evidence is
+    /// retained, and an over-limit file is not truncated to make it fit.
+    CapacityExceeded {
+        /// Which finite resource would exceed its ceiling.
+        resource: JournalLimitKind,
+        /// The resource's configured hard ceiling.
+        limit: u64,
+        /// The amount required by the refused operation or existing file.
+        requested: u64,
+    },
     /// Another writer holds the journal file's exclusive fence.
     ///
     /// The refusal carries the path because the fix is about *when* to open,
@@ -617,6 +654,14 @@ impl fmt::Display for JournalError {
                 ),
             },
             Self::Exhausted => f.write_str("journal position exhausted"),
+            Self::CapacityExceeded {
+                resource,
+                limit,
+                requested,
+            } => write!(
+                f,
+                "journal {resource:?} limit exceeded: limit {limit}, requested {requested}"
+            ),
             Self::Locked { ref path } => write!(
                 f,
                 "journal at {path} is held by another writer; \
@@ -720,6 +765,11 @@ pub trait EffectJournal {
     /// and a partial replay answers "what is uncertain" with a subset — which
     /// reads as "nothing is uncertain" for every attempt in the part that was
     /// not read.
+    ///
+    /// Shipped adapters enforce [`MAX_JOURNAL_EVENTS`] and
+    /// [`MAX_JOURNAL_BYTES`]. They refuse new history at the cap instead of
+    /// deleting old or unresolved events. External adapters remain responsible
+    /// for bounding their own backing store and returned vector.
     ///
     /// # Errors
     ///
@@ -1166,10 +1216,12 @@ pub fn verify_chain(entries: &[JournalEntry]) -> Result<JournalPosition, ChainBr
 /// An in-memory journal, for tests and for runs whose effects never leave the
 /// process.
 ///
-/// It reports [`DurabilityPromise::Ephemeral`] and therefore cannot be the
-/// record behind an external handoff. That is the whole reason it exists as a
-/// named type rather than as a default: a caller that reaches for it gets a
-/// refusal at the boundary instead of a green test that means nothing.
+/// It retains at most [`MAX_JOURNAL_EVENTS`] events and refuses the next append
+/// without changing committed state. It reports [`DurabilityPromise::Ephemeral`]
+/// and therefore cannot be the record behind an external handoff. That is the
+/// whole reason it exists as a named type rather than as a default: a caller
+/// that reaches for it gets a refusal at the boundary instead of a green test
+/// that means nothing.
 #[derive(Debug, Clone)]
 pub struct MemoryJournal {
     /// Every committed entry, in append order.
@@ -1184,6 +1236,8 @@ pub struct MemoryJournal {
     ladder: std::collections::HashMap<EffectKey, EventKind>,
     /// Latest durable outcome and its exact position per attempt.
     outcomes: std::collections::HashMap<EffectKey, (JournalPosition, EffectEvidence)>,
+    /// Encoded frame bytes admitted, kept in step with `committed`.
+    committed_bytes: u64,
 }
 
 impl Default for MemoryJournal {
@@ -1200,6 +1254,7 @@ impl MemoryJournal {
             committed: Vec::new(),
             ladder: std::collections::HashMap::new(),
             outcomes: std::collections::HashMap::new(),
+            committed_bytes: 0,
         }
     }
 
@@ -1305,6 +1360,29 @@ impl EffectJournal for MemoryJournal {
                 attempted,
             });
         }
+        let requested_events = u64::try_from(self.committed.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        if requested_events > u64::try_from(MAX_JOURNAL_EVENTS).unwrap_or(u64::MAX) {
+            return Err(JournalError::CapacityExceeded {
+                resource: JournalLimitKind::Events,
+                limit: u64::try_from(MAX_JOURNAL_EVENTS).unwrap_or(u64::MAX),
+                requested: requested_events,
+            });
+        }
+        let payload_len = u64::try_from(event.to_bytes().map_err(JournalError::Encoding)?.len())
+            .unwrap_or(u64::MAX);
+        let requested_bytes = self
+            .committed_bytes
+            .saturating_add(payload_len)
+            .saturating_add(36);
+        if requested_bytes > MAX_JOURNAL_BYTES {
+            return Err(JournalError::CapacityExceeded {
+                resource: JournalLimitKind::Bytes,
+                limit: MAX_JOURNAL_BYTES,
+                requested: requested_bytes,
+            });
+        }
         let sequence = actual
             .sequence()
             .checked_add(1)
@@ -1314,6 +1392,7 @@ impl EffectJournal for MemoryJournal {
             head: chain(actual, event)?,
         };
         self.committed.push(JournalEntry::new(position, *event));
+        self.committed_bytes = requested_bytes;
         self.ladder.insert(key, attempted);
         if let EffectEvent::OutcomeObserved { evidence, .. } = *event {
             self.outcomes.insert(key, (position, evidence));
@@ -1389,6 +1468,38 @@ mod tests {
     ) -> Result<DurableAck, Box<dyn std::error::Error>> {
         let tail = journal.tail();
         Ok(journal.compare_and_append(tail, &event)?)
+    }
+
+    #[test]
+    fn memory_journal_refuses_history_beyond_its_declared_limit() -> TestResult {
+        let mut journal = MemoryJournal::new();
+        for attempt in 1_u64..=100_000 {
+            let key = key(&attempt.to_string(), "1")?;
+            journal.compare_and_append(journal.tail(), &EffectEvent::IntentAdmitted { key })?;
+        }
+
+        let extra_key = key("100001", "1")?;
+        let extra = journal.compare_and_append(
+            journal.tail(),
+            &EffectEvent::IntentAdmitted { key: extra_key },
+        );
+        assert!(
+            matches!(
+                &extra,
+                Err(JournalError::CapacityExceeded {
+                    resource: JournalLimitKind::Events,
+                    limit: 100_000,
+                    requested: 100_001,
+                })
+            ),
+            "the refusal names both the hard limit and requested size: {extra:?}"
+        );
+        assert_eq!(
+            journal.committed().len(),
+            100_000,
+            "history must remain complete at the declared limit; extra append was {extra:?}"
+        );
+        Ok(())
     }
 
     /// Walk one attempt to the point where the irreversible boundary is next.

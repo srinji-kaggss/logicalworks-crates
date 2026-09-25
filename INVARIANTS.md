@@ -70,6 +70,13 @@ Each of these was a shipped defect. Treat the list as the spec.
   release capacity and emit an attributed terminal receipt. · why: #143 R10
   ownerless-cleanup finding · enforced by: `rt::supervise::tests` and
   `tests/rt_process.rs`
+- **INV-BOT-14** Shipped journals refuse appends and opens beyond their explicit
+  event/byte ceilings without deleting or partially replaying committed or
+  unresolved evidence. · why: #143 R06 · enforced by:
+  `journal::tests::memory_journal_refuses_history_beyond_its_declared_limit`,
+  `file::tests::scanning_refuses_a_complete_event_beyond_the_limit`,
+  `file::tests::batch_admission_refuses_history_over_the_event_limit_without_writing`,
+  and `file::tests::open_refuses_an_over_limit_file_without_truncating_it`
 
 ## lgwks_std
 
