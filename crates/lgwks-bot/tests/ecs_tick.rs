@@ -1068,6 +1068,47 @@ struct Dial {
     value: Rc<Cell<u32>>,
 }
 
+/// A source that counts real public-interface polls and can refuse once.
+struct PollProbe {
+    /// Stable public domain identity.
+    domain: &'static str,
+    /// The value returned after any one-shot refusal.
+    value: u32,
+    /// Number of calls made through `Bot::tick`.
+    polls: Rc<Cell<usize>>,
+    /// Whether this source's next poll must refuse.
+    refuse_next: Rc<Cell<bool>>,
+}
+
+impl Observe for PollProbe {
+    type Output = u32;
+
+    fn required_caps(&self) -> &[Cap] {
+        &[]
+    }
+
+    async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+        call.0.check(Observe::required_caps(self))?;
+        self.polls.set(self.polls.get().saturating_add(1));
+        if self.refuse_next.replace(false) {
+            return Err(BotError::DomainError {
+                domain: self.domain.to_owned(),
+                certainty: DispatchCertainty::NotDelivered,
+                cause: "one-shot poll refusal".to_owned(),
+            });
+        }
+        Ok(self.value)
+    }
+
+    fn fingerprint(&self) -> Option<u128> {
+        Some(u128::from(self.value))
+    }
+
+    fn domain_id(&self) -> &str {
+        self.domain
+    }
+}
+
 impl Observe for Dial {
     type Output = u32;
 
@@ -1474,6 +1515,66 @@ impl Execute for Noted {
     fn domain_id(&self) -> &str {
         "test::noted"
     }
+}
+
+/// A sibling's first refusal must not publish or cache away this source's
+/// successful observation; the next public tick must poll it again and run
+/// the action with the exact observed value.
+#[test]
+fn a_successful_public_poll_is_not_lost_when_a_sibling_refuses() -> TestResult {
+    let successful_polls = Rc::new(Cell::new(0));
+    let failing_polls = Rc::new(Cell::new(0));
+    let refuse_next = Rc::new(Cell::new(true));
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let mut bot = Bot::builder("poll-sibling-recovery")
+        .observe(PollProbe {
+            domain: "test::poll_success",
+            value: 17,
+            polls: Rc::clone(&successful_polls),
+            refuse_next: Rc::new(Cell::new(false)),
+        })
+        .on(|_observed: &u32| true, Noted(Rc::clone(&seen)))
+        .observe(PollProbe {
+            domain: "test::poll_refuses_once",
+            value: 23,
+            polls: Rc::clone(&failing_polls),
+            refuse_next: Rc::clone(&refuse_next),
+        })
+        .on(|_observed: &u32| true, Noted(Rc::clone(&seen)))
+        .with_effects(test_effects()?)
+        .build(&GrantSet::empty())?;
+
+    let first = bot.tick();
+    assert!(
+        matches!(first, Err(BotError::DomainError { ref domain, .. }) if domain == "test::poll_refuses_once"),
+        "the first tick must report the sibling's exact refusal, got {first:?}"
+    );
+    assert!(
+        seen.borrow().is_empty(),
+        "an aborted observation admits no action"
+    );
+
+    assert_eq!(
+        bot.tick()?,
+        2,
+        "both recovered observations reach their actions"
+    );
+    assert_eq!(
+        successful_polls.get(),
+        2,
+        "the good sibling is polled again on recovery"
+    );
+    assert_eq!(
+        failing_polls.get(),
+        2,
+        "the refusing sibling is retried on recovery"
+    );
+    assert_eq!(
+        *seen.borrow(),
+        vec![17, 23],
+        "actions consume the actual successful values in source order"
+    );
+    Ok(())
 }
 
 /// An abandoned entry is never a quiet tick.

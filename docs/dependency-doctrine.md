@@ -93,7 +93,7 @@ Import from the in-tree column. "Feature" is the `lgwks_std` cargo feature.
 | `getrandom`, `rand` (entropy) | `lgwks_std::random` | `random` | OS CSPRNG only; no distributions |
 | `chrono`, `time` | `lgwks_std::time` | core | UTC RFC 3339 + proleptic Gregorian calendar; no IANA time zones |
 | `glob` | `lgwks_std::glob` | core | matching only; traversal is `fs` |
-| `walkdir` | `lgwks_std::fs::walk_dir` | core | depth-bounded, symlink-sandboxed |
+| `walkdir` | `lgwks_std::fs::walk_dir` | core | depth-bounded, best-effort trusted-tree listing; not a race-safe sandbox |
 | `fs4`, raw `statvfs` | `lgwks_std::fs::available_space` | `fs-raw` | Unix; explicit `Unsupported` elsewhere |
 | `regex` | `lgwks_std::pattern::Regex` | `pattern` | compile-once, linear-time |
 | `blake3` | `lgwks_std::hash` | `hash` | BLAKE3 only; no SHA-2 |

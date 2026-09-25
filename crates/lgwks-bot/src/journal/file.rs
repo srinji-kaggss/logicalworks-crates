@@ -35,8 +35,11 @@
 //! One frame may not exceed [`MAX_FRAME_BYTES`]; a journal whose events were
 //! always a key plus a verdict cannot approach it, so an over-long length
 //! field is read as a torn write rather than as data. The scan is streaming:
-//! the file is never loaded whole, and the loop is bounded by the file's own
-//! length because every iteration consumes at least one byte.
+//! the file's bytes are never loaded whole, and the loop is bounded by the
+//! file's own length because every iteration consumes at least one byte. The
+//! shipped adapter also retains the complete decoded history, so it refuses
+//! files above [`MAX_JOURNAL_BYTES`] or [`MAX_JOURNAL_EVENTS`] rather than
+//! truncate, compact, or partially replay them.
 //!
 //! # Concurrency
 //!
@@ -58,8 +61,8 @@ use std::path::{Path, PathBuf};
 
 use super::{
     ChainBreak, DurabilityPromise, DurableAck, EffectEvent, EffectEvidence, EffectJournal,
-    EventKind, JournalEntry, JournalError, JournalPosition, Recovered, chain, next_allowed_of,
-    recover,
+    EventKind, JournalEntry, JournalError, JournalLimitKind, JournalPosition, MAX_JOURNAL_BYTES,
+    MAX_JOURNAL_EVENTS, Recovered, chain, next_allowed_of, recover,
 };
 use lgwks_std::wire::{WireError, from_bytes};
 
@@ -286,6 +289,7 @@ fn resolve_ambiguous_tail(
 fn scan(
     reader: &mut impl Read,
     previous: JournalPosition,
+    max_events: usize,
 ) -> Result<(Vec<JournalEntry>, ScanStop), JournalError> {
     let mut entries = Vec::new();
     let mut position = previous;
@@ -298,7 +302,18 @@ fn scan(
             Some(read_len) if read_len < LENGTH_BYTES => {
                 return Ok((entries, ScanStop::Torn(offset)));
             }
-            Some(_) => {}
+            Some(_) => {
+                let requested = u64::try_from(entries.len())
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(1);
+                if requested > u64::try_from(max_events).unwrap_or(u64::MAX) {
+                    return Err(JournalError::CapacityExceeded {
+                        resource: JournalLimitKind::Events,
+                        limit: u64::try_from(max_events).unwrap_or(u64::MAX),
+                        requested,
+                    });
+                }
+            }
         }
         let payload_len = usize::try_from(u32::from_be_bytes(prefix)).unwrap_or(usize::MAX);
         if payload_len == 0 || payload_len > MAX_FRAME_BYTES {
@@ -457,7 +472,9 @@ impl FileJournal {
     ///
     /// [`JournalError::Locked`] when another writer holds the file;
     /// [`JournalError::Storage`] when the file cannot be opened, read or
-    /// repaired; [`JournalError::Corrupt`] when committed bytes are refused.
+    /// repaired; [`JournalError::Corrupt`] when committed bytes are refused;
+    /// [`JournalError::CapacityExceeded`] when the complete history exceeds
+    /// [`MAX_JOURNAL_BYTES`] or [`MAX_JOURNAL_EVENTS`].
     pub fn open(path: impl AsRef<Path>) -> Result<Self, JournalError> {
         let path = path.as_ref().to_path_buf();
         let mut file = OpenOptions::new()
@@ -477,9 +494,18 @@ impl FileJournal {
             std::fs::TryLockError::Error(io) => JournalError::Storage(io),
         })?;
 
+        let file_len = file.metadata().map_err(JournalError::Storage)?.len();
+        if file_len > MAX_JOURNAL_BYTES {
+            return Err(JournalError::CapacityExceeded {
+                resource: JournalLimitKind::Bytes,
+                limit: MAX_JOURNAL_BYTES,
+                requested: file_len,
+            });
+        }
+
         file.seek_read_zero()?;
         let mut reader = BufReader::new(&mut file);
-        let (entries, stop) = scan(&mut reader, JournalPosition::genesis())?;
+        let (entries, stop) = scan(&mut reader, JournalPosition::genesis(), MAX_JOURNAL_EVENTS)?;
         drop(reader);
 
         let (acked_len, torn_tail_repaired) = match stop {
@@ -648,6 +674,16 @@ impl FileJournal {
         if events.is_empty() {
             return Ok(Vec::new());
         }
+        let requested_events = u64::try_from(self.committed.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(u64::try_from(events.len()).unwrap_or(u64::MAX));
+        if requested_events > u64::try_from(MAX_JOURNAL_EVENTS).unwrap_or(u64::MAX) {
+            return Err(JournalError::CapacityExceeded {
+                resource: JournalLimitKind::Events,
+                limit: u64::try_from(MAX_JOURNAL_EVENTS).unwrap_or(u64::MAX),
+                requested: requested_events,
+            });
+        }
 
         // Validate and frame every rung against the evolving view before any
         // byte moves: the staged kinds for keys this batch is itself climbing
@@ -690,12 +726,24 @@ impl FileJournal {
                     "the event exceeds this journal's frame bound",
                 ))
             })?;
-            frames.extend_from_slice(&payload_len.to_be_bytes());
-            frames.extend_from_slice(&payload);
-            frames.extend_from_slice(head.as_bytes());
             let frame_len = LENGTH_BYTES
                 .saturating_add(payload.len())
                 .saturating_add(HEAD_BYTES);
+            let frame_len_u64 = u64::try_from(frame_len).unwrap_or(u64::MAX);
+            let staged_bytes = u64::try_from(frames.len())
+                .unwrap_or(u64::MAX)
+                .saturating_add(frame_len_u64);
+            let requested_bytes = self.disk_len.saturating_add(staged_bytes);
+            if requested_bytes > MAX_JOURNAL_BYTES {
+                return Err(JournalError::CapacityExceeded {
+                    resource: JournalLimitKind::Bytes,
+                    limit: MAX_JOURNAL_BYTES,
+                    requested: requested_bytes,
+                });
+            }
+            frames.extend_from_slice(&payload_len.to_be_bytes());
+            frames.extend_from_slice(&payload);
+            frames.extend_from_slice(head.as_bytes());
             pending.push((position, frame_len));
         }
 
@@ -799,6 +847,16 @@ impl EffectJournal for FileJournal {
                 attempted,
             });
         }
+        let requested_events = u64::try_from(self.committed.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        if requested_events > u64::try_from(MAX_JOURNAL_EVENTS).unwrap_or(u64::MAX) {
+            return Err(JournalError::CapacityExceeded {
+                resource: JournalLimitKind::Events,
+                limit: u64::try_from(MAX_JOURNAL_EVENTS).unwrap_or(u64::MAX),
+                requested: requested_events,
+            });
+        }
         // The staleness fence: the file on the disk must still be exactly the
         // prefix this controller holds, or the controller's view is stale and
         // its append would branch the chain. A write this handle already
@@ -848,6 +906,16 @@ impl EffectJournal for FileJournal {
         frame.extend_from_slice(&payload_len.to_be_bytes());
         frame.extend_from_slice(&payload);
         frame.extend_from_slice(head.as_bytes());
+        let requested_bytes = self
+            .disk_len
+            .saturating_add(u64::try_from(frame.len()).unwrap_or(u64::MAX));
+        if requested_bytes > MAX_JOURNAL_BYTES {
+            return Err(JournalError::CapacityExceeded {
+                resource: JournalLimitKind::Bytes,
+                limit: MAX_JOURNAL_BYTES,
+                requested: requested_bytes,
+            });
+        }
 
         // The write and the sync happen through the shared door before the
         // acknowledgment: after this returns, the bytes are through the file
@@ -1422,7 +1490,7 @@ mod tests {
                 inner: std::io::Cursor::new(frame.clone()),
                 serve,
             };
-            match scan(&mut faulty, JournalPosition::genesis()) {
+            match scan(&mut faulty, JournalPosition::genesis(), MAX_JOURNAL_EVENTS) {
                 Err(JournalError::Storage(_)) => {}
                 Err(other) => {
                     return Err(format!(
@@ -1438,6 +1506,116 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn scanning_refuses_a_complete_event_beyond_the_limit() -> TestResult {
+        let first = EffectEvent::IntentAdmitted {
+            key: attempt_key(1)?,
+        };
+        let second = EffectEvent::IntentAdmitted {
+            key: attempt_key(2)?,
+        };
+        let genesis = JournalPosition::genesis();
+        let first_position = JournalPosition {
+            sequence: 1,
+            head: chain(genesis, &first)?,
+        };
+        let mut bytes = frame_bytes(genesis, &first)?;
+        bytes.extend_from_slice(&frame_bytes(first_position, &second)?);
+        let mut reader = std::io::Cursor::new(bytes);
+
+        match scan(&mut reader, genesis, 1) {
+            Err(JournalError::CapacityExceeded {
+                resource: JournalLimitKind::Events,
+                limit,
+                requested,
+            }) => {
+                assert_eq!(limit, 1);
+                assert_eq!(requested, 2);
+            }
+            Err(other) => return Err(format!("expected event-limit refusal, got {other}").into()),
+            Ok((entries, _)) => {
+                return Err(format!(
+                    "two frames under a one-event limit must refuse, retained {}",
+                    entries.len()
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn open_refuses_an_over_limit_file_without_truncating_it() -> TestResult {
+        let path = scratch("byte-limit");
+        let _guard = TempGuard(path.clone());
+        let file = File::create(&path)?;
+        let requested = MAX_JOURNAL_BYTES.saturating_add(1);
+        file.set_len(requested)?;
+        drop(file);
+
+        match FileJournal::open(&path) {
+            Err(JournalError::CapacityExceeded {
+                resource: JournalLimitKind::Bytes,
+                limit,
+                requested: actual,
+            }) => {
+                assert_eq!(limit, MAX_JOURNAL_BYTES);
+                assert_eq!(actual, requested);
+            }
+            Err(other) => return Err(format!("expected byte-limit refusal, got {other}").into()),
+            Ok(_) => return Err("an over-limit journal must not be opened".into()),
+        }
+        assert_eq!(
+            std::fs::metadata(&path)?.len(),
+            requested,
+            "capacity refusal preserves the existing file byte-for-byte in length"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn batch_admission_refuses_history_over_the_event_limit_without_writing() -> TestResult {
+        let path = scratch("event-limit");
+        let _guard = TempGuard(path.clone());
+        let requested = MAX_JOURNAL_EVENTS.saturating_add(1);
+        let mut events = Vec::new();
+        for attempt in 1..=requested {
+            events.push(EffectEvent::IntentAdmitted {
+                key: attempt_key(u64::try_from(attempt)?)?,
+            });
+        }
+        let mut journal = FileJournal::open(&path)?;
+
+        match journal.compare_and_append_all(&events) {
+            Err(JournalError::CapacityExceeded {
+                resource: JournalLimitKind::Events,
+                limit,
+                requested: actual,
+            }) => {
+                assert_eq!(limit, u64::try_from(MAX_JOURNAL_EVENTS)?);
+                assert_eq!(actual, u64::try_from(requested)?);
+            }
+            Err(other) => return Err(format!("expected event-limit refusal, got {other}").into()),
+            Ok(acks) => {
+                return Err(format!(
+                    "over-limit batch must refuse before write, returned {} acknowledgments",
+                    acks.len()
+                )
+                .into());
+            }
+        }
+        assert!(
+            journal.committed()?.is_empty(),
+            "refused batch leaves the complete prior history unchanged"
+        );
+        assert_eq!(
+            std::fs::metadata(&path)?.len(),
+            0,
+            "refused batch writes no partial prefix"
+        );
         Ok(())
     }
 
