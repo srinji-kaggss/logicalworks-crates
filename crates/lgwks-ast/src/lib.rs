@@ -598,28 +598,32 @@ fn inspect_ast_with_pending<'t, L: LanguageExt>(
     stop_after_nodes: Option<usize>,
 ) -> (AstMetrics, usize) {
     let mut metrics = AstMetrics::default();
-    // Frame = (node, depth, next child index). `Node::child` obtains only
-    // the requested child, avoiding an eager `children().collect()` or a
-    // push of every sibling into a frontier.
-    let mut frames = vec![(root.clone(), 1_usize, 0_usize)];
+    // Frame = (node, depth, remaining child index). Visiting the next lower
+    // index preserves the former stack walk's reverse-sibling order without
+    // enqueuing the sibling frontier.
+    let mut frames = vec![(root.clone(), 1_usize, root.children().len())];
     let mut peak_frames = 1;
     metrics = metrics.including(root, 1);
     if stop_after_nodes.is_some_and(|limit| metrics.nodes > limit) {
         return (metrics, peak_frames);
     }
     while let Some(frame) = frames.last_mut() {
-        let next_child = frame.0.child(frame.2);
-        let Some(child) = next_child else {
+        let Some(child_index) = frame.2.checked_sub(1) else {
             frames.pop();
             continue;
         };
-        frame.2 = frame.2.saturating_add(1);
+        frame.2 = child_index;
+        let next_child = frame.0.child(child_index);
+        let Some(child) = next_child else {
+            continue;
+        };
         let child_depth = frame.1.saturating_add(1);
         metrics = metrics.including(&child, child_depth);
         if stop_after_nodes.is_some_and(|limit| metrics.nodes > limit) {
             break;
         }
-        frames.push((child, child_depth, 0));
+        let child_count = child.children().len();
+        frames.push((child, child_depth, child_count));
         peak_frames = peak_frames.max(frames.len());
     }
     (metrics, peak_frames)
@@ -697,6 +701,24 @@ mod tests {
         assert_eq!(
             peak_frames, 1,
             "the overflow witness is counted without enqueuing its siblings"
+        );
+    }
+
+    #[test]
+    fn a_node_budget_preserves_the_existing_reverse_sibling_order() {
+        let parsed = parse("fn okay() {}\n@\n", Language::Rust);
+        let root = parsed.root();
+        assert!(
+            root.children().last().is_some_and(|node| node.is_error()),
+            "the fixture puts a recovery node in the last root-child position"
+        );
+
+        let metrics = inspect_ast(&root, Some(1));
+
+        assert_eq!(metrics.nodes, 2, "the overflow witness is counted");
+        assert!(
+            metrics.has_syntax_issues,
+            "reverse-sibling traversal encounters the last root child first"
         );
     }
 
