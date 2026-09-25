@@ -49,9 +49,9 @@ pub enum OmissionStage {
     EntryType,
     /// A symlink target could not be read or resolved for the root policy.
     SymlinkTarget,
-    /// A directory whose identity (canonical path within the root) could
+    /// A directory whose canonical path within the root could
     /// not be established before the read or no longer held after it.
-    DirectoryIdentity,
+    DirectoryResolution,
 }
 
 /// One place the walk came back short of complete coverage.
@@ -108,8 +108,8 @@ impl WalkReport {
 ///
 /// Strict is the fail-closed mode: the first omission refuses the whole
 /// walk. Tolerant records the omission and continues with the rest of the
-/// tree. The root's own identity is not omittable in either mode: without a
-/// resolved root there is no sandbox to be inside of, so both modes refuse.
+/// tree. Root resolution is not omittable in either mode: without a resolved
+/// root path neither mode can apply its root-bounded symlink policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WalkMode {
     /// Refuse the first incomplete observation.
@@ -141,10 +141,10 @@ struct WalkContext<'a> {
 /// Recursively walks `root` according to `options`, returning all matching entries.
 ///
 /// This is the strict walk: any omission — an unreadable directory entry,
-/// an unstated file type, a directory whose identity cannot be proved —
+/// an unstated file type, or a directory path that cannot be resolved —
 /// refuses the whole walk rather than returning a silent subset. The root
 /// itself must resolve: an unresolvable root is an error, never a walk with
-/// no root identity. Successfully resolved symlink targets outside the root
+/// no root path. Successfully resolved symlink targets outside the root
 /// and already visited directories are policy exclusions; unresolved symlink
 /// targets are omissions. Use
 /// [`walk_dir_tolerant`] for the same walk with omissions reported instead
@@ -175,8 +175,8 @@ pub fn walk_dir(root: impl AsRef<Path>, options: &WalkOptions) -> io::Result<Vec
 /// The tolerant walk returns every admitted entry together with every place
 /// it came back short. [`WalkReport::is_complete`] tells a complete scan
 /// from a partial one. Like the strict walk, an unresolvable root refuses:
-/// tolerance covers coverage loss inside the tree, not the absence of the
-/// tree's own identity.
+/// tolerance covers coverage loss inside the tree, not failure to resolve
+/// the tree's root path.
 pub fn walk_dir_tolerant(root: impl AsRef<Path>, options: &WalkOptions) -> io::Result<WalkReport> {
     let canonical_root = root.as_ref().canonicalize()?;
     let mut report = WalkReport {
@@ -219,8 +219,8 @@ fn omit(
 /// The set holds canonical paths, so the same directory reached through two
 /// different symlinks (or through `..`) is recognised as one node and a symlink
 /// loop terminates instead of recursing until the stack is exhausted. A path
-/// that cannot be canonicalised is treated as new rather than skipped, because
-/// the caller has already checked it against the sandbox.
+/// that cannot be canonicalised is treated as new rather than skipped; the
+/// caller reports any later failure to resolve or read it.
 fn track_canonical_visit(dir: &Path, visited_canonical: &mut HashSet<PathBuf>) -> bool {
     if let Ok(canonical) = dir.canonicalize()
         && !visited_canonical.insert(canonical)
@@ -310,7 +310,7 @@ fn handle_directory_entry(path: &Path, depth: usize, ctx: &mut WalkContext<'_>) 
 /// Descends through a symlink entry when the options allow it.
 ///
 /// The link is followed only when `follow_symlinks` is set *and* the resolved
-/// target stays inside the sandbox, so enabling the option widens the walk to
+/// target stays within the root policy, so enabling the option widens the walk to
 /// links within the root and never to the rest of the filesystem. `depth` is
 /// the link's own depth, so a chain of links cannot buy extra levels.
 fn handle_symlink_entry(
@@ -390,15 +390,15 @@ fn process_entry(
     Ok(())
 }
 
-/// Proves `dir` is still the directory inside the root it was a moment ago.
+/// Checks that `dir` currently resolves to an in-root directory.
 ///
-/// Returns the canonical path the read that follows must be attributed to.
-/// Failure means the directory cannot be canonicalised, resolves outside the
-/// root, or resolves differently than it did before: a concurrently swapped
-/// directory, a `..` escape, or a vanished path. The caller treats that as an
-/// omission — refused by strict, reported by tolerant — and, critically,
-/// reports nothing read under a disproved identity.
-fn verify_directory_identity(dir: &Path, canonical_root: &Path) -> io::Result<PathBuf> {
+/// Returns the canonical path string observed by this path-based check. Failure
+/// means the directory cannot be canonicalised or resolves outside the
+/// root. The caller treats that as an omission — refused by strict, reported
+/// by tolerant. This is not a filesystem-object identity, and a later
+/// path-based read is not bound to this pathname; the
+/// surrounding before/after checks are best-effort only.
+fn check_directory_path(dir: &Path, canonical_root: &Path) -> io::Result<PathBuf> {
     let canon = dir.canonicalize().map_err(|error| {
         io::Error::new(
             error.kind(),
@@ -421,20 +421,20 @@ fn verify_directory_identity(dir: &Path, canonical_root: &Path) -> io::Result<Pa
 ///
 /// The recursion has four bounds, and all four are needed for
 /// INV-FS-SAFE-WALK: `options.max_depth` caps how deep the walk goes, the
-/// canonical-visited set makes a symlink loop terminate, the sandbox check
-/// in `check_sandbox` decides which symlinks are followed at all, and the
-/// identity re-verification below decides whether what was read may be
+/// canonical-visited set makes a symlink loop terminate, the root check
+/// decides which symlinks are followed at all, and the
+/// before/after canonical-path checks determine whether what was read may be
 /// reported. `dir` is the directory currently being read and `current_depth`
 /// is its depth; the root call is depth zero, so `max_depth: 0` reports only
 /// the root's own children.
 ///
 /// The read happens through the original path, so reported entry paths keep
-/// the spelling the caller walked. Identity is proved before and after: a
-/// directory swapped for a symlink between the two proves differently, and
-/// everything read under the disproved identity is discarded, not reported.
-/// A swap forth and back inside the window still defeats this — only a
-/// handle-relative traversal (openat2 beneath) closes that — and the docs
-/// say so rather than claiming a security containment the code cannot hold.
+/// the spelling the caller walked. The canonical path string is checked
+/// before and after; if those observations differ, entries read in between
+/// are discarded. This does not establish filesystem-object identity. A
+/// swap forth and back inside the window, or replacement at the same path,
+/// remains invisible. A handle-relative platform API is required to close
+/// that threat model; the public contract says trusted-tree listing.
 fn walk_recursive(dir: &Path, current_depth: usize, ctx: &mut WalkContext<'_>) -> io::Result<()> {
     if current_depth > ctx.options.max_depth {
         return Ok(());
@@ -442,15 +442,15 @@ fn walk_recursive(dir: &Path, current_depth: usize, ctx: &mut WalkContext<'_>) -
     if !track_canonical_visit(dir, ctx.visited) {
         return Ok(());
     }
-    let identity = match verify_directory_identity(dir, ctx.canonical_root) {
-        Ok(identity) => identity,
+    let canonical_path = match check_directory_path(dir, ctx.canonical_root) {
+        Ok(canonical_path) => canonical_path,
         Err(error) => {
             return omit(
                 ctx.mode,
                 ctx.omissions,
                 WalkOmission {
                     path: dir.to_path_buf(),
-                    stage: OmissionStage::DirectoryIdentity,
+                    stage: OmissionStage::DirectoryResolution,
                     error,
                 },
             );
@@ -488,14 +488,15 @@ fn walk_recursive(dir: &Path, current_depth: usize, ctx: &mut WalkContext<'_>) -
     for entry in listed {
         process_entry(entry, dir, current_depth, ctx)?;
     }
-    // The second proof: anything read above is reported only if the
-    // directory still resolves to the identity it was read under. On a
+    // The second canonical-path observation: anything read above is reported
+    // only if the path string still resolves the same way. On a
     // mismatch the entries and any omissions recorded for them are rolled
-    // back — a partial attribution to a disproved directory is exactly the
+    // back — a partial attribution to a path with changed canonical
+    // resolution is exactly the
     // outside-content-under-inside-names failure — and the directory itself
     // is recorded as the omission.
-    match verify_directory_identity(dir, ctx.canonical_root) {
-        Ok(again) if again == identity => Ok(()),
+    match check_directory_path(dir, ctx.canonical_root) {
+        Ok(again) if again == canonical_path => Ok(()),
         Ok(_) | Err(_) => {
             ctx.out.truncate(out_len);
             ctx.omissions.truncate(omissions_len);
@@ -504,11 +505,11 @@ fn walk_recursive(dir: &Path, current_depth: usize, ctx: &mut WalkContext<'_>) -
                 ctx.omissions,
                 WalkOmission {
                     path: dir.to_path_buf(),
-                    stage: OmissionStage::DirectoryIdentity,
+                    stage: OmissionStage::DirectoryResolution,
                     error: io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!(
-                            "walked directory {} changed identity during the read",
+                            "walked directory {} changed canonical path during the read",
                             dir.display()
                         ),
                     ),
@@ -650,7 +651,7 @@ mod tests {
             !entries
                 .iter()
                 .any(|path| path.to_string_lossy().contains("secret")),
-            "sandbox escape: symlink outside root must be rejected"
+            "a symlink outside the root policy must be rejected"
         );
         Ok(())
     }
@@ -671,7 +672,7 @@ mod tests {
             !entries
                 .iter()
                 .any(|path| path.to_string_lossy().contains("escape")),
-            "symlink pointing outside sandbox must not appear in output"
+            "symlink pointing outside the root must not appear in output"
         );
         Ok(())
     }
@@ -783,7 +784,7 @@ mod tests {
         Ok(())
     }
 
-    // ── R15: swaps are detected, never reported ────────────────────────────
+    // ── R15: roots fail closed and unproved symlinks are not reported ──────
 
     #[test]
     fn unresolvable_root_is_refused() -> std::io::Result<()> {
