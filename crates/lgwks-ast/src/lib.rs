@@ -583,17 +583,50 @@ pub fn inspect_ast<'t, L: LanguageExt>(
     root: &AstNode<'t, L>,
     stop_after_nodes: Option<usize>,
 ) -> AstMetrics {
+    inspect_ast_with_pending(root, stop_after_nodes).0
+}
+
+/// Inspect without retaining all siblings in one pending vector.
+///
+/// Each frame owns one node, its next child index, and depth: at most one
+/// frame per active ancestor. The bounded path therefore allocates according
+/// to tree depth, not the root's fan-out. `peak_frames` is kept private as a
+/// directly asserted resource invariant rather than exported as a public
+/// metric whose callers might mistake it for a configured limit.
+fn inspect_ast_with_pending<'t, L: LanguageExt>(
+    root: &AstNode<'t, L>,
+    stop_after_nodes: Option<usize>,
+) -> (AstMetrics, usize) {
     let mut metrics = AstMetrics::default();
-    let mut frontier: Vec<(AstNode<'t, L>, usize)> = vec![(root.clone(), 1)];
-    while let Some((node, depth)) = frontier.pop() {
-        metrics = metrics.including(&node, depth);
-        if metrics.nodes > stop_after_nodes.unwrap_or(usize::MAX) {
+    // Frame = (node, depth, remaining child index). Visiting the next lower
+    // index preserves the former stack walk's reverse-sibling order without
+    // enqueuing the sibling frontier.
+    let mut frames = vec![(root.clone(), 1_usize, root.children().len())];
+    let mut peak_frames = 1;
+    metrics = metrics.including(root, 1);
+    if stop_after_nodes.is_some_and(|limit| metrics.nodes > limit) {
+        return (metrics, peak_frames);
+    }
+    while let Some(frame) = frames.last_mut() {
+        let Some(child_index) = frame.2.checked_sub(1) else {
+            frames.pop();
+            continue;
+        };
+        frame.2 = child_index;
+        let next_child = frame.0.child(child_index);
+        let Some(child) = next_child else {
+            continue;
+        };
+        let child_depth = frame.1.saturating_add(1);
+        metrics = metrics.including(&child, child_depth);
+        if stop_after_nodes.is_some_and(|limit| metrics.nodes > limit) {
             break;
         }
-        let child_depth = depth.saturating_add(1);
-        frontier.extend(node.children().map(|child| (child, child_depth)));
+        let child_count = child.children().len();
+        frames.push((child, child_depth, child_count));
+        peak_frames = peak_frames.max(frames.len());
     }
-    metrics
+    (metrics, peak_frames)
 }
 
 /// The text of the first direct child whose `kind` equals one of `kinds`, or
@@ -644,6 +677,50 @@ pub fn callee_name<L: LanguageExt>(
 #[cfg(all(test, feature = "lang-rust"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_small_node_budget_does_not_retain_a_wide_sibling_frontier() {
+        let source = (0..4_096)
+            .map(|index| format!("fn f{index}() {{}}\n"))
+            .collect::<String>();
+        let parsed = parse(&source, Language::Rust);
+        assert_eq!(
+            parsed.root().children().len(),
+            4_096,
+            "the fixture presents 4,096 immediate siblings to the traversal"
+        );
+
+        let (metrics, peak_frames) = inspect_ast_with_pending(&parsed.root(), Some(1));
+
+        assert_eq!(metrics.nodes, 2, "one node beyond the cap proves refusal");
+        assert_eq!(
+            inspect_ast(&parsed.root(), Some(1)).nodes,
+            2,
+            "the public inspector preserves the budget's overflow witness"
+        );
+        assert_eq!(
+            peak_frames, 1,
+            "the overflow witness is counted without enqueuing its siblings"
+        );
+    }
+
+    #[test]
+    fn a_node_budget_preserves_the_existing_reverse_sibling_order() {
+        let parsed = parse("fn okay() {}\n@\n", Language::Rust);
+        let root = parsed.root();
+        assert!(
+            root.children().last().is_some_and(|node| node.is_error()),
+            "the fixture puts a recovery node in the last root-child position"
+        );
+
+        let metrics = inspect_ast(&root, Some(1));
+
+        assert_eq!(metrics.nodes, 2, "the overflow witness is counted");
+        assert!(
+            metrics.has_syntax_issues,
+            "reverse-sibling traversal encounters the last root child first"
+        );
+    }
 
     #[test]
     fn path_extension_selects_a_language() {

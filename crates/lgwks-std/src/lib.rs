@@ -33,7 +33,7 @@
 ///
 /// Single-import encoding primitives: base64 and percent-encoding.
 pub mod encoding;
-/// Filesystem traversal with sandbox enforcement.
+/// Filesystem traversal with best-effort root-bounded symlink policy for trusted trees.
 pub mod fs;
 /// Shell-style glob matching.
 pub mod glob;

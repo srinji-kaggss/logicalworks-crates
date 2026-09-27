@@ -31,7 +31,6 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
   budgets; a hung or flooding child is killed and reaped, and a collection
   failure is a refusal, never an empty graph. · why: #143 R14 · enforced by:
   `lgwks_deps::metadata::tests`
-
 ## lgwks_bot — durable execution
 
 Each of these was a shipped defect. Treat the list as the spec.
@@ -71,6 +70,29 @@ Each of these was a shipped defect. Treat the list as the spec.
   release capacity and emit an attributed terminal receipt. · why: #143 R10
   ownerless-cleanup finding · enforced by: `rt::supervise::tests` and
   `tests/rt_process.rs`
+- **INV-BOT-14** Shipped journals refuse appends and opens beyond their explicit
+  event/byte ceilings without deleting or partially replaying committed or
+  unresolved evidence. · why: #143 R06 · enforced by:
+  `journal::tests::memory_journal_refuses_history_beyond_its_declared_limit`,
+  `file::tests::scanning_refuses_a_complete_event_beyond_the_limit`,
+  `file::tests::batch_admission_refuses_history_over_the_event_limit_without_writing`,
+  and `file::tests::open_refuses_an_over_limit_file_without_truncating_it`
+
+## lgwks_std
+
+- **INV-FS-2** A successful strict directory walk has no known omissions; a
+  tolerant walk returns each known omission alongside its entries, and an
+  unresolved root is always refused. Path-based identity rechecks are
+  best-effort only and do not promise race-safe containment against hostile
+  concurrent replacement. · why: #143 R15/R16 · enforced by:
+  `lgwks_std::fs::tests`
+
+## lgwks_ast
+
+- **INV-AST-1** Checked AST inspection charges nodes before descending and
+  retains pending traversal state proportional to active depth, not sibling
+  fan-out; the byte and node ceilings remain separate from parser allocation.
+  · why: #143 R17 · enforced by: `lgwks_ast::tests::a_small_node_budget_does_not_retain_a_wide_sibling_frontier`
 
 ## Docs
 
