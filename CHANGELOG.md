@@ -10,6 +10,19 @@ explicitly under that crate.
 
 ### lgwks_std Breaking
 
+- `time::format::from_unix_parts`, `unix_parts`, `to_rfc3339`, and
+  `time::now_rfc3339` now return `Result` so clock-range failures and
+  out-of-range RFC 3339 years are visible. Migrate by handling `?` or matching
+  `UnixTimeError` / `FormatError`; the old lossy behavior is available only as
+  explicitly named, deprecated `*_lossy` functions.
+  Replace `try_from_unix_parts` with checked `from_unix_parts`; replace calls
+  that intentionally relied on the old infallible epoch fallback with
+  `from_unix_parts_lossy`.
+- `time::parse_rfc3339` rejects offset hours above 23, offset minutes above 59,
+  leap-second labels, and platform-unrepresentable instants. Its SystemTime
+  profile is UTC-normalized, nanosecond-limited, and does not retain original
+  offset spelling or `-00:00` provenance.
+
 - `time` no longer re-exports the items of its `calendar` and `format`
   submodules, so `time::to_rfc3339` is now `time::format::to_rfc3339` and
   `time::civil_from_days` is `time::calendar::civil_from_days`. Both submodules

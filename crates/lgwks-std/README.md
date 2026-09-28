@@ -44,7 +44,7 @@ cargo run -p lgwks_std --example quickstart            # 10-line tour (this repo
 use lgwks_std::{hex, time, encoding, glob};
 
 let digest = hex::encode(b"hello");
-let now = time::now_rfc3339();
+let now = time::now_rfc3339()?;
 let encoded = encoding::base64::encode(b"payload");
 let matches = glob::matches("src/**/*.rs", "src/lib.rs");
 ```
@@ -135,6 +135,26 @@ lgwks_std = { version = "0.6", default-features = false, features = ["core"] }
 | `wire` | Zero-copy binary wire serialization via rkyv | `rkyv` |
 | `http` | Blocking HTTP GET/POST with strict URL validation | `ureq`, `iri-string` |
 | `online` | TCP reachability probing, zero-dep | — |
+
+## Time profile and migration
+
+`time::parse_rfc3339` and `time::format::to_rfc3339` use a zero-dependency,
+nanosecond-precision `SystemTime` profile. Parsing validates numeric offset
+hours (`00..=23`) and minutes (`00..=59`), refuses leap-second labels, and
+returns the instant normalized to UTC. The original numeric offset and the
+local-offset provenance of `-00:00` are not retained. Fractions longer than
+nine digits are refused rather than truncated. Formatting is canonical RFC
+3339 with a four-digit UTC year; an instant outside years `0000..=9999` returns
+`FormatError::YearOutsideRfc3339`.
+
+Clock conversion and formatting can now refuse values the platform cannot
+represent. Handle `Result` from `time::format::{from_unix_parts, unix_parts,
+to_rfc3339}` and `time::now_rfc3339`; match `UnixTimeError` or `FormatError` at
+the boundary. Previous silent epoch fallback behavior is available only via
+the deprecated, explicitly lossy `from_unix_parts_lossy` and
+`unix_parts_lossy` functions. This is a source migration: callers that ignored
+conversion failure must now handle it, and no checked API substitutes the Unix
+epoch for an unrepresentable instant.
 
 ## Dependency philosophy
 
