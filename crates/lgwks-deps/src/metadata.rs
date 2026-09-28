@@ -485,7 +485,8 @@ fn validated_workspace(metadata: &CargoMetadata) -> Result<ValidatedWorkspace<'_
         }
         if !package_ids.insert(package.id.as_str()) {
             return Err(MetadataError::Schema(format!(
-                "duplicate Cargo package id {:?}", package.id
+                "duplicate Cargo package id {:?}",
+                package.id
             )));
         }
     }
@@ -911,10 +912,13 @@ mod tests {
     #[test]
     fn missing_workspace_package_record_is_a_schema_refusal() {
         let input = r#"{"packages":[],"workspace_members":["path+file:///repo#app@0.1.0"]}"#;
-        assert!(matches!(
-            parse(input),
-            Err(MetadataError::Schema(message)) if message.contains("has no package record")
-        ), "a missing workspace member record must be a schema refusal");
+        assert!(
+            matches!(
+                parse(input),
+                Err(MetadataError::Schema(message)) if message.contains("has no package record")
+            ),
+            "a missing workspace member record must be a schema refusal"
+        );
     }
 
     #[test]
@@ -932,19 +936,25 @@ mod tests {
           {"id":"same","name":"app","manifest_path":"/repo/Cargo.toml","dependencies":[]},
           {"id":"same","name":"other","manifest_path":"/repo/other/Cargo.toml","dependencies":[]}
         ],"workspace_members":["same"]}"#;
-        assert!(matches!(
-            parse(duplicate_id),
-            Err(MetadataError::Schema(message)) if message.contains("duplicate Cargo package id")
-        ), "duplicate package ids must be refused before graph extraction");
+        assert!(
+            matches!(
+                parse(duplicate_id),
+                Err(MetadataError::Schema(message)) if message.contains("duplicate Cargo package id")
+            ),
+            "duplicate package ids must be refused before graph extraction"
+        );
 
         let duplicate_dir = r#"{"packages":[
           {"id":"first","name":"first","manifest_path":"/repo/Cargo.toml","dependencies":[]},
           {"id":"second","name":"second","manifest_path":"/repo/Cargo.toml","dependencies":[]}
         ],"workspace_members":["first","second"]}"#;
-        assert!(matches!(
-            parse(duplicate_dir),
-            Err(MetadataError::Schema(message)) if message.contains("multiple workspace packages")
-        ), "two members cannot claim the same manifest directory");
+        assert!(
+            matches!(
+                parse(duplicate_dir),
+                Err(MetadataError::Schema(message)) if message.contains("multiple workspace packages")
+            ),
+            "two members cannot claim the same manifest directory"
+        );
     }
 
     #[test]
@@ -952,18 +962,24 @@ mod tests {
         let duplicate_member = r#"{"packages":[
           {"id":"app","name":"app","manifest_path":"/repo/Cargo.toml","dependencies":[]}
         ],"workspace_members":["app","app"]}"#;
-        assert!(matches!(
-            parse(duplicate_member),
-            Err(MetadataError::Schema(message)) if message.contains("duplicate Cargo workspace member id")
-        ), "a repeated workspace member id must be refused");
+        assert!(
+            matches!(
+                parse(duplicate_member),
+                Err(MetadataError::Schema(message)) if message.contains("duplicate Cargo workspace member id")
+            ),
+            "a repeated workspace member id must be refused"
+        );
 
         let missing_manifest = r#"{"packages":[
           {"id":"app","name":"app","dependencies":[]}
         ],"workspace_members":["app"]}"#;
-        assert!(matches!(
-            parse(missing_manifest),
-            Err(MetadataError::Schema(message)) if message.contains("has no manifest_path")
-        ), "a workspace member without a manifest identity must be refused");
+        assert!(
+            matches!(
+                parse(missing_manifest),
+                Err(MetadataError::Schema(message)) if message.contains("has no manifest_path")
+            ),
+            "a workspace member without a manifest identity must be refused"
+        );
     }
 
     #[test]
@@ -976,10 +992,13 @@ mod tests {
             {"id":"helper","name":"helper","manifest_path":"/repo/helper/Cargo.toml","dependencies":[]}
           ],"workspace_members":["app","helper"]
         }"#;
-        assert!(matches!(
-            parse(input),
-            Err(MetadataError::Schema(message)) if message.contains("resolves to workspace package")
-        ), "a path target's package identity must agree with its member record");
+        assert!(
+            matches!(
+                parse(input),
+                Err(MetadataError::Schema(message)) if message.contains("resolves to workspace package")
+            ),
+            "a path target's package identity must agree with its member record"
+        );
     }
 
     /// The manifest path must be absolute before it reaches the child.
