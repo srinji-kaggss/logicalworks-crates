@@ -76,6 +76,7 @@ lgwks-deps init [PATH]          # fail-closed starting register
 lgwks-deps freshness [PATH]     # resolved versus latest on crates.io
 lgwks-deps vendor check [PATH]  # prove the lockfile is covered by the shared vendor tree
 lgwks-deps scan [PATH]...       # source detectors, one verdict binary
+lgwks-deps debug [PATH]         # doctor the default lgwks_std debugger surface
 ```
 
 `check` reads `cargo metadata --no-deps` rather than the transitive lockfile
@@ -86,6 +87,12 @@ approval is unregistered.
 
 `vendor check` binds the register to the bytes the offline build resolves, by
 hash.
+
+`debug` is the cargo-doctor path for the debugging lifecycle. It installs the
+default `lgwks_std::trace` debugger in its own process, emits lifecycle events,
+and inspects the repository manifest to prove the default `trace` surface still
+includes `tracing-subscriber`. `--json` keeps the report on stdout and the
+trace stream on stderr so agents can parse it without scraping terminal text.
 
 The binary diagnoses. It never approves. Approval is a committed diff in
 `contract/APPROVED.toml` with a human's name on it.

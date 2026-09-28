@@ -100,5 +100,4 @@ crates/lgwks-deps/src/lib.rs:15	//! remote CI. It reads `cargo metadata --no-dep
 crates/lgwks-deps/src/lib.rs:76	pub mod scan;
 crates/lgwks-deps/src/lib.rs:547	pub fn check_dependencies(root: &Path) -> Result<(Contract, Vec<Refusal>), GateError> {
 crates/lgwks-std/src/task.rs:265	/// Run `job` on a dedicated OS thread and return a future for its result.
-crates/lgwks-std/src/trace.rs:47	pub use tracing::{self, Level};
 docs/guidance-runner-spec.md:193	`review`.

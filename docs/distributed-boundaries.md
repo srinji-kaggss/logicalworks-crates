@@ -63,19 +63,17 @@ faked consensus.
 
 ## Observability
 
-`log` / `tracing` / `env_logger` are not capabilities of this workspace
-(doctrine §6), and an earlier revision of this section (which stated that
-machine output stays parseable via `eprintln!` / `stderr`) is **superseded**
-(doctrine §6.1). `print_stdout` and `print_stderr`
-are `forbid` in the workspace lint table, so library code has no print path at
-all: it returns information in its result and error types. Only a binary writes,
-through an explicit locked handle, so a broken pipe is an ordinary `Err` rather
-than a panic. Machine output must still stay parseable
-(`experience/invariants/sdk.yaml`).
+`print_stdout` and `print_stderr` are `forbid` in the workspace lint table, so
+library code has no terminal print path: it returns information in its result
+and error types and emits structured events through `lgwks_std::trace`.
+Applications install the default debugger once at the process edge, and machine
+output must still stay parseable (`experience/invariants/sdk.yaml`).
 
-A mesh that needs spans, W3C `traceparent` propagation, or counters admits
-`tracing` / `metrics` through the storefront as BOUNDARY edges. A hand-rolled
-facade in `lgwks_std` is not the mechanism.
+`lgwks_std::trace` owns the local SDK path: `tracing` facade, default subscriber
+bootstrap, env filtering, compact output, and JSON lines. A mesh that needs W3C
+`traceparent` propagation, OTLP export, metrics, collector credentials, or
+retention admits those exporter/back-end edges separately, because those are
+deployment boundaries rather than library defaults.
 
 ## Schema evolution
 

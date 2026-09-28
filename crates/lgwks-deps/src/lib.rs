@@ -879,6 +879,7 @@ mod tests {
                 "serde",
                 "serde_json",
                 "tracing",
+                "tracing-subscriber",
                 "ureq",
             ];
 

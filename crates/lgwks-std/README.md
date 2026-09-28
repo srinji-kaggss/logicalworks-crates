@@ -9,8 +9,10 @@ other capability is one feature with one vetted stack beneath it.
 
 `trace` is default-on. Structured logging is the replacement for terminal
 output in library code, so it has to be reachable without selecting a feature
-first. It costs four small crates (`tracing`, `tracing-core`,
-`pin-project-lite`, `once_cell`), with no proc macro and no `syn`.
+first. It includes the `tracing` facade and the default subscriber bootstrap:
+`LGWKS_LOG`/`RUST_LOG` filtering, compact local output, pretty local output,
+and JSON lines for machine ingestion. It still keeps `tracing-attributes` off,
+so the foundation crate does not pull the `syn` instrumentation macro stack.
 
 **Want a zero-dependency build?**
 
@@ -45,6 +47,14 @@ let digest = hex::encode(b"hello");
 let now = time::now_rfc3339();
 let encoded = encoding::base64::encode(b"payload");
 let matches = glob::matches("src/**/*.rs", "src/lib.rs");
+```
+
+```rust
+// Debugging — default-on with the crate defaults
+use lgwks_std::trace::{info, install_default};
+
+install_default("my-service")?;
+info!(tenant = "demo", "service started");
 ```
 
 ```rust
@@ -92,7 +102,7 @@ lgwks_std = { version = "0.6", default-features = false, features = ["core"] }
 | Feature | Modules | What it adds | External deps |
 |---------|---------|-------------|---------------|
 | `core` (default) | encoding, fs, glob, hex, leb128, retry, task, time | — | **0** |
-| `trace` (default) | trace | Structured logging (`tracing` re-export) | tracing, tracing-core, pin-project-lite, once_cell |
+| `trace` (default) | trace | Structured logging plus default debugger install | tracing, tracing-subscriber stack |
 | `random` | random, id | UUID v4, OS entropy | getrandom |
 | `hash` | hash | BLAKE3 content-addressable hashing | blake3 |
 | `pattern` | pattern | Linear-time compiled regex | regex |
@@ -142,10 +152,11 @@ Cargo metadata; Cargo.lock preserves the exact transitive provenance.
 - **ureq** — blocking HTTP client, rustls-only TLS stack plus small leaves
 - **iri-string** — zero-dep URI validation leaf at default features
 - **rustix** — safe POSIX syscall surface for the `fs-raw` primitive; Unix-only, optional
-- **tracing** — 4 crates (`tracing`, `tracing-core`, `pin-project-lite`,
-  `once_cell`), no proc macro because `attributes` is off. Default-on:
-  structured logging replaces terminal output in library code, so it has to be
-  reachable without selecting a feature.
+- **tracing / tracing-subscriber** — default-on structured events plus the
+  default debugger bootstrap. `install_default("service")` installs env-filtered
+  compact output, and `LGWKS_LOG_FORMAT=json` switches the same stream to JSON
+  lines. `attributes` stays off, so `#[instrument]` and its proc-macro stack do
+  not enter this crate.
 
 `core` alone carries zero external dependencies; the default build is `core`
 plus `trace`. You choose what you pull in; every other feature flag is one
@@ -166,7 +177,7 @@ dependency graph: `lgwks_bot` and `lgwks_deps` depend on `lgwks_std`, and
 |---|---|
 | [`lgwks_bot`](https://docs.rs/lgwks_bot) | A runtime for bots that run for weeks: four verbs, capability-gated authority, change-triggered execution, supervised background work |
 | [`lgwks_ast`](https://docs.rs/lgwks_ast) | Parse many languages into one AST type, with bounded traversal and typed diagnostics |
-| [`lgwks_deps`](https://docs.rs/lgwks_deps) | The audited storefront for third-party stacks, plus `lgwks-deps check` to prove no unreviewed dependency entered a build |
+| [`lgwks_deps`](https://docs.rs/lgwks_deps) | The audited storefront for third-party stacks, plus `lgwks-deps check` and `lgwks-deps debug` to prove dependency and debugger wiring |
 
 The [repository README](https://github.com/srinji-kaggss/logicalworks-crates#readme)
 indexes the design documents.

@@ -613,7 +613,7 @@ dependency graph: `lgwks_bot` and `lgwks_deps` depend on `lgwks_std`, and
 
 | Crate | What it gives you |
 |---|---|
-| [`lgwks_std`](https://docs.rs/lgwks_std) | Everyday primitives with no async runtime required: codecs, a blocking HTTP client, retry, structured logging, time, hashing, ids |
+| [`lgwks_std`](https://docs.rs/lgwks_std) | Everyday primitives with no async runtime required: codecs, a blocking HTTP client, retry, default structured debugging, time, hashing, ids |
 | [`lgwks_ast`](https://docs.rs/lgwks_ast) | Parse many languages into one AST type, with bounded traversal and typed diagnostics |
 | [`lgwks_deps`](https://docs.rs/lgwks_deps) | The audited storefront for third-party stacks. `lgwks_bot`'s async engine is selected through it, so this crate's tokio edge is the workspace's only one |
 

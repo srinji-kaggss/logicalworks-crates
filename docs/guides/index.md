@@ -8,10 +8,10 @@ for the version you are installing.
 
 | You need | Crate | Guide |
 |---|---|---|
-| Hex, base64, timestamps, UUIDs, hashing, globs, LEB128, retry budgets, a single-threaded executor | `lgwks_std` | [lgwks-std](lgwks-std/index.md) |
+| Hex, base64, timestamps, UUIDs, hashing, globs, LEB128, retry budgets, a single-threaded executor, and default structured debugging | `lgwks_std` | [lgwks-std](lgwks-std/index.md) |
 | An effect that runs when an observed value changes, behind a capability check | `lgwks_bot` | [lgwks-bot](lgwks-bot/index.md) |
 | One AST type across several languages, with bounded traversal | `lgwks_ast` | [lgwks-ast](lgwks-ast/index.md) |
-| A place to opt into a third-party stack, and a command that proves no unowned dependency entered a build | `lgwks_deps` | [lgwks-deps](lgwks-deps/index.md) |
+| A place to opt into a third-party stack, plus commands that prove no unowned dependency or missing debugger wiring entered a build | `lgwks_deps` | [lgwks-deps](lgwks-deps/index.md) |
 
 The crates share a release process, not a dependency graph. `lgwks_bot` depends
 on `lgwks_std`, `lgwks_deps` depends on `lgwks_std`, and `lgwks_ast` depends on

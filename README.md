@@ -26,10 +26,10 @@ They share a workspace and a release process, not a dependency graph. Only
 
 | Crate | Version | Docs | What it gives you |
 |---|---|---|---|
-| `lgwks_std` | 0.6.7 | [docs.rs](https://docs.rs/lgwks_std) | Everyday primitives with no async runtime required: JSON/RON/wire codecs, a blocking HTTP client, retry policies, structured logging, time and calendars, hashing, ids, globs, process control |
+| `lgwks_std` | 0.6.7 | [docs.rs](https://docs.rs/lgwks_std) | Everyday primitives with no async runtime required: JSON/RON/wire codecs, a blocking HTTP client, retry policies, structured logging with default debugger install, time and calendars, hashing, ids, globs, process control |
 | `lgwks_bot` | 0.5.0 | [docs.rs](https://docs.rs/lgwks_bot) | A runtime for bots that run for weeks: four verbs (Observe, Evaluate, Execute, Query), capability-gated authority, change-triggered execution, and supervision that bounds background work |
 | `lgwks_ast` | 0.2.2 | [docs.rs](https://docs.rs/lgwks_ast) | Parse many languages into one AST type. tree-sitter grammars behind cargo features, bounded traversal, and typed diagnostics for tools that report on code |
-| `lgwks_deps` | 0.1.13 | [docs.rs](https://docs.rs/lgwks_deps) | One audited place to opt into third-party stacks, plus `lgwks-deps check` to prove no dependency entered your build unreviewed |
+| `lgwks_deps` | 0.1.13 | [docs.rs](https://docs.rs/lgwks_deps) | One audited place to opt into third-party stacks, plus `lgwks-deps check` and `lgwks-deps debug` to prove dependency and debugger wiring |
 
 Versions move independently from one repository and one tag. The table lists the
 versions in this tree's manifests. A manifest version is not an upload: the
@@ -151,9 +151,9 @@ lgwks-deps check .        # audit, and refuse any unowned external edge
 
 ### Logging you can query
 
-- Structured, levelled logs from a library without `println!` and without
-  committing your consumers to a subscriber. → `lgwks_std`, feature `trace`
-  (default on)
+- Structured, levelled logs from a library without `println!`, plus a default
+  SDK debugger bootstrap that can render compact local lines or JSON. →
+  `lgwks_std`, feature `trace` (default on)
 
 ### A dependency graph you can defend
 
@@ -167,8 +167,9 @@ lgwks-deps check .        # audit, and refuse any unowned external edge
 - **Not an async runtime.** `lgwks_bot::rt` is a curated surface over tokio,
   which owns the engine. Parity and the deliberate divergences are documented in
   [`docs/async-parity.md`](docs/async-parity.md).
-- **Not a logging facade.** `lgwks_std::trace` re-exports `tracing`; bring your
-  own subscriber.
+- **Not a telemetry backend.** `lgwks_std::trace` re-exports `tracing` and ships
+  the default local subscriber bootstrap. OTLP export, collectors, credentials,
+  and retention stay at the deployment boundary.
 - **Not a parser generator.** `lgwks_ast` wraps tree-sitter grammars; it does not
   produce them.
 

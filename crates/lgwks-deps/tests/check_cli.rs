@@ -72,17 +72,38 @@ fn argument(path: &Path) -> Result<&str, Box<dyn Error>> {
 
 /// Runs `lgwks-deps check` with `args`, from `current_dir`.
 fn check_from(current_dir: &Path, args: &[&str]) -> Result<Outcome, Box<dyn Error>> {
+    command_from(current_dir, args, &[])
+}
+
+/// Runs `lgwks-deps` with `args`, from `current_dir`.
+fn command_from(
+    current_dir: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> Result<Outcome, Box<dyn Error>> {
     let binary = std::env::var_os("CARGO_BIN_EXE_lgwks-deps")
         .ok_or("Cargo did not provide the lgwks-deps test binary")?;
-    let output = Command::new(binary)
-        .args(args)
-        .current_dir(current_dir)
-        .output()?;
+    let mut command = Command::new(binary);
+    command.args(args).current_dir(current_dir);
+    for &(key, value) in envs {
+        command.env(key, value);
+    }
+    let output = command.output()?;
     Ok(Outcome {
         code: output.status.code(),
         stdout: String::from_utf8(output.stdout)?,
         stderr: String::from_utf8(output.stderr)?,
     })
+}
+
+/// The repository root containing the command under test.
+fn workspace_root() -> Result<PathBuf, Box<dyn Error>> {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    manifest
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "crates/lgwks-deps has no workspace root".into())
 }
 
 /// Asserts the run refused `subject` for its unapproved edge to `helper`.
@@ -117,6 +138,40 @@ fn assert_refused_subject(outcome: &Outcome) -> TestResult {
         "the verdict must not be about the clean repository: {:?}",
         outcome.stderr
     );
+    Ok(())
+}
+
+#[test]
+fn debug_reports_default_sdk_bootstrap_in_json() -> TestResult {
+    let root = workspace_root()?;
+    let outcome = command_from(
+        &root,
+        &["debug", "--json"],
+        &[("LGWKS_LOG", "info"), ("LGWKS_LOG_FORMAT", "json")],
+    )?;
+    assert_eq!(
+        outcome.code,
+        Some(0),
+        "debug doctor should pass (stdout {:?}, stderr {:?})",
+        outcome.stdout,
+        outcome.stderr
+    );
+    assert!(
+        outcome.stderr.contains("debugger installed"),
+        "install event should be emitted to stderr: {:?}",
+        outcome.stderr
+    );
+    assert!(
+        outcome.stderr.contains("debug doctor completed"),
+        "doctor lifecycle event should be emitted to stderr: {:?}",
+        outcome.stderr
+    );
+    let report: lgwks_std::json::Value = lgwks_std::json::from_str(&outcome.stdout)?;
+    assert_eq!(report["command"], "debug");
+    assert_eq!(report["admitted"], true);
+    assert_eq!(report["format"], "json");
+    assert_eq!(report["checks"]["default_includes_trace"], true);
+    assert_eq!(report["checks"]["trace_includes_tracing_subscriber"], true);
     Ok(())
 }
 
