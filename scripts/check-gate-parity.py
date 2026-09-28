@@ -79,12 +79,28 @@ def _step_segments(run: str) -> list[str]:
 
     A YAML ``run: >`` block is already folded to spaces by the parser, so
     ``&&`` / ``||`` are the separators. A ``run: |`` block keeps newlines and
-    each line is its own command. Splitting on both gives one segment per
-    command, which is what rule 2 compares for equality: a shortened command
-    is a different command, not a prefix of one.
+    each line is its own command, except a wrapped option line belongs to the
+    command before it. Splitting on both gives one segment per command, which
+    is what rule 2 compares for equality: a shortened command is a different
+    command, not a prefix of one.
     """
+    logical_lines: list[str] = []
+    current = ""
+    for raw in (run or "").splitlines():
+        line = _normalise(raw)
+        if not line:
+            continue
+        if current and (line.startswith("-") or current.endswith("\\")):
+            current = _normalise(f"{current.rstrip('\\')} {line}")
+            continue
+        if current:
+            logical_lines.append(current)
+        current = line
+    if current:
+        logical_lines.append(current)
+
     segments: list[str] = []
-    for line in (run or "").splitlines():
+    for line in logical_lines:
         for piece in re.split(r"\s*(?:&&|\|\|)\s*", line):
             normalised = _normalise(piece)
             if normalised:
@@ -362,6 +378,20 @@ class ParityRegression(unittest.TestCase):
         )
         problems = check_parity(mutated, self.workflow)
         self.assertTrue(problems, "a wholesale substitution must break parity")
+
+    def test_folded_commands_keep_option_continuations_together(self):
+        step = (
+            "cargo clippy --locked --manifest-path crates/lgwks-std/Cargo.toml\n"
+            "--all-targets --all-features -- -D warnings &&\n"
+            "cargo fmt --all -- --check"
+        )
+        self.assertEqual(
+            _step_segments(step),
+            [
+                "cargo clippy --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --all-features -- -D warnings",
+                "cargo fmt --all -- --check",
+            ],
+        )
 
     def test_builtin_must_route_through_the_coordinator(self):
         """A builtin's text exists once; CI runs the lane, not a copy."""

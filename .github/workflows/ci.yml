@@ -77,6 +77,8 @@ jobs:
         uses: taiki-e/install-action@nextest
       - name: Run all workspace tests
         run: cargo nextest run --workspace --locked
+      - name: Deterministic simulation evidence
+        run: python3 scripts/ci_local.py --lane simulation-evidence
       - name: Run lgwks-bot no-default-feature tests
         run: cargo nextest run -p lgwks_bot --all-targets --locked --no-default-features
       - name: Run lgwks-std full-feature tests
@@ -85,6 +87,8 @@ jobs:
         run: cargo nextest run -p lgwks_bot --all-targets --locked --features full
       - name: Doc tests
         run: cargo test --workspace --doc --locked
+      - name: Debug doctor end-to-end journey
+        run: python3 scripts/ci_local.py --lane debug-e2e
 
   clippy:
     name: Clippy
