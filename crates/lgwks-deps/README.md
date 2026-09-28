@@ -48,7 +48,7 @@ library does not intercept arbitrary Cargo invocations.
 | `bevy-app` | `lgwks_deps::bevy_app` | Bevy `App` runtime, layered on `bevy-ecs`. |
 | `bevy-time` | `lgwks_deps::bevy_time` | Bevy time resources and plugin, layered on `bevy-ecs`. |
 | `bevy-state` | `lgwks_deps::bevy_state` | Bevy state runtime, layered on `bevy-ecs`. For `States` derives, alias `lgwks_deps::bevy_state` as `bevy_state` at the consumer crate root; the upstream derive resolves that manifest crate name. |
-| `gpui` | `lgwks_deps::gpui` | Zed's GPU desktop UI framework, retaining its normal platform renderer. macOS builds require a usable Xcode Metal toolchain (`metal` and `metallib`); Linux builds require the platform development stack GPUI selects. External consumer checks run on macOS and Linux. |
+| `gpui` | `lgwks_deps::gpui` | Zed's GPU desktop UI framework, retaining its normal platform renderer. macOS builds require a usable Xcode Metal toolchain (`metal` and `metallib`); Linux builds require the platform development stack GPUI selects. External consumer checks run on Linux, macOS, and Windows. |
 | `appcui` | `lgwks_deps::appcui` | Native terminal UI. Downstream code uses `use lgwks_deps::appcui; use appcui::prelude::*;` so upstream macros resolve their crate alias without a direct dependency. |
 | `ml-candle` | `candle_core`, `candle_nn`, `candle_transformers` | ML inference: tensor compute and transformer models. |
 | `ml-candle-metal` | as `ml-candle`, plus Candle's macOS Metal backend | macOS-only. |

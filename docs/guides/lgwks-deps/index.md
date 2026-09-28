@@ -62,10 +62,9 @@ by the gate as second edges.
 | `process-group-probe` | `lgwks_deps::process_group::exists` (Unix only) | off |
 | `scan` | the gate's Rust source detectors | on |
 
-The facade-only consumer matrix compiles GPUI examples on Linux and macOS,
-Candle Metal only on macOS, and the process-group probe only on Unix. It does
-not treat those platform-bound combinations as all-target features. Windows
-GPUI support is not claimed by this feature table or fixture matrix.
+The facade-only consumer matrix compiles GPUI examples on Linux, macOS, and
+Windows, Candle Metal only on macOS, and the process-group probe only on Unix.
+It does not treat those platform-bound combinations as all-target features.
 
 For `tokio-macros`, alias `lgwks_deps::tokio` as `tokio` at the consumer crate
 root before using Tokio's `#[tokio::main]` or `#[tokio::test]` macro.

@@ -331,6 +331,11 @@ jobs:
       - run: cargo test --locked -p lgwks_deps --no-default-features --features appcui --lib
       - run: cargo test --locked -p lgwks_deps --no-default-features --features appcui --doc
       - run: cargo clippy --locked -p lgwks_deps --no-default-features --features appcui --all-targets -- -D warnings
+      - if: runner.os == 'Windows'
+        run: >
+          cargo check --locked
+          --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml
+          --no-default-features --features gpui --example gpui
 
   gpui-macos:
     name: GPUI macOS renderer
@@ -344,7 +349,11 @@ jobs:
         with:
           toolchain: "1.98.0"
       - name: Check normal GPUI renderer feature
-        run: cargo check --locked -p lgwks_deps --all-targets --features gpui
+        run: >
+          cargo check --locked -p lgwks_deps --all-targets --features gpui &&
+          cargo check --locked
+          --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml
+          --no-default-features --features gpui --example gpui
 
   candle-macos:
     name: Candle ML storefront (Metal)

@@ -119,9 +119,6 @@ fn minimal_external_consumers_exercise_each_storefront_family() -> TestResult {
         ("ml-candle-metal", "ml_candle_metal"),
         ("process-group-probe", "process_group_probe"),
     ];
-    if !cfg!(any(target_os = "linux", target_os = "macos")) {
-        selections.retain(|&(feature, _)| feature != "gpui");
-    }
     if !cfg!(target_os = "macos") {
         selections.retain(|&(feature, _)| feature != "ml-candle-metal");
     }
