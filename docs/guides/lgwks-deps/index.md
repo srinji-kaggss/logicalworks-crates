@@ -27,7 +27,7 @@ a runtime library has no use for it.
 | Embedding `check_dependencies`, leaner | `cargo add lgwks_deps --no-default-features` | no |
 | Choosing a third-party stack | `cargo add lgwks_deps --no-default-features --features tokio` | no |
 
-`scan` gates one module (`crates/lgwks-deps/src/lib.rs:76`) and the CLI's source
+`scan` gates one module (`crates/lgwks-deps/src/lib.rs:79`) and the CLI's source
 detectors, and nothing else. `check_dependencies` is not behind it: the embed
 example further down runs against a `default-features = false` build. If you are
 here for the storefront, disable defaults and select the engine you want.
@@ -41,6 +41,10 @@ by the gate as second edges.
 | Feature | Re-exports | Default |
 |---|---|---|
 | `tokio` | `lgwks_deps::tokio` | off |
+| `bevy-ecs` | `lgwks_deps::bevy_ecs` | off |
+| `bevy-app` | `lgwks_deps::bevy_app` | off |
+| `bevy-time` | `lgwks_deps::bevy_time` | off |
+| `bevy-state` | `lgwks_deps::bevy_state` | off |
 | `gpui` | `lgwks_deps::gpui` | off |
 | `appcui` | `lgwks_deps::appcui` | off |
 | `ml-candle` | `candle_core`, `candle_nn`, `candle_transformers` | off |
@@ -114,7 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 `check_dependencies(root)` returns `Result<(Contract, Vec<Refusal>), GateError>`
-(`crates/lgwks-deps/src/lib.rs:547`). An empty refusal list is a pass. A
+(`crates/lgwks-deps/src/lib.rs:590`). An empty refusal list is a pass. A
 `GateError` is a different thing from a refusal: the module documentation lists
 a missing register, unparseable metadata, an unparseable register, and an
 unreadable lock file as errors, and all four are fail-closed, because "a gate

@@ -45,13 +45,16 @@
 //! ## Storefront
 //!
 //! `lgwks_deps` is also the install-and-select surface for third-party
-//! engines: enable `tokio` for the async runtime behind
-//! `lgwks_bot::rt` (`use lgwks_deps::tokio::...` only when bypassing the bot
-//! facade) or `gpui` for the GPU desktop UI. Capability features are
-//! default-off; the `scan` gate-tool feature is the default-on exception for
-//! `cargo install` CLI use. Library consumers take
-//! `default-features = false` plus exactly the engine they need so the Rust
-//! parser never rides along with a runtime edge.
+//! engines: enable a storefront feature and import its engine through this
+//! crate. For example, `bevy-app` exposes `lgwks_deps::bevy_app::App`,
+//! `bevy-time` exposes `lgwks_deps::bevy_time::Time`, and `bevy-state`
+//! exposes Bevy's state API.
+//! `tokio` is the async engine behind `lgwks_bot::rt` (`use
+//! lgwks_deps::tokio::...` only when bypassing the bot facade), and `gpui` is
+//! the GPU desktop UI. Capability features are default-off; `scan`, the
+//! gate-tool feature, is the default-on exception for `cargo install` CLI use.
+//! Library consumers take `default-features = false` plus exactly the engine
+//! they need so the Rust parser never rides along with a runtime edge.
 //!
 //! Do NOT `cargo add tokio` / `cargo add gpui` directly: the gate refuses any
 //! second edge, and the facade (`lgwks_bot::rt`, `lgwks_deps::tokio`) is the
@@ -86,12 +89,52 @@ pub mod vendor;
 #[cfg(feature = "tokio")]
 pub use tokio;
 
-/// The optional GPUI desktop UI framework selected through the storefront.
-/// Re-exported so a consumer names the storefront, never the crate: `lgwks_bot`
-/// reaches `bevy_ecs` through `lgwks_deps::bevy_ecs`, which is the same rule the
-/// `tokio` edge follows.
+/// Bevy's ECS engine, selected explicitly through the storefront.
+///
+/// This path is available only with the `bevy-ecs` feature.
 #[cfg(feature = "bevy-ecs")]
 pub use bevy_ecs;
+
+/// Bevy's application runtime, selected explicitly through the storefront.
+///
+/// ```
+/// use lgwks_deps::bevy_app::App;
+///
+/// let _app = App::new();
+/// ```
+#[cfg(feature = "bevy-app")]
+pub use bevy_app;
+
+/// Bevy's time resources and plugin, selected explicitly through the storefront.
+///
+/// ```
+/// use lgwks_deps::bevy_time::{Time, TimePlugin};
+///
+/// let _time = Time::<lgwks_deps::bevy_time::Real>::default();
+/// let _plugin = TimePlugin;
+/// ```
+#[cfg(feature = "bevy-time")]
+pub use bevy_time;
+
+/// Bevy's state runtime, selected explicitly through the storefront.
+///
+/// Derive macros resolve the upstream crate name from the consumer manifest.
+/// Alias this facade module at the consumer crate root before deriving:
+///
+/// ```
+/// use lgwks_deps::bevy_state as bevy_state;
+/// use lgwks_deps::bevy_state::prelude::States;
+///
+/// #[derive(Clone, Debug, Default, Eq, Hash, PartialEq, States)]
+/// enum Screen { #[default] Loading, Ready }
+///
+/// let _initial = Screen::default();
+/// ```
+#[cfg(feature = "bevy-state")]
+pub use bevy_state;
+
+/// The optional GPUI desktop UI framework selected through the storefront.
+/// Re-exported so consumers name the storefront, never the crate.
 #[cfg(feature = "gpui")]
 pub use gpui;
 

@@ -31,6 +31,10 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
   budgets; a hung or flooding child is killed and reaped, and a collection
   failure is a refusal, never an empty graph. · why: #143 R14 · enforced by:
   `lgwks_deps::metadata::tests`
+- **INV-DEP-9** Each selected Bevy runtime feature (`bevy-app`, `bevy-time`,
+  `bevy-state`) exposes its promised public import path; a deselected path is
+  absent from the facade. · why: #169 · enforced by:
+  `crates/lgwks-deps/tests/storefront_consumers.rs`
 ## lgwks_bot — durable execution
 
 Each of these was a shipped defect. Treat the list as the spec.

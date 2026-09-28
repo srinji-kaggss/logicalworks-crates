@@ -1,0 +1,18 @@
+[package]
+name = "bevy-app-consumer"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[features]
+default = ["selected"]
+selected = ["lgwks_deps/bevy-app"]
+probe = []
+
+[dependencies]
+lgwks_deps = { path = "../../..", default-features = false }
+
+[[example]]
+name = "feature_off"
+required-features = ["probe"]

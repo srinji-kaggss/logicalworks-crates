@@ -143,5 +143,12 @@ workspace = true
 # so this crate had no rendered documentation at all. This list is the set the
 # CI doc and clippy lanes already verify on Linux; the platform-bound features
 # are covered by the per-platform jobs instead.
-features = ["tokio-full", "appcui", "process-group-probe"]
+features = [
+    "tokio-full",
+    "appcui",
+    "process-group-probe",
+    "bevy-app",
+    "bevy-time",
+    "bevy-state",
+]
 rustdoc-args = ["--cfg", "docsrs"]

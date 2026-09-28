@@ -27,12 +27,18 @@ dependency graph.
 ## Storefront
 
 Each feature exposes a reviewed upstream capability through the storefront, so
-a consumer never declares it directly. Do not run `cargo add tokio` or
-`cargo add gpui`; `lgwks-deps check` refuses the second edge.
+a consumer never declares it directly. Do not add `tokio`, `gpui`, or Bevy
+crates directly; select the storefront feature and import its public path. The
+explicit admission gate detects unregistered direct edges when it runs; the
+library does not intercept arbitrary Cargo invocations.
 
 | Feature | Re-exports | Notes |
 |---|---|---|
 | `tokio` | `lgwks_deps::tokio` | The bypass path. Prefer `lgwks_bot::rt` unless you are deliberately working below the bot facade. |
+| `bevy-ecs` | `lgwks_deps::bevy_ecs` | ECS substrate; no renderer, window, audio, or multithreaded scheduler. |
+| `bevy-app` | `lgwks_deps::bevy_app` | Bevy `App` runtime, layered on `bevy-ecs`. |
+| `bevy-time` | `lgwks_deps::bevy_time` | Bevy time resources and plugin, layered on `bevy-ecs`. |
+| `bevy-state` | `lgwks_deps::bevy_state` | Bevy state runtime, layered on `bevy-ecs`. For `States` derives, alias `lgwks_deps::bevy_state` as `bevy_state` at the consumer crate root; the upstream derive resolves that manifest crate name. |
 | `gpui` | `lgwks_deps::gpui` | Zed's GPU desktop UI framework, retaining its normal platform renderer. macOS builds require a usable Xcode Metal toolchain (`metal` and `metallib`); Linux builds require the platform development stack GPUI selects. |
 | `appcui` | `lgwks_deps::appcui` | Native terminal UI. Downstream code uses `use lgwks_deps::appcui; use appcui::prelude::*;` so upstream macros resolve their crate alias without a direct dependency. |
 | `ml-candle` | `candle_core`, `candle_nn`, `candle_transformers` | ML inference: tensor compute and transformer models. |
