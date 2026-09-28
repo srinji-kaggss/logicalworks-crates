@@ -12,7 +12,8 @@
 //! [`crate::retry::RetryPolicy`] budget and keep concurrency bounded
 //! (`lgwks_bot::rt::task::join_all_bounded`), not open unbounded parallel
 //! requests. Retries, backoff, and circuit-breaking are caller policy, not
-//! client behavior: the client makes exactly one attempt per call.
+//! client behavior. Redirects are the separately bounded exception, with an
+//! explicit no-follow choice and the previous ten-hop default.
 //!
 //! Response bodies are read under a ceiling the caller declares
 //! ([`Options::max_body_bytes`], 8 MiB by default). A body that reaches the
@@ -27,12 +28,17 @@
 //! [`Error::BodyTooLarge`]: crate::http::Error::BodyTooLarge
 //! [`BodyPolicy::Preview`]: crate::http::BodyPolicy::Preview
 //! [`Truncation::Cut`]: crate::http::Truncation::Cut
+//!
+//! The implementation keeps the existing ureq engine. A hand-written
+//! `TcpStream` HTTP/TLS stack would duplicate protocol and TLS ownership;
+//! reqwest would add a second HTTP stack rather than repair this one.
 
 use std::fmt;
 use std::io::Read;
 use std::time::Duration;
 
 use iri_string::types::UriAbsoluteStr;
+use ureq::ResponseExt;
 
 // ── Body ceilings ───────────────────────────────────────────────────────────
 
@@ -45,6 +51,11 @@ use iri_string::types::UriAbsoluteStr;
 /// needs more raises it through [`Options::max_body_bytes`] — an explicit
 /// decision, made once, at the call site that needs it.
 pub const DEFAULT_MAX_BODY_BYTES: usize = 8_388_608;
+
+/// Maximum redirects an HTTP call may follow.
+///
+/// This preserves ureq's former default while bounding caller-selected policy.
+pub const MAX_REDIRECT_HOPS: u8 = 10;
 
 /// Bytes read per `read` call in [`read_bounded`].
 ///
@@ -91,6 +102,87 @@ pub enum Truncation {
     Cut,
 }
 
+/// Redirect behavior for one HTTP call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum RedirectPolicy {
+    /// Return the first redirect response without contacting its target.
+    NoFollow,
+    /// Follow at most ten redirects, matching the previous ureq default.
+    #[default]
+    Follow,
+    /// Follow at most `max_hops` redirects. Values above
+    /// [`MAX_REDIRECT_HOPS`] are refused.
+    FollowAtMost(u8),
+}
+
+/// Stage at which an HTTP exchange failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FailureStage {
+    /// DNS resolution.
+    Resolve,
+    /// Socket connection; ureq includes the TLS handshake in this phase.
+    Connect,
+    /// TLS protocol negotiation or certificate validation failure.
+    Tls,
+    /// Request headers or body transmission.
+    Send,
+    /// Response header reception.
+    Headers,
+    /// Response body reception.
+    Body,
+    /// The one-byte read distinguishing exact-cap EOF from overflow.
+    EofProbe,
+    /// Redirect validation or hop-limit refusal.
+    Redirect,
+    /// Response body conversion to UTF-8 text.
+    TextDecode,
+    /// Whole-call deadline where ureq cannot identify a narrower active phase.
+    Deadline,
+    /// Request configuration before the first exchange.
+    Request,
+}
+
+/// Machine-readable reason for an HTTP failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FailureKind {
+    /// A configured timeout elapsed.
+    Timeout,
+    /// A transport failed without timing out.
+    Transport,
+    /// A response body was not valid UTF-8.
+    InvalidUtf8,
+    /// The redirect count exceeded the declared limit.
+    RedirectLimit,
+    /// Request configuration is invalid or ambiguous.
+    InvalidRequest,
+    /// A bounded response allocation could not be satisfied.
+    Resource,
+}
+
+/// Sanitized source detail carried by a structured HTTP failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FailureCause(String);
+
+impl FailureCause {
+    /// Return the sanitized source detail.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for FailureCause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for FailureCause {}
+
 // ── Options ─────────────────────────────────────────────────────────────────
 
 /// Request options. Start from [`Options::default`](crate::http::Options::default)
@@ -98,21 +190,24 @@ pub enum Truncation {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Options {
-    /// Total request timeout, covering connect, TLS, send, and receive.
+    /// Maximum time allowed for each transport phase. Body reads and redirect
+    /// hops each receive this bound independently.
     pub timeout: Duration,
     /// `User-Agent` header sent with every request.
-    pub user_agent: String,
+    user_agent: String,
     /// Extra headers sent with every request as `(name, value)` pairs, e.g.
     /// `("Authorization", "Bearer ...")`. Names and values must be valid
     /// header bytes; an invalid pair is a caller bug and the request errors
     /// rather than silently dropping the header.
-    pub headers: Vec<(String, String)>,
+    headers: Vec<(String, String)>,
     /// Ceiling on the response body in bytes, enforced while reading. See
     /// [`DEFAULT_MAX_BODY_BYTES`] for the default and the reason there is no
     /// unbounded value, and [`BodyPolicy`] for what happens at the ceiling.
     pub max_body_bytes: usize,
     /// What to do when the body reaches [`Options::max_body_bytes`].
     pub body_policy: BodyPolicy,
+    /// Redirect policy. The default follows at most ten hops.
+    pub redirect_policy: RedirectPolicy,
 }
 
 impl Default for Options {
@@ -123,12 +218,33 @@ impl Default for Options {
             headers: Vec::new(),
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             body_policy: BodyPolicy::Whole,
+            redirect_policy: RedirectPolicy::default(),
         }
     }
 }
 
 impl Options {
-    /// Set the total request timeout, covering connect, TLS, send, and receive.
+    /// Set the `User-Agent` value sent with each request.
+    #[must_use]
+    pub fn user_agent(mut self, user_agent: impl Into<String>) -> Self {
+        self.user_agent = user_agent.into();
+        self
+    }
+
+    /// Add a request header. Repeated calls preserve ordinary header
+    /// multiplicity; `Idempotency-Key` is kept singular by replacement.
+    #[must_use]
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        let name = name.into();
+        if name.eq_ignore_ascii_case("Idempotency-Key") {
+            self.headers
+                .retain(|existing| !existing.0.eq_ignore_ascii_case("Idempotency-Key"));
+        }
+        self.headers.push((name, value.into()));
+        self
+    }
+
+    /// Set the maximum time allowed for each transport phase and body read.
     ///
     /// [`Options`] is `#[non_exhaustive]`, so a caller outside this crate
     /// cannot construct it with a struct expression. Start from
@@ -158,17 +274,24 @@ impl Options {
         self
     }
 
-    /// Attach an idempotency key (`Idempotency-Key` header) so a retried
-    /// request is deduplicated by the receiver. Pair with
+    /// Set the redirect policy for this call.
+    #[must_use]
+    pub fn redirect_policy(mut self, redirect_policy: RedirectPolicy) -> Self {
+        self.redirect_policy = redirect_policy;
+        self
+    }
+
+    /// Attach one idempotency key (`Idempotency-Key` header) for a logical
+    /// operation. Repeated calls replace the configured key. Pair with
     /// [`crate::retry::RetryPolicy`] and a caller-generated key
     /// (`crate::id::Uuid::new_v4` under feature `random`); the client never
-    /// invents the key, because a regenerated key on retry would defeat the
-    /// deduplication the header exists for.
+    /// invents the key. The receiver must define deduplication behavior;
+    /// retries for one operation must reuse the key and semantic payload.
+    /// Reuse with a different payload is receiver-defined and is not made safe
+    /// by this helper.
     #[must_use]
-    pub fn idempotency_key(mut self, key: &str) -> Self {
-        self.headers
-            .push(("Idempotency-Key".to_owned(), key.to_owned()));
-        self
+    pub fn idempotency_key(self, key: &str) -> Self {
+        self.header("Idempotency-Key", key)
     }
 }
 
@@ -180,20 +303,77 @@ impl Options {
 pub struct Response {
     /// HTTP status code, including 4xx/5xx.
     pub status: u16,
-    /// Response headers in wire order as `(name, value)` pairs.
-    pub headers: Vec<(String, String)>,
+    /// HTTP response headers.
+    headers: Vec<(String, String)>,
+    /// Final request target without userinfo, query or fragment.
+    final_target: String,
+    /// Redirect targets, including original and final, with userinfo, query
+    /// and fragment removed.
+    redirect_chain: Vec<String>,
+    /// Exact legal header value bytes with multiplicity, in upstream map order.
+    header_bytes: Vec<(String, Vec<u8>)>,
     /// Response body bytes, at most [`Options::max_body_bytes`] long.
-    pub body: Vec<u8>,
+    body: Vec<u8>,
     /// Whether [`Response::body`] is the whole body or a prefix of it.
     pub truncation: Truncation,
 }
 
 impl Response {
-    /// The body as UTF-8, or [`crate::http::Error::Transport`]
-    /// when it is not valid UTF-8.
+    /// Compatibility projection of headers. Values are lossy UTF-8 text and
+    /// order follows the upstream `HeaderMap`, not wire arrival order.
+    #[must_use]
+    pub fn headers(&self) -> &[(String, String)] {
+        &self.headers
+    }
+
+    /// Iterate header names and exact legal value bytes, preserving repeated
+    /// values. Order is upstream `HeaderMap` iteration order.
+    ///
+    /// ```rust
+    /// use lgwks_std::http::{get_with, Options};
+    ///
+    /// let response = get_with("http://127.0.0.1:1/", &Options::default());
+    /// if let Ok(response) = response {
+    ///     for (name, value) in response.header_values() {
+    ///         let _ = (name, value);
+    ///     }
+    /// }
+    /// ```
+    #[must_use]
+    pub fn header_values(&self) -> impl ExactSizeIterator<Item = (&str, &[u8])> {
+        self.header_bytes
+            .iter()
+            .map(|header| (header.0.as_str(), header.1.as_slice()))
+    }
+
+    /// The sanitized final request target after any followed redirects.
+    #[must_use]
+    pub fn final_target(&self) -> &str {
+        &self.final_target
+    }
+
+    /// Sanitized redirect history, including original and final targets.
+    #[must_use]
+    pub fn redirect_chain(&self) -> &[String] {
+        &self.redirect_chain
+    }
+
+    /// The body bytes, whole or previewed according to [`Response::truncation`].
+    #[must_use]
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    /// The body as UTF-8, or a `TextDecode` / `InvalidUtf8` failure when it is
+    /// not valid UTF-8. Decoding failure does not imply exchange failure.
     pub fn text(&self) -> Result<&str, Error> {
-        std::str::from_utf8(&self.body).map_err(|utf8_error| {
-            Error::Transport(format!("response body is not valid UTF-8: {utf8_error}"))
+        std::str::from_utf8(&self.body).map_err(|utf8_error| Error::Failure {
+            stage: FailureStage::TextDecode,
+            kind: FailureKind::InvalidUtf8,
+            cause: Some(FailureCause(format!(
+                "valid UTF-8 ends at byte {}",
+                utf8_error.valid_up_to()
+            ))),
         })
     }
 
@@ -202,7 +382,7 @@ impl Response {
     /// Use this where the body is a preview rather than a payload: a caller
     /// that only wants a diagnostic excerpt should not have to invent a
     /// fallback for a body it is about to truncate anyway. For a strict read
-    /// that reports non-UTF-8 as a transport failure, use [`Response::text`].
+    /// that reports invalid encoding distinctly, use [`Response::text`].
     #[must_use]
     pub fn text_lossy(&self) -> std::borrow::Cow<'_, str> {
         String::from_utf8_lossy(&self.body)
@@ -211,7 +391,7 @@ impl Response {
 
 // ── Error ───────────────────────────────────────────────────────────────────
 
-/// What `http` refuses to hide: bad URLs, timeouts, transport failure.
+/// Typed HTTP refusal, including its stage and machine-readable failure class.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
@@ -229,8 +409,24 @@ pub enum Error {
         /// The declared ceiling the body reached.
         limit: usize,
     },
-    /// The exchange never completed: DNS, TCP, TLS, or protocol failure.
+    /// Legacy transport variant retained for source compatibility.
     Transport(String),
+    /// A failure with stable stage and machine-readable class.
+    Failure {
+        /// Phase where the failure was observed.
+        stage: FailureStage,
+        /// Failure classification independent of display text.
+        kind: FailureKind,
+        /// Sanitized diagnostic detail, never a raw URL.
+        cause: Option<FailureCause>,
+    },
+    /// A caller selected a redirect limit above the supported ceiling.
+    RedirectLimitTooLarge {
+        /// Requested redirect limit.
+        requested: u8,
+        /// Maximum supported redirect limit.
+        maximum: u8,
+    },
 }
 
 impl fmt::Display for Error {
@@ -250,11 +446,38 @@ impl fmt::Display for Error {
                  prefix"
             ),
             Self::Transport(ref cause) => write!(f, "transport failure: {cause}"),
+            Self::Failure {
+                stage,
+                kind,
+                ref cause,
+            } => {
+                write!(f, "HTTP {kind:?} failure during {stage:?}")?;
+                if let Some(detail) = cause.as_ref() {
+                    write!(f, ": {detail}")?;
+                }
+                Ok(())
+            }
+            Self::RedirectLimitTooLarge { requested, maximum } => write!(
+                f,
+                "redirect limit {requested} exceeds the supported maximum {maximum}"
+            ),
         }
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match *self {
+            Self::Failure { ref cause, .. } => cause.as_ref().map(failure_cause_source),
+            _ => None,
+        }
+    }
+}
+
+/// Coerce a structured failure cause to its standard error source type.
+fn failure_cause_source(cause: &FailureCause) -> &(dyn std::error::Error + 'static) {
+    cause
+}
 
 // ── Exchange ────────────────────────────────────────────────────────────────
 
@@ -310,21 +533,67 @@ pub fn validate_url(url: &str) -> Result<(), Error> {
 /// A fresh agent per call is the documented cost model: no connection pooling,
 /// no shared state between requests. `http_status_as_error(false)` is what makes
 /// a 4xx/5xx a [`Response`] rather than an [`Error`]; the timeout is applied
-/// globally, so it covers connect, TLS, send, and receive.
-fn agent(options: &Options) -> ureq::Agent {
+/// for each transport phase, so the error identifies the phase whose bound
+/// elapsed. Body reads use the same bound directly in the body reader.
+fn agent(options: &Options, max_redirects: u32) -> ureq::Agent {
     let config = ureq::Agent::config_builder()
-        .timeout_global(Some(options.timeout))
+        // Do not also set ureq's global timeout: when it equals the phase
+        // limits, its earlier absolute deadline masks the typed phase timeout.
+        .timeout_global(None)
+        .timeout_resolve(Some(options.timeout))
+        .timeout_connect(Some(options.timeout))
+        .timeout_send_request(Some(options.timeout))
+        .timeout_send_body(Some(options.timeout))
+        .timeout_recv_response(Some(options.timeout))
+        .timeout_recv_body(Some(options.timeout))
+        .max_redirects(max_redirects)
+        .save_redirect_history(true)
+        .redirect_auth_headers(ureq::config::RedirectAuthHeaders::Never)
         .http_status_as_error(false)
         .user_agent(&options.user_agent)
         .build();
     ureq::Agent::new_with_config(config)
 }
 
+/// Resolve a caller policy into ureq's bounded redirect count.
+fn redirect_limit(options: &Options) -> Result<u32, Error> {
+    match options.redirect_policy {
+        RedirectPolicy::NoFollow => Ok(0),
+        RedirectPolicy::Follow => Ok(u32::from(MAX_REDIRECT_HOPS)),
+        RedirectPolicy::FollowAtMost(requested) if requested <= MAX_REDIRECT_HOPS => {
+            Ok(u32::from(requested))
+        }
+        RedirectPolicy::FollowAtMost(requested) => Err(Error::RedirectLimitTooLarge {
+            requested,
+            maximum: MAX_REDIRECT_HOPS,
+        }),
+    }
+}
+
+/// Remove userinfo, query and fragment from an absolute target for receipts.
+fn sanitized_target(uri: &str) -> String {
+    let Some((scheme, remainder)) = uri.split_once("://") else {
+        return String::from("<invalid-target>");
+    };
+    let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
+    let authority = remainder
+        .get(..authority_end)
+        .unwrap_or_default()
+        .rsplit_once('@')
+        .map_or_else(
+            || remainder.get(..authority_end).unwrap_or_default(),
+            |(_, host)| host,
+        );
+    let suffix = remainder.get(authority_end..).unwrap_or_default();
+    let path = suffix.split(['?', '#']).next().unwrap_or_default();
+    let path = if path.is_empty() { "/" } else { path };
+    format!("{scheme}://{authority}{path}")
+}
+
 /// Read a completed ureq response into the owned [`Response`].
 ///
-/// Header values are decoded lossily: a non-UTF-8 header must not fail the
-/// whole exchange, and the replacement character keeps the wire bytes
-/// distinguishable from a header that was genuinely invalid UTF-8. The body, by
+/// Header bytes are retained alongside their lossy String compatibility view.
+/// The body, by
 /// contrast, is read strictly: only the I/O read can fail here, and a partial
 /// read is reported as [`Error::Transport`] rather than returned as a short
 /// body. Non-UTF-8 *bodies* are not an error at this layer: [`Response::text`]
@@ -338,20 +607,37 @@ fn response_of(
     options: &Options,
 ) -> Result<Response, Error> {
     let status = response.status().as_u16();
-    let headers = response
+    let header_bytes: Vec<_> = response
         .headers()
         .iter()
-        .map(|(name, value)| {
+        .map(|(name, value)| (name.to_string(), value.as_bytes().to_vec()))
+        .collect();
+    let headers = header_bytes
+        .iter()
+        .map(|header| {
             (
-                name.to_string(),
-                String::from_utf8_lossy(value.as_bytes()).into_owned(),
+                header.0.clone(),
+                String::from_utf8_lossy(&header.1).into_owned(),
             )
         })
         .collect();
+    let final_target = sanitized_target(&response.get_uri().to_string());
+    let redirect_chain = response
+        .get_redirect_history()
+        .map(|history| {
+            history
+                .iter()
+                .map(|target| sanitized_target(&target.to_string()))
+                .collect()
+        })
+        .unwrap_or_else(|| vec![final_target.clone()]);
     let (body, truncation) = read_bounded(&mut response.body_mut().as_reader(), options)?;
     Ok(Response {
         status,
         headers,
+        final_target,
+        redirect_chain,
+        header_bytes,
         body,
         truncation,
     })
@@ -392,10 +678,17 @@ fn read_bounded(reader: &mut impl Read, options: &Options) -> Result<(Vec<u8>, T
         let wanted = remaining.min(READ_CHUNK_BYTES);
         let read = reader
             .read(&mut chunk[..wanted])
-            .map_err(|read_error| Error::Transport(read_error.to_string()))?;
+            .map_err(|read_error| map_read_error(read_error, FailureStage::Body))?;
         if read == 0 {
             break Truncation::Complete;
         }
+        body.try_reserve_exact(read).map_err(|reserve_error| {
+            failure(
+                FailureStage::Body,
+                FailureKind::Resource,
+                Some(reserve_error.to_string()),
+            )
+        })?;
         body.extend_from_slice(&chunk[..read]);
     };
     if options.body_policy == BodyPolicy::Whole && truncation == Truncation::Cut {
@@ -416,7 +709,7 @@ fn probe_for_more(reader: &mut impl Read) -> Result<Truncation, Error> {
     let mut scratch = [0_u8; 1];
     let read = reader
         .read(&mut scratch)
-        .map_err(|read_error| Error::Transport(read_error.to_string()))?;
+        .map_err(|read_error| map_read_error(read_error, FailureStage::EofProbe))?;
     Ok(if read == 0 {
         Truncation::Complete
     } else {
@@ -432,15 +725,105 @@ fn probe_for_more(reader: &mut impl Read) -> Result<Truncation, Error> {
 /// class-only: ureq's message embeds the raw URI, so the string is dropped
 /// rather than carried into a caller's logs. Everything else keeps the
 /// underlying detail, which names DNS, TCP, TLS, or protocol failure.
-fn map_error(error: ureq::Error) -> Error {
+fn timeout_stage(timeout: ureq::Timeout) -> FailureStage {
+    match timeout {
+        ureq::Timeout::Resolve => FailureStage::Resolve,
+        ureq::Timeout::Connect => FailureStage::Connect,
+        ureq::Timeout::SendRequest | ureq::Timeout::SendBody | ureq::Timeout::Await100 => {
+            FailureStage::Send
+        }
+        ureq::Timeout::RecvResponse => FailureStage::Headers,
+        ureq::Timeout::RecvBody => FailureStage::Body,
+        ureq::Timeout::Global | ureq::Timeout::PerCall => FailureStage::Deadline,
+        _ => FailureStage::Deadline,
+    }
+}
+
+/// Build the canonical, text-safe failure without including a raw URL.
+fn failure(stage: FailureStage, kind: FailureKind, cause: Option<String>) -> Error {
+    Error::Failure {
+        stage,
+        kind,
+        cause: cause.map(FailureCause),
+    }
+}
+
+/// Classify a body-reader error by its typed source and I/O kind.
+fn map_read_error(error: std::io::Error, stage: FailureStage) -> Error {
+    let is_timeout = error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<ureq::Error>())
+        .and_then(|source| match source {
+            &ureq::Error::Timeout(_) => Some(()),
+            _ => None,
+        })
+        .is_some();
+    let timed_out = is_timeout || error.kind() == std::io::ErrorKind::TimedOut;
+    failure(
+        stage,
+        if timed_out {
+            FailureKind::Timeout
+        } else {
+            FailureKind::Transport
+        },
+        Some(error.to_string()),
+    )
+}
+
+/// Fold ureq's typed error variants without interpreting display strings.
+fn map_error(error: ureq::Error, is_tls: bool) -> Error {
     match error {
-        ureq::Error::Timeout(_) => Error::Timeout,
+        ureq::Error::Timeout(timeout) => {
+            failure(timeout_stage(timeout), FailureKind::Timeout, None)
+        }
         // ureq's `BadUri` message embeds the raw URI. `validate_url` rejects the
         // shapes that reach it, but collapse it to the class-only variant
         // anyway: a caller that logs the returned error must not receive the
         // userinfo or query string back.
         ureq::Error::BadUri(_) => Error::InvalidUrl,
-        other => Error::Transport(other.to_string()),
+        ureq::Error::HostNotFound => failure(FailureStage::Resolve, FailureKind::Transport, None),
+        ureq::Error::Tls(cause) => failure(
+            FailureStage::Tls,
+            FailureKind::Transport,
+            Some(cause.to_owned()),
+        ),
+        ureq::Error::Rustls(cause) => failure(
+            FailureStage::Tls,
+            FailureKind::Transport,
+            Some(cause.to_string()),
+        ),
+        ureq::Error::TooManyRedirects => {
+            failure(FailureStage::Redirect, FailureKind::RedirectLimit, None)
+        }
+        ureq::Error::RedirectFailed => {
+            failure(FailureStage::Redirect, FailureKind::Transport, None)
+        }
+        ureq::Error::Io(cause) => {
+            let stage = match cause.kind() {
+                std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::AddrNotAvailable
+                | std::io::ErrorKind::NetworkUnreachable => FailureStage::Connect,
+                std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof if is_tls => {
+                    FailureStage::Tls
+                }
+                _ => FailureStage::Request,
+            };
+            map_read_error(cause, stage)
+        }
+        ureq::Error::Protocol(cause) => failure(
+            FailureStage::Headers,
+            FailureKind::Transport,
+            Some(cause.to_string()),
+        ),
+        ureq::Error::ConnectionFailed => {
+            failure(FailureStage::Connect, FailureKind::Transport, None)
+        }
+        ureq::Error::Http(_) => failure(FailureStage::Request, FailureKind::InvalidRequest, None),
+        ureq::Error::BodyExceedsLimit(_) => {
+            failure(FailureStage::Body, FailureKind::Transport, None)
+        }
+        _ => failure(FailureStage::Request, FailureKind::Transport, None),
     }
 }
 
@@ -457,7 +840,7 @@ pub fn get(url: &str) -> Result<Response, Error> {
 /// GET `url` with `options`.
 pub fn get_with(url: &str, options: &Options) -> Result<Response, Error> {
     validate_url(url)?;
-    let mut call = agent(options).get(url);
+    let mut call = agent(options, redirect_limit(options)?).get(url);
     // Bound whole rather than destructured: the elements are `&String` behind
     // the tuple, so a `(name, value)` pattern would not match the scrutinee
     // type, and spelling the borrow out (`&(ref name, ref value)`) is the
@@ -466,7 +849,7 @@ pub fn get_with(url: &str, options: &Options) -> Result<Response, Error> {
         call = call.header(header.0.as_str(), header.1.as_str());
     }
     call.call()
-        .map_err(map_error)
+        .map_err(|error| map_error(error, url.starts_with("https://")))
         .and_then(|response| response_of(response, options))
 }
 
@@ -489,13 +872,15 @@ pub fn post_with(
     // the caller nothing it does not already hold: it has the URL, the content
     // type, and the body length. A caller that wants a request trace owns that
     // decision, and owns redacting the URL when it does.
-    let mut request = agent(options)
+    let mut request = agent(options, redirect_limit(options)?)
         .post(url)
         .header("Content-Type", content_type);
     for header in &options.headers {
         request = request.header(header.0.as_str(), header.1.as_str());
     }
-    let response = request.send(body).map_err(map_error)?;
+    let response = request
+        .send(body)
+        .map_err(|error| map_error(error, url.starts_with("https://")))?;
     response_of(response, options)
 }
 
@@ -514,10 +899,62 @@ pub fn post_with(
 mod tests {
     use super::*;
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::thread;
 
     const ECHO: &str = "echo-body-123";
+
+    /// Read through the end of one HTTP request header block.
+    fn read_request_head(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+        let mut request = [0_u8; 1024];
+        let mut head = Vec::new();
+        while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut request)?;
+            if read == 0 {
+                break;
+            }
+            head.extend_from_slice(&request[..read]);
+        }
+        Ok(head)
+    }
+
+    /// Send one response prefix and hold its socket open until the test releases it.
+    fn serve_held_response(
+        response: Vec<u8>,
+    ) -> std::io::Result<(
+        u16,
+        std::sync::mpsc::SyncSender<()>,
+        thread::JoinHandle<std::io::Result<()>>,
+    )> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        let (release, wait_release) = std::sync::mpsc::sync_channel(1);
+        let handle = thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let _ = read_request_head(&mut stream)?;
+            stream.write_all(&response)?;
+            let _released = wait_release.recv();
+            Ok(())
+        });
+        Ok((port, release, handle))
+    }
+
+    /// Accept one socket and keep it open without reading or replying.
+    fn serve_held_socket() -> std::io::Result<(
+        u16,
+        std::sync::mpsc::SyncSender<()>,
+        thread::JoinHandle<std::io::Result<()>>,
+    )> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        let (release, wait_release) = std::sync::mpsc::sync_channel(1);
+        let handle = thread::spawn(move || -> std::io::Result<()> {
+            let (_stream, _) = listener.accept()?;
+            let _released = wait_release.recv();
+            Ok(())
+        });
+        Ok((port, release, handle))
+    }
 
     /// Serve `replies` canned responses, then exit. Returns the bound port.
     /// Reads full requests (headers plus any `Content-Length` body) before
@@ -645,6 +1082,7 @@ mod tests {
             headers: Vec::new(),
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             body_policy: BodyPolicy::Whole,
+            redirect_policy: RedirectPolicy::default(),
         }
     }
 
@@ -698,6 +1136,183 @@ mod tests {
         Ok(())
     }
 
+    /// Raw header bytes remain distinct even when the String view replaces both.
+    #[test]
+    fn legal_header_bytes_and_repeated_values_are_preserved()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (port, server) = serve_raw(
+            b"HTTP/1.1 200 OK\r\nX-Value: \x80A\r\nX-Value: \x81A\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+        )?;
+        let response = get_with(&format!("http://127.0.0.1:{port}/"), &quiet())?;
+        let values: Vec<_> = response
+            .header_values()
+            .filter(|header| header.0.eq_ignore_ascii_case("x-value"))
+            .map(|header| header.1.to_vec())
+            .collect();
+        assert_eq!(values.len(), 2, "both repeated values are retained");
+        assert!(
+            values.contains(&vec![0x80, b'A']),
+            "first raw value is exact"
+        );
+        assert!(
+            values.contains(&vec![0x81, b'A']),
+            "second raw value is exact"
+        );
+        let display_values: Vec<_> = response
+            .headers()
+            .iter()
+            .filter(|header| header.0.eq_ignore_ascii_case("x-value"))
+            .map(|header| header.1.clone())
+            .collect();
+        assert_eq!(
+            display_values.len(),
+            2,
+            "the compatibility view keeps multiplicity"
+        );
+        assert_eq!(
+            display_values[0], display_values[1],
+            "lossy display is explicitly lossy"
+        );
+        join_server(server)?;
+        Ok(())
+    }
+
+    /// No-follow returns a redirect response without making a second exchange.
+    #[test]
+    fn no_follow_returns_the_redirect_without_contacting_its_target()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let reply = b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:9/next?token=secret\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let (port, server) = serve_raw(reply.to_vec())?;
+        let response = get_with(
+            &format!("http://127.0.0.1:{port}/start?credential=hidden"),
+            &quiet().redirect_policy(RedirectPolicy::NoFollow),
+        )?;
+        assert_eq!(
+            response.status, 302,
+            "the redirect remains an HTTP response"
+        );
+        assert_eq!(
+            response.final_target(),
+            format!("http://127.0.0.1:{port}/start")
+        );
+        assert_eq!(response.redirect_chain().len(), 1);
+        assert!(!response.final_target().contains("hidden"));
+        join_server(server)?;
+        Ok(())
+    }
+
+    /// Following records sanitized provenance and preserves ureq's no-auth redirect rule.
+    #[test]
+    fn followed_redirect_records_target_and_strips_sensitive_headers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let destination = TcpListener::bind("127.0.0.1:0")?;
+        let destination_port = destination.local_addr()?.port();
+        let destination_server = thread::spawn(move || -> std::io::Result<String> {
+            let (mut stream, _) = destination.accept()?;
+            let request = read_request_head(&mut stream)?;
+            stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+            )?;
+            Ok(String::from_utf8_lossy(&request).into_owned())
+        });
+        let origin = TcpListener::bind("127.0.0.1:0")?;
+        let origin_port = origin.local_addr()?.port();
+        let origin_server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = origin.accept()?;
+            let _ = read_request_head(&mut stream)?;
+            let reply = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{destination_port}/final?token=hidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(reply.as_bytes())
+        });
+        let options = quiet()
+            .header("Authorization", "Bearer secret")
+            .redirect_policy(RedirectPolicy::FollowAtMost(1));
+        let response = get_with(
+            &format!("http://127.0.0.1:{origin_port}/start?token=hidden"),
+            &options,
+        )?;
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.final_target(),
+            format!("http://127.0.0.1:{destination_port}/final")
+        );
+        assert_eq!(response.redirect_chain().len(), 2);
+        assert!(
+            response
+                .redirect_chain()
+                .iter()
+                .all(|target| !target.contains("hidden") && !target.contains("secret")),
+            "redirect provenance strips query secrets"
+        );
+        let received = destination_server
+            .join()
+            .map_err(|_| "redirect destination thread panicked")??;
+        assert!(
+            !received.to_ascii_lowercase().contains("authorization:"),
+            "sensitive authorization is not forwarded"
+        );
+        origin_server
+            .join()
+            .map_err(|_| "redirect origin thread panicked")??;
+        Ok(())
+    }
+
+    /// Redirect cycles stop at the declared hop limit and report a typed refusal.
+    #[test]
+    fn redirect_loop_refuses_at_the_configured_limit() -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        let server = thread::spawn(move || -> std::io::Result<usize> {
+            let mut count = 0;
+            for _ in 0..=2 {
+                let (mut stream, _) = listener.accept()?;
+                let _ = read_request_head(&mut stream)?;
+                let reply = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/loop\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                stream.write_all(reply.as_bytes())?;
+                count += 1;
+            }
+            Ok(count)
+        });
+        let result = get_with(
+            &format!("http://127.0.0.1:{port}/loop"),
+            &quiet().redirect_policy(RedirectPolicy::FollowAtMost(2)),
+        );
+        assert!(matches!(
+            result,
+            Err(Error::Failure {
+                stage: FailureStage::Redirect,
+                kind: FailureKind::RedirectLimit,
+                ..
+            })
+        ));
+        assert_eq!(
+            server
+                .join()
+                .map_err(|_| "redirect loop server panicked")??,
+            3,
+            "the receiver observed the initial request plus two followed hops"
+        );
+        Ok(())
+    }
+
+    /// Redirect limits above the supported ceiling fail before any socket opens.
+    #[test]
+    fn oversized_redirect_limit_is_refused_before_dialing() {
+        assert!(matches!(
+            get_with(
+                "http://127.0.0.1:9/",
+                &quiet().redirect_policy(RedirectPolicy::FollowAtMost(
+                    MAX_REDIRECT_HOPS.saturating_add(1)
+                )),
+            ),
+            Err(Error::RedirectLimitTooLarge { .. })
+        ));
+    }
+
     #[test]
     fn posts_body_with_content_type() -> Result<(), Box<dyn std::error::Error>> {
         let (port, server) = serve(vec![("200 OK", String::new())])?;
@@ -748,7 +1363,14 @@ mod tests {
         let Err(error) = get_with(&format!("http://127.0.0.1:{port}/"), &quiet()) else {
             return Err("a refused connection must not yield a response".into());
         };
-        assert!(matches!(error, Error::Transport(_)));
+        assert!(matches!(
+            error,
+            Error::Failure {
+                stage: FailureStage::Connect,
+                kind: FailureKind::Transport,
+                ..
+            }
+        ));
         Ok(())
     }
 
@@ -774,10 +1396,10 @@ mod tests {
             stream.write_all(reply.as_bytes())?;
             Ok(text)
         });
-        let mut options = quiet();
-        options
-            .headers
-            .push(("Authorization".into(), "Bearer test-token".into()));
+        let options = quiet()
+            .header("Authorization", "Bearer test-token")
+            .idempotency_key("old-operation")
+            .idempotency_key("current-operation");
         let response = post_with(
             &format!("http://127.0.0.1:{port}/"),
             "text/plain",
@@ -793,6 +1415,17 @@ mod tests {
                 .contains("authorization: bearer test-token"),
             "server never saw the Authorization header:\n{seen}"
         );
+        assert_eq!(
+            seen.to_ascii_lowercase()
+                .matches("idempotency-key:")
+                .count(),
+            1,
+            "the receiver sees exactly one idempotency key"
+        );
+        assert!(
+            seen.to_ascii_lowercase()
+                .contains("idempotency-key: current-operation")
+        );
         Ok(())
     }
 
@@ -803,17 +1436,217 @@ mod tests {
         // Held open past the client's timeout: the accept must succeed (so the
         // dial is not what fails) and the reply must never come, leaving the
         // client's read timeout as the only thing that can end the request.
+        let (release, released) = std::sync::mpsc::sync_channel(1);
         let handle = thread::spawn(move || -> std::io::Result<()> {
             let (_stream, _) = listener.accept()?;
-            thread::sleep(Duration::from_secs(30));
+            let _released = released.recv();
             Ok(())
         });
         let options = quiet().timeout(Duration::from_millis(200));
         let Err(error) = get_with(&format!("http://127.0.0.1:{port}/"), &options) else {
             return Err("a silent server must hit the read timeout".into());
         };
-        assert_eq!(error, Error::Timeout);
-        drop(handle);
+        assert!(matches!(
+            error,
+            Error::Failure {
+                stage: FailureStage::Headers,
+                kind: FailureKind::Timeout,
+                ..
+            }
+        ));
+        release
+            .send(())
+            .map_err(|_| "timeout fixture receiver ended")?;
+        handle
+            .join()
+            .map_err(|_| "timeout fixture thread panicked")??;
+        Ok(())
+    }
+
+    /// A stalled TLS handshake is reported at the connect stage with timeout class.
+    #[test]
+    fn tls_handshake_timeout_preserves_connect_stage() -> Result<(), Box<dyn std::error::Error>> {
+        let (port, release, server) = serve_held_socket()?;
+        let result = get_with(
+            &format!("https://127.0.0.1:{port}/"),
+            &quiet().timeout(Duration::from_millis(150)),
+        );
+        assert!(matches!(
+            result,
+            Err(Error::Failure {
+                stage: FailureStage::Connect,
+                kind: FailureKind::Timeout,
+                ..
+            })
+        ));
+        release.send(()).map_err(|_| "TLS fixture receiver ended")?;
+        server.join().map_err(|_| "TLS fixture thread panicked")??;
+        Ok(())
+    }
+
+    /// Malformed TLS bytes remain a TLS-class transport failure.
+    #[test]
+    fn malformed_tls_handshake_preserves_tls_stage() -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            stream.write_all(b"not-a-tls-record")
+        });
+        let result = get_with(
+            &format!("https://127.0.0.1:{port}/"),
+            &quiet().timeout(Duration::from_secs(2)),
+        );
+        assert!(matches!(
+            result,
+            Err(Error::Failure {
+                stage: FailureStage::Tls,
+                kind: FailureKind::Transport,
+                ..
+            })
+        ));
+        server
+            .join()
+            .map_err(|_| "malformed TLS fixture panicked")??;
+        Ok(())
+    }
+
+    /// A stalled request-body write reports the send stage and timeout class.
+    #[test]
+    fn request_body_timeout_preserves_send_stage() -> Result<(), Box<dyn std::error::Error>> {
+        let (port, release, server) = serve_held_socket()?;
+        let body = vec![b'x'; 32 * 1024 * 1024];
+        let result = post_with(
+            &format!("http://127.0.0.1:{port}/"),
+            "application/octet-stream",
+            &body,
+            &quiet().timeout(Duration::from_millis(150)),
+        );
+        assert!(matches!(
+            result,
+            Err(Error::Failure {
+                stage: FailureStage::Send,
+                kind: FailureKind::Timeout,
+                ..
+            })
+        ));
+        release
+            .send(())
+            .map_err(|_| "send fixture receiver ended")?;
+        server
+            .join()
+            .map_err(|_| "send fixture thread panicked")??;
+        Ok(())
+    }
+
+    /// A body timeout keeps its body phase and timeout class after headers land.
+    #[test]
+    fn body_timeout_preserves_stage_and_class() -> Result<(), Box<dyn std::error::Error>> {
+        let (port, release, server) = serve_held_response(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: keep-alive\r\n\r\nx".to_vec(),
+        )?;
+        let result = get_with(
+            &format!("http://127.0.0.1:{port}/"),
+            &quiet().timeout(Duration::from_millis(150)),
+        );
+        assert!(matches!(
+            result,
+            Err(Error::Failure {
+                stage: FailureStage::Body,
+                kind: FailureKind::Timeout,
+                ..
+            })
+        ));
+        release
+            .send(())
+            .map_err(|_| "body fixture receiver ended")?;
+        server
+            .join()
+            .map_err(|_| "body fixture thread panicked")??;
+        Ok(())
+    }
+
+    /// The exact-cap EOF probe reports its own timeout stage.
+    #[test]
+    fn eof_probe_timeout_preserves_stage_and_class() -> Result<(), Box<dyn std::error::Error>> {
+        let limit = SMALL_CEILING;
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+            limit.saturating_add(1)
+        )
+        .into_bytes();
+        response.extend(std::iter::repeat_n(b'x', limit));
+        let (port, release, server) = serve_held_response(response)?;
+        let result = get_with(
+            &format!("http://127.0.0.1:{port}/"),
+            &previewing(limit).timeout(Duration::from_millis(150)),
+        );
+        assert!(matches!(
+            result,
+            Err(Error::Failure {
+                stage: FailureStage::EofProbe,
+                kind: FailureKind::Timeout,
+                ..
+            })
+        ));
+        release.send(()).map_err(|_| "EOF fixture receiver ended")?;
+        server.join().map_err(|_| "EOF fixture thread panicked")??;
+        Ok(())
+    }
+
+    /// A short content-length response is transport failure, never ordinary EOF.
+    #[test]
+    fn truncated_transport_is_not_reported_as_complete_eof()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (port, server) = serve_raw(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nabc".to_vec(),
+        )?;
+        let result = get_with(&format!("http://127.0.0.1:{port}/"), &quiet());
+        assert!(matches!(
+            result,
+            Err(Error::Failure {
+                stage: FailureStage::Body,
+                kind: FailureKind::Transport,
+                ..
+            })
+        ));
+        join_server(server)?;
+        Ok(())
+    }
+
+    /// Invalid UTF-8 belongs to payload decoding after the HTTP response exists.
+    #[test]
+    fn invalid_utf8_is_a_payload_decoding_failure() -> Result<(), Box<dyn std::error::Error>> {
+        let (port, server) = serve_raw(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\n\xff".to_vec(),
+        )?;
+        let response = get_with(&format!("http://127.0.0.1:{port}/"), &quiet())?;
+        assert_eq!(response.status, 200, "the HTTP exchange completed");
+        assert!(matches!(
+            response.text(),
+            Err(Error::Failure {
+                stage: FailureStage::TextDecode,
+                kind: FailureKind::InvalidUtf8,
+                ..
+            })
+        ));
+        join_server(server)?;
+        Ok(())
+    }
+
+    /// Logical Vec capacity stays inside a non-power-of-two body ceiling.
+    #[test]
+    fn non_power_of_two_ceiling_bounds_retained_capacity() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let limit = 73;
+        let mut reader = std::io::Cursor::new(filler(limit).into_bytes());
+        let (body, truncation) = read_bounded(&mut reader, &ceiling(limit))?;
+        assert_eq!(body.len(), limit, "the exact body is retained");
+        assert!(
+            body.capacity() <= limit,
+            "body capacity stays within the declared ceiling"
+        );
+        assert_eq!(truncation, Truncation::Complete);
         Ok(())
     }
 
@@ -858,6 +1691,34 @@ mod tests {
             Truncation::Complete,
             "a body that ends at the ceiling has not overflowed it"
         );
+        join_server(server)?;
+        Ok(())
+    }
+
+    /// A zero-byte ceiling accepts an empty body after its EOF probe.
+    #[test]
+    fn zero_ceiling_accepts_an_empty_body() -> Result<(), Box<dyn std::error::Error>> {
+        let (port, server) = serve_raw(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+        )?;
+        let response = get_with(&format!("http://127.0.0.1:{port}/"), &ceiling(0))?;
+        assert!(
+            response.body.is_empty(),
+            "zero ceiling retains no body bytes"
+        );
+        assert_eq!(response.truncation, Truncation::Complete);
+        join_server(server)?;
+        Ok(())
+    }
+
+    /// A zero-byte ceiling distinguishes an empty response from one body byte.
+    #[test]
+    fn zero_ceiling_refuses_a_nonempty_whole_body() -> Result<(), Box<dyn std::error::Error>> {
+        let (port, server) = serve_raw(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx".to_vec(),
+        )?;
+        let result = get_with(&format!("http://127.0.0.1:{port}/"), &ceiling(0));
+        assert!(matches!(result, Err(Error::BodyTooLarge { limit: 0 })));
         join_server(server)?;
         Ok(())
     }
