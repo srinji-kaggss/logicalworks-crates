@@ -143,6 +143,23 @@ builtin = "debug-e2e"
 ci_step = "Debug doctor end-to-end journey"
 
 [[lane]]
+id = "simulation-evidence-check"
+surfaces = "ci"
+required = true
+command = "python3 scripts/ci_local.py --lane simulation-evidence"
+ci_step = "Check successful simulation result"
+needs = ["bin:cargo-nextest"]
+reason = "dedicated PR check row whose job name exposes the successful simulation result"
+
+[[lane]]
+id = "debug-e2e-check"
+surfaces = "ci"
+required = true
+command = "python3 scripts/ci_local.py --lane debug-e2e"
+ci_step = "Check successful end-to-end journey result"
+reason = "dedicated PR check row whose job name exposes the successful end-to-end journey result"
+
+[[lane]]
 id = "lint"
 surfaces = "local ci"
 required = true

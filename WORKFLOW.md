@@ -43,7 +43,10 @@ test listing and also counts source-visible `#[test]` attributes under
 least half deterministic simulation. `debug-e2e` drives the public
 `lgwks-deps debug` command through its JSON success path and a fail-closed
 manifest fixture, and prints the successful end-to-end journey result CI must
-show.
+show. CI also runs those two lanes as dedicated PR check jobs named
+`successful simulation result` and `successful end-to-end journey result`, so
+the checks list exposes the result without requiring a reader to open the
+aggregate `Tests` log.
 
 Hosted Actions executes on this account and is the CI surface: the workflow
 routes to `ubuntu-latest`, `macos-14`, and `windows-latest`, with `macos-14`

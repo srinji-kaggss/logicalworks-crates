@@ -90,6 +90,36 @@ jobs:
       - name: Debug doctor end-to-end journey
         run: python3 scripts/ci_local.py --lane debug-e2e
 
+  simulation_evidence:
+    name: successful simulation result
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.98.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Check successful simulation result
+        run: python3 scripts/ci_local.py --lane simulation-evidence
+
+  debug_e2e:
+    name: successful end-to-end journey result
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.98.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+      - name: Check successful end-to-end journey result
+        run: python3 scripts/ci_local.py --lane debug-e2e
+
   clippy:
     name: Clippy
     needs: [build]
