@@ -84,6 +84,22 @@ mid-implementation.
 SLO evidence matrix with measured evidence per axis. Config, docs, CI, README,
 and script changes get one line of receipt per file. No table. No axes.
 
+**The nine-axis matrix for the 2026-09-27 async-journal change.** This is a
+product-runtime change, so Rule 6 asks for measured evidence per axis. The row
+states what was measured, not what is hoped for.
+
+| Axis | Measured evidence | Where |
+|---|---|---|
+| Frontier | Owner-serialized writes with a poisoned-ambiguity handle, rather than a per-write lock and a silent timeout. A dropped waiter used to complete invisibly; the handle is now poisoned with the reason | `journal::file::a_dropped_waiter_poisons_the_handle_and_a_reopen_does_not_duplicate` |
+| Hyperscale | Concurrency tiers 100 / 1k / 10k / 100k swept; the reached level is 50,000 on one store, bounded by `MAX_JOURNAL_EVENTS` of 100,000 at two events per fact. Requested, reached and ceiling are all in the trace | `sim_scale::tier_r*` |
+| Idiomatic | `clippy -D warnings` over the workspace and all targets: 0 errors. `cargo fmt --check`: clean. Every `allow` in new code carries a `reason` | workspace gate |
+| Generalized | The async append shares the sync append's frame preparation and length-check, write, `sync_all` path, so the two cannot drift into writing different bytes | `src/journal/file.rs` |
+| Decoupled | The harness owns time, network and disk; the code under test owns none of it. Tests drive `FileJournal`, `Bot`, `Broker`, `EffectScope` through their public interfaces only | `tests/sim/mod.rs` |
+| Ephemeral | Every scratch store is under the system temp directory, named by seed and by `lgwks_std::random` bytes, and removed on drop. A process id would have been shorter and wrong: the OS reuses it | `sim::Sim::scratch` |
+| Portable | Reopen across a fresh handle, path round-trip, and a real file-backed reopen; no wall-clock or pid enters a trace hash | `sim_journal::reopen_portability_r*`, `sim_scale::portable_r*` |
+| Multi-tenant | 5,000 concurrent provisions, 5,000 distinct tails, 10,000 events, no cross-tenant history | `sim_scale::the_named_five_thousand_tenant_provision` |
+| Fastest | 1,747 tests in 176.6s wall under nextest, 890 of them simulation, each sweeping a band twice for replay equality | `cargo nextest run --workspace --locked` |
+
 **Rule 7, refuse the theater.** No `wwfd boot` + `mem show` as a session-start
 ritual. No prophylactic skill loading. No re-reading source already held in
 context. No re-grepping something already found.

@@ -58,6 +58,8 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::task::Waker;
 
 use super::{
     ChainBreak, DurabilityPromise, DurableAck, EffectEvent, EffectEvidence, EffectJournal,
@@ -406,6 +408,379 @@ fn read_exact_or_eof(
     }
 }
 
+/// Take the lock, treating a poisoned one as recoverable.
+///
+/// Nothing in this module can panic while the lock is held — every arm is a
+/// `Result` that propagates — so a poison would be a bug in an unrelated
+/// thread, and refusing every later append because of it would turn one
+/// failure into a bricked journal.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// One durable append, as the storage owner receives it.
+struct Append {
+    /// The acknowledged prefix length this handle believes the file has.
+    expected_len: u64,
+    /// The frames to write, in chain order.
+    frames: Vec<u8>,
+}
+
+/// The state the handle and its storage owner share.
+///
+/// A single slot, not a queue. Every append API takes `&mut self`, so the type
+/// system already admits one outstanding request per journal: a second is not
+/// representable. That is the whole bound, and it is the tightest one
+/// available — an owner that could be handed two requests would need a queue,
+/// and a queue would need a length to bound it.
+#[derive(Default)]
+struct Slot {
+    /// The append waiting to be performed, if one is.
+    request: Option<Append>,
+    /// The outcome of the append the owner is performing or has performed.
+    outcome: Option<std::io::Result<()>>,
+    /// Whether the caller that submitted is still there to receive it.
+    waiting: bool,
+    /// The task to wake when it is, for a caller awaiting rather than blocking.
+    waker: Option<Waker>,
+    /// Whether bytes may be on the disk that no acknowledgment names.
+    poisoned: bool,
+    /// Whether the handle is gone and the owner should finish and exit.
+    closed: bool,
+    /// Whether the owner has dropped the file and released the writer lock.
+    released: bool,
+    /// Whether a flush should wait for an explicit release before syncing.
+    stalled: bool,
+    /// Whether the next commit should report a device refusal instead of
+    /// writing. Private, and never reachable from outside the crate: a write
+    /// that fails after the fence has passed is the one failure the poison
+    /// exists for, and it cannot be produced from the filesystem on demand.
+    fail_next: bool,
+}
+
+/// The one thread that owns a journal's file.
+///
+/// # ASSUMPTION: the owner is the only writer
+///
+/// Every append on this journal goes through the owner's slot, and the only
+/// other handle anyone holds is a read-only view that can be asked a length
+/// and nothing else. This is a durability boundary, not a style preference: it
+/// is why the length check and the write it guards can be one ordered step.
+/// `grep -n "ASSUMPTION: the owner is the only writer"` finds every place that
+/// claim is relied on.
+///
+/// # ASSUMPTION: the advisory lock is held by the file, not the thread
+///
+/// The lock is taken in `open` and the `File` then moves to the owner thread,
+/// so the lock must follow the descriptor rather than the thread that took it.
+/// This holds on the platforms the estate builds for; a platform where an
+/// advisory lock were owned per-thread would need the lock taken on the owner
+/// instead, which is a one-line move of `try_lock` into `serve`.
+///
+/// # ASSUMPTION: an append is at-least-once, never exactly-once
+///
+/// The owner performs what it was asked and reports what happened. It cannot
+/// know whether a caller that stopped listening will retry, and it does not
+/// pretend to: a caller that leaves latches the poison, and the next reader
+/// reconciles by reading the file back rather than by assuming. Exactly-once
+/// is a property of a caller's idempotency key, never of this thread.
+///
+/// # Why the file is not on the handle
+///
+/// `write_all` and `sync_all` are the storage device's cost, and the durable
+/// path reaches them from the thread that awaits the dispatch. On a
+/// current-thread executor there is no other thread to run anything, so the
+/// device's latency became the process's latency: a heartbeat, a timer and
+/// every unrelated bot in the same runtime stalled for the length of an
+/// `fsync`. Moving the file here makes the device's cost the owner's, and the
+/// caller's cost a wait it may await rather than sit through.
+///
+/// # What the owner preserves
+///
+/// Ordering is the owner's: it is one thread taking one request at a time, so
+/// the order appends were admitted in is the order they reach the disk. The
+/// staleness fence moved here with the write, so the length check and the
+/// write it guards are one ordered step and no append can be admitted between
+/// them. And an append whose caller has gone is not quietly forgotten: the
+/// owner notices the waiter is gone, latches the poison, and the handle refuses
+/// every later append rather than continuing from a view that may be behind
+/// the file.
+struct StorageOwner {
+    /// The slot both sides read, and the poison the owner latches.
+    shared: Arc<Mutex<Slot>>,
+    /// Woken on every state change, so a blocking caller and the owner's own
+    /// wait both re-read rather than spin.
+    signal: Arc<Condvar>,
+}
+
+/// A handle onto one journal's storage device, cloneable and independent of
+/// the journal.
+///
+/// It exists because a caller awaiting an append cannot reach the journal to
+/// release it: the future holds the handle's borrow for exactly as long as the
+/// append is outstanding, which is the window in which the device most needs
+/// to be unstuck. An operator un-sticking a real device is in the same
+/// position — their handle is busy on the append that is waiting.
+#[derive(Clone)]
+pub struct StorageGate {
+    /// The owner's slot, shared with the thread that performs the appends.
+    shared: Arc<Mutex<Slot>>,
+    /// Woken so the owner re-reads the gate.
+    signal: Arc<Condvar>,
+}
+
+impl StorageGate {
+    /// Let a flush that is waiting for a release proceed, and every flush
+    /// after it. The stall is not re-armed.
+    pub fn release(&self) {
+        let mut slot = lock(&self.shared);
+        slot.stalled = false;
+        self.signal.notify_all();
+    }
+}
+
+impl StorageOwner {
+    /// Hand `file` to a new owner thread and return the handle side, plus a
+    /// read-only view of the same file for the handle's own fence.
+    ///
+    /// Two handles, one writer. The owner holds the only handle that can write
+    /// and the lock; the view can only be asked how long the file is, which is
+    /// what the fence needs before it decides anything. The fence cannot go to
+    /// the owner for that answer, because a fence that had to wait for the
+    /// device would charge the caller the device's cost before it had decided
+    /// to append at all.
+    fn spawn(file: File, path: &Path, stalled: bool) -> Result<(Self, FileView), JournalError> {
+        let shared = Arc::new(Mutex::new(Slot {
+            stalled,
+            ..Slot::default()
+        }));
+        let signal = Arc::new(Condvar::new());
+        let owner = Self {
+            shared: Arc::clone(&shared),
+            signal: Arc::clone(&signal),
+        };
+        // A dedicated thread, not a pooled blocking job: this one outlives
+        // every job it runs and holds the file for the handle's whole life, so
+        // it is a thread with a lifetime rather than work handed to a pool.
+        // The handle is owned by `StorageOwner::drop`, which closes the slot
+        // and waits for the owner to report it has let the file go.
+        let view = FileView::read_only(path)?;
+        let _task = lgwks_std::task::spawn_blocking(move || serve(file, shared, signal));
+        Ok((owner, view))
+    }
+
+    /// Whether an append may be admitted at all.
+    fn poisoned(&self) -> bool {
+        lock(&self.shared).poisoned
+    }
+
+    /// Perform `frames` and wait for the owner to finish.
+    fn submit(&self, expected_len: u64, frames: Vec<u8>) -> Result<(), std::io::Error> {
+        let mut slot = lock(&self.shared);
+        slot.request = Some(Append {
+            expected_len,
+            frames,
+        });
+        slot.outcome = None;
+        slot.waiting = true;
+        self.signal.notify_all();
+        loop {
+            if let Some(outcome) = slot.outcome.take() {
+                slot.waiting = false;
+                return outcome;
+            }
+            slot = self
+                .signal
+                .wait(slot)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
+    /// Make the next commit report a device refusal instead of writing.
+    ///
+    /// Private, and deliberately so: the failure this models is a write that
+    /// fails after the fence has passed, which no filesystem will produce on
+    /// demand, and the poison latch behind it has to be tested somehow.
+    #[cfg(test)]
+    fn fail_next_commit(&self) {
+        lock(&self.shared).fail_next = true;
+    }
+
+    /// The same door, for a caller that awaits rather than blocks.
+    ///
+    /// The difference is only in how the answer is delivered: a blocking caller
+    /// waits on the signal, a task registers a waker and is woken by the owner
+    /// when it answers. The append itself is the same ordered step either way,
+    /// so a caller choosing to await does not get a weaker write than one that
+    /// chose to sit through it.
+    fn submit_async<'a>(&'a self, expected_len: u64, frames: Vec<u8>) -> Awaiting<'a> {
+        Awaiting {
+            owner: self,
+            pending: Some(Append {
+                expected_len,
+                frames,
+            }),
+            submitted: false,
+        }
+    }
+}
+
+/// A submitted append waiting for the storage owner's answer.
+///
+/// Dropping this is not a cancellation of the append, and the type says so:
+/// [`Drop`] tells the owner its waiter is gone, which is the same position a
+/// failed write leaves the handle in, and the owner latches the poison on it.
+/// A caller that walks away from a durable write it started must not then keep
+/// appending from a view that may be behind the file.
+struct Awaiting<'a> {
+    /// The owner that was asked, and will answer.
+    owner: &'a StorageOwner,
+    /// The append, until it has been handed over.
+    pending: Option<Append>,
+    /// Whether it has been handed over.
+    submitted: bool,
+}
+
+impl Drop for Awaiting<'_> {
+    fn drop(&mut self) {
+        if !self.submitted {
+            return;
+        }
+        let mut slot = lock(&self.owner.shared);
+        slot.waiting = false;
+    }
+}
+
+impl std::future::Future for Awaiting<'_> {
+    type Output = Result<(), std::io::Error>;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        let mut slot = lock(&this.owner.shared);
+        if !this.submitted {
+            let request = this.pending.take().unwrap_or_else(|| Append {
+                expected_len: 0,
+                frames: Vec::new(),
+            });
+            this.submitted = true;
+            slot.request = Some(request);
+            slot.outcome = None;
+            slot.waiting = true;
+            this.owner.signal.notify_all();
+        }
+        if let Some(outcome) = slot.outcome.take() {
+            slot.waiting = false;
+            return std::task::Poll::Ready(outcome);
+        }
+        slot.waker = Some(cx.waker().clone());
+        std::task::Poll::Pending
+    }
+}
+
+impl Drop for StorageOwner {
+    fn drop(&mut self) {
+        let mut slot = lock(&self.shared);
+        slot.closed = true;
+        self.signal.notify_all();
+        // Wait for the owner to report the file released, so the advisory lock
+        // this journal held is gone before a caller reopens the same path. The
+        // wait is bounded by the device: it ends when the owner's own in-flight
+        // append ends, which is the same append whose bytes are on the disk
+        // under the acknowledgment the caller may never see.
+        while !slot.released {
+            slot = self
+                .signal
+                .wait(slot)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+}
+
+/// The owner's loop: take a request, perform it, publish the outcome, repeat.
+///
+/// The file is dropped before `released` is set, so a waiter that observes the
+/// release knows the advisory lock is already gone rather than about to be.
+fn serve(mut file: File, shared: Arc<Mutex<Slot>>, signal: Arc<Condvar>) {
+    loop {
+        let request = {
+            let mut slot = lock(&shared);
+            loop {
+                if slot.closed {
+                    break None;
+                }
+                if let Some(request) = slot.request.take() {
+                    break Some(request);
+                }
+                slot = signal
+                    .wait(slot)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+        };
+        let Some(request) = request else { break };
+
+        // A stalled flush models a device that has not answered yet. It is the
+        // only reason this thread ever waits on anything but its own request.
+        {
+            let mut slot = lock(&shared);
+            while slot.stalled && !slot.closed {
+                slot = signal
+                    .wait(slot)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+        }
+
+        let outcome = {
+            let mut slot = lock(&shared);
+            if std::mem::take(&mut slot.fail_next) {
+                Err(std::io::Error::other("the injected device refusal"))
+            } else {
+                drop(slot);
+                commit(&mut file, request.expected_len, &request.frames)
+            }
+        };
+
+        let mut slot = lock(&shared);
+        // A caller that went away while the bytes were moving leaves the handle
+        // unable to say whether they landed. That is the same position a failed
+        // write leaves it in, so it is refused the same way.
+        if outcome.is_err() || !slot.waiting {
+            slot.poisoned = true;
+        }
+        slot.outcome = Some(outcome);
+        if let Some(waker) = slot.waker.take() {
+            waker.wake();
+        }
+        signal.notify_all();
+    }
+    drop(file);
+    let mut slot = lock(&shared);
+    slot.released = true;
+    signal.notify_all();
+}
+
+/// The ordered step that is the append: check the fence, write, sync.
+///
+/// # Errors
+///
+/// Whatever the device reports. A length that is not the one the caller
+/// expected means the file moved, and is refused before any byte is written.
+fn commit(file: &mut File, expected_len: u64, frames: &[u8]) -> std::io::Result<()> {
+    let on_disk = file.metadata()?.len();
+    if on_disk != expected_len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the journal file moved under this controller; reopen before appending",
+        ));
+    }
+    file.write_all(frames)?;
+    file.sync_all()
+}
+
 /// An effect journal whose acknowledged appends are on the disk.
 ///
 /// Opened with [`FileJournal::open`], which creates the file when it does not
@@ -418,9 +793,13 @@ fn read_exact_or_eof(
 pub struct FileJournal {
     /// Where the journal lives.
     path: PathBuf,
-    /// The append handle. Append mode writes at the end of the file whatever
-    /// a concurrent reader believes, so no cursor has to survive the replay.
-    file: File,
+    /// The thread that holds the file, and the one door an append reaches the
+    /// disk through. It also carries the poison, so the handle never has to
+    /// guess whether a write it did not see succeed.
+    storage: StorageOwner,
+    /// A read-only window onto the same file, so the fence can check the
+    /// acknowledged length without a round trip to the storage owner.
+    view: FileView,
     /// The replayed history, which is also the append fence's view.
     committed: Vec<JournalEntry>,
     /// The last kind recorded per key, the append fence's index, so an
@@ -430,10 +809,6 @@ pub struct FileJournal {
     outcomes: HashMap<crate::effect::EffectKey, (JournalPosition, EffectEvidence)>,
     /// Byte length of the acknowledged prefix on disk.
     disk_len: u64,
-    /// Whether a write of this handle failed after bytes may have reached
-    /// the disk. The handle's view can no longer be trusted against the
-    /// file's, so appends are refused until a reopen replays the truth.
-    write_failed: bool,
     /// Whether open repaired a torn tail to get here.
     torn_tail_repaired: bool,
 }
@@ -446,6 +821,38 @@ impl core::fmt::Debug for FileJournal {
             .field("disk_len", &self.disk_len)
             .field("torn_tail_repaired", &self.torn_tail_repaired)
             .finish()
+    }
+}
+
+/// A read-only window onto the journal's file, for the handle's own fence.
+///
+/// It exists so the fence can ask how long the file is without asking the
+/// storage owner, and asking the owner would mean waiting for the device
+/// before deciding whether to append at all. It cannot write: it is opened
+/// without write permission, so the owner stays the only writer even though
+/// two descriptors exist.
+struct FileView {
+    /// The read-only descriptor.
+    file: File,
+}
+
+impl FileView {
+    /// Open a read-only descriptor onto `path`.
+    fn read_only(path: &Path) -> Result<Self, JournalError> {
+        Ok(Self {
+            file: OpenOptions::new()
+                .read(true)
+                .open(path)
+                .map_err(JournalError::Storage)?,
+        })
+    }
+
+    /// The file's current byte length.
+    fn len(&self) -> Result<u64, JournalError> {
+        self.file
+            .metadata()
+            .map_err(JournalError::Storage)
+            .map(|meta| meta.len())
     }
 }
 
@@ -476,7 +883,19 @@ impl FileJournal {
     /// [`JournalError::CapacityExceeded`] when the complete history exceeds
     /// [`MAX_JOURNAL_BYTES`] or [`MAX_JOURNAL_EVENTS`].
     pub fn open(path: impl AsRef<Path>) -> Result<Self, JournalError> {
-        let path = path.as_ref().to_path_buf();
+        Self::open_impl(path.as_ref(), false)
+    }
+
+    /// Open, with the device's answering behaviour chosen by the caller.
+    ///
+    /// One implementation for both constructors: a stalled device is a
+    /// property of the storage owner, not a second way to open a journal.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the file, the lock or the scan reports.
+    fn open_impl(path: &Path, stalled: bool) -> Result<Self, JournalError> {
+        let path = path.to_path_buf();
         let mut file = OpenOptions::new()
             .read(true)
             .append(true)
@@ -557,16 +976,41 @@ impl FileJournal {
             }
         }
 
+        let (storage, view) = StorageOwner::spawn(file, &path, stalled)?;
         Ok(Self {
             path,
-            file,
+            storage,
+            view,
             committed: entries,
             ladder,
             outcomes,
             disk_len: acked_len,
-            write_failed: false,
             torn_tail_repaired,
         })
+    }
+
+    /// Refuse an append that would take the file past [`MAX_JOURNAL_EVENTS`].
+    ///
+    /// `additional` is how many events this append is about to add.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::CapacityExceeded`] when the total would be over the
+    /// bound. The history is not compacted to make room, so nothing
+    /// acknowledged is evicted to admit more work.
+    fn bound_events(&self, additional: u64) -> Result<(), JournalError> {
+        let requested = u64::try_from(self.committed.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(additional);
+        let limit = u64::try_from(MAX_JOURNAL_EVENTS).unwrap_or(u64::MAX);
+        if requested > limit {
+            return Err(JournalError::CapacityExceeded {
+                resource: JournalLimitKind::Events,
+                limit,
+                requested,
+            });
+        }
+        Ok(())
     }
 
     /// Where the journal lives.
@@ -595,31 +1039,231 @@ impl FileJournal {
         recover(self.events())
     }
 
-    /// The one place either append path touches the disk: write the frames,
-    /// then sync. Both append APIs answer a failure of either half with the
-    /// same two facts — the error is [`JournalError::OutcomeUnknown`],
-    /// because a prefix of the bytes, or all of them, may be on the disk
-    /// with only the reply lost — and latch the poison, so this handle
-    /// refuses every later append until a reopen replays the truth.
+    /// The one door both append paths take before they are allowed to write.
+    ///
+    /// A handle whose own write failed is stale by definition: bytes may be on
+    /// the disk that no acknowledgment names, and only a reopen replays the
+    /// truth. A file that is no longer exactly the acknowledged prefix means
+    /// something else moved it, and an append from here would branch the chain
+    /// rather than extend it.
+    ///
+    /// The length half here is a precondition, not the guarantee: it is a
+    /// `stat` against a file another writer may still be moving. The
+    /// authoritative check is inside the storage owner's ordered step, where it
+    /// cannot be overtaken by another append. This one exists so a stale
+    /// handle is refused before it spends anything, and so an append with no
+    /// frames to write is still answered for itself.
     ///
     /// # Errors
     ///
-    /// [`JournalError::OutcomeUnknown`] from either the write or the sync;
-    /// never a bare [`JournalError::Storage`], which would claim the journal
-    /// is unchanged when the write may have landed.
-    fn write_and_sync(&mut self, frames: &[u8]) -> Result<(), JournalError> {
-        if let Err(error) = self.file.write_all(frames) {
-            self.write_failed = true;
-            return Err(JournalError::OutcomeUnknown { cause: error });
+    /// [`JournalError::Storage`] when this handle is stale and must be reopened.
+    fn fence(&self) -> Result<(), JournalError> {
+        if self.storage.poisoned() {
+            return Err(JournalError::Storage(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "a previous append failed while writing; the file may hold \
+                 unacknowledged bytes, reopen to replay",
+            )));
         }
-        if let Err(error) = self.file.sync_all() {
-            self.write_failed = true;
-            return Err(JournalError::OutcomeUnknown { cause: error });
+        if self.view.len()? != self.disk_len {
+            return Err(JournalError::Storage(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the journal file moved under this controller; reopen before appending",
+            )));
         }
         Ok(())
     }
 
-    /// Append a whole batch of events for one `sync_all`, the group commit
+    /// Frame one event: its length prefix, its archived bytes, and the chain
+    /// head it commits to.
+    ///
+    /// The head is stored with the frame rather than recomputed on faith at
+    /// read time. A frame over [`MAX_FRAME_BYTES`] is refused here rather than
+    /// written, because the bytes behind it may be acknowledged.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::Exhausted`] when the position cannot advance,
+    /// [`JournalError::Encoding`] when the event cannot be archived, and
+    /// [`JournalError::Storage`] when the frame is over the bound.
+    fn frame(
+        &self,
+        event: &EffectEvent,
+        from: JournalPosition,
+    ) -> Result<(JournalPosition, Vec<u8>), JournalError> {
+        let sequence = from
+            .sequence()
+            .checked_add(1)
+            .ok_or(JournalError::Exhausted)?;
+        let head = chain(from, event)?;
+        let position = JournalPosition { sequence, head };
+        let payload = event.to_bytes().map_err(JournalError::Encoding)?;
+        let payload_len = u32::try_from(payload.len())
+            .ok()
+            .filter(|len| usize::try_from(*len).is_ok_and(|len| len <= MAX_FRAME_BYTES));
+        let Some(payload_len) = payload_len else {
+            return Err(JournalError::Storage(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the event exceeds this journal's frame bound",
+            )));
+        };
+        let mut framed = Vec::with_capacity(
+            LENGTH_BYTES
+                .saturating_add(payload.len())
+                .saturating_add(HEAD_BYTES),
+        );
+        framed.extend_from_slice(&payload_len.to_be_bytes());
+        framed.extend_from_slice(&payload);
+        framed.extend_from_slice(head.as_bytes());
+        Ok((position, framed))
+    }
+
+    /// Refuse an append that would take the file past [`MAX_JOURNAL_BYTES`].
+    ///
+    /// The file is refused rather than compacted, so no acknowledged evidence
+    /// is evicted to make room.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::CapacityExceeded`] when the staged write is over the
+    /// bound.
+    fn bound_bytes(&self, staged: usize) -> Result<(), JournalError> {
+        let requested = self
+            .disk_len
+            .saturating_add(u64::try_from(staged).unwrap_or(u64::MAX));
+        if requested > MAX_JOURNAL_BYTES {
+            return Err(JournalError::CapacityExceeded {
+                resource: JournalLimitKind::Bytes,
+                limit: MAX_JOURNAL_BYTES,
+                requested,
+            });
+        }
+        Ok(())
+    }
+
+    /// Hand the frames to the storage owner, which is where the write and the
+    /// sync happen, and wait for it to answer.
+    ///
+    /// A failure of either half is [`JournalError::OutcomeUnknown`], because a
+    /// prefix of the bytes, or all of them, may be on the disk with only the
+    /// reply lost — never a bare [`JournalError::Storage`], which would claim
+    /// the journal is unchanged when the write may have landed. The owner
+    /// latches the poison, so this handle refuses every later append until a
+    /// reopen replays the truth.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::OutcomeUnknown`] from either the write or the sync.
+    fn write_and_sync(&mut self, frames: &[u8]) -> Result<(), JournalError> {
+        self.storage
+            .submit(self.disk_len, frames.to_vec())
+            .map_err(|cause| JournalError::OutcomeUnknown { cause })
+    }
+
+    /// Fold a committed frame into this handle's view of the journal.
+    ///
+    /// The acknowledgment is minted from the position the frame was chained at,
+    /// so the two cannot disagree.
+    fn accept(&mut self, event: &EffectEvent, position: JournalPosition, frame_len: usize) {
+        self.committed.push(JournalEntry::new(position, *event));
+        self.ladder.insert(event.key(), event.kind());
+        if let EffectEvent::OutcomeObserved { key, evidence } = *event {
+            self.outcomes.insert(key, (position, evidence));
+        }
+        self.disk_len = self
+            .disk_len
+            .saturating_add(u64::try_from(frame_len).unwrap_or(u64::MAX));
+    }
+
+    /// Everything one append checks and frames before the disk is touched.
+    ///
+    /// The synchronous and asynchronous forms differ only in how they wait for
+    /// the storage owner, so everything that decides *whether* to append lives
+    /// here and is reached by both: the tail fence, the ladder, the event
+    /// bound, the frame, and the byte bound. A check that exists once cannot
+    /// drift between the two doors.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::TailMismatch`] when the caller's view of the tail is
+    /// not this journal's, [`JournalError::OutOfOrder`] when the rung cannot
+    /// follow what is committed for the key, [`JournalError::Storage`] when
+    /// this handle is stale or the frame is over the bound, and
+    /// [`JournalError::CapacityExceeded`] when the append is over an event or
+    /// byte ceiling. Nothing is written by any of them.
+    fn prepare_append(
+        &self,
+        expected_tail: JournalPosition,
+        event: &EffectEvent,
+    ) -> Result<(JournalPosition, Vec<u8>), JournalError> {
+        let actual = self.tail();
+        if expected_tail != actual {
+            return Err(JournalError::TailMismatch {
+                expected: expected_tail,
+                actual,
+            });
+        }
+        let attempted = event.kind();
+        let expected = next_allowed_of(self.ladder.get(&event.key()).copied());
+        if expected != Some(attempted) {
+            return Err(JournalError::OutOfOrder {
+                key: Box::new(event.key()),
+                expected,
+                attempted,
+            });
+        }
+        self.fence()?;
+        self.bound_events(1)?;
+        let (position, frame) = self.frame(event, actual)?;
+        self.bound_bytes(frame.len())?;
+        Ok((position, frame))
+    }
+
+    /// Open a journal whose storage does not answer a flush until
+    /// [`Self::release_storage`] is called.
+    ///
+    /// A fault injector, and the reason it is public rather than hidden behind
+    /// `cfg(test)`: "what does this bot do while its disk has stopped
+    /// answering" is a question an operator has to be able to ask on a real
+    /// process, and a probe that only exists inside the crate's own test
+    /// binary cannot answer it. The bytes written are real and the frames are
+    /// the ones the journal always writes — only the device's answer is held
+    /// back, which is exactly what a stalled device does.
+    ///
+    /// Everything else about the handle is unchanged, including what it
+    /// promises: nothing is acknowledged until the release, so a stall delays
+    /// acknowledgments and never mints one early.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`FileJournal::open`] reports.
+    pub fn open_with_stalled_storage(path: impl AsRef<Path>) -> Result<Self, JournalError> {
+        Self::open_impl(path.as_ref(), true)
+    }
+
+    /// A handle that can release the stall, independently of this journal.
+    ///
+    /// Returned alongside the journal rather than only as
+    /// [`Self::release_storage`] because the caller that most needs to un-stick
+    /// the device is the one awaiting an append on it, and that caller holds
+    /// the journal's borrow for the whole wait.
+    fn storage_gate(&self) -> StorageGate {
+        StorageGate {
+            shared: Arc::clone(&self.storage.shared),
+            signal: Arc::clone(&self.storage.signal),
+        }
+    }
+
+    /// Let the outstanding flush proceed, and every flush after it.
+    ///
+    /// After this, the handle is an ordinary file journal: the stall is over
+    /// and is not re-armed. A caller blocked inside
+    /// [`Self::compare_and_append`] cannot reach this method — the borrow the
+    /// append holds is the same one — and needs
+    /// [`Self::storage_gate`] instead.
+    pub fn release_storage(&self) {
+        self.storage_gate().release();
+    }
     /// every durable log converges on: one flush pays for many records.
     ///
     /// Every rung is checked first — fence, ladder, frame bound — against
@@ -653,37 +1297,14 @@ impl FileJournal {
         &mut self,
         events: &[EffectEvent],
     ) -> Result<Vec<DurableAck>, JournalError> {
-        // The staleness fence runs once for the batch, ahead of everything
-        // including the empty case: a stale handle answers for itself, not
-        // with an empty success. Between the checks and the single write
-        // this controller holds the file's only moving part.
-        if self.write_failed {
-            return Err(JournalError::Storage(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "a previous append failed while writing; the file may hold \
-                 unacknowledged bytes, reopen to replay",
-            )));
-        }
-        let on_disk = self.file.metadata().map_err(JournalError::Storage)?.len();
-        if on_disk != self.disk_len {
-            return Err(JournalError::Storage(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "the journal file moved under this controller; reopen before appending",
-            )));
-        }
+        // The fence runs once for the batch, ahead of everything including the
+        // empty case: a stale handle answers for itself, not with an empty
+        // success.
+        self.fence()?;
         if events.is_empty() {
             return Ok(Vec::new());
         }
-        let requested_events = u64::try_from(self.committed.len())
-            .unwrap_or(u64::MAX)
-            .saturating_add(u64::try_from(events.len()).unwrap_or(u64::MAX));
-        if requested_events > u64::try_from(MAX_JOURNAL_EVENTS).unwrap_or(u64::MAX) {
-            return Err(JournalError::CapacityExceeded {
-                resource: JournalLimitKind::Events,
-                limit: u64::try_from(MAX_JOURNAL_EVENTS).unwrap_or(u64::MAX),
-                requested: requested_events,
-            });
-        }
+        self.bound_events(u64::try_from(events.len()).unwrap_or(u64::MAX))?;
 
         // Validate and frame every rung against the evolving view before any
         // byte moves: the staged kinds for keys this batch is itself climbing
@@ -707,44 +1328,11 @@ impl FileJournal {
                 });
             }
             staged.insert(key, attempted);
-            let sequence = position
-                .sequence()
-                .checked_add(1)
-                .ok_or(JournalError::Exhausted)?;
-            let head = chain(position, event)?;
-            position = JournalPosition { sequence, head };
-            let payload = event.to_bytes().map_err(JournalError::Encoding)?;
-            if payload.len() > MAX_FRAME_BYTES {
-                return Err(JournalError::Storage(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "the event exceeds this journal's frame bound",
-                )));
-            }
-            let payload_len = u32::try_from(payload.len()).map_err(|_| {
-                JournalError::Storage(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "the event exceeds this journal's frame bound",
-                ))
-            })?;
-            let frame_len = LENGTH_BYTES
-                .saturating_add(payload.len())
-                .saturating_add(HEAD_BYTES);
-            let frame_len_u64 = u64::try_from(frame_len).unwrap_or(u64::MAX);
-            let staged_bytes = u64::try_from(frames.len())
-                .unwrap_or(u64::MAX)
-                .saturating_add(frame_len_u64);
-            let requested_bytes = self.disk_len.saturating_add(staged_bytes);
-            if requested_bytes > MAX_JOURNAL_BYTES {
-                return Err(JournalError::CapacityExceeded {
-                    resource: JournalLimitKind::Bytes,
-                    limit: MAX_JOURNAL_BYTES,
-                    requested: requested_bytes,
-                });
-            }
-            frames.extend_from_slice(&payload_len.to_be_bytes());
-            frames.extend_from_slice(&payload);
-            frames.extend_from_slice(head.as_bytes());
-            pending.push((position, frame_len));
+            let (next, framed) = self.frame(event, position)?;
+            position = next;
+            self.bound_bytes(frames.len().saturating_add(framed.len()))?;
+            pending.push((position, framed.len()));
+            frames.extend_from_slice(&framed);
         }
 
         // One write, one flush, through the same door the single append
@@ -755,14 +1343,7 @@ impl FileJournal {
         let mut acks = Vec::with_capacity(pending.len());
         for (event, entry) in events.iter().zip(&pending) {
             let (position, frame_len) = *entry;
-            self.committed.push(JournalEntry::new(position, *event));
-            self.ladder.insert(event.key(), event.kind());
-            if let EffectEvent::OutcomeObserved { key, evidence } = *event {
-                self.outcomes.insert(key, (position, evidence));
-            }
-            self.disk_len = self
-                .disk_len
-                .saturating_add(u64::try_from(frame_len).unwrap_or(u64::MAX));
+            self.accept(event, position, frame_len);
             acks.push(DurableAck::new(position, self.durability()));
         }
         Ok(acks)
@@ -830,110 +1411,42 @@ impl EffectJournal for FileJournal {
         expected_tail: JournalPosition,
         event: &EffectEvent,
     ) -> Result<DurableAck, JournalError> {
-        let actual = self.tail();
-        if expected_tail != actual {
-            return Err(JournalError::TailMismatch {
-                expected: expected_tail,
-                actual,
-            });
-        }
-        let key = event.key();
-        let attempted = event.kind();
-        let expected = next_allowed_of(self.ladder.get(&key).copied());
-        if expected != Some(attempted) {
-            return Err(JournalError::OutOfOrder {
-                key: Box::new(key),
-                expected,
-                attempted,
-            });
-        }
-        let requested_events = u64::try_from(self.committed.len())
-            .unwrap_or(u64::MAX)
-            .saturating_add(1);
-        if requested_events > u64::try_from(MAX_JOURNAL_EVENTS).unwrap_or(u64::MAX) {
-            return Err(JournalError::CapacityExceeded {
-                resource: JournalLimitKind::Events,
-                limit: u64::try_from(MAX_JOURNAL_EVENTS).unwrap_or(u64::MAX),
-                requested: requested_events,
-            });
-        }
-        // The staleness fence: the file on the disk must still be exactly the
-        // prefix this controller holds, or the controller's view is stale and
-        // its append would branch the chain. A write this handle already
-        // failed mid-way counts as stale by definition: bytes may be on the
-        // disk that no acknowledgment names, and only a reopen replays the
-        // truth.
-        if self.write_failed {
-            return Err(JournalError::Storage(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "a previous append failed while writing; the file may hold \
-                 unacknowledged bytes, reopen to replay",
-            )));
-        }
-        let on_disk = self.file.metadata().map_err(JournalError::Storage)?.len();
-        if on_disk != self.disk_len {
-            return Err(JournalError::Storage(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "the journal file moved under this controller; reopen before appending",
-            )));
-        }
+        // The staleness fence, the ladder, the bounds and the framing are the
+        // two doors' shared decision, so they are made once. The file's byte
+        // length is checked against this write on the thread that holds it.
+        let (position, frame) = self.prepare_append(expected_tail, event)?;
 
-        let sequence = actual
-            .sequence()
-            .checked_add(1)
-            .ok_or(JournalError::Exhausted)?;
-        let head = chain(actual, event)?;
-        let position = JournalPosition { sequence, head };
-        let payload = event.to_bytes().map_err(JournalError::Encoding)?;
-        if payload.len() > MAX_FRAME_BYTES {
-            return Err(JournalError::Storage(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "the event exceeds this journal's frame bound",
-            )));
-        }
-        let payload_len = u32::try_from(payload.len()).map_err(|_| {
-            JournalError::Storage(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "the event exceeds this journal's frame bound",
-            ))
-        })?;
-
-        let mut frame = Vec::with_capacity(
-            LENGTH_BYTES
-                .saturating_add(payload.len())
-                .saturating_add(HEAD_BYTES),
-        );
-        frame.extend_from_slice(&payload_len.to_be_bytes());
-        frame.extend_from_slice(&payload);
-        frame.extend_from_slice(head.as_bytes());
-        let requested_bytes = self
-            .disk_len
-            .saturating_add(u64::try_from(frame.len()).unwrap_or(u64::MAX));
-        if requested_bytes > MAX_JOURNAL_BYTES {
-            return Err(JournalError::CapacityExceeded {
-                resource: JournalLimitKind::Bytes,
-                limit: MAX_JOURNAL_BYTES,
-                requested: requested_bytes,
-            });
-        }
-
-        // The write and the sync happen through the shared door before the
-        // acknowledgment: after this returns, the bytes are through the file
-        // system, and a kill of this process cannot take the fact back out
-        // of the file. A failure here may have left a prefix of the frame on
-        // the disk, so the handle poisons itself rather than keep appending
-        // on a view it can no longer vouch for.
+        // Through the shared door before the acknowledgment: after this
+        // returns, the bytes are through the file system, and a kill of this
+        // process cannot take the fact back out of the file.
         self.write_and_sync(&frame)?;
 
-        self.committed.push(JournalEntry::new(position, *event));
-        self.ladder.insert(key, attempted);
-        if let EffectEvent::OutcomeObserved { evidence, .. } = *event {
-            self.outcomes.insert(key, (position, evidence));
-        }
-        self.disk_len = self
-            .disk_len
-            .saturating_add(u64::try_from(frame.len()).unwrap_or(u64::MAX));
+        self.accept(event, position, frame.len());
         Ok(DurableAck::new(position, self.durability()))
+    }
+
+    /// The same append, waited for rather than sat through.
+    ///
+    /// The decision is [`Self::prepare_append`]'s, so the fence, the ladder
+    /// and the bounds are the synchronous form's; only the wait differs. The
+    /// caller may go away while the bytes are moving, and the storage owner
+    /// latches its poison when it does, so a handle that lost its waiter
+    /// refuses the next append rather than continue from a view that may be
+    /// behind the file.
+    fn compare_and_append_async<'a>(
+        &'a mut self,
+        expected_tail: JournalPosition,
+        event: &'a EffectEvent,
+    ) -> crate::BoxFuture<'a, Result<DurableAck, JournalError>> {
+        Box::pin(async move {
+            let (position, frame) = self.prepare_append(expected_tail, event)?;
+            self.storage
+                .submit_async(self.disk_len, frame.clone())
+                .await
+                .map_err(|cause| JournalError::OutcomeUnknown { cause })?;
+            self.accept(event, position, frame.len());
+            Ok(DurableAck::new(position, self.durability()))
+        })
     }
 
     /// Attest that an outcome this journal committed is durable.
@@ -1156,6 +1669,18 @@ mod tests {
             "a stale handle must not answer an empty batch with success"
         );
         Ok(())
+    }
+
+    /// Make the next append of `journal` fail the way a device fails: after
+    /// the fence has passed, so the refusal is genuinely about the write.
+    ///
+    /// Growing the file from outside is the other way in, and these tests use
+    /// it too — but that is a *fence* refusal, because the handle is stale,
+    /// which is a different contract with a different answer. A write that
+    /// fails after the fence is what the poison latch exists for, and no
+    /// filesystem produces one on demand.
+    fn fail_next_write_of(journal: &FileJournal) {
+        journal.storage.fail_next_commit();
     }
 
     /// A key for attempt `n`, so a frame count can be built without
@@ -1762,7 +2287,7 @@ mod tests {
         // refuses everything after it.
         let mut journal = FileJournal::open(&path)?;
         journal.compare_and_append(journal.tail(), &event(200)?)?;
-        journal.file = std::fs::OpenOptions::new().read(true).open(&path)?;
+        fail_next_write_of(&journal);
         match journal.compare_and_append(journal.tail(), &event(201)?) {
             Err(JournalError::OutcomeUnknown { .. }) => {}
             Err(other) => return Err(format!("expected an unknown outcome, got {other}").into()),
@@ -1782,7 +2307,7 @@ mod tests {
         // and the handle is poisoned afterwards, not silently reusable.
         let mut journal = FileJournal::open(&path)?;
         journal.compare_and_append(journal.tail(), &event(300)?)?;
-        journal.file = std::fs::OpenOptions::new().read(true).open(&path)?;
+        fail_next_write_of(&journal);
         match journal.compare_and_append_all(&[event(301)?, event(302)?]) {
             Err(JournalError::OutcomeUnknown { .. }) => {}
             Err(other) => {
@@ -1803,6 +2328,189 @@ mod tests {
             ),
             Ok(_) => return Err("a poisoned handle must refuse further batches".into()),
         }
+        Ok(())
+    }
+
+    /// A storage device that has stopped answering must not stop the task that
+    /// is waiting on it.
+    ///
+    /// This is finding R07's acceptance case, and the instrument is chosen so
+    /// there is no timing race anywhere in it. The journal is opened on a
+    /// stalled device, so the flush provably cannot complete until
+    /// [`FileJournal::release_storage`] is called — the append is not "slow",
+    /// it is *parked*, and no amount of waiting would finish it. The test then
+    /// drives the same current-thread runtime the finding is about, counts how
+    /// many times an unrelated task ran while the append was outstanding, and
+    /// only then releases the storage.
+    ///
+    /// On a tree whose durable write runs on the awaiting thread, the append is
+    /// not merely slow: it never returns, so the release is never reached. That
+    /// is the negative control, and it is why the assertion is about the count
+    /// and not about a duration.
+    #[test]
+    #[cfg(feature = "rt")]
+    fn a_stalled_device_does_not_stop_the_task_waiting_on_it() -> TestResult {
+        use std::future::poll_fn;
+        use std::task::Poll;
+        use std::time::{Duration, Instant};
+
+        let path = scratch("stalled-device");
+        let _guard = TempGuard(path.clone());
+        let mut journal = FileJournal::open_with_stalled_storage(&path)?;
+        // Taken before the append starts: once the future holds the journal's
+        // borrow, the journal itself is unreachable for the whole wait.
+        let gate = journal.storage_gate();
+        let event = EffectEvent::IntentAdmitted {
+            key: attempt_key(900)?,
+        };
+        let tail = journal.tail();
+        let runtime = crate::rt::runtime::Runtime::new()?;
+
+        let mut append = Box::pin(journal.compare_and_append_async(tail, &event));
+        let mut last = Instant::now();
+        let mut longest = Duration::ZERO;
+        let mut ticks = 0u64;
+
+        let ack = runtime.block_on(poll_fn(|cx| {
+            // The unrelated task, sampled on every wakeup. Its gap is the
+            // runtime's unavailability, which is the thing under test.
+            let now = Instant::now();
+            longest = longest.max(now.duration_since(last));
+            last = now;
+            ticks = ticks.saturating_add(1);
+
+            match append.as_mut().poll(cx) {
+                Poll::Ready(answer) => Poll::Ready(answer),
+                Poll::Pending => {
+                    // Nothing else is queued on this runtime, so the wakeup
+                    // that stands in for "an unrelated task got a turn" has to
+                    // come from here. Without it the task parks on the stalled
+                    // device and never reaches the release below — which is
+                    // the point: the device is genuinely not answering.
+                    if ticks >= 64 {
+                        gate.release();
+                    }
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            }
+        }))?;
+        // The future holds the handle's borrow, and it is the future's drop
+        // that tells the storage owner nobody is waiting any more.
+        drop(append);
+
+        assert!(
+            ticks >= 64,
+            "the runtime stopped after {ticks} wakeups before the parked flush \
+             was released: the durable write is running on the awaiting thread"
+        );
+        assert_eq!(
+            ack.promise(),
+            DurabilityPromise::ProcessCrash,
+            "the acknowledgment still has to be earned, and a released device earns it"
+        );
+        assert!(
+            longest < Duration::from_millis(500),
+            "the executor was unavailable for {longest:?} while a flush that \
+             could not finish was outstanding"
+        );
+        assert_eq!(
+            EffectJournal::committed(&journal)?.len(),
+            1,
+            "the frame was folded in"
+        );
+        drop(journal);
+        let reopened = FileJournal::open(&path)?;
+        assert_eq!(
+            EffectJournal::committed(&reopened)?.len(),
+            1,
+            "the released frame must be on the disk, not only in the handle"
+        );
+        Ok(())
+    }
+
+    /// A caller that walks away from a durable append it started leaves the
+    /// handle unable to say whether the bytes landed, and the handle must say
+    /// so rather than carry on.
+    ///
+    /// The finding's second half: dropping a waiter is not proof that the
+    /// append stopped. This drives that case and then checks the two things
+    /// that make it safe — the handle refuses to append again, and a reopen
+    /// reconciles by reading the file back, with no second frame for the same
+    /// attempt.
+    #[test]
+    #[cfg(feature = "rt")]
+    fn a_dropped_waiter_poisons_the_handle_and_a_reopen_does_not_duplicate() -> TestResult {
+        use std::future::poll_fn;
+        use std::task::Poll;
+
+        let path = scratch("dropped-waiter");
+        let _guard = TempGuard(path.clone());
+        let mut journal = FileJournal::open_with_stalled_storage(&path)?;
+        let gate = journal.storage_gate();
+        let event = EffectEvent::IntentAdmitted {
+            key: attempt_key(901)?,
+        };
+        let tail = journal.tail();
+        let runtime = crate::rt::runtime::Runtime::new()?;
+
+        // Poll the append exactly once, so the storage owner has been handed
+        // the request, then drop it: the caller is gone while the bytes are
+        // still moving. This is the cancellation the finding names, and the
+        // device is parked so the ordering is the one under test rather than a
+        // race with a fast disk — the owner cannot finish before the drop.
+        let mut append = Box::pin(journal.compare_and_append_async(tail, &event));
+        let started = runtime.block_on(poll_fn(|cx| {
+            let polled = append.as_mut().poll(cx);
+            if polled.is_pending() {
+                cx.waker().wake_by_ref();
+            }
+            Poll::Ready(polled)
+        }));
+        assert!(
+            started.is_pending(),
+            "the append completed before it could be abandoned"
+        );
+        drop(append);
+        gate.release();
+
+        // The owner finishes the write it was given and finds no waiter. The
+        // handle must be poisoned once it has. Polled against a deadline
+        // rather than a spin count: what is being waited for is a `sync_all`,
+        // which on a real device is milliseconds, so a yield budget would be
+        // racing the disk rather than the owner.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !journal.storage.poisoned() {
+            if std::time::Instant::now() >= deadline {
+                return Err("the storage owner never latched the poison".into());
+            }
+            std::thread::yield_now();
+        }
+        match journal.compare_and_append(journal.tail(), &event) {
+            Err(error) => assert!(
+                error.to_string().contains("previous append failed"),
+                "an abandoned append must refuse with its own fence, not {error}"
+            ),
+            Ok(_) => return Err("a handle that lost its waiter must refuse".into()),
+        }
+        drop(journal);
+
+        // The reopen is the reconciliation: it reads what actually landed, and
+        // the ladder then refuses the same rung again, so a retry cannot write
+        // a second frame for one attempt.
+        let mut reopened = FileJournal::open(&path)?;
+        let landed = EffectJournal::committed(&reopened)?.len();
+        assert!(
+            landed <= 1,
+            "an abandoned append wrote {landed} frames for one attempt"
+        );
+        let same = EffectEvent::IntentAdmitted {
+            key: attempt_key(901)?,
+        };
+        assert!(
+            reopened.compare_and_append(reopened.tail(), &same).is_err(),
+            "the replayed ladder must refuse a rung the file already records"
+        );
         Ok(())
     }
 }

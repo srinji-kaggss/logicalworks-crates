@@ -104,6 +104,21 @@ Each of these was a shipped defect. Treat the list as the spec.
 - **INV-GOV-1** The gate is defined once in `scripts/gate-lanes.toml`; CI runs
   the same lane commands and `scripts/check-gate-parity.py` refuses drift. ·
   enforced by: `gate-parity` lane
+- **INV-BOT-15** One owner serializes journal writes, and an ambiguous write is
+  never reported as a clean failure. A capacity-one request slot preserves
+  ordering; a `FileView` gives lock-free fence checks; and when a waiter is
+  dropped mid-write the owner poisons the handle with the reason instead of
+  letting a later append proceed on an unknown outcome. A poisoned handle is
+  recovered by reopening, which replays to the same facts and never a second
+  effect. · enforced by: `journal::file::a_stalled_device_does_not_stop_the_
+  task_waiting_on_it`, `journal::file::a_dropped_waiter_poisons_the_handle_and_a_
+  reopen_does_not_duplicate`, and the `tests/sim_journal` torn-tail, replay and
+  chain families
+- **INV-BOT-16** The journal's event cap is a reported bound, not a hidden one.
+  A scale measurement that had to clamp to the cap records the requested level,
+  the level reached and the ceiling together, so a reader is never told a
+  concurrency number nobody ran. · enforced by: `tests/sim_scale::tier_r*`
+  (`tier-requested`, `tier-reached`, `tier-ceiling` in the trace)
 - **INV-GOV-2** A product requirement is superseded, never edited: a changed
   normative sentence with no Supersession log entry fails the gate. · enforced
   by: `python3 scripts/check-requirements.py` (`requirements` lane)

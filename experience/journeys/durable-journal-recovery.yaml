@@ -1,0 +1,72 @@
+id: durable-journal-recovery
+actor: agent-or-human-dev
+job: Ship an effect through the durable journal, and be certain afterwards that
+  it happened exactly once, without waiting on a slow disk and without leaving
+  a process wedged behind one.
+prior_knowledge:
+  - Knows the effect they want to record; has not read the journal module.
+  - Assumes a commit means the effect happened, and that a timeout means it
+    did not. Both assumptions are wrong, and this journey is where they learn
+    it.
+start:
+  installation: lgwks-bot built; a store directory the process can write.
+  state: a journal with a committed intent, an attempt that may or may not have
+    reached the effect, and a device that has stopped responding.
+success:
+  visible_outcome: the caller sees either a definite result or an explicit
+    "unknown" that survives a reopen without a second effect; a slow device
+    never stops unrelated work, and dropping a waiter never wedges the handle.
+states:
+  - name: definite
+    expectation: the caller learns the effect was applied, once, from the same
+      store, with the chain verified.
+  - name: unknown
+    expectation: the caller is told the outcome is unknown, not told "failed",
+      and is not offered a retry that could duplicate.
+  - name: poisoned
+    expectation: a handle abandoned mid-write refuses later appends with a
+      reason naming the ambiguity, instead of reporting a clean failure that
+      invites a duplicate.
+  - name: recovered
+    expectation: after a reopen, the same facts replay to the same tail, and
+      the next attempt is the only new thing written.
+invariants:
+  - A commit is not a receipt; the effect's own idempotency key is.
+  - A crashed writer never leaves a fact the next writer cannot read or trust.
+  - One store owner serializes writers, so a torn tail is a crash artefact and
+    never a race.
+  - The journal's event cap is a real bound, and a scale claim that quietly
+    shrank to fit the cap is a false claim.
+trust_boundaries:
+  - "The store owner is the only writer, and the journal refuses anything that
+    would give a second one."
+  - A slow device is untrusted; it may complete, and it may not. Nothing infers
+    which.
+recovery_contracts:
+  - Every refusal names the repair, naming the store, the fence and the reopen.
+  - An unknown outcome is preserved across reopen; recovery never guesses.
+  - A poisoned handle names the ambiguity and the way out is a reopen, which
+    replays to the same facts.
+agent_contracts:
+  - compare_and_append_async reports applied, not-applied, or unknown; it never
+    reports a failure for an effect it cannot prove did not happen.
+  - A dropped waiter poisons the handle rather than letting the owner write
+    past a vanished observer.
+probes:
+  - id: stalled-device-stays-responsive
+    action: Hold the storage gate mid-write; assert the waiting task is
+      rescheduled on every Pending rather than parked forever, and that an
+      unrelated task still completes.
+  - id: dropped-waiter-no-duplicate
+    action: Start an append, drop the waiter, release the device, reopen the
+      store; assert the handle is poisoned, the chain verifies, and the fact
+      count does not grow on a second recovery.
+  - id: five-thousand-tenant-provision
+    action: Provision 5,000 stores, write one ladder into each, and assert
+      5,000 distinct tails and 10,000 events.
+  - id: tier-ceiling-is-reported
+    action: Sweep the concurrency tiers and assert the trace records both the
+      requested level and the level reached, with the ceiling that bounded it.
+  - id: same-seed-same-tail
+    action: Run a seeded sweep twice; assert the trace hashes and every store
+      tail are identical.

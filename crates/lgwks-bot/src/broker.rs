@@ -483,14 +483,16 @@ impl Prepared {
 /// [`DispatchError::Journal`] when the append is refused. The append is also
 /// where a second `DispatchPrepared` for one attempt is refused, so a retry that
 /// reuses an `AttemptId` fails here rather than dispatching twice.
-pub(crate) fn prepare_dispatch(
+pub(crate) async fn prepare_dispatch(
     broker: &Broker,
     journal: &mut dyn EffectJournal,
     expected_tail: JournalPosition,
     key: EffectKey,
 ) -> Result<Prepared, DispatchError> {
     let authority = broker.authorize(key)?;
-    let ack = journal.compare_and_append(expected_tail, &EffectEvent::DispatchPrepared { key })?;
+    let ack = journal
+        .compare_and_append_async(expected_tail, &EffectEvent::DispatchPrepared { key })
+        .await?;
     Ok(Prepared { authority, ack })
 }
 
@@ -753,6 +755,21 @@ mod tests {
         Ok(())
     }
 
+    /// The synchronous shape of [`prepare_dispatch`], for a test with no
+    /// executor of its own.
+    ///
+    /// One definition rather than a `block_on` at each call site: these tests
+    /// are about what the order records and refuses, and the await is not part
+    /// of either question.
+    fn prepare(
+        broker: &Broker,
+        journal: &mut MemoryJournal,
+        tail: JournalPosition,
+        key: EffectKey,
+    ) -> Result<Prepared, DispatchError> {
+        lgwks_std::task::block_on(prepare_dispatch(broker, journal, tail, key))
+    }
+
     #[test]
     fn prepare_dispatch_records_the_attempt_it_authorized() -> TestResult {
         let mut broker = Broker::new();
@@ -762,7 +779,7 @@ mod tests {
         admitted(&mut journal, key)?;
 
         let tail = journal.tail();
-        let (authority, ack) = prepare_dispatch(&broker, &mut journal, tail, key)?.into_parts();
+        let (authority, ack) = prepare(&broker, &mut journal, tail, key)?.into_parts();
         assert_eq!(authority.epoch(), first);
         assert_eq!(ack.position(), journal.tail());
         assert_eq!(journal.committed().len(), 2);
@@ -780,7 +797,7 @@ mod tests {
 
         broker.replace(env()?)?;
 
-        let refused = prepare_dispatch(&broker, &mut journal, before, stale);
+        let refused = prepare(&broker, &mut journal, before, stale);
         assert!(
             matches!(
                 refused,
@@ -802,11 +819,11 @@ mod tests {
         admitted(&mut journal, key)?;
 
         let tail = journal.tail();
-        let first_prepare = prepare_dispatch(&broker, &mut journal, tail, key)?;
+        let first_prepare = prepare(&broker, &mut journal, tail, key)?;
         let spent = first_prepare.into_parts();
 
         let tail = journal.tail();
-        let refused = prepare_dispatch(&broker, &mut journal, tail, key);
+        let refused = prepare(&broker, &mut journal, tail, key);
         assert!(
             matches!(
                 refused,
@@ -830,7 +847,7 @@ mod tests {
         // current. The order still refuses it, because nothing was admitted.
         assert!(broker.authorize(key).is_ok());
         let tail = journal.tail();
-        let refused = prepare_dispatch(&broker, &mut journal, tail, key);
+        let refused = prepare(&broker, &mut journal, tail, key);
         assert!(matches!(
             refused,
             Err(DispatchError::Journal(JournalError::OutOfOrder { .. }))
@@ -850,7 +867,7 @@ mod tests {
         // A second controller reads the tail before the first appends.
         let stale_tail = journal.tail();
         let tail = journal.tail();
-        prepare_dispatch(&broker, &mut journal, tail, key)?;
+        prepare(&broker, &mut journal, tail, key)?;
 
         let late = journal.compare_and_append(
             stale_tail,

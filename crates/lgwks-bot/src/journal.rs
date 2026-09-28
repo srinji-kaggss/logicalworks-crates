@@ -57,6 +57,8 @@ use crate::effect::{EffectKey, Id128};
 /// keeps one definition with two consumers.
 pub use crate::ecs::EffectEvidence;
 
+use crate::BoxFuture;
+
 mod wire_form;
 
 /// The two journal records whose archived form is an enum, re-exported from the
@@ -864,6 +866,39 @@ pub trait EffectJournal {
         expected_tail: JournalPosition,
         event: &EffectEvent,
     ) -> Result<DurableAck, JournalError>;
+
+    /// The same append, for a caller that awaits rather than blocks.
+    ///
+    /// One contract with two doors, and the reason is the storage device's
+    /// cost. A store whose durability path blocks — a `fsync` on the caller's
+    /// own thread — charges that latency to everything else sharing the
+    /// executor, and awaiting the surrounding tick does not make the call
+    /// inside it non-blocking. An adapter that owns its storage on a separate
+    /// thread overrides this and returns the same acknowledgment, from the
+    /// same fence, over the same bytes.
+    ///
+    /// The default reaches the synchronous form, which is correct for a store
+    /// with no blocking durability path. It is a default rather than a
+    /// requirement so an adapter is not asked to reimplement the fence; what
+    /// it must not do is answer with a weaker write than its synchronous form
+    /// would have made.
+    ///
+    /// Dropping the returned future is not a cancellation of the append. An
+    /// adapter whose append can outlive its caller has to leave the handle in
+    /// a state that refuses the next append rather than continue from a view
+    /// that may be behind the store.
+    ///
+    /// # Errors
+    ///
+    /// Every [`JournalError`] [`Self::compare_and_append`] produces, from the
+    /// same checks in the same order.
+    fn compare_and_append_async<'a>(
+        &'a mut self,
+        expected_tail: JournalPosition,
+        event: &'a EffectEvent,
+    ) -> BoxFuture<'a, Result<DurableAck, JournalError>> {
+        Box::pin(async move { self.compare_and_append(expected_tail, event) })
+    }
 
     /// Confirm that an existing outcome record now meets `required`.
     ///

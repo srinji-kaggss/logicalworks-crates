@@ -361,6 +361,56 @@ refuses a second `tokio` consumer.
 
 ---
 
+### 2026-09-27 — Async journal ownership, poisoned ambiguity, deterministic simulation
+
+**What changed.** `FileJournal` writes through a single owner thread over a
+capacity-one request slot. `FileView` gives lock-free fence checks. The async
+append shares the sync append's frame preparation and its length-check, write,
+`sync_all` path. A dropped waiter poisons the handle with the reason instead of
+leaving an invisible write that a later append would treat as certain. Two new
+invariants: INV-BOT-15 (owner-serialized writes, ambiguity never reported as a
+clean failure) and INV-BOT-16 (the event cap is a reported bound).
+
+**Deterministic simulation.** The suite had **0** simulation tests in 857. It
+now has **890 of 1,747, or 50.9%**, under `tests/sim/` and `tests/sim_*.rs`:
+`sim_journal` 210, `sim_dispatch` 258, `sim_network` 258, `sim_scale` 164. One
+seed controls time, network and disk faults; every sweep runs twice and requires
+identical trace hashes, so a nondeterministic run fails even when its assertions
+pass. All four families drive shipped code — the real `FileJournal`, `Bot`,
+`Broker` and `EffectScope`.
+
+**Receipts, this session.** `cargo nextest run --workspace --locked`: 1,747 run,
+1,747 passed, 0 skipped, 176.6s test time. `cargo clippy --workspace
+--all-targets --locked -- -D warnings`: 0 errors. `cargo fmt --all -- --check`:
+clean. `python3 scripts/check-std-first.py`: holds. `cargo run -p lgwks_deps --
+check .`: OK, 29 semantic approvals. `python3 scripts/check-requirements.py`: 13
+declared, all digests match. `python3 scripts/check-gate-parity.py`: 41 lanes,
+36 shared, ids/commands/toolchain agree. `python3 scripts/ci_local.py --lane
+tests`: pass.
+
+**The four nextest lanes were each run to green before the manifest named them**:
+workspace 1,747; `lgwks_bot` no-default-features 1,345; `lgwks_std` full 177;
+`lgwks_bot` full 1,453 (before the lag family landed; the lane is re-run in CI). The doc-test lane stays on `cargo test --doc` because
+nextest does not run doc tests, and the compile lane stays on `cargo test
+--no-run` for the same reason.
+
+**What is NOT claimed.** The named concurrency levels are 100, 1,000, 10,000 and
+100,000 attempts, but the highest level reached on a single store is **50,000**,
+because `MAX_JOURNAL_EVENTS` is 100,000 and each accepted fact writes a two-rung
+ladder. The trace records `tier-requested`, `tier-reached` and `tier-ceiling`
+together, so the clamp is stated rather than hidden. The 5,000-tenant
+provision ran in full as its own test (42.1s, 5,000 distinct tails, 10,000
+events). No SLO is claimed from a laptop: p50/p95/p99 under a named 1-2 vCPU
+VPS load test is still open, as is cross-OS execution of the three-OS matrix,
+which only hosted Actions can produce.
+
+**A product question the simulation raised and this change did not close.**
+Whether a `Stored` fact whose sequence number is far behind the head should
+still enter the idempotency fence is not settled. The shipped answer is yes, and
+`sim_journal::stored_lags_history_but_still_fences_a_replay` now pins it as
+deliberate, so a future change to it must be a decision rather than an accident.
+Whether that is the right answer is a Director decision, recorded in §7.
+
 ## 6. Open correctness and acceptance work
 
 | Priority | Work | Observed gap and completion evidence |
@@ -370,6 +420,7 @@ refuses a second `tokio` consumer.
 | P1 | Effect-dispatch crash exercise | #93 made effect dispatch durable and authorized. A real crash-during-settlement journey is not in the suite |
 | P1 | Narrowed-surface semver audit | #98 is `refactor!`. Confirm no downstream consumer inside the estate is broken, and record the break in `CHANGELOG.md` |
 | P2 | Frontier / Performance evidence | #79 carries a baseline. No matched architecture-class comparison, no allocation or contention profiling |
+| P1 | Concurrency tier ceiling | A single store fences at 50,000 attempts, half of `MAX_JOURNAL_EVENTS`. Whether the cap should be raised, or a store should roll to segments so a long-lived process can exceed it, is undecided; the trace reports the ceiling either way |
 | Deferred | CLA instrument | #73 deferred it. `lgwks_bot` is closed to outside contributions meanwhile |
 | Standing | Dependency admission | Any new third-party edge goes through `skills/lgwks-dependency-admission/SKILL.md` and lands in `contract/APPROVED.toml` |
 
@@ -381,6 +432,7 @@ refuses a second `tokio` consumer.
 |---|---|---|
 | Publish of the PR #91 cut | Human-held crates.io token | The tag and changelog exist. Published artifacts are not claimed to match the tree |
 | Merge without executed CI reproduction | A local PASS is not a CI run | Local receipts support source review only. Merge eligibility needs executed CI reproduction on the affected lanes unless the Director records a bounded exception naming its replacement evidence |
+| Does a lagging `Stored` fact still fence a replay? | The simulation found a fact that enters the fence 900 events behind the head and asked whether it should. Shipped answer is yes, and `sim_journal::stored_lags_history_but_still_fences_a_replay` now pins it | Until decided, the shipped behaviour stands and the pinning test fails loudly if it changes |
 | Licence change or re-opening `lgwks_bot` | #73 closed it to outside contributions; the CLA instrument is deferred | `lgwks_bot` stays closed. The other three crates keep their licence map from #63 |
 
 A required decision pauses dependent work. Audits, reproducible counterexamples,
