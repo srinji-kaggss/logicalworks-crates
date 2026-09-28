@@ -73,14 +73,16 @@ jobs:
         with:
           toolchain: "1.98.0"
           components: clippy
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
       - name: Run all workspace tests
-        run: cargo test --workspace --all-targets --locked
+        run: cargo nextest run --workspace --locked
       - name: Run lgwks-bot no-default-feature tests
-        run: cargo test -p lgwks_bot --all-targets --locked --no-default-features
+        run: cargo nextest run -p lgwks_bot --all-targets --locked --no-default-features
       - name: Run lgwks-std full-feature tests
-        run: cargo test -p lgwks_std --all-targets --locked --features full
+        run: cargo nextest run -p lgwks_std --all-targets --locked --features full
       - name: Run lgwks-bot async runner tests
-        run: cargo test -p lgwks_bot --all-targets --locked --features full
+        run: cargo nextest run -p lgwks_bot --all-targets --locked --features full
       - name: Doc tests
         run: cargo test --workspace --doc --locked
 

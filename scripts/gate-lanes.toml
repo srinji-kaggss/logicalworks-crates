@@ -94,34 +94,36 @@ ci_step = "Check formatting"
 id = "tests"
 surfaces = "local ci"
 required = true
-command = "cargo test --workspace --all-targets --locked"
+command = "cargo nextest run --workspace --locked"
 ci_step = "Run all workspace tests"
 
 [[lane]]
 id = "tests-bot-nodefault"
 surfaces = "local ci"
 required = true
-command = "cargo test -p lgwks_bot --all-targets --locked --no-default-features"
+command = "cargo nextest run -p lgwks_bot --all-targets --locked --no-default-features"
 ci_step = "Run lgwks-bot no-default-feature tests"
 
 [[lane]]
 id = "tests-std-full"
 surfaces = "local ci"
 required = true
-command = "cargo test -p lgwks_std --all-targets --locked --features full"
+command = "cargo nextest run -p lgwks_std --all-targets --locked --features full"
 ci_step = "Run lgwks-std full-feature tests"
 
 [[lane]]
 id = "tests-bot-full"
 surfaces = "local ci"
 required = true
-command = "cargo test -p lgwks_bot --all-targets --locked --features full"
+command = "cargo nextest run -p lgwks_bot --all-targets --locked --features full"
 ci_step = "Run lgwks-bot async runner tests"
 
 [[lane]]
 id = "doc-tests"
 surfaces = "local ci"
 required = true
+# nextest does not run doc tests, so this lane stays on cargo test by
+# necessity, not by habit.
 command = "cargo test --workspace --doc --locked"
 ci_step = "Doc tests"
 

@@ -645,7 +645,7 @@ impl Effects {
     ///
     /// [`DispatchError::Broker`] when the environment refuses, and
     /// [`DispatchError::Journal`] when the append is refused.
-    fn prepare(
+    async fn prepare(
         &mut self,
         key: EffectKey,
         lifetime: EffectLifetime,
@@ -668,7 +668,7 @@ impl Effects {
         // before `DispatchPrepared` exists for recovery to misread as a live
         // dispatch (issue #100).
         let intent = EffectEvent::IntentAdmitted { key };
-        let intent_ack = self.append(&intent)?;
+        let intent_ack = self.append_async(&intent).await?;
         self.note_journal_attempt(key.action(), key.attempt());
         if !intent_ack.promise().meets(required) {
             return Err(DispatchError::Journal(JournalError::PromiseUnmet {
@@ -680,7 +680,9 @@ impl Effects {
         let expected_tail = self.tail;
         let scope = &mut self.scope;
         let (authority, ack) =
-            prepare_dispatch(&scope.broker, &mut *scope.journal, expected_tail, key)?.into_parts();
+            prepare_dispatch(&scope.broker, &mut *scope.journal, expected_tail, key)
+                .await?
+                .into_parts();
         // The acknowledgment, not the advertisement. A journal that offers
         // less on this append than the handoff requires is refused even when
         // its `durability()` claimed enough.
@@ -743,6 +745,19 @@ impl Effects {
         self.scope
             .journal_mut()
             .compare_and_append(self.tail, event)
+    }
+
+    /// The same append, for a caller on an executor.
+    ///
+    /// The two doors differ only in how they wait, so which one a caller uses
+    /// is a statement about that caller and not about the append. A dispatch
+    /// path is on an executor, where a journal whose durability path blocks
+    /// would charge the device's latency to everything else on the thread.
+    async fn append_async(&mut self, event: &EffectEvent) -> Result<DurableAck, JournalError> {
+        self.scope
+            .journal_mut()
+            .compare_and_append_async(self.tail, event)
+            .await
     }
 
     /// Advance the fold fence only after the journal confirms the exact
@@ -2402,7 +2417,7 @@ impl Ledger {
     /// The warrant is handed back rather than consumed here because the handoff
     /// is the caller's: it runs after the payload the attempt acts on is in
     /// hand, and it presents the warrant at [`Broker::revalidate`] on the way in.
-    fn begin_attempt(
+    async fn begin_attempt(
         &mut self,
         id: WorkId,
         lifetime: EffectLifetime,
@@ -2474,6 +2489,7 @@ impl Ledger {
         let authority = self
             .effects
             .prepare(key, lifetime)
+            .await
             .map_err(|cause| BotError::EffectRefused { cause })?;
         let transition = self
             .transitions
@@ -4184,6 +4200,7 @@ impl EcsBot {
                 .world
                 .non_send_mut::<Ledger>()
                 .begin_attempt(work, lifetime)
+                .await
             {
                 Ok(pair) => pair,
                 Err(error) => {

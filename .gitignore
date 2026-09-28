@@ -11,6 +11,12 @@ graphify-out/
 # creates a target directory the root `/target` rule does not cover.
 bench/target/
 
+# Member crates can be built on their own (`cargo test -p lgwks_bot`), which
+# puts a target directory beside the crate rather than at the workspace root, so
+# the root `/target` rule does not cover it. Without this, a `git add -A` stages
+# a few hundred megabytes of derived build output.
+crates/*/target/
+
 # HOL4 theory output: compiled objects and the signature store are derived build
 # artifacts. The proof script is the source and is committed; these are not.
 proofs/sigobj/

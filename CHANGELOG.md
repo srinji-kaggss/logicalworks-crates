@@ -79,6 +79,22 @@ explicitly under that crate.
 
 ### lgwks_bot Added
 
+- **`EffectJournal::compare_and_append_async`, `FileJournal::open_with_stalled_storage`,
+  `FileJournal::release_storage`, and `FileJournal::storage_gate` visibility.**
+  The async half of the journal now shares the sync half's frame preparation and
+  its authoritative length-check, write, `sync_all` path, so the two cannot
+  drift into writing different bytes. The async surface is additive: the sync
+  signature and every on-disk frame and chain format are unchanged, so no
+  existing store needs migrating. `FileView` gives lock-free fence checks
+  without a second open, and `FileJournal` drives its writes from a single
+  owner thread over a capacity-one request slot, which is what makes ordering
+  a property of the type rather than of a caller.
+- **An ambiguous write is poisoned, never reported as a clean failure.** When a
+  waiter awaiting an append is dropped, the owner learns of it and poisons the
+  handle with the reason. Before this, a dropped waiter was invisible to the
+  owner: it completed the write, and a later append on the same handle would
+  have proceeded as though nothing had been uncertain. The repair is a reopen,
+  which replays to the same facts.
 - **`BotError::EffectUnrecorded`, `DispatchCertainty::Occurred`, and
   `TransitionHold::RecordingFailed`.** A post-effect journal failure now
   carries the exact `EffectKey` and the observed `Applied`/`NotApplied` fact
