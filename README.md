@@ -147,7 +147,7 @@ lgwks-deps check .        # audit, and refuse any unowned external edge
   tool across several languages. → `lgwks_ast` gives one AST type and one
   diagnostic type across every grammar you enable
 - Reporting a parse failure with a real span. → `lgwks_ast` diagnostics carry
-  file, range, and severity
+  the recovery-node kind and bounded byte ranges into the original source
 
 ### Logging you can query
 

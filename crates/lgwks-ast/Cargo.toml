@@ -1,6 +1,6 @@
 [package]
 name = "lgwks_ast"
-description = "One multi-language AST parser: language identification from path or shebang, tree-sitter grammar selection by cargo feature, and bounded traversal. Includes a typed-diagnostic derive."
+description = "One multi-language AST parser: extension lookup, opt-in content parsing, feature-selected grammars, bounded traversal, and typed diagnostics."
 version = "0.2.2"
 edition = "2024"
 rust-version = "1.98"
