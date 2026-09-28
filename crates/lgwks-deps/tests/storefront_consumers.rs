@@ -53,7 +53,13 @@ fn minimal_external_consumers_use_selected_bevy_facades_only() -> TestResult {
 
         let disabled = cargo_check(
             &manifest,
-            &["--no-default-features", "--features", "probe", "--example", "feature_off"],
+            &[
+                "--no-default-features",
+                "--features",
+                "probe",
+                "--example",
+                "feature_off",
+            ],
         )?;
         assert!(
             !disabled.status.success(),
