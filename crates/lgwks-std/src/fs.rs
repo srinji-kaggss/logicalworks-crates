@@ -761,6 +761,12 @@ fn walk_recursive(
     let listed = match read_sorted_entries(dir, logical_dir, ctx.options.sort_alphabetically, ctx) {
         Ok(entries) => entries,
         Err(error) => {
+            if error
+                .get_ref()
+                .is_some_and(|source| source.is::<WalkFailure>())
+            {
+                return Err(error);
+            }
             return omit(
                 ctx,
                 WalkOmission {
