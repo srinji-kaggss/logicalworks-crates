@@ -1,6 +1,6 @@
 [package]
 name = "lgwks_deps"
-description = "Dependency admission and supply-chain policy for a Rust workspace: every external edge names a human-approved owner, verified in CI."
+description = "Dependency admission, supply-chain policy, and debugger-doctor CLI for a Rust workspace: every external edge and default trace install is verified."
 version = "0.1.13"
 edition = "2024"
 rust-version = "1.98"
@@ -10,7 +10,7 @@ documentation = "https://docs.rs/lgwks_deps"
 readme = "README.md"
 homepage = "https://github.com/srinji-kaggss/logicalworks-crates/tree/main/crates/lgwks-deps"
 categories = ["development-tools", "config"]
-keywords = ["dependencies", "audit", "supply-chain", "cargo", "policy"]
+keywords = ["dependencies", "audit", "supply-chain", "cargo", "debug"]
 
 # This crate consumes JSON only through the facade it enforces.
 # Depending on serde_json directly here would make the checker its own first

@@ -98,6 +98,14 @@ command = "cargo nextest run --workspace --locked"
 ci_step = "Run all workspace tests"
 
 [[lane]]
+id = "simulation-evidence"
+surfaces = "local ci"
+required = true
+builtin = "simulation-evidence"
+ci_step = "Deterministic simulation evidence"
+needs = ["bin:cargo-nextest"]
+
+[[lane]]
 id = "tests-bot-nodefault"
 surfaces = "local ci"
 required = true
@@ -126,6 +134,30 @@ required = true
 # necessity, not by habit.
 command = "cargo test --workspace --doc --locked"
 ci_step = "Doc tests"
+
+[[lane]]
+id = "debug-e2e"
+surfaces = "local ci"
+required = true
+builtin = "debug-e2e"
+ci_step = "Debug doctor end-to-end journey"
+
+[[lane]]
+id = "simulation-evidence-check"
+surfaces = "ci"
+required = true
+command = "python3 scripts/ci_local.py --lane simulation-evidence"
+ci_step = "Check successful simulation result"
+needs = ["bin:cargo-nextest"]
+reason = "dedicated PR check row whose job name exposes the successful simulation result"
+
+[[lane]]
+id = "debug-e2e-check"
+surfaces = "ci"
+required = true
+command = "python3 scripts/ci_local.py --lane debug-e2e"
+ci_step = "Check successful end-to-end journey result"
+reason = "dedicated PR check row whose job name exposes the successful end-to-end journey result"
 
 [[lane]]
 id = "lint"

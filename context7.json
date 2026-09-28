@@ -1,7 +1,7 @@
 {
   "$schema": "https://context7.com/schema/context7.json",
   "projectTitle": "Logical Works Crates",
-  "description": "Four Rust crates: lgwks_std, a zero-config stand-in for a dozen crates; lgwks_bot, a capability-gated runtime; lgwks_deps, the storefront that owns every edge; lgwks_ast, a standalone parser.",
+  "description": "Four Rust crates: lgwks_std, a zero-config stand-in for a dozen crates with default structured debugging; lgwks_bot, a capability-gated runtime; lgwks_deps, the storefront and doctor CLI that owns dependency and debugger checks; lgwks_ast, a standalone parser.",
   "folders": [
     "crates",
     "docs"
@@ -41,7 +41,8 @@
     "A spec's strings resolve through the DomainRegistry a binary declares with domains!, and an identifier outside that list is refused with BotError::UnregisteredDomain naming it.",
     "BotSpec is validate-only: no from_spec materializer exists yet. ChainSpec::on is a bare identifier with no slot for a condition's parameters such as Above<u16>'s threshold.",
     "The second obstacle to a from_spec materializer: an erased source carries no durable statement of its Output type.",
-    "Use tracing for diagnostics. println! and eprintln! are forbidden in library code, and library code must not unwrap or expect on recoverable paths \u2014 return typed errors with ?.",
+    "Use lgwks_std::trace for diagnostics. Applications call lgwks_std::trace::install_default once at the process edge; libraries emit structured events and return typed errors. println! and eprintln! are forbidden in library code, and library code must not unwrap or expect on recoverable paths.",
+    "Run lgwks-deps debug [PATH] when changing the tracing surface. It must report that the default trace feature includes tracing-subscriber, and --json must keep the report on stdout while trace events go to stderr.",
     "A domain that fails returns BotError::DomainError { domain, certainty, cause }. The certainty: DispatchCertainty field is required: Refused means nothing was dispatched and nothing ever will be, NotDelivered means nothing reached the peer.",
     "Unsettled means it may have taken effect, so a retry is a possible duplicate. BotError::retry_class() reads it \u2014 Never, Safe, RequiresEvidence. State what the failure actually establishes; never parse a cause string to decide whether to retry.",
     "lgwks_ast is standalone and finished, not grandfathered and not awaiting work. Do not grow it into a fourth dependency surface, do not route it through lgwks_deps, and do not propose capability additions to it.",

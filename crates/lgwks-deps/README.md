@@ -65,6 +65,7 @@ lgwks-deps init [PATH]          # fail-closed starting register
 lgwks-deps freshness [PATH]     # resolved versus latest on crates.io
 lgwks-deps vendor check [PATH]  # prove the lockfile is covered by the shared vendor tree
 lgwks-deps scan [PATH]...       # source detectors, one verdict binary
+lgwks-deps debug [PATH]         # doctor the default lgwks_std debugger surface
 ```
 
 `check` runs as the first CI lane. The binary diagnoses; it never approves.
@@ -76,6 +77,11 @@ which edges are owned, the tree in `vendor/` states which bytes the offline
 build resolves, and the subcommand binds the two by hash. The tree sits at the
 workspace root so every repository here resolves one physical copy. It is
 outside all package directories, so `cargo package` never ships it.
+
+`debug` is the cargo-doctor path for observability: install the default
+`lgwks_std::trace` debugger, emit lifecycle events, and refuse if the SDK
+debugger no longer rides the default trace surface. `--json` writes the report
+to stdout and leaves trace events on stderr.
 
 An approval with no authored Cargo edge is refused as stale authority. An
 authored edge with no approval is refused as unregistered. Both directions are
@@ -89,7 +95,7 @@ dependency graph: `lgwks_bot` and `lgwks_deps` depend on `lgwks_std`, and
 
 | Crate | What it gives you |
 |---|---|
-| [`lgwks_std`](https://docs.rs/lgwks_std) | Everyday primitives with no async runtime required: codecs, a blocking HTTP client, retry, structured logging, time, hashing, ids |
+| [`lgwks_std`](https://docs.rs/lgwks_std) | Everyday primitives with no async runtime required: codecs, a blocking HTTP client, retry, default structured debugging, time, hashing, ids |
 | [`lgwks_bot`](https://docs.rs/lgwks_bot) | A runtime for bots that run for weeks: four verbs, capability-gated authority, change-triggered execution, supervised background work. Its async engine is one of the stacks this storefront ships |
 | [`lgwks_ast`](https://docs.rs/lgwks_ast) | Parse many languages into one AST type, with bounded traversal and typed diagnostics |
 

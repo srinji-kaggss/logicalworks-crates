@@ -36,6 +36,12 @@ explicitly under that crate.
 
 ### lgwks_std Added
 
+- `trace` now includes a default debugger bootstrap: `DebugConfig`,
+  `DebugFormat`, `install_default`, `LGWKS_LOG`/`RUST_LOG` filtering, compact
+  and pretty local output, and JSON-line output via `LGWKS_LOG_FORMAT=json`.
+  The surface stays default-on with `trace`; `#[instrument]` remains out of
+  scope because `tracing-attributes` would pull the proc-macro stack into the
+  foundation crate.
 - `Debug` for `Hasher` (reports bytes written), `Weighted` (reports the
   composition rather than the components) and `task::JoinHandle` (reports
   running / done / panicked / taken). All three were unprintable, so a consumer
@@ -367,6 +373,13 @@ explicitly under that crate.
   named before the growth, matched by the text of that line rather than by the
   numbers the offset would predict; the five whose text is not unique in the
   file were confirmed by reading them.
+
+### lgwks_deps Added
+
+- `lgwks-deps debug [PATH] [--json]`, a cargo-doctor-style command for the
+  `lgwks_std::trace` lifecycle. It installs the default debugger in its own
+  process, emits lifecycle events, inspects `crates/lgwks-std/Cargo.toml`, and
+  refuses if the SDK debugger no longer rides the default `trace` feature.
 
 ### Repository Added
 

@@ -72,6 +72,8 @@ USAGE
    lgwks-deps scan [PATH]...            run the zero-gate source detectors
                                         (error swallow, unlogged returns,
                                         lint allowances, try chains, docs)
+   lgwks-deps debug [PATH]              run the cargo-doctor-style debugger
+             [--json]                   emit the doctor report as JSON
 
 EXIT
    0  every authored external edge has an admitted semantic owner
@@ -390,6 +392,7 @@ fn dispatch(
         "freshness" => handle_freshness(&args[1..], out, err),
         "vendor" => handle_vendor(&args[1..], out, err),
         "scan" => handle_scan(&args[1..], out, err),
+        "debug" => handle_debug(&args[1..], out, err),
         "-h" | "--help" | "help" => handle_help(out),
         other => handle_unknown(other, err),
     }
@@ -536,8 +539,10 @@ fn run_check(
         Ok(Some((invariant_register, invariant_audit))) => report_check_with_invariants(
             &root,
             dependency,
-            &invariant_register,
-            &invariant_audit,
+            InvariantReport {
+                register: &invariant_register,
+                audit: &invariant_audit,
+            },
             json_output,
             out,
             err,
@@ -563,12 +568,42 @@ struct InvariantJson<'a> {
     error: Option<&'a str>,
 }
 
+/// Parsed invariant register and its resolved audit, carried together.
+#[derive(Clone, Copy)]
+struct InvariantReport<'a> {
+    /// Parsed invariant register.
+    register: &'a InvariantRegister,
+    /// Resolved invariant audit.
+    audit: &'a InvariantAudit,
+}
+
+impl<'a> InvariantReport<'a> {
+    /// Converts this pair into the JSON payload shape.
+    const fn json(self) -> InvariantJson<'a> {
+        InvariantJson {
+            register: Some(self.register),
+            audit: Some(self.audit),
+            error: None,
+        }
+    }
+
+    /// Computes the combined check exit code for this invariant report.
+    fn check_exit_code(self, register: &Contract, refusals: &[Refusal]) -> ExitCode {
+        let dependencies_pass = refusals.is_empty() || !register.enforce;
+        let invariants_pass = self.audit.refusals().is_empty() || !self.register.enforce;
+        if dependencies_pass && invariants_pass {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(2)
+        }
+    }
+}
+
 /// Reports one check verdict after both registers have been audited.
 fn report_check_with_invariants(
     root: &Path,
     dependency: Result<(Contract, Vec<Refusal>), String>,
-    invariant_register: &InvariantRegister,
-    invariant_audit: &InvariantAudit,
+    invariant: InvariantReport<'_>,
     json_output: bool,
     out: &mut impl io::Write,
     err: &mut impl io::Write,
@@ -581,29 +616,20 @@ fn report_check_with_invariants(
                     Some(&register),
                     &refusals,
                     None,
-                    Some(InvariantJson {
-                        register: Some(invariant_register),
-                        audit: Some(invariant_audit),
-                        error: None,
-                    }),
+                    Some(invariant.json()),
                     out,
                 )?;
-                return Ok(check_exit_code(
-                    &register,
-                    &refusals,
-                    invariant_register,
-                    invariant_audit,
-                ));
+                return Ok(invariant.check_exit_code(&register, &refusals));
             }
-            if refusals.is_empty() && invariant_audit.refusals().is_empty() {
+            if refusals.is_empty() && invariant.audit.refusals().is_empty() {
                 writeln!(
                     out,
                     "OK  {} — {} semantic approvals; {} invariants resolve ({} resolved, {} attested by a recorded run)",
                     root.display(),
                     register.entries.len(),
-                    invariant_audit.registered(),
-                    invariant_audit.resolved(),
-                    invariant_audit.attested()
+                    invariant.audit.registered(),
+                    invariant.audit.resolved(),
+                    invariant.audit.attested()
                 )?;
                 writeln!(out, "SCOPE  {INVARIANT_SCOPE}")?;
                 return Ok(ExitCode::SUCCESS);
@@ -613,37 +639,21 @@ fn report_check_with_invariants(
                 "REFUSED  {} — {} dependency-edge violations, {} invariant violations\n",
                 root.display(),
                 refusals.len(),
-                invariant_audit.refusals().len()
+                invariant.audit.refusals().len()
             )?;
-            for refusal in &refusals {
-                writeln!(err, "  dependency register: {refusal}")?;
-            }
-            if refusals.is_empty() {
-                writeln!(err, "  dependency register: 0 refusals")?;
-            }
-            for refusal in invariant_audit.refusals() {
-                writeln!(err, "  invariant register: {refusal}")?;
-            }
-            if invariant_audit.refusals().is_empty() {
-                writeln!(err, "  invariant register: 0 refusals")?;
-            }
+            write_dependency_refusals(&refusals, err)?;
+            write_invariant_refusals(invariant.audit, err)?;
             writeln!(err, "SCOPE  {INVARIANT_SCOPE}")?;
             writeln!(
                 err,
                 "\nBoth registers are reviewed contracts; repair each named refusal before delivery."
             )?;
-            Ok(check_exit_code(
-                &register,
-                &refusals,
-                invariant_register,
-                invariant_audit,
-            ))
+            Ok(invariant.check_exit_code(&register, &refusals))
         }
         Err(dependency_error) => report_check_with_dependency_error(
             root,
             &dependency_error,
-            invariant_register,
-            invariant_audit,
+            invariant,
             json_output,
             out,
             err,
@@ -651,33 +661,11 @@ fn report_check_with_invariants(
     }
 }
 
-/// The one place both renderings read the verdict's exit code from.
-///
-/// Shared so the human and `--json` paths cannot disagree about what a refusal
-/// means: `enforce = false` still reports refusals but does not fail a build,
-/// and a refusal the register refuses to enforce is exactly as green as the
-/// author asked for.
-fn check_exit_code(
-    register: &Contract,
-    refusals: &[Refusal],
-    invariant_register: &InvariantRegister,
-    invariant_audit: &InvariantAudit,
-) -> ExitCode {
-    let dependencies_pass = refusals.is_empty() || !register.enforce;
-    let invariants_pass = invariant_audit.refusals().is_empty() || !invariant_register.enforce;
-    if dependencies_pass && invariants_pass {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(2)
-    }
-}
-
 /// Reports a dependency-register error while preserving invariant findings.
 fn report_check_with_dependency_error(
     root: &Path,
     dependency_error: &str,
-    invariant_register: &InvariantRegister,
-    invariant_audit: &InvariantAudit,
+    invariant: InvariantReport<'_>,
     json_output: bool,
     out: &mut impl io::Write,
     err: &mut impl io::Write,
@@ -688,11 +676,7 @@ fn report_check_with_dependency_error(
             None,
             &[],
             Some(dependency_error),
-            Some(InvariantJson {
-                register: Some(invariant_register),
-                audit: Some(invariant_audit),
-                error: None,
-            }),
+            Some(invariant.json()),
             out,
         )?;
         return Ok(ExitCode::from(2));
@@ -701,15 +685,10 @@ fn report_check_with_dependency_error(
         err,
         "REFUSED  {} — dependency register error, {} invariant violations\n",
         root.display(),
-        invariant_audit.refusals().len()
+        invariant.audit.refusals().len()
     )?;
-    writeln!(err, "  dependency register: {dependency_error}")?;
-    for refusal in invariant_audit.refusals() {
-        writeln!(err, "  invariant register: {refusal}")?;
-    }
-    if invariant_audit.refusals().is_empty() {
-        writeln!(err, "  invariant register: 0 refusals")?;
-    }
+    write_register_detail(err, "dependency", dependency_error)?;
+    write_invariant_refusals(invariant.audit, err)?;
     writeln!(err, "SCOPE  {INVARIANT_SCOPE}")?;
     Ok(ExitCode::from(2))
 }
@@ -719,13 +698,13 @@ fn report_check_with_invariant_error(
     root: &Path,
     dependency: Result<(Contract, Vec<Refusal>), String>,
     invariant_error: &str,
-    json_output: bool,
-    out: &mut impl io::Write,
-    err: &mut impl io::Write,
+    machine_output: bool,
+    stdout: &mut impl io::Write,
+    stderr: &mut impl io::Write,
 ) -> io::Result<ExitCode> {
     match dependency {
         Ok((register, refusals)) => {
-            if json_output {
+            if machine_output {
                 print_check_json(
                     Some(root),
                     Some(&register),
@@ -736,27 +715,22 @@ fn report_check_with_invariant_error(
                         audit: None,
                         error: Some(invariant_error),
                     }),
-                    out,
+                    stdout,
                 )?;
                 return Ok(ExitCode::from(2));
             }
             writeln!(
-                err,
+                stderr,
                 "REFUSED  {} — {} dependency-edge violations, invariant register error\n",
                 root.display(),
                 refusals.len()
             )?;
-            for refusal in &refusals {
-                writeln!(err, "  dependency register: {refusal}")?;
-            }
-            if refusals.is_empty() {
-                writeln!(err, "  dependency register: 0 refusals")?;
-            }
-            writeln!(err, "  invariant register: {invariant_error}")?;
+            write_dependency_refusals(&refusals, stderr)?;
+            write_register_detail(stderr, "invariant", invariant_error)?;
             Ok(ExitCode::from(2))
         }
         Err(dependency_error) => {
-            if json_output {
+            if machine_output {
                 print_check_json(
                     Some(root),
                     None,
@@ -767,20 +741,49 @@ fn report_check_with_invariant_error(
                         audit: None,
                         error: Some(invariant_error),
                     }),
-                    out,
+                    stdout,
                 )?;
                 return Ok(ExitCode::from(2));
             }
             writeln!(
-                err,
+                stderr,
                 "REFUSED  {} — both registers could not be audited",
                 root.display()
             )?;
-            writeln!(err, "  dependency register: {dependency_error}")?;
-            writeln!(err, "  invariant register: {invariant_error}")?;
+            write_register_detail(stderr, "dependency", &dependency_error)?;
+            write_register_detail(stderr, "invariant", invariant_error)?;
             Ok(ExitCode::from(2))
         }
     }
+}
+
+/// Writes dependency-register refusals with an explicit zero line.
+fn write_dependency_refusals(refusals: &[Refusal], err: &mut impl io::Write) -> io::Result<()> {
+    if refusals.is_empty() {
+        write_register_detail(err, "dependency", "0 refusals")
+    } else {
+        for refusal in refusals {
+            write_register_detail(err, "dependency", &refusal.to_string())?;
+        }
+        Ok(())
+    }
+}
+
+/// Writes invariant-register refusals with an explicit zero line.
+fn write_invariant_refusals(audit: &InvariantAudit, err: &mut impl io::Write) -> io::Result<()> {
+    if audit.refusals().is_empty() {
+        write_register_detail(err, "invariant", "0 refusals")
+    } else {
+        for refusal in audit.refusals() {
+            write_register_detail(err, "invariant", &refusal.to_string())?;
+        }
+        Ok(())
+    }
+}
+
+/// Writes one register detail line.
+fn write_register_detail(err: &mut impl io::Write, register: &str, detail: &str) -> io::Result<()> {
+    writeln!(err, "  {register} register: {detail}")
 }
 
 /// Renders the verdict in the requested mode and returns the exit code.
@@ -1013,6 +1016,282 @@ fn refuse(message: &str, err: &mut impl io::Write) -> io::Result<ExitCode> {
     Ok(ExitCode::from(2))
 }
 
+/// Returns a value or emits a command refusal and exits the current handler.
+macro_rules! unwrap_or_refuse {
+    ($result:expr, $err:expr) => {
+        match $result {
+            Ok(value) => value,
+            Err(message) => return refuse(&message, $err),
+        }
+    };
+}
+
+/// Resolves a repository root into the command's string-refusal vocabulary.
+fn resolve_repository_root(start: &Path) -> Result<PathBuf, String> {
+    repository_root(start).map_err(|error| error.to_string())
+}
+
+/// Reads the lockfile text for commands that audit the resolved dependency set.
+fn read_lock_text(root: &Path) -> Result<String, String> {
+    let lock_path = root.join("Cargo.lock");
+    std::fs::read_to_string(&lock_path)
+        .map_err(|error| format!("cannot read {}: {error}", lock_path.display()))
+}
+
+// ── debug ──────────────────────────────────────────────────────────────────
+
+/// Parsed arguments for the debugger doctor.
+struct DebugArgs {
+    /// Repository to inspect. `None` means the process working directory.
+    target: Option<PathBuf>,
+    /// True when the doctor report is written as JSON.
+    json: bool,
+}
+
+/// A check that must hold for the debugger to be default-on.
+struct DebugSurface {
+    /// `default = [...]` includes `trace`.
+    default_includes_trace: bool,
+    /// `trace = [...]` includes `dep:tracing`.
+    trace_includes_tracing: bool,
+    /// `trace = [...]` includes `dep:tracing-subscriber`.
+    trace_includes_subscriber: bool,
+    /// The `tracing` dependency is declared.
+    tracing_declared: bool,
+    /// The `tracing-subscriber` dependency is declared.
+    subscriber_declared: bool,
+}
+
+impl DebugSurface {
+    /// True when no caller has to select an optional feature to get debugging.
+    const fn passes(&self) -> bool {
+        self.default_includes_trace
+            && self.trace_includes_tracing
+            && self.trace_includes_subscriber
+            && self.tracing_declared
+            && self.subscriber_declared
+    }
+}
+
+/// Complete doctor report.
+struct DebugReport {
+    /// Repository root inspected by the doctor.
+    root: PathBuf,
+    /// Service name installed into the debugger.
+    service_name: String,
+    /// Filter directive installed into the debugger.
+    filter: String,
+    /// Output format installed into the debugger.
+    format: lgwks_std::trace::DebugFormat,
+    /// Manifest-level checks.
+    surface: DebugSurface,
+    /// True when the report should render as JSON.
+    json: bool,
+}
+
+/// Parses `lgwks-deps debug` arguments.
+fn parse_debug_args(args: &[String]) -> Result<DebugArgs, String> {
+    let mut target: Option<PathBuf> = None;
+    let mut json = false;
+    for argument in args {
+        match argument.as_str() {
+            "--json" => json = true,
+            flag if flag.starts_with("--") => {
+                return Err(format!("unknown option for `debug`: {flag}"));
+            }
+            value => {
+                if target.is_some() {
+                    return Err(format!(
+                        "`debug` inspects one repository, and {value:?} is a second path"
+                    ));
+                }
+                target = Some(PathBuf::from(value));
+            }
+        }
+    }
+    Ok(DebugArgs { target, json })
+}
+
+/// Runs the debugger doctor and returns the report to render.
+fn run_debug(args: &[String]) -> Result<DebugReport, String> {
+    let request = parse_debug_args(args)?;
+    let start = request.target.unwrap_or_else(|| PathBuf::from("."));
+    let root = repository_root(&start).map_err(|error| error.to_string())?;
+    let mut config = lgwks_std::trace::DebugConfig::from_env("lgwks-deps")
+        .map_err(|error| format!("cannot configure debugger: {error}"))?;
+    if request.json {
+        config = config.with_ansi(false);
+    }
+    let service_name = config.service_name().to_owned();
+    let filter = config.filter().to_owned();
+    let format = config.format();
+    config
+        .install()
+        .map_err(|error| format!("cannot install debugger: {error}"))?;
+    let surface = inspect_debug_surface(&root)?;
+    let root_text = format!("{}", root.display());
+    lgwks_std::trace::info!(
+        service_name = service_name.as_str(),
+        repository_root = root_text.as_str(),
+        otel_schema_url = lgwks_std::trace::OTEL_SCHEMA_URL,
+        default_debugger = surface.passes(),
+        "debug doctor completed"
+    );
+    Ok(DebugReport {
+        root,
+        service_name,
+        filter,
+        format,
+        surface,
+        json: request.json,
+    })
+}
+
+/// Inspects the standard-library manifest for the default debugger surface.
+fn inspect_debug_surface(root: &Path) -> Result<DebugSurface, String> {
+    let manifest_path = root.join("crates/lgwks-std/Cargo.toml");
+    let manifest = std::fs::read_to_string(&manifest_path)
+        .map_err(|error| format!("cannot read {}: {error}", manifest_path.display()))?;
+    let default_value = assignment_value(&manifest, "default").unwrap_or_default();
+    let trace_value = assignment_value(&manifest, "trace").unwrap_or_default();
+    Ok(DebugSurface {
+        default_includes_trace: default_value.contains("\"trace\""),
+        trace_includes_tracing: trace_value.contains("\"dep:tracing\""),
+        trace_includes_subscriber: trace_value.contains("\"dep:tracing-subscriber\""),
+        tracing_declared: dependency_declared(&manifest, "tracing"),
+        subscriber_declared: dependency_declared(&manifest, "tracing-subscriber"),
+    })
+}
+
+/// Reads one TOML assignment value as text, including a multi-line array.
+fn assignment_value(text: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key} =");
+    let mut lines = text.lines().map(str::trim);
+    while let Some(line) = lines.next() {
+        let Some(value) = line.strip_prefix(&prefix) else {
+            continue;
+        };
+        let mut collected = value.to_owned();
+        let mut opens = value.matches('[').count();
+        let mut closes = value.matches(']').count();
+        while opens > closes {
+            let Some(next) = lines.next() else {
+                break;
+            };
+            collected.push(' ');
+            collected.push_str(next);
+            opens = opens.saturating_add(next.matches('[').count());
+            closes = closes.saturating_add(next.matches(']').count());
+        }
+        return Some(collected);
+    }
+    None
+}
+
+/// True when a direct dependency assignment exists in a manifest.
+fn dependency_declared(text: &str, name: &str) -> bool {
+    let prefix = format!("{name} =");
+    text.lines()
+        .map(str::trim)
+        .any(|line| line.starts_with(&prefix))
+}
+
+/// Handles the cargo-doctor-style debugger command.
+fn handle_debug(
+    args: &[String],
+    out: &mut impl io::Write,
+    err: &mut impl io::Write,
+) -> io::Result<ExitCode> {
+    let report = match run_debug(args) {
+        Ok(report) => report,
+        Err(message) => return refuse(&message, err),
+    };
+    if report.json {
+        print_debug_json(&report, out)?;
+    } else if report.surface.passes() {
+        print_debug_human(&report, "OK", out)?;
+    } else {
+        print_debug_human(&report, "REFUSED", err)?;
+    }
+    Ok(if report.surface.passes() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(2)
+    })
+}
+
+/// Prints the human debugger report.
+fn print_debug_human(
+    report: &DebugReport,
+    status: &str,
+    writer: &mut impl io::Write,
+) -> io::Result<()> {
+    writeln!(
+        writer,
+        "{status}  {} — lgwks_std debugger bootstrap is default-on",
+        report.root.display()
+    )?;
+    writeln!(writer, "SERVICE  {}", report.service_name)?;
+    writeln!(writer, "FILTER   {}", report.filter)?;
+    writeln!(writer, "FORMAT   {}", report.format.as_str())?;
+    writeln!(writer, "SCHEMA   {}", lgwks_std::trace::OTEL_SCHEMA_URL)?;
+    debug_check_line(
+        writer,
+        report.surface.default_includes_trace,
+        "default feature includes trace",
+    )?;
+    debug_check_line(
+        writer,
+        report.surface.trace_includes_tracing,
+        "trace includes tracing facade",
+    )?;
+    debug_check_line(
+        writer,
+        report.surface.trace_includes_subscriber,
+        "trace includes default subscriber",
+    )?;
+    debug_check_line(
+        writer,
+        report.surface.tracing_declared,
+        "tracing dependency declared",
+    )?;
+    debug_check_line(
+        writer,
+        report.surface.subscriber_declared,
+        "tracing-subscriber dependency declared",
+    )
+}
+
+/// Prints one debugger check.
+fn debug_check_line(writer: &mut impl io::Write, pass: bool, label: &str) -> io::Result<()> {
+    let mark = if pass { "yes" } else { "no" };
+    writeln!(writer, "CHECK    {mark:<3} {label}")
+}
+
+/// Prints the JSON debugger report.
+fn print_debug_json(report: &DebugReport, out: &mut impl io::Write) -> io::Result<()> {
+    let payload = lgwks_std::json::json!({
+        "command": "debug",
+        "admitted": report.surface.passes(),
+        "root": format!("{}", report.root.display()),
+        "service_name": report.service_name.as_str(),
+        "filter": report.filter.as_str(),
+        "format": report.format.as_str(),
+        "otel": {
+            "schema_url": lgwks_std::trace::OTEL_SCHEMA_URL
+        },
+        "checks": {
+            "default_includes_trace": report.surface.default_includes_trace,
+            "trace_includes_tracing": report.surface.trace_includes_tracing,
+            "trace_includes_tracing_subscriber": report.surface.trace_includes_subscriber,
+            "tracing_declared": report.surface.tracing_declared,
+            "tracing_subscriber_declared": report.surface.subscriber_declared
+        }
+    });
+    let rendered = lgwks_std::json::to_string_pretty(&payload).map_err(io::Error::other)?;
+    writeln!(out, "{rendered}")
+}
+
 // ── request ─────────────────────────────────────────────────────────────────
 
 /// Prints the ladder followed by an approval block pre-filled with the crate
@@ -1132,10 +1411,7 @@ fn run_init(
     err: &mut impl io::Write,
 ) -> io::Result<ExitCode> {
     let start = path.unwrap_or_else(|| PathBuf::from("."));
-    let root = match repository_root(&start) {
-        Ok(root) => root,
-        Err(error) => return refuse(&error.to_string(), err),
-    };
+    let root = unwrap_or_refuse!(resolve_repository_root(&start), err);
     let target = root.join(CONTRACT_PATH);
     if let Err(msg) = prepare_init_file(&target) {
         return refuse(&msg, err);
@@ -1164,21 +1440,8 @@ fn handle_freshness(
         .map(|candidate| PathBuf::from(candidate.as_str()))
         .unwrap_or_else(|| PathBuf::from("."));
 
-    let root = match repository_root(&start) {
-        Ok(root) => root,
-        Err(error) => return refuse(&error.to_string(), err),
-    };
-
-    let lock_path = root.join("Cargo.lock");
-    let lock_text = match std::fs::read_to_string(&lock_path) {
-        Ok(text) => text,
-        Err(error) => {
-            return refuse(
-                &format!("cannot read {}: {error}", lock_path.display()),
-                err,
-            );
-        }
-    };
+    let root = unwrap_or_refuse!(resolve_repository_root(&start), err);
+    let lock_text = unwrap_or_refuse!(read_lock_text(&root), err);
 
     let resolved = match lgwks_deps::lock::parse(&lock_text) {
         Ok(parsed) => parsed,
@@ -1229,6 +1492,33 @@ struct FreshnessResult {
     error: Option<String>,
 }
 
+impl FreshnessResult {
+    /// Successful registry lookup.
+    fn found(package: &lgwks_deps::lock::Resolved, latest: String, repository: String) -> Self {
+        let stale = !latest.is_empty() && latest != package.version;
+        Self {
+            name: package.name.clone(),
+            resolved: package.version.clone(),
+            latest,
+            repository,
+            stale,
+            error: None,
+        }
+    }
+
+    /// Failed registry lookup, which is reported but not treated as stale.
+    fn lookup_failed(package: &lgwks_deps::lock::Resolved, error: String) -> Self {
+        Self {
+            name: package.name.clone(),
+            resolved: package.version.clone(),
+            latest: String::new(),
+            repository: String::new(),
+            stale: false,
+            error: Some(error),
+        }
+    }
+}
+
 /// Queries crates.io for each distinct package name.
 ///
 /// Names are de-duplicated first: a lock file commonly resolves several
@@ -1259,35 +1549,16 @@ fn query_crates_io(packages: &[&lgwks_deps::lock::Resolved]) -> Vec<FreshnessRes
             Ok(response) if response.status.success() => {
                 let body = String::from_utf8_lossy(&response.stdout);
                 let (latest, repo) = parse_crate_response(&body);
-                let stale = !latest.is_empty() && latest != package.version;
-                results.push(FreshnessResult {
-                    name: package.name.clone(),
-                    resolved: package.version.clone(),
-                    latest,
-                    repository: repo,
-                    stale,
-                    error: None,
-                });
+                results.push(FreshnessResult::found(package, latest, repo));
             }
             Ok(response) => {
-                results.push(FreshnessResult {
-                    name: package.name.clone(),
-                    resolved: package.version.clone(),
-                    latest: String::new(),
-                    repository: String::new(),
-                    stale: false,
-                    error: Some(format!("HTTP {}", response.status)),
-                });
+                results.push(FreshnessResult::lookup_failed(
+                    package,
+                    format!("HTTP {}", response.status),
+                ));
             }
             Err(error) => {
-                results.push(FreshnessResult {
-                    name: package.name.clone(),
-                    resolved: package.version.clone(),
-                    latest: String::new(),
-                    repository: String::new(),
-                    stale: false,
-                    error: Some(error.to_string()),
-                });
+                results.push(FreshnessResult::lookup_failed(package, error.to_string()));
             }
         }
     }
@@ -1458,24 +1729,12 @@ fn run_vendor_check(
     out: &mut impl io::Write,
     err: &mut impl io::Write,
 ) -> io::Result<ExitCode> {
-    let root = match lgwks_deps::repository_root(start) {
-        Ok(root) => root,
-        Err(error) => return refuse(&error.to_string(), err),
-    };
+    let root = unwrap_or_refuse!(resolve_repository_root(start), err);
     let tree = match lgwks_deps::vendor::tree_for(&root) {
         Ok(tree) => tree,
         Err(error) => return refuse(&error.to_string(), err),
     };
-    let lock_path = root.join("Cargo.lock");
-    let lock_text = match std::fs::read_to_string(&lock_path) {
-        Ok(text) => text,
-        Err(error) => {
-            return refuse(
-                &format!("cannot read {}: {error}", lock_path.display()),
-                err,
-            );
-        }
-    };
+    let lock_text = unwrap_or_refuse!(read_lock_text(&root), err);
     match lgwks_deps::vendor::check_coverage(&lock_text, &tree) {
         Ok(report) if report.missing.is_empty() => {
             writeln!(

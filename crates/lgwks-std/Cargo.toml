@@ -1,6 +1,6 @@
 [package]
 name = "lgwks_std"
-description = "Everyday Rust primitives with no async runtime required: hex, base64, timestamps, UUIDs, hashing, glob matching, regex, JSON, RON, binary wire, blocking HTTP, and structured logging. One audited dependency stack per feature."
+description = "Everyday Rust primitives with no async runtime required: codecs, timestamps, ids, hashing, regex, JSON/RON/wire, HTTP, and default structured-debugging install. One audited stack per feature."
 version = "0.6.7"
 edition = "2024"
 rust-version = "1.98"
@@ -10,7 +10,7 @@ documentation = "https://docs.rs/lgwks_std"
 readme = "README.md"
 homepage = "https://github.com/srinji-kaggss/logicalworks-crates/tree/main/crates/lgwks-std"
 categories = ["development-tools", "encoding", "asynchronous"]
-keywords = ["stdlib", "zero-dependencies", "json", "hex", "async"]
+keywords = ["stdlib", "zero-dependencies", "json", "tracing", "debug"]
 
 # INV-STDPLUS-APPROVED-ONLY: every dependency here is a vetted leaf or
 # single-purpose stack with zero further external deps. The gate test
@@ -35,9 +35,11 @@ keywords = ["stdlib", "zero-dependencies", "json", "hex", "async"]
 #                   primitives stable std does not expose; Unix-only, optional
 #   thiserror     — not here; the typed-error derive is owned by `lgwks_ast`
 #                   so the core stack stays lean
-#   tracing       — 4 crates measured (`tracing`, `tracing-core`,
-#                   `pin-project-lite`, `once_cell`), no proc macro because
-#                   `attributes` is off. Default-on: see the `[features]` note.
+#   tracing       — event/span facade.
+#   tracing-subscriber — default debugger bootstrap: env filters, compact local
+#                   output, JSON production output, and a fallible global
+#                   installer. `attributes` stays off, so no instrumentation
+#                   proc macro enters the foundation.
 [features]
 # `trace` is default-on, and that is a recorded decision rather
 # than a convenience. Library code here does not print to the terminal, and
@@ -48,7 +50,7 @@ keywords = ["stdlib", "zero-dependencies", "json", "hex", "async"]
 # genuinely zero-dependency build.
 default = ["core", "trace"]
 core = []
-trace = ["dep:tracing"]
+trace = ["dep:tracing", "dep:tracing-subscriber"]
 random = ["dep:getrandom"]
 hash = ["dep:blake3"]
 pattern = ["dep:regex"]
@@ -65,12 +67,9 @@ full = ["trace", "random", "hash", "pattern", "json", "ron", "wire", "http", "on
 # `attributes` is deliberately NOT enabled. It is the half of `tracing` that
 # provides `#[instrument]`, and it expands through `tracing-attributes`, which
 # expands through `syn`, a proc-macro stack that is not permitted outside the
-# `lgwks_deps` gate tool. Leaving it off keeps this edge at four small crates —
-# `tracing`, `tracing-core`, `pin-project-lite`, `once_cell` — with no proc
-# macro and no build step beyond a normal compile. A consumer who wants
-# `#[instrument]` can add `tracing` with
-# `attributes` themselves; that is their audited edge, not the foundation's.
+# `lgwks_deps` gate tool.
 tracing = { version = "0.1", default-features = false, features = ["std"], optional = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "env-filter", "json", "ansi", "registry"], optional = true }
 blake3 = { version = "1.8", default-features = false, optional = true }
 regex = { version = "1.13", optional = true }
 rkyv = { version = "0.8", default-features = false, features = ["alloc", "bytecheck"], optional = true }

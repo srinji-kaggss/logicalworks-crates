@@ -36,6 +36,18 @@ When the two disagree, the lane table is the source of truth and the
 disagreement is a defect in whichever side diverged. Fix that side and re-run
 both.
 
+Two evidence lanes exist because they are user-facing claims rather than
+ordinary unit-test counts. `simulation-evidence` parses Nextest's executable
+test listing and also counts source-visible `#[test]` attributes under
+`tests/sim/` and `sim_*` files, then refuses the gate unless each view is at
+least half deterministic simulation. `debug-e2e` drives the public
+`lgwks-deps debug` command through its JSON success path and a fail-closed
+manifest fixture, and prints the successful end-to-end journey result CI must
+show. CI also runs those two lanes as dedicated PR check jobs named
+`successful simulation result` and `successful end-to-end journey result`, so
+the checks list exposes the result without requiring a reader to open the
+aggregate `Tests` log.
+
 Hosted Actions executes on this account and is the CI surface: the workflow
 routes to `ubuntu-latest`, `macos-14`, and `windows-latest`, with `macos-14`
 reserved for the Metal storefronts. `check-gate-parity.py` refuses a required
@@ -98,7 +110,7 @@ states what was measured, not what is hoped for.
 | Ephemeral | Every scratch store is under the system temp directory, named by seed and by `lgwks_std::random` bytes, and removed on drop. A process id would have been shorter and wrong: the OS reuses it | `sim::Sim::scratch` |
 | Portable | Reopen across a fresh handle, path round-trip, and a real file-backed reopen; no wall-clock or pid enters a trace hash | `sim_journal::reopen_portability_r*`, `sim_scale::portable_r*` |
 | Multi-tenant | 5,000 concurrent provisions, 5,000 distinct tails, 10,000 events, no cross-tenant history | `sim_scale::the_named_five_thousand_tenant_provision` |
-| Fastest | 1,747 tests in 176.6s wall under nextest, 890 of them simulation, each sweeping a band twice for replay equality | `cargo nextest run --workspace --locked` |
+| Fastest | 2,852 tests in 162.465s wall under nextest, 1,990 of them simulation, with source-visible simulation coverage at 1,111 of 2,055 tests | `cargo nextest run --workspace --locked`; `python3 scripts/ci_local.py --lane simulation-evidence` |
 
 **Rule 7, refuse the theater.** No `wwfd boot` + `mem show` as a session-start
 ritual. No prophylactic skill loading. No re-reading source already held in

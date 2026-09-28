@@ -77,6 +77,8 @@ jobs:
         uses: taiki-e/install-action@nextest
       - name: Run all workspace tests
         run: cargo nextest run --workspace --locked
+      - name: Deterministic simulation evidence
+        run: python3 scripts/ci_local.py --lane simulation-evidence
       - name: Run lgwks-bot no-default-feature tests
         run: cargo nextest run -p lgwks_bot --all-targets --locked --no-default-features
       - name: Run lgwks-std full-feature tests
@@ -85,6 +87,38 @@ jobs:
         run: cargo nextest run -p lgwks_bot --all-targets --locked --features full
       - name: Doc tests
         run: cargo test --workspace --doc --locked
+      - name: Debug doctor end-to-end journey
+        run: python3 scripts/ci_local.py --lane debug-e2e
+
+  simulation_evidence:
+    name: successful simulation result
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.98.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Check successful simulation result
+        run: python3 scripts/ci_local.py --lane simulation-evidence
+
+  debug_e2e:
+    name: successful end-to-end journey result
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.98.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+      - name: Check successful end-to-end journey result
+        run: python3 scripts/ci_local.py --lane debug-e2e
 
   clippy:
     name: Clippy

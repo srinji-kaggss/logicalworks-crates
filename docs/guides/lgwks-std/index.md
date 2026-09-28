@@ -18,12 +18,13 @@ cargo add lgwks_std --no-default-features --features core   # zero external deps
 ## Feature selection
 
 The default is `core` plus `trace`. That is two features, and the second one
-matters: it is what makes the default build pull four crates rather than zero.
+matters: it is what makes the default build pull the tracing facade and the
+subscriber bootstrap rather than zero external crates.
 
 | Feature | Modules | External deps |
 |---|---|---|
 | `core` (default) | `encoding`, `fs`, `glob`, `hex`, `leb128`, `retry`, `task`, `time` | none |
-| `trace` (default) | `trace` | `tracing`, `tracing-core`, `pin-project-lite`, `once_cell` |
+| `trace` (default) | `trace` | `tracing`, `tracing-subscriber` stack |
 | `random` | `random`, `id` | `getrandom` |
 | `hash` | `hash` | `blake3` |
 | `pattern` | `pattern` | `regex` |
@@ -59,9 +60,9 @@ cargo tree -e normal | grep lgwks_std
 ```
 
 Against this repository, `cargo tree -p lgwks_std --no-default-features
---features core -e normal` prints a single line, `lgwks_std v0.6.6`, and nothing
-beneath it. The default build prints `tracing`, `tracing-core`,
-`pin-project-lite`, and `once_cell` under it.
+--features core -e normal` prints a single line, `lgwks_std v0.6.7`, and nothing
+beneath it. The default build prints the tracing facade and subscriber stack
+under it.
 
 ## Logging
 
@@ -72,17 +73,19 @@ No file under `crates/*/src` or `crates/*/examples` calls `println!` or
 `eprintln!`. `lgwks_std::trace` is the replacement, and `trace` is default-on
 precisely so it is reachable without selecting a feature first.
 
-`trace` is a re-export, not a second facade
-(`crates/lgwks-std/src/trace.rs:47`). It exposes the level macros, the span
-macros, `Level`, `Event`, `Span`, `Value`, `Instrument`, and `field` from
-`tracing` itself, so a subscriber you build against `tracing` works unchanged.
-The crate chooses no subscriber: bring your own.
+`trace` is a re-export plus a default debugger bootstrap, not a second logging
+facade. It exposes the level macros, the span macros, `Level`, `Event`, `Span`,
+`Value`, `Instrument`, and `field` from `tracing` itself, so a subscriber you
+build against `tracing` works unchanged. It also exposes
+`install_default("service-name")`, which installs a process-global subscriber
+with `LGWKS_LOG`/`RUST_LOG` filtering, compact output by default, and JSON lines
+when `LGWKS_LOG_FORMAT=json`.
 
 ```rust
-use lgwks_std::trace::{info, warn};
+use lgwks_std::trace::{info, install_default, warn};
 
 /// A typed failure. The error travels as a value; the event travels to whatever
-/// subscriber the *application* installed, which this crate never chooses.
+/// subscriber the application installed once at the process edge.
 #[derive(Debug, PartialEq, Eq)]
 pub enum PortError {
     /// The text was not a number at all.
@@ -93,8 +96,7 @@ pub enum PortError {
 
 /// Parse a listening port. Emits structured events and returns a typed error.
 ///
-/// `info!` and `warn!` are no-ops when no subscriber is installed, which is the
-/// point: a library emits and does not decide where the output goes.
+/// `info!` and `warn!` are no-ops until the process installs a subscriber.
 pub fn parse_port(raw: &str) -> Result<u16, PortError> {
     let parsed: u32 = raw.parse().map_err(|_| {
         warn!(input = raw, "port is not a number");
@@ -107,6 +109,12 @@ pub fn parse_port(raw: &str) -> Result<u16, PortError> {
     info!(port, "parsed a listening port");
     Ok(port)
 }
+
+pub fn main() -> Result<(), lgwks_std::trace::DebugInstallError> {
+    install_default("port-service")?;
+    let _ = parse_port("8080");
+    Ok(())
+}
 ```
 
 Two facts about that feature that the name does not carry:
@@ -116,12 +124,14 @@ Two facts about that feature that the name does not carry:
   then `syn`. `crates/lgwks-std/Cargo.toml` records the decision and names the
   alternative: a consumer who wants `#[instrument]` adds `tracing` with
   `attributes` themselves, as their own audited edge.
-- **`trace` is a logging path, not an output path.** `event_enabled!` and the
-  macros are no-ops without a subscriber, so a library that returns a typed error
-  and emits an event does both, and neither is a print.
+- **`trace` is a debugging path, not a network exporter.** The default
+  subscriber writes local structured output to stderr and keeps stdout clean for
+  data. OpenTelemetry is the schema/export boundary; OTLP export belongs in the
+  deployment adapter that owns network destinations and credentials.
 
 Returning a typed error and emitting an event are different concerns. A library
-returns information; the application decides whether a human sees it.
+returns information; the application installs the debugger once and decides
+whether a human, an agent, or an exporter sees it.
 
 ## Notes that save a support round
 

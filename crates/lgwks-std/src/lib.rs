@@ -14,8 +14,8 @@
 //! ## Feature map
 //!
 //! - `core` (default) — encoding, fs, glob, hex, leb128, retry, task, time. Zero deps.
-//! - `trace` (default) — trace. Adds `tracing` (`std` only; no `attributes`,
-//!   so no `syn`).
+//! - `trace` (default) — trace. Adds `tracing` plus the default subscriber
+//!   bootstrap (`std` only; no `attributes`, so no `syn`).
 //! - `random` — random, id. Adds `getrandom`.
 //! - `hash` — hash. Adds `blake3`.
 //! - `pattern` — pattern. Adds `regex`.
@@ -76,7 +76,8 @@ pub mod similarity;
 pub mod task;
 /// RFC 3339 timestamps and calendar math.
 pub mod time;
-/// Structured, levelled logging via `tracing` (feature `trace`, default-on).
+/// Structured, levelled logging and default debugger bootstrap (feature
+/// `trace`, default-on).
 #[cfg(feature = "trace")]
 pub mod trace;
 /// Zero-copy binary wire serialization via rkyv (feature `wire`).
