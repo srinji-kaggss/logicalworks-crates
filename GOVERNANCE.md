@@ -404,6 +404,30 @@ events). No SLO is claimed from a laptop: p50/p95/p99 under a named 1-2 vCPU
 VPS load test is still open, as is cross-OS execution of the three-OS matrix,
 which only hosted Actions can produce.
 
+**One gate was bypassed, on the Director's authorisation, and it is a defect
+worth fixing rather than a licence worth keeping.** `rust-guard`'s REPETITION
+check refused this change four times. Every real duplication it named was
+extracted first — the run identity and its single `EffectKey::new`, the
+ladder, both per-family key builders, the seed space, the band split, the
+sixteen-test declaration macro, and the tenant-provision loop. What remained
+was not duplication. It was a block that **moved**: `fn durability(&self) ->
+DurabilityPromise` appears 7 times in `origin/main`'s
+`durable_dispatch.rs` and 6 times in this tree, so one instance left the
+source and arrived at `tests/sim/rig.rs` with no second copy anywhere. And it
+was compiler-mandated shape the check cannot distinguish from logic: `type
+Input`/`type Output` and `fn required_caps` across three `impl Execute`
+blocks, and `sim::assert_replays(band, |sim| {`, the mandatory opener of all
+sixteen band families.
+
+The cause is that the check compares per file against the base commit and
+never nets a deletion against an addition. That is the same class of defect
+`scripts/check-gate-parity.py` was written to stop, for the same reason:
+issue #127 refused *"the script is the single definition of the gate"* while
+the workflow invented its own commands, and the cure was four explicit rules
+rather than an implicit guess. The fix this check needs is recorded in §7. It
+is not a licence to skip the check — the extraction came first, and the
+bypass is the last step.
+
 **A product question the simulation raised and this change did not close.**
 Whether a `Stored` fact whose sequence number is far behind the head should
 still enter the idempotency fence is not settled. The shipped answer is yes, and
@@ -432,6 +456,7 @@ Whether that is the right answer is a Director decision, recorded in §7.
 |---|---|---|
 | Publish of the PR #91 cut | Human-held crates.io token | The tag and changelog exist. Published artifacts are not claimed to match the tree |
 | Merge without executed CI reproduction | A local PASS is not a CI run | Local receipts support source review only. Merge eligibility needs executed CI reproduction on the affected lanes unless the Director records a bounded exception naming its replacement evidence |
+| rust-guard's REPETITION check | The Director authorised a bypass on 2026-09-27 for commit `b30a2716`, on the stated reason that the remaining findings are a relocated block and compiler-mandated shape, not duplication | The check is compared per file against the base commit and does not net a deletion against an addition, so a move reads as a copy. It needs three rules: net deletions against additions across the whole diff, exempt trait-impl boilerplate, and match a repeated body rather than a repeated line shape. Until then every real duplication is still extracted first and the bypass is the last step, recorded in the commit message |
 | Does a lagging `Stored` fact still fence a replay? | The simulation found a fact that enters the fence 900 events behind the head and asked whether it should. Shipped answer is yes, and `sim_journal::stored_lags_history_but_still_fences_a_replay` now pins it | Until decided, the shipped behaviour stands and the pinning test fails loudly if it changes |
 | Licence change or re-opening `lgwks_bot` | #73 closed it to outside contributions; the CLA instrument is deferred | `lgwks_bot` stays closed. The other three crates keep their licence map from #63 |
 
