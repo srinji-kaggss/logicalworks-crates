@@ -119,7 +119,7 @@ lgwks_std = { version = "0.6", default-features = false, features = ["core"] }
 | Module | What it does | Replaces |
 |--------|-------------|----------|
 | `encoding` | Base64 and percent-encoding | `base64`, `percent-encoding` |
-| `fs` | Recursive directory walking with sandbox enforcement | `walkdir` |
+| `fs` | Recursive trusted-tree walking with a best-effort in-root symlink policy | `walkdir` |
 | `glob` | Shell-style glob matching (DP algorithm, O(M*N)) | `glob` |
 | `hex` | Hex encode and decode | `hex` |
 | `leb128` | LEB128 variable-length integer encoding | — |

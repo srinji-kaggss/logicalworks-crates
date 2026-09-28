@@ -86,6 +86,15 @@ Each of these was a shipped defect. Treat the list as the spec.
   best-effort only and do not promise race-safe containment against hostile
   concurrent replacement. · why: #143 R15/R16 · enforced by:
   `lgwks_std::fs::tests`
+- **INV-FS-3** Walk output uses absolute paths rooted at the canonicalized
+  input root; descendants reached through symlinks retain the logical alias,
+  while canonical targets identify visits. Reports expose the applied depth
+  and symlink policy, and completeness means complete within that policy.
+  Bounded walks charge entries and path bytes before retention and mark any
+  budget-limited prefix incomplete. Strict failures preserve path, stage and
+  the original I/O source. `available_space` is an advisory snapshot, never a
+  reservation or write guarantee. · why: #166 · enforced by:
+  `lgwks_std::fs::tests` and the public API doctest
 
 ## lgwks_ast
 
