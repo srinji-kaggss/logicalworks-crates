@@ -80,6 +80,12 @@ Each of these was a shipped defect. Treat the list as the spec.
 
 ## lgwks_std
 
+- **INV-CODEC-1** JSON and RON text/slice decoders preserve input borrowing
+  where their decoders support it; escaped text that needs allocation is not
+  reported as borrowed. RON writer failures distinguish serialization from I/O
+  and preserve the underlying cause without claiming unobserved byte progress.
+  · why: #162 · enforced by: `json`/`ron` tests and external facade consumers
+
 - **INV-FS-2** A successful strict directory walk has no known omissions; a
   tolerant walk returns each known omission alongside its entries, and an
   unresolved root is always refused. Path-based identity rechecks are
