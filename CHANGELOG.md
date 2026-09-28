@@ -8,6 +8,16 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+## [lgwks_std 0.7.0 / lgwks_bot 0.5.0 / lgwks_deps 0.1.13] - 2026-09-28
+
+The first upload of this train. It carries everything below, including the
+2026-09-21 cut, which was never published. `lgwks_std` takes the minor position
+(0.7.0), not the cut's 0.6.7, because the entries under "lgwks_std Breaking"
+rename and remove public items, and Cargo treats 0.6.6 → 0.6.7 as compatible.
+`lgwks_bot` 0.5.0 is already a minor bump from the published 0.4.2; it re-exports
+`lgwks_std::json`, so it moves with std. `lgwks_deps` 0.1.13 only adds a command
+and exposes no `lgwks_std` type, so it stays a patch. `lgwks_ast` does not move.
+
 ### lgwks_std Breaking
 
 - `time` no longer re-exports the items of its `calendar` and `format`
@@ -436,7 +446,7 @@ explicitly under that crate.
   and not it. It was a second copy of the module list that nothing compiled and
   nothing kept in step.
 
-## [lgwks_std 0.6.7 / lgwks_bot 0.5.0 / lgwks_deps 0.1.13] - 2026-09-21
+## [2026-09-21 cut, never published; ships as lgwks_std 0.7.0 / lgwks_bot 0.5.0 / lgwks_deps 0.1.13 above]
 
 ### Proofs
 

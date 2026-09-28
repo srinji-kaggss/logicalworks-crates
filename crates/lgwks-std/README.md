@@ -89,14 +89,14 @@ One manifest key, three alternative lines. Use exactly one of them:
 ```toml
 [dependencies]
 # Zero external deps: defaults off, core selected. The default build is core
-# plus trace, so a bare `lgwks_std = "0.6"` is NOT zero-dependency.
-lgwks_std = { version = "0.6", default-features = false, features = ["core"] }
+# plus trace, so a bare `lgwks_std = "0.7"` is NOT zero-dependency.
+lgwks_std = { version = "0.7", default-features = false, features = ["core"] }
 
 # Pick what you need, on top of the default core + trace.
-# lgwks_std = { version = "0.6", features = ["hash", "json"] }
+# lgwks_std = { version = "0.7", features = ["hash", "json"] }
 
 # Everything.
-# lgwks_std = { version = "0.6", features = ["full"] }
+# lgwks_std = { version = "0.7", features = ["full"] }
 ```
 
 | Feature | Modules | What it adds | External deps |

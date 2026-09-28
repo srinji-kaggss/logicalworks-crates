@@ -29,7 +29,7 @@ what is implied.
 
 | Crate | `Cargo.toml` version | Newest tag | Checked |
 |---|---|---|---|
-| `lgwks_std` | 0.6.7 | `lgwks_std-v0.6.6` | Manifest raised in the 2026-09-21 cut; no tag for it yet |
+| `lgwks_std` | 0.7.0 | `lgwks_std-v0.6.6` | Manifest raised in the 2026-09-28 cut (breaking; supersedes the unpublished 0.6.7); no tag until upload |
 | `lgwks_bot` | 0.5.0 | `lgwks_bot-v0.4.2` | Manifest raised in the 2026-09-21 cut; no tag for it yet, and the 0.4.2 tag's surface differs from `main` (below) |
 | `lgwks_ast` | 0.2.2 | `lgwks_ast-v0.2.2` | Tag exists in this repository |
 | `lgwks_deps` | 0.1.13 | `lgwks_deps-v0.1.12` | Manifest raised in the 2026-09-21 cut; no tag for it yet |
