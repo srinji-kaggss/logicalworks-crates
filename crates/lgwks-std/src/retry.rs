@@ -26,9 +26,11 @@
 //! assert!(policy.deadline_exceeded(Duration::from_secs(6)));
 //! ```
 //!
-//! INV-RETRY-PURE: [`RetryPolicy`](crate::retry::RetryPolicy) never sleeps, never reads a clock, never
-//! allocates. `delay` is O(1) with saturating arithmetic, so a hostile attempt
-//! count cannot overflow into a panic or an unbounded sleep.
+//! INV-STD-RETRY: [`RetryPolicy`](crate::retry::RetryPolicy) never sleeps, never reads a clock,
+//! never allocates, and computes the exact capped delay for every `u32` retry
+//! index and every `Duration`. Its work is bounded independently of the retry
+//! index. The one-word jitter mapping is deterministic and modulo-biased; it
+//! does not claim uniform sampling across the full delay range.
 
 use std::time::Duration;
 
@@ -39,8 +41,8 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RetryPolicy {
-    /// Maximum attempts including the first try. `0` is normalised to `1`:
-    /// a policy always permits the initial attempt, never zero work.
+    /// Maximum attempts including the first try. Zero is treated as one both
+    /// at construction and use, including after direct public-field mutation.
     pub max_attempts: u32,
     /// Backoff after the first failure; doubled per subsequent attempt.
     pub base_delay: Duration,
@@ -64,42 +66,38 @@ impl RetryPolicy {
         }
     }
 
-    /// Cap any single backoff at `max_delay` (applied before jitter).
+    /// Cap any single backoff at `max_delay` (applied before jitter). A zero
+    /// cap produces a zero delay.
     #[must_use]
     pub fn with_max_delay(mut self, max_delay: Duration) -> Self {
         self.max_delay = max_delay;
         self
     }
 
-    /// Backoff before attempt `attempt` (0-based failures so far), shortened
-    /// by full jitter derived from `jitter_entropy`: the returned delay is
-    /// `backoff - (entropy % (backoff + 1))`, so jitter only ever shrinks the
-    /// wait. Saturating shift arithmetic keeps hostile attempt counts O(1)
-    /// and panic-free.
+    /// Backoff after a failure and before its retry, with `attempt` as the
+    /// zero-based retry index (`0` follows the first failure). The uncapped
+    /// delay is `base_delay * 2^attempt`, capped at `max_delay`, then shortened
+    /// by `backoff - (jitter_entropy % (backoff_nanoseconds + 1))`.
+    ///
+    /// The one `u64` entropy word maps by modulo, so it is biased unless the
+    /// inclusive range divides `2^64`. If that range is wider than `2^64`,
+    /// only its first `2^64` remainders are reachable. No entropy is sampled
+    /// here; callers own that policy.
     #[must_use]
     pub fn delay(&self, attempt: u32, jitter_entropy: u64) -> Duration {
-        let shift = attempt.min(31);
-        let backoff = self
-            .base_delay
-            .checked_mul(1u32 << shift)
-            .unwrap_or(self.max_delay)
-            .min(self.max_delay);
-        if backoff.is_zero() {
+        let backoff_nanos = capped_backoff_nanos(
+            self.base_delay.as_nanos(),
+            self.max_delay.as_nanos(),
+            attempt,
+        );
+        if backoff_nanos == 0 {
             return Duration::ZERO;
         }
-        // Saturation, not truncation: a delay beyond `u64::MAX` nanoseconds
-        // (~584 years) has already exceeded every usable deadline, so clamping
-        // to `u64::MAX` keeps the cap honest where the old cast would have
-        // silently wrapped the duration around to a short one.
-        let nanos = u64::try_from(backoff.as_nanos()).unwrap_or(u64::MAX);
-        // `backoff` is non-zero here, so `nanos` is at least one and the
-        // modulus is never zero; the fallback is unreachable and is spelled out
-        // rather than panicking. `saturating_add` only clamps the modulus for
-        // the `u64::MAX` case above, where the remainder is exact anyway.
-        let jitter = jitter_entropy
-            .checked_rem(nanos.saturating_add(1))
+        let jitter_range = backoff_nanos.saturating_add(1);
+        let jitter = u128::from(jitter_entropy)
+            .checked_rem(jitter_range)
             .unwrap_or(0);
-        Duration::from_nanos(nanos.saturating_sub(jitter))
+        duration_from_nanos(backoff_nanos.saturating_sub(jitter))
     }
 
     /// Whether `elapsed` has consumed the total `deadline` budget.
@@ -108,11 +106,43 @@ impl RetryPolicy {
         elapsed >= self.deadline
     }
 
-    /// Whether another attempt is allowed after `failures` failures.
+    /// Whether an attempt is allowed after `failures` failed attempts; zero
+    /// failures includes the initial attempt. The deadline gates that initial
+    /// attempt too, and equality refuses it. This checks current eligibility,
+    /// not whether the next delay fits: before sleeping, callers must bound
+    /// `delay` by `deadline.saturating_sub(elapsed)`.
     #[must_use]
     pub fn should_retry(&self, failures: u32, elapsed: Duration) -> bool {
-        failures < self.max_attempts && !self.deadline_exceeded(elapsed)
+        failures < self.max_attempts.max(1) && !self.deadline_exceeded(elapsed)
     }
+}
+
+/// Returns the exact capped base-delay product in nanoseconds.
+///
+/// `Duration::as_nanos` fits in `u128`, including `Duration::MAX`. Comparing
+/// against the cap shifted right proves whether the product reaches the cap
+/// before shifting, so overflow and work proportional to `attempt` are avoided.
+fn capped_backoff_nanos(base_nanos: u128, cap_nanos: u128, attempt: u32) -> u128 {
+    let base_nanos = base_nanos.min(cap_nanos);
+    if base_nanos == 0 || base_nanos == cap_nanos {
+        return base_nanos;
+    }
+    if attempt >= u128::BITS {
+        return cap_nanos;
+    }
+    let shift = attempt;
+    if base_nanos > (cap_nanos >> shift) {
+        cap_nanos
+    } else {
+        base_nanos << shift
+    }
+}
+
+/// Converts nanoseconds within `Duration`'s representable range to a duration.
+fn duration_from_nanos(nanos: u128) -> Duration {
+    let seconds = u64::try_from(nanos.checked_div(1_000_000_000).unwrap_or(0)).unwrap_or(u64::MAX);
+    let subsecond_nanos = u32::try_from(nanos.checked_rem(1_000_000_000).unwrap_or(0)).unwrap_or(0);
+    Duration::new(seconds, subsecond_nanos)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -156,8 +186,11 @@ mod tests {
     #[test]
     fn huge_attempt_counts_cannot_overflow_or_hang() {
         let policy = RetryPolicy::new(u32::MAX, Duration::from_millis(1), Duration::MAX);
-        let delay = policy.delay(u32::MAX, u64::MAX);
-        assert!(delay <= Duration::from_secs(30));
+        assert_eq!(
+            policy.delay(u32::MAX, 0),
+            Duration::from_secs(30),
+            "a huge retry index reaches the configured cap"
+        );
     }
 
     #[test]
@@ -171,6 +204,102 @@ mod tests {
     #[test]
     fn zero_base_delay_stays_zero() {
         let policy = RetryPolicy::new(3, Duration::ZERO, Duration::from_secs(1));
-        assert_eq!(policy.delay(4, 12345), Duration::ZERO);
+        assert_eq!(
+            policy.delay(4, 12345),
+            Duration::ZERO,
+            "zero base delay remains zero after any retry index"
+        );
+    }
+
+    /// Computes the expected capped delay by bounded repeated doubling.
+    fn reference_backoff_nanos(base: Duration, cap: Duration, attempt: u32) -> u128 {
+        let cap_nanos = cap.as_nanos();
+        let mut delay_nanos = base.as_nanos().min(cap_nanos);
+        for _ in 0..attempt.min(u128::BITS) {
+            delay_nanos = delay_nanos.saturating_mul(2).min(cap_nanos);
+            if delay_nanos == cap_nanos {
+                break;
+            }
+        }
+        delay_nanos
+    }
+
+    #[test]
+    fn public_delay_matches_reference_at_attempt_and_cap_boundaries() {
+        let attempts = [0, 1, 30, 31, 32, 35, u32::MAX];
+        let cases = [
+            (Duration::ZERO, Duration::from_nanos(1)),
+            (Duration::from_nanos(1), Duration::ZERO),
+            (Duration::from_nanos(1), Duration::from_nanos(1)),
+            (Duration::from_nanos(1), Duration::from_nanos(2)),
+            (Duration::from_millis(100), Duration::from_millis(50)),
+            (Duration::from_millis(100), Duration::from_millis(100)),
+            (Duration::from_millis(100), Duration::from_millis(200)),
+            (Duration::from_millis(100), Duration::from_secs(30)),
+        ];
+        for (base, cap) in cases {
+            let policy = RetryPolicy::new(1, base, Duration::MAX).with_max_delay(cap);
+            for attempt in attempts {
+                let expected = duration_from_nanos(reference_backoff_nanos(base, cap, attempt));
+                assert_eq!(
+                    policy.delay(attempt, 0),
+                    expected,
+                    "attempt {attempt} must use exact capped doubling from {base:?} to {cap:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn jitter_matches_wide_reference_across_duration_boundaries() {
+        let durations = [
+            Duration::from_nanos(1),
+            Duration::from_nanos(u64::MAX),
+            Duration::new(u64::MAX, 999_999_999),
+            Duration::MAX,
+        ];
+        let entropies = [0, 1, u64::MAX];
+        for duration in durations {
+            for entropy in entropies {
+                let policy = RetryPolicy::new(1, duration, Duration::MAX).with_max_delay(duration);
+                let backoff_nanos = reference_backoff_nanos(duration, duration, 0);
+                let expected = backoff_nanos - (u128::from(entropy) % (backoff_nanos + 1));
+                assert_eq!(
+                    policy.delay(0, entropy),
+                    duration_from_nanos(expected),
+                    "entropy {entropy} must follow the inclusive wide-range formula for {duration:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn effective_attempt_floor_and_deadline_equality_are_consistent() {
+        let mut policy = RetryPolicy::new(0, Duration::ZERO, Duration::from_nanos(1));
+        assert_eq!(
+            policy.max_attempts, 1,
+            "construction normalizes zero attempts"
+        );
+        assert!(
+            policy.should_retry(0, Duration::ZERO),
+            "one initial attempt is allowed before the deadline"
+        );
+        assert!(
+            !policy.should_retry(0, Duration::from_nanos(1)),
+            "deadline equality refuses even the initial attempt"
+        );
+        policy.max_attempts = 0;
+        assert!(
+            policy.should_retry(0, Duration::ZERO),
+            "direct mutation to zero retains the effective one-attempt floor"
+        );
+        assert!(
+            !policy.should_retry(1, Duration::ZERO),
+            "the effective one-attempt floor refuses work after one failure"
+        );
+        assert!(
+            !RetryPolicy::new(1, Duration::ZERO, Duration::ZERO).should_retry(0, Duration::ZERO),
+            "a zero deadline refuses at equality"
+        );
     }
 }

@@ -80,6 +80,15 @@ Each of these was a shipped defect. Treat the list as the spec.
 
 ## lgwks_std
 
+- **INV-STD-RETRY** `RetryPolicy` remains a pure, allocation-free policy:
+  `delay(0)` is the backoff after the first failure, exponential scaling
+  reaches the exact `max_delay` cap for every retry index without work
+  proportional to that index, and jitter applies the documented inclusive
+  modulo formula across the complete `Duration` range. The one-word entropy
+  mapping is modulo-biased and does not promise uniformity. Zero attempts have
+  an effective floor of one at construction and use, while deadline equality
+  refuses an attempt, including the initial one. · why: #164 · enforced by:
+  `lgwks_std::retry::tests`
 - **INV-FS-2** A successful strict directory walk has no known omissions; a
   tolerant walk returns each known omission alongside its entries, and an
   unresolved root is always refused. Path-based identity rechecks are
