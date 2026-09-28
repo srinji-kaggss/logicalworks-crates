@@ -133,11 +133,11 @@ impl DependencySource {
 #[non_exhaustive]
 pub struct DirectEdge {
     /// Workspace package declaring the dependency.
-    pub consumer: String,
+    pub(crate) consumer: String,
     /// Upstream package name, independent of a local rename.
-    pub package: String,
+    pub(crate) package: String,
     /// Manifest semver requirement exactly as Cargo reports it.
-    pub requirement: String,
+    pub(crate) requirement: String,
     /// Normal, build, or development edge.
     pub kind: DependencyKind,
     /// Registry, Git, or path origin.
@@ -148,6 +148,26 @@ pub struct DirectEdge {
     pub workspace: bool,
     /// Repository declared by a workspace path target, when present.
     pub target_repository: Option<String>,
+}
+
+impl DirectEdge {
+    /// Returns the declaring package, upstream package identity, and manifest
+    /// requirement as an immutable tuple.
+    ///
+    /// ```
+    /// let edges = lgwks_deps::metadata::parse(r#"{
+    ///   "packages":[{"id":"app","name":"app","manifest_path":"/repo/Cargo.toml","dependencies":[
+    ///     {"name":"serde","source":"registry+https://github.com/rust-lang/crates.io-index","req":"^1","kind":null,"optional":false,"path":null}
+    ///   ]}],"workspace_members":["app"]
+    /// }"#)?;
+    /// let edge = edges.first().ok_or("missing edge")?;
+    /// assert_eq!(edge.identity(), ("app", "serde", "^1"));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn identity(&self) -> (&str, &str, &str) {
+        (&self.consumer, &self.package, &self.requirement)
+    }
 }
 
 /// Failure to obtain or decode Cargo's authored dependency graph.
@@ -394,34 +414,10 @@ fn lexical_join(base: &Path, relative: &str) -> Option<PathBuf> {
 /// hostile tree cannot change the answer between classification and audit.
 /// Anything unresolvable fails closed to external.
 fn direct_edges(metadata: CargoMetadata) -> Result<Vec<DirectEdge>, MetadataError> {
-    let members: std::collections::BTreeSet<&str> = metadata
-        .workspace_members
-        .iter()
-        .map(String::as_str)
-        .collect();
-    let member_packages: Vec<&CargoPackage> = metadata
-        .packages
-        .iter()
-        .filter(|package| members.contains(package.id.as_str()))
-        .collect();
-    let member_dirs: std::collections::BTreeMap<PathBuf, (&str, Option<&str>)> = member_packages
-        .iter()
-        .filter_map(|package| {
-            let dir = Path::new(package.manifest_path.as_deref()?)
-                .parent()?
-                .to_path_buf();
-            Some((dir, (package.name.as_str(), package.repository.as_deref())))
-        })
-        .collect();
-    let declaring_dirs: std::collections::BTreeMap<&str, PathBuf> = member_packages
-        .iter()
-        .filter_map(|package| {
-            let dir = Path::new(package.manifest_path.as_deref()?)
-                .parent()?
-                .to_path_buf();
-            Some((package.id.as_str(), dir))
-        })
-        .collect();
+    let workspace = validated_workspace(&metadata)?;
+    let member_packages = workspace.packages;
+    let member_dirs = workspace.member_dirs;
+    let declaring_dirs = workspace.declaring_dirs;
     let mut edges = Vec::new();
     for package in member_packages {
         let declaring = declaring_dirs.get(package.id.as_str());
@@ -436,6 +432,14 @@ fn direct_edges(metadata: CargoMetadata) -> Result<Vec<DirectEdge>, MetadataErro
                 }
                 _ => None,
             };
+            if let Some((member_name, _)) = member
+                && dependency.name != member_name
+            {
+                return Err(MetadataError::Schema(format!(
+                    "dependency {:?} resolves to workspace package {:?}",
+                    dependency.name, member_name
+                )));
+            }
             edges.push(DirectEdge {
                 consumer: package.name.clone(),
                 package: dependency.name.clone(),
@@ -458,6 +462,89 @@ fn direct_edges(metadata: CargoMetadata) -> Result<Vec<DirectEdge>, MetadataErro
         ))
     });
     Ok(edges)
+}
+
+/// Validated view shared by edge extraction and workspace inventory.
+struct ValidatedWorkspace<'a> {
+    /// Workspace packages resolved uniquely from the member-id list.
+    packages: Vec<&'a CargoPackage>,
+    /// Unique manifest directories mapped to package identity and repository.
+    member_dirs: std::collections::BTreeMap<PathBuf, (&'a str, Option<&'a str>)>,
+    /// Manifest directories keyed by each validated Cargo package id.
+    declaring_dirs: std::collections::BTreeMap<&'a str, PathBuf>,
+}
+
+/// Validates identity completeness before classifying any package or edge.
+fn validated_workspace(metadata: &CargoMetadata) -> Result<ValidatedWorkspace<'_>, MetadataError> {
+    let mut package_ids = std::collections::BTreeSet::new();
+    for package in &metadata.packages {
+        if package.id.trim().is_empty() || package.name.trim().is_empty() {
+            return Err(MetadataError::Schema(
+                "Cargo package identity contains a blank id or name".to_owned(),
+            ));
+        }
+        if !package_ids.insert(package.id.as_str()) {
+            return Err(MetadataError::Schema(format!(
+                "duplicate Cargo package id {:?}", package.id
+            )));
+        }
+    }
+    let mut member_ids = std::collections::BTreeSet::new();
+    for id in &metadata.workspace_members {
+        if !member_ids.insert(id.as_str()) {
+            return Err(MetadataError::Schema(format!(
+                "duplicate Cargo workspace member id {id:?}"
+            )));
+        }
+        if !package_ids.contains(id.as_str()) {
+            return Err(MetadataError::Schema(format!(
+                "workspace member id {id:?} has no package record"
+            )));
+        }
+    }
+    let packages: Vec<&CargoPackage> = metadata
+        .packages
+        .iter()
+        .filter(|package| member_ids.contains(package.id.as_str()))
+        .collect();
+    let mut member_dirs = std::collections::BTreeMap::new();
+    let mut declaring_dirs = std::collections::BTreeMap::new();
+    for package in &packages {
+        let manifest = package.manifest_path.as_deref().ok_or_else(|| {
+            MetadataError::Schema(format!(
+                "workspace member {:?} has no manifest_path",
+                package.id
+            ))
+        })?;
+        let dir = Path::new(manifest)
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .ok_or_else(|| {
+                MetadataError::Schema(format!(
+                    "workspace member {:?} has invalid manifest_path {manifest:?}",
+                    package.id
+                ))
+            })?
+            .to_path_buf();
+        if member_dirs
+            .insert(
+                dir.clone(),
+                (package.name.as_str(), package.repository.as_deref()),
+            )
+            .is_some()
+        {
+            return Err(MetadataError::Schema(format!(
+                "multiple workspace packages claim manifest directory {:?}",
+                dir
+            )));
+        }
+        declaring_dirs.insert(package.id.as_str(), dir);
+    }
+    Ok(ValidatedWorkspace {
+        packages,
+        member_dirs,
+        declaring_dirs,
+    })
 }
 
 /// Elapsed-deadline budget for the Cargo subprocess: `cargo metadata` on
@@ -766,9 +853,17 @@ pub fn read(root: &Path) -> Result<Vec<DirectEdge>, MetadataError> {
 #[non_exhaustive]
 pub struct Member {
     /// Package name as the manifest declares it.
-    pub name: String,
+    pub(crate) name: String,
     /// Directory holding the member's `Cargo.toml`, as Cargo reported it.
     pub manifest_dir: PathBuf,
+}
+
+impl Member {
+    /// Returns the immutable package identity for this workspace member.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 /// Runs locked Cargo metadata and returns its workspace members.
@@ -782,32 +877,19 @@ pub struct Member {
 /// a refusal rather than a member it quietly cannot resolve scopes against.
 pub fn workspace_members(root: &Path) -> Result<Vec<Member>, MetadataError> {
     let metadata = read_metadata(root)?;
-    let members: std::collections::BTreeSet<&str> = metadata
-        .workspace_members
-        .iter()
-        .map(String::as_str)
-        .collect();
+    let workspace = validated_workspace(&metadata)?;
     let mut located = Vec::new();
-    for package in metadata
-        .packages
-        .iter()
-        .filter(|package| members.contains(package.id.as_str()))
-    {
-        let manifest_path = package.manifest_path.as_deref().ok_or_else(|| {
-            MetadataError::Schema(format!(
-                "workspace member {:?} has no manifest_path",
-                package.name
-            ))
-        })?;
-        let manifest_dir = Path::new(manifest_path)
-            .parent()
+    for package in workspace.packages {
+        let manifest_dir = workspace
+            .declaring_dirs
+            .get(package.id.as_str())
+            .cloned()
             .ok_or_else(|| {
                 MetadataError::Schema(format!(
-                    "workspace member {:?} manifest_path {manifest_path:?} has no directory",
-                    package.name
+                    "workspace member {:?} has no validated manifest directory",
+                    package.id
                 ))
-            })?
-            .to_path_buf();
+            })?;
         located.push(Member {
             name: package.name.clone(),
             manifest_dir,
@@ -825,6 +907,80 @@ mod tests {
     /// forbidden workspace-wide, and a failing edge extraction should surface
     /// as the error it is, not as a panic with no variant attached.
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn missing_workspace_package_record_is_a_schema_refusal() {
+        let input = r#"{"packages":[],"workspace_members":["path+file:///repo#app@0.1.0"]}"#;
+        assert!(matches!(
+            parse(input),
+            Err(MetadataError::Schema(message)) if message.contains("has no package record")
+        ), "a missing workspace member record must be a schema refusal");
+    }
+
+    #[test]
+    fn a_valid_empty_workspace_remains_valid() -> TestResult {
+        assert!(
+            parse(r#"{"packages":[],"workspace_members":[]}"#)?.is_empty(),
+            "an empty virtual workspace is a valid metadata subject"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_package_ids_and_manifest_directories_are_schema_refusals() {
+        let duplicate_id = r#"{"packages":[
+          {"id":"same","name":"app","manifest_path":"/repo/Cargo.toml","dependencies":[]},
+          {"id":"same","name":"other","manifest_path":"/repo/other/Cargo.toml","dependencies":[]}
+        ],"workspace_members":["same"]}"#;
+        assert!(matches!(
+            parse(duplicate_id),
+            Err(MetadataError::Schema(message)) if message.contains("duplicate Cargo package id")
+        ), "duplicate package ids must be refused before graph extraction");
+
+        let duplicate_dir = r#"{"packages":[
+          {"id":"first","name":"first","manifest_path":"/repo/Cargo.toml","dependencies":[]},
+          {"id":"second","name":"second","manifest_path":"/repo/Cargo.toml","dependencies":[]}
+        ],"workspace_members":["first","second"]}"#;
+        assert!(matches!(
+            parse(duplicate_dir),
+            Err(MetadataError::Schema(message)) if message.contains("multiple workspace packages")
+        ), "two members cannot claim the same manifest directory");
+    }
+
+    #[test]
+    fn duplicate_workspace_ids_and_missing_member_manifests_are_refused() {
+        let duplicate_member = r#"{"packages":[
+          {"id":"app","name":"app","manifest_path":"/repo/Cargo.toml","dependencies":[]}
+        ],"workspace_members":["app","app"]}"#;
+        assert!(matches!(
+            parse(duplicate_member),
+            Err(MetadataError::Schema(message)) if message.contains("duplicate Cargo workspace member id")
+        ), "a repeated workspace member id must be refused");
+
+        let missing_manifest = r#"{"packages":[
+          {"id":"app","name":"app","dependencies":[]}
+        ],"workspace_members":["app"]}"#;
+        assert!(matches!(
+            parse(missing_manifest),
+            Err(MetadataError::Schema(message)) if message.contains("has no manifest_path")
+        ), "a workspace member without a manifest identity must be refused");
+    }
+
+    #[test]
+    fn a_member_path_with_a_different_package_identity_is_refused() {
+        let input = r#"{
+          "packages": [
+            {"id":"app","name":"app","manifest_path":"/repo/Cargo.toml","dependencies":[
+              {"name":"renamed","source":null,"req":"*","kind":null,"optional":false,"path":"helper"}
+            ]},
+            {"id":"helper","name":"helper","manifest_path":"/repo/helper/Cargo.toml","dependencies":[]}
+          ],"workspace_members":["app","helper"]
+        }"#;
+        assert!(matches!(
+            parse(input),
+            Err(MetadataError::Schema(message)) if message.contains("resolves to workspace package")
+        ), "a path target's package identity must agree with its member record");
+    }
 
     /// The manifest path must be absolute before it reaches the child.
     ///

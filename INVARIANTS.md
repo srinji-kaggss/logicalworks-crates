@@ -31,6 +31,11 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
   budgets; a hung or flooding child is killed and reaped, and a collection
   failure is a refusal, never an empty graph. · why: #143 R14 · enforced by:
   `lgwks_deps::metadata::tests`
+- **INV-DEP-9** Every declared workspace member resolves to exactly one package
+  record and one unique manifest directory before dependency classification;
+  duplicate or missing identity records and member/path name mismatches are
+  schema refusals, never filtered into an empty or misattributed graph. · why:
+  #158 A3 · enforced by: `lgwks_deps::metadata::tests`
 ## lgwks_bot — durable execution
 
 Each of these was a shipped defect. Treat the list as the spec.
