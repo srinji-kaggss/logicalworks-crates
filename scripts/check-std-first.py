@@ -192,11 +192,6 @@ EXEMPT: dict[str, tuple[str, str]] = {
         "atomic three lines above; the comment there records that the timestamp "
         "alone was already tried and was not sufficient",
     ),
-    "crates/lgwks-deps/tests/check_cli.rs:435": (
-        'std::env::temp_dir().join(format!("lgwks-deps-check-cli-{}-{tag}", std::process::id()));',
-        "a scratch directory name, not an identity: the per-test `tag` is what "
-        "keeps two tests apart",
-    ),
 }
 
 

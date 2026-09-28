@@ -20,6 +20,8 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use lgwks_std::{hex, random};
+
 /// What every test here returns.
 ///
 /// The workspace forbids `unwrap`/`expect` outright, with no test exemption, so
@@ -481,13 +483,13 @@ struct Scratch {
 }
 
 impl Scratch {
-    /// Creates `<temp>/lgwks-deps-check-cli-<pid>-<tag>`, empty.
+    /// Creates `<temp>/lgwks-deps-check-cli-<nonce>-<tag>`, empty.
     ///
     /// The tag is per-test, so two tests never share a directory and a stale
     /// one from an earlier run cannot change a verdict.
     fn new(tag: &str) -> Result<Self, Box<dyn Error>> {
-        let path =
-            std::env::temp_dir().join(format!("lgwks-deps-check-cli-{}-{tag}", std::process::id()));
+        let nonce = hex::encode(random::bytes::<8>()?);
+        let path = std::env::temp_dir().join(format!("lgwks-deps-check-cli-{nonce}-{tag}"));
         if path.exists() {
             std::fs::remove_dir_all(&path)?;
         }
