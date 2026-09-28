@@ -80,6 +80,9 @@ Each of these was a shipped defect. Treat the list as the spec.
 
 ## lgwks_std
 
+- **INV-STD-SIM-1** The documented `Geometry::score` accepts both `[f64; 4]`
+  and `BoundingBox`. · why: #160 S3 · enforced by:
+  `tests/similarity_public_api.rs`
 - **INV-FS-2** A successful strict directory walk has no known omissions; a
   tolerant walk returns each known omission alongside its entries, and an
   unresolved root is always refused. Path-based identity rechecks are
