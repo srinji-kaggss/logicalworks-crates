@@ -435,6 +435,21 @@ still enter the idempotency fence is not settled. The shipped answer is yes, and
 deliberate, so a future change to it must be a decision rather than an accident.
 Whether that is the right answer is a Director decision, recorded in §7.
 
+### 2026-09-28 — Release cut: lgwks_std 0.7.0, lgwks_bot 0.5.0, lgwks_deps 0.1.13
+
+- **Director-authorized release cut** ("Yes, do it", 2026-09-28). The PR #91
+  cut (0.6.7 / 0.5.0 / 0.1.13) was never uploaded, and `main` gained 86
+  commits afterwards, including `lgwks_std` breaking renames and removals. Uploading
+  that tree as 0.6.7 would publish a break under a version Cargo resolves as
+  compatible with 0.6.6, so `lgwks_std` moves to **0.7.0**. `lgwks_bot` 0.5.0 and
+  `lgwks_deps` 0.1.13 keep their cut numbers; the reasons are in CHANGELOG.md.
+  `lgwks_ast` does not move.
+- Publish is still manual and needs a human-held crates.io token; this cut is
+  the manifest, lockfile, README pins and changelog, not an upload.
+
+**Does not claim:** that anything is on crates.io; tags or GitHub releases, which
+follow the upload per `docs/releasing.md` §4.
+
 ## 6. Open correctness and acceptance work
 
 | Priority | Work | Observed gap and completion evidence |

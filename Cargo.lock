@@ -4216,7 +4216,7 @@ dependencies = [
 
 [[package]]
 name = "lgwks_std"
-version = "0.6.7"
+version = "0.7.0"
 dependencies = [
  "blake3",
  "getrandom 0.4.3",
