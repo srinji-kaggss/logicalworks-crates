@@ -1259,8 +1259,8 @@ impl FileJournal {
     /// After this, the handle is an ordinary file journal: the stall is over
     /// and is not re-armed. A caller blocked inside
     /// [`Self::compare_and_append`] cannot reach this method — the borrow the
-    /// append holds is the same one — and needs
-    /// [`Self::storage_gate`] instead.
+    /// append holds is the same one — and needs the gate that
+    /// `open_with_stalled_storage` hands back instead.
     pub fn release_storage(&self) {
         self.storage_gate().release();
     }
@@ -1427,8 +1427,8 @@ impl EffectJournal for FileJournal {
 
     /// The same append, waited for rather than sat through.
     ///
-    /// The decision is [`Self::prepare_append`]'s, so the fence, the ladder
-    /// and the bounds are the synchronous form's; only the wait differs. The
+    /// The decision — the fence, the ladder and the bounds — is the
+    /// synchronous form's; only the wait differs. The
     /// caller may go away while the bytes are moving, and the storage owner
     /// latches its poison when it does, so a handle that lost its waiter
     /// refuses the next append rather than continue from a view that may be
