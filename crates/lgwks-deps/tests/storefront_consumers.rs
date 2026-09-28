@@ -95,3 +95,84 @@ fn minimal_external_consumers_use_selected_bevy_facades_only() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn minimal_external_consumers_exercise_each_storefront_family() -> TestResult {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let manifest = fixtures.join("storefront-matrix/Cargo.toml");
+    let mut selections = vec![
+        ("appcui", "appcui"),
+        ("bevy-ecs", "bevy_ecs"),
+        ("tokio-base", "tokio_base"),
+        ("tokio-time", "tokio_time"),
+        ("tokio-sync", "tokio_sync"),
+        ("tokio-macros", "tokio_macros"),
+        ("tokio-io", "tokio_io"),
+        ("tokio-net", "tokio_net"),
+        ("tokio-process", "tokio_process"),
+        ("tokio-fs", "tokio_fs"),
+        ("tokio-signal", "tokio_signal"),
+        ("tokio-full", "tokio_full"),
+        ("ml-candle", "ml_candle"),
+        ("ml-tokenizers", "ml_tokenizers"),
+        ("gpui", "gpui"),
+        ("ml-candle-metal", "ml_candle_metal"),
+        ("process-group-probe", "process_group_probe"),
+    ];
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        selections.retain(|&(feature, _)| feature != "gpui");
+    }
+    if !cfg!(target_os = "macos") {
+        selections.retain(|&(feature, _)| feature != "ml-candle-metal");
+    }
+    if !cfg!(unix) {
+        selections.retain(|&(feature, _)| feature != "process-group-probe");
+    }
+
+    for (feature, example) in selections {
+        let output = cargo_check(
+            &manifest,
+            &[
+                "--no-default-features",
+                "--features",
+                feature,
+                "--example",
+                example,
+            ],
+        )?;
+        assert!(
+            output.status.success(),
+            "storefront-only {feature} consumer failed:\n{}",
+            output_text(&output)
+        );
+    }
+
+    let tree = Command::new(env!("CARGO"))
+        .args(["tree", "--locked", "--manifest-path"])
+        .arg(&manifest)
+        .args(["--no-default-features", "-e", "features"])
+        .env("CARGO_TARGET_DIR", workspace_target_dir()?)
+        .output()?;
+    assert!(tree.status.success(), "{}", output_text(&tree));
+    assert!(
+        !output_text(&tree).contains("lgwks_deps feature \"scan\""),
+        "default-features=false matrix consumer acquired the scan feature:\n{}",
+        output_text(&tree)
+    );
+    for optional_package in [
+        "appcui v",
+        "bevy_ecs v",
+        "gpui v",
+        "candle-core v",
+        "tokenizers v",
+        "tokio v",
+        "nix v",
+    ] {
+        assert!(
+            !output_text(&tree).contains(optional_package),
+            "default-features=false consumer acquired {optional_package}:\n{}",
+            output_text(&tree)
+        );
+    }
+    Ok(())
+}
