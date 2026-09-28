@@ -1,7 +1,6 @@
-//! `id` owns UUID version 4 generation and parsing, and enforces
-//! INV-UUID-RFC4122: the version nibble is always `4` and the variant bits are
-//! always `10`, so a value that this module produces is indistinguishable from
-//! one the `uuid` crate produces.
+//! `id` owns UUID version 4 generation and canonical text parsing. Generated
+//! values carry version 4 and the RFC variant bits; parsing and raw-byte
+//! construction accept any 128-bit UUID value without imposing a version.
 
 use std::error::Error;
 use std::fmt;
@@ -16,7 +15,12 @@ pub struct Uuid([u8; 16]);
 impl Uuid {
     /// Generates a version 4 UUID from OS entropy.
     pub fn new_v4() -> Result<Self, EntropyError> {
-        let mut raw: [u8; 16] = random::bytes()?;
+        Self::new_v4_with(random::bytes)
+    }
+
+    /// Obtains the bytes and applies the version and variant masks.
+    fn new_v4_with<E>(entropy: impl FnOnce() -> Result<[u8; 16], E>) -> Result<Self, E> {
+        let mut raw = entropy()?;
         raw[6] = (raw[6] & 0x0f) | 0x40;
         raw[8] = (raw[8] & 0x3f) | 0x80;
         Ok(Self(raw))
@@ -92,8 +96,8 @@ fn check_hyphen(bytes: &[u8], cursor: usize) -> Result<(), ParseError> {
 /// `bytes` must hold at least `cursor + width` bytes: the caller walks the
 /// fixed 8-4-4-4-12 layout of an input that `check_uuid_length` already proved
 /// to be 36 bytes, so the slice is in range. `out` is the destination for this
-/// group's bytes and must be exactly `width / 2` bytes wide; both offsets are
-/// inside the same input, so their sum cannot saturate.
+/// group's bytes and must be exactly `width / 2` bytes wide. The error retains
+/// both the group's start and the offending source character offset.
 fn parse_uuid_group(
     bytes: &[u8],
     cursor: usize,
@@ -101,15 +105,17 @@ fn parse_uuid_group(
     out: &mut [u8],
 ) -> Result<(), ParseError> {
     let group = &bytes[cursor..cursor.saturating_add(width)];
-    let decoded = crate::hex::decode(group).map_err(|err| match err {
-        DecodeError::NotHexDigit { at, .. } => ParseError::NotHexDigit {
-            at: cursor.saturating_add(at),
-        },
-        DecodeError::OddLength { at, .. } => ParseError::NotHexDigit {
-            at: cursor.saturating_add(at),
-        },
+    crate::hex::decode_into(group, out).map_err(|err| match err {
+        DecodeError::NotHexDigit { at, .. } | DecodeError::OddLength { at, .. } => {
+            ParseError::NotHexDigit {
+                group_at: cursor,
+                at: cursor.saturating_add(at),
+            }
+        }
+        DecodeError::OutputLength { expected, actual } => {
+            ParseError::DecodeOutputLength { expected, actual }
+        }
     })?;
-    out[..decoded.len()].copy_from_slice(&decoded);
     Ok(())
 }
 
@@ -143,16 +149,16 @@ fn parse_uuid_groups(bytes: &[u8], raw: &mut [u8; 16]) -> Result<(), ParseError>
 
 impl fmt::Display for Uuid {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let hex_str = crate::hex::encode(self.0);
-        write!(
-            f,
-            "{}-{}-{}-{}-{}",
-            &hex_str[0..8],
-            &hex_str[8..12],
-            &hex_str[12..16],
-            &hex_str[16..20],
-            &hex_str[20..32]
-        )
+        crate::hex::write_lowercase(&self.0[..4], f)?;
+        f.write_str("-")?;
+        crate::hex::write_lowercase(&self.0[4..6], f)?;
+        f.write_str("-")?;
+        crate::hex::write_lowercase(&self.0[6..8], f)?;
+        f.write_str("-")?;
+        crate::hex::write_lowercase(&self.0[8..10], f)?;
+        f.write_str("-")?;
+        crate::hex::write_lowercase(&self.0[10..], f)?;
+        Ok(())
     }
 }
 
@@ -178,8 +184,17 @@ pub enum ParseError {
     },
     /// A group contained a character outside `[0-9a-fA-F]`.
     NotHexDigit {
-        /// Zero-based offset of the group that failed to decode.
+        /// Zero-based offset where the malformed hex group begins.
+        group_at: usize,
+        /// Zero-based offset of the first invalid character in the input.
         at: usize,
+    },
+    /// The internal fixed-size destination did not match its hex group.
+    DecodeOutputLength {
+        /// Number of bytes represented by the group.
+        expected: usize,
+        /// Number of bytes in the fixed-size destination.
+        actual: usize,
     },
 }
 
@@ -192,9 +207,16 @@ impl fmt::Display for ParseError {
             Self::MissingHyphen { at } => {
                 write!(f, "expected '-' at offset {at}")
             }
-            Self::NotHexDigit { at } => {
-                write!(f, "non-hex character in UUID group starting at offset {at}")
+            Self::NotHexDigit { group_at, at } => {
+                write!(
+                    f,
+                    "non-hex character at offset {at} in UUID group starting at offset {group_at}"
+                )
             }
+            Self::DecodeOutputLength { expected, actual } => write!(
+                f,
+                "UUID group decodes to {expected} bytes but its destination has {actual}"
+            ),
         }
     }
 }
@@ -286,7 +308,47 @@ mod tests {
     fn parse_refuses_a_non_hex_group() {
         assert_eq!(
             Uuid::parse("12345678-123z-1234-1234-123456789abc"),
-            Err(ParseError::NotHexDigit { at: 12 })
+            Err(ParseError::NotHexDigit {
+                group_at: 9,
+                at: 12
+            })
+        );
+    }
+
+    #[test]
+    fn parse_preserves_arbitrary_uuid_version_and_variant_bits() -> Result<(), ParseError> {
+        let value = Uuid::parse("00000000-0000-0000-0000-000000000000")?;
+        assert_eq!(
+            value.as_bytes(),
+            &[0; 16],
+            "parsing keeps every supplied bit"
+        );
+        assert_eq!(
+            value.version(),
+            None,
+            "non-RFC variant has no reported version"
+        );
+        assert_eq!(
+            value.to_string(),
+            "00000000-0000-0000-0000-000000000000",
+            "arbitrary UUID values round-trip through canonical text"
+        );
+        let version_one = Uuid::parse("00000000-0000-1000-8000-000000000000")?;
+        assert_eq!(
+            version_one.version(),
+            Some(1),
+            "parsing accepts non-v4 values with an RFC variant"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn generation_refuses_entropy_failure_without_substitution() {
+        let result = Uuid::new_v4_with(|| Err::<[u8; 16], _>("entropy unavailable"));
+        assert_eq!(
+            result,
+            Err("entropy unavailable"),
+            "entropy error propagates unchanged"
         );
     }
 }
