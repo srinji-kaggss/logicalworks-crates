@@ -18,9 +18,11 @@ on:
 # never is: that run is the record of what shipped. Each `main` push is its own
 # group, keyed by commit: sharing one group made a merge's run sit pending until
 # the previous merge's run finished (measured 2026-09-30: 678 s queued before a
-# 293 s run), because a concurrency group admits one run at a time.
+# 293 s run), because a concurrency group admits one run at a time. A pull
+# request is keyed by its number, not its branch name: two fork PRs from
+# branches that share a name (`patch-1`) would otherwise cancel each other.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.sha }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.ref_name != 'main' }}
 
 jobs:
