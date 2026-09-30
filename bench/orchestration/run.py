@@ -148,14 +148,14 @@ def render(report):
         cell = cells["throughput"]
         out.append(f"| `{way}` | {span(cell, 'per_s')} | {cell['p50_ms']['median']:g} | "
                    f"{cell['p99_ms']['median']:g} | {cell['rss_mb']['median']:g} | {loc[way]} |")
-    out += ["", "**Failure behaviour** (worst case over every run):", "",
+    out += ["", "**Failure behaviour** (worst case over every run; the error text is from the first run):", "",
             "| way | failfast ms | failfast attempts | live at return (failfast / cancel / storm) | "
             "storm attempts | deadline ms | failfast error |", "|---|---:|---:|---|---:|---:|---|"]
     for way, cells in results.items():
         live = " / ".join(str(cells[s]["live_at_return"]) for s in ("failfast", "cancel", "storm"))
         error = cells["failfast"]["error"].replace("|", "\\|")
-        out.append(f"| `{way}` | {cells['failfast']['wall_ms']['median']:g} | {cells['failfast']['attempts']} | "
-                   f"{live} | {cells['storm']['attempts']} | {cells['deadline']['wall_ms']['median']:g} | `{error}` |")
+        out.append(f"| `{way}` | {cells['failfast']['wall_ms']['max']:g} | {cells['failfast']['attempts']} | "
+                   f"{live} | {cells['storm']['attempts']} | {cells['deadline']['wall_ms']['max']:g} | `{error}` |")
     names = list(next(iter(verdict.values())))
     out += ["", "**Semantic invariants:**", "", "| way | " + " | ".join(names) + " |",
             "|---|" + "---|" * len(names)]
