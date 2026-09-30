@@ -117,7 +117,13 @@ Each of these was a shipped defect. Treat the list as the spec.
   conversion and canonical formatting report range failures instead of
   manufacturing the epoch or extended-year RFC text. Civil-to-day conversion
   narrows only after the complete mathematical count is computed. · why: #153
-  T1–T5 · enforced by: `lgwks_std::time` parser, formatter, and calendar tests
+  T1–T5 · enforced by: `tests/sim_time_profile.rs`
+  (`invalid_numeric_offsets_name_the_field_and_byte`,
+  `leap_second_labels_are_explicitly_unsupported`,
+  `checked_unix_conversion_never_substitutes_epoch`,
+  `rfc_year_boundaries_refuse_extended_output_without_clamping`,
+  `calendar_roundtrips_endpoints_neighbors_and_overflow_transition`) and
+  `time::parse::tests::conversion_seam_preserves_platform_range_failure`
 - **INV-STD-HTTP-1** HTTP failures retain a machine-readable class and observed
   stage; a body or EOF-probe timeout is never EOF, preview completion, or proof
   of no effect. Response header bytes and multiplicity survive, while the
@@ -215,7 +221,11 @@ Each of these was a shipped defect. Treat the list as the spec.
   leaves detection incomplete. Bounded AST metrics identify partial walks, and
   checked syntax diagnostics preserve recovery kind and original-source byte
   spans under a fixed ceiling. · why: #165 A1–A4 · enforced by:
-  `lgwks_ast::tests` and `lgwks_ast` public API integration tests
+  `lgwks_ast::tests::duplicate_and_permuted_candidates_parse_once_and_preserve_ambiguity`,
+  `lgwks_ast::tests::incomplete_candidate_inspection_is_not_reported_as_unique`,
+  `lgwks_ast::tests::inspection_metrics_name_complete_exact_and_over_limit_walks`,
+  `lgwks_ast::tests::syntax_diagnostics_stop_at_the_declared_bound`, and
+  `tests/content_detection.rs`
 
 ## Docs
 
