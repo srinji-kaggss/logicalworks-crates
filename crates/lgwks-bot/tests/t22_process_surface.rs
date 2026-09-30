@@ -97,7 +97,7 @@ fn public_process_description_rejects_direct_execution() -> TestResult {
         ", features = [\"process\"]",
         "use lgwks_bot::rt::process::Command;\n\nfn main() {\n    let mut command = Command::new(\"true\");\n    let _ = command.spawn();\n}\n",
     )?;
-    assert_refused_for(&output, "E0432", "Command");
+    assert_refused_for(&output, "E0603", "Command");
     Ok(())
 }
 
