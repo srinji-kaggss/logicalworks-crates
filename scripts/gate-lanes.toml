@@ -47,7 +47,13 @@ id = "lockfile"
 surfaces = "local ci"
 required = true
 fast = true
-command = "cargo metadata --locked --format-version 1 >/dev/null"
+# The storefront fixtures are separate workspaces with their own lockfiles, and
+# every version bump of a workspace crate makes them stale (#175 failed CI on
+# exactly that). Checking them here makes the release cut impossible to forget.
+command = """\
+cargo metadata --locked --format-version 1 >/dev/null && \
+for f in crates/lgwks-deps/tests/fixtures/*/Cargo.lock; do if ! cargo metadata --locked --format-version 1 --manifest-path \"${f%.lock}.toml\" >/dev/null; then echo \"stale fixture lockfile $f: run cargo update --workspace --manifest-path ${f%.lock}.toml\" >&2; exit 1; fi; done\
+"""
 ci_step = "Verify lockfile is up-to-date"
 
 [[lane]]
@@ -426,6 +432,19 @@ needs = ["module:yaml"]
 # ── ci only, platform-bound ─────────────────────────────────────────────────
 # A local run never covers these. The receipt names them. On a host outside
 # `platforms` the lane is `skip` (out of scope), never `pass`.
+
+# The GPUI Windows renderer builds only on a Windows host. The check runs inside
+# the AppCUI job's Windows leg; naming it here puts it in the one gate table, so
+# parity sees it and `ci_local.py` runs it on a Windows machine. (#195)
+[[lane]]
+id = "gpui-windows"
+surfaces = "local ci"
+required = false
+command = "cargo check --locked --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml --no-default-features --features gpui --example gpui"
+ci_step = "Check GPUI Windows renderer fixture"
+platforms = ["win32"]
+reason = "the GPUI Windows renderer builds only on Windows"
+
 
 [[lane]]
 id = "appcui-native"

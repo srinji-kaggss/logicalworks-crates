@@ -40,7 +40,8 @@ jobs:
       - name: Verify lockfile is up-to-date
         run: >
           cargo metadata --locked --format-version 1 >/dev/null ||
-          { echo 'Lockfile out of date: run cargo update --workspace and commit Cargo.lock' >&2; exit 1; }
+          { echo 'Lockfile out of date: run cargo update --workspace and commit Cargo.lock' >&2; exit 1; } &&
+          for f in crates/lgwks-deps/tests/fixtures/*/Cargo.lock; do if ! cargo metadata --locked --format-version 1 --manifest-path "${f%.lock}.toml" >/dev/null; then echo "stale fixture lockfile $f: run cargo update --workspace --manifest-path ${f%.lock}.toml" >&2; exit 1; fi; done
       - name: Enforce dependency edge ownership
         run: cargo run --locked -p lgwks_deps --bin lgwks-deps -- check .
       - name: Verify invariant enforcement references resolve
@@ -382,7 +383,8 @@ jobs:
       - run: cargo test --locked -p lgwks_deps --no-default-features --features appcui --lib
       - run: cargo test --locked -p lgwks_deps --no-default-features --features appcui --doc
       - run: cargo clippy --locked -p lgwks_deps --no-default-features --features appcui --all-targets -- -D warnings
-      - if: runner.os == 'Windows'
+      - name: Check GPUI Windows renderer fixture
+        if: runner.os == 'Windows'
         run: >
           cargo check --locked
           --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml
