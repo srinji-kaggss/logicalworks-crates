@@ -657,6 +657,33 @@ impl CleanupObligation {
     }
 }
 
+/// How many poll quanta a dropped obligation waits for its child to exit.
+///
+/// Twenty 5 ms quanta: long enough for a killed child to be reaped on a loaded
+/// host, short enough that dropping an error never stalls the caller for more
+/// than a tenth of a second.
+const DROP_CLEANUP_QUANTA: usize = 20;
+
+/// A dropped obligation makes a last, bounded attempt to kill and reap.
+///
+/// The shipped gate reports a `ProcessCleanup` refusal as text and drops the
+/// error, so without this the Cargo child it names was never killed or reaped
+/// by anyone. A killed child is not reaped the instant the signal is sent, so
+/// one `try_wait` would usually leave a zombie; this repeats the same `kill`
+/// plus `try_wait` a retry makes for at most [`DROP_CLEANUP_QUANTA`] poll
+/// quanta and then gives up, because a destructor must not block without
+/// bound. Capture files have their own `Drop`.
+impl Drop for CleanupObligation {
+    fn drop(&mut self) {
+        for _ in 0..DROP_CLEANUP_QUANTA {
+            if matches!(self.retry_cleanup(), Ok(true)) {
+                return;
+            }
+            poll_quantum();
+        }
+    }
+}
+
 /// One deadline-poll quantum.
 ///
 /// The suppression is the narrow exception for the `deny` API ban: no
@@ -1459,6 +1486,30 @@ mod tests {
             std::fs::metadata(&path).err().map(|error| error.kind()),
             Some(std::io::ErrorKind::NotFound),
             "the acquired capture pathname must be reclaimed on scope exit"
+        );
+        Ok(())
+    }
+
+    /// Dropping an unresolved obligation kills and reaps its child, so a
+    /// refusal the caller only prints does not leave Cargo running.
+    #[cfg(unix)]
+    #[test]
+    fn a_dropped_obligation_kills_and_reaps_its_child() -> TestResult {
+        let child = std::process::Command::new("sleep").arg("30").spawn()?;
+        let pid = child.id().to_string();
+        drop(CleanupObligation {
+            child: Some(child),
+            captures: CaptureFiles::new(),
+        });
+        // `kill -0` succeeds for any process that still has a table entry,
+        // zombies included, so a failure here means killed *and* reaped.
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .stderr(std::process::Stdio::null())
+            .status()?;
+        assert!(
+            !alive.success(),
+            "the dropped obligation's child {pid} is still in the process table"
         );
         Ok(())
     }

@@ -5,7 +5,17 @@ use std::process::{Command, Output};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+/// Where the nested builds put their artifacts: the caller's
+/// `CARGO_TARGET_DIR` when one is set, otherwise the workspace's `target/`.
+///
+/// Sharing the outer build's directory is what keeps the heavy storefront
+/// crates compiled once; forcing the repository-local path instead gave a
+/// developer with a custom target directory a second, cold copy of all of
+/// them on every run.
 fn workspace_target_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if let Some(configured) = std::env::var_os("CARGO_TARGET_DIR") {
+        return Ok(PathBuf::from(configured));
+    }
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace = manifest
         .parent()
