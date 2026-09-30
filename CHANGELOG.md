@@ -78,7 +78,12 @@ and exposes no `lgwks_std` type, so it stays a patch. `lgwks_ast` does not move.
   leap-second labels, and platform-unrepresentable instants. Its SystemTime
   profile is UTC-normalized, nanosecond-limited, and does not retain original
   offset spelling or `-00:00` provenance.
-
+- `glob::matches` now interprets `?` and character classes as Unicode scalar
+  values rather than UTF-8 bytes. ASCII results and literals are unchanged;
+  callers that relied on multiple wildcards consuming one multibyte scalar
+  should update their pattern. `GlobPattern::compile` offers checked strict
+  syntax, while `GlobDialect::Legacy` preserves permissive bracket and `**`
+  forms during migration.
 - `time` no longer re-exports the items of its `calendar` and `format`
   submodules, so `time::to_rfc3339` is now `time::format::to_rfc3339` and
   `time::civil_from_days` is `time::calendar::civil_from_days`. Both submodules

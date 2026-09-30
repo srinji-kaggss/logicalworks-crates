@@ -132,6 +132,19 @@ Each of these was a shipped defect. Treat the list as the spec.
   remains a TCP heuristic, not application health. · why: #163 N4 · enforced
   by: `online::tests::address_candidates_share_one_remaining_budget` and
   `online::tests::resolver_delay_is_outside_the_connection_budget`
+- **INV-GLOB-1** Glob matching is anchored and operates on Unicode scalar
+  values without normalization: `?` and classes consume one scalar, `/` is
+  excluded from `?`, `*`, and all classes (including negated classes), `*`
+  stays within a segment, and `**` may cross separators. Matching is
+  case-sensitive; leading dots are ordinary; backslash is literal; `**` in a
+  component and unmatched `[` are accepted only by the named legacy dialect.
+  Strict compilation reports malformed classes, descending ranges, and
+  component-invalid `**` as typed errors. Compilation is O(M); each token
+  transition is O(N) over the finite Unicode scalar alphabet; reusable
+  scratch retains one scalar index and two rolling rows in O(N), with no row
+  allocation per token. · enforced by: `glob::tests` work-growth, scratch
+  capacity, Unicode, strict-error and exact double-star cases, plus
+  `tests/glob_public.rs`
 - **INV-FS-2** A successful strict directory walk has no known omissions; a
   tolerant walk returns each known omission alongside its entries, and an
   unresolved root is always refused. Path-based identity rechecks are
