@@ -749,9 +749,9 @@ mod line_index_tests {
         let index = LineIndex::new(source);
         let span = index.span(1..3);
         assert_eq!(span.start.byte, 0, "inside the first character");
-        assert_eq!(span.start.column, 0);
+        assert_eq!(span.start.column, 1, "columns are 1-based");
         assert_eq!(span.end.byte, 2, "inside the second character");
-        assert_eq!(span.end.column, 1);
+        assert_eq!(span.end.column, 2, "the second character's column");
     }
 
     #[test]

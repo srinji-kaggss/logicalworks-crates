@@ -1255,12 +1255,12 @@ fn read_metadata(root: &Path) -> Result<Collected<CargoMetadata>, MetadataError>
 /// A complete collection, and any capture cleanup that could not be confirmed
 /// after it.
 ///
-/// Cargo's output was read in full and its process reaped, so [`value`] is the
+/// Cargo's output was read in full and its process reaped, so the value is the
 /// whole answer. A capture file that could not then be removed is reported
 /// beside it as [`MetadataError::ProcessCleanup`], whose obligation still owns
 /// the path for a retry, rather than turning a valid graph into a refusal.
-///
-/// [`value`]: Collected::value
+/// [`Collected::into_parts`] is the only way to the value, so a caller takes
+/// the cleanup in the same move and cannot borrow past it.
 ///
 /// ```rust
 /// use lgwks_deps::metadata::{self, Collected, DirectEdge};
