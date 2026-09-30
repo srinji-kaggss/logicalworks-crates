@@ -128,11 +128,18 @@ Each of these was a shipped defect. Treat the list as the spec.
   stage; a body or EOF-probe timeout is never EOF, preview completion, or proof
   of no effect. Response header bytes and multiplicity survive, while the
   String view is explicitly lossy and map-ordered. Redirects are explicit and
-  bounded to ten hops; target provenance redacts userinfo, query and fragment,
-  and ureq's no-authorization redirect policy is retained. Idempotency keys
+  bounded to ten hops; target provenance redacts userinfo, query and fragment.
+  A redirect hop to another origin (scheme, host, effective port) carries none
+  of the caller's headers; a same-origin hop carries them all but
+  `Authorization`, `Cookie` and `Proxy-Authorization`; a 307/308 of a POST is
+  refused rather than replaying the body. Idempotency keys
   remain singular and receiver-defined. `EINTR` is its own failure class at
   every stage and is never presented as proof of no effect. · why: #163
-  N1/N2/N3 · enforced by:
+  N1/N2/N3, #190 review (ureq forwarded custom headers cross-origin) ·
+  enforced by:
+  `http::tests::a_cross_origin_redirect_carries_no_caller_header`,
+  `http::tests::a_same_origin_redirect_keeps_ordinary_headers_but_not_credentials`,
+  `http::tests::a_method_keeping_redirect_of_a_post_is_refused`,
   `http::tests::an_interruption_is_classified_the_same_way_at_every_stage`,
   `http::tests::body_timeout_preserves_stage_and_class`,
   `http::tests::eof_probe_timeout_preserves_stage_and_class`,

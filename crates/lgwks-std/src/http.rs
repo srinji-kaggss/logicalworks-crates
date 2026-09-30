@@ -13,7 +13,8 @@
 //! (`lgwks_bot::rt::task::join_all_bounded`), not open unbounded parallel
 //! requests. Retries, backoff, and circuit-breaking are caller policy, not
 //! client behavior. Redirects are the separately bounded exception, with an
-//! explicit no-follow choice and the previous ten-hop default.
+//! explicit no-follow choice and the previous ten-hop default. A redirect to
+//! another origin carries none of the caller's headers.
 //!
 //! Response bodies are read under a ceiling the caller declares
 //! ([`Options::max_body_bytes`], 8 MiB by default). A body that reaches the
@@ -37,7 +38,8 @@ use std::fmt;
 use std::io::Read;
 use std::time::Duration;
 
-use iri_string::types::UriAbsoluteStr;
+use iri_string::format::ToDedicatedString;
+use iri_string::types::{UriAbsoluteStr, UriReferenceStr};
 use ureq::ResponseExt;
 
 // ── Body ceilings ───────────────────────────────────────────────────────────
@@ -213,7 +215,9 @@ pub struct Options {
     /// Extra headers sent with every request as `(name, value)` pairs, e.g.
     /// `("Authorization", "Bearer ...")`. Names and values must be valid
     /// header bytes; an invalid pair is a caller bug and the request errors
-    /// rather than silently dropping the header.
+    /// rather than silently dropping the header. A followed redirect to the
+    /// same origin re-sends them all but `Authorization`, `Cookie` and
+    /// `Proxy-Authorization`; a redirect to any other origin sends none.
     headers: Vec<(String, String)>,
     /// Ceiling on the response body in bytes, enforced while reading. See
     /// [`DEFAULT_MAX_BODY_BYTES`] for the default and the reason there is no
@@ -550,7 +554,13 @@ pub fn validate_url(url: &str) -> Result<(), Error> {
 /// a 4xx/5xx a [`Response`] rather than an [`Error`]; the timeout is applied
 /// for each transport phase, so the error identifies the phase whose bound
 /// elapsed. Body reads use the same bound directly in the body reader.
-fn agent(options: &Options, max_redirects: u32) -> ureq::Agent {
+///
+/// The agent never follows a redirect itself: [`exchange`] follows them, so it
+/// decides which caller headers each hop carries. ureq strips only
+/// `Authorization` and `Cookie` on a redirect and forwards every other header,
+/// so an `X-Api-Key` sent to one origin used to reach any origin it redirected
+/// to.
+fn agent(options: &Options) -> ureq::Agent {
     let config = ureq::Agent::config_builder()
         // Do not also set ureq's global timeout: when it equals the phase
         // limits, its earlier absolute deadline masks the typed phase timeout.
@@ -561,16 +571,16 @@ fn agent(options: &Options, max_redirects: u32) -> ureq::Agent {
         .timeout_send_body(Some(options.timeout))
         .timeout_recv_response(Some(options.timeout))
         .timeout_recv_body(Some(options.timeout))
-        .max_redirects(max_redirects)
-        .save_redirect_history(true)
-        .redirect_auth_headers(ureq::config::RedirectAuthHeaders::Never)
+        // Zero: every 3xx comes back as a response, never an error, and
+        // `exchange` owns the hop.
+        .max_redirects(0)
         .http_status_as_error(false)
         .user_agent(&options.user_agent)
         .build();
     ureq::Agent::new_with_config(config)
 }
 
-/// Resolve a caller policy into ureq's bounded redirect count.
+/// Resolve a caller policy into a bounded redirect count.
 fn redirect_limit(options: &Options) -> Result<u32, Error> {
     match options.redirect_policy {
         RedirectPolicy::NoFollow => Ok(0),
@@ -620,6 +630,7 @@ fn sanitized_target(uri: &str) -> String {
 fn response_of(
     mut response: ureq::http::Response<ureq::Body>,
     options: &Options,
+    redirect_chain: Vec<String>,
 ) -> Result<Response, Error> {
     let status = response.status().as_u16();
     let header_bytes: Vec<_> = response
@@ -637,15 +648,6 @@ fn response_of(
         })
         .collect();
     let final_target = sanitized_target(&response.get_uri().to_string());
-    let redirect_chain = response
-        .get_redirect_history()
-        .map(|history| {
-            history
-                .iter()
-                .map(|target| sanitized_target(&target.to_string()))
-                .collect()
-        })
-        .unwrap_or_else(|| vec![final_target.clone()]);
     let (body, truncation) = read_bounded(&mut response.body_mut().as_reader(), options)?;
     Ok(Response {
         status,
@@ -866,18 +868,7 @@ pub fn get(url: &str) -> Result<Response, Error> {
 
 /// GET `url` with `options`.
 pub fn get_with(url: &str, options: &Options) -> Result<Response, Error> {
-    validate_url(url)?;
-    let mut call = agent(options, redirect_limit(options)?).get(url);
-    // Bound whole rather than destructured: the elements are `&String` behind
-    // the tuple, so a `(name, value)` pattern would not match the scrutinee
-    // type, and spelling the borrow out (`&(ref name, ref value)`) is the
-    // redundant-reference form clippy rejects. The fields stay as written.
-    for header in &options.headers {
-        call = call.header(header.0.as_str(), header.1.as_str());
-    }
-    call.call()
-        .map_err(|error| map_error(error, is_https(url)))
-        .and_then(|response| response_of(response, options))
+    exchange(url, Method::Get, options)
 }
 
 /// POST `body` to `url` with `content_type`, using default options.
@@ -892,23 +883,225 @@ pub fn post_with(
     body: &[u8],
     options: &Options,
 ) -> Result<Response, Error> {
-    validate_url(url)?;
     // Nothing about this request is written anywhere, and deliberately so: the
     // URL can carry credentials in its userinfo or a token in its query string,
     // and a library that prints on a request the caller itself authored tells
     // the caller nothing it does not already hold: it has the URL, the content
     // type, and the body length. A caller that wants a request trace owns that
     // decision, and owns redacting the URL when it does.
-    let mut request = agent(options, redirect_limit(options)?)
-        .post(url)
-        .header("Content-Type", content_type);
-    for header in &options.headers {
-        request = request.header(header.0.as_str(), header.1.as_str());
+    exchange(url, Method::Post { content_type, body }, options)
+}
+
+// ── Redirects ───────────────────────────────────────────────────────────────
+
+/// The request one hop sends: a GET, or a POST with its content type and body.
+#[derive(Debug, Clone, Copy)]
+enum Method<'body> {
+    /// A GET, which carries no body.
+    Get,
+    /// A POST of `body` labelled `content_type`.
+    Post {
+        /// The `Content-Type` sent with the body.
+        content_type: &'body str,
+        /// The request body.
+        body: &'body [u8],
+    },
+}
+
+/// Headers never forwarded past the first hop, whatever the target's origin.
+///
+/// The two ureq stripped on every redirect, plus the proxy credential it did
+/// not: a redirect is the server's instruction, and a credential the caller
+/// addressed to one request is not re-sent on a server's say-so.
+const CREDENTIAL_HEADERS: [&str; 3] = ["Authorization", "Cookie", "Proxy-Authorization"];
+
+/// Scheme, host and port of an absolute http(s) target, compared to decide
+/// whether a redirect hop may carry the caller's headers.
+///
+/// Scheme and host are lowercased and a missing port is the scheme's default,
+/// so `HTTP://Example.com` and `http://example.com:80` are one origin. An
+/// `https` to `http` hop on the same host is a different origin, so a
+/// downgrade never carries them either.
+#[derive(Debug, PartialEq, Eq)]
+struct Origin {
+    /// Lowercased scheme.
+    scheme: String,
+    /// Lowercased host, brackets kept for an IP literal.
+    host: String,
+    /// Explicit port, or the scheme's default.
+    port: Option<u16>,
+}
+
+/// The origin of `target`, or `None` when its authority cannot be read,
+/// which makes every comparison with it cross-origin.
+fn origin_of(target: &str) -> Option<Origin> {
+    let target = UriAbsoluteStr::new(target).ok()?;
+    let authority = target.authority_components()?;
+    let scheme = target.scheme_str().to_ascii_lowercase();
+    let port = match authority.port() {
+        Some(port) if !port.is_empty() => Some(port.parse::<u16>().ok()?),
+        _ => match scheme.as_str() {
+            "http" => Some(80),
+            "https" => Some(443),
+            _ => None,
+        },
+    };
+    Some(Origin {
+        scheme,
+        host: authority.host().to_ascii_lowercase(),
+        port,
+    })
+}
+
+/// Resolve a `Location` value against the target that returned it.
+///
+/// The resolved target must itself be an absolute http(s) URI, and its
+/// fragment is dropped: a fragment is never sent in a request. Every refusal
+/// is class-only, like [`validate_url`]: a `Location` can carry a token the
+/// caller never saw, so it is not echoed into the error.
+fn resolve_location(base: &str, location: &str) -> Result<String, Error> {
+    let refused = |detail: &str| {
+        failure(
+            FailureStage::Redirect,
+            FailureKind::Transport,
+            Some(detail.to_owned()),
+        )
+    };
+    let base = UriAbsoluteStr::new(base).map_err(|_| refused("redirect base is not absolute"))?;
+    let reference =
+        UriReferenceStr::new(location).map_err(|_| refused("Location is not a URI reference"))?;
+    let resolved = reference.resolve_against(base);
+    resolved
+        .ensure_rfc3986_normalizable()
+        .map_err(|_| refused("Location does not resolve to one unambiguous target"))?;
+    let resolved = resolved
+        .try_to_dedicated_string()
+        .map_err(|_| failure(FailureStage::Redirect, FailureKind::Resource, None))?;
+    let target = resolved
+        .as_str()
+        .split_once('#')
+        .map_or(resolved.as_str(), |(target, _fragment)| target);
+    validate_url(target).map_err(|_| refused("Location leaves absolute http(s)"))?;
+    Ok(target.to_owned())
+}
+
+/// The `Location` of a response that asks to be followed, or `None`.
+///
+/// Mirrors ureq's rule: any 3xx but 304 with a `Location` is a redirect, and
+/// the last `Location` wins when a server sends several. A value that is not
+/// visible ASCII is refused rather than read lossily.
+fn redirect_location(response: &ureq::http::Response<ureq::Body>) -> Result<Option<&str>, Error> {
+    let status = response.status();
+    if !status.is_redirection() || status == ureq::http::StatusCode::NOT_MODIFIED {
+        return Ok(None);
     }
-    let response = request
-        .send(body)
-        .map_err(|error| map_error(error, is_https(url)))?;
-    response_of(response, options)
+    let Some(location) = response
+        .headers()
+        .get_all(ureq::http::header::LOCATION)
+        .iter()
+        .next_back()
+    else {
+        return Ok(None);
+    };
+    location.to_str().map(Some).map_err(|_| {
+        failure(
+            FailureStage::Redirect,
+            FailureKind::Transport,
+            Some("Location is not visible ASCII".to_owned()),
+        )
+    })
+}
+
+/// The method the next hop uses, or a refusal when following would resend a
+/// body.
+///
+/// ureq's rule, kept: 307 and 308 keep the method, so a POST under them would
+/// replay its body at a target the caller never named, and is refused; every
+/// other redirect turns a POST into a bodiless GET, as curl and browsers do.
+fn next_method<'body>(
+    status: ureq::http::StatusCode,
+    method: Method<'body>,
+) -> Result<Method<'body>, Error> {
+    let keeps_method = matches!(status.as_u16(), 307 | 308);
+    match method {
+        Method::Post { .. } if keeps_method => Err(failure(
+            FailureStage::Redirect,
+            FailureKind::Transport,
+            Some("a 307/308 redirect would resend the request body; not followed".to_owned()),
+        )),
+        Method::Post { .. } | Method::Get => Ok(Method::Get),
+    }
+}
+
+/// Send one hop of `method` to `target` with the given caller headers.
+fn send_hop<'headers>(
+    agent: &ureq::Agent,
+    target: &str,
+    method: Method<'_>,
+    headers: impl Iterator<Item = &'headers (String, String)>,
+) -> Result<ureq::http::Response<ureq::Body>, Error> {
+    let result = match method {
+        Method::Get => headers
+            .fold(agent.get(target), |call, header| {
+                call.header(header.0.as_str(), header.1.as_str())
+            })
+            .call(),
+        Method::Post { content_type, body } => headers
+            .fold(
+                agent.post(target).header("Content-Type", content_type),
+                |call, header| call.header(header.0.as_str(), header.1.as_str()),
+            )
+            .send(body),
+    };
+    result.map_err(|error| map_error(error, is_https(target)))
+}
+
+/// Run one call, following redirects under the caller's policy.
+///
+/// The first hop carries every caller header. A later hop to the first hop's
+/// origin carries them all but [`CREDENTIAL_HEADERS`]; a hop to any other
+/// origin carries none. The hop count is bounded by [`redirect_limit`], and
+/// each hop's target is recorded, sanitized, in the response's chain.
+fn exchange(url: &str, method: Method<'_>, options: &Options) -> Result<Response, Error> {
+    validate_url(url)?;
+    let limit = redirect_limit(options)?;
+    let agent = agent(options);
+    let origin = origin_of(url);
+    let mut target = url.to_owned();
+    let mut method = method;
+    let mut chain = vec![sanitized_target(url)];
+    let mut hops: u32 = 0;
+    loop {
+        let first = hops == 0;
+        let same_origin = origin.is_some() && origin_of(&target) == origin;
+        let headers = options.headers.iter().filter(|header| {
+            first
+                || (same_origin
+                    && !CREDENTIAL_HEADERS
+                        .iter()
+                        .any(|credential| header.0.eq_ignore_ascii_case(credential)))
+        });
+        let response = send_hop(&agent, &target, method, headers)?;
+        // No-follow returns whatever came back, redirect or not, unread.
+        if limit == 0 {
+            return response_of(response, options, chain);
+        }
+        let Some(location) = redirect_location(&response)? else {
+            return response_of(response, options, chain);
+        };
+        if hops >= limit {
+            return Err(failure(
+                FailureStage::Redirect,
+                FailureKind::RedirectLimit,
+                None,
+            ));
+        }
+        let next = resolve_location(&target, location)?;
+        method = next_method(response.status(), method)?;
+        hops = hops.saturating_add(1);
+        chain.push(sanitized_target(&next));
+        target = next;
+    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -1340,6 +1533,231 @@ mod tests {
         ));
     }
 
+    const OK_REPLY: &str = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+
+    /// A bodiless redirect reply with `status` pointing at `location`.
+    fn redirect_reply(status: &str, location: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+    }
+
+    /// Answer one connection per raw reply, in order, and return every
+    /// request head received, lowercased, in arrival order.
+    fn serve_recording(
+        replies: Vec<String>,
+    ) -> std::io::Result<(u16, thread::JoinHandle<std::io::Result<Vec<String>>>)> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        let handle = thread::spawn(move || -> std::io::Result<Vec<String>> {
+            let mut heads = Vec::new();
+            for reply in replies {
+                let (mut stream, _) = listener.accept()?;
+                let head = read_request_head(&mut stream)?;
+                heads.push(String::from_utf8_lossy(&head).to_ascii_lowercase());
+                stream.write_all(reply.as_bytes())?;
+            }
+            Ok(heads)
+        });
+        Ok((port, handle))
+    }
+
+    /// A hop to another origin carries none of the caller's headers: not the
+    /// credentials ureq stripped, and not the custom ones it forwarded.
+    #[test]
+    fn a_cross_origin_redirect_carries_no_caller_header() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (destination_port, destination) = serve_recording(vec![OK_REPLY.to_owned()])?;
+        let (origin_port, origin) = serve_recording(vec![redirect_reply(
+            "302 Found",
+            &format!("http://127.0.0.1:{destination_port}/landed"),
+        )])?;
+        let options = quiet()
+            .header("X-Api-Key", "key-secret")
+            .header("Proxy-Authorization", "Basic proxy-secret")
+            .header("Authorization", "Bearer bearer-secret");
+        let response = get_with(&format!("http://127.0.0.1:{origin_port}/start"), &options)?;
+        assert_eq!(response.status, 200);
+        let sent = origin
+            .join()
+            .map_err(|_| "origin server panicked")??
+            .concat();
+        assert!(
+            sent.contains("x-api-key: key-secret"),
+            "the first hop carries the caller's headers:\n{sent}"
+        );
+        let forwarded = destination
+            .join()
+            .map_err(|_| "destination server panicked")??
+            .concat();
+        assert!(
+            !forwarded.contains("secret"),
+            "no caller header reaches another origin:\n{forwarded}"
+        );
+        Ok(())
+    }
+
+    /// A hop back to the same origin keeps ordinary caller headers and drops
+    /// credentials; a relative `Location` resolves and loses its fragment.
+    #[test]
+    fn a_same_origin_redirect_keeps_ordinary_headers_but_not_credentials()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (port, server) = serve_recording(vec![
+            redirect_reply("302 Found", "next?page=2#section"),
+            OK_REPLY.to_owned(),
+        ])?;
+        let options = quiet()
+            .header("X-Api-Key", "key-value")
+            .header("Authorization", "Bearer bearer-secret");
+        let response = get_with(&format!("http://127.0.0.1:{port}/dir/start"), &options)?;
+        assert_eq!(
+            response.final_target(),
+            format!("http://127.0.0.1:{port}/dir/next")
+        );
+        let heads = server.join().map_err(|_| "server panicked")??;
+        let (Some(first), Some(second), 2) = (heads.first(), heads.get(1), heads.len()) else {
+            return Err(format!("expected two requests, saw {}", heads.len()).into());
+        };
+        assert!(first.contains("authorization: bearer bearer-secret"));
+        assert!(
+            second.starts_with("get /dir/next?page=2 "),
+            "the relative Location resolves against the target, without its fragment:\n{second}"
+        );
+        assert!(
+            second.contains("x-api-key: key-value"),
+            "same origin keeps ordinary headers:\n{second}"
+        );
+        assert!(
+            !second.contains("authorization:"),
+            "credentials are not re-sent on a server's say-so:\n{second}"
+        );
+        Ok(())
+    }
+
+    /// 303 turns a POST into a bodiless GET with no content type.
+    #[test]
+    fn a_see_other_redirect_turns_a_post_into_a_bodiless_get()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (port, server) = serve_recording(vec![
+            redirect_reply("303 See Other", "/after"),
+            OK_REPLY.to_owned(),
+        ])?;
+        let response = post_with(
+            &format!("http://127.0.0.1:{port}/submit"),
+            "application/json",
+            b"",
+            &quiet(),
+        )?;
+        assert_eq!(response.status, 200);
+        let heads = server.join().map_err(|_| "server panicked")??;
+        let (Some(first), Some(second), 2) = (heads.first(), heads.get(1), heads.len()) else {
+            return Err(format!("expected two requests, saw {}", heads.len()).into());
+        };
+        assert!(first.starts_with("post /submit "), "{first}");
+        assert!(second.starts_with("get /after "), "{second}");
+        assert!(
+            !second.contains("content-type:"),
+            "the GET carries no body, so no content type:\n{second}"
+        );
+        Ok(())
+    }
+
+    /// 307 keeps the method, so following it would replay the POST body at a
+    /// target the caller never named; it is refused without a second request.
+    #[test]
+    fn a_method_keeping_redirect_of_a_post_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+        let (port, server) =
+            serve_recording(vec![redirect_reply("307 Temporary Redirect", "/again")])?;
+        let result = post_with(
+            &format!("http://127.0.0.1:{port}/submit"),
+            "application/json",
+            b"",
+            &quiet(),
+        );
+        assert!(
+            matches!(
+                result,
+                Err(Error::Failure {
+                    stage: FailureStage::Redirect,
+                    kind: FailureKind::Transport,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        let heads = server.join().map_err(|_| "server panicked")??;
+        assert_eq!(heads.len(), 1, "the body was not replayed");
+        Ok(())
+    }
+
+    /// Origins compare lowercased scheme and host and the effective port.
+    #[test]
+    fn origins_compare_scheme_host_and_effective_port() {
+        assert!(origin_of("HTTP://Example.COM/a").is_some());
+        assert_eq!(
+            origin_of("HTTP://Example.COM/a"),
+            origin_of("http://example.com:80/b")
+        );
+        assert_eq!(
+            origin_of("https://example.com/"),
+            origin_of("https://example.com:443/")
+        );
+        assert_ne!(
+            origin_of("https://example.com/"),
+            origin_of("http://example.com/"),
+            "a downgrade is another origin"
+        );
+        assert_ne!(
+            origin_of("http://example.com:8080/"),
+            origin_of("http://example.com/")
+        );
+        assert_eq!(
+            origin_of("http://[::1]:8080/"),
+            origin_of("http://[::1]:8080/x")
+        );
+        assert!(
+            origin_of("http://example.com:99999/").is_none(),
+            "an unreadable port is never the same origin"
+        );
+    }
+
+    /// A `Location` resolves to an absolute http(s) target or is refused
+    /// without echoing it.
+    #[test]
+    fn a_location_resolves_to_an_absolute_http_target_or_is_refused() -> Result<(), Error> {
+        assert_eq!(
+            resolve_location("http://a.test/dir/page", "next?x=1#top")?,
+            "http://a.test/dir/next?x=1"
+        );
+        assert_eq!(
+            resolve_location("http://a.test/dir/page", "//b.test/p")?,
+            "http://b.test/p"
+        );
+        for hostile in [
+            "ftp://a.test/token-secret",
+            "javascript:token-secret",
+            "http://",
+            "not a uri token-secret",
+        ] {
+            let refusal = resolve_location("http://a.test/", hostile);
+            assert!(
+                matches!(
+                    refusal,
+                    Err(Error::Failure {
+                        stage: FailureStage::Redirect,
+                        ..
+                    })
+                ),
+                "{hostile} must be refused"
+            );
+            assert!(
+                !format!("{refusal:?}").contains("token-secret"),
+                "the Location is not echoed"
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn posts_body_with_content_type() -> Result<(), Box<dyn std::error::Error>> {
         let (port, server) = serve(vec![("200 OK", String::new())])?;
@@ -1529,7 +1947,16 @@ mod tests {
         let port = listener.local_addr()?.port();
         let server = thread::spawn(move || -> std::io::Result<()> {
             let (mut stream, _) = listener.accept()?;
-            stream.write_all(b"not-a-tls-record")
+            // Read the ClientHello before answering and drain until the client
+            // hangs up: closing a socket with unread bytes sends RST, and a
+            // reset that overtakes the reply is a connection failure, not the
+            // malformed record this test is about.
+            let mut hello = [0_u8; 1024];
+            let _hello_len = stream.read(&mut hello)?;
+            stream.write_all(b"not-a-tls-record")?;
+            // How the client hangs up (FIN or reset) is not under test.
+            let _hung_up = std::io::copy(&mut stream, &mut std::io::sink());
+            Ok(())
         });
         let result = get_with(
             &format!("https://127.0.0.1:{port}/"),
