@@ -16,14 +16,13 @@ pub mod parse;
 // without having to know which submodule defined it. `time::parse::parse_rfc3339`
 // would stutter, and the low-level calendar arithmetic is what the submodules
 // are for.
-pub use error::{Field, ParseError};
+pub use error::{Field, FormatError, ParseError, UnixTimeError};
 pub use parse::parse_rfc3339;
 
 use std::time::SystemTime;
 
 /// Formats the current instant as an RFC 3339 UTC string.
-#[must_use]
-pub fn now_rfc3339() -> String {
+pub fn now_rfc3339() -> Result<String, FormatError> {
     format::to_rfc3339(SystemTime::now())
 }
 
@@ -35,12 +34,8 @@ mod tests {
     // The low-level halves are reached by their own path now, so these tests
     // name the submodule they come from rather than leaning on a re-export.
     use crate::time::calendar::{civil_from_days, days_from_civil};
-    use crate::time::format::{from_unix_parts, to_rfc3339};
+    use crate::time::format::to_rfc3339;
     use std::time::{Duration, UNIX_EPOCH};
-
-    fn at(secs: i64) -> SystemTime {
-        from_unix_parts(secs, 0)
-    }
 
     #[test]
     fn epoch_day_zero_is_nineteen_seventy() {
@@ -63,51 +58,83 @@ mod tests {
     }
 
     #[test]
-    fn epoch_renders_without_a_fraction() {
-        assert_eq!(to_rfc3339(UNIX_EPOCH), "1970-01-01T00:00:00Z");
+    fn epoch_renders_without_a_fraction() -> Result<(), FormatError> {
+        assert_eq!(
+            to_rfc3339(UNIX_EPOCH)?,
+            "1970-01-01T00:00:00Z",
+            "the Unix epoch must render with a four-digit year and no fraction"
+        );
+        Ok(())
     }
 
     #[test]
-    fn nanoseconds_render_at_full_precision() {
+    fn nanoseconds_render_at_full_precision() -> Result<(), FormatError> {
         let instant = UNIX_EPOCH + Duration::new(0, 123_456_789);
-        assert_eq!(to_rfc3339(instant), "1970-01-01T00:00:00.123456789Z");
+        assert_eq!(
+            to_rfc3339(instant)?,
+            "1970-01-01T00:00:00.123456789Z",
+            "nanosecond precision must render all nine digits"
+        );
+        Ok(())
     }
 
     #[test]
-    fn short_fractions_are_left_aligned() {
+    fn short_fractions_are_left_aligned() -> Result<(), FormatError> {
         let instant = UNIX_EPOCH + Duration::new(0, 120_000_000);
-        assert_eq!(to_rfc3339(instant), "1970-01-01T00:00:00.12Z");
+        assert_eq!(
+            to_rfc3339(instant)?,
+            "1970-01-01T00:00:00.12Z",
+            "trailing fractional zeroes must be omitted"
+        );
+        Ok(())
     }
 
     #[test]
-    fn a_known_instant_renders_exactly() {
+    fn a_known_instant_renders_exactly() -> Result<(), FormatError> {
         let instant = UNIX_EPOCH + Duration::new(1_700_000_000, 500_000_000);
-        assert_eq!(to_rfc3339(instant), "2023-11-14T22:13:20.5Z");
+        assert_eq!(
+            to_rfc3339(instant)?,
+            "2023-11-14T22:13:20.5Z",
+            "known Unix seconds must retain the expected UTC civil fields"
+        );
+        Ok(())
     }
 
     // Tests that parse return `Result`: a parse refusal reports its own `Debug`
     // on failure, which is the same report `.expect` would have panicked with,
     // without an `expect` in the tree.
     #[test]
-    fn parse_reverses_render_for_the_current_instant() -> Result<(), ParseError> {
+    fn parse_reverses_render_for_the_current_instant() -> Result<(), Box<dyn std::error::Error>> {
         let original = SystemTime::now();
-        let rendered = to_rfc3339(original);
+        let rendered = to_rfc3339(original)?;
         let parsed = parse_rfc3339(&rendered)?;
-        assert_eq!(to_rfc3339(parsed), rendered);
+        assert_eq!(
+            to_rfc3339(parsed)?,
+            rendered,
+            "parse and canonical formatting must round-trip the current instant"
+        );
         Ok(())
     }
 
     #[test]
     fn lowercase_separator_and_zulu_are_accepted() -> Result<(), ParseError> {
         let parsed = parse_rfc3339("2023-11-14t22:13:20z")?;
-        assert_eq!(parsed, at(1_700_000_000));
+        assert_eq!(
+            parsed,
+            UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            "lowercase t and z must parse to the expected UTC instant"
+        );
         Ok(())
     }
 
     #[test]
     fn a_numeric_offset_is_folded_into_utc() -> Result<(), ParseError> {
         let parsed = parse_rfc3339("2023-11-15T00:13:20+02:00")?;
-        assert_eq!(parsed, at(1_700_000_000));
+        assert_eq!(
+            parsed,
+            UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            "numeric offsets must normalize to the expected UTC instant"
+        );
         Ok(())
     }
 
@@ -166,18 +193,26 @@ mod tests {
     }
 
     #[test]
-    fn pre_epoch_instants_are_preserved_not_clamped() -> Result<(), ParseError> {
+    fn pre_epoch_instants_are_preserved_not_clamped() -> Result<(), Box<dyn std::error::Error>> {
         let stamp = "1969-12-31T23:59:59Z";
         let parsed = parse_rfc3339(stamp)?;
-        assert_eq!(to_rfc3339(parsed), stamp);
+        assert_eq!(
+            to_rfc3339(parsed)?,
+            stamp,
+            "the pre-epoch whole-second instant must round-trip"
+        );
         Ok(())
     }
 
     #[test]
-    fn pre_epoch_fractions_round_trip() -> Result<(), ParseError> {
+    fn pre_epoch_fractions_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let stamp = "1969-12-31T23:59:59.5Z";
         let parsed = parse_rfc3339(stamp)?;
-        assert_eq!(to_rfc3339(parsed), stamp);
+        assert_eq!(
+            to_rfc3339(parsed)?,
+            stamp,
+            "the pre-epoch fraction must remain normalized without loss"
+        );
         Ok(())
     }
 

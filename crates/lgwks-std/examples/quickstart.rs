@@ -28,7 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "base64 of b\"payload\" must be the padded standard encoding"
     );
 
-    let now = time::now_rfc3339();
+    let now = time::now_rfc3339()?;
     assert!(
         now.ends_with('Z'),
         "RFC 3339 UTC output must end in Z, got {now}"

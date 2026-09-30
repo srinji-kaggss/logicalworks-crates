@@ -105,6 +105,12 @@ Each of these was a shipped defect. Treat the list as the spec.
 - **INV-LEB128-1** Integer decoders accept only minimal encodings and return the
   consumed prefix length; trailing input remains with the caller. · enforced by:
   `leb128::tests::distinguishes_prefix_trailing_bytes_from_nonminimal_and_truncated_input`
+- **INV-TIME-1** RFC 3339 parsing validates offset component bounds and refuses
+  leap-second labels the `SystemTime` profile cannot preserve; checked Unix
+  conversion and canonical formatting report range failures instead of
+  manufacturing the epoch or extended-year RFC text. Civil-to-day conversion
+  narrows only after the complete mathematical count is computed. · why: #153
+  T1–T5 · enforced by: `lgwks_std::time` parser, formatter, and calendar tests
 - **INV-FS-2** A successful strict directory walk has no known omissions; a
   tolerant walk returns each known omission alongside its entries, and an
   unresolved root is always refused. Path-based identity rechecks are

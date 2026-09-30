@@ -66,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut out = std::io::stdout().lock();
 
     // Core primitives: zero-config, zero external deps by default.
-    let now = lgwks_std::time::now_rfc3339();
+    let now = lgwks_std::time::now_rfc3339()?;
     writeln!(out, "now: {now} hex: {}", lgwks_std::hex::encode(b"hi"))?;
 
     // bot: capability-gated actors. Grants are required to build, not only to
