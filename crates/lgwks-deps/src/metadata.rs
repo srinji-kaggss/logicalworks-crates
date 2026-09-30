@@ -670,9 +670,9 @@ const DROP_CLEANUP_QUANTA: usize = 20;
 /// error, so without this the Cargo child it names was never killed or reaped
 /// by anyone. A killed child is not reaped the instant the signal is sent, so
 /// one `try_wait` would usually leave a zombie; this repeats the same `kill`
-/// plus `try_wait` a retry makes for at most [`DROP_CLEANUP_QUANTA`] poll
-/// quanta and then gives up, because a destructor must not block without
-/// bound. Capture files have their own `Drop`.
+/// plus `try_wait` a retry makes for at most twenty poll quanta and then gives
+/// up, because a destructor must not block without bound. Capture files have
+/// their own `Drop`.
 impl Drop for CleanupObligation {
     fn drop(&mut self) {
         for _ in 0..DROP_CLEANUP_QUANTA {
