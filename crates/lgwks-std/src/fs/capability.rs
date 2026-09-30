@@ -62,12 +62,22 @@ pub enum SymlinkPolicy {
     /// points elsewhere must be a decision, not a side effect.
     #[default]
     NoFollow,
-    /// Follow a final symlink, resolving its target from this same directory.
+    /// Follow a final symlink, exactly as the kernel would.
     ///
-    /// A *relative* target is still resolved by the kernel from this
-    /// descriptor, so it stays within this directory's resolution path. An
-    /// *absolute* target escapes it, because absolute means absolute; use
-    /// [`self::Dir::read_link`] to inspect one before opening it.
+    /// This is **containment of no kind**. The kernel resolves a relative
+    /// target against the link's own directory and then walks `..` freely, so
+    /// `../outside` and `../../elsewhere/outside` both leave the directory this
+    /// `Dir` was opened on; an absolute target leaves it trivially. An earlier
+    /// version of this doc claimed relative targets "stay within this
+    /// directory's resolution path", which is false and was the stated reason a
+    /// reader might choose this variant.
+    ///
+    /// The admitted directory constrains how a *name* is resolved, not where a
+    /// *link* may point. To keep a walk inside its tree, call
+    /// [`self::Dir::read_link`] first, reject targets that are absolute or
+    /// contain `..`, and open the result relative to a separately admitted
+    /// [`self::Dir`] — a capability you chose to grant, not one this
+    /// descriptor confers.
     FollowFinal,
 }
 
@@ -191,6 +201,21 @@ impl OpenFlags {
                 io::ErrorKind::InvalidInput,
                 "open needs read, write, or both; neither asks for a descriptor \
                  that can do nothing",
+            ));
+        }
+        if self.create && self.symlinks == SymlinkPolicy::FollowFinal {
+            // `create` is `O_CREAT` without `O_EXCL`, and `FollowFinal` is
+            // `O_NOFOLLOW` absent. Together they mean: follow the name, and if
+            // it does not exist, make it. On a symlink that means opening the
+            // link's target for writing — and on a *dangling* one, creating
+            // whatever the link points at, wherever that is. `create_new` is
+            // the safe spelling: it always pairs `O_CREAT` with `O_EXCL` and
+            // `O_NOFOLLOW`, so an existing or linked name is an error.
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "create cannot follow a final symlink: O_CREAT without O_EXCL \
+                 writes through the link, and creates a dangling link's target. \
+                 Use Dir::create_new, which pairs O_EXCL with O_NOFOLLOW",
             ));
         }
         Ok(())
@@ -404,19 +429,36 @@ impl Dir {
     #[cfg(target_os = "linux")]
     pub fn entry_names(&self) -> io::Result<Vec<OsString>> {
         use std::mem::MaybeUninit;
-        use std::os::unix::ffi::OsStrExt;
 
         /// One page is the kernel's own `getdents64` granularity. A wide
         /// directory costs this much stack to enumerate, not one `PathBuf` per
         /// sibling.
         const DIRENT_BUFFER_BYTES: usize = 4_096;
 
+        // A directory descriptor carries a read position, and `getdents64`
+        // advances it. `mkdirat` and `openat(O_CREAT)` through this same
+        // descriptor move that position too, so a `Dir` that created something
+        // and then listed resumed past the first entries and reported a
+        // directory holding two files as empty. Rewinding first makes the
+        // listing a property of the directory rather than of whatever this
+        // descriptor happened to do before.
+        rustix::fs::seek(self.fd.as_fd(), rustix::fs::SeekFrom::Start(0)).map_err(errno_to_io)?;
+
         let mut buffer = [MaybeUninit::<u8>::uninit(); DIRENT_BUFFER_BYTES];
         let mut directory = rustix::fs::RawDir::new(self.fd.as_fd(), &mut buffer);
         let mut names = Vec::new();
         while let Some(entry) = directory.next() {
             let entry = entry.map_err(errno_to_io)?;
-            names.push(OsString::from_vec(entry.file_name().to_bytes().to_vec()));
+            let name = entry.file_name().to_bytes();
+            // `RawDir` reports `.` and `..`; `std::fs::read_dir` does not, and
+            // no caller can act on either. Passing one back to `kind` or
+            // `open_subdir` is refused as a non-component, so a walk driven by
+            // this list would log two errors per directory and miss the real
+            // entries behind them.
+            if name == b"." || name == b".." {
+                continue;
+            }
+            names.push(OsString::from_vec(name.to_vec()));
         }
         Ok(names)
     }
@@ -454,7 +496,13 @@ impl Dir {
     /// either panic or hand back a shared descriptor, and the second closes the
     /// directory out from under the first holder.
     pub fn try_clone(&self) -> io::Result<Self> {
-        let fd = rustix::io::dup(self.fd.as_fd()).map_err(errno_to_io)?;
+        // `fcntl_dupfd_cloexec`, not `dup(2)`. `dup` explicitly clears
+        // FD_CLOEXEC, and every other descriptor this type creates sets it
+        // explicitly, so a plain `dup` would make the clone the one leaked into
+        // any child spawned during a walk — the exact case a walk cursor is
+        // likely to have. `try_clone` is the method a caller uses to hold two
+        // cursors over one directory, so it is the one that has to be right.
+        let fd = rustix::io::fcntl_dupfd_cloexec(self.fd.as_fd(), 0).map_err(errno_to_io)?;
         Ok(Self { fd })
     }
 }
@@ -562,48 +610,35 @@ fn single_component(name: &str) -> io::Result<std::ffi::CString> {
     })
 }
 
-/// Mask selecting the file-type bits of a `st_mode` word.
-#[cfg(unix)]
-const FILE_TYPE_MASK: u16 = 0o170_000;
-
-/// `S_IFMT` code for a regular file.
-#[cfg(unix)]
-const S_IFREG: u16 = 0o100_000;
-/// `S_IFMT` code for a directory.
-#[cfg(unix)]
-const S_IFDIR: u16 = 0o040_000;
-/// `S_IFMT` code for a symbolic link.
-#[cfg(unix)]
-const S_IFLNK: u16 = 0o120_000;
-/// `S_IFMT` code for a named pipe.
-#[cfg(unix)]
-const S_IFIFO: u16 = 0o010_000;
-/// `S_IFMT` code for a character device.
-#[cfg(unix)]
-const S_IFCHR: u16 = 0o020_000;
-/// `S_IFMT` code for a block device.
-#[cfg(unix)]
-const S_IFBLK: u16 = 0o060_000;
-/// `S_IFMT` code for a socket.
-#[cfg(unix)]
-const S_IFSOCK: u16 = 0o140_000;
-
 /// Map a raw `st_mode` word to the kind this crate reports.
 ///
-/// Matched on the `S_IFMT` bits rather than through rustix's `FileType`, because
-/// `Stat::st_mode` is the raw word on every backend and a helper that only
-/// exists on some of them would make this function's answer target-dependent.
+/// Delegates to rustix's `FileType::from_raw_mode` rather than decoding the
+/// `S_IFMT` bits here, and that is not a style preference. `Stat::st_mode` has
+/// type `rustix::fs::RawMode`, which is `c_uint` on rustix's Linux backend and
+/// `mode_t` — a `u16` — on its libc backend. A hand-written `u16` parameter
+/// compiles on macOS and fails on Linux, which is where this repository's CI
+/// runs. Decoding the bits locally also restated seven `S_IF*` constants that
+/// rustix already maps, with nothing to catch a transcription error.
 #[cfg(unix)]
-fn classify(mode: u16) -> FileKind {
-    match mode & FILE_TYPE_MASK {
-        S_IFREG => FileKind::File,
-        S_IFDIR => FileKind::Directory,
-        S_IFLNK => FileKind::Symlink,
-        S_IFIFO => FileKind::Fifo,
-        S_IFCHR => FileKind::CharDevice,
-        S_IFBLK => FileKind::BlockDevice,
-        S_IFSOCK => FileKind::Socket,
-        _ => FileKind::Unknown,
+fn classify(raw: rustix::fs::RawMode) -> FileKind {
+    use rustix::fs::FileType as Ft;
+    let file_type = Ft::from_raw_mode(raw);
+    if file_type == Ft::RegularFile {
+        FileKind::File
+    } else if file_type == Ft::Directory {
+        FileKind::Directory
+    } else if file_type == Ft::Symlink {
+        FileKind::Symlink
+    } else if file_type == Ft::Fifo {
+        FileKind::Fifo
+    } else if file_type == Ft::CharacterDevice {
+        FileKind::CharDevice
+    } else if file_type == Ft::BlockDevice {
+        FileKind::BlockDevice
+    } else if file_type == Ft::Socket {
+        FileKind::Socket
+    } else {
+        FileKind::Unknown
     }
 }
 
@@ -798,11 +833,15 @@ mod tests {
         let tmp = tempfile::tempdir()?;
         let dir = Dir::open(tmp.path())?;
         dir.create_new("f.txt")?;
-        let mode = stdfs::metadata(tmp.path().join("f.txt"))?.permissions().mode() & 0o7777;
+        let mode = stdfs::metadata(tmp.path().join("f.txt"))?
+            .permissions()
+            .mode()
+            & 0o7777;
         assert_eq!(
             mode & 0o077,
             0,
-            "created file is group/world accessible: {mode:o} grants {:o} to others", mode & 0o077
+            "created file is group/world accessible: {mode:o} grants {:o} to others",
+            mode & 0o077
         );
         assert_eq!(
             mode & 0o4000,
@@ -847,24 +886,19 @@ mod tests {
     /// holds whatever the host's umask happens to be instead of hardcoding an
     /// assumption that fails in CI and passes locally.
     fn current_umask() -> u32 {
-        let tmp = tempfile::tempdir().map_or_else(
-            |_| {
-                // A temp dir we cannot create is not a reason to skip the
-                // permission check; report no mask and let the 0o600 assertion
-                // fail loudly rather than silently passing.
-                0
-            },
-            |tmp| {
-                stdfs::write(tmp.path().join("probe"), b"").map_or(0, |()| {
-                    use std::os::unix::fs::PermissionsExt;
-                    let mode = stdfs::metadata(tmp.path().join("probe"))
-                        .map(|meta| meta.permissions().mode())
-                        .unwrap_or(0o600);
-                    0o600 & !mode
-                })
-            },
-        );
-        tmp
+        // A temp dir we cannot create is not a reason to skip the permission
+        // check; report no mask and let the 0o600 assertion fail loudly rather
+        // than silently passing.
+        let Ok(tmp) = tempfile::tempdir() else {
+            return 0;
+        };
+        if stdfs::write(tmp.path().join("probe"), b"").is_err() {
+            return 0;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let mode = stdfs::metadata(tmp.path().join("probe"))
+            .map_or(0o600, |meta| meta.permissions().mode());
+        0o600 & !mode
     }
 
     /// `OpenFlags` with neither `read` nor `write` must not truncate.
@@ -890,8 +924,7 @@ mod tests {
         let result = dir.open_entry("keep.txt", flags);
         let contents = stdfs::read(tmp.path().join("keep.txt"))?;
         assert_eq!(
-            contents,
-            b"ORIGINAL",
+            contents, b"ORIGINAL",
             "a truncate request without write access emptied the file"
         );
         // Whatever the platform decides, the caller's data must survive.
@@ -1023,6 +1056,147 @@ mod tests {
         let mut names = dir.entry_names()?;
         names.sort();
         assert_eq!(names, vec![OsString::from("a"), OsString::from("b.txt")]);
+        assert!(
+            !names.iter().any(|name| name == "." || name == ".."),
+            "`.` and `..` are not entries a caller can act on"
+        );
+        Ok(())
+    }
+
+    /// Listing works on a `Dir` that has already created something.
+    ///
+    /// A directory descriptor carries a read position and `getdents64` advances
+    /// it. Creating a child through the *same* descriptor moves that position
+    /// too, so a listing that did not rewind first resumed past the first
+    /// entries and reported a directory holding two files as empty. This is the
+    /// shape a real caller produces: open, create, create, list.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn listing_a_dir_that_already_created_a_child_is_not_empty() -> io::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let dir = Dir::open(tmp.path())?;
+        dir.create_dir("a")?;
+        dir.create_new("b.txt")?;
+        let mut names = dir.entry_names()?;
+        names.sort();
+        assert_eq!(
+            names,
+            vec![OsString::from("a"), OsString::from("b.txt")],
+            "a Dir that created entries must still list them"
+        );
+        let mut again = dir.entry_names()?;
+        again.sort();
+        assert_eq!(
+            again,
+            vec![OsString::from("a"), OsString::from("b.txt")],
+            "a second listing must be identical, not a continuation"
+        );
+        Ok(())
+    }
+
+    /// An empty directory lists nothing at all.
+    ///
+    /// Unfiltered this returned `[".", ".."]`, which reads as a two-entry
+    /// directory and makes a caller that iterates the list call `kind` twice per
+    /// directory and get two refusals for the privilege of finding nothing.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_empty_directory_lists_nothing() -> io::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let dir = Dir::open(tmp.path())?;
+        assert_eq!(dir.entry_names()?, Vec::<OsString>::new());
+        Ok(())
+    }
+
+    /// Following a link gives the kernel's answer, not a contained one.
+    ///
+    /// The doc for `SymlinkPolicy::FollowFinal` used to claim a relative target
+    /// "stays within this directory's resolution path". It does not: the kernel
+    /// resolves `..` freely. This test is the reason the sentence is gone.
+    #[test]
+    #[cfg(unix)]
+    fn following_a_relative_link_is_not_contained() -> io::Result<()> {
+        // A root with an `inside/` subdirectory, so `../outside.txt` has to
+        // climb out of the directory `Dir` was actually opened on.
+        let root = tempfile::tempdir()?;
+        stdfs::create_dir(root.path().join("inside"))?;
+        stdfs::write(root.path().join("outside.txt"), b"OUTSIDE")?;
+        symlink("../outside.txt", root.path().join("inside/escape"))?;
+        let dir = Dir::open(root.path().join("inside"))?;
+        let flags = OpenFlags {
+            symlinks: SymlinkPolicy::FollowFinal,
+            ..OpenFlags::read()
+        };
+        let mut file = dir.open_entry("escape", flags)?;
+        assert_eq!(
+            read_all(&mut file)?,
+            "OUTSIDE",
+            "following leaves the admitted directory; that is documented now"
+        );
+        // Meanwhile the unfollowed view is unchanged and still local.
+        assert_eq!(dir.kind("escape")?, FileKind::Symlink);
+        Ok(())
+    }
+
+    /// `create` may not follow a final symlink.
+    ///
+    /// `O_CREAT` without `O_EXCL` and without `O_NOFOLLOW` means "resolve the
+    /// link and write to whatever it names" — and on a dangling link, "create
+    /// whatever it names". Both are refused, because the safe spelling
+    /// (`create_new`) is one call away and is not a guess.
+    #[test]
+    fn create_refuses_to_follow_a_final_symlink() -> io::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        stdfs::write(tmp.path().join("target.txt"), b"INTACT")?;
+        symlink("target.txt", tmp.path().join("link"))?;
+        let dir = Dir::open(tmp.path())?;
+        let flags = OpenFlags {
+            write: true,
+            create: true,
+            truncate: true,
+            symlinks: SymlinkPolicy::FollowFinal,
+            ..OpenFlags::default()
+        };
+        assert_eq!(
+            kind_of(dir.open_entry("link", flags).map(|_| ())),
+            io::ErrorKind::InvalidInput,
+            "create+FollowFinal must be refused before the syscall"
+        );
+        assert_eq!(
+            stdfs::read(tmp.path().join("target.txt"))?,
+            b"INTACT",
+            "the link's target must be untouched"
+        );
+        Ok(())
+    }
+
+    /// A cloned `Dir` does not leak into a child process.
+    ///
+    /// `try_clone` is how a walk holds two cursors over one directory, and a
+    /// walk is exactly when a child process may be spawned. `dup(2)` clears
+    /// FD_CLOEXEC, so the clone would survive the exec and hand the child a
+    /// live directory capability.
+    #[test]
+    #[cfg(unix)]
+    fn a_cloned_dir_is_closed_across_exec() -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+
+        let tmp = tempfile::tempdir()?;
+        let dir = Dir::open(tmp.path())?;
+        let clone = dir.try_clone()?;
+        let fd = clone.as_fd().as_raw_fd();
+        let flags = rustix::io::fcntl_getfd(clone.as_fd()).map_err(errno_to_io)?;
+        assert!(
+            flags.contains(rustix::io::FdFlags::CLOEXEC),
+            "cloned fd {fd} lacks FD_CLOEXEC and would leak into a child"
+        );
+        // And the original is unaffected.
+        assert!(
+            rustix::io::fcntl_getfd(dir.as_fd())
+                .map_err(errno_to_io)?
+                .contains(rustix::io::FdFlags::CLOEXEC),
+            "the original descriptor must still be close-on-exec"
+        );
         Ok(())
     }
 
