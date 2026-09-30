@@ -228,6 +228,20 @@ approved_on = "2026-09-04"
 review = "https://github.com/srinji-kaggss/logicalworks-crates"
 
 [[approved]]
+crate = "quote"
+tier = "boundary"
+version = "^1"
+owner = "lgwks_deps"
+capability = "macro.quasi_quote"
+source = "registry"
+allowed_consumers = "lgwks_deps"
+allowed_kinds = "normal"
+reason = "Emitting Rust tokens from the lgwks_macros script! proc macro needs quasi-quoting the standard library does not provide; the Director chose the syn/quote stack for the script macro on 2026-09-30. Reached only through the lgwks_deps `macro` storefront feature."
+approved_by = "srinji-kaggss"
+approved_on = "2026-09-30"
+review = "https://github.com/srinji-kaggss/logicalworks-crates"
+
+[[approved]]
 crate = "ast-grep-core"
 tier = "boundary"
 version = "^0.45"

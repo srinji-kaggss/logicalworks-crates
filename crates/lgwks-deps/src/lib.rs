@@ -77,6 +77,12 @@ pub mod scan;
 /// Vendor-tree coverage: binding the lockfile to the shared `vendor/` tree.
 pub mod vendor;
 
+#[cfg(feature = "macro")]
+pub use proc_macro2;
+#[cfg(feature = "macro")]
+pub use quote;
+#[cfg(feature = "macro")]
+pub use syn;
 /// The one authored `tokio` edge, re-exported for the storefront.
 ///
 /// `lgwks_deps` owns this edge so no other crate declares `tokio` directly
@@ -840,6 +846,7 @@ mod tests {
                     "lgwks_std",
                     "syn",
                     "proc-macro2",
+                    "quote",
                     "gpui",
                     "appcui",
                     "bevy_ecs",

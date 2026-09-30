@@ -8,6 +8,50 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### lgwks_bot Added
+
+- `script!` and the `script` module (feature `script`, default on):
+  orchestration written as indented flows (`each x in xs:`, `within 2s:`,
+  `retry up to 3 times, waiting 100ms:`, `together:`, `step`, `for`,
+  `if`/`else`, `run`, `give back`, `fail with`). Every flow takes a tenant
+  `Scope`; every step has a stable `StepKey` over its tenant and structural
+  path; failures are `FlowError`s located at a path and classed as retryable
+  or not; every script emits an `ARCHITECTURE` map as text or JSON. `each`
+  runs bodies on the calling task, so they may borrow locals.
+- The root scope decides what an author should not: `each` with no bound runs
+  64 bodies per available core (a typed concurrency literal is refused at
+  compile time), and every `retry` under one root shares a retry budget of 10
+  plus one per five first attempts (Finagle's `RetryBudget` defaults), ending
+  in the new `FlowError::Throttled` instead of a retry storm
+  (arXiv:2608.25403, arXiv:2510.03551).
+- A flow is `Send` whenever what it holds is: `each` and `retry` store their
+  bodies as named future types, never `dyn`, so a tenant's flow can be spawned
+  onto the multi-threaded runtime. `retry` bodies take their `Scope` by value.
+- An `each` item's scope is `<step>#i` (for example `sync/each:page#39`), and
+  item and retry scopes share the stop of their step instead of minting a
+  token each: cancelling inside a body ends the whole fan-out, like `break`.
+- `bench/orchestration` compares `script!` with `join_all_bounded`, tokio
+  `JoinSet`, asyncio `TaskGroup`, Trio, Go `errgroup`, a Node pool and
+  Effect-TS on one workload, five runs per cell. `script!` is the only way to
+  hold every invariant measured: no body live at return under failure, cancel
+  and storm; 130 attempts in a retry storm where the others make 326-5,000;
+  and an error that names the failing item. It is also slower than
+  hand-written Rust: 267,000 items/s median against 348,000, p99 35.9 ms
+  against 9.4 ms, 13.8 MB against 7-9.5 MB peak RSS. It needs 11 lines to
+  their 23-46.
+
+### lgwks_macros 0.1.0 Added
+
+- New crate: the syntax of `lgwks_bot::script!`. Parses indentation from token
+  spans, expands each block to one call into `lgwks_bot::script`, and refuses
+  unbounded, panicking, blocking or machine-specific code with a compile error
+  naming the replacement.
+
+### lgwks_deps Added
+
+- Feature `macro`: `syn`, `proc-macro2` and `quote` (new edge, registered in
+  `contract/APPROVED.toml`) re-exported for first-party proc-macro crates.
+
 ## [lgwks_std 0.7.0 / lgwks_bot 0.5.0 / lgwks_deps 0.1.13] - 2026-09-28
 
 The first upload of this train. It carries everything below, including the

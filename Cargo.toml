@@ -4,6 +4,7 @@ members = [
     "crates/lgwks-bot",
     "crates/lgwks-ast",
     "crates/lgwks-deps",
+    "crates/lgwks-macros",
 ]
 resolver = "2"
 
@@ -21,6 +22,7 @@ resolver = "2"
 lgwks_std = { version = "0.7.0", path = "crates/lgwks-std" }
 lgwks_bot = { version = "0.5.0", path = "crates/lgwks-bot" }
 lgwks_ast = { version = "0.2.2", path = "crates/lgwks-ast" }
+lgwks_macros = { version = "0.1.0", path = "crates/lgwks-macros" }
 # Dependents reach the storefront without its `scan` default (the gate tool's
 # Rust parser is not a runtime dependency); they opt into storefront features
 # such as `tokio` explicitly.

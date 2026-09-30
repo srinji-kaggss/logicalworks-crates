@@ -216,6 +216,10 @@ pub mod retry;
 /// timers, channels, and opt-in drivers.
 #[cfg(feature = "rt")]
 pub mod rt;
+/// Orchestration blocks for [`script!`]: scoped, bounded, deadline-carrying,
+/// keyed, and mapped (feature `script`).
+#[cfg(feature = "script")]
+pub mod script;
 /// The semantic tier: resolving an utterance a lexicon cannot reach.
 pub mod semantic;
 /// Synchronous validated guidance flows and session runner.
@@ -236,7 +240,10 @@ pub mod session;
 /// proc-macro: it would drag the `syn` stack into every consumer and hide the
 /// per-call `Auth::check` that auditors read. [`domains!`](crate::domains)
 /// declares the registry as data instead, with no proc macro and no new
-/// dependency.
+/// dependency. Orchestration *between* verbs is a different job, and it does
+/// have a proc macro: `script!` (feature `script`) expands to plain calls into
+/// the `script` module, leaves every verb's `Auth::check` where it was, and
+/// reaches `syn` only on the host through the `lgwks_deps` storefront.
 pub mod spec;
 /// The four verbs: Observe, Evaluate, Execute, Query. No fifth verb exists.
 pub mod verb;
@@ -261,6 +268,13 @@ pub use session::{
     VarType, Verdict,
 };
 pub use spec::{Bot, BotSpec};
+
+/// Write orchestration as indented blocks that expand to bounded,
+/// deadline-carrying, tenant-keyed flows over [`script`](mod@script), plus an
+/// `ARCHITECTURE` map of what was declared. The language is documented on
+/// the [`script`](mod@script) module and in `lgwks_macros`.
+#[cfg(feature = "script")]
+pub use lgwks_macros::script;
 pub use verb::EffectLifetime;
 pub use verb::{Evaluate, Execute, Observe, Query};
 
