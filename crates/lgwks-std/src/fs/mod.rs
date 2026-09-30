@@ -3,10 +3,13 @@
 //! loops defensively, applies best-effort root-bounded symlink policy, and
 //! requires zero external dependencies like `walkdir`. This path-based API is
 //! for trusted trees, not a race-safe sandbox against hostile concurrent path
-//! replacement. For that threat model use [`capability::Dir`], which opens a
+//! replacement. For that threat model use `fs::capability::Dir`, which opens a
 //! directory once and resolves every name beneath it with `openat`/`statat`
 //! from that one descriptor, so a name replaced mid-walk cannot redirect the
-//! walk off the tree it was admitted to.
+//! walk off the tree it was admitted to. It is behind the `fs-raw` feature,
+//! which is why the path is written out rather than linked: an intra-doc link
+//! from this always-on module to a default-off one resolves in one feature set
+//! and dangles in every other, and this module is on in all of them.
 
 /// Handle-relative filesystem access, for trees that are being rewritten while
 /// you read them. Unix-only; other targets report
