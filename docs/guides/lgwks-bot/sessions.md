@@ -1,10 +1,7 @@
 # Guidance sessions
 
-> **Unreleased.** This page describes `crates/lgwks-bot/src/lib.rs` on the
-> development commit this branch was cut from. The `lgwks_bot-v0.4.2` tag does
-> not export the `session` module, so an installed `lgwks_bot = "0.4.2"` does not
-> have anything on this page. Check `CHANGELOG.md` for the release that carries
-> `Session` before depending on it.
+> **Needs `lgwks_bot` 0.5.0 or later.** The `session` module first shipped in the
+> `lgwks_bot-v0.5.0` tag; the `lgwks_bot-v0.4.2` tag does not export it.
 
 `Session` interprets a validated, declarative flow document and records the
 conversation as it goes. It is a cursor over a graph, not a pipeline: the module

@@ -1,9 +1,7 @@
 # Resolution and degraded verdicts
 
-> **Unreleased.** This page describes `crates/lgwks-bot/src/lib.rs` on the
-> development commit this branch was cut from. The `lgwks_bot-v0.4.2` tag does
-> not export `language` or `semantic`, so an installed `lgwks_bot = "0.4.2"`
-> does not have anything on this page.
+> **Needs `lgwks_bot` 0.5.0 or later.** `language` and `semantic` first shipped in the
+> `lgwks_bot-v0.5.0` tag; the `lgwks_bot-v0.4.2` tag does not export them.
 
 A session asks a question with a known set of options and a person answers in
 free text. Two implementations of the `Resolver` seam turn that text into a
