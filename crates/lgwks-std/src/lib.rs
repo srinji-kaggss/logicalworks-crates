@@ -24,7 +24,9 @@
 //! - `wire` — wire. Adds `rkyv`.
 //! - `http` — http. Adds `ureq` (rustls-only TLS), `iri-string`.
 //! - `online` — online. Zero deps.
-//! - `fs-raw` — fs::available_space. Adds `rustix` (Unix-only).
+//! - `fs-raw` — `fs::available_space`, and `fs::capability::Dir`: handle-relative
+//!   access (`openat`/`statat`/`unlinkat`/`mkdirat`/`readlinkat`) for trees that
+//!   are being rewritten while you walk them. Adds `rustix` (Unix-only).
 //! - `process` — process::kill_process_group. Adds `rustix/process` (Unix-only).
 //! - `full` — all of the above.
 //!
