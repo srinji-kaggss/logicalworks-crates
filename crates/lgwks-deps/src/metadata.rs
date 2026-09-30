@@ -1715,8 +1715,7 @@ mod tests {
     /// own output, so the only process signalled is the one this test made.
     #[cfg(unix)]
     #[test]
-    fn a_descendant_holding_a_capture_neither_blocks_collection_nor_keeps_its_name()
-    -> TestResult {
+    fn a_descendant_holding_a_capture_neither_blocks_collection_nor_keeps_its_name() -> TestResult {
         arm_faults(&[]);
         let started = std::time::Instant::now();
         let output = run_bounded(
