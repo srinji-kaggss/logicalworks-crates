@@ -233,7 +233,11 @@ pub enum MetadataError {
         /// Capture paths that could not be reclaimed.
         captures: Vec<std::io::Error>,
         /// A live owner for any unresolved child or capture cleanup.
-        obligation: CleanupObligation,
+        ///
+        /// Boxed because it owns a `std::process::Child`, which is large on
+        /// Windows: carried inline it made every `Result<_, MetadataError>`
+        /// exceed clippy's `result_large_err` bound on that target alone.
+        obligation: Box<CleanupObligation>,
     },
     /// OS entropy could not be read, so no capture file could be named.
     /// Cargo was never started: without a distinguisher the call refuses
@@ -781,12 +785,12 @@ fn run_bounded(
             cause: cause.map(Box::new),
             process,
             captures: capture_errors,
-            obligation: CleanupObligation {
+            obligation: Box::new(CleanupObligation {
                 child,
                 captures: CaptureFiles {
                     paths: std::mem::take(&mut captures.paths),
                 },
-            },
+            }),
         }
     }
 
@@ -914,12 +918,12 @@ fn run_bounded(
             cause: None,
             process: None,
             captures: cleanup_errors,
-            obligation: CleanupObligation {
+            obligation: Box::new(CleanupObligation {
                 child: None,
                 captures: CaptureFiles {
                     paths: std::mem::take(&mut captures.paths),
                 },
-            },
+            }),
         });
     }
     Ok(BoundedOutput {
