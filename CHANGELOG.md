@@ -54,16 +54,6 @@ explicitly under that crate.
 - Feature `macro`: `syn`, `proc-macro2` and `quote` (new edge, registered in
   `contract/APPROVED.toml`) re-exported for first-party proc-macro crates.
 
-## [lgwks_std 0.7.0 / lgwks_bot 0.5.0 / lgwks_deps 0.1.13] - 2026-09-28
-
-The first upload of this train. It carries everything below, including the
-2026-09-21 cut, which was never published. `lgwks_std` takes the minor position
-(0.7.0), not the cut's 0.6.7, because the entries under "lgwks_std Breaking"
-rename and remove public items, and Cargo treats 0.6.6 → 0.6.7 as compatible.
-`lgwks_bot` 0.5.0 is already a minor bump from the published 0.4.2; it re-exports
-`lgwks_std::json`, so it moves with std. `lgwks_deps` 0.1.13 only adds a command
-and exposes no `lgwks_std` type, so it stays a patch. `lgwks_ast` does not move.
-
 ### lgwks_std Breaking
 
 - `time::format::from_unix_parts`, `unix_parts`, `to_rfc3339`, and
@@ -84,6 +74,19 @@ and exposes no `lgwks_std` type, so it stays a patch. `lgwks_ast` does not move.
   should update their pattern. `GlobPattern::compile` offers checked strict
   syntax, while `GlobDialect::Legacy` preserves permissive bracket and `**`
   forms during migration.
+
+## [lgwks_std 0.7.0 / lgwks_bot 0.5.0 / lgwks_deps 0.1.13] - 2026-09-28
+
+The first upload of this train. It carries everything below, including the
+2026-09-21 cut, which was never published. `lgwks_std` takes the minor position
+(0.7.0), not the cut's 0.6.7, because the entries under "lgwks_std Breaking"
+rename and remove public items, and Cargo treats 0.6.6 → 0.6.7 as compatible.
+`lgwks_bot` 0.5.0 is already a minor bump from the published 0.4.2; it re-exports
+`lgwks_std::json`, so it moves with std. `lgwks_deps` 0.1.13 only adds a command
+and exposes no `lgwks_std` type, so it stays a patch. `lgwks_ast` does not move.
+
+### lgwks_std Breaking
+
 - `time` no longer re-exports the items of its `calendar` and `format`
   submodules, so `time::to_rfc3339` is now `time::format::to_rfc3339` and
   `time::civil_from_days` is `time::calendar::civil_from_days`. Both submodules
