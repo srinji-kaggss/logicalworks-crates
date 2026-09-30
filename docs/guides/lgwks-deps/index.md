@@ -71,7 +71,7 @@ root before using Tokio's `#[tokio::main]` or `#[tokio::test]` macro.
 
 ```toml
 [dependencies]
-lgwks_deps = { version = "0.3.0", default-features = false, features = ["tokio"] }
+lgwks_deps = { version = "0.4.0", default-features = false, features = ["tokio"] }
 ```
 
 The ML features are default-off, so the default `scan` build compiles none of

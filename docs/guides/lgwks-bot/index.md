@@ -52,7 +52,7 @@ a future. See [failures](failures.md) for why the refusal is not a failed tick.
 
 ## Supported versions
 
-`crates/lgwks-bot/Cargo.toml` declares version `0.7.0` and `rust-version =
+`crates/lgwks-bot/Cargo.toml` declares version `0.8.0` and `rust-version =
 "1.98"`, edition 2024.
 
 The version in the manifest is not the whole story. Five modules first shipped
