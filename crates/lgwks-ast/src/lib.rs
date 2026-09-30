@@ -380,9 +380,7 @@ fn is_versioned_name_of(interpreter: &str, name: &str) -> bool {
     if !remainder.eq_ignore_ascii_case(name) {
         return false;
     }
-    interpreter
-        .get(name.len()..)
-        .is_some_and(is_version_suffix)
+    interpreter.get(name.len()..).is_some_and(is_version_suffix)
 }
 
 /// Shortest language name this will match an interpreter against.
@@ -400,7 +398,9 @@ const MIN_SHEBANG_NAME_BYTES: usize = 2;
 /// nothing.
 fn is_version_suffix(rest: &str) -> bool {
     rest.starts_with(|first: char| first.is_ascii_digit())
-        && rest.chars().all(|part| part.is_ascii_digit() || part == '.')
+        && rest
+            .chars()
+            .all(|part| part.is_ascii_digit() || part == '.')
 }
 
 impl Language {
@@ -630,7 +630,7 @@ pub enum ParseError {
 /// // The source comes from the tree, so no span can resolve wrongly.
 /// let found = lgwks_ast::tree_diagnostics("main.rs", &tree, language.name());
 /// assert!(!found.is_empty());
-/// assert_eq!(found[0].span.start.line, 2);
+/// assert_eq!(found[0].span().start.line, 2);
 /// ```
 #[must_use]
 pub fn tree_diagnostics<L: LanguageExt>(
@@ -677,17 +677,14 @@ impl ParseError {
     ///
     /// let refusal = ParseError::SourceTooLarge { actual: 9, limit: 8 };
     /// let reported = refusal.to_diagnostic("big.rs", "too big");
-    /// assert_eq!(reported.severity, Severity::Error);
-    /// assert!(reported.span.is_empty());
+    /// assert_eq!(reported.severity(), Severity::Error);
+    /// assert!(reported.span().is_empty());
     /// ```
     #[must_use]
     pub fn to_diagnostic(&self, path: impl Into<std::path::PathBuf>, source: &str) -> Diagnostic {
-        Diagnostic {
-            file: path.into(),
-            severity: Severity::Error,
-            message: self.to_string(),
-            span: diagnostic::end_of(source),
-        }
+        Diagnostic::new(self.to_string(), diagnostic::end_of(source))
+            .in_file(path)
+            .with_severity(Severity::Error)
     }
 }
 
@@ -1029,7 +1026,11 @@ mod tests {
         // ancestors is the depth, and the frames retained must be that depth
         // rather than the total node count.
         let depth = 200;
-        let source = format!("{}fn f() {{}}{}", "fn f() {".repeat(depth), "}".repeat(depth));
+        let source = format!(
+            "{}fn f() {{}}{}",
+            "fn f() {".repeat(depth),
+            "}".repeat(depth)
+        );
         let parsed = parse(&source, Language::Rust);
         let (metrics, peak_frames) = inspect_ast_with_pending(&parsed.root(), None);
 
@@ -1136,8 +1137,14 @@ mod tests {
         // The case the crates.io description promises: a script with no
         // extension to read. Python and Rust are both default-on, so these hold
         // at every feature set that has any grammar at all.
-        assert_eq!(Language::of_shebang("#!/usr/bin/env python3\n"), Some(Language::Python));
-        assert_eq!(Language::of_shebang("#!/usr/bin/env rust\n"), Some(Language::Rust));
+        assert_eq!(
+            Language::of_shebang("#!/usr/bin/env python3\n"),
+            Some(Language::Python)
+        );
+        assert_eq!(
+            Language::of_shebang("#!/usr/bin/env rust\n"),
+            Some(Language::Rust)
+        );
         // A version-pinned interpreter names the same language.
         assert_eq!(
             Language::of_shebang("#!/usr/bin/python3.12\n"),
@@ -1158,19 +1165,24 @@ mod tests {
     fn an_interpreter_flag_is_not_part_of_the_language_name() {
         // `-u`, `-Es` and friends are options to the interpreter, not part of
         // its name. `#!/usr/bin/python3 -u` runs python.
-        assert_eq!(Language::of_shebang("#!/usr/bin/python3 -u\n"), Some(Language::Python));
+        assert_eq!(
+            Language::of_shebang("#!/usr/bin/python3 -u\n"),
+            Some(Language::Python)
+        );
         // `env` takes the interpreter as its argument, and may itself take a
-        // `-S` style option before it, spelled either way in the wild.
-        assert_eq!(
-            Language::of_shebang("#!/usr/bin/env -S python3 -u\n"),
-            Some(Language::Python)
-        );
-        assert_eq!(
-            Language::of_shebang("#!/usr/bin/env -Spython3 -u\n"),
-            Some(Language::Python)
-        );
-        // A flag to `env` rather than to the interpreter is still peeled.
-        assert_eq!(Language::of_shebang("#!/usr/bin/env -i python3\n"), Some(Language::Python));
+        // `-S` style option before it, spelled either way in the wild, plus a
+        // flag of its own. All three shapes must peel to the same interpreter.
+        for line in [
+            "#!/usr/bin/env -S python3 -u\n",
+            "#!/usr/bin/env -Spython3 -u\n",
+            "#!/usr/bin/env -i python3\n",
+        ] {
+            assert_eq!(
+                Language::of_shebang(line),
+                Some(Language::Python),
+                "{line:?} must resolve to Python"
+            );
+        }
     }
 
     #[test]

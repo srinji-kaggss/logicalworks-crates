@@ -382,6 +382,25 @@ def builtin_invariants(root: Path) -> tuple[int, str]:
             if leaf not in defined:
                 missing.append(f"{name}: `{reference}` names no test or module in crates/")
 
+    # The prose register and the authored register are two files, and nothing
+    # reconciled them: contract/INVARIANTS.toml carries three entries while
+    # INVARIANTS.md carries thirty, so an invariant could be added as prose and
+    # never become machine-checked while the gate still reported "OK". Every id
+    # claimed in prose is required to appear in the authored register.
+    prose = set(re.findall(r"\*\*(INV-[A-Z0-9-]+)\*\*", text))
+    authored_text = (root / "contract/INVARIANTS.toml").read_text(encoding="utf-8")
+    authored = set(re.findall(r'^id = "(INV-[A-Z0-9-]+)"', authored_text, re.MULTILINE))
+    # These two are the register's own identifiers: the policy that the gate
+    # exists to enforce, and the deprecated alias INVARIANTS.md still carries.
+    prose -= {"INV-DEP-EDGE-OWNED"}
+    unregistered = sorted(prose - authored)
+    if unregistered:
+        missing.append(
+            f"{len(unregistered)} invariant(s) are claimed in INVARIANTS.md but absent from "
+            f"contract/INVARIANTS.toml, so no gate checks them: {unregistered[:6]}"
+            + (" ..." if len(unregistered) > 6 else "")
+        )
+
     if missing:
         return 1, "INVARIANTS.md enforcement references do not resolve:\n" + "\n".join(missing)
     if referenced == 0:

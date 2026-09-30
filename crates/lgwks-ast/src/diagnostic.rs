@@ -23,7 +23,7 @@
 //! wide tree retains memory proportional to depth rather than to fan-out.
 
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::{AstNode, LanguageExt};
 
@@ -84,7 +84,10 @@ impl Span {
     /// line. A renderer should not underline an empty span.
     #[must_use]
     pub fn at(pos: Pos) -> Self {
-        Self { start: pos, end: pos }
+        Self {
+            start: pos,
+            end: pos,
+        }
     }
 
     /// Whether this span covers no bytes.
@@ -122,22 +125,84 @@ impl Severity {
 }
 
 /// One reportable finding against a source file.
+///
+/// The fields are readable but not publicly writable. A finding is a claim
+/// about a source location: the message, the severity and the span have to
+/// describe *one* thing at *one* place. Public mutable fields would let a
+/// caller re-point `span` while leaving a message that describes the old
+/// location, and the result still renders as well-formed output — a plausible
+/// finding at an implausible place, which is worse than no finding. Build with
+/// [`Diagnostic::new`]; [`Diagnostic::with_severity`] is the one adjustment this
+/// type supports, and it exists because escalating or dropping a warning is a
+/// decision a policy layer makes, not a field poke.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Diagnostic {
     /// The file the finding is against. This is a label carried through the
     /// report; this crate does not read the file and does not check that the
     /// bytes it parsed are the bytes this path holds now.
-    pub file: PathBuf,
+    file: PathBuf,
     /// How much the finding matters.
-    pub severity: Severity,
+    severity: Severity,
     /// What to say, in one line.
-    pub message: String,
+    message: String,
     /// Where in the file the finding is.
-    pub span: Span,
+    span: Span,
 }
 
 impl Diagnostic {
+    /// A warning-level finding at `span`.
+    #[must_use]
+    pub fn new(message: impl Into<String>, span: Span) -> Self {
+        Self {
+            file: PathBuf::new(),
+            severity: Severity::Warning,
+            message: message.into(),
+            span,
+        }
+    }
+
+    /// The same finding, reported against `file`.
+    ///
+    /// A label only: this crate does not read the path, so nothing here checks
+    /// that the bytes it parsed are the bytes that path holds now.
+    #[must_use]
+    pub fn in_file(mut self, file: impl Into<PathBuf>) -> Self {
+        self.file = file.into();
+        self
+    }
+
+    /// The same finding at a different severity.
+    #[must_use]
+    pub fn with_severity(mut self, severity: Severity) -> Self {
+        self.severity = severity;
+        self
+    }
+
+    /// The file this finding is reported against.
+    #[must_use]
+    pub fn file(&self) -> &Path {
+        &self.file
+    }
+
+    /// How much the finding matters.
+    #[must_use]
+    pub fn severity(&self) -> Severity {
+        self.severity
+    }
+
+    /// What to say, in one line.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Where in the file the finding is.
+    #[must_use]
+    pub fn span(&self) -> &Span {
+        &self.span
+    }
+
     /// The diagnostic rendered the way `rustc` renders one, without a trailing
     /// newline: `path:line:column: severity: message`.
     ///
@@ -180,7 +245,11 @@ impl<'src> LineIndex<'src> {
         // `+ 1` is a saturating step past the newline, not a wrapping one: the
         // offset of a character is always strictly less than the length of the
         // string it indexes, so this cannot reach `usize::MAX`.
-        line_starts.extend(source.match_indices('\n').map(|(at, _)| at.saturating_add(1)));
+        line_starts.extend(
+            source
+                .match_indices('\n')
+                .map(|(at, _)| at.saturating_add(1)),
+        );
         Self {
             source,
             line_starts,
@@ -240,8 +309,8 @@ impl<'src> LineIndex<'src> {
 /// let found = diagnostics("src/main.rs", &tree.root(), source, "Rust");
 ///
 /// // The recovery is reported, and it points at the line that carries it.
-/// assert!(found.iter().all(|one| one.severity == Severity::Warning));
-/// assert!(found.iter().all(|d| d.span.start.line == 2));
+/// assert!(found.iter().all(|one| one.severity() == Severity::Warning));
+/// assert!(found.iter().all(|d| d.span().start.line == 2));
 /// ```
 ///
 /// # Bounds
@@ -270,31 +339,17 @@ pub fn diagnostics<L: LanguageExt>(
     let file = labeled(path.into());
     let index = LineIndex::new(source);
     let mut found = Vec::new();
-    // Frame = (node, next child index), mirroring `inspect_ast_with_pending`:
-    // one frame per *active* ancestor, so retained memory follows depth rather
-    // than the root's fan-out, and a frame is popped at the end of its branch
-    // rather than left pending.
-    let mut frames = vec![(root.clone(), root.children().len())];
-    while let Some(frame) = frames.last_mut() {
-        let Some(child_index) = frame.1.checked_sub(1) else {
-            frames.pop();
-            continue;
-        };
-        frame.1 = child_index;
-        let Some(child) = frame.0.child(child_index) else {
-            continue;
-        };
+    visit_each_node(root, &mut |child| {
         if child.is_error() || child.is_missing() {
-            found.push(Diagnostic {
-                file: file.clone(),
-                severity: Severity::Warning,
-                message: recovery_message(child.is_missing(), &child.kind(), language),
-                span: index.span(child.range()),
-            });
+            found.push(
+                Diagnostic::new(
+                    recovery_message(child.is_missing(), &child.kind(), language),
+                    index.span(child.range()),
+                )
+                .in_file(file.clone()),
+            );
         }
-        let child_count = child.children().len();
-        frames.push((child, child_count));
-    }
+    });
     // The walk is depth-first over children in reverse index order, which is
     // the order `inspect_ast` preserves and is *not* source order. Sorting is
     // what makes the result presentable as a list.
@@ -312,6 +367,46 @@ pub fn diagnostics<L: LanguageExt>(
 #[must_use]
 pub fn recovery_count<L: LanguageExt>(root: &AstNode<'_, L>) -> usize {
     let mut count = 0_usize;
+    visit_each_node(root, &mut |child| {
+        if child.is_error() || child.is_missing() {
+            count = count.saturating_add(1);
+        }
+    });
+    count
+}
+
+/// Visit every node below `root` exactly once, depth-first, in bounded memory.
+///
+/// Frame = (node, next child index), mirroring `inspect_ast_with_pending`: one
+/// frame per *active* ancestor, so retained memory follows depth rather than the
+/// root's fan-out, and a frame is popped at the end of its branch rather than
+/// left pending. A file with N top-level items therefore costs O(depth)
+/// resident memory, not O(N).
+///
+/// Children are visited in reverse index order, which is the order
+/// [`inspect_ast`](crate::inspect_ast) preserves. Callers that present results
+/// in source order sort afterwards.
+///
+/// The root itself is not visited: a caller asking about `root`'s own kind has
+/// [`AstNode`] directly.
+fn visit_each_node<'t, L: LanguageExt>(
+    root: &AstNode<'t, L>,
+    visit: &mut dyn FnMut(&AstNode<'t, L>),
+) {
+    visit_each_node_measuring(root, visit, None);
+}
+
+/// [`visit_each_node`], reporting the high-water mark of retained frames.
+///
+/// The `peak` out-parameter is how INV-AST-1's resource claim is *tested*
+/// against this walk rather than against a second copy of it. A test that
+/// reimplemented the traversal would keep passing if this one regressed, which
+/// is the failure mode a copied walk always has.
+fn visit_each_node_measuring<'t, L: LanguageExt>(
+    root: &AstNode<'t, L>,
+    visit: &mut dyn FnMut(&AstNode<'t, L>),
+    mut peak: Option<&mut usize>,
+) {
     let mut frames = vec![(root.clone(), root.children().len())];
     while let Some(frame) = frames.last_mut() {
         let Some(child_index) = frame.1.checked_sub(1) else {
@@ -322,13 +417,26 @@ pub fn recovery_count<L: LanguageExt>(root: &AstNode<'_, L>) -> usize {
         let Some(child) = frame.0.child(child_index) else {
             continue;
         };
-        if child.is_error() || child.is_missing() {
-            count = count.saturating_add(1);
+        visit(&child);
+        if let Some(peak) = peak.as_deref_mut() {
+            *peak = (*peak).max(frames.len());
         }
         let child_count = child.children().len();
         frames.push((child, child_count));
     }
-    count
+}
+
+/// Peak frames [`visit_each_node`] retains while walking `root`.
+///
+/// One walk, run for its side effect of measuring. Test-only by construction:
+/// it exists so INV-AST-1's resource claim is asserted against the walk that
+/// actually ships rather than against a copy of it.
+#[cfg(test)]
+#[must_use]
+fn peak_retained_frames<L: LanguageExt>(root: &AstNode<'_, L>) -> usize {
+    let mut peak = 0_usize;
+    visit_each_node_measuring(root, &mut |_| {}, Some(&mut peak));
+    peak
 }
 
 /// What to say about one recovery node.
@@ -414,20 +522,20 @@ mod tests {
         assert_eq!(found.len(), 1, "one malformed function reports once");
         let first = &found[0];
         assert_eq!(
-            first.span.start.line, 2,
+            first.span().start.line,
+            2,
             "the recovery is on the second line, not the clean first one"
         );
         // The byte range is a real slice of the source, and it is exactly the
         // malformed text: not an approximation of it, and not an offset past it.
-        let range = first.span.byte_range();
+        let range = first.span().byte_range();
         assert!(
             range.start <= range.end && range.end <= BROKEN.len(),
             "span {range:?} is not inside a source of {} bytes",
             BROKEN.len()
         );
         assert_eq!(
-            &BROKEN[range],
-            "fn broken( {",
+            &BROKEN[range], "fn broken( {",
             "the span covers the malformed text and nothing else"
         );
     }
@@ -437,7 +545,7 @@ mod tests {
         let tree = parse(BROKEN, Language::Rust);
         let found = diagnostics("bad.rs", &tree.root(), BROKEN, "Rust");
         assert!(
-            found.iter().all(|one| one.severity == Severity::Warning),
+            found.iter().all(|one| one.severity() == Severity::Warning),
             "a recovered parse is a warning; only a refusal is an error"
         );
         assert_eq!(recovery_count(&tree.root()), found.len());
@@ -449,7 +557,7 @@ mod tests {
         let tree = parse(source, Language::Rust);
         let found = diagnostics("many.rs", &tree.root(), source, "Rust");
         assert!(found.len() > 1, "three broken functions report separately");
-        let starts: Vec<usize> = found.iter().map(|one| one.span.start.byte).collect();
+        let starts: Vec<usize> = found.iter().map(|one| one.span().start.byte).collect();
         let mut sorted = starts.clone();
         sorted.sort_unstable();
         assert_eq!(starts, sorted, "findings are not in source order");
@@ -461,19 +569,22 @@ mod tests {
         let found = diagnostics("p.rs", &tree.root(), BROKEN, "Rust");
         let first = &found[0];
         assert!(
-            first.span.start.line >= 1,
+            first.span().start.line >= 1,
             "a report reading line 0 is a defect in the report"
         );
         assert!(
-            first.span.start.column >= 1,
+            first.span().start.column >= 1,
             "a report reading column 0 is a defect in the report"
         );
         // The 1-based convention is what makes the second line report 2. A
         // 0-based reading of the same byte offset would say 1, so this is the
         // assertion that pins the convention rather than the arithmetic.
         assert_eq!(
-            first.span.start.line,
-            BROKEN[..first.span.start.byte].matches('\n').count().saturating_add(1),
+            first.span().start.line,
+            BROKEN[..first.span().start.byte]
+                .matches('\n')
+                .count()
+                .saturating_add(1),
             "the reported line is one more than the newlines before it"
         );
     }
@@ -486,19 +597,19 @@ mod tests {
         let tree = parse(source, Language::Rust);
         let found = diagnostics("u.rs", &tree.root(), source, "Rust");
         let first = &found[0];
-        let line_start = source[..first.span.start.byte]
+        let line_start = source[..first.span().start.byte]
             .rfind('\n')
             .map_or(0, |at| at.saturating_add(1));
-        let column_chars = source[line_start..first.span.start.byte].chars().count();
+        let column_chars = source[line_start..first.span().start.byte].chars().count();
         assert_eq!(
-            first.span.start.column,
+            first.span().start.column,
             column_chars.saturating_add(1),
             "column is 1-based and counted in characters"
         );
         // The byte offset is genuinely further along than the character count,
         // which is the whole reason this distinction exists.
         assert!(
-            first.span.start.byte > first.span.start.column,
+            first.span().start.byte > first.span().start.column,
             "the multi-byte line should separate byte and character offsets"
         );
     }
@@ -509,7 +620,10 @@ mod tests {
         let span = end_of(source);
         assert!(span.is_empty(), "a whole-file condition has no width");
         assert_eq!(span.start.byte, source.len());
-        assert_eq!(span.start.line, 2, "the trailing newline opens the second line");
+        assert_eq!(
+            span.start.line, 2,
+            "the trailing newline opens the second line"
+        );
     }
 
     #[test]
@@ -528,8 +642,14 @@ mod tests {
         let tree = parse(BROKEN, Language::Rust);
         let rendered = diagnostics("src/a.rs", &tree.root(), BROKEN, "Rust")[0].render();
         assert!(rendered.starts_with("src/a.rs:"), "{rendered}");
-        assert!(rendered.contains(": W: "), "a warning renders as ` W: `: {rendered}");
-        assert!(!rendered.ends_with('\n'), "render carries no trailing newline");
+        assert!(
+            rendered.contains(": W: "),
+            "a warning renders as ` W: `: {rendered}"
+        );
+        assert!(
+            !rendered.ends_with('\n'),
+            "render carries no trailing newline"
+        );
     }
 
     #[test]
@@ -537,9 +657,9 @@ mod tests {
         let tree = parse(BROKEN, Language::Rust);
         let found = diagnostics("m.rs", &tree.root(), BROKEN, "Rust");
         assert!(
-            found[0].message.contains("Rust"),
+            found[0].message().contains("Rust"),
             "the message names the grammar: {}",
-            found[0].message
+            found[0].message()
         );
     }
 
@@ -555,20 +675,7 @@ mod tests {
             4_096,
             "the fixture presents 4,096 immediate siblings to the walk"
         );
-        let mut peak = 0_usize;
-        let mut frames = vec![(tree.root().clone(), tree.root().children().len())];
-        while let Some(frame) = frames.last_mut() {
-            let Some(child_index) = frame.1.checked_sub(1) else {
-                frames.pop();
-                continue;
-            };
-            frame.1 = child_index;
-            let Some(child) = frame.0.child(child_index) else {
-                continue;
-            };
-            frames.push((child.clone(), child.children().len()));
-            peak = peak.max(frames.len());
-        }
+        let peak = peak_retained_frames(&tree.root());
         assert!(
             peak < 64,
             "retained {peak} frames for 4,096 wide siblings; that is fan-out, not depth"
@@ -580,22 +687,13 @@ mod tests {
         // The other half of the same invariant: a deep tree does cost depth,
         // and the cost is the active depth rather than the total node count.
         let depth = 200;
-        let source = format!("{}fn f() {{}}{}", "fn f() {".repeat(depth), "}".repeat(depth));
+        let source = format!(
+            "{}fn f() {{}}{}",
+            "fn f() {".repeat(depth),
+            "}".repeat(depth)
+        );
         let tree = parse(&source, Language::Rust);
-        let mut peak = 0_usize;
-        let mut frames = vec![(tree.root().clone(), tree.root().children().len())];
-        while let Some(frame) = frames.last_mut() {
-            let Some(child_index) = frame.1.checked_sub(1) else {
-                frames.pop();
-                continue;
-            };
-            frame.1 = child_index;
-            let Some(child) = frame.0.child(child_index) else {
-                continue;
-            };
-            frames.push((child.clone(), child.children().len()));
-            peak = peak.max(frames.len());
-        }
+        let peak = peak_retained_frames(&tree.root());
         assert!(
             peak > 1,
             "a {depth}-deep tree retained {peak} frames; the walk is not descending"
@@ -635,7 +733,10 @@ mod line_index_tests {
         let index = LineIndex::new(source);
         let span = index.span(9_000..9_001);
         assert_eq!(span.start.byte, source.len());
-        assert_eq!(span.start.line, 4, "the trailing newline opens a fourth line");
+        assert_eq!(
+            span.start.line, 4,
+            "the trailing newline opens a fourth line"
+        );
     }
 
     #[test]
@@ -644,7 +745,11 @@ mod line_index_tests {
         let index = LineIndex::new(source);
         assert_eq!(
             index.position(0),
-            Pos { line: 1, column: 1, byte: 0 },
+            Pos {
+                line: 1,
+                column: 1,
+                byte: 0
+            },
             "1-based line and column over a 0-based byte offset"
         );
     }
