@@ -21,17 +21,11 @@ distinguish it from a task runner:
 cargo add lgwks_bot
 ```
 
-**Version boundary.** `crates/lgwks-bot/Cargo.toml` reads `0.5.0`, and the
-newest tag is `lgwks_bot-v0.4.2`. That tag's `lib.rs` exports `cap`, `domain`,
-`error`, `gate`, `json`, `rt`, `spec`, and `verb`, and nothing else. `main`
-exports those plus `broker`, `effect`, `frontier`, `interface`, `journal`,
-`language`, `retry`, `semantic`, and `session`, none of which is in any tag yet.
-This README, like the rustdoc beside it, describes `main`.
-
-The manifest reading `0.5.0` is not an installable version: it is the release cut
-for the 2026-09-21 train, and no `lgwks_bot-v0.5.0` tag exists. Check
-`CHANGELOG.md` for the release that carries a symbol before depending on it, and
-do not assume an installed `0.4.2` has any of the nine modules above.
+**Version boundary.** `crates/lgwks-bot/Cargo.toml` reads `0.6.0`, the
+2026-09-30 cut, which is not uploaded yet. The newest tag and crates.io version
+is `0.5.0`, which exports every module this README names except `script` (the
+`script!` macro, feature `script`). Check `CHANGELOG.md` for the release that
+carries a symbol before depending on it.
 
 ## Quick start
 

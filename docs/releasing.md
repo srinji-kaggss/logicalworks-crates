@@ -9,19 +9,26 @@ The crates form a chain, and Cargo refuses to publish a crate whose path
 dependency version is not already on the registry:
 
 ```
-lgwks_std  ──►  lgwks_deps  ──►  lgwks_bot
-           └─►  lgwks_ast            (standalone)
+lgwks_std  ──►  lgwks_deps  ──►  lgwks_macros  ──►  lgwks_bot
+           └─►  lgwks_ast                            (standalone)
 ```
 
-`lgwks_deps` and `lgwks_bot` both depend on `lgwks_std`; `lgwks_bot` also
-depends on `lgwks_deps`. So:
+`lgwks_deps` and `lgwks_bot` both depend on `lgwks_std`; `lgwks_macros` depends
+on `lgwks_deps` (feature `macro`), and `lgwks_bot` depends on `lgwks_deps` and,
+for its default `script` feature, on `lgwks_macros`. So:
 
 ```sh
-cargo publish -p lgwks_std  --locked
-cargo publish -p lgwks_ast  --locked     # order with deps does not matter
-cargo publish -p lgwks_deps --locked
-cargo publish -p lgwks_bot  --locked     # last: needs both of the above
+cargo publish -p lgwks_std    --locked
+cargo publish -p lgwks_ast    --locked   # order with deps does not matter
+cargo publish -p lgwks_deps   --locked
+cargo publish -p lgwks_macros --locked   # needs lgwks_deps
+cargo publish -p lgwks_bot    --locked   # last: needs all of the above
 ```
+
+`cargo publish --workspace --dry-run --locked` packages and verifies the whole
+chain in dependency order before any of it is on the registry, which a per-crate
+`--dry-run` cannot do for a crate whose dependency's new version is not
+uploaded yet.
 
 Evidence that this is a real constraint rather than caution. Publishing
 `lgwks_deps` before `lgwks_std` fails with:
@@ -89,7 +96,7 @@ to the manifest without adding a bullet fails that job.
 
 ## 3. Cut the release commit
 
-All version bumps land in a single commit: the four `[package] version` fields,
+All version bumps land in a single commit: the `[package] version` fields,
 their `[workspace.dependencies]` requirements in the root `Cargo.toml`, the
 version table in the root `README.md`, and `Cargo.lock` (`cargo update
 --workspace`). The `CHANGELOG.md` entry follows, per crate, and records the
