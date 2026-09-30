@@ -130,17 +130,23 @@ Each of these was a shipped defect. Treat the list as the spec.
   String view is explicitly lossy and map-ordered. Redirects are explicit and
   bounded to ten hops; target provenance redacts userinfo, query and fragment,
   and ureq's no-authorization redirect policy is retained. Idempotency keys
-  remain singular and receiver-defined. · why: #163 N1/N2/N3 · enforced by:
+  remain singular and receiver-defined. `EINTR` is its own failure class at
+  every stage and is never presented as proof of no effect. · why: #163
+  N1/N2/N3 · enforced by:
+  `http::tests::an_interruption_is_classified_the_same_way_at_every_stage`,
   `http::tests::body_timeout_preserves_stage_and_class`,
   `http::tests::eof_probe_timeout_preserves_stage_and_class`,
   `http::tests::legal_header_bytes_and_repeated_values_are_preserved`, and
   `http::tests::redirect_loop_refuses_at_the_configured_limit`
 - **INV-STD-ONLINE-1** Resolved reachability candidates share one monotonic
-  connection budget and at most 64 addresses are attempted. Synchronous
+  connection budget and at most 64 addresses are attempted; each is offered an
+  equal share of what remains, so a blackholed candidate cannot starve the
+  ones after it. Synchronous
   `ToSocketAddrs` work is outside that budget and is not promised preemptible;
   the literal `is_online` endpoints share the same budget. The Boolean result
   remains a TCP heuristic, not application health. · why: #163 N4 · enforced
-  by: `online::tests::address_candidates_share_one_remaining_budget` and
+  by: `online::tests::address_candidates_share_one_remaining_budget`,
+  `online::tests::a_blackholed_candidate_does_not_starve_the_next` and
   `online::tests::resolver_delay_is_outside_the_connection_budget`
 - **INV-GLOB-1** Glob matching is anchored and operates on Unicode scalar
   values without normalization: `?` and classes consume one scalar, `/` is

@@ -58,18 +58,33 @@ fn probe_candidates(addrs: impl Iterator<Item = SocketAddr>, timeout: Duration) 
 }
 
 /// Run bounded candidates through one shared clock and connection operation.
+///
+/// Each candidate is offered an equal share of what remains, not all of it:
+/// the budget is spent across the candidates rather than by the first. With
+/// the whole remainder, one blackholed address (a filtered IPv6 route, a
+/// dropped anycast prefix) consumed the entire budget and every later address,
+/// including one that would have answered at once, was never dialed. The total
+/// is still bounded by `timeout`, and a candidate that fails fast hands its
+/// unused share on to the ones after it.
 fn probe_candidates_with(
     addrs: impl Iterator<Item = SocketAddr>,
     timeout: Duration,
     mut connect: impl FnMut(&SocketAddr, Duration) -> bool,
 ) -> bool {
+    // Bounded by the callers' `take(MAX_PROBE_ADDRESSES)`; collected only to
+    // know how many shares the remainder is split into.
+    let candidates: Vec<SocketAddr> = addrs.take(MAX_PROBE_ADDRESSES).collect();
     let started = Instant::now();
-    for candidate in addrs {
+    for (index, candidate) in candidates.iter().enumerate() {
         let remaining = timeout.saturating_sub(started.elapsed());
         if remaining.is_zero() {
             return false;
         }
-        if connect(&candidate, remaining) {
+        // `index < len`, so at least this candidate is left; the conversion
+        // cannot fail for a list capped at 64.
+        let left = u32::try_from(candidates.len().saturating_sub(index)).unwrap_or(u32::MAX);
+        let share = remaining.checked_div(left).unwrap_or(remaining);
+        if connect(candidate, share) {
             return true;
         }
     }
@@ -79,7 +94,9 @@ fn probe_candidates_with(
 /// True when the public internet is reachable within `timeout`.
 ///
 /// Dials literal anycast endpoints over TCP (1.1.1.1:443, 8.8.8.8:53) under
-/// one shared monotonic budget; true when either answers. This is a heuristic
+/// one shared monotonic budget, each offered at least half of it, so a
+/// blackholed first endpoint cannot starve the second; true when either
+/// answers within its share. This is a heuristic
 /// for UI gating and diagnostics, not a guarantee a given host is reachable;
 /// use [`crate::online::probe`] for that.
 #[must_use]
@@ -166,6 +183,41 @@ mod tests {
         assert!(
             budgets[1] <= Duration::from_millis(50),
             "the second candidate does not receive a restarted timeout"
+        );
+    }
+
+    /// A blackholed first candidate spends only its share, so the second is
+    /// still dialed and its answer is still heard.
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the injected dial sleeps out its whole share, which is what a blackholed address does"
+    )]
+    fn a_blackholed_candidate_does_not_starve_the_next() {
+        let candidates = [
+            SocketAddr::from(([192, 0, 2, 1], 443)),
+            SocketAddr::from(([198, 51, 100, 1], 443)),
+        ];
+        let timeout = Duration::from_millis(100);
+        let mut budgets = Vec::new();
+        let result = probe_candidates_with(candidates.into_iter(), timeout, |_, share| {
+            budgets.push(share);
+            if budgets.len() == 1 {
+                // Blackholed: no answer, and the dial waits out all it was given.
+                std::thread::sleep(share);
+                return false;
+            }
+            true
+        });
+        assert!(result, "the second candidate answers, so the probe is true");
+        assert_eq!(budgets.len(), 2, "the second candidate was dialed");
+        assert!(
+            budgets[0] <= timeout / 2,
+            "the first candidate is offered its share, not the whole budget"
+        );
+        assert!(
+            !budgets[1].is_zero(),
+            "the second candidate still has time left to answer"
         );
     }
 

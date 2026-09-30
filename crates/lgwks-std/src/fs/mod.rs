@@ -1229,6 +1229,7 @@ mod tests {
     // ── R16: strict refuses, tolerant reports ─────────────────────────────
 
     /// The parent of `locked`, or a refusal when the path has none.
+    #[cfg(unix)]
     fn locked_parent(locked: &Path) -> std::io::Result<PathBuf> {
         locked.parent().map(Path::to_path_buf).ok_or_else(|| {
             std::io::Error::new(

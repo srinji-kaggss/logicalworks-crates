@@ -34,7 +34,7 @@
 //! reqwest would add a second HTTP stack rather than repair this one.
 
 use std::fmt;
-use std::io::{ErrorKind, Read};
+use std::io::Read;
 use std::time::Duration;
 
 use iri_string::types::UriAbsoluteStr;
@@ -140,7 +140,9 @@ pub enum FailureStage {
     TextDecode,
     /// Whole-call deadline where ureq cannot identify a narrower active phase.
     Deadline,
-    /// Request configuration before the first exchange.
+    /// Request configuration before the first exchange, or an I/O failure
+    /// ureq reports without naming the phase it happened in. A failure at this
+    /// stage is not proof that nothing was sent.
     Request,
 }
 
@@ -152,6 +154,19 @@ pub enum FailureKind {
     Timeout,
     /// A transport failed without timing out.
     Transport,
+    /// A signal interrupted a blocking socket read or write (`EINTR`).
+    ///
+    /// Distinct from [`FailureKind::Transport`] because the connection itself
+    /// was not refused, reset or severed; ureq's TCP transport maps only
+    /// `TimedOut` and `WouldBlock` to its timeout variant and lets `EINTR`
+    /// through as an I/O error, which used to read as an outage. It is not
+    /// proof that the receiver took no action: once the request has been sent,
+    /// an interruption while awaiting headers or reading the body leaves the
+    /// effect as unknown as any other failure at that stage. Retry only a
+    /// request that is idempotent or carries an idempotency key. A signal
+    /// handler installed with `SA_RESTART` resumes the call and this kind
+    /// never appears.
+    Interrupted,
     /// A response body was not valid UTF-8.
     InvalidUtf8,
     /// The redirect count exceeded the declared limit.
@@ -405,20 +420,6 @@ pub enum Error {
     /// carried: it can contain credentials in its userinfo or a token in its
     /// query string, and the caller already holds it.
     InvalidUrl,
-    /// The request hit [`Options::timeout`](crate::http::Options::timeout).
-    Timeout,
-    /// A signal interrupted the request before it completed (`EINTR`).
-    ///
-    /// Not a transport failure and not a timeout: the connection was not
-    /// refused, reset or severed, and nothing about the exchange says it
-    /// failed. It is reported separately because this is the one error a
-    /// caller may retry without risking a second effect — a transport failure
-    /// during a `POST` may have arrived after the server acted, whereas an
-    /// interrupted request is one the kernel has not finished relaying.
-    ///
-    /// A signal handler installed with `SA_RESTART` lets the read resume and
-    /// this variant never appears; it is reported for the handlers that do not.
-    Interrupted,
     /// The response body reached [`Options::max_body_bytes`] without ending,
     /// under [`BodyPolicy::Whole`]. The ceiling is reported, the bytes read are
     /// not: they are a prefix, and handing a prefix to a caller that asked for
@@ -427,8 +428,6 @@ pub enum Error {
         /// The declared ceiling the body reached.
         limit: usize,
     },
-    /// Legacy transport variant retained for source compatibility.
-    Transport(String),
     /// A failure with stable stage and machine-readable class.
     Failure {
         /// Phase where the failure was observed.
@@ -450,21 +449,18 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Matched through `*self` so every arm's pattern is the enum's own
-        // type; `Transport` binds its payload by reference, since `Error` is
-        // not `Copy` and formatting must not consume it.
+        // type; `Failure` binds its cause by reference, since `Error` is not
+        // `Copy` and formatting must not consume it.
         match *self {
             Self::InvalidUrl => {
                 write!(f, "invalid http(s) URL (absolute http(s) URI required)")
             }
-            Self::Timeout => write!(f, "request timed out"),
-            Self::Interrupted => write!(f, "request interrupted by a signal"),
             Self::BodyTooLarge { limit } => write!(
                 f,
                 "response body reached the declared {limit}-byte ceiling; raise \
                  `max_body_bytes` to read it whole, or select `BodyPolicy::Preview` to keep a \
                  prefix"
             ),
-            Self::Transport(ref cause) => write!(f, "transport failure: {cause}"),
             Self::Failure {
                 stage,
                 kind,
@@ -614,7 +610,7 @@ fn sanitized_target(uri: &str) -> String {
 /// Header bytes are retained alongside their lossy String compatibility view.
 /// The body, by
 /// contrast, is read strictly: only the I/O read can fail here, and a partial
-/// read is reported as [`Error::Transport`] rather than returned as a short
+/// read is reported as an [`Error::Failure`] at the body stage rather than returned as a short
 /// body. Non-UTF-8 *bodies* are not an error at this layer: [`Response::text`]
 /// is where that is decided.
 ///
@@ -738,8 +734,9 @@ fn probe_for_more(reader: &mut impl Read) -> Result<Truncation, Error> {
 
 /// Fold a ureq failure into this crate's [`Error`].
 ///
-/// `Timeout` is preserved as its own variant because it is the one transport
-/// failure a caller can act on by widening [`Options::timeout`]. `BadUri` is
+/// A timeout keeps its own [`FailureKind::Timeout`] and the phase ureq names,
+/// because it is the one transport failure a caller can act on by widening
+/// [`Options::timeout`]. `BadUri` is
 /// collapsed to [`Error::InvalidUrl`] for the same reason `validate_url` is
 /// class-only: ureq's message embeds the raw URI, so the string is dropped
 /// rather than carried into a caller's logs. Everything else keeps the
@@ -778,15 +775,18 @@ fn map_read_error(error: std::io::Error, stage: FailureStage) -> Error {
         })
         .is_some();
     let timed_out = is_timeout || error.kind() == std::io::ErrorKind::TimedOut;
-    failure(
-        stage,
-        if timed_out {
-            FailureKind::Timeout
-        } else {
-            FailureKind::Transport
-        },
-        Some(error.to_string()),
-    )
+    // `EINTR` is its own class at every stage: a signal landing in a socket
+    // read is not a severed connection, and reporting it as one is what made a
+    // signal look like an outage. The stage says how far the exchange got,
+    // which is what decides whether a retry could repeat an effect.
+    let kind = if timed_out {
+        FailureKind::Timeout
+    } else if error.kind() == std::io::ErrorKind::Interrupted {
+        FailureKind::Interrupted
+    } else {
+        FailureKind::Transport
+    };
+    failure(stage, kind, Some(error.to_string()))
 }
 
 /// Fold ureq's typed error variants without interpreting display strings.
@@ -794,21 +794,6 @@ fn map_error(error: ureq::Error, is_tls: bool) -> Error {
     match error {
         ureq::Error::Timeout(timeout) => {
             failure(timeout_stage(timeout), FailureKind::Timeout, None)
-        }
-        // A signal interrupted the request. ureq's TCP transport maps only
-        // `TimedOut` and `WouldBlock` to its timeout variant, so `EINTR`
-        // arrives here as a transport error — which is both wrong and, under
-        // load, frequent: the kernel delivers signals to whichever thread they
-        // land on, and a process running many requests will have one land
-        // inside a socket read.
-        //
-        // It is not a broken connection, so it is not `Transport`. The
-        // distinction matters to a caller with a retry policy: `Transport` is
-        // terminal for a POST whose effect may have landed, while an
-        // interruption is the one failure that is safe to retry. Collapsing
-        // the two into a string is what made a signal look like an outage.
-        ureq::Error::Io(io_error) if io_error.kind() == ErrorKind::Interrupted => {
-            Error::Interrupted
         }
         // ureq's `BadUri` message embeds the raw URI. `validate_url` rejects the
         // shapes that reach it, but collapse it to the class-only variant
@@ -861,6 +846,14 @@ fn map_error(error: ureq::Error, is_tls: bool) -> Error {
     }
 }
 
+/// Whether `url` names the `https` scheme. Schemes are case-insensitive
+/// (RFC 3986 §3.1) and [`validate_url`] admits `HTTPS://`, so a byte-exact
+/// prefix check would file that spelling's TLS failures under the wrong stage.
+fn is_https(url: &str) -> bool {
+    url.get(..8)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+}
+
 /// GET `url` with default options.
 ///
 /// Named for the verb, matching [`post`]: the default-options form of each
@@ -883,7 +876,7 @@ pub fn get_with(url: &str, options: &Options) -> Result<Response, Error> {
         call = call.header(header.0.as_str(), header.1.as_str());
     }
     call.call()
-        .map_err(|error| map_error(error, url.starts_with("https://")))
+        .map_err(|error| map_error(error, is_https(url)))
         .and_then(|response| response_of(response, options))
 }
 
@@ -914,7 +907,7 @@ pub fn post_with(
     }
     let response = request
         .send(body)
-        .map_err(|error| map_error(error, url.starts_with("https://")))?;
+        .map_err(|error| map_error(error, is_https(url)))?;
     response_of(response, options)
 }
 
@@ -1492,9 +1485,12 @@ mod tests {
                     stage: FailureStage::Headers,
                     kind: FailureKind::Timeout,
                     ..
-                } | Error::Interrupted
+                } | Error::Failure {
+                    kind: FailureKind::Interrupted,
+                    ..
+                }
             ),
-            "a silent server yields a header timeout or Interrupted, not {error:?}"
+            "a silent server yields a header timeout or an interruption, not {error:?}"
         );
         release
             .send(())
@@ -1692,30 +1688,44 @@ mod tests {
         Ok(())
     }
 
-    /// An interrupted request is not reported as a broken connection.
+    /// An interruption is its own class at every stage, never a transport failure.
     ///
     /// ureq's TCP transport maps `TimedOut` and `WouldBlock` to its timeout
     /// variant and lets `EINTR` through as an I/O error, which arrived here as
-    /// `Transport("io: Interrupted system call")`. That is the wrong class: a
-    /// caller with a retry policy treats a transport failure as possibly-post
-    /// -action and will not retry it, while an interrupted request is the one
-    /// failure that is safe to retry. Signals land on whichever thread they
-    /// land on, so under load this was frequent enough to break CI.
+    /// a transport failure. Signals land on whichever thread they land on, so
+    /// under load this was frequent enough to break CI. The request path and
+    /// the body path classify it the same way, and each keeps its stage.
     #[test]
-    fn an_interrupted_request_is_not_a_transport_failure() {
-        assert_eq!(
-            map_error(
-                ureq::Error::Io(std::io::Error::from_raw_os_error(libc_eintr())),
-                false,
+    fn an_interruption_is_classified_the_same_way_at_every_stage() {
+        let interrupted = || std::io::Error::from(std::io::ErrorKind::Interrupted);
+        assert!(
+            matches!(
+                map_error(ureq::Error::Io(interrupted()), false),
+                Error::Failure {
+                    kind: FailureKind::Interrupted,
+                    ..
+                }
             ),
-            Error::Interrupted,
-            "EINTR must not be reported as a transport failure"
+            "EINTR on the request path must not be reported as a transport failure"
         );
+        for stage in [FailureStage::Body, FailureStage::EofProbe] {
+            assert!(
+                matches!(
+                    map_read_error(interrupted(), stage),
+                    Error::Failure {
+                        kind: FailureKind::Interrupted,
+                        stage: observed,
+                        ..
+                    } if observed == stage
+                ),
+                "EINTR while reading at {stage:?} keeps its stage and its class"
+            );
+        }
         // A genuine transport error still is one, so the split is meaningful
-        // rather than the whole enum collapsing to Interrupted.
+        // rather than every I/O failure collapsing to an interruption.
         assert!(matches!(
             map_error(
-                ureq::Error::Io(std::io::Error::from_raw_os_error(libc_econnreset())),
+                ureq::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
                 false,
             ),
             Error::Failure {
@@ -1725,17 +1735,15 @@ mod tests {
         ));
     }
 
-    /// `EINTR` as this platform reports it.
-    fn libc_eintr() -> i32 {
-        // Spelled rather than computed: these are the two error numbers the
-        // mapping is about, and deriving them would need libc, which this
-        // workspace forbids.
-        4
-    }
-
-    /// `ECONNRESET` as this platform reports it.
-    fn libc_econnreset() -> i32 {
-        104
+    /// The scheme check behind TLS stage attribution ignores case, as
+    /// [`validate_url`] does.
+    #[test]
+    fn the_https_scheme_is_recognised_in_any_case() {
+        assert!(is_https("https://example.com/"));
+        assert!(is_https("HTTPS://example.com/"));
+        assert!(is_https("HtTpS://example.com/"));
+        assert!(!is_https("http://example.com/"));
+        assert!(!is_https("https:"));
     }
 
     // ── Body ceilings ───────────────────────────────────────────────────────
