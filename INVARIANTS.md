@@ -226,11 +226,15 @@ Each of these was a shipped defect. Treat the list as the spec.
   only invalid syntax is negative evidence, while parser or budget refusal
   leaves detection incomplete. Bounded AST metrics identify partial walks, and
   checked syntax diagnostics preserve recovery kind and original-source byte
-  spans under a fixed ceiling. · why: #165 A1–A4 · enforced by:
+  spans under a fixed ceiling that keeps the earliest in source order. The
+  refusal and the rendered report walk the same node set, root included.
+  · why: #165 A1–A4 · enforced by:
   `lgwks_ast::tests::duplicate_and_permuted_candidates_parse_once_and_preserve_ambiguity`,
   `lgwks_ast::tests::incomplete_candidate_inspection_is_not_reported_as_unique`,
   `lgwks_ast::tests::inspection_metrics_name_complete_exact_and_over_limit_walks`,
-  `lgwks_ast::tests::syntax_diagnostics_stop_at_the_declared_bound`, and
+  `lgwks_ast::tests::syntax_diagnostics_stop_at_the_declared_bound`,
+  `lgwks_ast::tests::a_truncated_syntax_report_keeps_the_earliest_errors_in_source_order`,
+  `lgwks_ast::tests::the_refusal_and_the_report_count_the_same_recovery_nodes`, and
   `tests/content_detection.rs`
 
 ## Docs

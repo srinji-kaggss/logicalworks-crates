@@ -1060,6 +1060,7 @@ fn inspect_ast_with_pending<'t, L: LanguageExt>(
         frames.push((child, child_depth, child_count));
         peak_frames = peak_frames.max(frames.len());
     }
+    diagnostics.sort_unstable_by_key(syntax_position);
     (metrics, peak_frames, diagnostics, diagnostics_truncated)
 }
 
@@ -1097,16 +1098,36 @@ fn record_syntax_diagnostic<L: LanguageExt>(
     );
 }
 
-/// Append a diagnostic unless the fixed per-parse ceiling has been reached.
+/// Where a diagnostic sits in the source, for keeping and ordering them.
+fn syntax_position(diagnostic: &SyntaxDiagnostic) -> (usize, usize) {
+    (diagnostic.start_byte, diagnostic.end_byte)
+}
+
+/// Retain a diagnostic under the fixed per-parse ceiling, keeping the earliest.
+///
+/// The walk visits siblings in reverse order, so "the first
+/// [`MAX_SYNTAX_DIAGNOSTICS`] seen" would be the last ones in the file, and
+/// the error a reader needs first — where the source stopped parsing — would
+/// be the one dropped. At the ceiling a new diagnostic replaces the latest one
+/// retained when it starts earlier; the retained set is always the earliest in
+/// source order, in constant memory.
 fn push_syntax_diagnostic(
     diagnostic: SyntaxDiagnostic,
     diagnostics: &mut Vec<SyntaxDiagnostic>,
     diagnostics_truncated: &mut bool,
 ) {
-    if diagnostics.len() == MAX_SYNTAX_DIAGNOSTICS {
-        *diagnostics_truncated = true;
-    } else {
+    if diagnostics.len() < MAX_SYNTAX_DIAGNOSTICS {
         diagnostics.push(diagnostic);
+        return;
+    }
+    *diagnostics_truncated = true;
+    let latest = diagnostics
+        .iter_mut()
+        .max_by_key(|retained| syntax_position(retained));
+    if let Some(latest) = latest
+        && syntax_position(&diagnostic) < syntax_position(latest)
+    {
+        *latest = diagnostic;
     }
 }
 
@@ -1367,6 +1388,72 @@ mod tests {
                     if diagnostics.iter().any(|diagnostic| diagnostic.kind == SyntaxIssueKind::Missing)
             ),
             "an omitted let semicolon is reported as MISSING"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_truncated_syntax_report_keeps_the_earliest_errors_in_source_order()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Far more broken items than the ceiling, one per line, so the error
+        // on the first line is the one a reader needs and the walk, which runs
+        // siblings in reverse, meets it last.
+        let source = "fn broken( {\n".repeat(MAX_SYNTAX_DIAGNOSTICS * 3);
+        let (diagnostics, truncated) = match try_parse(&source, Language::Rust) {
+            Err(ParseError::InvalidSyntax {
+                diagnostics,
+                diagnostics_truncated,
+                ..
+            }) => (diagnostics, diagnostics_truncated),
+            other => {
+                return Err(format!("expected InvalidSyntax, got {:?}", other.err()).into());
+            }
+        };
+        assert!(
+            truncated,
+            "more recovery nodes than the ceiling were observed"
+        );
+        assert_eq!(diagnostics.len(), MAX_SYNTAX_DIAGNOSTICS);
+        let first = diagnostics
+            .first()
+            .ok_or("a truncated report is not empty")?;
+        assert!(
+            first.start_byte < "fn broken( {\n".len(),
+            "the first retained error is on the first line, not {first:?}"
+        );
+        assert!(
+            diagnostics.windows(2).all(|pair| matches!(
+                pair,
+                [earlier, later] if syntax_position(earlier) <= syntax_position(later)
+            )),
+            "the retained errors are in source order"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_refusal_and_the_report_count_the_same_recovery_nodes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Under the ceiling, the refusal's diagnostics and the rendered report
+        // are two views of one walk's node set; they must not disagree.
+        let source = "fn main() {\n    let x = ;\n}\nfn broken( {\n";
+        let refused = match try_parse(source, Language::Rust) {
+            Err(ParseError::InvalidSyntax {
+                diagnostics,
+                diagnostics_truncated: false,
+                ..
+            }) => diagnostics,
+            other => {
+                return Err(
+                    format!("expected an untruncated refusal, got {:?}", other.err()).into(),
+                );
+            }
+        };
+        let tree = parse(source, Language::Rust);
+        assert_eq!(tree_recovery_count(&tree), refused.len());
+        assert_eq!(
+            tree_diagnostics("main.rs", &tree, Language::Rust.name()).len(),
+            refused.len()
         );
         Ok(())
     }

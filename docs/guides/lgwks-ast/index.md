@@ -105,9 +105,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 `detect` is `Language::of_path` under a second name: filename extensions select
-a grammar but do not validate syntax. There is no shebang detection, and `.vue`
-or `.svelte` selects the JavaScript grammar rather than a full-container
-grammar. Content sniffing is separate and opt-in, because it costs one full
+a grammar but do not validate syntax. `detect` does not read a `#!` line;
+`Language::of_shebang` does, for extensionless scripts. `.vue` or `.svelte`
+selects the JavaScript grammar rather than a full-container grammar. Content sniffing is separate and opt-in, because it costs one full
 parse per distinct candidate grammar:
 `try_detect_content(source, &[Language::Rust, Language::Python])` names the small
 candidate set you expect. Repeated candidates are parsed once. The

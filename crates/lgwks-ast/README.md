@@ -3,9 +3,9 @@
 A multi-language AST front end for tools that read source code.
 
 A code tool needs the same three things: identify a source file's language by
-extension or by explicitly trial-parsing a small candidate set, select that
-language's tree-sitter grammar, and walk the resulting syntax tree safely. This
-crate provides those paths under explicit bounds. It does not detect shebangs or
+extension, by its `#!` line, or by explicitly trial-parsing a small candidate
+set, select that language's tree-sitter grammar, and walk the resulting syntax
+tree safely. This crate provides those paths under explicit bounds. It does not
 parse full Vue/Svelte containers; those extensions select the JavaScript
 grammar as a filename heuristic.
 
@@ -129,7 +129,8 @@ cannot select.
 
 Extension lookup is a filename heuristic, not a syntax verdict. In particular,
 `.vue` and `.svelte` select the JavaScript grammar; they do not enable dedicated
-container grammars. This crate has no shebang detection path.
+container grammars. An extensionless script is identified by its `#!` line
+through `Language::of_shebang`, which `detect` does not consult.
 
 `try_detect_content` returns `ContentDetection::NoMatch`, `Unique(language)`, or
 `Ambiguous`; non-syntax parser failures return `Err` because they leave a
