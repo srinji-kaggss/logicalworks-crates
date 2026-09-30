@@ -451,7 +451,6 @@ impl Dir {
         // directory holding two files as empty. Rewinding first makes the
         // listing a property of the directory rather than of whatever this
         // descriptor happened to do before.
-        
 
         let mut buffer = [MaybeUninit::<u8>::uninit(); DIRENT_BUFFER_BYTES];
         let mut directory = rustix::fs::RawDir::new(self.fd.as_fd(), &mut buffer);
