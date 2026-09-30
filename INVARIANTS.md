@@ -229,8 +229,10 @@ Each of these was a shipped defect. Treat the list as the spec.
   and symlink policy, and completeness means complete within that policy.
   Bounded walks charge entries and path bytes before retention and mark any
   budget-limited prefix incomplete. Completeness does not depend on
-  filesystem iteration order; which entries an incomplete report retains, in
-  the directory where a budget ran out, does. Strict failures preserve path, stage and
+  filesystem iteration order, except that following symlinks without sorting
+  charges an aliased directory through whichever alias is met first; which
+  entries an incomplete report retains, in the directory where a budget ran
+  out, does. Strict failures preserve path, stage and
   the original I/O source. `available_space` is an advisory snapshot, never a
   reservation or write guarantee. · why: #166 · enforced by:
   `lgwks_std::fs::tests` and the public API doctest

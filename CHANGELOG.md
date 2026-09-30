@@ -27,8 +27,9 @@ explicitly under that crate.
 - A response body's buffer grows geometrically up to `max_body_bytes` instead of
   reserving exactly each 8 KiB read. (#191)
 - `WalkLimits` states which part of a bounded walk depends on filesystem order:
-  completeness does not; the entries an incomplete report keeps, in the
-  directory where the budget ran out, do. (#192)
+  completeness does not (unless symlinks are followed without sorting); the
+  entries an incomplete report keeps, in the directory where the budget ran
+  out, do. (#192)
 
 ### lgwks_deps Breaking
 
@@ -43,7 +44,15 @@ explicitly under that crate.
 ### lgwks_deps Changed
 
 - A `ProcessCleanup` refusal names the failed step (kill or reap), the cargo
-  pid, the OS error, and each capture path it could not remove. (#193)
+  pid, the OS error, and each capture path it could not remove. Its
+  `Error::source` is the primary failure when there is one. (#193)
+- `check --json` may write one `WARN` line to stderr, for a Cargo capture file
+  that could not be removed; stdout stays one JSON document. (#193)
+
+### lgwks_ast Fixed
+
+- A span whose offset falls inside a multi-byte character resolves to that
+  character's start instead of panicking. (#194)
 
 ### lgwks_ast Breaking
 

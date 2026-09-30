@@ -328,7 +328,14 @@ impl std::error::Error for MetadataError {
             | Self::Schema(_)
             | Self::Timeout { .. }
             | Self::OutputTooLarge { .. } => None,
+            // The primary failure first: it is why collection stopped, and the
+            // cleanup errors are what it left behind.
             Self::ProcessCleanup {
+                cause: Some(ref cause),
+                ..
+            } => Some(&**cause),
+            Self::ProcessCleanup {
+                cause: None,
                 ref process,
                 ref captures,
                 ..
@@ -1276,11 +1283,6 @@ pub struct Collected<T> {
 }
 
 impl<T> Collected<T> {
-    /// The complete result.
-    pub fn value(&self) -> &T {
-        &self.value
-    }
-
     /// The result, and the cleanup that could not be confirmed after it as a
     /// [`MetadataError::ProcessCleanup`] with no primary cause.
     pub fn into_parts(self) -> (T, Option<MetadataError>) {

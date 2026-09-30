@@ -55,9 +55,10 @@ USAGE
                                        PATH/contract/APPROVED.toml. Diagnosis
                                        only — a build always reads the register
                                        committed beside the code it builds.
-             [--json]                  emit one JSON object on stdout and
-                                       nothing on stderr; the exit code still
-                                       carries the verdict
+             [--json]                  emit one JSON object on stdout; stderr
+                                       carries only a WARN line when a Cargo
+                                       capture file could not be removed. The
+                                       exit code still carries the verdict
   `check` parses its own arguments in one pass, and refuses rather than
   guesses: a missing or repeated --contract value, an unknown --flag, or a
   second PATH exits 2 without auditing anything. --contract's FILE is a

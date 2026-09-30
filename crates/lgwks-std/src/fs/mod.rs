@@ -202,6 +202,11 @@ pub struct WalkPolicy {
 /// Whether a bounded walk is complete does not depend on the order the
 /// filesystem yields entries: a budget runs out exactly when the tree within
 /// the policy holds more entries or path bytes than it allows, in any order.
+/// One exception: with `follow_symlinks` on and sorting off, a directory
+/// reachable through two aliases of different lengths is visited, and its path
+/// bytes charged, through whichever alias the filesystem yields first, so a
+/// path-byte budget between the two totals can pass in one order and not the
+/// other. Sorting makes the visit order, and so completeness, deterministic.
 /// *Which* entries an incomplete report retains does depend on that order. In
 /// the directory where a budget ran out, the entries kept are the ones the
 /// filesystem yielded first, which differs between filesystems; they are

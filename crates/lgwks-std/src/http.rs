@@ -140,7 +140,10 @@ pub enum FailureStage {
     Redirect,
     /// Response body conversion to UTF-8 text.
     TextDecode,
-    /// Whole-call deadline where ureq cannot identify a narrower active phase.
+    /// The whole-call deadline ([`Options::deadline`]) or ureq's own global
+    /// bound expired. It can expire in any phase, before the request was sent
+    /// or after part of the response was read, and on any redirect hop, so a
+    /// failure at this stage is not proof that nothing was sent.
     Deadline,
     /// Request configuration before the first exchange, or an I/O failure
     /// ureq reports without naming the phase it happened in. A failure at this
