@@ -64,6 +64,10 @@ pub enum OmissionStage {
     /// A directory whose canonical path within the root could
     /// not be established before the read or no longer held after it.
     DirectoryResolution,
+    /// The input root could not be canonicalized.
+    RootResolution,
+    /// A configured producer or retention budget was reached.
+    ResourceBudget,
 }
 
 /// One place the walk came back short of complete coverage.
@@ -83,10 +87,8 @@ pub struct WalkOmission {
 /// What a tolerant walk saw: every admitted entry plus every place it came
 /// back short.
 ///
-/// A report with entries and no omissions is a complete scan. A report with
-/// omissions is a partial one, and [`WalkReport::is_complete`] is the one
-/// question that distinguishes them: no consumer can read completeness off
-/// the entry list alone.
+/// A report retains entries, omissions and the policy scope under which the
+/// walk ran. Completeness never needs to be inferred from the entry list.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct WalkReport {
@@ -94,9 +96,27 @@ pub struct WalkReport {
     entries: Vec<PathBuf>,
     /// Every place the walk came back short, in walk order.
     omissions: Vec<WalkOmission>,
+    /// Whether an applied depth, symlink, or resource policy excluded work.
+    policy: WalkPolicy,
+    /// Whether a resource budget stopped the walk before its policy scope ended.
+    budget_exhausted: bool,
 }
 
 impl WalkReport {
+    /// Creates a result container for the configured walk policy.
+    fn new(options: &WalkOptions) -> Self {
+        Self {
+            entries: Vec::new(),
+            omissions: Vec::new(),
+            policy: WalkPolicy {
+                max_depth: options.max_depth,
+                follow_symlinks: options.follow_symlinks,
+                sort_alphabetically: options.sort_alphabetically,
+            },
+            budget_exhausted: false,
+        }
+    }
+
     /// Every entry the policy admitted, in walk order.
     #[must_use]
     pub fn entries(&self) -> &[PathBuf] {
@@ -109,10 +129,135 @@ impl WalkReport {
         &self.omissions
     }
 
-    /// Whether the walk covered the whole tree: no omissions recorded.
+    /// Whether the walk is complete within the applied policy.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.omissions.is_empty()
+        self.is_complete_within_policy()
+    }
+
+    /// Whether the report has no omissions or resource-budget refusal within
+    /// the supplied walk policy. Depth and outside-root symlink exclusions are
+    /// deliberate policy boundaries and do not make this false.
+    #[must_use]
+    pub fn is_complete_within_policy(&self) -> bool {
+        self.omissions.is_empty() && !self.budget_exhausted
+    }
+
+    /// The depth and symlink policy applied to this report.
+    #[must_use]
+    pub fn policy(&self) -> WalkPolicy {
+        self.policy
+    }
+
+    /// Whether a resource budget stopped traversal before policy coverage ended.
+    #[must_use]
+    pub fn budget_exhausted(&self) -> bool {
+        self.budget_exhausted
+    }
+
+    /// Transfers the owned entries and omissions without cloning paths or errors.
+    #[must_use]
+    pub fn into_parts(self) -> (Vec<PathBuf>, Vec<WalkOmission>) {
+        (self.entries, self.omissions)
+    }
+}
+
+impl std::fmt::Display for WalkFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "filesystem walk failed at {:?} for {}: {}",
+            self.stage,
+            self.path.display(),
+            self.source
+        )
+    }
+}
+
+impl std::error::Error for WalkFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// The depth and symlink scope applied to a filesystem walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WalkPolicy {
+    /// Maximum directory depth traversed (0 means root entries only).
+    pub max_depth: usize,
+    /// Whether in-root symlink targets were followed.
+    pub follow_symlinks: bool,
+    /// Whether entries were sorted by filename within each directory.
+    pub sort_alphabetically: bool,
+}
+
+/// Producer and retention ceilings for a bounded materializing walk.
+///
+/// The entry and path-byte budgets are charged before each directory entry is
+/// retained for sorting or output. `max_directory_entries` bounds the sorted
+/// working set for one directory. The legacy convenience APIs are unbounded
+/// materializers; use this type when input width or path volume is untrusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WalkLimits {
+    /// Maximum directory entries read across the full traversal.
+    pub max_entries: usize,
+    /// Maximum entries retained from any one directory for sorting.
+    pub max_directory_entries: usize,
+    /// Maximum cumulative encoded path bytes observed and retained.
+    pub max_path_bytes: usize,
+    /// Maximum omissions recorded in tolerant mode.
+    pub max_omissions: usize,
+}
+
+impl WalkLimits {
+    /// Constructs explicit ceilings for a bounded walk.
+    #[must_use]
+    pub const fn new(
+        max_entries: usize,
+        max_directory_entries: usize,
+        max_path_bytes: usize,
+        max_omissions: usize,
+    ) -> Self {
+        Self {
+            max_entries,
+            max_directory_entries,
+            max_path_bytes,
+            max_omissions,
+        }
+    }
+}
+
+/// Failure context attached to strict walk errors as their typed source.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct WalkFailure {
+    /// The path whose processing failed.
+    path: PathBuf,
+    /// The stage at which the failure occurred.
+    stage: OmissionStage,
+    /// The underlying filesystem or budget error.
+    source: io::Error,
+}
+
+impl WalkFailure {
+    /// Path whose processing failed.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Stage at which processing failed.
+    #[must_use]
+    pub fn stage(&self) -> OmissionStage {
+        self.stage
+    }
+
+    /// Underlying filesystem or budget error.
+    #[must_use]
+    pub fn source_error(&self) -> &io::Error {
+        &self.source
     }
 }
 
@@ -148,6 +293,14 @@ struct WalkContext<'a> {
     omissions: &'a mut Vec<WalkOmission>,
     /// Canonical directories already entered, for loop termination.
     visited: &'a mut HashSet<PathBuf>,
+    /// Optional producer ceilings; absent only for legacy materializers.
+    limits: Option<&'a WalkLimits>,
+    /// Number of directory entries observed so far.
+    entries_seen: usize,
+    /// Cumulative path-byte charge.
+    path_bytes_seen: usize,
+    /// Set when tolerant traversal returns a budget-limited prefix.
+    budget_exhausted: bool,
 }
 
 /// Recursively walks `root` according to `options`, returning all matching entries.
@@ -160,51 +313,129 @@ struct WalkContext<'a> {
 /// and already visited directories are policy exclusions; unresolved symlink
 /// targets are omissions. Use
 /// [`walk_dir_tolerant`] for the same walk with omissions reported instead
-/// of refused.
+/// of refused. Every returned path is absolute under the canonicalized input
+/// root; descendants reached through an in-root alias keep that alias in their
+/// logical path. This replaces the previous mixed relative/canonical spelling.
+/// The convenience API materializes the entire result; use
+/// [`walk_dir_bounded`] when input width or path volume is untrusted.
+///
+/// ```rust
+/// use lgwks_std::fs::{walk_dir_bounded, WalkLimits, WalkOptions};
+///
+/// let limits = WalkLimits::new(10_000, 2_000, 8 * 1024 * 1024, 100);
+/// let entries = walk_dir_bounded(".", &WalkOptions::default(), &limits)?;
+/// assert!(entries.iter().all(|path| path.is_absolute()));
+/// # Ok::<(), std::io::Error>(())
+/// ```
+///
+/// A report can also be consumed by a downstream crate without cloning:
+///
+/// ```rust
+/// use lgwks_std::fs::{walk_dir_tolerant, WalkOptions};
+///
+/// let report = walk_dir_tolerant(".", &WalkOptions::default())?;
+/// let (entries, omissions) = report.into_parts();
+/// assert!(!entries.is_empty());
+/// assert!(omissions.is_empty());
+/// # Ok::<(), std::io::Error>(())
+/// ```
+///
+/// A bounded tolerant report exposes whether the returned prefix reached a
+/// producer ceiling:
+///
+/// ```rust
+/// use lgwks_std::fs::{walk_dir_tolerant_bounded, WalkLimits, WalkOptions};
+///
+/// let limits = WalkLimits::new(100, 20, 64 * 1024, 10);
+/// let report = walk_dir_tolerant_bounded(".", &WalkOptions::default(), &limits)?;
+/// let policy = report.policy();
+/// let complete = report.is_complete_within_policy();
+/// let stopped_for_budget = report.budget_exhausted();
+/// assert_eq!(policy.max_depth, WalkOptions::default().max_depth);
+/// assert_eq!(complete, !stopped_for_budget && report.omissions().is_empty());
+/// # Ok::<(), std::io::Error>(())
+/// ```
 pub fn walk_dir(root: impl AsRef<Path>, options: &WalkOptions) -> io::Result<Vec<PathBuf>> {
-    let canonical_root = root.as_ref().canonicalize()?;
-    let mut out = Vec::new();
-    let mut visited = HashSet::new();
-    let mut omissions = Vec::new();
-    let mut ctx = WalkContext {
-        canonical_root: &canonical_root,
-        options,
-        mode: WalkMode::Strict,
-        out: &mut out,
-        omissions: &mut omissions,
-        visited: &mut visited,
-    };
-    walk_recursive(root.as_ref(), 0, &mut ctx)?;
-    debug_assert!(
-        ctx.omissions.is_empty(),
-        "strict mode records no omissions: the first one returns"
-    );
-    Ok(out)
+    let report = run_walk(root.as_ref(), options, WalkMode::Strict, None)?;
+    Ok(report.into_parts().0)
 }
 
 /// Recursively walks `root` according to `options`, reporting omissions.
 ///
 /// The tolerant walk returns every admitted entry together with every place
-/// it came back short. [`WalkReport::is_complete`] tells a complete scan
-/// from a partial one. Like the strict walk, an unresolvable root refuses:
+/// it came back short. Completeness is evaluated within the returned policy:
+/// depth limits and outside-root symlinks are deliberate exclusions, while a
+/// budget stop is explicitly incomplete. Like the strict walk, an
+/// unresolvable root refuses:
 /// tolerance covers coverage loss inside the tree, not failure to resolve
 /// the tree's root path.
 pub fn walk_dir_tolerant(root: impl AsRef<Path>, options: &WalkOptions) -> io::Result<WalkReport> {
-    let canonical_root = root.as_ref().canonicalize()?;
-    let mut report = WalkReport {
-        entries: Vec::new(),
-        omissions: Vec::new(),
-    };
+    run_walk(root.as_ref(), options, WalkMode::Tolerant, None)
+}
+
+/// Walks with strict refusal and explicit producer and path-retention ceilings.
+///
+/// Sorting retains at most `max_directory_entries` from one directory. Entry
+/// count and cumulative path-byte budgets are charged before retention. Paths
+/// are absolute and rooted at the canonicalized input root. This API
+/// materializes the admitted output; its retained output is bounded by the
+/// configured limits.
+pub fn walk_dir_bounded(
+    root: impl AsRef<Path>,
+    options: &WalkOptions,
+    limits: &WalkLimits,
+) -> io::Result<Vec<PathBuf>> {
+    let report = run_walk(root.as_ref(), options, WalkMode::Strict, Some(limits))?;
+    Ok(report.into_parts().0)
+}
+
+/// Walks tolerantly with explicit producer and path-retention ceilings.
+///
+/// Reaching a resource ceiling returns the admitted prefix with
+/// [`WalkReport::budget_exhausted`] set; that prefix is never complete. Paths
+/// are absolute and rooted at the canonicalized input root.
+pub fn walk_dir_tolerant_bounded(
+    root: impl AsRef<Path>,
+    options: &WalkOptions,
+    limits: &WalkLimits,
+) -> io::Result<WalkReport> {
+    run_walk(root.as_ref(), options, WalkMode::Tolerant, Some(limits))
+}
+
+/// Runs both report modes through the same traversal engine.
+fn run_walk(
+    root: &Path,
+    options: &WalkOptions,
+    mode: WalkMode,
+    limits: Option<&WalkLimits>,
+) -> io::Result<WalkReport> {
+    let canonical_root = root.canonicalize().map_err(|source| {
+        let kind = source.kind();
+        io::Error::new(
+            kind,
+            WalkFailure {
+                path: root.to_path_buf(),
+                stage: OmissionStage::RootResolution,
+                source,
+            },
+        )
+    })?;
+    let mut report = WalkReport::new(options);
     let mut visited = HashSet::new();
     let mut ctx = WalkContext {
         canonical_root: &canonical_root,
         options,
-        mode: WalkMode::Tolerant,
+        mode,
         out: &mut report.entries,
         omissions: &mut report.omissions,
         visited: &mut visited,
+        limits,
+        entries_seen: 0,
+        path_bytes_seen: 0,
+        budget_exhausted: false,
     };
-    walk_recursive(root.as_ref(), 0, &mut ctx)?;
+    walk_recursive(root, &canonical_root, 0, &mut ctx)?;
+    report.budget_exhausted = ctx.budget_exhausted;
     Ok(report)
 }
 
@@ -214,16 +445,63 @@ pub fn walk_dir_tolerant(root: impl AsRef<Path>, options: &WalkOptions) -> io::R
 /// The two arms are the whole of the strict/tolerant contract. Every
 /// omission in the engine passes through here, so no new omission site can
 /// silently pick a mode: it states one by calling this.
-fn omit(
-    mode: WalkMode,
-    omissions: &mut Vec<WalkOmission>,
-    omission: WalkOmission,
-) -> io::Result<()> {
-    if mode == WalkMode::Strict {
-        return Err(omission.error);
+fn omit(ctx: &mut WalkContext<'_>, omission: WalkOmission) -> io::Result<()> {
+    if ctx.mode == WalkMode::Strict {
+        let kind = omission.error.kind();
+        return Err(io::Error::new(
+            kind,
+            WalkFailure {
+                path: omission.path,
+                stage: omission.stage,
+                source: omission.error,
+            },
+        ));
     }
-    omissions.push(omission);
+    if let Some(limits) = ctx.limits
+        && ctx.omissions.len() >= limits.max_omissions
+    {
+        ctx.budget_exhausted = true;
+        return Ok(());
+    }
+    ctx.omissions.push(omission);
     Ok(())
+}
+
+/// Charges an observed path and entry before the directory list retains it.
+fn charge_entry(
+    ctx: &mut WalkContext<'_>,
+    path: &Path,
+    directory_entries: usize,
+) -> io::Result<bool> {
+    let Some(limits) = ctx.limits else {
+        return Ok(true);
+    };
+    let next_count = ctx.entries_seen.saturating_add(1);
+    let next_path_bytes = ctx.path_bytes_seen.saturating_add(path.as_os_str().len());
+    let exceeded = next_count > limits.max_entries
+        || directory_entries >= limits.max_directory_entries
+        || next_path_bytes > limits.max_path_bytes;
+    if exceeded {
+        if ctx.mode == WalkMode::Strict {
+            omit(
+                ctx,
+                WalkOmission {
+                    path: path.to_path_buf(),
+                    stage: OmissionStage::ResourceBudget,
+                    error: io::Error::new(
+                        io::ErrorKind::OutOfMemory,
+                        "filesystem walk budget reached",
+                    ),
+                },
+            )?;
+        } else {
+            ctx.budget_exhausted = true;
+        }
+        return Ok(false);
+    }
+    ctx.entries_seen = next_count;
+    ctx.path_bytes_seen = next_path_bytes;
+    Ok(true)
 }
 
 /// Records that `dir` has been entered, returning whether it is newly visited.
@@ -242,29 +520,46 @@ fn track_canonical_visit(dir: &Path, visited_canonical: &mut HashSet<PathBuf>) -
     true
 }
 
-/// Reads `dir` and returns its entries, optionally in filename order,
-/// together with the items that arrived as errors.
+/// Reads a directory into a bounded working set and records item errors.
 ///
-/// A failed item carries no path of its own, so the errors come back
-/// alongside the entries for the caller to attribute to `dir`. Sorting by
-/// file name is what makes the walk's output deterministic across
-/// filesystems, which the determinism test below pins.
+/// Sorting by filename makes output deterministic across filesystems. With
+/// limits present, entry count, per-directory width and cumulative path bytes
+/// are charged before each `DirEntry` is retained.
 fn read_sorted_entries(
     dir: &Path,
+    logical_dir: &Path,
     sort_alphabetically: bool,
-) -> io::Result<(Vec<DirEntry>, Vec<io::Error>)> {
+    ctx: &mut WalkContext<'_>,
+) -> io::Result<Vec<DirEntry>> {
     let mut entries = Vec::new();
-    let mut item_errors = Vec::new();
     for item in fs::read_dir(dir)? {
         match item {
-            Ok(entry) => entries.push(entry),
-            Err(error) => item_errors.push(error),
+            Ok(entry) => {
+                let output_path = logical_dir.join(entry.file_name());
+                if !charge_entry(ctx, &output_path, entries.len())? {
+                    break;
+                }
+                entries.push(entry);
+            }
+            Err(error) => {
+                omit(
+                    ctx,
+                    WalkOmission {
+                        path: logical_dir.to_path_buf(),
+                        stage: OmissionStage::ReadEntries,
+                        error,
+                    },
+                )?;
+                if ctx.budget_exhausted {
+                    break;
+                }
+            }
         }
     }
     if sort_alphabetically {
         entries.sort_by_key(|entry| entry.file_name());
     }
-    Ok((entries, item_errors))
+    Ok(entries)
 }
 
 /// Resolves a symlink's target, relative to the directory holding the link.
@@ -315,8 +610,13 @@ fn resolve_symlink(
 /// Kept separate from the symlink path so the two ways of descending are
 /// readable side by side; `depth` is the depth of `path` itself, and
 /// `walk_recursive` is what bounds it against `options.max_depth`.
-fn handle_directory_entry(path: &Path, depth: usize, ctx: &mut WalkContext<'_>) -> io::Result<()> {
-    walk_recursive(path, depth, ctx)
+fn handle_directory_entry(
+    path: &Path,
+    logical_path: &Path,
+    depth: usize,
+    ctx: &mut WalkContext<'_>,
+) -> io::Result<()> {
+    walk_recursive(path, logical_path, depth, ctx)
 }
 
 /// Descends through a symlink entry when the options allow it.
@@ -327,13 +627,14 @@ fn handle_directory_entry(path: &Path, depth: usize, ctx: &mut WalkContext<'_>) 
 /// the link's own depth, so a chain of links cannot buy extra levels.
 fn handle_symlink_entry(
     target_dir: Option<PathBuf>,
+    logical_path: &Path,
     depth: usize,
     ctx: &mut WalkContext<'_>,
 ) -> io::Result<()> {
     if ctx.options.follow_symlinks
         && let Some(target_dir) = target_dir
     {
-        walk_recursive(&target_dir, depth, ctx)?;
+        walk_recursive(&target_dir, logical_path, depth, ctx)?;
     }
     Ok(())
 }
@@ -349,18 +650,19 @@ fn handle_symlink_entry(
 fn process_entry(
     entry: DirEntry,
     dir: &Path,
+    logical_dir: &Path,
     current_depth: usize,
     ctx: &mut WalkContext<'_>,
 ) -> io::Result<()> {
     let path = entry.path();
+    let logical_path = logical_dir.join(entry.file_name());
     let file_type = match entry.file_type() {
         Ok(file_type) => file_type,
         Err(error) => {
             return omit(
-                ctx.mode,
-                ctx.omissions,
+                ctx,
                 WalkOmission {
-                    path,
+                    path: logical_path,
                     stage: OmissionStage::EntryType,
                     error,
                 },
@@ -374,17 +676,16 @@ fn process_entry(
     // saturate.
     let next_depth = current_depth.saturating_add(1);
     if file_type.is_dir() {
-        ctx.out.push(path.clone());
-        handle_directory_entry(&path, next_depth, ctx)?;
+        ctx.out.push(logical_path.clone());
+        handle_directory_entry(&path, &logical_path, next_depth, ctx)?;
     } else if file_type.is_symlink() {
         let resolution = match resolve_symlink(dir, &path, ctx.canonical_root) {
             Ok(resolution) => resolution,
             Err(error) => {
                 omit(
-                    ctx.mode,
-                    ctx.omissions,
+                    ctx,
                     WalkOmission {
-                        path: path.clone(),
+                        path: logical_path.clone(),
                         stage: OmissionStage::SymlinkTarget,
                         error,
                     },
@@ -393,11 +694,11 @@ fn process_entry(
             }
         };
         if resolution.within_root {
-            ctx.out.push(path.clone());
+            ctx.out.push(logical_path.clone());
         }
-        handle_symlink_entry(resolution.directory, next_depth, ctx)?;
+        handle_symlink_entry(resolution.directory, &logical_path, next_depth, ctx)?;
     } else {
-        ctx.out.push(path.clone());
+        ctx.out.push(logical_path);
     }
     Ok(())
 }
@@ -411,12 +712,7 @@ fn process_entry(
 /// path-based read is not bound to this pathname; the
 /// surrounding before/after checks are best-effort only.
 fn check_directory_path(dir: &Path, canonical_root: &Path) -> io::Result<PathBuf> {
-    let canon = dir.canonicalize().map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("cannot resolve walked directory {}: {error}", dir.display()),
-        )
-    })?;
+    let canon = dir.canonicalize()?;
     if !canon.starts_with(canonical_root) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -447,8 +743,13 @@ fn check_directory_path(dir: &Path, canonical_root: &Path) -> io::Result<PathBuf
 /// swap forth and back inside the window, or replacement at the same path,
 /// remains invisible. A handle-relative platform API is required to close
 /// that threat model; the public contract says trusted-tree listing.
-fn walk_recursive(dir: &Path, current_depth: usize, ctx: &mut WalkContext<'_>) -> io::Result<()> {
-    if current_depth > ctx.options.max_depth {
+fn walk_recursive(
+    dir: &Path,
+    logical_dir: &Path,
+    current_depth: usize,
+    ctx: &mut WalkContext<'_>,
+) -> io::Result<()> {
+    if current_depth > ctx.options.max_depth || ctx.budget_exhausted {
         return Ok(());
     }
     if !track_canonical_visit(dir, ctx.visited) {
@@ -458,10 +759,9 @@ fn walk_recursive(dir: &Path, current_depth: usize, ctx: &mut WalkContext<'_>) -
         Ok(canonical_path) => canonical_path,
         Err(error) => {
             return omit(
-                ctx.mode,
-                ctx.omissions,
+                ctx,
                 WalkOmission {
-                    path: dir.to_path_buf(),
+                    path: logical_dir.to_path_buf(),
                     stage: OmissionStage::DirectoryResolution,
                     error,
                 },
@@ -470,35 +770,31 @@ fn walk_recursive(dir: &Path, current_depth: usize, ctx: &mut WalkContext<'_>) -
     };
     let out_len = ctx.out.len();
     let omissions_len = ctx.omissions.len();
-    let listed = match read_sorted_entries(dir, ctx.options.sort_alphabetically) {
-        Ok((entries, item_errors)) => {
-            for error in item_errors {
-                omit(
-                    ctx.mode,
-                    ctx.omissions,
-                    WalkOmission {
-                        path: dir.to_path_buf(),
-                        stage: OmissionStage::ReadEntries,
-                        error,
-                    },
-                )?;
-            }
-            entries
-        }
+    let listed = match read_sorted_entries(dir, logical_dir, ctx.options.sort_alphabetically, ctx) {
+        Ok(entries) => entries,
         Err(error) => {
+            if error
+                .get_ref()
+                .is_some_and(|source| source.is::<WalkFailure>())
+            {
+                return Err(error);
+            }
             return omit(
-                ctx.mode,
-                ctx.omissions,
+                ctx,
                 WalkOmission {
-                    path: dir.to_path_buf(),
+                    path: logical_dir.to_path_buf(),
                     stage: OmissionStage::ReadEntries,
                     error,
                 },
             );
         }
     };
+    let budget_reached_during_listing = ctx.budget_exhausted;
     for entry in listed {
-        process_entry(entry, dir, current_depth, ctx)?;
+        if ctx.budget_exhausted && !budget_reached_during_listing {
+            break;
+        }
+        process_entry(entry, dir, logical_dir, current_depth, ctx)?;
     }
     // The second canonical-path observation: anything read above is reported
     // only if the path string still resolves the same way. On a
@@ -509,22 +805,22 @@ fn walk_recursive(dir: &Path, current_depth: usize, ctx: &mut WalkContext<'_>) -
     // is recorded as the omission.
     match check_directory_path(dir, ctx.canonical_root) {
         Ok(again) if again == canonical_path => Ok(()),
-        Ok(_) | Err(_) => {
+        changed => {
             ctx.out.truncate(out_len);
             ctx.omissions.truncate(omissions_len);
+            let error = match changed {
+                Ok(_) => io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "walked directory changed canonical path during the read",
+                ),
+                Err(error) => error,
+            };
             omit(
-                ctx.mode,
-                ctx.omissions,
+                ctx,
                 WalkOmission {
-                    path: dir.to_path_buf(),
+                    path: logical_dir.to_path_buf(),
                     stage: OmissionStage::DirectoryResolution,
-                    error: io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "walked directory {} changed canonical path during the read",
-                            dir.display()
-                        ),
-                    ),
+                    error,
                 },
             )
         }
@@ -539,6 +835,9 @@ fn walk_recursive(dir: &Path, current_depth: usize, ctx: &mut WalkContext<'_>) -
 /// unstable), so this is the `fs-raw` feature's one primitive. It reports the
 /// bytes the calling user may actually write (`f_bavail * f_frsize`), not the
 /// filesystem's total size.
+///
+/// This is an advisory snapshot, not a reservation, quota guarantee, or
+/// promise that a later write will succeed.
 ///
 /// # Errors
 ///
@@ -609,10 +908,201 @@ mod tests {
             max_depth: 0,
             ..Default::default()
         };
-        let entries = walk_dir(tmp.path().join("a"), &opts)?;
+        let root = tmp.path().join("a").canonicalize()?;
+        let entries = walk_dir(&root, &opts)?;
         for entry in &entries {
-            assert_eq!(entry.parent(), Some(tmp.path().join("a").as_path()));
+            assert_eq!(
+                entry.parent(),
+                Some(root.as_path()),
+                "depth-zero paths remain under the resolved root"
+            );
         }
+        let report = walk_dir_tolerant(&root, &opts)?;
+        assert!(
+            report.is_complete_within_policy(),
+            "depth exclusion is complete within the selected policy"
+        );
+        assert_eq!(
+            report.policy().max_depth,
+            0,
+            "the report states its depth boundary"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn alias_order_keeps_one_absolute_logical_path_basis() -> std::io::Result<()> {
+        let cwd = std::env::current_dir()?;
+        let temp = tempfile::tempdir_in(&cwd)?;
+        let root = temp.path().join("before");
+        stdfs::create_dir_all(root.join("z-target"))?;
+        stdfs::write(root.join("z-target/file"), b"content")?;
+        std::os::unix::fs::symlink("z-target", root.join("b-middle"))?;
+        std::os::unix::fs::symlink("b-middle", root.join("a-alias"))?;
+
+        let options = WalkOptions {
+            follow_symlinks: true,
+            ..Default::default()
+        };
+        let absolute = walk_dir(&root, &options)?;
+        let relative_root = root.strip_prefix(&cwd).map_err(io::Error::other)?;
+        let relative = walk_dir(relative_root, &options)?;
+        let tolerant = walk_dir_tolerant(&root, &options)?;
+        assert_eq!(
+            absolute, relative,
+            "relative and absolute roots share one output basis"
+        );
+        assert_eq!(
+            absolute,
+            tolerant.entries(),
+            "strict and tolerant clean walks agree"
+        );
+        assert!(
+            absolute.iter().all(|path| path.is_absolute()),
+            "every emitted path is absolute"
+        );
+        assert!(
+            absolute.iter().any(|path| path.ends_with("a-alias/file")),
+            "alias provenance remains visible"
+        );
+        assert!(
+            !absolute.iter().any(|path| path.ends_with("z-target/file")),
+            "canonical target is deduplicated after the earlier alias"
+        );
+
+        let after = temp.path().join("after");
+        stdfs::create_dir_all(after.join("a-target"))?;
+        stdfs::write(after.join("a-target/file"), b"content")?;
+        std::os::unix::fs::symlink("a-target", after.join("z-alias"))?;
+        let entries = walk_dir(&after, &options)?;
+        assert!(
+            entries.iter().any(|path| path.ends_with("a-target/file")),
+            "earlier target traversal keeps its logical path"
+        );
+        assert!(
+            !entries.iter().any(|path| path.ends_with("z-alias/file")),
+            "later alias does not duplicate a visited target"
+        );
+        let depth_one = WalkOptions {
+            max_depth: 1,
+            follow_symlinks: options.follow_symlinks,
+            sort_alphabetically: options.sort_alphabetically,
+        };
+        let limited = walk_dir_tolerant(&after, &depth_one)?;
+        assert!(
+            limited.is_complete_within_policy(),
+            "depth exclusion is complete within its selected policy"
+        );
+        assert_eq!(
+            limited.policy().max_depth,
+            1,
+            "the report exposes the applied depth"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_walk_marks_prefix_and_strict_refusal() -> std::io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        for name in ["a", "b", "c"] {
+            stdfs::write(temp.path().join(name), b"x")?;
+        }
+        let options = WalkOptions::default();
+        let limits = WalkLimits::new(2, 2, 1024, 1);
+        let report = walk_dir_tolerant_bounded(temp.path(), &options, &limits)?;
+        assert_eq!(
+            report.entries().len(),
+            2,
+            "entry ceiling bounds the retained prefix"
+        );
+        assert!(
+            report.budget_exhausted(),
+            "budget exhaustion is visible in the report"
+        );
+        assert!(
+            !report.is_complete_within_policy(),
+            "a budget-limited prefix is incomplete"
+        );
+        let error = walk_dir_bounded(temp.path(), &options, &limits)
+            .err()
+            .ok_or_else(|| io::Error::other("strict bounded walk accepted an incomplete tree"))?;
+        let failure = error
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<WalkFailure>())
+            .ok_or_else(|| io::Error::other("strict error did not retain WalkFailure"))?;
+        assert_eq!(
+            failure.stage(),
+            OmissionStage::ResourceBudget,
+            "strict budget refusal preserves its stage"
+        );
+        assert_eq!(
+            failure.source_error().kind(),
+            io::ErrorKind::OutOfMemory,
+            "budget source remains typed as an io error"
+        );
+        let path_limits = WalkLimits::new(100, 100, 1, 10);
+        let path_report = walk_dir_tolerant_bounded(temp.path(), &options, &path_limits)?;
+        assert!(
+            path_report.entries().is_empty(),
+            "path-byte ceiling is charged before entry retention"
+        );
+        assert!(
+            path_report.budget_exhausted(),
+            "path-byte exhaustion is visible"
+        );
+        let directory_limits = WalkLimits::new(100, 1, 1024, 10);
+        let directory_report = walk_dir_tolerant_bounded(temp.path(), &options, &directory_limits)?;
+        assert_eq!(
+            directory_report.entries().len(),
+            1,
+            "per-directory sorting storage is independently bounded"
+        );
+        assert!(
+            directory_report.budget_exhausted(),
+            "per-directory overflow is reported"
+        );
+
+        let long_path_root = tempfile::tempdir()?;
+        let long_name = "x".repeat(180);
+        stdfs::write(long_path_root.path().join(long_name), b"x")?;
+        let long_path_limits = WalkLimits::new(100, 100, 128, 10);
+        let long_path_report =
+            walk_dir_tolerant_bounded(long_path_root.path(), &options, &long_path_limits)?;
+        assert!(
+            long_path_report.entries().is_empty(),
+            "long entry paths are refused before materialization"
+        );
+        assert!(
+            long_path_report.budget_exhausted(),
+            "long-path budget refusal is visible"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn omission_budget_marks_report_incomplete() -> std::io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        for index in 0..5 {
+            let name = format!("broken-{index}");
+            std::os::unix::fs::symlink(temp.path().join("missing"), temp.path().join(name))?;
+        }
+        let limits = WalkLimits::new(10, 10, 1024, 1);
+        let report = walk_dir_tolerant_bounded(temp.path(), &WalkOptions::default(), &limits)?;
+        assert_eq!(
+            report.omissions().len(),
+            1,
+            "omission flood is capped before growth"
+        );
+        assert!(
+            report.budget_exhausted(),
+            "dropped omission is reported as budget exhaustion"
+        );
+        assert!(
+            !report.is_complete_within_policy(),
+            "budget omission cannot look complete"
+        );
         Ok(())
     }
 
@@ -627,6 +1117,18 @@ mod tests {
         assert!(
             !entries.iter().any(|path| path.ends_with("h.txt")),
             "depth-2 file h.txt should be excluded"
+        );
+        let deep = tempfile::tempdir()?;
+        let mut current = deep.path().to_path_buf();
+        for _ in 0..24 {
+            current.push("d");
+            stdfs::create_dir(&current)?;
+        }
+        stdfs::write(current.join("leaf"), b"")?;
+        let deep_entries = walk_dir(deep.path(), &opts)?;
+        assert!(
+            !deep_entries.iter().any(|path| path.ends_with("leaf")),
+            "depth policy excludes leaves on a deep chain"
         );
         Ok(())
     }
@@ -665,6 +1167,11 @@ mod tests {
                 .any(|path| path.to_string_lossy().contains("secret")),
             "a symlink outside the root policy must be rejected"
         );
+        let report = walk_dir_tolerant(inner.path(), &opts)?;
+        assert!(
+            report.is_complete_within_policy(),
+            "outside-root symlink exclusion is complete within the declared policy"
+        );
         Ok(())
     }
 
@@ -685,6 +1192,11 @@ mod tests {
                 .iter()
                 .any(|path| path.to_string_lossy().contains("escape")),
             "symlink pointing outside the root must not appear in output"
+        );
+        let report = walk_dir_tolerant(inner.path(), &opts)?;
+        assert!(
+            report.is_complete_within_policy(),
+            "disabled symlink following is complete within the declared policy"
         );
         Ok(())
     }
@@ -782,7 +1294,11 @@ mod tests {
         );
         assert_eq!(report.omissions().len(), 1);
         assert_eq!(report.omissions()[0].stage, OmissionStage::ReadEntries);
-        assert_eq!(report.omissions()[0].path, locked);
+        assert_eq!(
+            report.omissions()[0].path,
+            locked.canonicalize()?,
+            "omission paths use the canonical-root coordinate basis"
+        );
         Ok(())
     }
 
@@ -793,6 +1309,15 @@ mod tests {
         let report = walk_dir_tolerant(tmp.path().join("a"), &WalkOptions::default())?;
         assert_eq!(report.entries(), strict);
         assert!(report.is_complete());
+        assert!(
+            report.is_complete_within_policy(),
+            "clean tree is complete within its policy"
+        );
+        assert_eq!(
+            report.policy().max_depth,
+            WalkOptions::default().max_depth,
+            "report carries applied depth policy"
+        );
         Ok(())
     }
 
@@ -806,7 +1331,23 @@ mod tests {
         std::os::unix::fs::symlink(tmp.path().join("gone"), &dangling)?;
         #[cfg(windows)]
         std::os::windows::fs::symlink_dir(tmp.path().join("gone"), &dangling)?;
-        assert!(walk_dir(&dangling, &WalkOptions::default()).is_err());
+        let error = walk_dir(&dangling, &WalkOptions::default())
+            .err()
+            .ok_or_else(|| io::Error::other("strict walk accepted an unresolved root"))?;
+        let failure = error
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<WalkFailure>())
+            .ok_or_else(|| io::Error::other("root refusal did not retain typed context"))?;
+        assert_eq!(
+            failure.path(),
+            dangling,
+            "root failure retains the requested path"
+        );
+        assert_eq!(
+            failure.stage(),
+            OmissionStage::RootResolution,
+            "root failure has its own stage"
+        );
         assert!(walk_dir_tolerant(&dangling, &WalkOptions::default()).is_err());
         Ok(())
     }
@@ -823,6 +1364,26 @@ mod tests {
             std::io::Error::other("strict walk silently accepted an unresolved symlink")
         })?;
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        let failure = error
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<WalkFailure>())
+            .ok_or_else(|| io::Error::other("strict error did not retain typed context"))?;
+        let canonical_link = tmp.path().canonicalize()?.join("broken-link");
+        assert_eq!(
+            failure.path(),
+            canonical_link,
+            "strict error retains the canonical-root logical link path"
+        );
+        assert_eq!(
+            failure.stage(),
+            OmissionStage::SymlinkTarget,
+            "strict error retains the failure stage"
+        );
+        assert_eq!(
+            failure.source_error().kind(),
+            io::ErrorKind::NotFound,
+            "strict error preserves the original source"
+        );
 
         let report = walk_dir_tolerant(tmp.path(), &WalkOptions::default())?;
         assert_eq!(
@@ -835,7 +1396,11 @@ mod tests {
             1,
             "the unread target is visible once"
         );
-        assert_eq!(report.omissions()[0].path, link);
+        assert_eq!(
+            report.omissions()[0].path,
+            canonical_link,
+            "tolerant omission uses the same canonical-root path basis"
+        );
         assert_eq!(report.omissions()[0].stage, OmissionStage::SymlinkTarget);
         assert_eq!(
             report.omissions()[0].error.kind(),
