@@ -92,7 +92,8 @@ were the exception: `join_all_bounded` ran 348,000 at 9.5 ms and `JoinSet`
 is the only Rust way that slowed. An `each` drives all its bodies on one task
 (see below), so one fan-out uses one core, as asyncio and Trio do on their
 single-threaded loops, and those three lost the most (loaded throughput 0.61,
-0.68 and 0.63 of idle). That is the likely reason `script!` slowed where the
+0.68 and 0.63 of idle), while the Node ways, also on one thread, lost less
+(0.76 and 0.93). That is the likely reason `script!` slowed where the
 hand-written Rust ways, which spread bodies across tokio's worker threads, did
 not; no variant isolates that factor. Every yes/no verdict in the invariants
 table was the same in both runs; some counts behind them moved, for example
@@ -170,12 +171,12 @@ Rust.** Median throughput is 435,000 items/s against 334,000 for
 `join_all_bounded` and 316,000 for `JoinSet`. Its slowest run (425,000) beat
 the fastest run of each hand-written way (339,000 and 355,000). Its p99 is
 higher and less steady: a median of 12.0 ms, 9.7-17.4 ms across runs, against
-9.4-9.6 ms for `join_all_bounded`. Its peak RSS is 13.6 MB against 7-9.5 MB.
-An `each` drives its bodies on the task that awaits it rather than spawning
-each as a task, which is what lets a body borrow the flow's locals with no
-`Arc` and no `'static` bound. It also means one fan-out uses one core, which
-is the likely reason it slowed under load when the hand-written Rust ways
-did not (see above). No variant isolates that factor, and why it comes out ahead when idle
+9.4-9.6 ms for `join_all_bounded`. Its peak RSS is 13.6 MB against 7-9.5 MB. An
+`each` drives its bodies on the task that awaits it rather than spawning each
+as a task, which is what lets a body borrow the flow's locals with no `Arc` and
+no `'static` bound. It also means one fan-out uses one core, which is the
+likely reason it slowed under load when the hand-written Rust ways did not (see
+above). No variant isolates that factor, and why it comes out ahead when idle
 was not measured. Go errgroup has the highest median, 458,000 items/s
 (448,000-471,000), with 29.4 MB; its range overlaps that of `script!`.
 `script!` needs 11 lines where the others need 23-46.
