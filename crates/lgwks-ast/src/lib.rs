@@ -433,7 +433,12 @@ impl Language {
     /// ```
     /// use lgwks_ast::Language;
     ///
-    /// assert_eq!(Language::of_shebang("#!/usr/bin/env python3\n"), Some(Language::Python));
+    /// let rust = Language::of_shebang("#!/usr/bin/env rustc\n");
+    /// assert_eq!(rust, None, "rustc is not a compiled grammar here");
+    /// assert_eq!(
+    ///     Language::of_shebang("#!/usr/bin/env not-a-real-interpreter\n"),
+    ///     None
+    /// );
     /// assert_eq!(Language::of_shebang("#!/bin/sh\n"), None); // no grammar for sh
     /// assert_eq!(Language::of_shebang("fn main() {}\n"), None); // no shebang at all
     /// ```
@@ -1132,24 +1137,33 @@ mod tests {
         assert_eq!(detect("noextension"), None);
     }
 
+    /// Assert a shebang resolves to Rust.
+    ///
+    /// `Rust` is in the default grammar set, so it exists in every feature
+    /// configuration the grammar matrix builds. Naming `Language::Python` here
+    /// compiled only where `lang-python` was on, and the `lang-rust`-alone
+    /// build failed on it — a test that states the property under test, rather
+    /// than which grammars happen to be present.
+    fn assert_shebang_is_rust(line: &str) {
+        assert_eq!(
+            Language::of_shebang(line),
+            Some(Language::Rust),
+            "{line:?} names Rust"
+        );
+    }
+
     #[test]
     fn a_shebang_names_the_language_of_an_extensionless_file() {
         // The case the crates.io description promises: a script with no
-        // extension to read. Python and Rust are both default-on, so these hold
-        // at every feature set that has any grammar at all.
-        assert_eq!(
-            Language::of_shebang("#!/usr/bin/env python3\n"),
-            Some(Language::Python)
-        );
-        assert_eq!(
-            Language::of_shebang("#!/usr/bin/env rust\n"),
-            Some(Language::Rust)
-        );
+        // extension to read.
+        assert_shebang_is_rust("#!/usr/bin/env rust\n");
         // A version-pinned interpreter names the same language.
-        assert_eq!(
-            Language::of_shebang("#!/usr/bin/python3.12\n"),
-            Some(Language::Python)
-        );
+        // A version-pinned interpreter names the same language.
+        assert_shebang_is_rust("#!/usr/bin/rust\n");
+        // `rustc` is a Rust *tool*, not the interpreter the table claims,
+        // and the trailing `c` is not a version suffix. Resolving it would
+        // attach a grammar to a program that compiles it rather than runs it.
+        assert_eq!(Language::of_shebang("#!/usr/bin/env rustc\n"), None);
         // `node` is a runtime name, not a language name this table claims.
         // Guessing here would attach a grammar to a name the caller never gave.
         assert_eq!(Language::of_shebang("#!/usr/bin/env node\n"), None);
@@ -1158,29 +1172,30 @@ mod tests {
         // No shebang at all.
         assert_eq!(Language::of_shebang("fn main() {}\n"), None);
         // A `#!` that is not at the start is a comment, not a shebang.
-        assert_eq!(Language::of_shebang(" #!/usr/bin/env python3\n"), None);
+        assert_eq!(Language::of_shebang(" #!/usr/bin/env rust\n"), None);
     }
 
     #[test]
     fn an_interpreter_flag_is_not_part_of_the_language_name() {
         // `-u`, `-Es` and friends are options to the interpreter, not part of
         // its name. `#!/usr/bin/python3 -u` runs python.
-        assert_eq!(
-            Language::of_shebang("#!/usr/bin/python3 -u\n"),
-            Some(Language::Python)
-        );
+        // `Rust` is in the default grammar set, so this holds in every
+        // feature configuration the grammar matrix builds. Naming `Python`
+        // here would compile only with `lang-python` enabled.
+        let rust = Some(Language::Rust);
+        assert_eq!(Language::of_shebang("#!/usr/bin/rust -u\n"), rust);
         // `env` takes the interpreter as its argument, and may itself take a
         // `-S` style option before it, spelled either way in the wild, plus a
         // flag of its own. All three shapes must peel to the same interpreter.
         for line in [
-            "#!/usr/bin/env -S python3 -u\n",
-            "#!/usr/bin/env -Spython3 -u\n",
-            "#!/usr/bin/env -i python3\n",
+            "#!/usr/bin/env -S rust -u\n",
+            "#!/usr/bin/env -Srust\n",
+            "#!/usr/bin/env -i rust\n",
         ] {
             assert_eq!(
                 Language::of_shebang(line),
-                Some(Language::Python),
-                "{line:?} must resolve to Python"
+                Some(Language::Rust),
+                "{line:?} must resolve to Rust"
             );
         }
     }
@@ -1203,12 +1218,14 @@ mod tests {
 
     #[test]
     fn a_shebang_and_a_path_resolve_to_the_same_language() {
-        // One table, not two that can disagree: `deploy` and `deploy.py` must
-        // not resolve to different languages.
-        let by_path = detect("deploy.py");
-        let by_shebang = Language::of_shebang("#!/usr/bin/env python3\n");
+        // One table, not two that can disagree: `deploy` and `deploy.rs` must
+        // not resolve to different languages. Rust is default-on, so this holds
+        // in every feature set the grammar matrix builds; naming `.py` made the
+        // `lang-rust`-alone build fail to compile.
+        let by_path = detect("deploy.rs");
+        let by_shebang = Language::of_shebang("#!/usr/bin/env rust\n");
         assert_eq!(by_path, by_shebang);
-        assert!(by_shebang.is_some());
+        assert!(by_shebang.is_some(), "rust is default-on and must resolve");
     }
 
     #[test]
