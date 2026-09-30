@@ -108,8 +108,18 @@ ci_step = "Check formatting"
 id = "tests"
 surfaces = "local ci"
 required = true
-command = "cargo nextest run --workspace --locked"
+# The storefront consumer builds run in their own lane and CI job: they are
+# nested cargo builds that serialize on one target-directory lock, and in the
+# Tests job they alone held the step at 441 s of a 513 s job.
+command = "cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)'"
 ci_step = "Run all workspace tests"
+
+[[lane]]
+id = "storefront-consumers"
+surfaces = "local ci"
+required = true
+command = "cargo nextest run --locked -p lgwks_deps --test storefront_consumers"
+ci_step = "Build storefront consumers"
 
 [[lane]]
 id = "simulation-evidence"
