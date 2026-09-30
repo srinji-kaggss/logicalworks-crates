@@ -148,7 +148,7 @@ def render(report):
         cell = cells["throughput"]
         out.append(f"| `{way}` | {span(cell, 'per_s')} | {cell['p50_ms']['median']:g} | "
                    f"{cell['p99_ms']['median']:g} | {cell['rss_mb']['median']:g} | {loc[way]} |")
-    out += ["", "**Failure behaviour** (worst case over every run):", "",
+    out += ["", "**Failure behaviour** (worst case over every run; the error text is from the first run):", "",
             "| way | failfast ms | failfast attempts | live at return (failfast / cancel / storm) | "
             "storm attempts | deadline ms | failfast error |", "|---|---:|---:|---|---:|---:|---|"]
     for way, cells in results.items():

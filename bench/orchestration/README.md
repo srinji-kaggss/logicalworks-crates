@@ -81,18 +81,22 @@ codegen units, `panic = "abort"` and `target-cpu=native`. The Rust ways
 compare fairly with each other; absolute numbers and comparisons across
 languages hold for this host only.
 
-An earlier run of the same harness, taken before this code landed and while
-other builds loaded the machine (one-minute load about 14 on 15 cores), is the
-one number here that is sensitive to load. Under that load, `script!` fell to
-267,000 items/s with a 35.9 ms p99, while `join_all_bounded` (348,000, 9.5 ms)
-and `JoinSet` (348,000, 9.4 ms) did not slow down. An `each` drives all its
-bodies on one task (see below), so a busy host costs it more than it costs
-ways that spawn a task per body. Every yes/no verdict in the invariants table
-was the same in both runs; some counts behind them moved, for example Trio's
-storm attempts (326 then 368) and the bodies left live by `JoinSet` and
-`join_all_bounded`. Lines are the code the author writes for the
-orchestration, counted between the `BEGIN`/`END` markers with comments and
-blanks left out.
+An earlier run of the same harness was taken while other builds were running on
+the machine. Its load was not recorded, and neither was the tree it built,
+except that it ran before this code landed, so load and code changes cannot be
+fully separated in it. In that run most ways were slower than they are here:
+`script!` ran 267,000 items/s with a 35.9 ms p99, asyncio 98,000, Trio 27,000,
+the Node pool 30,000 and Go errgroup 375,000. The two hand-written Rust ways
+were the exception: `join_all_bounded` ran 348,000 at 9.5 ms and `JoinSet`
+348,000 at 9.4 ms, no slower than their 334,000 and 316,000 here. So `script!`
+is the only Rust way that slowed. An `each` drives all its bodies on one task
+(see below), which is the likely reason a busy host costs it more than it costs
+ways that spawn a task per body; no variant isolates that factor. Every yes/no
+verdict in the invariants table was the same in both runs; some counts behind
+them moved, for example Trio's storm attempts (326 then 368) and the bodies
+left live by `JoinSet` and `join_all_bounded`. Lines are the code the author
+writes for the orchestration, counted between the `BEGIN`/`END` markers with
+comments and blanks left out.
 
 Median (min-max) of 5 runs per cell.
 
@@ -109,7 +113,7 @@ Median (min-max) of 5 runs per cell.
 | `node-pool` | 38780 (37603-39460) | 9.634 | 409.09 | 208.1 | 41 |
 | `node-effect` | 30154 (29272-30415) | 54.61 | 108.089 | 533.8 | 23 |
 
-**Failure behaviour** (worst case over every run):
+**Failure behaviour** (worst case over every run; the error text is from the first run):
 
 | way | failfast ms | failfast attempts | live at return (failfast / cancel / storm) | storm attempts | deadline ms | failfast error |
 |---|---:|---:|---|---:|---:|---|
@@ -168,10 +172,10 @@ higher and less steady: a median of 12.0 ms, 9.7-17.4 ms across runs, against
 An `each` drives its bodies on the task that awaits it rather than spawning
 each as a task, which is what lets a body borrow the flow's locals with no
 `Arc` and no `'static` bound. It also means one fan-out uses one core, which
-is the likely reason it slowed under load when the others did not (see
-above). No variant isolates that factor, and why it comes out ahead when idle
+is the likely reason it slowed under load when the hand-written Rust ways
+did not (see above). No variant isolates that factor, and why it comes out ahead when idle
 was not measured. Go errgroup has the highest median, 458,000 items/s
-(447,000-471,000), with 29.4 MB; its range overlaps that of `script!`.
+(448,000-471,000), with 29.4 MB; its range overlaps that of `script!`.
 `script!` needs 11 lines where the others need 23-46.
 
 This comparison already led to one fix. `script!` used to mint a cancellation
