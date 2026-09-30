@@ -8,7 +8,7 @@
 # its claim rather than rewriting the entry to match.
 Cargo.toml:115	print_stderr = "forbid"
 Cargo.toml:116	print_stdout = "forbid"
-crates/lgwks-ast/src/lib.rs:54	//! The two bounds are not interchangeable. [`MAX_SOURCE_BYTES`] bounds the
+crates/lgwks-ast/src/lib.rs:54	//! point for anything else is a caller-registered parser. [`CustomLang`] is
 crates/lgwks-bot/src/cap.rs:15	//! before acting. This stops confused-deputy calls and accidental ungated
 crates/lgwks-bot/src/cap.rs:53	pub const NET: &str = "bot.net";
 crates/lgwks-bot/src/cap.rs:64	pub fn new(name: impl Into<Cow<'static, str>>) -> Self {
@@ -98,6 +98,6 @@ crates/lgwks-bot/src/spec.rs:621	let auth: Auth = grants.issue(self.0.required_c
 crates/lgwks-bot/src/spec.rs:666	pub fn from_json(source: &str) -> Result<Self, BotError> {
 crates/lgwks-deps/src/lib.rs:15	//! remote CI. It reads `cargo metadata --no-deps`, not the transitive lockfile
 crates/lgwks-deps/src/lib.rs:76	pub mod scan;
-crates/lgwks-deps/src/lib.rs:553	pub fn check_dependencies(root: &Path) -> Result<(Contract, Vec<Refusal>), GateError> {
+crates/lgwks-deps/src/lib.rs:574	pub fn check_dependencies(root: &Path) -> Result<(Contract, Vec<Refusal>), GateError> {
 crates/lgwks-std/src/task.rs:265	/// Run `job` on a dedicated OS thread and return a future for its result.
 docs/guidance-runner-spec.md:193	`review`.

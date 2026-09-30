@@ -416,8 +416,8 @@ impl Language {
     ///
     /// The interpreter is matched against the language's canonical name with a
     /// version allowed, so `python3`, `python3.12` and `python` all resolve to
-    /// Python — see [`is_versioned_name_of`] for why that is one rule rather
-    /// than a second table of interpreter names to keep in step with this one.
+    /// Python. That is one rule (`is_versioned_name_of`) rather than a second
+    /// table of interpreter names to keep in step with this one.
     ///
     /// This is a heuristic and is documented as one: a file whose first line is
     /// `#!/usr/bin/env c` is probably not C, and the ambiguity is the caller's

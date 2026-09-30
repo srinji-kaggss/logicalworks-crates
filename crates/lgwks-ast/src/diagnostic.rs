@@ -295,8 +295,8 @@ impl<'src> LineIndex<'src> {
 /// [`Severity::Warning`] carrying the exact span of the offending text, so a
 /// caller can underline it. A clean tree yields an empty `Vec`.
 ///
-/// `language` names the grammar in each message; see [`recovery_message`] for
-/// why it is a parameter.
+/// `language` names the grammar in each message; `recovery_message` is why it
+/// is a parameter rather than something read off the node.
 ///
 /// The reported order is source order, whatever shape the tree is, because a
 /// reader scanning a list of findings expects to walk down the file.
@@ -431,7 +431,7 @@ fn visit_each_node_measuring<'t, L: LanguageExt>(
 /// One walk, run for its side effect of measuring. Test-only by construction:
 /// it exists so INV-AST-1's resource claim is asserted against the walk that
 /// actually ships rather than against a copy of it.
-#[cfg(test)]
+#[cfg(all(test, feature = "lang-rust"))]
 #[must_use]
 fn peak_retained_frames<L: LanguageExt>(root: &AstNode<'_, L>) -> usize {
     let mut peak = 0_usize;

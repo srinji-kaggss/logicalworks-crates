@@ -1,6 +1,6 @@
 //! Handle-relative filesystem access: the answer to a hostile tree.
 //!
-//! [`walk_dir`](super::walk_dir) identifies files by *path*, and INV-FS-2 says
+//! [`crate::fs::walk_dir`] identifies files by *path*, and INV-FS-2 says
 //! plainly that its identity rechecks are best-effort. That is the right
 //! tradeoff for a trusted tree and the wrong one for a directory another
 //! process can rewrite while you walk it: between the `stat` that says "this is
@@ -27,6 +27,11 @@
 //! [`OpenFlags`] where the caller states [`SymlinkPolicy`], because "follow" is
 //! a policy decision with a security consequence and the default must be the one
 //! that cannot escape.
+//!
+//! [`Dir`]: struct.Dir
+//! [`Dir::open_entry`]: struct.Dir.html#method.open_entry
+//! [`OpenFlags`]: struct.OpenFlags.html
+//! [`SymlinkPolicy`]: enum.SymlinkPolicy.html
 
 use std::ffi::OsString;
 use std::io;
@@ -36,7 +41,7 @@ use std::path::Path;
 
 /// A directory held open, for handle-relative access to what it contains.
 ///
-/// Usable as a walk cursor: [`Dir::try_clone`] gives another reference to the
+/// Usable as a walk cursor: [`self::Dir::try_clone`] gives another reference to the
 /// *same* directory, and dropping every one closes its own descriptor. It is
 /// deliberately not `Clone` — see that method for why duplicating the
 /// descriptor can fail and is not allowed to be silently swallowed.
@@ -62,7 +67,7 @@ pub enum SymlinkPolicy {
     /// A *relative* target is still resolved by the kernel from this
     /// descriptor, so it stays within this directory's resolution path. An
     /// *absolute* target escapes it, because absolute means absolute; use
-    /// [`Dir::read_link`] to inspect one before opening it.
+    /// [`self::Dir::read_link`] to inspect one before opening it.
     FollowFinal,
 }
 
@@ -72,7 +77,7 @@ pub enum SymlinkPolicy {
 pub enum FileKind {
     /// A regular file.
     File,
-    /// A directory, safe to descend into with [`Dir::open_subdir`].
+    /// A directory, safe to descend into with [`self::Dir::open_subdir`].
     Directory,
     /// A symbolic link. Its target is not resolved by `kind`.
     Symlink,
