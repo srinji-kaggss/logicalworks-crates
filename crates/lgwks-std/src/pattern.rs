@@ -514,6 +514,11 @@ impl BoundedString {
         }
     }
     /// Append text only if the full append fits and allocation succeeds.
+    ///
+    /// Capacity grows geometrically, as `String` itself would, but never past
+    /// the ceiling: an exact reservation per append made a replacement with
+    /// many small matches reallocate on every append, which is quadratic
+    /// copying, while an unclamped doubling could reserve twice the limit.
     fn push_str(&mut self, value: &str) -> Result<(), PatternRunError> {
         let attempted = match self.value.len().checked_add(value.len()) {
             Some(attempted) => attempted,
@@ -525,9 +530,16 @@ impl BoundedString {
                 attempted,
             });
         }
-        self.value
-            .try_reserve_exact(value.len())
-            .map_err(|_| PatternRunError::AllocationFailed)?;
+        if self.value.capacity() < attempted {
+            let target = self
+                .value
+                .len()
+                .saturating_mul(2)
+                .clamp(attempted, self.limit);
+            self.value
+                .try_reserve_exact(target.saturating_sub(self.value.len()))
+                .map_err(|_| PatternRunError::AllocationFailed)?;
+        }
         self.value.push_str(value);
         Ok(())
     }
@@ -579,12 +591,12 @@ fn expand_replacement(
         };
         output.push_str(&replacement[literal_start..cursor])?;
         let name = &replacement[name_start..reference_end];
-        let matched = if !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()) {
-            name.parse::<usize>()
-                .ok()
-                .and_then(|index| captures.get(index))
-        } else {
-            captures.name(name)
+        // The engine's own rule, so `${+1}` is group 1 here exactly as it is in
+        // `regex::Captures::expand`: whatever `usize::from_str` accepts is a
+        // group number, and anything else is a group name.
+        let matched = match name.parse::<usize>() {
+            Ok(index) => captures.get(index),
+            Err(_) => captures.name(name),
         };
         if let Some(matched) = matched {
             output.push_str(matched.as_str())?;
@@ -708,6 +720,49 @@ mod tests {
                 attempted: 6
             })
         );
+        Ok(())
+    }
+
+    /// The bounded expander is a second implementation of the engine's
+    /// replacement syntax, so it is held to byte-for-byte agreement with the
+    /// engine on the templates where a hand-written parser drifts: signed and
+    /// zero-padded group numbers, an index that overflows `usize`, names that
+    /// start with digits, and every unterminated or bare `$`.
+    #[test]
+    fn bounded_replacement_expands_exactly_like_the_engine()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pattern = r"(?<name>a)(b)";
+        let unbounded = Regex::new(pattern)?;
+        let bounded = Regex::with_config(pattern, config(64, 4096))?;
+        for template in [
+            "${+1}",
+            "$1a",
+            "${1}a",
+            "$01",
+            "${01}",
+            "$",
+            "a$",
+            "$-",
+            "${",
+            "${unclosed",
+            "$$1",
+            "$$$1",
+            "${name}",
+            "$name",
+            "$name$2",
+            "$99999999999999999999",
+            "${99999999999999999999}",
+            "${ 1}",
+            "${}",
+            "$0$0",
+            "é$2é",
+        ] {
+            assert_eq!(
+                bounded.replace_all("abxab", template)?,
+                unbounded.replace_all("abxab", template),
+                "template {template:?} must expand as the engine expands it"
+            );
+        }
         Ok(())
     }
 

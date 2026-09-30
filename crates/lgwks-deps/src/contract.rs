@@ -642,8 +642,13 @@ fn decode_enforce(value: &str, line_no: usize) -> Result<bool, ContractError> {
 
 /// Decodes a single-line TOML v1.0 basic string used by either register schema.
 ///
-/// Delimiters, standard escapes and Unicode scalar escapes are decoded. Literal
-/// and multiline strings are outside this register subset and refused.
+/// Every TOML escape is recognised, but a register value may not contain a
+/// control character, raw or decoded: `\b`, `\t`, `\n`, `\f`, `\r` and any
+/// `\u`/`\U` escape naming a control character are refused with their own
+/// reason rather than as unknown escapes. What a value can carry is therefore
+/// printable text plus `\"`, `\\` and non-control Unicode escapes. This is
+/// stricter than TOML, which admits a raw tab, and it fails closed. Literal and
+/// multiline strings are outside this register subset and refused.
 fn decode_string(value: &str, key: &str, line: usize) -> Result<String, ContractError> {
     let invalid = |reason| ContractError::InvalidString {
         line,

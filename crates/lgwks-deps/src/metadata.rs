@@ -126,9 +126,10 @@ impl DependencySource {
 /// only for an edge with no `source` key whose manifest-relative `path`
 /// resolves into a workspace member's manifest directory, and `source`
 /// separates a registry package from a path copy that happens to share its
-/// name. A path edge Cargo cannot locate — no `path` key, no declaring
-/// manifest directory, or an escape past the root — is external, never
-/// internal by name.
+/// name. A path edge Cargo cannot locate — no `path` key, or an escape past
+/// the root — is external, never internal by name. A workspace member with no
+/// manifest directory never gets this far: `parse` refuses the whole document
+/// as a schema error before any edge is classified.
 ///
 /// Read approval-relevant identity through accessors so callers cannot mutate
 /// the graph after Cargo's metadata has been parsed:
@@ -1286,6 +1287,19 @@ mod tests {
         OWNED_CAPTURES.with(|paths| std::mem::take(&mut *paths.borrow_mut()))
     }
 
+    /// Retries cleanup for the same bounded quanta `Drop` allows. A killed
+    /// child is not reaped the instant the signal lands, so one
+    /// `retry_cleanup` legitimately reports `false` on a loaded host.
+    fn retry_until_resolved(obligation: &mut CleanupObligation) -> std::io::Result<bool> {
+        for _ in 0..DROP_CLEANUP_QUANTA {
+            if obligation.retry_cleanup()? {
+                return Ok(true);
+            }
+            poll_quantum();
+        }
+        obligation.retry_cleanup()
+    }
+
     fn assert_paths_removed(paths: &[PathBuf]) -> TestResult {
         for path in paths {
             assert_eq!(
@@ -1434,6 +1448,7 @@ mod tests {
             "id": "path+file:///repo#app@0.1.0",
             "name": "app",
             "repository": "https://example.invalid/app",
+            "manifest_path": "/repo/Cargo.toml",
             "dependencies": [
               {"name":"serde","source":"registry+https://github.com/rust-lang/crates.io-index","req":"^1","kind":null,"optional":true,"path":null},
               {"name":"proptest","source":"registry+https://github.com/rust-lang/crates.io-index","req":"^1.6","kind":"dev","optional":false,"path":null}
@@ -1461,7 +1476,8 @@ mod tests {
     fn ignores_non_workspace_transitives() -> TestResult {
         let input = r#"{
           "packages": [
-            {"id":"path+file:///repo#app@0.1.0","name":"app","repository":null,"dependencies":[]},
+            {"id":"path+file:///repo#app@0.1.0","name":"app","repository":null,
+             "manifest_path":"/repo/Cargo.toml","dependencies":[]},
             {"id":"registry+x#serde@1.0.0","name":"serde","repository":null,"dependencies":[]}
           ],
           "workspace_members": ["path+file:///repo#app@0.1.0"]
@@ -1896,7 +1912,7 @@ mod tests {
             };
             assert!(process.is_some(), "fault {failure:?} must remain visible");
             assert!(
-                obligation.retry_cleanup()?,
+                retry_until_resolved(&mut obligation)?,
                 "retry should finish owned cleanup"
             );
             assert_paths_removed(&captured_paths())?;
@@ -1926,17 +1942,18 @@ mod tests {
         let retained = obligation.captures.paths.clone();
         assert_eq!(retained.len(), 1, "the unresolved path stays owned");
         assert!(std::fs::metadata(&retained[0]).is_ok());
-        assert!(obligation.retry_cleanup()?);
+        assert!(retry_until_resolved(&mut obligation)?);
         assert_paths_removed(&retained)?;
         assert!(FAULTS.with(|faults| faults.borrow().is_empty()));
         Ok(())
     }
 
-    /// Fail closed when the declaring package has no manifest directory to
-    /// resolve against: a path edge Cargo cannot locate is external, never
-    /// internal by name.
+    /// A declaring member with no manifest directory has nothing to resolve a
+    /// path edge against. Before #158 the edge was classified external; now
+    /// the member itself is an identity defect, so the whole document is
+    /// refused rather than any edge being classified from it.
     #[test]
-    fn a_path_edge_without_a_locatable_declarer_is_external() -> TestResult {
+    fn a_path_edge_whose_declarer_has_no_manifest_is_refused() {
         let input = r#"{
           "packages": [
             {"id":"path+file:///repo#app@0.1.0","name":"app","repository":null,
@@ -1950,13 +1967,12 @@ mod tests {
           ],
           "workspace_members": ["path+file:///repo#app@0.1.0","path+file:///repo/helper#helper@0.1.0"]
         }"#;
-        let edges = parse(input)?;
-        assert_eq!(edges.len(), 1);
         assert!(
-            !edges[0].workspace,
-            "an unresolvable path target must fail closed to external"
+            matches!(
+                parse(input),
+                Err(MetadataError::Schema(message)) if message.contains("has no manifest_path")
+            ),
+            "a member without a manifest must be refused, not classified"
         );
-        assert_eq!(edges[0].target_repository, None);
-        Ok(())
     }
 }
