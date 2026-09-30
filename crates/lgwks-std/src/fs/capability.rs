@@ -152,7 +152,9 @@ impl Dir {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let fd = rustix::fs::open(
             path.as_ref(),
-            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC,
             rustix::fs::Mode::empty(),
         )
         .map_err(errno_to_io)?;
@@ -276,8 +278,7 @@ impl Dir {
     /// The OS error, including `EEXIST` when the name is taken.
     pub fn create_dir(&self, name: &str) -> io::Result<()> {
         let component = single_component(name)?;
-        rustix::fs::mkdirat(self.fd.as_fd(), &component, user_directory_mode())
-            .map_err(errno_to_io)
+        rustix::fs::mkdirat(self.fd.as_fd(), &component, user_directory_mode()).map_err(errno_to_io)
     }
 
     /// Remove the directory `name` within `self`.
@@ -641,7 +642,10 @@ mod tests {
         // Now the name is repointed at different contents: the victim's name is
         // swapped for the attacker's, entry by entry, exactly as a concurrent
         // writer with write access to the parent would do it.
-        stdfs::rename(tmp.path().join("attacker/secret.txt"), tmp.path().join("victim/secret.txt"))?;
+        stdfs::rename(
+            tmp.path().join("attacker/secret.txt"),
+            tmp.path().join("victim/secret.txt"),
+        )?;
         stdfs::remove_file(tmp.path().join("victim/secret.txt"))?;
         stdfs::write(tmp.path().join("victim/secret.txt"), b"attacker bytes")?;
 
@@ -686,7 +690,11 @@ mod tests {
             "`..` is refused before the kernel sees it"
         );
         // And the refusal is total: no spelling of the parent gets through.
-        assert!(inside.open_entry("../outside.txt", OpenFlags::read()).is_err());
+        assert!(
+            inside
+                .open_entry("../outside.txt", OpenFlags::read())
+                .is_err()
+        );
         Ok(())
     }
 
@@ -731,7 +739,11 @@ mod tests {
             dir.remove_dir("d").is_err(),
             "rmdir must not delete a subtree; callers remove entries themselves"
         );
-        assert_eq!(dir.kind("d")?, FileKind::Directory, "the directory survived");
+        assert_eq!(
+            dir.kind("d")?,
+            FileKind::Directory,
+            "the directory survived"
+        );
         Ok(())
     }
 
@@ -791,7 +803,11 @@ mod tests {
             ..OpenFlags::read()
         };
         let mut file = dir.open_entry("link", flags)?;
-        assert_eq!(read_all(&mut file)?, "secret", "following is a stated choice");
+        assert_eq!(
+            read_all(&mut file)?,
+            "secret",
+            "following is a stated choice"
+        );
         Ok(())
     }
 

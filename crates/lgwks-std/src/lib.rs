@@ -8,12 +8,15 @@
 //! default build carries `core` **and `trace`**: this workspace forbids
 //! `println!` in library code and names `tracing` as the replacement, so a
 //! build without `trace` would leave that rule with nothing to point at.
-//! `--no-default-
-//! features --features core` restores a genuinely zero-dependency build.
+//! `--no-default-features --features core` restores a genuinely
+//! zero-dependency build. (Kept on one line on purpose: rustdoc joins these
+//! lines but not a word broken across them, so a wrapped flag renders as a
+//! flag nobody can paste.)
 //!
 //! ## Feature map
 //!
-//! - `core` (default) — encoding, fs, glob, hex, leb128, retry, task, time. Zero deps.
+//! - `core` (default) — encoding, fs, glob, hex, leb128, retry, similarity,
+//!   task, time. Zero deps.
 //! - `trace` (default) — trace. Adds `tracing` plus the default subscriber
 //!   bootstrap (`std` only; no `attributes`, so no `syn`).
 //! - `random` — random, id. Adds `getrandom`.
@@ -27,7 +30,12 @@
 //! - `fs-raw` — `fs::available_space`, and `fs::capability::Dir`: handle-relative
 //!   access (`openat`/`statat`/`unlinkat`/`mkdirat`/`readlinkat`) for trees that
 //!   are being rewritten while you walk them. Adds `rustix` (Unix-only).
-//! - `process` — process::kill_process_group. Adds `rustix/process` (Unix-only).
+//! - `process` — the two supervised-subprocess primitives:
+//!   `process::kill_process_group` (signal a whole group) and
+//!   `process::child_has_exited_without_reaping` (observe an exit *without*
+//!   releasing the pid, which is what stops the OS reissuing a group id under a
+//!   supervisor that still owes signals to it). Adds `rustix/process`
+//!   (Unix-only).
 //! - `full` — all of the above.
 //!
 //! Lint contract: workspace `missing_docs` deny, `unsafe_code` forbid,
