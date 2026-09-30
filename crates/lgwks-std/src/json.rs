@@ -13,34 +13,43 @@ pub use serde_json::{Deserializer, Error, Map, Number, Value, json};
 // ── Encoding ────────────────────────────────────────────────────────────────
 
 /// Serialize `value` to a compact JSON string (no whitespace, no newlines).
-pub fn to_string<T: Serialize>(value: &T) -> Result<String, Error> {
+pub fn to_string<T: Serialize + ?Sized>(value: &T) -> Result<String, Error> {
     serde_json::to_string(value)
 }
 
 /// Serialize `value` to a pretty-printed JSON string with indentation.
-pub fn to_string_pretty<T: Serialize>(value: &T) -> Result<String, Error> {
+pub fn to_string_pretty<T: Serialize + ?Sized>(value: &T) -> Result<String, Error> {
     serde_json::to_string_pretty(value)
 }
 
 /// Serialize `value` to a byte vector (compact JSON).
-pub fn to_vec<T: Serialize>(value: &T) -> Result<Vec<u8>, Error> {
+pub fn to_vec<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, Error> {
     serde_json::to_vec(value)
 }
 
 /// Serialize `value` to a writer.
-pub fn to_writer<W: std::io::Write, T: Serialize>(writer: W, value: &T) -> Result<(), Error> {
+pub fn to_writer<W: std::io::Write, T: Serialize + ?Sized>(
+    writer: W,
+    value: &T,
+) -> Result<(), Error> {
     serde_json::to_writer(writer, value)
 }
 
 // ── Decoding ────────────────────────────────────────────────────────────────
 
-/// Deserialize a JSON string into the requested type.
-pub fn from_str<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, Error> {
+/// Deserialize JSON while allowing unescaped strings to borrow from `text`.
+///
+/// Escaped strings need decoded storage and therefore cannot deserialize into
+/// a borrowed `&str`; use an owned `String` field for inputs that may escape.
+pub fn from_str<'de, T: serde::Deserialize<'de>>(text: &'de str) -> Result<T, Error> {
     serde_json::from_str(text)
 }
 
-/// Deserialize a JSON byte slice into the requested type.
-pub fn from_slice<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
+/// Deserialize JSON while allowing unescaped strings to borrow from `bytes`.
+///
+/// Escaped strings need decoded storage and therefore cannot deserialize into
+/// a borrowed `&str`; use an owned `String` field for inputs that may escape.
+pub fn from_slice<'de, T: serde::Deserialize<'de>>(bytes: &'de [u8]) -> Result<T, Error> {
     serde_json::from_slice(bytes)
 }
 
@@ -59,7 +68,7 @@ pub fn from_value<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, Err
 
 /// Build a [`Value`] tree from `value`. Fails when `value` contains a map whose
 /// keys are not strings, or when its `Serialize` impl reports an error.
-pub fn to_value<T: Serialize>(value: &T) -> Result<Value, Error> {
+pub fn to_value<T: Serialize + ?Sized>(value: &T) -> Result<Value, Error> {
     serde_json::to_value(value)
 }
 
@@ -74,6 +83,11 @@ mod tests {
     struct Point {
         x: i32,
         y: i32,
+    }
+
+    #[derive(Deserialize)]
+    struct Borrowed<'a> {
+        value: &'a str,
     }
 
     // These tests return `Result` rather than unwrapping: a JSON refusal
@@ -109,5 +123,91 @@ mod tests {
     fn from_str_rejects_invalid() {
         let result: Result<Point, _> = from_str("{");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn unescaped_string_fields_borrow_from_text_and_slice() -> Result<(), Error> {
+        let text = r#"{"value":"borrowed"}"#;
+        let decoded: Borrowed<'_> = from_str(text)?;
+        assert_eq!(
+            decoded.value, "borrowed",
+            "the parsed field retains its value"
+        );
+        assert!(
+            text.as_ptr() <= decoded.value.as_ptr()
+                && decoded.value.as_ptr() < text.as_ptr().wrapping_add(text.len()),
+            "unescaped JSON text borrows from the supplied input"
+        );
+
+        let bytes = text.as_bytes();
+        let decoded: Borrowed<'_> = from_slice(bytes)?;
+        assert_eq!(
+            decoded.value, "borrowed",
+            "the parsed slice field retains its value"
+        );
+        assert!(
+            bytes.as_ptr() <= decoded.value.as_ptr()
+                && decoded.value.as_ptr() < bytes.as_ptr().wrapping_add(bytes.len()),
+            "unescaped JSON slice text borrows from the supplied input"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn escaped_string_cannot_be_returned_as_a_borrowed_str() {
+        let result: Result<Borrowed<'_>, _> = from_str(r#"{"value":"line\nfeed"}"#);
+        assert!(
+            result.is_err(),
+            "escaped JSON text requires owned decoded storage"
+        );
+    }
+
+    #[test]
+    fn borrowed_serializers_accept_str_and_slices() -> Result<(), Error> {
+        let text: &str = "plain";
+        assert_eq!(to_string(text)?, "\"plain\"", "str serializes directly");
+        assert_eq!(
+            to_string_pretty(text)?,
+            "\"plain\"",
+            "pretty serialization accepts str"
+        );
+        assert_eq!(
+            to_vec([1, 2].as_slice())?,
+            b"[1,2]",
+            "slices serialize directly"
+        );
+        let mut output = Vec::new();
+        to_writer(&mut output, [1, 2].as_slice())?;
+        assert_eq!(output, b"[1,2]", "writer serialization accepts slices");
+        assert_eq!(
+            to_value([1, 2].as_slice())?,
+            Value::Array(vec![Value::from(1), Value::from(2)]),
+            "value-tree serialization accepts slices"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_errors_keep_utf8_location_and_trailing_content_details() {
+        let invalid_utf8: Result<Point, _> = from_slice(&[0xFF]);
+        assert!(
+            matches!(invalid_utf8, Err(error) if error.classify() == serde_json::error::Category::Syntax),
+            "invalid UTF-8 is a syntax failure through the facade"
+        );
+
+        let malformed: Result<Point, _> = from_str("{\n  \"x\": }");
+        assert!(
+            malformed
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.line() == 2 && error.column() > 0),
+            "syntax errors retain their source line and column"
+        );
+
+        let trailing: Result<Point, _> = from_str(r#"{"x":1,"y":2} trailing"#);
+        assert!(
+            matches!(trailing, Err(error) if error.classify() == serde_json::error::Category::Syntax),
+            "non-whitespace trailing content remains a syntax error"
+        );
     }
 }

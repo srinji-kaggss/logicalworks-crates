@@ -82,6 +82,29 @@ let point: Point = json::from_str(r#"{"x":1,"y":2}"#).expect("valid JSON");
 > `cannot find serde in this scope`, add the attribute rather than running
 > `cargo add serde`; `lgwks-deps check` refuses that edge.
 
+The RON-only feature re-exports the same derive support path from
+`lgwks_std::ron::serde`; it does not require `json` or a direct `serde`
+dependency:
+
+```rust
+use lgwks_std::ron;
+
+#[derive(ron::Serialize, ron::Deserialize)]
+#[serde(crate = "lgwks_std::ron::serde")]
+struct Settings<'a> { name: &'a str }
+```
+
+JSON and RON text/slice decoders can borrow unescaped string fields from their
+input. Escaped strings require decoded storage: use `String` when input may
+contain escapes. JSON reader decoding remains owned because the input is read
+through a temporary buffer. RON's `to_writer` renders before writing, so a
+serialization error leaves the writer untouched, while an I/O error may leave
+a prefix. Its return type is `ron::WriterError`, with distinct `Serialize`
+and `Write` variants and the original cause available through `Error::source`;
+callers that matched `ron::Error` should update those matches. The previous
+`write_all failed after {n} bytes` display text is removed because that count
+was not observed; the facade defines no serialized error representation.
+
 ## Feature map
 
 One manifest key, three alternative lines. Use exactly one of them:

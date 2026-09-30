@@ -120,10 +120,11 @@ Import from the in-tree column. "Feature" is the `lgwks_std` cargo feature.
 The measured source for each row is the module header in
 `crates/lgwks-std/src/*.rs`; the register rows are `contract/APPROVED.toml`.
 
-**serde derive, downstream.** `lgwks_std::json` re-exports the `serde` crate and
-the `Serialize`/`Deserialize` derives, but serde's derive macro resolves a
-`serde` crate path. The gate forbids a consumer declaring `serde` directly
-(`allowed_consumers = lgwks_std`), so annotate the type:
+**serde derive, downstream.** `lgwks_std::json` and `lgwks_std::ron` each
+re-export the `serde` crate and the `Serialize`/`Deserialize` derives, but
+serde's derive macro resolves a `serde` crate path. The gate forbids a consumer
+declaring `serde` directly (`allowed_consumers = lgwks_std`), so annotate the
+type with the facade selected by the feature:
 
 ```rust
 use lgwks_std::json;
@@ -133,7 +134,22 @@ use lgwks_std::json;
 struct Doc { n: u32 }
 ```
 
-Verified downstream with no direct `serde` dependency.
+For RON-only consumers, use `#[serde(crate = "lgwks_std::ron::serde")]`; that
+path is available with `ron` alone and does not activate JSON. The text and
+slice decode entry points borrow unescaped strings from their input where the
+decoder supports it. Escaped strings need owned storage; JSON reader decoding
+remains owned.
+
+`lgwks_std::ron::to_writer` renders the value before touching the writer, then
+streams the rendered bytes with `write_all`. A serialization failure writes
+nothing; an I/O failure may leave a prefix, and `write_all` does not expose an
+accepted-byte count. Its `ron::WriterError` distinguishes serialization from
+I/O and preserves each original cause. Callers that previously matched
+`ron::Error` must migrate to `WriterError::Serialize` or `WriterError::Write`.
+The `Display` text also changes: the former fabricated `write_all failed after
+{n} bytes` count is removed. These errors have no facade-defined serialized
+representation, and no in-repository caller of `ron::to_writer` needs a source
+migration.
 
 ## 4. Worked example: `tokio`
 
@@ -257,11 +273,10 @@ artifact that governs.
 
 The consequence for the row above is not "where do logs go" but *whether there
 is a log at all*. A diagnostic the caller will need belongs in the return type:
-carry the byte count, the rejected shape, or the failing field in the error
-variant, rather than narrating it to a stream the caller may not be reading. The
-workspace's own crates follow this rule: `lgwks_std::ron` reports
-`write_all failed after {n} bytes: {error}` in the error value instead of on
-stderr, because a library cannot be silenced by its caller.
+carry only facts the operation actually observed, rather than narrating them to
+a stream the caller may not be reading. `lgwks_std::ron::to_writer` preserves
+the original I/O error and reports no byte count because `write_all` does not
+expose how much of a failing write the writer accepted.
 
 A **binary** still has to produce output, and writes to an explicit handle:
 
