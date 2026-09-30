@@ -92,12 +92,33 @@ pub use syn;
 #[cfg(feature = "tokio")]
 pub use tokio;
 
-/// The optional GPUI desktop UI framework selected through the storefront.
-/// Re-exported so a consumer names the storefront, never the crate: `lgwks_bot`
-/// reaches `bevy_ecs` through `lgwks_deps::bevy_ecs`, which is the same rule the
+/// The Bevy ECS substrate, selected through the storefront.
+///
+/// `lgwks_deps` owns this edge so no other crate declares `bevy_ecs` directly
+/// (`INV-DEP-EDGE-OWNED`). `lgwks_bot` enables the `bevy-ecs` storefront feature
+/// and reaches the crate through this re-export, which is the same rule the
 /// `tokio` edge follows.
 #[cfg(feature = "bevy-ecs")]
 pub use bevy_ecs;
+
+/// The Bevy application layer: the `App` that owns schedules and plugins.
+///
+/// Re-exported for the same reason as [`bevy_ecs`]. It is a separate feature
+/// from `bevy-ecs` because it is a separate decision: a consumer running ECS
+/// systems inside its own loop needs the substrate and not the application
+/// layer, and the two carry different transitive cost.
+#[cfg(feature = "bevy-app")]
+pub use bevy_app;
+
+/// Bevy's time sources, including the virtual clock.
+#[cfg(feature = "bevy-time")]
+pub use bevy_time;
+
+/// Bevy's state machines and their run conditions.
+#[cfg(feature = "bevy-state")]
+pub use bevy_state;
+
+/// The optional GPUI desktop UI framework selected through the storefront.
 #[cfg(feature = "gpui")]
 pub use gpui;
 

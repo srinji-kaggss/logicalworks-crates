@@ -306,6 +306,89 @@ def builtin_contract_drift(root: Path) -> tuple[int, str]:
     return 0, "README dependency philosophy and version pins track the manifests"
 
 
+def builtin_invariants(root: Path) -> tuple[int, str]:
+    """Every `enforced by:` reference in INVARIANTS.md resolves to a real test.
+
+    An invariant that names its own enforcement is a claim a reader can check.
+    Nothing verified it: a renamed or deleted test left the sentence reading
+    exactly as authoritative as one pointing at a passing test, and the only way
+    to find out was to go looking by hand. So the references are checked here,
+    against the test names the sources actually define.
+    """
+    text = (root / "INVARIANTS.md").read_text(encoding="utf-8")
+
+    # Every test the sources define, per module path, so a reference can be
+    # resolved from the qualified name the invariant writes.
+    defined: set[str] = set()
+    for path in sorted((root / "crates").glob("**/*.rs")):
+        if "target" in path.parts:
+            continue
+        source = path.read_text(encoding="utf-8")
+        for match in re.finditer(r"^\s*(?:pub\s+)?mod\s+([a-z0-9_]+)\s*\{", source, re.MULTILINE):
+            defined.add(match.group(1))
+        for match in re.finditer(r"^\s*fn\s+([a-z0-9_]+)\s*\(", source, re.MULTILINE):
+            defined.add(match.group(1))
+
+    # Collect the references: `enforced by:` runs to the end of the bullet, and
+    # each backticked item is either a test path or a module path.
+    missing: list[str] = []
+    referenced = 0
+    for bullet in re.finditer(r"^- \*\*(INV-[A-Z0-9-]+)\*\*(.*?)(?=\n- \*\*|\n\n|\Z)", text, re.DOTALL | re.MULTILINE):
+        name, body = bullet.group(1), bullet.group(2)
+        # An invariant is enforced either by a named test or by a cited commit
+        # that introduced it; both are checkable claims, and requiring both would
+        # reject the older entries that predate named enforcement.
+        # The prose wraps, so `enforced by:` can be split as `enforced\n  by:`.
+        flattened = re.sub(r"\s+", " ", body)
+        # `.+?` with an explicit `\s·\s` terminator: `(.*?)(?: · | $)` cannot
+        # match this text, because the alternation's optional branch lets the
+        # group match empty and the engine never widens from there.
+        test_clause = re.search("enforced by: (.+?)(?: \\s\u00b7\\s|$)", flattened)
+        commits = re.findall(r"\b([0-9a-f]{7,40})\b", flattened)
+        clause = test_clause.group(1) if test_clause else ""
+        if not clause.strip() and not commits:
+            missing.append(
+                f"{name}: no `enforced by:` clause and no `why:` commit to check"
+            )
+            continue
+        # Three kinds of reference are checkable, and prose is not:
+        #   * `a::b::test_name` or `test_name` — must be a real test or module
+        #   * `scripts/foo.py` — must exist and be executable
+        #   * `some-lane` lane — must be a lane in the gate table
+        lanes = set(re.findall(r'id = "([^"]+)"', (root / "scripts/gate-lanes.toml").read_text(encoding="utf-8")))
+        for reference in re.findall(r"`([^`]+)`", clause):
+            reference = reference.strip()
+            # A lane reference is written as `` `requirements` lane``: the
+            # backticks capture only the name, and "lane" sits outside them.
+            lane = re.fullmatch(r"([a-z0-9-]+) lane", reference + " lane") if reference in lanes else None
+            if lane:
+                referenced += 1
+                if lane.group(1) not in lanes:
+                    missing.append(f"{name}: `{lane.group(1)}` is not a lane in scripts/gate-lanes.toml")
+                continue
+            script = re.search(r"(scripts/[A-Za-z0-9_.-]+)", reference)
+            if script:
+                referenced += 1
+                target = root / script.group(1)
+                if not target.exists():
+                    missing.append(f"{name}: {script.group(1)} does not exist")
+                elif not target.stat().st_mode & 0o111:
+                    missing.append(f"{name}: {script.group(1)} is not executable, so the gate cannot run it")
+                continue
+            if not re.search(r"(::\w+)+$", reference) and not re.match(r"^[a-z0-9_]+$", reference):
+                continue
+            referenced += 1
+            leaf = reference.split("::")[-1]
+            if leaf not in defined:
+                missing.append(f"{name}: `{reference}` names no test or module in crates/")
+
+    if missing:
+        return 1, "INVARIANTS.md enforcement references do not resolve:\n" + "\n".join(missing)
+    if referenced == 0:
+        return 1, "INVARIANTS.md parsed zero enforcement references; the parser is broken"
+    return 0, f"{referenced} INVARIANTS.md enforcement references resolve to real tests"
+
+
 def builtin_docsrs_metadata(root: Path) -> tuple[int, str]:
     """Every ``[package.metadata.docs.rs]`` names a feature set that builds."""
     commands: list[tuple[str, list[str]]] = []
@@ -516,6 +599,7 @@ BUILTINS = {
     "unwrap-scan": builtin_unwrap_scan,
     "suppressions": builtin_suppressions,
     "artifacts": builtin_artifacts,
+    "invariants": builtin_invariants,
     "contract-drift": builtin_contract_drift,
     "docsrs-metadata": builtin_docsrs_metadata,
     "readme-quickstart": builtin_readme_quickstart,
