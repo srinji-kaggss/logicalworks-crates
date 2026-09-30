@@ -8,6 +8,11 @@ on:
     branches: [main]
   pull_request:
 
+# No job waits on another. `needs: [build]` made every job queue behind the
+# 1.5-minute gate job, which gated nothing: a failing gate step still fails the
+# run with every other job running beside it. The run's wall clock is its
+# slowest job.
+
 # Supersede rather than duplicate. Two `pull_request` events in one group are
 # the same branch pushed twice, so the older run is cancelled. A run on `main`
 # never is: that run is the record of what shipped.
@@ -50,7 +55,6 @@ jobs:
 
   fmt:
     name: Format
-    needs: [build]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -63,11 +67,15 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+  # The three test suites run as three jobs, not three steps of one. Each spends
+  # about three minutes running tests (the `sim_scale` tiers alone sum to
+  # ~620 s of test time in every suite), so in one job they queued behind each
+  # other for ~12 minutes. Side by side, the run is as long as its slowest
+  # suite. Every command is unchanged; only where it runs moved.
   tests:
     name: Tests
-    needs: [build]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.98.0
@@ -81,20 +89,45 @@ jobs:
         run: cargo nextest run --workspace --locked
       - name: Deterministic simulation evidence
         run: python3 scripts/ci_local.py --lane simulation-evidence
-      - name: Run lgwks-bot no-default-feature tests
-        run: cargo nextest run -p lgwks_bot --all-targets --locked --no-default-features
-      - name: Run lgwks-std full-feature tests
-        run: cargo nextest run -p lgwks_std --all-targets --locked --features full
-      - name: Run lgwks-bot async runner tests
-        run: cargo nextest run -p lgwks_bot --all-targets --locked --features full
       - name: Doc tests
         run: cargo test --workspace --doc --locked
       - name: Debug doctor end-to-end journey
         run: python3 scripts/ci_local.py --lane debug-e2e
 
+  tests_nodefault:
+    name: Tests (lgwks-bot no default features, lgwks-std full)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.98.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run lgwks-bot no-default-feature tests
+        run: cargo nextest run -p lgwks_bot --all-targets --locked --no-default-features
+      - name: Run lgwks-std full-feature tests
+        run: cargo nextest run -p lgwks_std --all-targets --locked --features full
+
+  tests_bot_full:
+    name: Tests (lgwks-bot full)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.98.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run lgwks-bot async runner tests
+        run: cargo nextest run -p lgwks_bot --all-targets --locked --features full
+
   simulation_evidence:
     name: successful simulation result
-    needs: [build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -110,7 +143,6 @@ jobs:
 
   debug_e2e:
     name: successful end-to-end journey result
-    needs: [build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -124,7 +156,6 @@ jobs:
 
   clippy:
     name: Clippy
-    needs: [build]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -167,7 +198,6 @@ jobs:
 
   docs:
     name: Docs
-    needs: [build]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -230,13 +260,13 @@ jobs:
         run: python3 scripts/check-doc-citations.py
       - name: Root README quickstart matches its compiled example
         run: python3 scripts/ci_local.py --lane readme-quickstart
-  feature-matrix:
-    name: lgwks-std feature matrix
-    needs: [build]
+  # The storefront checks run beside the bot and ast matrices below rather than
+  # before them: one job was 5.4 minutes of `cargo check` in series, the
+  # longest in the run once the test suites were split.
+  feature-matrix-std-deps:
+    name: lgwks-std and lgwks-deps feature matrix
     runs-on: ubuntu-latest
-    # 30 minutes covered the check lanes only; the grammar matrix below builds
-    # and runs 31 test configurations, so the budget matches the work.
-    timeout-minutes: 60
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.98.0
@@ -264,6 +294,19 @@ jobs:
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features gpui
       - name: Check lgwks-deps ML storefront features
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features ml-candle,ml-tokenizers
+
+  feature-matrix:
+    name: lgwks-bot and lgwks-ast feature matrix
+    runs-on: ubuntu-latest
+    # 30 minutes covered the check lanes only; the grammar matrix below builds
+    # and runs 31 test configurations, so the budget matches the work.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.98.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
       - name: Check lgwks-bot async feature matrix
         run: |
           set -eu
@@ -336,7 +379,6 @@ jobs:
 
   gpui-macos:
     name: GPUI macOS renderer
-    needs: [build]
     runs-on: macos-14
     timeout-minutes: 30
     steps:
@@ -350,7 +392,6 @@ jobs:
 
   candle-macos:
     name: Candle ML storefront (Metal)
-    needs: [build]
     runs-on: macos-14
     timeout-minutes: 40
     steps:
@@ -364,7 +405,6 @@ jobs:
 
   contract-drift:
     name: lgwks-std contract drift checks
-    needs: [build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -375,7 +415,6 @@ jobs:
         run: python3 scripts/check-requirements.py
   package-smoke:
     name: lgwks-std package smoke-test
-    needs: [build]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
