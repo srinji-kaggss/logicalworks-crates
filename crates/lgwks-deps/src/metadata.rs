@@ -1694,11 +1694,61 @@ mod tests {
             Err(other) => return Err(format!("expected a timeout refusal, got {other}").into()),
             Ok(_) => return Err("a hung child must not report success".into()),
         }
+        // Overshoot is observed, not assumed: the deadline is checked every
+        // 5 ms poll quantum and the kill and reap follow at once, so anything
+        // near a second past the deadline is a defect, not scheduling noise.
+        let overshoot = elapsed.saturating_sub(timeout);
         assert!(
-            elapsed < Duration::from_secs(5),
-            "the deadline must kill the 10s sleeper, took {elapsed:?}"
+            overshoot < Duration::from_millis(1500),
+            "the deadline must kill the 10s sleeper promptly: {overshoot:?} past a {timeout:?} deadline"
         );
         Ok(())
+    }
+
+    /// INV-DEP-8's stated scope, observed with a real descendant: the direct
+    /// child exits at once after starting a grandchild that inherits the
+    /// capture descriptors. Collection must return without waiting for the
+    /// grandchild, and every capture name must be gone, while the grandchild
+    /// is still alive holding its descriptor. Disk space for an unlinked file
+    /// is reclaimed only when that last descriptor closes, which is exactly
+    /// the limit the invariant declares. The grandchild's PID comes from its
+    /// own output, so the only process signalled is the one this test made.
+    #[cfg(unix)]
+    #[test]
+    fn a_descendant_holding_a_capture_neither_blocks_collection_nor_keeps_its_name()
+    -> TestResult {
+        arm_faults(&[]);
+        let started = std::time::Instant::now();
+        let output = run_bounded(
+            "sh",
+            &[OsString::from("-c"), OsString::from("sleep 30 & echo $!")],
+            Path::new("."),
+            Duration::from_secs(10),
+            32 * 1024,
+        )?;
+        let elapsed = started.elapsed();
+        let pid = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        assert!(
+            !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit()),
+            "the direct child must report its grandchild's pid: {pid:?}"
+        );
+        let alive = |pid: &str| {
+            Command::new("kill")
+                .args(["-0", pid])
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        let grandchild_was_alive = alive(&pid);
+        let _signalled = Command::new("kill").args(["-9", &pid]).status();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "collection must not wait for a descendant holding the capture: {elapsed:?}"
+        );
+        assert!(
+            grandchild_was_alive,
+            "the grandchild must still hold its descriptor when collection returns"
+        );
+        assert_paths_removed(&captured_paths())
     }
 
     /// A flooding stdout is refused past its budget instead of retained.

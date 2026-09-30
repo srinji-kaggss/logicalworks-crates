@@ -183,7 +183,12 @@ Each of these was a shipped defect. Treat the list as the spec.
   where their decoders support it; escaped text that needs allocation is not
   reported as borrowed. RON writer failures distinguish serialization from I/O
   and preserve the underlying cause without claiming unobserved byte progress.
-  · why: #162 · enforced by: `json`/`ron` tests and external facade consumers
+  · why: #162 · enforced by:
+  `json::tests::unescaped_string_fields_borrow_from_text_and_slice`,
+  `json::tests::escaped_string_cannot_be_returned_as_a_borrowed_str`,
+  `ron::tests::unescaped_string_fields_borrow_from_text_and_slice`,
+  `ron::tests::writer_preserves_serialization_and_io_failures`, and
+  `tests/serde_facade_consumers.rs`
 - **INV-WIRE-1** `lgwks_std::wire` is a feature-unified rkyv archive facade, not a
   canonical semantic encoding or versioned envelope. The effective byte order,
   alignment, and archived pointer width are observable via
@@ -198,7 +203,12 @@ Each of these was a shipped defect. Treat the list as the spec.
   replacement-output-byte ceilings before avoidable allocation, preserve
   engine match semantics, and never return a partial replacement. Pattern text
   is escaped in `Debug` and `Display`.
-  · why: issue #168 · enforced by: `lgwks_std::pattern` tests
+  · why: issue #168 · enforced by:
+  `pattern::tests::configured_limits_refuse_input_and_amplified_output`,
+  `pattern::tests::configured_pattern_compile_size_and_nesting_limits_are_enforced`,
+  `pattern::tests::greedy_adversary_and_literal_control_keep_exact_match_workloads`,
+  `pattern::tests::bounded_replacement_expands_exactly_like_the_engine`, and
+  `tests/pattern_external.rs`
 - **INV-FS-2** A successful strict directory walk has no known omissions; a
   tolerant walk returns each known omission alongside its entries, and an
   unresolved root is always refused. Path-based identity rechecks are
