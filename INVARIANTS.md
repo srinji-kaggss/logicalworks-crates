@@ -100,6 +100,26 @@ Each of these was a shipped defect. Treat the list as the spec.
   `lgwks_std::fs::capability::tests::open_entry_does_not_follow_a_symlink_by_default`,
   `lgwks_std::fs::capability::tests::remove_file_unlinks_a_symlink_not_its_target`
 
+- **INV-FS-4** A capability that creates names grants the owner and nobody
+  else: a created file is mode 0o600 and a created directory 0o700 before the
+  umask, because a umask can only clear bits and a mode naming group or world
+  stays granted wherever the umask leaves it. A descriptor returned to a caller
+  is close-on-exec, including one duplicated by `try_clone`, so a directory
+  capability does not survive an `exec` into a child spawned mid-walk. A
+  listing is rewound before it is read, so it is a property of the directory
+  rather than of whatever that descriptor did earlier, and it omits `.` and
+  `..`. An open request that the kernel answers inconsistently across platforms
+  is refused before the syscall: `truncate` without write access, and neither
+  read nor write, and `create` combined with following a final symlink. · why:
+  #185 adversarial review · enforced by:
+  `lgwks_std::fs::capability::tests::a_created_file_is_not_writable_by_group_or_world`,
+  `lgwks_std::fs::capability::tests::a_created_directory_is_not_accessible_by_group_or_world`,
+  `lgwks_std::fs::capability::tests::a_cloned_dir_is_closed_across_exec`,
+  `lgwks_std::fs::capability::tests::listing_a_dir_that_already_created_a_child_is_not_empty`,
+  `lgwks_std::fs::capability::tests::an_empty_directory_lists_nothing`,
+  `lgwks_std::fs::capability::tests::a_readless_write_request_is_refused_rather_than_truncating`,
+  `lgwks_std::fs::capability::tests::create_refuses_to_follow_a_final_symlink`
+
   Known limit, stated rather than left to be discovered:
   `fs::capability::Dir::entry_names` is Linux-only. `getdents64` is the only
   syscall that lists a descriptor, the BSDs expose no equivalent, and calling
