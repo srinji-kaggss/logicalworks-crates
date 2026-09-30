@@ -435,6 +435,22 @@ still enter the idempotency fence is not settled. The shipped answer is yes, and
 deliberate, so a future change to it must be a decision rather than an accident.
 Whether that is the right answer is a Director decision, recorded in §7.
 
+### 2026-09-30 — Release cut: lgwks_std 0.8.0, lgwks_ast 0.3.0, lgwks_deps 0.2.0, lgwks_bot 0.6.0, lgwks_macros 0.1.0
+
+- **Director-ordered release cut** ("Once done, if required, update cargo
+  release", 2026-09-30). #190 integrated eleven open PRs (#173, #175–#183,
+  #188) plus its review fixes. Each moved crate carries a break against what
+  crates.io holds, so each takes the minor position; the per-crate reasons are
+  in CHANGELOG.md. `lgwks_macros` is new and is published between
+  `lgwks_deps` and `lgwks_bot`; `docs/releasing.md` now names it in the order.
+- Publish is still manual and needs a human-held crates.io token; this cut is
+  the manifests, lockfiles (workspace and the storefront fixtures), README and
+  guide pins, and changelog, verified by `cargo publish --workspace --dry-run`,
+  not an upload.
+
+**Does not claim:** that anything is on crates.io; tags or GitHub releases,
+which follow the upload per `docs/releasing.md` §4.
+
 ### 2026-09-28 — Release cut: lgwks_std 0.7.0, lgwks_bot 0.5.0, lgwks_deps 0.1.13
 
 - **Director-authorized release cut** ("Yes, do it", 2026-09-28). The PR #91
