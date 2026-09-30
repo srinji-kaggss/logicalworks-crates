@@ -2,9 +2,12 @@
 
 A multi-language AST front end for tools that read source code.
 
-A code tool needs the same three things: identify a source file's language,
-select that language's tree-sitter grammar, and walk the resulting syntax tree
-safely. This crate provides all three, once, under explicit bounds.
+A code tool needs the same three things: identify a source file's language by
+extension or by explicitly trial-parsing a small candidate set, select that
+language's tree-sitter grammar, and walk the resulting syntax tree safely. This
+crate provides those paths under explicit bounds. It does not detect shebangs or
+parse full Vue/Svelte containers; those extensions select the JavaScript
+grammar as a filename heuristic.
 
 It also provides the shared typed-diagnostic derive, so a parser and its
 consumers report failures through one `Display`/`source` implementation rather
@@ -21,7 +24,11 @@ fn main() -> Result<(), lgwks_ast::ParseError> {
     let language = Language::of_path("src/lib.rs");
     assert_eq!(language, Some(Language::Rust), "`.rs` resolves without parsing");
 
-    // Content sniffing is opt-in, because it costs one full parse per candidate:
+    // Content sniffing is opt-in, because it costs one full parse per distinct
+    // candidate. Repeated candidates do not repeat parsing, and an unavailable or
+    // over-budget candidate returns an error instead of being treated as a failed
+    // syntax match. Its result distinguishes NoMatch, Unique(language), and
+    // Ambiguous:
     // let detected = try_detect_content(source, &[Language::Rust, Language::Python])?;
 
     // Checked parse: oversized bytes, recovery nodes, and over-budget trees are
@@ -120,6 +127,14 @@ A language whose feature is off does not exist in `Language::ALL` and is never
 returned by `Language::of_path`, so a consumer never compiles a grammar it
 cannot select.
 
+Extension lookup is a filename heuristic, not a syntax verdict. In particular,
+`.vue` and `.svelte` select the JavaScript grammar; they do not enable dedicated
+container grammars. This crate has no shebang detection path.
+
+`try_detect_content` returns `ContentDetection::NoMatch`, `Unique(language)`, or
+`Ambiguous`; non-syntax parser failures return `Err` because they leave a
+required candidate uninspected.
+
 ## Custom languages
 
 ast-grep ships a fixed built-in set; its documented extension point for
@@ -166,18 +181,25 @@ upstream as a pull request.
   tree. It is measured on the tree *after* tree-sitter builds it, so it bounds
   the validation walk, not the parser's own allocation.
 - `MAX_DETECT_BYTES`: 64 KiB per content-detection probe. `try_detect_content`
-  tries each caller-named candidate in full, so the probe is bounded well below
-  `MAX_SOURCE_BYTES`; `detect` never parses at all.
+  tries each distinct caller-named candidate in full, so the probe is bounded
+  well below `MAX_SOURCE_BYTES`; `detect` never parses at all.
 - `MAX_SHEBANG_BYTES`: 256 bytes — the `#!` line is the only part of a file
   `of_shebang` reads, and a script whose first line is longer than that is
   treated as unidentified rather than scanned further.
 - `try_parse` refuses an `ERROR`/`MISSING` recovery node: a recoverable tree
   is not proof of valid syntax. `parse` is the unchecked escape hatch for
   diagnostics and tests that inspect malformed trees on purpose.
+- Checked syntax refusals carry at most `MAX_SYNTAX_DIAGNOSTICS` recovery-node
+  diagnostics. Each identifies `ERROR` versus `MISSING` and a half-open byte
+  range into the original UTF-8 source; no source text is copied into the
+  diagnostic.
 - A tree is not only accepted or refused. `diagnostics` and `to_diagnostic`
   turn a refused or suspect parse into a `Diagnostic` carrying a byte offset, a
   1-based line and column, and a caret span, so a caller reports *where* the
   source stopped making sense rather than only that it did.
+- `inspect_ast` reports whether traversal completed, the applied node limit,
+  and its stop reason. A partial walk's `has_syntax_issues == false` is not a
+  clean-syntax result.
 
 ## The other crates
 

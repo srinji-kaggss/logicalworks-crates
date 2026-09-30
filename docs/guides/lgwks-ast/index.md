@@ -78,7 +78,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // A recoverable tree is refused, not reported as clean.
     match try_parse("fn f( {", language) {
-        Err(ParseError::InvalidSyntax { language }) => assert_eq!(language, "rust"),
+        Err(ParseError::InvalidSyntax { language, diagnostics, diagnostics_truncated, .. }) => {
+            assert_eq!(language, "rust");
+            assert!(!diagnostics.is_empty());
+            assert!(!diagnostics_truncated);
+        }
         other => return Err(format!("expected InvalidSyntax, got {:?}", other.err()).into()),
     }
 
@@ -100,10 +104,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`detect` is `Language::of_path` under a second name. Content sniffing is
-separate and opt-in, because it costs one full parse per candidate grammar:
+`detect` is `Language::of_path` under a second name: filename extensions select
+a grammar but do not validate syntax. There is no shebang detection, and `.vue`
+or `.svelte` selects the JavaScript grammar rather than a full-container
+grammar. Content sniffing is separate and opt-in, because it costs one full
+parse per distinct candidate grammar:
 `try_detect_content(source, &[Language::Rust, Language::Python])` names the small
-candidate set you expect.
+candidate set you expect. Repeated candidates are parsed once. The
+`ContentDetection` result is `NoMatch`, `Unique(language)`, or `Ambiguous`;
+parser-unavailable and node-budget refusals return `Err` because they leave
+detection incomplete.
 
 ## The bounds
 
@@ -129,7 +139,7 @@ into a huge tree is parsed before the node count is checked; what the constant
 stops is an unbounded walk over the result.
 
 `MAX_DETECT_BYTES` is small on purpose, because detection trial-parses each
-candidate in full.
+distinct candidate in full.
 
 ## Refusals
 
@@ -140,12 +150,17 @@ candidate in full.
 |---|---|
 | `SourceTooLarge { actual, limit }` | input past `MAX_SOURCE_BYTES` |
 | `ParserUnavailable { language, detail }` | the grammar produced no tree |
-| `InvalidSyntax { language }` | the tree carries an `ERROR` or `MISSING` node |
-| `AstTooLarge { language, observed, limit }` | the tree passed the node bound |
+| `InvalidSyntax { language, diagnostics, diagnostics_truncated }` | the tree carries bounded `ERROR`/`MISSING` diagnostics with half-open source-byte ranges |
+| `AstTooLarge { language, observed, limit }` | the tree exceeded the node bound |
 
 None of them may be reported as clean. That is the point of the type: a
 tree-sitter tree with recovery nodes is not proof of valid syntax, so `try_parse`
 refuses it rather than handing you a tree that mostly parsed.
+
+`inspect_ast` reports `complete`, the applied `node_limit`, and the
+`stop_reason`. A partial walk's `has_syntax_issues == false` does not certify a
+clean tree. Checked syntax diagnostics retain at most
+`MAX_SYNTAX_DIAGNOSTICS` recovery nodes and do not copy source text.
 
 `parse` is the unchecked counterpart, for diagnostics and tests that inspect
 malformed trees on purpose. Use it when a partial tree is what you want, and not

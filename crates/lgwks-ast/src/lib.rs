@@ -74,8 +74,8 @@
 //! parser's own allocation. Neither is a hard memory ceiling.
 //!
 //! Content sniffing is opt-in for the same reason: [`try_detect_content`]
-//! trial-parses each candidate grammar in full, so the caller names a small
-//! candidate set and the probe source is held to [`MAX_DETECT_BYTES`]. The
+//! trial-parses each distinct candidate grammar in full, so the caller names
+//! a small candidate set and the probe source is held to [`MAX_DETECT_BYTES`]. The
 //! extension-only [`detect`] never parses.
 //!
 //! ## The README is compiled
@@ -137,8 +137,8 @@ pub const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_AST_NODES: usize = 2_000_000;
 
 /// Largest probe source admitted to [`try_detect_content`] (64 KiB). Content
-/// detection costs one full parse per candidate grammar, so it is bounded far
-/// below [`MAX_SOURCE_BYTES`]; a language probe only needs enough bytes to
+/// detection costs one full parse per distinct candidate grammar, so it is
+/// bounded far below [`MAX_SOURCE_BYTES`]; a language probe only needs enough bytes to
 /// show one clean reading.
 pub const MAX_DETECT_BYTES: usize = 64 * 1024;
 
@@ -149,6 +149,9 @@ pub const MAX_DETECT_BYTES: usize = 64 * 1024;
 /// an arbitrary file: a binary whose first "line" is a megabyte of non-newline
 /// bytes is refused in constant time rather than scanned.
 pub const MAX_SHEBANG_BYTES: usize = 256;
+
+/// Maximum recovery diagnostics retained from one checked parse.
+pub const MAX_SYNTAX_DIAGNOSTICS: usize = 32;
 
 /// Define `Language` and its lookup tables from one row per grammar.
 ///
@@ -595,6 +598,10 @@ pub enum ParseError {
     InvalidSyntax {
         /// The language name.
         language: &'static str,
+        /// At most [`MAX_SYNTAX_DIAGNOSTICS`] recovery nodes from the bounded walk.
+        diagnostics: Vec<SyntaxDiagnostic>,
+        /// Whether more recovery nodes were observed than retained.
+        diagnostics_truncated: bool,
     },
     /// The tree exceeds the node bound.
     #[error("{language} AST exceeds {limit} nodes (observed at least {observed})")]
@@ -693,7 +700,49 @@ impl ParseError {
     }
 }
 
-/// Node count, deepest depth, and recovery state from one traversal.
+/// Kind of tree-sitter recovery node reported by a checked parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SyntaxIssueKind {
+    /// Tree-sitter inserted an error node for unparsed source.
+    Error,
+    /// Tree-sitter inserted a missing token to recover the parse.
+    Missing,
+}
+
+/// A bounded recovery diagnostic with byte offsets into the original source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SyntaxDiagnostic {
+    /// Whether the recovery node is `ERROR` or `MISSING`.
+    pub kind: SyntaxIssueKind,
+    /// Inclusive UTF-8 byte offset in the original source.
+    pub start_byte: usize,
+    /// Exclusive UTF-8 byte offset in the original source.
+    pub end_byte: usize,
+}
+
+/// Why a bounded AST inspection stopped before visiting the full tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum InspectionStopReason {
+    /// The walk observed one node beyond its configured node limit.
+    NodeLimitExceeded,
+}
+
+/// Complete content-detection result after every distinct candidate was checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ContentDetection {
+    /// No candidate parsed without recovery nodes.
+    NoMatch,
+    /// Exactly one candidate parsed without recovery nodes.
+    Unique(Language),
+    /// More than one distinct candidate parsed without recovery nodes.
+    Ambiguous,
+}
+
+/// Node count, deepest depth, recovery state, and completeness from one traversal.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct AstMetrics {
@@ -703,6 +752,12 @@ pub struct AstMetrics {
     pub max_depth: usize,
     /// Whether an `ERROR` or `MISSING` node was seen.
     pub has_syntax_issues: bool,
+    /// Whether the whole tree was visited.
+    pub complete: bool,
+    /// Node limit supplied to the traversal, if any.
+    pub node_limit: Option<usize>,
+    /// Why the walk stopped early, if inspection is incomplete.
+    pub stop_reason: Option<InspectionStopReason>,
 }
 
 impl AstMetrics {
@@ -726,7 +781,7 @@ impl AstMetrics {
 /// the file, so report unscanned, never clean.
 ///
 /// Content sniffing is deliberately not part of this call: it costs one full
-/// parse per grammar. A caller that needs it opts in with
+/// parse per distinct grammar. A caller that needs it opts in with
 /// [`try_detect_content`] and names the few grammars it expects, rather than
 /// trial-parsing every language this build carries.
 #[must_use]
@@ -736,35 +791,101 @@ pub fn detect(path: &str) -> Option<Language> {
 
 /// Identify `source` by trial-parsing `candidates`, the opt-in content path.
 ///
-/// Cost is `candidates.len()` full parses, so `source` is held to
+/// Each distinct candidate is parsed once, so `source` is held to
 /// [`MAX_DETECT_BYTES`] rather than [`MAX_SOURCE_BYTES`], and the caller, not
-/// this crate, decides which grammars are plausible. Exactly one candidate
-/// must parse cleanly; zero or several yield `None`, because reporting a guess
-/// or picking among equally valid readings would attach a rule set on no
-/// evidence.
+/// this crate, decides which grammars are plausible. The result distinguishes
+/// no match, one clean candidate, and multiple clean candidates. A
+/// parser-unavailable or node-budget refusal returns `Err`: an uninspected
+/// required candidate cannot be treated as evidence against it.
 pub fn try_detect_content(
     source: &str,
     candidates: &[Language],
-) -> Result<Option<Language>, ParseError> {
+) -> Result<ContentDetection, ParseError> {
     validate_source_size(source, MAX_DETECT_BYTES)?;
-    Ok(detect_by_parsing(source, candidates))
+    detect_by_parsing(source, candidates)
 }
 
-/// The one candidate that parses `source` cleanly, or `None` when zero or more
-/// than one do.
+/// Classify `source` across all distinct candidates, returning parser failures
+/// because they leave the candidate set incompletely inspected.
 ///
 /// `source` is assumed already size-checked by the caller: [`try_detect_content`]
 /// is the only one, and it applies [`MAX_DETECT_BYTES`] before reaching here.
 /// "Several clean readings" is a refusal rather than a tie-break: picking among
 /// grammars that all accept the source would attach a rule set on no evidence,
-/// which is the same defect as reporting a guess.
-fn detect_by_parsing(source: &str, candidates: &[Language]) -> Option<Language> {
-    let mut readable = candidates
-        .iter()
-        .copied()
-        .filter(|&language| try_parse(source, language).is_ok());
-    let only = readable.next()?;
-    readable.next().is_none().then_some(only)
+/// which is the same defect as reporting a guess. Duplicate candidates are
+/// discarded against the finite compiled grammar table before parsing.
+fn detect_by_parsing(
+    source: &str,
+    candidates: &[Language],
+) -> Result<ContentDetection, ParseError> {
+    detect_candidates(candidates, |language| {
+        try_parse(source, language).map(|_| ())
+    })
+}
+
+/// Parse each distinct compiled candidate once and refuse incomplete inspection.
+fn detect_candidates(
+    candidates: &[Language],
+    mut parse_candidate: impl FnMut(Language) -> Result<(), ParseError>,
+) -> Result<ContentDetection, ParseError> {
+    let mut seen = vec![false; Language::ALL.len()];
+    let mut unique_reading = None;
+    let mut ambiguous = false;
+    let mut incomplete = None;
+
+    for &language in candidates {
+        let Some(index) = Language::ALL
+            .iter()
+            .position(|&compiled| compiled == language)
+        else {
+            keep_first_incomplete(
+                language,
+                ParseError::ParserUnavailable {
+                    language: language.name(),
+                    detail: "candidate grammar is not present in this build".to_owned(),
+                },
+                &mut incomplete,
+            );
+            continue;
+        };
+        if std::mem::replace(&mut seen[index], true) {
+            continue;
+        }
+        match parse_candidate(language) {
+            Ok(()) => {
+                if unique_reading.replace(language).is_some() {
+                    ambiguous = true;
+                }
+            }
+            Err(ParseError::InvalidSyntax { .. }) => {}
+            Err(error) => keep_first_incomplete(language, error, &mut incomplete),
+        }
+    }
+
+    if let Some((_, error)) = incomplete {
+        return Err(error);
+    }
+    if ambiguous {
+        Ok(ContentDetection::Ambiguous)
+    } else if let Some(language) = unique_reading {
+        Ok(ContentDetection::Unique(language))
+    } else {
+        Ok(ContentDetection::NoMatch)
+    }
+}
+
+/// Keep the lexically first failed candidate so permutations report the same refusal.
+fn keep_first_incomplete(
+    language: Language,
+    error: ParseError,
+    incomplete: &mut Option<(Language, ParseError)>,
+) {
+    if incomplete
+        .as_ref()
+        .is_none_or(|&(recorded, _)| language.name() < recorded.name())
+    {
+        *incomplete = Some((language, error));
+    }
 }
 
 /// Production boundary: refuse oversized bytes, then reject recovery nodes and
@@ -816,8 +937,9 @@ fn parse_bounded<L: LanguageExt>(
             detail,
         }
     })?;
-    let metrics = inspect_ast(&parsed.root(), Some(max_ast_nodes));
-    if metrics.nodes > max_ast_nodes {
+    let (metrics, _, diagnostics, diagnostics_truncated) =
+        inspect_ast_with_pending(&parsed.root(), Some(max_ast_nodes));
+    if !metrics.complete {
         return Err(ParseError::AstTooLarge {
             language: name,
             observed: metrics.nodes,
@@ -825,7 +947,11 @@ fn parse_bounded<L: LanguageExt>(
         });
     }
     if metrics.has_syntax_issues {
-        return Err(ParseError::InvalidSyntax { language: name });
+        return Err(ParseError::InvalidSyntax {
+            language: name,
+            diagnostics,
+            diagnostics_truncated,
+        });
     }
     Ok(parsed)
 }
@@ -869,10 +995,13 @@ pub fn max_depth<L: LanguageExt>(root: &AstNode<'_, L>) -> usize {
     inspect_ast(root, None).max_depth
 }
 
-/// Node count, depth, and recovery state in one heap-backed walk.
+/// Node count, depth, recovery state, and traversal completeness in one walk.
 ///
 /// With a node cap, traversal stops at `limit + 1`: enough to prove refusal
-/// without letting validation itself go unbounded on a hostile tree.
+/// without letting validation itself go unbounded on a hostile tree. The
+/// returned metrics preserve that cap and identify incomplete inspection;
+/// `has_syntax_issues == false` is not evidence of a clean tree unless
+/// `complete` is also true.
 #[must_use]
 pub fn inspect_ast<'t, L: LanguageExt>(
     root: &AstNode<'t, L>,
@@ -891,16 +1020,24 @@ pub fn inspect_ast<'t, L: LanguageExt>(
 fn inspect_ast_with_pending<'t, L: LanguageExt>(
     root: &AstNode<'t, L>,
     stop_after_nodes: Option<usize>,
-) -> (AstMetrics, usize) {
-    let mut metrics = AstMetrics::default();
+) -> (AstMetrics, usize, Vec<SyntaxDiagnostic>, bool) {
+    let mut metrics = AstMetrics {
+        complete: true,
+        node_limit: stop_after_nodes,
+        ..AstMetrics::default()
+    };
+    let mut diagnostics = Vec::new();
+    let mut diagnostics_truncated = false;
     // Frame = (node, depth, remaining child index). Visiting the next lower
     // index preserves the former stack walk's reverse-sibling order without
     // enqueuing the sibling frontier.
     let mut frames = vec![(root.clone(), 1_usize, root.children().len())];
     let mut peak_frames = 1;
     metrics = metrics.including(root, 1);
+    record_syntax_diagnostic(root, &mut diagnostics, &mut diagnostics_truncated);
     if stop_after_nodes.is_some_and(|limit| metrics.nodes > limit) {
-        return (metrics, peak_frames);
+        mark_inspection_incomplete(&mut metrics);
+        return (metrics, peak_frames, diagnostics, diagnostics_truncated);
     }
     while let Some(frame) = frames.last_mut() {
         let Some(child_index) = frame.2.checked_sub(1) else {
@@ -914,19 +1051,69 @@ fn inspect_ast_with_pending<'t, L: LanguageExt>(
         };
         let child_depth = frame.1.saturating_add(1);
         metrics = metrics.including(&child, child_depth);
+        record_syntax_diagnostic(&child, &mut diagnostics, &mut diagnostics_truncated);
         if stop_after_nodes.is_some_and(|limit| metrics.nodes > limit) {
+            mark_inspection_incomplete(&mut metrics);
             break;
         }
         let child_count = child.children().len();
         frames.push((child, child_depth, child_count));
         peak_frames = peak_frames.max(frames.len());
     }
-    (metrics, peak_frames)
+    (metrics, peak_frames, diagnostics, diagnostics_truncated)
 }
 
-/// The text of the first direct child whose `kind` equals one of `kinds`, or
-/// `None` when no direct child matches. Descendants are not searched, so a
-/// caller hunting a nested identifier must walk to that level first.
+/// Mark a walk as partial after it observes the node beyond its configured cap.
+fn mark_inspection_incomplete(metrics: &mut AstMetrics) {
+    metrics.complete = false;
+    metrics.stop_reason = Some(InspectionStopReason::NodeLimitExceeded);
+}
+
+/// Retain one recovery-node span until the public diagnostic ceiling is reached.
+fn record_syntax_diagnostic<L: LanguageExt>(
+    node: &AstNode<'_, L>,
+    diagnostics: &mut Vec<SyntaxDiagnostic>,
+    diagnostics_truncated: &mut bool,
+) {
+    let kind = if node.is_error() {
+        Some(SyntaxIssueKind::Error)
+    } else if node.is_missing() {
+        Some(SyntaxIssueKind::Missing)
+    } else {
+        None
+    };
+    let Some(kind) = kind else {
+        return;
+    };
+    let span = node.range();
+    push_syntax_diagnostic(
+        SyntaxDiagnostic {
+            kind,
+            start_byte: span.start,
+            end_byte: span.end,
+        },
+        diagnostics,
+        diagnostics_truncated,
+    );
+}
+
+/// Append a diagnostic unless the fixed per-parse ceiling has been reached.
+fn push_syntax_diagnostic(
+    diagnostic: SyntaxDiagnostic,
+    diagnostics: &mut Vec<SyntaxDiagnostic>,
+    diagnostics_truncated: &mut bool,
+) {
+    if diagnostics.len() == MAX_SYNTAX_DIAGNOSTICS {
+        *diagnostics_truncated = true;
+    } else {
+        diagnostics.push(diagnostic);
+    }
+}
+
+/// The owned text of the first direct child whose `kind` equals one of `kinds`,
+/// or `None` when no direct child matches. Descendants are not searched, so a
+/// caller hunting a nested identifier must walk to that level first. The text
+/// is owned because the node's source borrow is tied to the parsed tree.
 #[must_use]
 pub fn child_text_with_kind<L: LanguageExt>(
     node: &AstNode<'_, L>,
@@ -987,7 +1174,7 @@ mod tests {
             "the fixture presents 4,096 immediate siblings to the traversal"
         );
 
-        let (metrics, peak_frames) = inspect_ast_with_pending(&parsed.root(), Some(1));
+        let (metrics, peak_frames, _, _) = inspect_ast_with_pending(&parsed.root(), Some(1));
 
         assert_eq!(metrics.nodes, 2, "one node beyond the cap proves refusal");
         assert_eq!(
@@ -1037,7 +1224,7 @@ mod tests {
             "}".repeat(depth)
         );
         let parsed = parse(&source, Language::Rust);
-        let (metrics, peak_frames) = inspect_ast_with_pending(&parsed.root(), None);
+        let (metrics, peak_frames, _, _) = inspect_ast_with_pending(&parsed.root(), None);
 
         assert!(
             metrics.max_depth > 50,
@@ -1056,6 +1243,152 @@ mod tests {
              sibling frontier rather than a depth",
             metrics.nodes
         );
+    }
+
+    #[test]
+    fn inspection_metrics_name_complete_exact_and_over_limit_walks() {
+        let parsed = parse("fn a() {}\nfn b() {}", Language::Rust);
+        let root = parsed.root();
+        let full = inspect_ast(&root, None);
+        assert!(
+            full.complete,
+            "an unlimited traversal inspects the whole tree"
+        );
+        assert_eq!(
+            full.node_limit, None,
+            "unlimited inspection has no applied cap"
+        );
+        assert_eq!(
+            full.stop_reason, None,
+            "complete inspection has no stop reason"
+        );
+
+        let exact = inspect_ast(&root, Some(full.nodes));
+        assert!(
+            exact.complete,
+            "visiting exactly the cap is a complete traversal"
+        );
+        assert_eq!(
+            exact.node_limit,
+            Some(full.nodes),
+            "the applied cap is retained"
+        );
+
+        let over = inspect_ast(&root, Some(full.nodes - 1));
+        assert!(
+            !over.complete,
+            "a cap below the tree size marks partial metrics"
+        );
+        assert_eq!(over.nodes, full.nodes, "the overflow witness is counted");
+        assert_eq!(
+            over.node_limit,
+            Some(full.nodes - 1),
+            "partial metrics preserve the configured limit"
+        );
+        assert_eq!(
+            over.stop_reason,
+            Some(InspectionStopReason::NodeLimitExceeded),
+            "partial metrics identify the stop reason"
+        );
+
+        let zero = inspect_ast(&root, Some(0));
+        assert!(
+            !zero.complete,
+            "the root is the limit-plus-one witness at zero cap"
+        );
+        assert_eq!(zero.nodes, 1, "zero cap still records the root observation");
+    }
+
+    #[test]
+    fn recovery_beyond_the_visit_cap_is_not_reported_as_clean() {
+        let parsed = parse("@\nfn a() {}\nfn b() {}", Language::Rust);
+        let partial = inspect_ast(&parsed.root(), Some(1));
+        assert!(
+            !partial.complete,
+            "the small cap stops before the early recovery node"
+        );
+        assert!(
+            !partial.has_syntax_issues,
+            "unvisited nodes are not called clean or faulty"
+        );
+
+        let complete = inspect_ast(&parsed.root(), None);
+        assert!(
+            complete.complete,
+            "the uncapped walk reaches the whole tree"
+        );
+        assert!(
+            complete.has_syntax_issues,
+            "the full walk observes the recovery node"
+        );
+    }
+
+    #[test]
+    fn syntax_diagnostics_distinguish_recovery_kinds_and_use_source_byte_ranges()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let source = "fn main() {\n    let café = ;\n}\n";
+        let invalid = try_parse(source, Language::Rust);
+        let diagnostics = match invalid {
+            Err(ParseError::InvalidSyntax { diagnostics, .. }) => diagnostics,
+            other => {
+                return Err(format!("expected syntax diagnostics, got {:?}", other.err()).into());
+            }
+        };
+        let error = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.kind == SyntaxIssueKind::Error)
+            .ok_or_else(|| std::io::Error::other("the malformed expression has no ERROR node"))?;
+        assert!(
+            source.is_char_boundary(error.start_byte),
+            "start byte is a UTF-8 boundary"
+        );
+        assert!(
+            source.is_char_boundary(error.end_byte),
+            "end byte is a UTF-8 boundary"
+        );
+        assert!(
+            error.start_byte <= error.end_byte,
+            "diagnostic span is ordered"
+        );
+        assert!(
+            source.get(error.start_byte..error.end_byte).is_some(),
+            "span slices the source"
+        );
+        assert!(
+            source[..error.start_byte].contains('é'),
+            "span follows the multibyte prefix"
+        );
+
+        let missing = try_parse("fn f() { let x = 1 }", Language::Rust);
+        assert!(
+            matches!(
+                missing,
+                Err(ParseError::InvalidSyntax { ref diagnostics, .. })
+                    if diagnostics.iter().any(|diagnostic| diagnostic.kind == SyntaxIssueKind::Missing)
+            ),
+            "an omitted let semicolon is reported as MISSING"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn syntax_diagnostics_stop_at_the_declared_bound() {
+        let mut diagnostics = Vec::new();
+        let mut truncated = false;
+        let diagnostic = SyntaxDiagnostic {
+            kind: SyntaxIssueKind::Error,
+            start_byte: 0,
+            end_byte: 0,
+        };
+        for _ in 0..MAX_SYNTAX_DIAGNOSTICS + 1 {
+            push_syntax_diagnostic(diagnostic, &mut diagnostics, &mut truncated);
+        }
+        assert_eq!(
+            diagnostics.len(),
+            MAX_SYNTAX_DIAGNOSTICS,
+            "retained diagnostic memory is bounded by the public ceiling"
+        );
+        assert!(truncated, "omitted diagnostics are reported as truncated");
     }
 
     #[test]
@@ -1232,7 +1565,7 @@ mod tests {
     fn content_detection_is_opt_in_and_capped_below_the_parse_bound() {
         assert_eq!(
             try_detect_content("fn f() {}", &[Language::Rust]),
-            Ok(Some(Language::Rust))
+            Ok(ContentDetection::Unique(Language::Rust))
         );
         // A probe past MAX_DETECT_BYTES is refused before any grammar runs, so
         // content detection costs at most candidates x MAX_DETECT_BYTES even
@@ -1246,13 +1579,137 @@ mod tests {
 
     #[test]
     fn content_detection_needs_exactly_one_clean_reading() {
-        assert_eq!(try_detect_content("fn f() {}", &[]), Ok(None));
-        // Two clean readings are ambiguous, so the answer is None rather than a
-        // pick. Repeating one candidate is a deterministic way to produce that
-        // without depending on a source two grammars happen to agree on.
+        assert_eq!(
+            try_detect_content("fn f() {}", &[]),
+            Ok(ContentDetection::NoMatch)
+        );
         assert_eq!(
             try_detect_content("fn f() {}", &[Language::Rust, Language::Rust]),
-            Ok(None)
+            Ok(ContentDetection::Unique(Language::Rust))
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "lang-python")]
+    fn duplicate_and_permuted_candidates_parse_once_and_preserve_ambiguity() {
+        let candidate_orders = [
+            [Language::Rust, Language::Rust, Language::Python],
+            [Language::Python, Language::Rust, Language::Rust],
+            [Language::Rust, Language::Python, Language::Rust],
+        ];
+        for candidates in candidate_orders {
+            let mut attempts = Vec::new();
+            let result = detect_candidates(&candidates, |language| {
+                attempts.push(language);
+                if language == Language::Rust {
+                    Ok(())
+                } else {
+                    Err(ParseError::InvalidSyntax {
+                        language: language.name(),
+                        diagnostics: Vec::new(),
+                        diagnostics_truncated: false,
+                    })
+                }
+            });
+            assert_eq!(
+                result,
+                Ok(ContentDetection::Unique(Language::Rust)),
+                "order preserves the unique result"
+            );
+            assert_eq!(attempts.len(), 2, "each distinct candidate is parsed once");
+            assert_eq!(
+                attempts
+                    .iter()
+                    .filter(|&&item| item == Language::Rust)
+                    .count(),
+                1,
+                "repeated Rust candidates do not repeat parsing"
+            );
+        }
+
+        let ambiguous_candidates = [Language::Rust, Language::Python, Language::Rust];
+        let mut attempts = Vec::new();
+        let ambiguous = detect_candidates(&ambiguous_candidates, |language| {
+            attempts.push(language);
+            Ok(())
+        });
+        assert_eq!(
+            ambiguous,
+            Ok(ContentDetection::Ambiguous),
+            "two distinct clean readings remain ambiguous"
+        );
+        assert_eq!(
+            attempts.len(),
+            2,
+            "duplicate candidates are not parsed twice"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "lang-python")]
+    fn incomplete_candidate_inspection_is_not_reported_as_unique() {
+        let candidates = [Language::Rust, Language::Python];
+        let unavailable = ParseError::ParserUnavailable {
+            language: "python",
+            detail: "injected parser failure".to_owned(),
+        };
+        let result = detect_candidates(&candidates, |language| {
+            if language == Language::Rust {
+                Ok(())
+            } else {
+                Err(unavailable.clone())
+            }
+        });
+        assert_eq!(
+            result,
+            Err(unavailable),
+            "an unavailable candidate blocks uniqueness"
+        );
+
+        let over_budget = ParseError::AstTooLarge {
+            language: "python",
+            observed: 3,
+            limit: 2,
+        };
+        let result = detect_candidates(&candidates, |language| {
+            if language == Language::Rust {
+                Ok(())
+            } else {
+                Err(over_budget.clone())
+            }
+        });
+        assert_eq!(
+            result,
+            Err(over_budget),
+            "a budget refusal blocks uniqueness"
+        );
+
+        let reversed = [Language::Python, Language::Rust];
+        let first_order_error = detect_candidates(&candidates, |language| {
+            Err(ParseError::ParserUnavailable {
+                language: language.name(),
+                detail: "injected failure".to_owned(),
+            })
+        });
+        let reversed_order_error = detect_candidates(&reversed, |language| {
+            Err(ParseError::ParserUnavailable {
+                language: language.name(),
+                detail: "injected failure".to_owned(),
+            })
+        });
+        assert_eq!(
+            first_order_error, reversed_order_error,
+            "candidate permutation preserves the deterministic incomplete result"
+        );
+        assert!(
+            matches!(
+                first_order_error,
+                Err(ParseError::ParserUnavailable {
+                    language: "python",
+                    ..
+                })
+            ),
+            "the lexically first failed candidate owns the stable refusal"
         );
     }
 

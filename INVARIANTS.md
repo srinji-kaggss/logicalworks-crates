@@ -206,6 +206,12 @@ Each of these was a shipped defect. Treat the list as the spec.
   retains pending traversal state proportional to active depth, not sibling
   fan-out; the byte and node ceilings remain separate from parser allocation.
   · why: #143 R17 · enforced by: `lgwks_ast::tests::a_small_node_budget_does_not_retain_a_wide_sibling_frontier`
+- **INV-AST-2** Content detection parses each distinct compiled candidate once;
+  only invalid syntax is negative evidence, while parser or budget refusal
+  leaves detection incomplete. Bounded AST metrics identify partial walks, and
+  checked syntax diagnostics preserve recovery kind and original-source byte
+  spans under a fixed ceiling. · why: #165 A1–A4 · enforced by:
+  `lgwks_ast::tests` and `lgwks_ast` public API integration tests
 
 ## Docs
 
