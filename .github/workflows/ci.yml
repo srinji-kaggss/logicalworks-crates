@@ -82,6 +82,12 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # The simulation suites write a real file journal and `sync_all` it. On the
+    # runner's disk those syncs queue behind each other; on tmpfs they cost
+    # nothing and the syscalls, the code and every assertion are unchanged.
+    # Measured on sim_scale alone: 104 s on disk, 21.6 s on a RAM volume.
+    env:
+      TMPDIR: /dev/shm
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.98.0
@@ -104,6 +110,8 @@ jobs:
     name: Tests (lgwks-bot no default features, lgwks-std full)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      TMPDIR: /dev/shm
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.98.0
@@ -121,6 +129,8 @@ jobs:
     name: Tests (lgwks-bot full)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      TMPDIR: /dev/shm
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.98.0
@@ -401,8 +411,20 @@ jobs:
       - run: cargo test --locked -p lgwks_deps --no-default-features --features appcui --lib
       - run: cargo test --locked -p lgwks_deps --no-default-features --features appcui --doc
       - run: cargo clippy --locked -p lgwks_deps --no-default-features --features appcui --all-targets -- -D warnings
+
+  # Its own job rather than a step of the AppCUI Windows leg: the GPUI build is
+  # 194 s, and behind the AppCUI steps it made that leg the run's longest job.
+  gpui-windows:
+    name: GPUI Windows renderer
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.98.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
       - name: Check GPUI Windows renderer fixture
-        if: runner.os == 'Windows'
         run: >
           cargo check --locked
           --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml
@@ -419,10 +441,15 @@ jobs:
         with:
           toolchain: "1.98.0"
       - name: Check normal GPUI renderer feature
+        # The fixture is its own workspace, so by default it builds into its
+        # own target directory and compiles the GPUI stack a second time.
+        # Pointing it at the directory the first check just filled reuses
+        # every unit whose features match.
         run: >
           cargo check --locked -p lgwks_deps --all-targets --features gpui &&
           cargo check --locked
           --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml
+          --target-dir "${CARGO_TARGET_DIR:-target}"
           --no-default-features --features gpui --example gpui
 
   candle-macos:
