@@ -34,11 +34,12 @@ explicitly under that crate.
   `JoinSet`, asyncio `TaskGroup`, Trio, Go `errgroup`, a Node pool and
   Effect-TS on one workload, five runs per cell. `script!` is the only way to
   hold every invariant measured: no body live at return under failure, cancel
-  and storm; 130 attempts in a retry storm where the others make 326-5,000;
+  and storm; 130 attempts in a retry storm where the others make 368-5,000;
   and an error that names the failing item. On an idle host it ran 435,000
   items/s median against 334,000 for `join_all_bounded` and 316,000 for
   `JoinSet`, with a higher p99 (12.0 ms against 9.5 ms) and more peak RSS
-  (13.6 MB against 7-9.5 MB). It needs 11 lines to their 23-46.
+  (13.6 MB against 7-9.5 MB). On a loaded host it fell to 267,000 while
+  the hand-written ways held about 348,000. It needs 11 lines to their 23-46.
 
 ### lgwks_macros 0.1.0 Added
 

@@ -519,9 +519,10 @@ body ends the whole fan-out, like `break`.
 against `join_all_bounded`, tokio `JoinSet`, asyncio, Trio, Go `errgroup`, a
 Node pool and Effect-TS. `script!` holds every invariant measured there,
 including no body left running at return and 130 attempts in a retry storm
-where the others make 326-5,000. On an idle host it ran 435,000 items/s
+where the others make 368-5,000. On an idle host it ran 435,000 items/s
 against 316,000-334,000 for hand-written Rust, with a p99 of 12.0 ms against
-9.5 ms. The language reference is the
+9.5 ms; on a loaded host it fell to 267,000 while they held about 348,000,
+likely because an `each` drives its bodies on one task. The language reference is the
 [`lgwks_macros`](https://docs.rs/lgwks_macros) crate documentation;
 `examples/script_tenants.rs` crawls 10,000 pages for two tenants at once and
 prints the counts, the timing against a hand-written `join_all_bounded`, and
