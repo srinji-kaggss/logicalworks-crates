@@ -435,6 +435,21 @@ still enter the idempotency fence is not settled. The shipped answer is yes, and
 deliberate, so a future change to it must be a decision rather than an accident.
 Whether that is the right answer is a Director decision, recorded in §7.
 
+### 2026-09-30 — Release cut: lgwks_std 0.10.0, lgwks_ast 0.4.0, lgwks_deps 0.4.0, lgwks_bot 0.8.0, lgwks_macros 0.1.2
+
+- **Director-ordered** ("SO FINISH THE WORK DUDE, LIKE WHY ARE U LEAVING
+  STUFF", 2026-09-30, under the standing "Once done, if required, update cargo
+  release"). #199 landed the #191-#194 review fixes. `lgwks_std`, `lgwks_deps`,
+  `lgwks_ast` and `lgwks_bot` each break against the version on crates.io, so
+  each takes the minor position; `lgwks_macros` takes a patch for its
+  requirement. The reasons for each crate are in CHANGELOG.md.
+- The credentials were confirmed before the chain started
+  (`~/.cargo/credentials.toml`). The cut was verified with
+  `cargo publish --workspace --dry-run --locked` before upload.
+
+**Does not claim:** that anything is uploaded when this entry lands. The upload,
+tags and GitHub releases follow the merge, in `docs/releasing.md` §1 and §4 order.
+
 ### 2026-09-30 — Release cut: lgwks_std 0.9.0, lgwks_deps 0.3.0, lgwks_bot 0.7.0, lgwks_macros 0.1.1
 
 - **Director-ordered** ("SO FINISH THE WORK DUDE, LIKE WHY ARE U LEAVING
