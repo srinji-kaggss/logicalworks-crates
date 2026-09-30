@@ -222,7 +222,10 @@ Each of these was a shipped defect. Treat the list as the spec.
   unresolved root is always refused. Path-based identity rechecks are
   best-effort only and do not promise race-safe containment against hostile
   concurrent replacement. · why: #143 R15/R16 · enforced by:
-  `lgwks_std::fs::tests`
+  `lgwks_std::fs::tests` and `tests/sim_fs_walk.rs`
+  (`strict_refuses_the_first_unreadable_directory`,
+  `tolerant_reports_unreadable_directories_and_keeps_the_rest`,
+  `an_unresolvable_root_is_refused_by_every_entry_point`)
 - **INV-FS-5** Walk output uses absolute paths rooted at the canonicalized
   input root; descendants reached through symlinks retain the logical alias,
   while canonical targets identify visits. Reports expose the applied depth
@@ -235,7 +238,12 @@ Each of these was a shipped defect. Treat the list as the spec.
   out, does. Strict failures preserve path, stage and
   the original I/O source. `available_space` is an advisory snapshot, never a
   reservation or write guarantee. · why: #166 · enforced by:
-  `lgwks_std::fs::tests` and the public API doctest
+  `lgwks_std::fs::tests`, the public API doctest, and `tests/sim_fs_walk.rs`,
+  which checks 48 seeded on-disk trees per family against a model of the
+  admitted set, preorder and budget charge
+  (`completeness_does_not_depend_on_sorting`,
+  `a_tolerant_budget_prefix_is_bounded_and_marked`,
+  `following_links_visits_each_directory_once_and_terminates`)
 
 - **INV-FS-3** Handle-relative access resolves every name below one admitted
   directory from that directory's descriptor, so a name replaced mid-walk
@@ -305,8 +313,11 @@ Each of these was a shipped defect. Treat the list as the spec.
   `lgwks_ast::tests::inspection_metrics_name_complete_exact_and_over_limit_walks`,
   `lgwks_ast::tests::syntax_diagnostics_stop_at_the_declared_bound`,
   `lgwks_ast::tests::a_truncated_syntax_report_keeps_the_earliest_errors_in_source_order`,
-  `lgwks_ast::tests::the_refusal_and_the_report_count_the_same_recovery_nodes`, and
-  `tests/content_detection.rs`
+  `lgwks_ast::tests::the_refusal_and_the_report_count_the_same_recovery_nodes`,
+  `tests/content_detection.rs`, and `tests/sim_diagnostics.rs`, which checks 64
+  seeded malformed sources per family against a line/column model
+  (`the_refusal_keeps_the_earliest_recovery_nodes_in_source_order`,
+  `a_syntax_refusal_points_at_the_earliest_recovery_node`)
 
 ## Docs
 
