@@ -12,11 +12,12 @@ the capability: implemented here, caller policy, storefront BOUNDARY (requires
 | Capability | Status | Owner |
 |---|---|---|
 | Blocking GET/POST, rustls-only TLS, strict absolute-URL validation | Shipped | `lgwks_std::http` |
-| One attempt per call; timeouts surface as `Timeout`, statuses never error | Shipped, by design | `lgwks_std::http` |
+| No transport retries; redirects are explicit, bounded to ten hops (default ten), and expose sanitized target history; HTTP statuses never error | Shipped, by design | `lgwks_std::http` |
 | Retries, exponential backoff, total deadlines | Caller policy | `lgwks_std::retry::RetryPolicy` (zero-dep values) + caller sleep |
-| `Idempotency-Key` attachment | Shipped helper | `Options::idempotency_key` (caller generates the key) |
+| Typed failure stage/class and byte-preserving repeated response headers | Shipped | `lgwks_std::http`; `headers()` is a documented lossy String projection |
+| `Idempotency-Key` attachment | Shipped helper | `Options::idempotency_key` keeps one key; receiver defines deduplication and payload-conflict behavior |
 | Connection pooling / keep-alive reuse | Not implemented | Caller concern; the client builds one agent per call. Bursts stay bounded via `lgwks_bot::rt::task::join_all_bounded` |
-| Per-phase timeouts (connect / TLS / TTFB / body) | Single total `timeout` only | `lgwks_std`: needs a stated use case before growing `Options` |
+| Per-phase timeout configuration | One shared total `timeout`; failure classification reports ureq's observed connect/TLS, send, headers, body, and EOF-probe stage where available | `lgwks_std::http`; TLS handshake is part of ureq's connect stage |
 | mTLS, custom CA bundles, client identity material | Missing | Storefront BOUNDARY (`rustls-pki`/`pem`-class crate with reason); `std` has no PKI loader |
 | Pagination cursors, streaming bodies, SSE | Missing | `lgwks_std` for sync-reader shapes; async streaming is a storefront transport decision |
 | Raw-socket egress policy | Caller applies policy | `lgwks_bot::rt::net` explicitly does NOT pass the HTTP gate |
@@ -44,7 +45,7 @@ the capability: implemented here, caller policy, storefront BOUNDARY (requires
 
 Write-ahead log, snapshots, membership/gossip, failure detection, and
 consensus are **explicitly out of scope** for `lgwks_std` / `lgwks_bot`.
-`online::is_online` is a boolean TCP probe, not a detector (no latency, no
+`online::is_online` is a boolean TCP probe under one shared deadline, not a detector (no latency, no
 phi-accrual, no flap damping); `domain::net` is a single-endpoint poll. A
 Raft-class edge would be a new `lgwks_deps` BOUNDARY plus a new bot-domain
 surface, approved as a recorded decision, never a silent addition, and never a
