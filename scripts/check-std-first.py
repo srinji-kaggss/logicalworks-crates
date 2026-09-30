@@ -79,7 +79,9 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
+import tempfile
 import tomllib
 import unittest
 from pathlib import Path
@@ -409,10 +411,38 @@ def workspace_members(repo: Path) -> dict[str, Path]:
     return members
 
 
+def repository_files(repo: Path) -> set[Path] | None:
+    """The files git says the repository holds, or None outside a checkout.
+
+    Tracked files plus untracked ones `.gitignore` does not exclude: a new file
+    is checked before it is staged, and build output is not. None, not an empty
+    set, when git cannot answer, because "no files" would pass every check.
+    """
+    listing = subprocess.run(
+        ["git", "-C", str(repo), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        capture_output=True,
+        check=False,
+    )
+    if listing.returncode != 0:
+        return None
+    return {repo / name for name in listing.stdout.decode("utf-8", "surrogateescape").split("\0") if name}
+
+
 def source_files(repo: Path) -> list[Path]:
+    """Every file of the repository's source that a `SOURCE_GLOBS` pattern names.
+
+    The glob alone reads the disk, and the disk holds more than the repository:
+    a fixture compiled in place leaves `target/debug/build/*/out/*.rs` under
+    `crates/*/tests/`, and this gate failed on one machine and passed on
+    another over two such generated files (2026-09-30). Intersecting with what
+    git holds makes the verdict a property of the repository. Outside a git
+    checkout the disk is the only view, and the glob is used as is.
+    """
+    held = repository_files(repo)
     found: set[Path] = set()
     for pattern in SOURCE_GLOBS:
-        found.update(repo.glob(pattern))
+        matched = set(repo.glob(pattern))
+        found.update(matched if held is None else matched & held)
     return sorted(found)
 
 
@@ -502,6 +532,32 @@ class CodeOnlyRegression(unittest.TestCase):
         self.assertIn("'a", code)
 
 
+class SourceFilesRegression(unittest.TestCase):
+    """Which files the scan reads: the repository's, not whatever is on disk."""
+
+    def test_ignored_build_output_is_not_source_and_a_new_file_is(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            repo = Path(scratch)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            (repo / ".gitignore").write_text("target/\n", encoding="utf-8")
+            kept = repo / "crates/demo/tests/unstaged.rs"
+            generated = repo / "crates/demo/tests/fixtures/app/target/debug/build/out/private.rs"
+            for path in (kept, generated):
+                path.parent.mkdir(parents=True)
+                path.write_text("use serde_core::Serialize;\n", encoding="utf-8")
+            self.assertEqual(source_files(repo), [kept])
+
+    def test_outside_a_checkout_the_disk_is_scanned(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            repo = Path(scratch)
+            source = repo / "crates/demo/src/lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text("", encoding="utf-8")
+            if repository_files(repo) is not None:
+                self.skipTest("the scratch directory is inside a git checkout")
+            self.assertEqual(source_files(repo), [source])
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -518,7 +574,10 @@ def main() -> int:
     parser.add_argument("--test", action="store_true", help="run the regression suite")
     args = parser.parse_args()
     if args.test:
-        suite = unittest.defaultTestLoader.loadTestsFromTestCase(CodeOnlyRegression)
+        loader = unittest.defaultTestLoader
+        suite = unittest.TestSuite(
+            [loader.loadTestsFromTestCase(CodeOnlyRegression), loader.loadTestsFromTestCase(SourceFilesRegression)]
+        )
         return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1
     repo: Path = args.repo.resolve()
     home: Path = Path(__file__).resolve().parent.parent
