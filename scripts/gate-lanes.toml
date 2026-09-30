@@ -47,7 +47,13 @@ id = "lockfile"
 surfaces = "local ci"
 required = true
 fast = true
-command = "cargo metadata --locked --format-version 1 >/dev/null"
+# The storefront fixtures are separate workspaces with their own lockfiles, and
+# every version bump of a workspace crate makes them stale (#175 failed CI on
+# exactly that). Checking them here makes the release cut impossible to forget.
+command = """\
+cargo metadata --locked --format-version 1 >/dev/null && \
+for f in crates/lgwks-deps/tests/fixtures/*/Cargo.lock; do if ! cargo metadata --locked --format-version 1 --manifest-path \"${f%.lock}.toml\" >/dev/null; then echo \"stale fixture lockfile $f: run cargo update --workspace --manifest-path ${f%.lock}.toml\" >&2; exit 1; fi; done\
+"""
 ci_step = "Verify lockfile is up-to-date"
 
 [[lane]]
@@ -71,7 +77,7 @@ id = "std-first"
 surfaces = "local ci"
 required = true
 fast = true
-command = "python3 scripts/check-std-first.py"
+command = "python3 scripts/check-std-first.py --test && python3 scripts/check-std-first.py"
 ci_step = "Audit std-first and lgwks_std-first"
 
 [[lane]]
@@ -102,8 +108,18 @@ ci_step = "Check formatting"
 id = "tests"
 surfaces = "local ci"
 required = true
-command = "cargo nextest run --workspace --locked"
+# The storefront consumer builds run in their own lane and CI job: they are
+# nested cargo builds that serialize on one target-directory lock, and in the
+# Tests job they alone held the step at 441 s of a 513 s job.
+command = "cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)'"
 ci_step = "Run all workspace tests"
+
+[[lane]]
+id = "storefront-consumers"
+surfaces = "local ci"
+required = true
+command = "cargo nextest run --locked -p lgwks_deps --test storefront_consumers"
+ci_step = "Build storefront consumers"
 
 [[lane]]
 id = "simulation-evidence"
@@ -324,13 +340,19 @@ cargo check --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets -
 """
 ci_step = "Check lgwks-ast feature matrix"
 
+# `RUSTFLAGS=""` states the flags this target builds with: none. Without it a
+# machine's `$CARGO_HOME/config.toml` `[build] rustflags` reach the WASI target,
+# which has no rustflags table of its own, and nightly-only `-Z` flags there make
+# the pinned stable rustc refuse to start. The environment variable is the only
+# setting that replaces config rustflags rather than joining them; an empty
+# `[target.wasm32-wasip1] rustflags` table is ignored by cargo. (#195)
 [[lane]]
 id = "wasi-boundary"
 surfaces = "local ci"
 required = false
 command = """\
 rustup target add wasm32-wasip1 && \
-cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --target wasm32-wasip1 --features rt\
+RUSTFLAGS="" cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --target wasm32-wasip1 --features rt\
 """
 ci_step = "Check lgwks-bot WASI runtime boundary"
 needs = ["bin:rustup"]
@@ -420,6 +442,19 @@ needs = ["module:yaml"]
 # ── ci only, platform-bound ─────────────────────────────────────────────────
 # A local run never covers these. The receipt names them. On a host outside
 # `platforms` the lane is `skip` (out of scope), never `pass`.
+
+# The GPUI Windows renderer builds only on a Windows host. The check runs inside
+# the AppCUI job's Windows leg; naming it here puts it in the one gate table, so
+# parity sees it and `ci_local.py` runs it on a Windows machine. (#195)
+[[lane]]
+id = "gpui-windows"
+surfaces = "local ci"
+required = false
+command = "cargo check --locked --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml --no-default-features --features gpui --example gpui"
+ci_step = "Check GPUI Windows renderer fixture"
+platforms = ["win32"]
+reason = "the GPUI Windows renderer builds only on Windows"
+
 
 [[lane]]
 id = "appcui-native"

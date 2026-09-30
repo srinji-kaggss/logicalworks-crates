@@ -395,29 +395,29 @@ fn valid_revision(revision: &str) -> bool {
 #[non_exhaustive]
 pub struct Entry {
     /// Stable `INV-<SCOPE>-<SLUG>` identifier.
-    pub id: String,
+    pub(crate) id: String,
     /// Human-readable claim the repository is meant to preserve.
-    pub statement: String,
+    pub(crate) statement: String,
     /// Workspace crate or Rust module path bound by the claim.
-    pub scope: String,
+    pub(crate) scope: String,
     /// Workspace crate responsible for preserving the claim.
-    pub owner: String,
+    pub(crate) owner: String,
     /// Enforcement kind, parsed from the closed two-word grammar.
-    pub enforcement: Enforcement,
+    pub(crate) enforcement: Enforcement,
     /// The mechanism named as enforcement, or `None` when the entry names one
     /// and it is absent. Resolution against the repository happens in
     /// [`audit`], not here.
-    pub enforced_by: Option<EnforcedBy>,
+    pub(crate) enforced_by: Option<EnforcedBy>,
     /// Recorded run attesting the claim, when the entry carries one.
-    pub evidence: Option<Evidence>,
+    pub(crate) evidence: Option<Evidence>,
     /// Human who approved the claim.
-    pub approved_by: String,
+    pub(crate) approved_by: String,
     /// ISO date of the review.
-    pub approved_on: String,
+    pub(crate) approved_on: String,
     /// Path or URL to the review evidence.
-    pub review: String,
+    pub(crate) review: String,
     /// One-based line where the entry opened.
-    pub line: usize,
+    pub(crate) line: usize,
 }
 
 /// The parsed invariant register.
@@ -427,7 +427,15 @@ pub struct Register {
     /// Whether invariant refusals are enforcement failures.
     pub enforce: bool,
     /// Invariants in source order.
-    pub entries: Vec<Entry>,
+    pub(crate) entries: Vec<Entry>,
+}
+
+impl Register {
+    /// Number of invariant declarations in this register.
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
 }
 
 // ── Verdicts ────────────────────────────────────────────────────────────────
@@ -473,11 +481,19 @@ impl fmt::Display for Status {
 #[non_exhaustive]
 pub struct Outcome {
     /// Invariant identifier.
-    pub id: String,
+    id: String,
     /// What the audit established about it.
     pub status: Status,
     /// One-based line where the invariant opened.
     pub line: usize,
+}
+
+impl Outcome {
+    /// Invariant identifier bound to this audit result.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
 }
 
 /// The result of resolving a register against one repository.
@@ -817,6 +833,8 @@ pub enum ErrorKind {
     BadDate {
         /// Invariant identifier.
         id: String,
+        /// One-based line where the field was written.
+        line: usize,
         /// The invalid value.
         value: String,
     },
@@ -920,9 +938,13 @@ impl fmt::Display for ErrorKind {
                     "invariant {id:?} is missing required field {field:?}"
                 )
             }
-            Self::BadDate { ref id, ref value } => write!(
+            Self::BadDate {
+                ref id,
+                line,
+                ref value,
+            } => write!(
                 formatter,
-                "invariant {id:?} has approved_on {value:?}, want YYYY-MM-DD"
+                "line {line}: invariant {id:?} has invalid approved_on {value:?}; want a real YYYY-MM-DD date"
             ),
             Self::NonMonitorable { ref id, ref reason } => {
                 write!(formatter, "invariant {id:?} is not monitorable: {reason}")
@@ -1046,6 +1068,7 @@ fn build(raw: &RawEntry) -> Result<Entry, ErrorKind> {
     if !contract::is_iso_date(&approved_on) {
         return Err(ErrorKind::BadDate {
             id,
+            line: raw.field_line("approved_on").unwrap_or(raw.line()),
             value: approved_on,
         });
     }
@@ -1197,9 +1220,11 @@ fn map_contract_error(error: contract::ContractError) -> ErrorKind {
             line,
             text: format!("tier = {value:?}"),
         },
-        contract::ContractError::BadDate { krate, value } => {
-            ErrorKind::BadDate { id: krate, value }
-        }
+        contract::ContractError::BadDate { krate, line, value } => ErrorKind::BadDate {
+            id: krate,
+            line,
+            value,
+        },
         contract::ContractError::ThinReason { krate } => ErrorKind::Malformed {
             line: 0,
             text: format!("reason for {krate:?} is not an invariant field"),
@@ -1207,6 +1232,21 @@ fn map_contract_error(error: contract::ContractError) -> ErrorKind {
         contract::ContractError::DuplicateEntry { krate, line } => ErrorKind::Malformed {
             line,
             text: format!("duplicate dependency approval {krate:?}"),
+        },
+        error @ contract::ContractError::InvalidString { line, .. } => ErrorKind::Malformed {
+            line,
+            text: error.to_string(),
+        },
+        error @ contract::ContractError::DuplicateEntryKey {
+            duplicate_line: line,
+            ..
+        } => ErrorKind::Malformed {
+            line,
+            text: error.to_string(),
+        },
+        error @ contract::ContractError::InvalidField { line, .. } => ErrorKind::Malformed {
+            line,
+            text: error.to_string(),
         },
         contract::ContractError::BadPolicyValue { line, key, value } => {
             ErrorKind::BadPolicyValue { line, key, value }

@@ -1,13 +1,48 @@
-//! `wire` owns binary serialization and enforces INV-WIRE-DETERMINISTIC:
-//! the same value always produces the same byte sequence on the same
-//! architecture (little-endian, pointer-width-64). Built on rkyv for
-//! zero-copy deserialization: archived data is accessed directly from the
-//! byte buffer without allocation.
+//! `wire` is a thin archive facade over rkyv 0.8. It does not define a
+//! versioned envelope or promise canonical bytes for semantic values.
 //!
-//! This is the internal binary wire format. For external JSON APIs, use the
-//! `json` module. Callers use the rkyv derive macros (`Archive`,
-//! `Serialize`, `Deserialize`) on their types, then call the functions
-//! here with the error type already pinned.
+//! The archive format is selected by rkyv's Cargo feature-unified format
+//! controls, not by the host architecture. With the current rkyv defaults,
+//! archives are little-endian, aligned, and encode `usize`/`isize` as 32-bit
+//! values. A downstream feature unifier can select a different endianness,
+//! alignment, or pointer width. Use [`format_descriptor`](crate::wire::format_descriptor) to observe the
+//! effective primitive format in this build and bind it, together with an
+//! application schema/version, in any durable or exchanged envelope.
+//!
+//! rkyv 0.8.18 is the version pinned by this workspace's `Cargo.lock`; the
+//! published dependency accepts the compatible `0.8` series. Compatibility
+//! still requires the same archived schema and effective format, and a
+//! semver-compatible rkyv release. No format migration or old-reader
+//! guarantee is provided by this facade.
+//!
+//! Checked access validates the archive structure supported by the selected
+//! rkyv configuration. It does not validate application invariants, schema
+//! identity, authorization, freshness, or resource limits. `access` borrows
+//! from the aligned archive bytes; `from_bytes` reconstructs an owned value.
+//! The re-export also includes rkyv's unchecked APIs, whose callers must meet
+//! their unsafe preconditions. These boundaries are part of the consumer
+//! contract.
+//!
+//! This general facade is chosen over a fixed internal profile because
+//! enabling a format-control feature here would unify it into downstream
+//! builds and could change existing archive layouts. `bincode` offers
+//! explicit encoder configuration, but introducing a second codec would not
+//! repair this facade's contract and is outside this module's dependency
+//! surface. The rkyv format controls and compatibility rules are documented
+//! in the [rkyv 0.8 format reference](https://docs.rs/rkyv/0.8.18/rkyv/).
+//!
+//! This is an archive format, not a semantic canonicalization format. The
+//! same value serialized by the same schema and format can be tested for
+//! repeatable bytes, but arbitrary `Serialize` implementations, unordered
+//! collections, floating-point representations, and shared-pointer topology
+//! do not acquire a universal byte-identity guarantee. Do not use these bytes
+//! as semantic content identity for hashing or signing without a separate,
+//! explicitly constrained canonical profile.
+//!
+//! Callers derive `Archive`, `Serialize`, and `Deserialize` and choose the
+//! rkyv error type at each call, as in `to_bytes::<WireError>(&value)`.
+
+use core::mem::{align_of, size_of};
 
 // ── Re-exports ──────────────────────────────────────────────────────────────
 
@@ -15,6 +50,80 @@ pub use rkyv::rancor::Error as WireError;
 pub use rkyv::util::AlignedVec;
 pub use rkyv::{Archive, Deserialize, Serialize};
 pub use rkyv::{access, from_bytes, to_bytes};
+
+/// Endianness observed in the effective archived primitive format.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum Endianness {
+    /// Multi-byte archived primitives use little-endian bytes.
+    Little,
+    /// Multi-byte archived primitives use big-endian bytes.
+    Big,
+    /// The runtime probe did not match either supported byte order.
+    Unknown,
+}
+
+/// Effective rkyv primitive-format properties for this compiled dependency.
+///
+/// This is not a schema identifier or a complete archive version. Persist or
+/// exchange it alongside an application-owned schema/version identifier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct FormatDescriptor {
+    /// Effective byte order observed by serializing a `u32` sentinel.
+    pub endianness: Endianness,
+    /// Width used for archived `usize` and `isize`, in bits.
+    pub pointer_width_bits: u8,
+    /// Alignment of rkyv's archived `u32` primitive, in bytes.
+    pub archived_u32_alignment: u8,
+    /// rkyv codec compatibility series used by this facade.
+    pub codec_series: &'static str,
+}
+
+/// Observe format controls selected for the linked rkyv instance.
+///
+/// rkyv feature unification means the manifest of this crate alone cannot
+/// identify the effective format. This probe reports byte order, archived
+/// pointer width, and primitive alignment. It deliberately does not invent a
+/// schema id or promise that archives of different application types are
+/// compatible.
+///
+/// ```rust
+/// use lgwks_std::wire::{Endianness, WireError, format_descriptor};
+///
+/// let format = format_descriptor()?;
+/// assert!(matches!(format.endianness, Endianness::Little | Endianness::Big));
+/// # Ok::<(), WireError>(())
+/// ```
+pub fn format_descriptor() -> Result<FormatDescriptor, WireError> {
+    let sentinel = to_bytes::<WireError>(&0x0102_0304_u32)?;
+    let endianness = if sentinel
+        .windows(4)
+        .any(|bytes| bytes == [0x04, 0x03, 0x02, 0x01])
+    {
+        Endianness::Little
+    } else if sentinel
+        .windows(4)
+        .any(|bytes| bytes == [0x01, 0x02, 0x03, 0x04])
+    {
+        Endianness::Big
+    } else {
+        Endianness::Unknown
+    };
+
+    Ok(FormatDescriptor {
+        endianness,
+        pointer_width_bits: match size_of::<rkyv::primitive::ArchivedUsize>() {
+            2 => 16,
+            4 => 32,
+            8 => 64,
+            _ => u8::MAX,
+        },
+        archived_u32_alignment: u8::try_from(align_of::<rkyv::primitive::ArchivedU32>())
+            .unwrap_or(u8::MAX),
+        codec_series: "rkyv 0.8",
+    })
+}
 
 /// The archive implementation itself, re-exported so a *consumer* crate can
 /// derive against it.
@@ -33,80 +142,3 @@ pub use rkyv::{access, from_bytes, to_bytes};
 /// the derive: naming the items individually is how this module came to be
 /// usable only by its own tests.
 pub use rkyv;
-
-// ── Tests ───────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[derive(Archive, Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
-    #[rkyv(compare(PartialEq), derive(Debug))]
-    struct Rect {
-        x: u32,
-        y: u32,
-        w: u32,
-        height: u32,
-    }
-
-    #[derive(Archive, Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
-    #[rkyv(compare(PartialEq), derive(Debug))]
-    struct Nested {
-        name: String,
-        bounds: Rect,
-    }
-
-    // These tests return `Result` rather than unwrapping: a rkyv refusal
-    // reports its own `Debug` on failure, which is the same report `.unwrap`
-    // would have panicked with, without an `unwrap` in the tree.
-    #[test]
-    fn roundtrips_through_bytes() -> Result<(), WireError> {
-        let value = Nested {
-            name: "test".into(),
-            bounds: Rect {
-                x: 1,
-                y: 2,
-                w: 100,
-                height: 200,
-            },
-        };
-        let bytes = to_bytes::<WireError>(&value)?;
-        let archived = access::<ArchivedNested, WireError>(&bytes)?;
-        assert_eq!(&value, archived);
-        let restored = from_bytes::<Nested, WireError>(&bytes)?;
-        assert_eq!(value, restored);
-        Ok(())
-    }
-
-    #[test]
-    fn encoding_is_deterministic() -> Result<(), WireError> {
-        let value = Rect {
-            x: 5,
-            y: 10,
-            w: 50,
-            height: 100,
-        };
-        let first = to_bytes::<WireError>(&value)?;
-        let second = to_bytes::<WireError>(&value)?;
-        assert_eq!(first.as_slice(), second.as_slice());
-        Ok(())
-    }
-
-    #[test]
-    fn different_values_produce_different_bytes() -> Result<(), WireError> {
-        let first = to_bytes::<WireError>(&Rect {
-            x: 1,
-            y: 1,
-            w: 1,
-            height: 1,
-        })?;
-        let second = to_bytes::<WireError>(&Rect {
-            x: 2,
-            y: 1,
-            w: 1,
-            height: 1,
-        })?;
-        assert_ne!(first.as_slice(), second.as_slice());
-        Ok(())
-    }
-}

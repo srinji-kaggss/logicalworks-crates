@@ -78,8 +78,10 @@ deployment boundaries rather than library defaults.
 
 ## Schema evolution
 
-- `lgwks_std::wire` (rkyv) is deterministic internal binary with no envelope:
-  version the envelope before putting it on a wire that outlives one deploy.
+- `lgwks_std::wire` (rkyv 0.8) is a feature-unified archive facade, not a
+  canonical semantic encoding and not a versioned envelope. Record its observed
+  primitive format and the application schema/version in an envelope before
+  persisting or exchanging archives; checked access does not validate either.
 - `BotSpec` uses `deny_unknown_fields`, correct for strict manifests, wrong
   for rolling mesh channels. `BotSpec` has no `version` field yet; adding one
   plus a per-channel unknown-field policy is recorded future work.

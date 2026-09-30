@@ -81,6 +81,7 @@ import argparse
 import re
 import sys
 import tomllib
+import unittest
 from pathlib import Path
 
 # The standard library, plus the two relative-path prefixes every module may
@@ -195,31 +196,87 @@ EXEMPT: dict[str, tuple[str, str]] = {
 }
 
 
-def in_string_literal(line: str, column: int) -> bool:
-    """Whether an offset on a line sits inside a `"…"` literal.
+def code_only(text: str) -> str:
+    """The text with every comment and literal blanked, offsets preserved.
 
-    A bare `name::` path can only be code, so the scan has to tell code from a
-    string that happens to spell one. It matters here because
-    `crates/lgwks-deps/src/scan.rs` *is* a source scanner: its pattern table
-    contains `"tracing::"`, and reporting that string as a reach into `tracing`
-    is the checker reporting a detector as the thing it detects.
+    A `use` statement or a bare `name::` path can only be code, so the scan has
+    to tell code from a string or comment that happens to spell one. Two real
+    cases forced this. `crates/lgwks-deps/src/scan.rs` *is* a source scanner,
+    and its pattern table holds `"tracing::"`; reporting that as a reach into
+    `tracing` is the checker reporting a detector as the thing it detects. And
+    `crates/lgwks-macros/src/refuse.rs` writes a diagnostic whose continuation
+    line starts with `use `…`;`, which the `use` pattern read as a statement:
+    the prose became a "crate", bound itself as a name, resolved through that
+    binding, and was printed among the crates the estate reaches (#195).
 
-    Odd unescaped quotes before the offset, which is true for the single-line
-    strings a pattern table holds. It is honestly a heuristic and not a lexer: a
-    raw string spanning lines, or a `"` inside a character literal, will confuse
-    it. The failure direction is a missed finding rather than a false one only
-    for text that looks like code and is not, which is the rarer case.
+    This is a lexer for exactly the Rust forms that can hide code-like text:
+    line and nested block comments, string and byte-string literals with
+    escapes, raw strings with any number of `#`, and character literals, which
+    are told apart from lifetimes by their closing quote. Every blanked
+    character becomes a space and every newline is kept, so an offset and a
+    line number mean the same thing in the result as in the file.
     """
-    quotes = 0
-    escaped = False
-    for char in line[:column]:
-        if escaped:
-            escaped = False
-        elif char == "\\":
-            escaped = True
+    out = list(text)
+    length = len(text)
+
+    def blank(start: int, end: int) -> None:
+        for index in range(start, min(end, length)):
+            if out[index] != "\n":
+                out[index] = " "
+
+    index = 0
+    while index < length:
+        char = text[index]
+        after = text[index + 1] if index + 1 < length else ""
+        if char == "/" and after == "/":
+            end = text.find("\n", index)
+            end = length if end == -1 else end
+            blank(index, end)
+            index = end
+        elif char == "/" and after == "*":
+            depth, cursor = 1, index + 2
+            while cursor < length and depth:
+                pair = text[cursor : cursor + 2]
+                if pair == "/*":
+                    depth, cursor = depth + 1, cursor + 2
+                elif pair == "*/":
+                    depth, cursor = depth - 1, cursor + 2
+                else:
+                    cursor += 1
+            blank(index, cursor)
+            index = cursor
+        elif char == "r" and (index == 0 or not (text[index - 1].isalnum() or text[index - 1] == "_") or text[index - 1] == "b"):
+            hashes = 0
+            while index + 1 + hashes < length and text[index + 1 + hashes] == "#":
+                hashes += 1
+            if index + 1 + hashes < length and text[index + 1 + hashes] == '"':
+                closing = '"' + "#" * hashes
+                end = text.find(closing, index + 2 + hashes)
+                end = length if end == -1 else end + len(closing)
+                blank(index, end)
+                index = end
+            else:
+                index += 1
         elif char == '"':
-            quotes += 1
-    return quotes % 2 == 1
+            cursor = index + 1
+            while cursor < length and text[cursor] != '"':
+                cursor += 2 if text[cursor] == "\\" else 1
+            blank(index, cursor + 1)
+            index = cursor + 1
+        elif char == "'":
+            if after == "\\":
+                end = text.find("'", index + 3 if text[index + 2 : index + 3] == "'" else index + 2)
+                end = length if end == -1 else end + 1
+                blank(index, end)
+                index = end
+            elif index + 2 < length and text[index + 2] == "'" and after != "\n":
+                blank(index, index + 3)
+                index += 3
+            else:
+                index += 1
+        else:
+            index += 1
+    return "".join(out)
 
 
 def split_top_level(text: str) -> list[str]:
@@ -399,7 +456,7 @@ def module_names(paths: list[Path]) -> set[str]:
     """Every module name declared across a crate's source."""
     names: set[str] = set()
     for path in paths:
-        names.update(m.group("name") for m in LOCAL_MODULE.finditer(cleaned_text(path)))
+        names.update(m.group("name") for m in LOCAL_MODULE.finditer(code_only(cleaned_text(path))))
     return names
 
 
@@ -411,6 +468,38 @@ def justification(record: dict | None) -> str:
         f"owner={record.get('owner')} capability={record.get('capability')} "
         f"tier={record.get('tier')} — {record.get('reason')}"
     )
+
+
+class CodeOnlyRegression(unittest.TestCase):
+    """What `code_only` must blank, and what it must leave as code."""
+
+    def scan_uses(self, source: str) -> list[str]:
+        return [m.group("body") for m in USE.finditer(code_only(source))]
+
+    def test_a_use_line_inside_a_multiline_string_is_not_a_statement(self) -> None:
+        # The refuse.rs shape that put prose into the crate list (#195).
+        source = 'let m = "flows stop here: \\\n    use `?` or `.or_fail()?` (permanent)";\nuse std::fmt;\n'
+        self.assertEqual(self.scan_uses(source), ["std::fmt"])
+
+    def test_raw_strings_comments_and_char_literals_hide_code_like_text(self) -> None:
+        source = (
+            'let a = r#"use serde::Value; "quoted" tokio::spawn"#;\n'
+            "/* use regex::Regex; /* nested */ still comment */\n"
+            "let q = '\"'; let e = '\\''; // tokio::spawn\n"
+            "use lgwks_std::json;\n"
+        )
+        code = code_only(source)
+        self.assertEqual(self.scan_uses(source), ["lgwks_std::json"])
+        self.assertNotIn("tokio::", code)
+        self.assertNotIn("regex::", code)
+
+    def test_lifetimes_stay_code_and_offsets_are_preserved(self) -> None:
+        source = "fn f<'a>(x: &'a str) -> &'a str { serde_json::from_str(x) }\n\"\n\""
+        code = code_only(source)
+        self.assertEqual(len(code), len(source))
+        self.assertEqual(code.count("\n"), source.count("\n"))
+        self.assertIn("serde_json::", code)
+        self.assertIn("'a", code)
 
 
 def main() -> int:
@@ -426,7 +515,11 @@ def main() -> int:
         action="store_true",
         help="print the approval record for every crate reached past the clean roots",
     )
+    parser.add_argument("--test", action="store_true", help="run the regression suite")
     args = parser.parse_args()
+    if args.test:
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(CodeOnlyRegression)
+        return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1
     repo: Path = args.repo.resolve()
     home: Path = Path(__file__).resolve().parent.parent
 
@@ -509,12 +602,16 @@ def main() -> int:
         for path in paths:
             relative = path.relative_to(repo)
             text = cleaned_text(path)
+            # `use` statements and path roots are read from code only; the
+            # `STD-FIRST` patterns below keep reading `text`, because a format
+            # string or a written-out alphabet is exactly what they look for.
+            code = code_only(text)
 
             # Every name this file binds, collected before any root is judged:
             # `use lgwks_std::json::serde;` at the top is what makes a later
             # `use serde::de::VariantAccess;` a path through `lgwks_std`.
-            statements = list(USE.finditer(text))
-            statements += list(EXTERN_CRATE.finditer(text))
+            statements = list(USE.finditer(code))
+            statements += list(EXTERN_CRATE.finditer(code))
             bindings: set[str] = set()
             for match in statements:
                 if "body" in match.groupdict():
@@ -536,13 +633,9 @@ def main() -> int:
                 # *through* the storefront that owns it, which is the rule
                 # working rather than a violation of it.
                 for match in re.finditer(
-                    rf"(?<![A-Za-z0-9_:]){re.escape(name)}::", text
+                    rf"(?<![A-Za-z0-9_:]){re.escape(name)}::", code
                 ):
-                    number = line_of(text, match.start())
-                    line_start = text.rfind("\n", 0, match.start()) + 1
-                    line_text = text[line_start : text.find("\n", line_start)]
-                    if in_string_literal(line_text, match.start() - line_start):
-                        continue
+                    number = line_of(code, match.start())
                     # A declared edge is reached, whether or not this reports
                     # it. Recording it only in the undeclared branch left a
                     # crate that declares an unapproved edge and uses it
@@ -579,7 +672,7 @@ def main() -> int:
                 if root in resolvable:
                     continue
                 findings.append(
-                    f"{relative}:{line_of(text, match.start())} — UNDECLARED: "
+                    f"{relative}:{line_of(code, match.start())} — UNDECLARED: "
                     f"`{root}` is neither a clean root, nor a module `{crate}` "
                     f"declares, nor a name this file binds"
                 )

@@ -82,6 +82,29 @@ let point: Point = json::from_str(r#"{"x":1,"y":2}"#).expect("valid JSON");
 > `cannot find serde in this scope`, add the attribute rather than running
 > `cargo add serde`; `lgwks-deps check` refuses that edge.
 
+The RON-only feature re-exports the same derive support path from
+`lgwks_std::ron::serde`; it does not require `json` or a direct `serde`
+dependency:
+
+```rust
+use lgwks_std::ron;
+
+#[derive(ron::Serialize, ron::Deserialize)]
+#[serde(crate = "lgwks_std::ron::serde")]
+struct Settings<'a> { name: &'a str }
+```
+
+JSON and RON text/slice decoders can borrow unescaped string fields from their
+input. Escaped strings require decoded storage: use `String` when input may
+contain escapes. JSON reader decoding remains owned because the input is read
+through a temporary buffer. RON's `to_writer` renders before writing, so a
+serialization error leaves the writer untouched, while an I/O error may leave
+a prefix. Its return type is `ron::WriterError`, with distinct `Serialize`
+and `Write` variants and the original cause available through `Error::source`;
+callers that matched `ron::Error` should update those matches. The previous
+`write_all failed after {n} bytes` display text is removed because that count
+was not observed; the facade defines no serialized error representation.
+
 ## Feature map
 
 One manifest key, three alternative lines. Use exactly one of them:
@@ -105,7 +128,7 @@ lgwks_std = { version = "0.8", default-features = false, features = ["core"] }
 | `trace` (default) | trace | Structured logging plus default debugger install | tracing, tracing-subscriber stack |
 | `random` | random, id | UUID v4, OS entropy | getrandom |
 | `hash` | hash | BLAKE3 content-addressable hashing | blake3 |
-| `pattern` | pattern | Linear-time compiled regex | regex |
+| `pattern` | pattern | Compiled regex with explicit compile, input and replacement-output limits | regex |
 | `json` | json | JSON serialization | serde, serde_json |
 | `ron` | ron | Rusty Object Notation | serde, ron |
 | `wire` | wire | Zero-copy binary serialization | rkyv |
@@ -130,7 +153,7 @@ lgwks_std = { version = "0.8", default-features = false, features = ["core"] }
 | `random` | OS entropy via `getrandom` | `getrandom` |
 | `id` | UUID v4 generation and parsing | `uuid` |
 | `hash` | BLAKE3 content-addressable hashing | `blake3` |
-| `pattern` | Compiled regex matching (linear-time guarantee) | `regex` |
+| `pattern` | Compiled regex matching: single search is O(m*n); complete greedy iteration may be O(m*n^2). `Regex::with_config` bounds source-pattern bytes, compiled size, nesting, input bytes and replacement output bytes. | `regex` |
 | `json` | JSON encoding and decoding via serde | `serde_json` |
 | `ron` | RON encoding and decoding via serde | `ron` |
 | `wire` | Zero-copy binary wire serialization via rkyv | `rkyv` |

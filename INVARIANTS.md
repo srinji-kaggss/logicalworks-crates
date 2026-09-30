@@ -38,6 +38,17 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
   `bevy-state`) exposes its promised public import path; a deselected path is
   absent from the facade. · why: #169 · enforced by:
   `crates/lgwks-deps/tests/storefront_consumers.rs`
+- **INV-DEP-10** Every declared workspace member resolves to exactly one package
+  record and one unique manifest directory before dependency classification;
+  duplicate or missing identity records and member/path name mismatches are
+  schema refusals, never filtered into an empty or misattributed graph. · why:
+  #158 A3 · enforced by: `lgwks_deps::metadata::tests`
+- **INV-DEP-11** Dependency and invariant registers share one fail-closed TOML
+  subset: repeated entry keys, unsupported string syntax, invalid decoded
+  vocabularies, and impossible dates are refused with source identity and
+  position; valid unique fields have order-independent meaning, and parsed
+  approvals cannot be mutated outside the crate. · why: #157 ·
+  enforced by: `contract::tests::invariant_register_uses_the_shared_duplicate_key_refusal`
 ## lgwks_bot — durable execution
 
 Each of these was a shipped defect. Treat the list as the spec.
@@ -168,6 +179,36 @@ Each of these was a shipped defect. Treat the list as the spec.
   allocation per token. · enforced by: `glob::tests` work-growth, scratch
   capacity, Unicode, strict-error and exact double-star cases, plus
   `tests/glob_public.rs`
+- **INV-CODEC-1** JSON and RON text/slice decoders preserve input borrowing
+  where their decoders support it; escaped text that needs allocation is not
+  reported as borrowed. RON writer failures distinguish serialization from I/O
+  and preserve the underlying cause without claiming unobserved byte progress.
+  · why: #162 · enforced by:
+  `json::tests::unescaped_string_fields_borrow_from_text_and_slice`,
+  `json::tests::escaped_string_cannot_be_returned_as_a_borrowed_str`,
+  `ron::tests::unescaped_string_fields_borrow_from_text_and_slice`,
+  `ron::tests::writer_preserves_serialization_and_io_failures`, and
+  `tests/serde_facade_consumers.rs`
+- **INV-WIRE-1** `lgwks_std::wire` is a feature-unified rkyv archive facade, not a
+  canonical semantic encoding or versioned envelope. The effective byte order,
+  alignment, and archived pointer width are observable via
+  `wire::format_descriptor`; callers bind those properties and their own schema
+  version before persisting or exchanging bytes. Structural validation does not
+  establish application validity or schema identity. · why: #167 · enforced by:
+  `tests/wire_consumer.rs`
+- **INV-PATTERN-SAFE** A single regex search costs worst-case `O(m * n)`, but
+  complete greedy match, split, and replacement iteration may cost `O(m * n^2)`;
+  iterator laziness does not promise prefix-only search work. Checked patterns
+  enforce source-pattern, compiled-size, nesting, input-byte, and
+  replacement-output-byte ceilings before avoidable allocation, preserve
+  engine match semantics, and never return a partial replacement. Pattern text
+  is escaped in `Debug` and `Display`.
+  · why: issue #168 · enforced by:
+  `pattern::tests::configured_limits_refuse_input_and_amplified_output`,
+  `pattern::tests::configured_pattern_compile_size_and_nesting_limits_are_enforced`,
+  `pattern::tests::greedy_adversary_and_literal_control_keep_exact_match_workloads`,
+  `pattern::tests::bounded_replacement_expands_exactly_like_the_engine`, and
+  `tests/pattern_external.rs`
 - **INV-FS-2** A successful strict directory walk has no known omissions; a
   tolerant walk returns each known omission alongside its entries, and an
   unresolved root is always refused. Path-based identity rechecks are

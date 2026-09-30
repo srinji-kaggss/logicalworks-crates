@@ -65,31 +65,31 @@ impl fmt::Display for Tier {
 #[non_exhaustive]
 pub struct Entry {
     /// Package name as `Cargo.lock` spells it.
-    pub krate: String,
+    pub(crate) krate: String,
     /// Which tier the approval sits in.
-    pub tier: Tier,
+    pub(crate) tier: Tier,
     /// Approved Cargo manifest requirement, exactly as metadata reports it.
-    pub version: String,
+    pub(crate) version: String,
     /// Workspace crate responsible for this external capability.
-    pub owner: String,
+    pub(crate) owner: String,
     /// Stable semantic capability supplied by the dependency.
-    pub capability: String,
+    pub(crate) capability: String,
     /// Admitted Cargo source class: `registry`, `git`, or `path`.
-    pub source: String,
+    pub(crate) source: String,
     /// Workspace crates permitted to declare this edge directly.
-    pub allowed_consumers: Vec<String>,
+    pub(crate) allowed_consumers: Vec<String>,
     /// Permitted edge kinds: `normal`, `build`, and/or `dev`.
-    pub allowed_kinds: Vec<String>,
+    pub(crate) allowed_kinds: Vec<String>,
     /// One sentence naming what the standard library cannot do.
-    pub reason: String,
+    pub(crate) reason: String,
     /// The human who approved it.
-    pub approved_by: String,
+    pub(crate) approved_by: String,
     /// ISO date of approval.
-    pub approved_on: String,
+    pub(crate) approved_on: String,
     /// Path or URL to the evidence behind the approval.
-    pub review: String,
+    pub(crate) review: String,
     /// Line where the entry opened, for diagnosis.
-    pub line: usize,
+    pub(crate) line: usize,
 }
 
 /// The parsed register.
@@ -103,7 +103,7 @@ pub struct Contract {
     /// Canonical repository URL whose workspace members are local authority.
     pub repository: Option<String>,
     /// Every approved dependency.
-    pub entries: Vec<Entry>,
+    pub(crate) entries: Vec<Entry>,
 }
 
 // ── Errors ──────────────────────────────────────────────────────────────────
@@ -178,8 +178,49 @@ pub enum ContractError {
     BadDate {
         /// The entry's crate name.
         krate: String,
+        /// One-based line where the field was written.
+        line: usize,
         /// The offending value.
         value: String,
+    },
+    /// A string value is outside the supported TOML basic-string subset.
+    InvalidString {
+        /// One-based line number.
+        line: usize,
+        /// The field that carried the value.
+        key: String,
+        /// The authored value, including quotes.
+        value: String,
+        /// The syntax rule that was not met.
+        reason: &'static str,
+    },
+    /// A repeated field key makes an entry ambiguous.
+    DuplicateEntryKey {
+        /// Repeated field name.
+        key: String,
+        /// Repeated table header, such as `[[approved]]`.
+        entry_header: String,
+        /// One-based entry ordinal in this register.
+        entry_index: usize,
+        /// One-based line where the table opened.
+        entry_line: usize,
+        /// One-based line of the first assignment.
+        first_line: usize,
+        /// One-based line of the duplicate assignment.
+        duplicate_line: usize,
+    },
+    /// A decoded field value does not satisfy the schema's closed vocabulary.
+    InvalidField {
+        /// The entry's crate name.
+        krate: String,
+        /// The field that failed validation.
+        field: &'static str,
+        /// One-based line where the field was written.
+        line: usize,
+        /// Decoded offending value.
+        value: String,
+        /// Accepted value shape.
+        expected: &'static str,
     },
     /// `reason` did not name what the standard library cannot do. A reason must
     /// be a sentence (at least four words, at least 24 characters, ending in a
@@ -274,11 +315,61 @@ fn fmt_duplicate_policy_section(formatter: &mut fmt::Formatter<'_>, line: usize)
     )
 }
 
-/// Renders `ContractError::BadDate`, printing the required layout explicitly.
-fn fmt_bad_date(formatter: &mut fmt::Formatter<'_>, krate: &str, value: &str) -> fmt::Result {
+/// Renders `ContractError::BadDate` at the field's source location.
+fn fmt_bad_date(
+    formatter: &mut fmt::Formatter<'_>,
+    krate: &str,
+    line: usize,
+    value: &str,
+) -> fmt::Result {
     write!(
         formatter,
-        "approval for {krate:?} has approved_on {value:?}, want YYYY-MM-DD"
+        "line {line}: approval for {krate:?} has invalid approved_on {value:?}; want a real YYYY-MM-DD date"
+    )
+}
+
+/// Renders a strict-string refusal at its source line and field.
+fn fmt_invalid_string(
+    formatter: &mut fmt::Formatter<'_>,
+    line: usize,
+    key: &str,
+    value: &str,
+    reason: &str,
+) -> fmt::Result {
+    write!(
+        formatter,
+        "line {line}: {key} value {value:?} is not supported TOML: {reason}"
+    )
+}
+
+/// Renders both locations and the repeated table identity for an ambiguous key.
+fn fmt_duplicate_entry_key(
+    formatter: &mut fmt::Formatter<'_>,
+    key: &str,
+    entry_header: &str,
+    entry_index: usize,
+    entry_line: usize,
+    first_line: usize,
+    duplicate_line: usize,
+) -> fmt::Result {
+    write!(
+        formatter,
+        "line {duplicate_line}: duplicate key {key:?} in {entry_header} entry #{entry_index} opened at line {entry_line}; first assignment is at line {first_line}"
+    )
+}
+
+/// Renders an offending decoded value with its field and source line.
+fn fmt_invalid_field(
+    formatter: &mut fmt::Formatter<'_>,
+    krate: &str,
+    field: &str,
+    line: usize,
+    value: &str,
+    expected: &str,
+) -> fmt::Result {
+    write!(
+        formatter,
+        "line {line}: approval for {krate:?} has invalid {field} value {value:?}; {expected}"
     )
 }
 
@@ -320,8 +411,38 @@ impl fmt::Display for ContractError {
             Self::DuplicatePolicySection { line } => fmt_duplicate_policy_section(formatter, line),
             Self::BadDate {
                 ref krate,
+                line,
                 ref value,
-            } => fmt_bad_date(formatter, krate, value),
+            } => fmt_bad_date(formatter, krate, line, value),
+            Self::InvalidString {
+                line,
+                ref key,
+                ref value,
+                reason,
+            } => fmt_invalid_string(formatter, line, key, value, reason),
+            Self::DuplicateEntryKey {
+                ref key,
+                ref entry_header,
+                entry_index,
+                entry_line,
+                first_line,
+                duplicate_line,
+            } => fmt_duplicate_entry_key(
+                formatter,
+                key,
+                entry_header,
+                entry_index,
+                entry_line,
+                first_line,
+                duplicate_line,
+            ),
+            Self::InvalidField {
+                ref krate,
+                field,
+                line,
+                ref value,
+                expected,
+            } => fmt_invalid_field(formatter, krate, field, line, value, expected),
             Self::ThinReason { ref krate } => fmt_thin_reason(formatter, krate),
             Self::DuplicateEntry { line, ref krate } => fmt_duplicate(formatter, line, krate),
         }
@@ -353,29 +474,49 @@ const REQUIRED: [&str; 12] = [
 
 /// One repeated register block as it is being read, before validation.
 ///
-/// Fields are kept in the order they appeared rather than in a map, because a
-/// repeated key is deliberately allowed to overwrite its earlier value and the
-/// parser must stay allocation-light: this module may not take a dependency on
-/// a TOML or map crate.
+/// Fields are kept in source order with their locations, so duplicate
+/// diagnostics can name both assignments without adding a TOML or map crate.
 #[derive(Default)]
 pub(crate) struct RawEntry {
     /// One-based line where the `[[approved]]` header opened. Diagnostics for
     /// the whole block point here, since individual fields carry no lines.
     line: usize,
-    /// Raw key/value pairs, unquoted but otherwise unvalidated.
-    fields: Vec<(&'static str, String)>,
+    /// One-based ordinal among repeated tables in this register.
+    index: usize,
+    /// Decoded key/value pairs and their source lines.
+    fields: Vec<RawField>,
+    /// Header that identifies this register's entry type.
+    entry_header: String,
+}
+
+/// One schema-approved field with decoded value and source location.
+struct RawField {
+    /// Key selected from the register-specific schema.
+    key: &'static str,
+    /// Decoded TOML basic-string value.
+    value: String,
+    /// One-based source line.
+    line: usize,
 }
 
 impl RawEntry {
-    /// Returns the last value written for `key`, or `None` if the block never
+    /// Returns the value written for `key`, or `None` if the block never
     /// carried it. An empty string is returned as `Some("")`: presence and
     /// non-emptiness are separate questions, and `check_field_present` is what
     /// rejects the blank case.
     pub(crate) fn get(&self, key: &str) -> Option<&str> {
         self.fields
             .iter()
-            .find(|field| field.0 == key)
-            .map(|field| field.1.as_str())
+            .find(|field| field.key == key)
+            .map(|field| field.value.as_str())
+    }
+
+    /// Returns a field's source line after successful syntax admission.
+    pub(crate) fn field_line(&self, key: &str) -> Option<usize> {
+        self.fields
+            .iter()
+            .find(|field| field.key == key)
+            .map(|field| field.line)
     }
 
     /// Returns a field that `validate_required_fields` has already proven
@@ -459,7 +600,9 @@ fn handle_section_header(
         *section = Section::Entry;
         drafts.push(RawEntry {
             line: line_no,
+            index: drafts.len().saturating_add(1),
             fields: Vec::new(),
+            entry_header: entry_header.to_owned(),
         });
         Ok(true)
     } else if line.starts_with('[') {
@@ -497,13 +640,86 @@ fn decode_enforce(value: &str, line_no: usize) -> Result<bool, ContractError> {
     }
 }
 
+/// Decodes a single-line TOML v1.0 basic string used by either register schema.
+///
+/// Every TOML escape is recognised, but a register value may not contain a
+/// control character, raw or decoded: `\b`, `\t`, `\n`, `\f`, `\r` and any
+/// `\u`/`\U` escape naming a control character are refused with their own
+/// reason rather than as unknown escapes. What a value can carry is therefore
+/// printable text plus `\"`, `\\` and non-control Unicode escapes. This is
+/// stricter than TOML, which admits a raw tab, and it fails closed. Literal and
+/// multiline strings are outside this register subset and refused.
+fn decode_string(value: &str, key: &str, line: usize) -> Result<String, ContractError> {
+    let invalid = |reason| ContractError::InvalidString {
+        line,
+        key: key.to_owned(),
+        value: value.to_owned(),
+        reason,
+    };
+    let Some(body) = value.strip_prefix('"') else {
+        return Err(invalid("expected a double-quoted basic string"));
+    };
+    let mut decoded = String::with_capacity(body.len());
+    let mut chars = body.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            if chars.peek().is_some() {
+                return Err(invalid("trailing tokens after the closing quote"));
+            }
+            if decoded.chars().any(char::is_control) {
+                return Err(invalid("decoded control characters are not supported"));
+            }
+            return Ok(decoded);
+        }
+        if ch.is_control() {
+            return Err(invalid("control characters are not supported"));
+        }
+        if ch != '\\' {
+            decoded.push(ch);
+            continue;
+        }
+        let Some(escaped) = chars.next() else {
+            return Err(invalid("incomplete escape sequence"));
+        };
+        match escaped {
+            'b' => decoded.push('\u{0008}'),
+            't' => decoded.push('\t'),
+            'n' => decoded.push('\n'),
+            'f' => decoded.push('\u{000c}'),
+            'r' => decoded.push('\r'),
+            '"' => decoded.push('"'),
+            '\\' => decoded.push('\\'),
+            'u' | 'U' => {
+                let digits = if escaped == 'u' { 4 } else { 8 };
+                let mut scalar = 0_u32;
+                for _ in 0..digits {
+                    let Some(digit) = chars.next() else {
+                        return Err(invalid("incomplete Unicode escape"));
+                    };
+                    let Some(hex) = digit.to_digit(16) else {
+                        return Err(invalid("invalid hexadecimal Unicode escape"));
+                    };
+                    scalar = scalar
+                        .checked_mul(16)
+                        .and_then(|value| value.checked_add(hex))
+                        .ok_or_else(|| invalid("Unicode escape is outside the scalar range"))?;
+                }
+                let Some(decoded_char) = char::from_u32(scalar) else {
+                    return Err(invalid("Unicode escape is not a scalar value"));
+                };
+                decoded.push(decoded_char);
+            }
+            _ => return Err(invalid("unsupported escape sequence")),
+        }
+    }
+    Err(invalid("missing closing quote"))
+}
+
 /// Applies one key/value pair written inside `[policy]`.
 ///
-/// A repeated key is refused rather than overwritten: "last write wins" would
-/// make the effective enforcement flag depend on line order, which is exactly
-/// the ambiguity this block exists to remove. The quote wrapper is stripped
-/// from `repository` because the reader does not implement TOML escapes, so an
-/// escaped quote inside the value is not accepted.
+/// A repeated key is refused rather than overwritten, keeping the enforcement
+/// flag independent of line order. `repository` uses the shared strict string
+/// decoder rather than stripping quotes without interpreting escapes.
 fn apply_policy_pair(
     key: &str,
     value: &str,
@@ -532,19 +748,18 @@ fn apply_policy_pair(
             Ok(())
         }
         _ => {
+            let decoded = decode_string(value, key, line_no)?;
             seen_keys.push(key.to_owned());
-            *repository = Some(unquote(value).to_owned());
+            *repository = Some(decoded);
             Ok(())
         }
     }
 }
 
-/// Applies one key/value pair to the repeated entry currently being read.
+/// Applies one schema-approved key/value pair to the current repeated entry.
 ///
-/// Only keys listed in `REQUIRED` are accepted, so a misspelled field is a hard
-/// refusal and cannot become an unenforced entry. A repeated key overwrites its
-/// earlier value rather than erroring: the last write wins, which keeps the
-/// parser's behaviour identical to the TOML reader a human might expect.
+/// Repeated keys and unsupported string spellings are refusals, not precedence
+/// rules, so line order cannot change the effective approval.
 fn apply_entry_pair(
     key: &str,
     value: &str,
@@ -559,7 +774,22 @@ fn apply_entry_pair(
             line: line_no,
             key: key.to_owned(),
         })?;
-    draft.fields.push((known, unquote(value).to_owned()));
+    if let Some(previous) = draft.fields.iter().find(|field| field.key == *known) {
+        return Err(ContractError::DuplicateEntryKey {
+            key: key.to_owned(),
+            entry_header: draft.entry_header.clone(),
+            entry_index: draft.index,
+            entry_line: draft.line,
+            first_line: previous.line,
+            duplicate_line: line_no,
+        });
+    }
+    let decoded = decode_string(value, key, line_no)?;
+    draft.fields.push(RawField {
+        key: known,
+        value: decoded,
+        line: line_no,
+    });
     Ok(())
 }
 
@@ -717,6 +947,12 @@ fn check_duplicate_entry(
 }
 
 impl Contract {
+    /// Number of reviewed dependency approvals in this register.
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
     /// Parses a register. Fail-closed: an unrecognised line is an error, not a
     /// line to skip.
     pub fn parse(text: &str) -> Result<Self, ContractError> {
@@ -806,17 +1042,16 @@ fn validate_tier(draft: &RawEntry, krate: &str) -> Result<Tier, ContractError> {
     })
 }
 
-/// Requires `approved_on` to be an ISO `YYYY-MM-DD` date.
+/// Requires `approved_on` to be a real Gregorian `YYYY-MM-DD` date.
 ///
-/// Shape only: the calendar is not consulted, so `2026-13-45` is as acceptable
-/// to this reader as `2026-01-01`. The field exists to make an approval
-/// attributable to a review, not to schedule anything.
-fn validate_date(approved_on: &str, krate: &str) -> Result<(), ContractError> {
+/// The field makes an approval attributable to a review, not a scheduled event.
+fn validate_date(approved_on: &str, krate: &str, line: usize) -> Result<(), ContractError> {
     if is_iso_date(approved_on) {
         Ok(())
     } else {
         Err(ContractError::BadDate {
             krate: krate.to_owned(),
+            line,
             value: approved_on.to_owned(),
         })
     }
@@ -835,6 +1070,37 @@ fn validate_reason(reason: &str, krate: &str) -> Result<(), ContractError> {
     }
 }
 
+/// Checks Cargo's portable package/owner identifier subset.
+fn is_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphanumeric())
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+}
+
+/// Refuses a decoded field that is outside its schema vocabulary.
+fn validate_closed_value(
+    draft: &RawEntry,
+    krate: &str,
+    field: &'static str,
+    value: &str,
+    valid: bool,
+    expected: &'static str,
+) -> Result<(), ContractError> {
+    if valid {
+        Ok(())
+    } else {
+        Err(ContractError::InvalidField {
+            krate: krate.to_owned(),
+            field,
+            line: draft.field_line(field).unwrap_or(draft.line),
+            value: value.to_owned(),
+            expected,
+        })
+    }
+}
+
 /// Turns a fully-read draft into an `Entry`, validating every field rule.
 ///
 /// The checks run in a fixed order (required fields, then tier, then date,
@@ -846,7 +1112,11 @@ fn build(draft: &RawEntry) -> Result<Entry, ContractError> {
     validate_required_fields(draft, &krate)?;
     let tier = validate_tier(draft, &krate)?;
     let approved_on = draft.require("approved_on", &krate)?.to_owned();
-    validate_date(&approved_on, &krate)?;
+    validate_date(
+        &approved_on,
+        &krate,
+        draft.field_line("approved_on").unwrap_or(draft.line),
+    )?;
     let reason = draft.require("reason", &krate)?.to_owned();
     validate_reason(&reason, &krate)?;
 
@@ -858,6 +1128,49 @@ fn build(draft: &RawEntry) -> Result<Entry, ContractError> {
     let source = draft.require("source", &krate)?.to_owned();
     let allowed_consumers = split_csv(draft.require("allowed_consumers", &krate)?);
     let allowed_kinds = split_csv(draft.require("allowed_kinds", &krate)?);
+    validate_closed_value(
+        draft,
+        &krate,
+        "crate",
+        &krate,
+        is_identifier(&krate),
+        "expected a Cargo package identifier using ASCII letters, digits, hyphens or underscores",
+    )?;
+    validate_closed_value(
+        draft,
+        &krate,
+        "owner",
+        &owner,
+        is_identifier(&owner),
+        "expected a workspace package identifier using ASCII letters, digits, hyphens or underscores",
+    )?;
+    validate_closed_value(
+        draft,
+        &krate,
+        "source",
+        &source,
+        matches!(source.as_str(), "registry" | "git" | "path"),
+        "expected one of registry, git or path",
+    )?;
+    validate_closed_value(
+        draft,
+        &krate,
+        "allowed_consumers",
+        &allowed_consumers.join(","),
+        !allowed_consumers.is_empty() && allowed_consumers.iter().all(|item| is_identifier(item)),
+        "expected a nonempty comma-separated list of package identifiers",
+    )?;
+    validate_closed_value(
+        draft,
+        &krate,
+        "allowed_kinds",
+        &allowed_kinds.join(","),
+        !allowed_kinds.is_empty()
+            && allowed_kinds
+                .iter()
+                .all(|kind| matches!(kind.as_str(), "normal" | "build" | "dev")),
+        "expected a nonempty list containing only normal, build or dev",
+    )?;
     let approved_by = draft.require("approved_by", &krate)?.to_owned();
     let review = draft.require("review", &krate)?.to_owned();
 
@@ -878,20 +1191,16 @@ fn build(draft: &RawEntry) -> Result<Entry, ContractError> {
     })
 }
 
-/// Splits a comma-separated list field, trimming each item and dropping the
-/// empty ones.
+/// Splits a comma-separated list, retaining empty members for schema refusal.
 ///
-/// Dropping empties is what lets `allowed_kinds = "normal,"` mean `["normal"]`
-/// rather than a list containing an unparseable blank. An entirely empty value
-/// therefore yields an empty list, which `check_field_present` has already
-/// refused, so no admitted entry can carry one.
+/// One final comma remains a supported legacy terminator; interior empty
+/// members are never discarded because they would hide malformed lists.
 fn split_csv(value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .map(str::to_owned)
-        .collect()
+    let mut items = value.split(',').map(str::trim).collect::<Vec<_>>();
+    if value.trim_end().ends_with(',') && items.last().is_some_and(|item| item.is_empty()) {
+        items.pop();
+    }
+    items.into_iter().map(str::to_owned).collect()
 }
 
 // ── Field rules ─────────────────────────────────────────────────────────────
@@ -915,20 +1224,45 @@ fn is_a_sentence(reason: &str, krate: &str) -> bool {
     normalise(trimmed.trim_end_matches('.')) != normalise(krate)
 }
 
-/// Tests the `YYYY-MM-DD` shape byte by byte.
+/// Validates a canonical Gregorian `YYYY-MM-DD` date without allocation.
 ///
-/// The length is checked before any index, so the fixed offsets below cannot
-/// panic; only the separator positions and digits are examined, and no calendar
-/// validation is attempted. The parameter is named `value` because the same
-/// check is applied to whatever `approved_on` held.
+/// Length is checked before indexing; decimal fields are bounded by the fixed
+/// format, and month length follows the Gregorian leap-year rule.
 pub(crate) fn is_iso_date(value: &str) -> bool {
     let date_bytes = value.as_bytes();
-    date_bytes.len() == 10
-        && date_bytes[4] == b'-'
-        && date_bytes[7] == b'-'
-        && [0, 1, 2, 3, 5, 6, 8, 9]
+    if date_bytes.len() != 10
+        || date_bytes[4] != b'-'
+        || date_bytes[7] != b'-'
+        || ![0, 1, 2, 3, 5, 6, 8, 9]
             .iter()
             .all(|&position| date_bytes[position].is_ascii_digit())
+    {
+        return false;
+    }
+    let year = decimal_pair(&date_bytes[0..4]);
+    let month = decimal_pair(&date_bytes[5..7]);
+    let day = decimal_pair(&date_bytes[8..10]);
+    let (Some(year), Some(month), Some(day)) = (year, month, day) else {
+        return false;
+    };
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let month_days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => 0,
+    };
+    year > 0 && day > 0 && day <= month_days
+}
+
+/// Parses an ASCII decimal byte slice without allocation.
+fn decimal_pair(bytes: &[u8]) -> Option<u32> {
+    bytes.iter().try_fold(0_u32, |value, byte| {
+        value
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(u32::from(byte.checked_sub(b'0')?)))
+    })
 }
 
 /// Cargo treats `-` and `_` as interchangeable in package names; so does this.
@@ -987,24 +1321,12 @@ fn split_pair(line: &str) -> Option<(&str, &str)> {
     Some((key, value.trim()))
 }
 
-/// Removes one layer of double quotes if, and only if, the value is wrapped in
-/// them.
-///
-/// A value with only a leading or only a trailing quote is returned unchanged,
-/// so the malformed form is visible in the refusal message rather than silently
-/// half-stripped. No escape sequences are interpreted.
-fn unquote(value: &str) -> &str {
-    value
-        .strip_prefix('"')
-        .and_then(|quoted| quoted.strip_suffix('"'))
-        .unwrap_or(value)
-}
-
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as FmtWrite;
 
     /// What every test here returns.
     ///
@@ -1067,6 +1389,304 @@ mod tests {
         assert_eq!(parsed.approved_by, "reviewer");
         assert_eq!(parsed.approved_on, "2026-08-19");
         assert_eq!(parsed.review, "docs/ADMISSION.md");
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_entry_keys_refuse_both_identical_and_conflicting_values() -> TestResult {
+        let assignments = [
+            ("crate", "\"serde\"", "\"another-crate\""),
+            ("tier", "\"boundary\"", "\"vendor\""),
+            ("version", "\"1.0\"", "\"2.0\""),
+            ("owner", "\"lgwks_std\"", "\"lgwks_deps\""),
+            (
+                "capability",
+                "\"json.serialization\"",
+                "\"other.capability\"",
+            ),
+            ("source", "\"registry\"", "\"git\""),
+            ("allowed_consumers", "\"lgwks_std\"", "\"lgwks_deps\""),
+            ("allowed_kinds", "\"normal\"", "\"dev\""),
+            (
+                "reason",
+                "\"Derive-based serialization needs compiler introspection std does not expose.\"",
+                "\"A different capability has a distinct boundary.\"",
+            ),
+            ("approved_by", "\"reviewer\"", "\"another-reviewer\""),
+            ("approved_on", "\"2026-08-19\"", "\"2026-08-20\""),
+            ("review", "\"docs/ADMISSION.md\"", "\"docs/OTHER.md\""),
+        ];
+        for (key, identical, conflicting) in assignments {
+            let original = entry("");
+            let reversed = original.replace(
+                &format!("{key} = {identical}"),
+                &format!("{key} = {conflicting}"),
+            );
+            for (base, value) in [
+                (original.as_str(), identical),
+                (original.as_str(), conflicting),
+                (reversed.as_str(), identical),
+            ] {
+                let first_line = base
+                    .lines()
+                    .position(|line| line.starts_with(&format!("{key} =")))
+                    .map(|index| index + 1)
+                    .ok_or_else(|| format!("fixture has no {key} assignment"))?;
+                let duplicate_line = base.lines().count() + 1;
+                let input = format!("{base}{key} = {value}\n");
+                assert_eq!(
+                    Contract::parse(&input),
+                    Err(ContractError::DuplicateEntryKey {
+                        key: key.to_owned(),
+                        entry_header: "[[approved]]".to_owned(),
+                        entry_index: 1,
+                        entry_line: 1,
+                        first_line,
+                        duplicate_line,
+                    }),
+                    "duplicate {key} with {value} must refuse both positions"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unique_fields_are_order_independent() -> TestResult {
+        let original = entry("");
+        let mut lines = original.lines();
+        let header = lines.next().ok_or("entry fixture has no table header")?;
+        let mut lines = lines.collect::<Vec<_>>();
+        lines.reverse();
+        let reordered = format!("{header}\n{}\n", lines.join("\n"));
+        assert_eq!(
+            Contract::parse(&original)?,
+            Contract::parse(&reordered)?,
+            "reordering unique fields must not change the admitted contract"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn basic_string_subset_decodes_escapes_comments_unicode_and_crlf() -> TestResult {
+        let input = entry("").replace(
+            "review = \"docs/ADMISSION.md\"",
+            r#"review = "docs/\u0041#é" # trailing comment"#,
+        );
+        let parsed = Contract::parse(&input)?;
+        assert_eq!(
+            parsed.entries[0].review, "docs/A#é",
+            "basic Unicode escapes, non-ASCII text and quoted hashes must decode"
+        );
+        let escaped = entry("").replace(
+            "review = \"docs/ADMISSION.md\"",
+            r#"review = "docs/\"quoted\"\\literal""#,
+        );
+        assert_eq!(
+            Contract::parse(&escaped)?.entries[0].review,
+            "docs/\"quoted\"\\literal",
+            "quote and backslash escapes must decode without reinterpretation"
+        );
+        let crlf = entry("").replace('\n', "\r\n");
+        assert_eq!(
+            Contract::parse(&crlf)?.entries.len(),
+            1,
+            "CRLF input must preserve the same one-entry register"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_string_forms_refuse_at_the_authored_field() {
+        let cases = [
+            ("approved_by = \"reviewer\"", "approved_by = reviewer"),
+            ("approved_by = \"reviewer\"", "approved_by = \"reviewer"),
+            (
+                "approved_by = \"reviewer\"",
+                "approved_by = \"reviewer\\q\"",
+            ),
+            (
+                "approved_by = \"reviewer\"",
+                "approved_by = \"reviewer\" trailing",
+            ),
+            (
+                "approved_by = \"reviewer\"",
+                "approved_by = \"\"\"reviewer\"\"\"",
+            ),
+            (
+                "approved_by = \"reviewer\"",
+                "approved_by = \"reviewer\\n\"",
+            ),
+        ];
+        for (from, to) in cases {
+            let input = entry("").replace(from, to);
+            assert!(
+                matches!(
+                    Contract::parse(&input),
+                    Err(ContractError::InvalidString {
+                        line: 11,
+                        ref key,
+                        ..
+                    }) if key == "approved_by"
+                ),
+                "unsupported string form {to:?} must give a typed field refusal"
+            );
+        }
+        let raw_control = format!("approved_by = \"reviewer{}\"", '\u{0001}');
+        let input = entry("").replace("approved_by = \"reviewer\"", &raw_control);
+        assert!(
+            matches!(
+                Contract::parse(&input),
+                Err(ContractError::InvalidString {
+                    line: 11,
+                    ref key,
+                    ..
+                }) if key == "approved_by"
+            ),
+            "a raw control character must be refused at its authored field"
+        );
+    }
+
+    #[test]
+    fn decoded_schema_values_and_calendar_dates_are_closed() -> TestResult {
+        let invalid = [
+            (
+                "allowed_consumers = \"lgwks_std\"",
+                "allowed_consumers = \",,,\"",
+                "allowed_consumers",
+                8,
+            ),
+            (
+                "allowed_kinds = \"normal\"",
+                "allowed_kinds = \",,,\"",
+                "allowed_kinds",
+                9,
+            ),
+            (
+                "allowed_kinds = \"normal\"",
+                "allowed_kinds = \"normal,unknown\"",
+                "allowed_kinds",
+                9,
+            ),
+            ("source = \"registry\"", "source = \"unknown\"", "source", 7),
+            ("crate = \"serde\"", "crate = \"bad package\"", "crate", 2),
+            ("owner = \"lgwks_std\"", "owner = \"bad owner\"", "owner", 5),
+        ];
+        for (from, to, field, line) in invalid {
+            let input = entry("").replace(from, to);
+            assert!(
+                matches!(
+                    Contract::parse(&input),
+                    Err(ContractError::InvalidField { field: found, line: found_line, .. })
+                        if found == field && found_line == line
+                ),
+                "invalid decoded {field} must be refused at line {line}"
+            );
+        }
+        for date in ["2026-13-45", "1900-02-29", "2024-04-31", "0000-01-01"] {
+            let input = entry("").replace("2026-08-19", date);
+            assert!(
+                matches!(
+                    Contract::parse(&input),
+                    Err(ContractError::BadDate { line: 12, .. })
+                ),
+                "impossible date {date} must be refused"
+            );
+        }
+        for date in ["2024-02-29", "2000-02-29", "2026-08-19"] {
+            let input = entry("").replace("2026-08-19", date);
+            assert_eq!(
+                Contract::parse(&input)?.entries[0].approved_on,
+                date,
+                "valid date {date} must remain supported"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_single_legacy_trailing_list_comma_remains_supported() -> TestResult {
+        let input = entry("")
+            .replace(
+                "allowed_consumers = \"lgwks_std\"",
+                "allowed_consumers = \"lgwks_std,\"",
+            )
+            .replace("allowed_kinds = \"normal\"", "allowed_kinds = \"normal,\"");
+        let parsed = Contract::parse(&input)?;
+        assert_eq!(
+            parsed.entries[0].allowed_consumers,
+            ["lgwks_std"],
+            "one final comma remains a delimiter rather than an empty consumer"
+        );
+        assert_eq!(
+            parsed.entries[0].allowed_kinds,
+            ["normal"],
+            "one final comma remains a delimiter rather than an empty kind"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn invariant_register_uses_the_shared_duplicate_key_refusal() -> TestResult {
+        let fields = [
+            ("id", "\"INV-DEP-TEST\"", "\"INV-DEP-OTHER\""),
+            (
+                "statement",
+                "\"The implementation preserves this reviewed contract.\"",
+                "\"A different invariant has its own exact statement.\"",
+            ),
+            ("scope", "\"lgwks_deps\"", "\"lgwks_std\""),
+            ("owner", "\"lgwks_deps\"", "\"lgwks_bot\""),
+            ("enforcement", "\"static-check\"", "\"monitor\""),
+            ("enforced_by", "\"src/lib.rs\"", "\"src/contract.rs\""),
+            ("approved_by", "\"reviewer\"", "\"second-reviewer\""),
+            ("approved_on", "\"2026-09-20\"", "\"2026-09-21\""),
+            ("review", "\"src/lib.rs\"", "\"src/contract.rs\""),
+            ("evidence_revision", "\"abcd1234\"", "\"1234abcd\""),
+            (
+                "evidence_invocation",
+                "\"cargo check --locked\"",
+                "\"cargo nextest run --locked\"",
+            ),
+            ("evidence_result", "\"pass\"", "\"fail\""),
+        ];
+        for (key, original, conflicting) in fields {
+            let mut base = String::from("[[invariant]]\n");
+            for (field, value, _) in fields {
+                writeln!(base, "{field} = {value}")?;
+            }
+            let reversed = base.replace(
+                &format!("{key} = {original}"),
+                &format!("{key} = {conflicting}"),
+            );
+            for (document, duplicate) in [
+                (base.as_str(), original),
+                (base.as_str(), conflicting),
+                (reversed.as_str(), original),
+            ] {
+                let first_line = document
+                    .lines()
+                    .position(|line| line.starts_with(&format!("{key} =")))
+                    .map(|index| index + 1)
+                    .ok_or_else(|| format!("fixture has no invariant {key}"))?;
+                let duplicate_line = document.lines().count() + 1;
+                let input = format!("{document}{key} = {duplicate}\n");
+                let error = crate::invariants::Register::parse(&input)
+                    .err()
+                    .ok_or_else(|| format!("invariant parser accepted duplicate {key}"))?;
+                let diagnostic = error.to_string();
+                assert!(
+                    diagnostic.contains(&format!("first assignment is at line {first_line}")),
+                    "invariant duplicate {key} must retain the first source position: {diagnostic}"
+                );
+                assert!(
+                    diagnostic.contains(&format!("line {duplicate_line}"))
+                        && diagnostic.contains("duplicate key")
+                        && diagnostic.contains(key),
+                    "invariant duplicate {key} must identify the key and second position: {diagnostic}"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1183,6 +1803,7 @@ mod tests {
             Contract::parse(&complete(input)),
             Err(ContractError::BadDate {
                 krate: "serde".into(),
+                line: 12,
                 value: "19-08-2026".into()
             })
         );

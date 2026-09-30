@@ -126,9 +126,10 @@ impl DependencySource {
 /// only for an edge with no `source` key whose manifest-relative `path`
 /// resolves into a workspace member's manifest directory, and `source`
 /// separates a registry package from a path copy that happens to share its
-/// name. A path edge Cargo cannot locate — no `path` key, no declaring
-/// manifest directory, or an escape past the root — is external, never
-/// internal by name.
+/// name. A path edge Cargo cannot locate — no `path` key, or an escape past
+/// the root — is external, never internal by name. A workspace member with no
+/// manifest directory never gets this far: `parse` refuses the whole document
+/// as a schema error before any edge is classified.
 ///
 /// Read approval-relevant identity through accessors so callers cannot mutate
 /// the graph after Cargo's metadata has been parsed:
@@ -470,34 +471,10 @@ fn lexical_join(base: &Path, relative: &str) -> Option<PathBuf> {
 /// hostile tree cannot change the answer between classification and audit.
 /// Anything unresolvable fails closed to external.
 fn direct_edges(metadata: CargoMetadata) -> Result<Vec<DirectEdge>, MetadataError> {
-    let members: std::collections::BTreeSet<&str> = metadata
-        .workspace_members
-        .iter()
-        .map(String::as_str)
-        .collect();
-    let member_packages: Vec<&CargoPackage> = metadata
-        .packages
-        .iter()
-        .filter(|package| members.contains(package.id.as_str()))
-        .collect();
-    let member_dirs: std::collections::BTreeMap<PathBuf, (&str, Option<&str>)> = member_packages
-        .iter()
-        .filter_map(|package| {
-            let dir = Path::new(package.manifest_path.as_deref()?)
-                .parent()?
-                .to_path_buf();
-            Some((dir, (package.name.as_str(), package.repository.as_deref())))
-        })
-        .collect();
-    let declaring_dirs: std::collections::BTreeMap<&str, PathBuf> = member_packages
-        .iter()
-        .filter_map(|package| {
-            let dir = Path::new(package.manifest_path.as_deref()?)
-                .parent()?
-                .to_path_buf();
-            Some((package.id.as_str(), dir))
-        })
-        .collect();
+    let workspace = validated_workspace(&metadata)?;
+    let member_packages = workspace.packages;
+    let member_dirs = workspace.member_dirs;
+    let declaring_dirs = workspace.declaring_dirs;
     let mut edges = Vec::new();
     for package in member_packages {
         let declaring = declaring_dirs.get(package.id.as_str());
@@ -512,6 +489,14 @@ fn direct_edges(metadata: CargoMetadata) -> Result<Vec<DirectEdge>, MetadataErro
                 }
                 _ => None,
             };
+            if let Some((member_name, _)) = member
+                && dependency.name != member_name
+            {
+                return Err(MetadataError::Schema(format!(
+                    "dependency {:?} resolves to workspace package {:?}",
+                    dependency.name, member_name
+                )));
+            }
             edges.push(DirectEdge {
                 consumer: package.name.clone(),
                 package: dependency.name.clone(),
@@ -534,6 +519,90 @@ fn direct_edges(metadata: CargoMetadata) -> Result<Vec<DirectEdge>, MetadataErro
         ))
     });
     Ok(edges)
+}
+
+/// Validated view shared by edge extraction and workspace inventory.
+struct ValidatedWorkspace<'a> {
+    /// Workspace packages resolved uniquely from the member-id list.
+    packages: Vec<&'a CargoPackage>,
+    /// Unique manifest directories mapped to package identity and repository.
+    member_dirs: std::collections::BTreeMap<PathBuf, (&'a str, Option<&'a str>)>,
+    /// Manifest directories keyed by each validated Cargo package id.
+    declaring_dirs: std::collections::BTreeMap<&'a str, PathBuf>,
+}
+
+/// Validates identity completeness before classifying any package or edge.
+fn validated_workspace(metadata: &CargoMetadata) -> Result<ValidatedWorkspace<'_>, MetadataError> {
+    let mut package_ids = std::collections::BTreeSet::new();
+    for package in &metadata.packages {
+        if package.id.trim().is_empty() || package.name.trim().is_empty() {
+            return Err(MetadataError::Schema(
+                "Cargo package identity contains a blank id or name".to_owned(),
+            ));
+        }
+        if !package_ids.insert(package.id.as_str()) {
+            return Err(MetadataError::Schema(format!(
+                "duplicate Cargo package id {:?}",
+                package.id
+            )));
+        }
+    }
+    let mut member_ids = std::collections::BTreeSet::new();
+    for id in &metadata.workspace_members {
+        if !member_ids.insert(id.as_str()) {
+            return Err(MetadataError::Schema(format!(
+                "duplicate Cargo workspace member id {id:?}"
+            )));
+        }
+        if !package_ids.contains(id.as_str()) {
+            return Err(MetadataError::Schema(format!(
+                "workspace member id {id:?} has no package record"
+            )));
+        }
+    }
+    let packages: Vec<&CargoPackage> = metadata
+        .packages
+        .iter()
+        .filter(|package| member_ids.contains(package.id.as_str()))
+        .collect();
+    let mut member_dirs = std::collections::BTreeMap::new();
+    let mut declaring_dirs = std::collections::BTreeMap::new();
+    for package in &packages {
+        let manifest = package.manifest_path.as_deref().ok_or_else(|| {
+            MetadataError::Schema(format!(
+                "workspace member {:?} has no manifest_path",
+                package.id
+            ))
+        })?;
+        let dir = Path::new(manifest)
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .ok_or_else(|| {
+                MetadataError::Schema(format!(
+                    "workspace member {:?} has invalid manifest_path {manifest:?}",
+                    package.id
+                ))
+            })?
+            .to_path_buf();
+        if member_dirs
+            .insert(
+                dir.clone(),
+                (package.name.as_str(), package.repository.as_deref()),
+            )
+            .is_some()
+        {
+            return Err(MetadataError::Schema(format!(
+                "multiple workspace packages claim manifest directory {:?}",
+                dir
+            )));
+        }
+        declaring_dirs.insert(package.id.as_str(), dir);
+    }
+    Ok(ValidatedWorkspace {
+        packages,
+        member_dirs,
+        declaring_dirs,
+    })
 }
 
 /// Elapsed-deadline budget for the Cargo subprocess: `cargo metadata` on
@@ -568,6 +637,44 @@ struct CaptureFiles {
     paths: Vec<PathBuf>,
 }
 
+/// Calls the operating system unless one test has armed a single-use fault.
+fn remove_capture(path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(error) = tests::take_fault(tests::FaultPoint::Unlink) {
+        return Err(error);
+    }
+    std::fs::remove_file(path)
+}
+
+/// Observes the direct child without treating an observation error as absence.
+fn observe_child(
+    child: &mut std::process::Child,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    #[cfg(test)]
+    if let Some(error) = tests::take_fault(tests::FaultPoint::WaitObservation) {
+        return Err(error);
+    }
+    child.try_wait()
+}
+
+/// Requests termination and preserves an OS refusal for the cleanup owner.
+fn terminate_child(child: &mut std::process::Child) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(error) = tests::take_fault(tests::FaultPoint::Kill) {
+        return Err(error);
+    }
+    child.kill()
+}
+
+/// Waits for a direct child; an error leaves it in the retryable owner.
+fn reap_child(child: &mut std::process::Child) -> std::io::Result<std::process::ExitStatus> {
+    #[cfg(test)]
+    if let Some(error) = tests::take_fault(tests::FaultPoint::Reap) {
+        return Err(error);
+    }
+    child.wait()
+}
+
 impl CaptureFiles {
     /// Starts an empty cleanup owner before acquiring the first file.
     fn new() -> Self {
@@ -576,6 +683,8 @@ impl CaptureFiles {
 
     /// Records a newly acquired path before another operation can fail.
     fn own(&mut self, path: PathBuf) {
+        #[cfg(test)]
+        tests::record_capture(path.clone());
         self.paths.push(path);
     }
 
@@ -585,7 +694,7 @@ impl CaptureFiles {
         let mut failures = Vec::new();
         let mut pending = Vec::new();
         for path in self.paths.drain(..) {
-            match std::fs::remove_file(&path) {
+            match remove_capture(&path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
@@ -635,7 +744,7 @@ impl CleanupObligation {
     /// ```
     pub fn retry_cleanup(&mut self) -> Result<bool, std::io::Error> {
         if let Some(child) = self.child.as_mut() {
-            match child.kill() {
+            match terminate_child(child) {
                 Ok(()) => {}
                 Err(kill_error) => match child.try_wait() {
                     Ok(Some(_)) => self.child = None,
@@ -644,7 +753,7 @@ impl CleanupObligation {
                 },
             }
             if let Some(child) = self.child.as_mut() {
-                match child.try_wait()? {
+                match observe_child(child)? {
                     Some(_) => self.child = None,
                     None => return Ok(false),
                 }
@@ -731,6 +840,17 @@ fn run_bounded(
     /// collision is a retried name, never another call's file truncated.
     fn capture(name: &str) -> Result<(PathBuf, File), MetadataError> {
         use std::io::ErrorKind;
+        #[cfg(test)]
+        {
+            let fault = if name == "stdout" {
+                tests::FaultPoint::CaptureStdout
+            } else {
+                tests::FaultPoint::CaptureStderr
+            };
+            if let Some(error) = tests::take_fault(fault) {
+                return Err(MetadataError::Spawn(error));
+            }
+        }
         // Bounded: each attempt draws a fresh distinguisher, so exhaustion
         // is a refusal shape, not a spin.
         for _ in 0..CAPTURE_ATTEMPTS {
@@ -783,7 +903,22 @@ fn run_bounded(
 
     /// Read at most one byte past budget: anything longer is an overflow,
     /// and the retained bytes are dropped with the Vec, never decoded.
-    fn read_capped(path: &Path, stream_cap: usize) -> Result<(Vec<u8>, bool), MetadataError> {
+    fn read_capped(
+        path: &Path,
+        stream_cap: usize,
+        _stream: &'static str,
+    ) -> Result<(Vec<u8>, bool), MetadataError> {
+        #[cfg(test)]
+        {
+            let fault = if _stream == "stdout" {
+                tests::FaultPoint::ReadStdout
+            } else {
+                tests::FaultPoint::ReadStderr
+            };
+            if let Some(error) = tests::take_fault(fault) {
+                return Err(MetadataError::Spawn(error));
+            }
+        }
         let limit = u64::try_from(stream_cap).unwrap_or(u64::MAX);
         let file = File::open(path).map_err(MetadataError::Spawn)?;
         let mut kept = Vec::new();
@@ -832,13 +967,20 @@ fn run_bounded(
         Err(error) => return Err(cleanup_error(Some(error), None, None, &mut captures)),
     };
     captures.own(stderr_path.clone());
-    let mut child = match Command::new(program)
-        .args(args)
-        .current_dir(dir)
-        .stdout(Stdio::from(stdout_file))
-        .stderr(Stdio::from(stderr_file))
-        .spawn()
-    {
+    #[cfg(test)]
+    let spawn_fault = tests::take_fault(tests::FaultPoint::Spawn);
+    #[cfg(not(test))]
+    let spawn_fault: Option<std::io::Error> = None;
+    let spawned = match spawn_fault {
+        Some(error) => Err(error),
+        None => Command::new(program)
+            .args(args)
+            .current_dir(dir)
+            .stdout(Stdio::from(stdout_file))
+            .stderr(Stdio::from(stderr_file))
+            .spawn(),
+    };
+    let mut child = match spawned {
         Ok(child) => child,
         Err(error) => {
             return Err(cleanup_error(
@@ -857,7 +999,7 @@ fn run_bounded(
     // File sizes only grow while the child lives, so a stat past budget
     // stands against every later one.
     let outcome = loop {
-        match child.try_wait() {
+        match observe_child(&mut child) {
             Err(error) => break Err(MetadataError::Spawn(error)),
             Ok(Some(status)) => break Ok(status),
             Ok(None) if std::time::Instant::now() >= deadline => {
@@ -865,6 +1007,13 @@ fn run_bounded(
             }
             Ok(None) => {
                 let limit = u64::try_from(stream_cap).unwrap_or(u64::MAX);
+                #[cfg(test)]
+                let stdout_stat_fault = tests::take_fault(tests::FaultPoint::StatStdout);
+                #[cfg(not(test))]
+                let stdout_stat_fault: Option<std::io::Error> = None;
+                if let Some(error) = stdout_stat_fault {
+                    break Err(MetadataError::Spawn(error));
+                }
                 let stdout_size = match std::fs::metadata(&stdout_path) {
                     Ok(size) => size,
                     Err(error) => break Err(MetadataError::Spawn(error)),
@@ -874,6 +1023,13 @@ fn run_bounded(
                         stream: "stdout",
                         limit: stream_cap,
                     });
+                }
+                #[cfg(test)]
+                let stderr_stat_fault = tests::take_fault(tests::FaultPoint::StatStderr);
+                #[cfg(not(test))]
+                let stderr_stat_fault: Option<std::io::Error> = None;
+                if let Some(error) = stderr_stat_fault {
+                    break Err(MetadataError::Spawn(error));
                 }
                 let stderr_size = match std::fs::metadata(&stderr_path) {
                     Ok(size) => size,
@@ -891,8 +1047,8 @@ fn run_bounded(
     };
     let status = match outcome {
         Err(cause) => {
-            let process_error = match child.kill() {
-                Ok(()) => child.wait().err(),
+            let process_error = match terminate_child(&mut child) {
+                Ok(()) => reap_child(&mut child).err(),
                 Err(kill_error) => match child.try_wait() {
                     Ok(Some(_)) => None,
                     Ok(None) | Err(_) => Some(kill_error),
@@ -908,18 +1064,18 @@ fn run_bounded(
                 None => Err(cleanup_error(Some(cause), None, None, &mut captures)),
             };
         }
-        Ok(status) => match child.wait() {
+        Ok(status) => match reap_child(&mut child) {
             Ok(_) => status,
             Err(error) => {
                 return Err(cleanup_error(None, Some(error), Some(child), &mut captures));
             }
         },
     };
-    let (stdout, stdout_overflow) = match read_capped(&stdout_path, stream_cap) {
+    let (stdout, stdout_overflow) = match read_capped(&stdout_path, stream_cap, "stdout") {
         Ok(output) => output,
         Err(error) => return Err(cleanup_error(Some(error), None, None, &mut captures)),
     };
-    let (stderr, stderr_overflow) = match read_capped(&stderr_path, stream_cap) {
+    let (stderr, stderr_overflow) = match read_capped(&stderr_path, stream_cap, "stderr") {
         Ok(output) => output,
         Err(error) => return Err(cleanup_error(Some(error), None, None, &mut captures)),
     };
@@ -1057,32 +1213,19 @@ impl Member {
 /// a refusal rather than a member it quietly cannot resolve scopes against.
 pub fn workspace_members(root: &Path) -> Result<Vec<Member>, MetadataError> {
     let metadata = read_metadata(root)?;
-    let members: std::collections::BTreeSet<&str> = metadata
-        .workspace_members
-        .iter()
-        .map(String::as_str)
-        .collect();
+    let workspace = validated_workspace(&metadata)?;
     let mut located = Vec::new();
-    for package in metadata
-        .packages
-        .iter()
-        .filter(|package| members.contains(package.id.as_str()))
-    {
-        let manifest_path = package.manifest_path.as_deref().ok_or_else(|| {
-            MetadataError::Schema(format!(
-                "workspace member {:?} has no manifest_path",
-                package.name
-            ))
-        })?;
-        let manifest_dir = Path::new(manifest_path)
-            .parent()
+    for package in workspace.packages {
+        let manifest_dir = workspace
+            .declaring_dirs
+            .get(package.id.as_str())
+            .cloned()
             .ok_or_else(|| {
                 MetadataError::Schema(format!(
-                    "workspace member {:?} manifest_path {manifest_path:?} has no directory",
-                    package.name
+                    "workspace member {:?} has no validated manifest directory",
+                    package.id
                 ))
-            })?
-            .to_path_buf();
+            })?;
         located.push(Member {
             name: package.name.clone(),
             manifest_dir,
@@ -1095,11 +1238,176 @@ pub fn workspace_members(root: &Path) -> Result<Vec<Member>, MetadataError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum FaultPoint {
+        CaptureStdout,
+        CaptureStderr,
+        Spawn,
+        WaitObservation,
+        StatStdout,
+        StatStderr,
+        ReadStdout,
+        ReadStderr,
+        Kill,
+        Reap,
+        Unlink,
+    }
+
+    thread_local! {
+        static FAULTS: RefCell<VecDeque<FaultPoint>> = const { RefCell::new(VecDeque::new()) };
+        static OWNED_CAPTURES: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn take_fault(point: FaultPoint) -> Option<std::io::Error> {
+        FAULTS.with(|faults| {
+            if faults.borrow().front() == Some(&point) {
+                faults.borrow_mut().pop_front();
+                Some(std::io::Error::other(format!(
+                    "injected metadata fault at {point:?}"
+                )))
+            } else {
+                None
+            }
+        })
+    }
+
+    fn arm_faults(points: &[FaultPoint]) {
+        FAULTS.with(|faults| *faults.borrow_mut() = points.iter().copied().collect());
+        OWNED_CAPTURES.with(|paths| paths.borrow_mut().clear());
+    }
+
+    pub(super) fn record_capture(path: PathBuf) {
+        OWNED_CAPTURES.with(|paths| paths.borrow_mut().push(path));
+    }
+
+    fn captured_paths() -> Vec<PathBuf> {
+        OWNED_CAPTURES.with(|paths| std::mem::take(&mut *paths.borrow_mut()))
+    }
+
+    /// Retries cleanup for the same bounded quanta `Drop` allows. A killed
+    /// child is not reaped the instant the signal lands, so one
+    /// `retry_cleanup` legitimately reports `false` on a loaded host.
+    fn retry_until_resolved(obligation: &mut CleanupObligation) -> std::io::Result<bool> {
+        for _ in 0..DROP_CLEANUP_QUANTA {
+            if obligation.retry_cleanup()? {
+                return Ok(true);
+            }
+            poll_quantum();
+        }
+        obligation.retry_cleanup()
+    }
+
+    fn assert_paths_removed(paths: &[PathBuf]) -> TestResult {
+        for path in paths {
+            assert_eq!(
+                std::fs::metadata(path).err().map(|error| error.kind()),
+                Some(std::io::ErrorKind::NotFound),
+                "capture path should be gone: {}",
+                path.display()
+            );
+        }
+        Ok(())
+    }
 
     /// Test bodies propagate with `?` rather than panicking: `unwrap` is
     /// forbidden workspace-wide, and a failing edge extraction should surface
     /// as the error it is, not as a panic with no variant attached.
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn missing_workspace_package_record_is_a_schema_refusal() {
+        let input = r#"{"packages":[],"workspace_members":["path+file:///repo#app@0.1.0"]}"#;
+        assert!(
+            matches!(
+                parse(input),
+                Err(MetadataError::Schema(message)) if message.contains("has no package record")
+            ),
+            "a missing workspace member record must be a schema refusal"
+        );
+    }
+
+    #[test]
+    fn a_valid_empty_workspace_remains_valid() -> TestResult {
+        assert!(
+            parse(r#"{"packages":[],"workspace_members":[]}"#)?.is_empty(),
+            "an empty virtual workspace is a valid metadata subject"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_package_ids_and_manifest_directories_are_schema_refusals() {
+        let duplicate_id = r#"{"packages":[
+          {"id":"same","name":"app","manifest_path":"/repo/Cargo.toml","dependencies":[]},
+          {"id":"same","name":"other","manifest_path":"/repo/other/Cargo.toml","dependencies":[]}
+        ],"workspace_members":["same"]}"#;
+        assert!(
+            matches!(
+                parse(duplicate_id),
+                Err(MetadataError::Schema(message)) if message.contains("duplicate Cargo package id")
+            ),
+            "duplicate package ids must be refused before graph extraction"
+        );
+
+        let duplicate_dir = r#"{"packages":[
+          {"id":"first","name":"first","manifest_path":"/repo/Cargo.toml","dependencies":[]},
+          {"id":"second","name":"second","manifest_path":"/repo/Cargo.toml","dependencies":[]}
+        ],"workspace_members":["first","second"]}"#;
+        assert!(
+            matches!(
+                parse(duplicate_dir),
+                Err(MetadataError::Schema(message)) if message.contains("multiple workspace packages")
+            ),
+            "two members cannot claim the same manifest directory"
+        );
+    }
+
+    #[test]
+    fn duplicate_workspace_ids_and_missing_member_manifests_are_refused() {
+        let duplicate_member = r#"{"packages":[
+          {"id":"app","name":"app","manifest_path":"/repo/Cargo.toml","dependencies":[]}
+        ],"workspace_members":["app","app"]}"#;
+        assert!(
+            matches!(
+                parse(duplicate_member),
+                Err(MetadataError::Schema(message)) if message.contains("duplicate Cargo workspace member id")
+            ),
+            "a repeated workspace member id must be refused"
+        );
+
+        let missing_manifest = r#"{"packages":[
+          {"id":"app","name":"app","dependencies":[]}
+        ],"workspace_members":["app"]}"#;
+        assert!(
+            matches!(
+                parse(missing_manifest),
+                Err(MetadataError::Schema(message)) if message.contains("has no manifest_path")
+            ),
+            "a workspace member without a manifest identity must be refused"
+        );
+    }
+
+    #[test]
+    fn a_member_path_with_a_different_package_identity_is_refused() {
+        let input = r#"{
+          "packages": [
+            {"id":"app","name":"app","manifest_path":"/repo/Cargo.toml","dependencies":[
+              {"name":"renamed","source":null,"req":"*","kind":null,"optional":false,"path":"helper"}
+            ]},
+            {"id":"helper","name":"helper","manifest_path":"/repo/helper/Cargo.toml","dependencies":[]}
+          ],"workspace_members":["app","helper"]
+        }"#;
+        assert!(
+            matches!(
+                parse(input),
+                Err(MetadataError::Schema(message)) if message.contains("resolves to workspace package")
+            ),
+            "a path target's package identity must agree with its member record"
+        );
+    }
 
     /// The manifest path must be absolute before it reaches the child.
     ///
@@ -1140,6 +1448,7 @@ mod tests {
             "id": "path+file:///repo#app@0.1.0",
             "name": "app",
             "repository": "https://example.invalid/app",
+            "manifest_path": "/repo/Cargo.toml",
             "dependencies": [
               {"name":"serde","source":"registry+https://github.com/rust-lang/crates.io-index","req":"^1","kind":null,"optional":true,"path":null},
               {"name":"proptest","source":"registry+https://github.com/rust-lang/crates.io-index","req":"^1.6","kind":"dev","optional":false,"path":null}
@@ -1167,7 +1476,8 @@ mod tests {
     fn ignores_non_workspace_transitives() -> TestResult {
         let input = r#"{
           "packages": [
-            {"id":"path+file:///repo#app@0.1.0","name":"app","repository":null,"dependencies":[]},
+            {"id":"path+file:///repo#app@0.1.0","name":"app","repository":null,
+             "manifest_path":"/repo/Cargo.toml","dependencies":[]},
             {"id":"registry+x#serde@1.0.0","name":"serde","repository":null,"dependencies":[]}
           ],
           "workspace_members": ["path+file:///repo#app@0.1.0"]
@@ -1384,11 +1694,60 @@ mod tests {
             Err(other) => return Err(format!("expected a timeout refusal, got {other}").into()),
             Ok(_) => return Err("a hung child must not report success".into()),
         }
+        // Overshoot is observed, not assumed: the deadline is checked every
+        // 5 ms poll quantum and the kill and reap follow at once, so anything
+        // near a second past the deadline is a defect, not scheduling noise.
+        let overshoot = elapsed.saturating_sub(timeout);
         assert!(
-            elapsed < Duration::from_secs(5),
-            "the deadline must kill the 10s sleeper, took {elapsed:?}"
+            overshoot < Duration::from_millis(1500),
+            "the deadline must kill the 10s sleeper promptly: {overshoot:?} past a {timeout:?} deadline"
         );
         Ok(())
+    }
+
+    /// INV-DEP-8's stated scope, observed with a real descendant: the direct
+    /// child exits at once after starting a grandchild that inherits the
+    /// capture descriptors. Collection must return without waiting for the
+    /// grandchild, and every capture name must be gone, while the grandchild
+    /// is still alive holding its descriptor. Disk space for an unlinked file
+    /// is reclaimed only when that last descriptor closes, which is exactly
+    /// the limit the invariant declares. The grandchild's PID comes from its
+    /// own output, so the only process signalled is the one this test made.
+    #[cfg(unix)]
+    #[test]
+    fn a_descendant_holding_a_capture_neither_blocks_collection_nor_keeps_its_name() -> TestResult {
+        arm_faults(&[]);
+        let started = std::time::Instant::now();
+        let output = run_bounded(
+            "sh",
+            &[OsString::from("-c"), OsString::from("sleep 30 & echo $!")],
+            Path::new("."),
+            Duration::from_secs(10),
+            32 * 1024,
+        )?;
+        let elapsed = started.elapsed();
+        let pid = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        assert!(
+            !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit()),
+            "the direct child must report its grandchild's pid: {pid:?}"
+        );
+        let alive = |pid: &str| {
+            Command::new("kill")
+                .args(["-0", pid])
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        let grandchild_was_alive = alive(&pid);
+        let _signalled = Command::new("kill").args(["-9", &pid]).status();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "collection must not wait for a descendant holding the capture: {elapsed:?}"
+        );
+        assert!(
+            grandchild_was_alive,
+            "the grandchild must still hold its descriptor when collection returns"
+        );
+        assert_paths_removed(&captured_paths())
     }
 
     /// A flooding stdout is refused past its budget instead of retained.
@@ -1533,11 +1892,117 @@ mod tests {
         Ok(())
     }
 
-    /// Fail closed when the declaring package has no manifest directory to
-    /// resolve against: a path edge Cargo cannot locate is external, never
-    /// internal by name.
+    /// Every fallible collection stage retains and resolves the resources it
+    /// already acquired. The injected errors are single-use and thread-local;
+    /// the process and capture files are real operating-system resources.
     #[test]
-    fn a_path_edge_without_a_locatable_declarer_is_external() -> TestResult {
+    fn injected_collection_fault_matrix_keeps_cleanup_owned_and_truthful() -> TestResult {
+        let (small_program, small_args) = small_answer();
+        let (sleep_program, sleep_args) = sleeper();
+        let stages = [
+            (FaultPoint::CaptureStdout, false),
+            (FaultPoint::CaptureStderr, false),
+            (FaultPoint::Spawn, false),
+            (FaultPoint::WaitObservation, true),
+            (FaultPoint::StatStdout, true),
+            (FaultPoint::StatStderr, true),
+            (FaultPoint::ReadStdout, false),
+            (FaultPoint::ReadStderr, false),
+        ];
+        for (fault, running_child) in stages {
+            arm_faults(&[fault]);
+            let (program, args) = if running_child {
+                (sleep_program, sleep_args.as_slice())
+            } else {
+                (small_program, small_args.as_slice())
+            };
+            let result = run_bounded(
+                program,
+                args,
+                Path::new("."),
+                Duration::from_secs(3),
+                1024 * 1024,
+            );
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => return Err(format!("fault {fault:?} unexpectedly passed").into()),
+            };
+            assert!(
+                matches!(error, MetadataError::Spawn(_)),
+                "fault {fault:?} should remain the primary collection error: {error}"
+            );
+            let paths = captured_paths();
+            assert_paths_removed(&paths)?;
+            assert!(
+                FAULTS.with(|faults| faults.borrow().is_empty()),
+                "fault {fault:?} was not reached"
+            );
+        }
+
+        for failure in [FaultPoint::Kill, FaultPoint::Reap] {
+            arm_faults(&[FaultPoint::WaitObservation, failure]);
+            let error = match run_bounded(
+                sleep_program,
+                &sleep_args,
+                Path::new("."),
+                Duration::from_secs(3),
+                1024 * 1024,
+            ) {
+                Err(error) => error,
+                Ok(_) => return Err(format!("fault {failure:?} unexpectedly passed").into()),
+            };
+            let MetadataError::ProcessCleanup {
+                process,
+                mut obligation,
+                ..
+            } = error
+            else {
+                return Err(format!("fault {failure:?} did not expose an obligation").into());
+            };
+            assert!(process.is_some(), "fault {failure:?} must remain visible");
+            assert!(
+                retry_until_resolved(&mut obligation)?,
+                "retry should finish owned cleanup"
+            );
+            assert_paths_removed(&captured_paths())?;
+            assert!(FAULTS.with(|faults| faults.borrow().is_empty()));
+        }
+
+        arm_faults(&[FaultPoint::Unlink]);
+        let error = match run_bounded(
+            small_program,
+            &small_args,
+            Path::new("."),
+            Duration::from_secs(3),
+            1024 * 1024,
+        ) {
+            Err(error) => error,
+            Ok(_) => return Err("unlink fault unexpectedly passed".into()),
+        };
+        let MetadataError::ProcessCleanup {
+            captures,
+            mut obligation,
+            ..
+        } = error
+        else {
+            return Err("unlink fault did not expose an unresolved cleanup owner".into());
+        };
+        assert_eq!(captures.len(), 1, "the unlink failure is retained");
+        let retained = obligation.captures.paths.clone();
+        assert_eq!(retained.len(), 1, "the unresolved path stays owned");
+        assert!(std::fs::metadata(&retained[0]).is_ok());
+        assert!(retry_until_resolved(&mut obligation)?);
+        assert_paths_removed(&retained)?;
+        assert!(FAULTS.with(|faults| faults.borrow().is_empty()));
+        Ok(())
+    }
+
+    /// A declaring member with no manifest directory has nothing to resolve a
+    /// path edge against. Before #158 the edge was classified external; now
+    /// the member itself is an identity defect, so the whole document is
+    /// refused rather than any edge being classified from it.
+    #[test]
+    fn a_path_edge_whose_declarer_has_no_manifest_is_refused() {
         let input = r#"{
           "packages": [
             {"id":"path+file:///repo#app@0.1.0","name":"app","repository":null,
@@ -1551,13 +2016,12 @@ mod tests {
           ],
           "workspace_members": ["path+file:///repo#app@0.1.0","path+file:///repo/helper#helper@0.1.0"]
         }"#;
-        let edges = parse(input)?;
-        assert_eq!(edges.len(), 1);
         assert!(
-            !edges[0].workspace,
-            "an unresolvable path target must fail closed to external"
+            matches!(
+                parse(input),
+                Err(MetadataError::Schema(message)) if message.contains("has no manifest_path")
+            ),
+            "a member without a manifest must be refused, not classified"
         );
-        assert_eq!(edges[0].target_repository, None);
-        Ok(())
     }
 }
