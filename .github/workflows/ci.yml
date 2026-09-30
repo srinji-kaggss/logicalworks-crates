@@ -323,7 +323,7 @@ jobs:
         run: |
           set -eu
           rustup target add wasm32-wasip1
-           cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --target wasm32-wasip1 --features rt
+           RUSTFLAGS="" cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --target wasm32-wasip1 --features rt
       - name: Check lgwks-ast feature matrix
         run: |
           set -eu

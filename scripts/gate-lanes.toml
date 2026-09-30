@@ -324,13 +324,19 @@ cargo check --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets -
 """
 ci_step = "Check lgwks-ast feature matrix"
 
+# `RUSTFLAGS=""` states the flags this target builds with: none. Without it a
+# machine's `$CARGO_HOME/config.toml` `[build] rustflags` reach the WASI target,
+# which has no rustflags table of its own, and nightly-only `-Z` flags there make
+# the pinned stable rustc refuse to start. The environment variable is the only
+# setting that replaces config rustflags rather than joining them; an empty
+# `[target.wasm32-wasip1] rustflags` table is ignored by cargo. (#195)
 [[lane]]
 id = "wasi-boundary"
 surfaces = "local ci"
 required = false
 command = """\
 rustup target add wasm32-wasip1 && \
-cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --target wasm32-wasip1 --features rt\
+RUSTFLAGS="" cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --target wasm32-wasip1 --features rt\
 """
 ci_step = "Check lgwks-bot WASI runtime boundary"
 needs = ["bin:rustup"]
