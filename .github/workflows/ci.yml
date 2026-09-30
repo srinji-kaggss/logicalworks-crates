@@ -15,9 +15,12 @@ on:
 
 # Supersede rather than duplicate. Two `pull_request` events in one group are
 # the same branch pushed twice, so the older run is cancelled. A run on `main`
-# never is: that run is the record of what shipped.
+# never is: that run is the record of what shipped. Each `main` push is its own
+# group, keyed by commit: sharing one group made a merge's run sit pending until
+# the previous merge's run finished (measured 2026-09-30: 678 s queued before a
+# 293 s run), because a concurrency group admits one run at a time.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.sha }}
   cancel-in-progress: ${{ github.ref_name != 'main' }}
 
 jobs:
