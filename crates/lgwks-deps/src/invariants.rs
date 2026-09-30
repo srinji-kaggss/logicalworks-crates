@@ -1799,7 +1799,13 @@ fn is_ignore_marker(text: &str) -> bool {
 ///
 /// Absence is deliberately `Ok(None)`: adding this register must not change
 /// the existing dependency gate for repositories that have not authored one.
-pub fn check(root: &Path) -> Result<Option<(Register, Audit)>, InvariantError> {
+///
+/// Workspace members come from Cargo metadata, so an unconfirmed capture
+/// cleanup after a complete read is carried beside the audit; see
+/// [`crate::metadata::Collected`].
+pub fn check(
+    root: &Path,
+) -> Result<Option<crate::metadata::Collected<(Register, Audit)>>, InvariantError> {
     let path = root.join(INVARIANTS_PATH);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
@@ -1810,8 +1816,10 @@ pub fn check(root: &Path) -> Result<Option<(Register, Audit)>, InvariantError> {
     };
     let register = Register::parse(&text)?;
     let members = crate::metadata::workspace_members(root).map_err(InvariantError::Metadata)?;
-    let audit = audit(&register, root, &members);
-    Ok(Some((register, audit)))
+    Ok(Some(members.map(|members| {
+        let audit = audit(&register, root, &members);
+        (register, audit)
+    })))
 }
 
 #[cfg(test)]

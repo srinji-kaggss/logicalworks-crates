@@ -61,7 +61,11 @@ fn fixture(name: &str) -> Result<&'static str, String> {
 /// so the audit resolves scopes exactly as `lgwks-deps check` does.
 fn audit_fixture(name: &str) -> Result<Audit, Box<dyn Error>> {
     let root = workspace_root();
-    let members = lgwks_deps::metadata::workspace_members(&root)?;
+    let (members, unresolved) = lgwks_deps::metadata::workspace_members(&root)?.into_parts();
+    assert!(
+        unresolved.is_none(),
+        "capture cleanup failed: {unresolved:?}"
+    );
     let register = Register::parse(fixture(name)?)?;
     Ok(invariants::audit(&register, &root, &members))
 }
@@ -147,7 +151,7 @@ fn non_monitorable_constraints_are_rejected_at_load() {
 fn a_missing_register_is_not_a_failure() -> TestResult {
     let missing = workspace_root().join("crates/lgwks-deps/tests/fixtures/invariants/absent");
     let result = invariants::check(&missing)?;
-    assert_eq!(result, None);
+    assert!(result.is_none(), "an absent register is not audited");
     Ok(())
 }
 

@@ -208,8 +208,15 @@ impl std::error::Error for FailureCause {}
 #[non_exhaustive]
 pub struct Options {
     /// Maximum time allowed for each transport phase. Body reads and redirect
-    /// hops each receive this bound independently.
+    /// hops each receive this bound independently, so it is not a bound on the
+    /// whole call; [`Options::deadline`] is.
     pub timeout: Duration,
+    /// Bound on the whole call, from the first hop's DNS lookup to the last
+    /// byte of the final body, carried across every redirect hop. `None` (the
+    /// default) leaves only the per-phase [`Options::timeout`]. A call that
+    /// exhausts it fails at [`FailureStage::Deadline`] with
+    /// [`FailureKind::Timeout`].
+    pub deadline: Option<Duration>,
     /// `User-Agent` header sent with every request.
     user_agent: String,
     /// Extra headers sent with every request as `(name, value)` pairs, e.g.
@@ -233,6 +240,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(30),
+            deadline: None,
             user_agent: format!("lgwks-std/{}", env!("CARGO_PKG_VERSION")),
             headers: Vec::new(),
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
@@ -271,6 +279,17 @@ impl Options {
     #[must_use]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Bound the whole call, redirects and body included.
+    ///
+    /// [`Options::timeout`] restarts for every phase of every hop, so a
+    /// ten-hop chain may take many times that value. This one is measured from
+    /// the start of the call and each hop is given only what remains of it.
+    #[must_use]
+    pub fn deadline(mut self, deadline: Duration) -> Self {
+        self.deadline = Some(deadline);
         self
     }
 
@@ -699,19 +718,41 @@ fn read_bounded(reader: &mut impl Read, options: &Options) -> Result<(Vec<u8>, T
         if read == 0 {
             break Truncation::Complete;
         }
-        body.try_reserve_exact(read).map_err(|reserve_error| {
-            failure(
-                FailureStage::Body,
-                FailureKind::Resource,
-                Some(reserve_error.to_string()),
-            )
-        })?;
+        reserve_for(&mut body, read, ceiling)?;
         body.extend_from_slice(&chunk[..read]);
     };
     if options.body_policy == BodyPolicy::Whole && truncation == Truncation::Cut {
         return Err(Error::BodyTooLarge { limit: ceiling });
     }
     Ok((body, truncation))
+}
+
+/// Make room for `incoming` more bytes, growing geometrically up to `ceiling`.
+///
+/// Reserving exactly each chunk made a large body reallocate once per 8 KiB
+/// read, O(n / 8 KiB) copies of a growing buffer. Doubling makes that O(log n),
+/// and clamping at the ceiling keeps the capacity, like the length, within the
+/// bound the caller set. `incoming` never takes the length past `ceiling`,
+/// because the read window was already clamped to what remains.
+fn reserve_for(body: &mut Vec<u8>, incoming: usize, ceiling: usize) -> Result<(), Error> {
+    let needed = body.len().saturating_add(incoming);
+    if needed <= body.capacity() {
+        return Ok(());
+    }
+    let target = body
+        .len()
+        .saturating_mul(2)
+        .max(READ_CHUNK_BYTES)
+        .min(ceiling)
+        .max(needed);
+    body.try_reserve_exact(target.saturating_sub(body.len()))
+        .map_err(|reserve_error| {
+            failure(
+                FailureStage::Body,
+                FailureKind::Resource,
+                Some(reserve_error.to_string()),
+            )
+        })
 }
 
 /// Whether `reader` has more to give, without keeping the byte.
@@ -768,15 +809,20 @@ fn failure(stage: FailureStage, kind: FailureKind, cause: Option<String>) -> Err
 
 /// Classify a body-reader error by its typed source and I/O kind.
 fn map_read_error(error: std::io::Error, stage: FailureStage) -> Error {
-    let is_timeout = error
+    let ureq_timeout = error
         .get_ref()
         .and_then(|source| source.downcast_ref::<ureq::Error>())
         .and_then(|source| match source {
-            &ureq::Error::Timeout(_) => Some(()),
+            &ureq::Error::Timeout(timeout) => Some(timeout),
             _ => None,
-        })
-        .is_some();
-    let timed_out = is_timeout || error.kind() == std::io::ErrorKind::TimedOut;
+        });
+    // The whole-call deadline can expire during a body read; it is reported as
+    // the deadline, not as the body phase's own bound.
+    let stage = match ureq_timeout {
+        Some(timeout) if timeout_stage(timeout) == FailureStage::Deadline => FailureStage::Deadline,
+        _ => stage,
+    };
+    let timed_out = ureq_timeout.is_some() || error.kind() == std::io::ErrorKind::TimedOut;
     // `EINTR` is its own class at every stage: a signal landing in a socket
     // read is not a severed connection, and reporting it as one is what made a
     // signal look like an outage. The stage says how far the exchange got,
@@ -1034,21 +1080,32 @@ fn next_method<'body>(
 }
 
 /// Send one hop of `method` to `target` with the given caller headers.
+///
+/// `remaining` is what is left of the whole-call deadline, if one was set. It
+/// becomes this hop's ureq global timeout, which runs from DNS lookup to the
+/// last body byte, so the body read after this returns is bounded by it too.
 fn send_hop<'headers>(
     agent: &ureq::Agent,
     target: &str,
     method: Method<'_>,
     headers: impl Iterator<Item = &'headers (String, String)>,
+    remaining: Option<Duration>,
 ) -> Result<ureq::http::Response<ureq::Body>, Error> {
     let result = match method {
         Method::Get => headers
-            .fold(agent.get(target), |call, header| {
-                call.header(header.0.as_str(), header.1.as_str())
-            })
+            .fold(
+                agent.get(target).config().timeout_global(remaining).build(),
+                |call, header| call.header(header.0.as_str(), header.1.as_str()),
+            )
             .call(),
         Method::Post { content_type, body } => headers
             .fold(
-                agent.post(target).header("Content-Type", content_type),
+                agent
+                    .post(target)
+                    .config()
+                    .timeout_global(remaining)
+                    .build()
+                    .header("Content-Type", content_type),
                 |call, header| call.header(header.0.as_str(), header.1.as_str()),
             )
             .send(body),
@@ -1071,7 +1128,20 @@ fn exchange(url: &str, method: Method<'_>, options: &Options) -> Result<Response
     let mut method = method;
     let mut chain = vec![sanitized_target(url)];
     let mut hops: u32 = 0;
+    // A deadline too far away to represent is no deadline at all.
+    let deadline_at = options
+        .deadline
+        .and_then(|deadline| std::time::Instant::now().checked_add(deadline));
     loop {
+        let remaining = match deadline_at {
+            Some(at) => match at.checked_duration_since(std::time::Instant::now()) {
+                Some(left) if !left.is_zero() => Some(left),
+                _ => {
+                    return Err(failure(FailureStage::Deadline, FailureKind::Timeout, None));
+                }
+            },
+            None => None,
+        };
         let first = hops == 0;
         let same_origin = origin.is_some() && origin_of(&target) == origin;
         let headers = options.headers.iter().filter(|header| {
@@ -1081,7 +1151,7 @@ fn exchange(url: &str, method: Method<'_>, options: &Options) -> Result<Response
                         .iter()
                         .any(|credential| header.0.eq_ignore_ascii_case(credential)))
         });
-        let response = send_hop(&agent, &target, method, headers)?;
+        let response = send_hop(&agent, &target, method, headers, remaining)?;
         // No-follow returns whatever came back, redirect or not, unread.
         if limit == 0 {
             return response_of(response, options, chain);
@@ -1298,6 +1368,7 @@ mod tests {
     fn quiet() -> Options {
         Options {
             timeout: Duration::from_secs(5),
+            deadline: None,
             user_agent: "lgwks-std-test".into(),
             headers: Vec::new(),
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
@@ -1515,6 +1586,160 @@ mod tests {
                 .map_err(|_| "redirect loop server panicked")??,
             3,
             "the receiver observed the initial request plus two followed hops"
+        );
+        Ok(())
+    }
+
+    /// The whole-call deadline is carried across hops: each hop here answers
+    /// well inside the per-phase timeout, yet the chain as a whole overruns
+    /// the deadline and is refused at the deadline stage (#191).
+    #[test]
+    fn a_deadline_bounds_the_whole_redirect_chain() -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        let server = thread::spawn(move || -> std::io::Result<usize> {
+            let mut served = 0;
+            // Nonblocking accept so the server stops once the client gives up,
+            // rather than waiting for hops that will never come.
+            listener.set_nonblocking(true)?;
+            let quiet_since = std::time::Instant::now();
+            while quiet_since.elapsed() < Duration::from_secs(3) && served < 10 {
+                let mut stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                stream.set_nonblocking(false)?;
+                let _ = read_request_head(&mut stream)?;
+                thread::sleep(Duration::from_millis(200));
+                let reply = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/hop\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                // The client may already have given up on this hop, which is
+                // the point of the test, so a refused write ends the chain.
+                if stream.write_all(reply.as_bytes()).is_err() {
+                    served += 1;
+                    break;
+                }
+                served += 1;
+            }
+            Ok(served)
+        });
+        let started = std::time::Instant::now();
+        let result = get_with(
+            &format!("http://127.0.0.1:{port}/hop"),
+            &quiet()
+                .timeout(Duration::from_secs(2))
+                .deadline(Duration::from_millis(500))
+                .redirect_policy(RedirectPolicy::FollowAtMost(10)),
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(
+                result,
+                Err(Error::Failure {
+                    stage: FailureStage::Deadline,
+                    kind: FailureKind::Timeout,
+                    ..
+                })
+            ),
+            "the chain is refused at its deadline, got {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1_500),
+            "the deadline bounds the chain, not ten hops of 200 ms: {elapsed:?}"
+        );
+        let served = server.join().map_err(|_| "redirect server panicked")??;
+        assert!(
+            (2..10).contains(&served),
+            "the chain made progress, then stopped at the deadline: {served} hops"
+        );
+        Ok(())
+    }
+
+    /// A body that trickles in under the per-phase timeout is still stopped by
+    /// the whole-call deadline, and the failure names the deadline.
+    #[test]
+    fn a_deadline_bounds_a_trickled_body() -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let _ = read_request_head(&mut stream)?;
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 64\r\n\r\n")?;
+            for _ in 0..64 {
+                thread::sleep(Duration::from_millis(50));
+                if stream.write_all(b"x").is_err() {
+                    break;
+                }
+            }
+            Ok(())
+        });
+        let started = std::time::Instant::now();
+        let result = get_with(
+            &format!("http://127.0.0.1:{port}/"),
+            &quiet()
+                .timeout(Duration::from_secs(2))
+                .deadline(Duration::from_millis(400)),
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(
+                result,
+                Err(Error::Failure {
+                    stage: FailureStage::Deadline,
+                    kind: FailureKind::Timeout,
+                    ..
+                })
+            ),
+            "a trickled body is stopped at the call deadline, got {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1_500),
+            "the body was not read to its 3.2 s end: {elapsed:?}"
+        );
+        server.join().map_err(|_| "trickle server panicked")??;
+        Ok(())
+    }
+
+    /// Body capacity grows geometrically and never past the ceiling: a 1 MiB
+    /// body in 8 KiB reads reallocates about log2(128) times, not 128 (#191).
+    #[test]
+    fn body_capacity_grows_geometrically_within_the_ceiling()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let body_len = 1 << 20;
+        let ceiling = body_len + 3;
+        let mut body = Vec::new();
+        let mut growths = 0;
+        let mut last_capacity = body.capacity();
+        while body.len() < body_len {
+            let incoming = READ_CHUNK_BYTES.min(body_len - body.len());
+            reserve_for(&mut body, incoming, ceiling)?;
+            body.extend(std::iter::repeat_n(b'x', incoming));
+            if body.capacity() != last_capacity {
+                growths += 1;
+                last_capacity = body.capacity();
+            }
+            assert!(
+                body.capacity() <= ceiling,
+                "capacity stays within the ceiling"
+            );
+        }
+        assert!(growths <= 9, "{growths} reallocations for 128 reads");
+
+        // Near the ceiling the growth is clamped to it, not doubled past it:
+        // doubling 10 would ask for 20, and the ceiling is 15.
+        let mut near_limit = Vec::with_capacity(10);
+        near_limit.extend([0_u8; 10]);
+        reserve_for(&mut near_limit, 5, 15)?;
+        assert!(near_limit.capacity() >= 15, "room for the incoming read");
+        assert!(
+            near_limit.capacity() < 20,
+            "the reservation was clamped to the ceiling: {}",
+            near_limit.capacity()
         );
         Ok(())
     }

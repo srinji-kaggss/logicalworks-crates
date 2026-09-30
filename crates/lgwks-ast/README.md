@@ -197,7 +197,9 @@ upstream as a pull request.
 - A tree is not only accepted or refused. `diagnostics` and `to_diagnostic`
   turn a refused or suspect parse into a `Diagnostic` carrying a byte offset, a
   1-based line and column, and a caret span, so a caller reports *where* the
-  source stopped making sense rather than only that it did.
+  source stopped making sense rather than only that it did. A refused parse
+  points at its earliest recovery node; only whole-file refusals (size, parser,
+  node budget) sit at the end of the file.
 - `inspect_ast` reports whether traversal completed, the applied node limit,
   and its stop reason. A partial walk's `has_syntax_issues == false` is not a
   clean-syntax result.

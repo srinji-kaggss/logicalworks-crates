@@ -198,6 +198,17 @@ pub struct WalkPolicy {
 /// retained for sorting or output. `max_directory_entries` bounds the sorted
 /// working set for one directory. The legacy convenience APIs are unbounded
 /// materializers; use this type when input width or path volume is untrusted.
+///
+/// Whether a bounded walk is complete does not depend on the order the
+/// filesystem yields entries: a budget runs out exactly when the tree within
+/// the policy holds more entries or path bytes than it allows, in any order.
+/// *Which* entries an incomplete report retains does depend on that order. In
+/// the directory where a budget ran out, the entries kept are the ones the
+/// filesystem yielded first, which differs between filesystems; they are
+/// sorted only after being charged. Picking a deterministic subset instead
+/// would mean reading the rest of that directory, which is the work the budget
+/// exists to refuse. A complete report is reproducible; an incomplete one is a
+/// bounded prefix, and says so.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct WalkLimits {

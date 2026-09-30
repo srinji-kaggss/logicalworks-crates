@@ -485,6 +485,14 @@ pub fn end_of(source: &str) -> Span {
     LineIndex::new(source).span(source.len()..source.len())
 }
 
+/// The span of `range` in `source`, each end clamped into the source.
+///
+/// How a checked parse's [`SyntaxDiagnostic`](crate::SyntaxDiagnostic) byte
+/// offsets become the line and column a renderer points at.
+pub(crate) fn span_of(source: &str, range: Range<usize>) -> Span {
+    LineIndex::new(source).span(range)
+}
+
 // The fixtures here are Rust source, so the tests need the Rust grammar. The
 // span arithmetic itself is language-independent and lives in `LineIndex`,
 // which is exercised by the clamped-position test below without a grammar.
