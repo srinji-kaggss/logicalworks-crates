@@ -289,10 +289,13 @@ jobs:
         # admitted independently, so each standalone grammar is exercised on its
         # own rather than inferred from the all-features lane.
         #
-        # One runner with a warm target directory rather than a 28-leg strategy
-        # matrix: the legs would each rebuild the shared parser stack from cold
-        # for the same evidence. Every combination runs even after one fails, so
-        # a single pass reports every grammar out of step.
+        # The 28 grammars go in ONE `cargo test` invocation, not a loop of 28.
+        # Each separate invocation re-resolves the feature set and relinks the
+        # whole ast-grep and tree-sitter stack, which was ~6 minutes of this
+        # run's wall clock; listing the features together builds the shared
+        # stack once and runs every grammar in one process. The no-default and
+        # all-features legs stay separate — they are two more feature sets, not
+        # 28, and each is a different resolution the combined call cannot make.
         run: |
           set -u
           failed=0
@@ -304,16 +307,14 @@ jobs:
             fi
             echo "::endgroup::"
           }
-          # No grammar, the default set, every declared grammar, and the lot.
           execute cargo test --locked -p lgwks_ast --lib --no-default-features
           execute cargo test --locked -p lgwks_ast --lib
-          for grammar in \
-            bash c cpp csharp css dart elixir go haskell hcl html java \
-            javascript json kotlin lua md nix php python ruby rust scala \
-            solidity swift tsx typescript yaml; do
-            execute cargo test --locked -p lgwks_ast --lib \
-              --no-default-features --features "lang-$grammar"
-          done
+          # Every standalone grammar, one build. A grammar that fails to parse
+          # its own language still fails here: the per-grammar test reads that
+          # grammar's fixture, and nextest/cargo reports the failing test by
+          # name either way.
+          execute cargo test --locked -p lgwks_ast --lib --no-default-features \
+            --features lang-bash,lang-c,lang-cpp,lang-csharp,lang-css,lang-dart,lang-elixir,lang-go,lang-haskell,lang-hcl,lang-html,lang-java,lang-javascript,lang-json,lang-kotlin,lang-lua,lang-md,lang-nix,lang-php,lang-python,lang-ruby,lang-rust,lang-scala,lang-solidity,lang-swift,lang-tsx,lang-typescript,lang-yaml
           execute cargo test --locked -p lgwks_ast --lib --all-features
           exit "$failed"
 
