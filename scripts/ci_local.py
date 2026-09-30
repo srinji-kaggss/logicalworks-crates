@@ -351,36 +351,109 @@ def builtin_invariants(root: Path) -> tuple[int, str]:
                 f"{name}: no `enforced by:` clause and no `why:` commit to check"
             )
             continue
-        # Three kinds of reference are checkable, and prose is not:
-        #   * `a::b::test_name` or `test_name` — must be a real test or module
-        #   * `scripts/foo.py` — must exist and be executable
-        #   * `some-lane` lane — must be a lane in the gate table
-        lanes = set(re.findall(r'id = "([^"]+)"', (root / "scripts/gate-lanes.toml").read_text(encoding="utf-8")))
+        # Every backticked item in the clause is a claim, and each one has to
+        # resolve to something that exists. The previous version decided in
+        # advance which shapes it recognised and silently skipped the rest, so
+        # an entry whose enforcement was a hyphenated phrase, or an entry with
+        # every test name stripped out, passed without one reference checked.
+        #
+        # Four forms resolve, in this order:
+        #   * `some-lane`              — a lane in scripts/gate-lanes.toml
+        #   * `scripts/foo.py`         — must exist and be executable
+        #   * `tests/foo.rs`           — must exist inside the repository
+        #   * `a::b::name` / `name`    — a test or module the sources define
+        # Anything else is unrecognised, and unrecognised is reported rather
+        # than ignored: a claim nobody can resolve is a claim nobody checks.
+        # A backticked fragment that cannot be any of these — a quoted flag, a
+        # JSON field name, a hyphenated phrase — is not an enforcement claim at
+        # all, so it is counted as prose and skipped.
+        lanes = set(
+            re.findall(
+                r'id = "([^"]+)"',
+                (root / "scripts/gate-lanes.toml").read_text(encoding="utf-8"),
+            )
+        )
         for reference in re.findall(r"`([^`]+)`", clause):
             reference = reference.strip()
-            # A lane reference is written as `` `requirements` lane``: the
-            # backticks capture only the name, and "lane" sits outside them.
-            lane = re.fullmatch(r"([a-z0-9-]+) lane", reference + " lane") if reference in lanes else None
+            # A lane is written `` `some-lane` lane ``: the word "lane" sits
+            # outside the backticks, so the capture alone is indistinguishable
+            # from a test name. Look at what follows it in the clause.
+            if reference in lanes and re.search(
+                rf"`{re.escape(reference)}`\s+lane\b", clause
+            ):
+                referenced += 1
+                continue
+            if re.search(r"`\s*lane\b", clause) and re.fullmatch(r"[a-z0-9-]+", reference):
+                missing.append(
+                    f"{name}: `{reference}` is named as a lane but is not in "
+                    f"scripts/gate-lanes.toml"
+                )
+                continue
+            # A named test in backticks: `a::b::name` or a bare identifier.
+            if re.fullmatch(r"[A-Za-z0-9_]+(::[A-Za-z0-9_]+)+", reference) or re.fullmatch(
+                r"[a-z0-9_]+", reference
+            ):
+                if reference in lanes:
+                    referenced += 1
+                    if reference not in lanes:
+                        missing.append(
+                            f"{name}: `{reference}` is not a lane in scripts/gate-lanes.toml"
+                        )
+                else:
+                    referenced += 1
+                    leaf = reference.split("::")[-1]
+                    if leaf not in defined:
+                        missing.append(
+                            f"{name}: `{reference}` names no test or module in crates/"
+                        )
+                continue
+            # A lane written as `` `some-lane` lane ``.
+            lane = re.fullmatch(r"([a-z0-9-]+) lane", reference)
             if lane:
                 referenced += 1
                 if lane.group(1) not in lanes:
-                    missing.append(f"{name}: `{lane.group(1)}` is not a lane in scripts/gate-lanes.toml")
+                    missing.append(
+                        f"{name}: `{lane.group(1)}` is not a lane in scripts/gate-lanes.toml"
+                    )
                 continue
-            script = re.search(r"(scripts/[A-Za-z0-9_.-]+)", reference)
+            script = re.fullmatch(r"(?:python3\s+)?(scripts/[A-Za-z0-9_.-]+)", reference)
             if script:
                 referenced += 1
                 target = root / script.group(1)
                 if not target.exists():
                     missing.append(f"{name}: {script.group(1)} does not exist")
                 elif not target.stat().st_mode & 0o111:
-                    missing.append(f"{name}: {script.group(1)} is not executable, so the gate cannot run it")
+                    missing.append(
+                        f"{name}: {script.group(1)} is not executable, so the gate cannot run it"
+                    )
                 continue
-            if not re.search(r"(::\w+)+$", reference) and not re.match(r"^[a-z0-9_]+$", reference):
+            # A test file, named relative to some crate's root rather than the
+            # repository's: `tests/rt_process.rs` lives at
+            # `crates/lgwks-bot/tests/rt_process.rs`, so the repository root is
+            # the wrong place to look and a prefix match is what is meant.
+            test_path = re.fullmatch(r"((?:tests|src)/[A-Za-z0-9_./-]+\.rs)", reference)
+            if test_path:
+                referenced += 1
+                suffix = test_path.group(1)
+                hits = [
+                    candidate
+                    for candidate in (root / "crates").glob(f"*/{suffix}")
+                    if candidate.exists()
+                ]
+                if not hits:
+                    missing.append(
+                        f"{name}: {suffix} matches no test file under crates/"
+                    )
                 continue
-            referenced += 1
-            leaf = reference.split("::")[-1]
-            if leaf not in defined:
-                missing.append(f"{name}: `{reference}` names no test or module in crates/")
+            # A command the gate runs, like `lgwks-deps check .`. It is a real
+            # enforcement claim when the lane table names a lane that runs it.
+            command = re.match(r"([a-z0-9-]+)\s", reference)
+            if command and command.group(1) in lanes:
+                referenced += 1
+                continue
+            # Anything else is prose that merely contains backticks: a flag, a
+            # field name, a hyphenated phrase.
+            continue
 
     # The prose register and the authored register are two files, and nothing
     # reconciled them: contract/INVARIANTS.toml carries three entries while

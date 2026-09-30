@@ -152,14 +152,14 @@ impl OpenFlags {
     ///
     /// Exhaustive rather than defaulted, so adding a fourth case is a compile
     /// error instead of a silent fallthrough. The `(false, false)` case is
-    /// refused by [`OpenFlags::try_new`] and so is unreachable here.
+    /// refused by [`OpenFlags::validate`] and so is unreachable here.
     #[cfg(unix)]
     fn access(self) -> rustix::fs::OFlags {
         match (self.read, self.write) {
             (true, true) => rustix::fs::OFlags::RDWR,
             (false, true) => rustix::fs::OFlags::WRONLY,
             (true, false) => rustix::fs::OFlags::RDONLY,
-            // Refused by `try_new`; returning RDONLY here would turn a refused
+            // Refused by `validate`; returning RDONLY here would turn a refused
             // request into a read, and with `truncate` set into data loss.
             (false, false) => rustix::fs::OFlags::RDONLY,
         }
@@ -408,7 +408,7 @@ impl Dir {
     /// cannot be stated is not an error: it is skipped, because inventing a
     /// name for it would be worse than omitting one, and the caller can
     /// re-stat any name it was actually given.
-    /// Every name in this directory, in the order the kernel reports them.
+    /// Every name in this directory, in filesystem order.
     ///
     /// Linux-only, and for a concrete reason: listing a descriptor means
     /// `getdents64`, which exists only on Linux. The BSDs have no equivalent
@@ -423,9 +423,18 @@ impl Dir {
     /// `/proc/self/fd/N` is a symlink that resolves to the directory itself as a
     /// file, which `read_dir` refuses with `ENOTDIR`.
     ///
+    /// The listing is of *this* directory, and it is rewound first, so it does
+    /// not depend on whether the descriptor has read or created anything
+    /// earlier. `.` and `..` are omitted, matching `std::fs::read_dir`.
+    ///
     /// # Errors
     ///
-    /// The OS error when the directory cannot be read.
+    /// The OS error when the directory cannot be read. An error part-way
+    /// through the stream is returned and the names already collected are
+    /// discarded: a truncated list that looks complete is worse than an error,
+    /// and this is the one place a caller cannot otherwise tell a short read
+    /// from a small directory.
+    ///
     #[cfg(target_os = "linux")]
     pub fn entry_names(&self) -> io::Result<Vec<OsString>> {
         use std::mem::MaybeUninit;
