@@ -71,7 +71,12 @@ so any location in the reported error must come from the orchestration.
 ## Results
 
 Measured 2026-09-30 on an Apple M5 Pro (15 cores), macOS 27.0: rustc 1.98.0,
-Go 1.27.1, Node 24.14.1 with Effect 3.22.2, Python 3.14.7 with Trio 0.34.0.
+Go 1.27.1, Node 24.14.1 with Effect 3.22.2, Python 3.14.7 with Trio 0.34.0, on
+an idle host: the run started after three readings 20 s apart below a
+one-minute load of 4, and its load was 3.3 at the start and 3.1 at the end.
+An earlier run on the same code, taken while other builds loaded the machine,
+put `script!` at 267,000 items/s with a 35.9 ms p99. Every timing here depends
+on the host being quiet; the invariants did not change between the two runs.
 Lines are the code the author writes for the orchestration, counted between the
 `BEGIN`/`END` markers with comments and blanks left out.
 
@@ -81,27 +86,27 @@ Median (min-max) of 5 runs per cell.
 
 | way | items/s | p50 ms | p99 ms | peak RSS MB | lines |
 |---|---:|---:|---:|---:|---:|
-| `rust-script` | 266556 (213777-276602) | 2.936 | 35.909 | 13.8 | 11 |
-| `rust-join_all` | 347517 (327235-380887) | 2.357 | 9.465 | 9.5 | 29 |
-| `rust-joinset` | 348213 (317339-353456) | 2.419 | 9.385 | 7 | 46 |
-| `python-asyncio` | 98119 (84890-107434) | 9.157 | 25.463 | 44.4 | 29 |
-| `python-trio` | 27482 (23142-34518) | 1.072 | 7.127 | 37.8 | 29 |
-| `go-errgroup` | 374847 (330824-425437) | 3.01 | 12.068 | 28.8 | 44 |
-| `node-pool` | 29607 (22852-32799) | 11.821 | 543.33 | 208.8 | 41 |
-| `node-effect` | 27926 (18608-28729) | 57.363 | 111.405 | 624.7 | 23 |
+| `rust-script` | 435142 (425224-472199) | 2.235 | 12.017 | 13.6 | 11 |
+| `rust-join_all` | 333655 (306748-338718) | 2.332 | 9.527 | 9.5 | 29 |
+| `rust-joinset` | 316215 (300874-354880) | 2.577 | 9.477 | 7 | 46 |
+| `python-asyncio` | 143589 (133064-144177) | 7.16 | 13.606 | 44.2 | 29 |
+| `python-trio` | 43582 (43184-44052) | 1.046 | 7.092 | 37.3 | 29 |
+| `go-errgroup` | 457622 (447740-471323) | 2.502 | 11.264 | 29.4 | 44 |
+| `node-pool` | 38780 (37603-39460) | 9.634 | 409.09 | 208.1 | 41 |
+| `node-effect` | 30154 (29272-30415) | 54.61 | 108.089 | 533.8 | 23 |
 
 **Failure behaviour** (worst case over every run):
 
 | way | failfast ms | failfast attempts | live at return (failfast / cancel / storm) | storm attempts | deadline ms | failfast error |
 |---|---:|---:|---|---:|---:|---|
-| `rust-script` | 3.854 | 977 | 0 / 0 / 0 | 130 | 103.31 | `run_items/each:item#500/retry: failed: "malformed record"` |
-| `rust-join_all` | 38.888 | 2000 | 0 / 771 / 0 | 5000 | 106.164 | `: failed: "malformed record"` |
-| `rust-joinset` | 3.231 | 983 | 844 / 828 / 70 | 500 | 105.964 | `: failed: "malformed record"` |
-| `python-asyncio` | 7.79 | 960 | 0 / 0 / 0 | 500 | 101.342 | `Permanent: malformed record` |
-| `python-trio` | 33.254 | 537 | 0 / 0 / 0 | 326 | 101.616 | `Permanent: malformed record` |
-| `go-errgroup` | 3.815 | 1006 | 0 / 0 / 0 | 501 | 101.104 | `malformed record` |
-| `node-pool` | 18.695 | 985 | 959 / 0 / 99 | 500 | 101.767 | `Error: malformed record` |
-| `node-effect` | 81.464 | 985 | 1 / 0 / 1 | 500 | 106.013 | `(FiberFailure) Error: malformed record` |
+| `rust-script` | 3.281 | 984 | 0 / 0 / 0 | 130 | 106.12 | `run_items/each:item#500/retry: failed: "malformed record"` |
+| `rust-join_all` | 40.03 | 2000 | 0 / 825 / 0 | 5000 | 106.153 | `: failed: "malformed record"` |
+| `rust-joinset` | 2.772 | 977 | 836 / 846 / 70 | 500 | 106.169 | `: failed: "malformed record"` |
+| `python-asyncio` | 6.019 | 960 | 0 / 0 / 0 | 500 | 101.281 | `Permanent: malformed record` |
+| `python-trio` | 18.749 | 543 | 0 / 0 / 0 | 368 | 101.384 | `Permanent: malformed record` |
+| `go-errgroup` | 3.585 | 1012 | 0 / 0 / 0 | 501 | 101.183 | `malformed record` |
+| `node-pool` | 12.282 | 985 | 959 / 0 / 99 | 500 | 101.809 | `Error: malformed record` |
+| `node-effect` | 79.677 | 985 | 1 / 0 / 1 | 500 | 105.95 | `(FiberFailure) Error: malformed record` |
 
 **Semantic invariants:**
 
@@ -111,7 +116,7 @@ Median (min-max) of 5 runs per cell.
 | `rust-join_all` | yes | **no** | **no** | yes | **no** | 5000 | yes | yes | **no** |
 | `rust-joinset` | yes | yes | **no** | yes | **no** | 500 | yes | yes | **no** |
 | `python-asyncio` | yes | yes | yes | yes | yes | 500 | yes | yes | **no** |
-| `python-trio` | yes | yes | yes | yes | yes | 326 | yes | yes | **no** |
+| `python-trio` | yes | yes | yes | yes | yes | 368 | yes | yes | **no** |
 | `go-errgroup` | yes | yes | yes | yes | yes | 501 | yes | yes | **no** |
 | `node-pool` | yes | yes | **no** | yes | yes | 500 | yes | yes | **no** |
 | `node-effect` | yes | yes | **no** | yes | yes | 500 | yes | yes | **no** |
@@ -140,28 +145,31 @@ writes none of the machinery.** It is the only way that does.
   the block. Every other way reports `malformed record` and leaves the author
   to find which of 2,000 items failed.
 
-**On cost, `script!` is slower than hand-written Rust.** Median throughput is
-267,000 items/s against 348,000, a 23% gap. p99 is 35.9 ms against 9.4 ms, and
-peak RSS is 13.8 MB against 7-9.5 MB. The cause is structural. An `each` drives
-its bodies on the task that awaits it, which is what lets a body borrow the
-flow's locals with no `Arc` and no `'static` bound. So one fan-out uses one
-core, while `JoinSet` and `join_all_bounded` spawn every body as its own task
-across all 15. Even so, `script!` is faster than every non-Rust way except Go
-(375,000 items/s, 28.8 MB). It needs 11 lines where the others need 23-46.
+**On cost, `script!` is not slower than the hand-written Rust here.** Median
+throughput is 435,000 items/s against 334,000 for `join_all_bounded` and
+316,000 for `JoinSet`. Its p99 is higher, 12.0 ms against 9.5 ms, and its
+peak RSS is 13.6 MB against 7-9.5 MB. An `each` drives its bodies on the task
+that awaits it rather than spawning each as a task, which is what lets a body
+borrow the flow's locals with no `Arc` and no `'static` bound. It also means
+one fan-out uses one core; on this workload, where each body mostly waits, that
+did not cost throughput. Why it comes out ahead was not measured. Go errgroup
+is the fastest way at 458,000 items/s, with 29.4 MB. `script!` needs 11 lines
+where the others need 23-46.
 
 This comparison already led to one fix. `script!` used to mint a cancellation
 token per item and per retry; the stop is now shared with the step (see
 `Scope`). In a 9-run A/B of the throughput scenario, that moved median
-throughput from 244,000 to 278,000 items/s and RSS from 17 to 13.7 MB. The p99
-fell from 41 to 18 ms in the A/B, but it did not hold in the full run above
-(35.9 ms), so the tail is still open. The remaining per-item cost is two scope
-allocations and two path strings, and it is the next thing to take out.
+throughput from 244,000 to 278,000 items/s and RSS from 17 to 13.7 MB. The A/B
+ran on a loaded host, so its absolute numbers are not comparable with the table
+above; only the difference between its two arms is. The p99 gap to
+hand-written Rust (12.0 against 9.5 ms) is still open. The remaining per-item
+cost is two scope allocations and two path strings.
 
 ### What this does not show
 
 - It covers one machine and a synthetic site with sleeps for I/O. A real
   upstream adds its own latency distribution.
-- The Node pool's tail (p99 543 ms, 209 MB) was not investigated. The pool
+- The Node pool's tail (p99 409 ms, 208 MB) was not investigated. The pool
   builds an `AbortSignal.any` per attempt, as a careful stdlib author would;
   whether that is the cause is not measured.
 - Trio's peak in flight stays under 100 in the throughput scenario although
