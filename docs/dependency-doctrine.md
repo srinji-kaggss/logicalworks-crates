@@ -100,7 +100,7 @@ Import from the in-tree column. "Feature" is the `lgwks_std` cargo feature.
 | `serde` | `lgwks_std::json::{Serialize, Deserialize}` | `json` | serde is the owned stack |
 | `serde_json` | `lgwks_std::json` | `json` | to/from str, slice, reader, Value |
 | `ron` | `lgwks_std::ron` | `ron` | |
-| `rkyv` | `lgwks_std::wire` | `wire` | deterministic internal binary |
+| `rkyv` | `lgwks_std::wire` | `wire` | feature-unified archive facade; not canonical semantic identity |
 | `ureq`, `reqwest` (blocking) | `lgwks_std::http` | `http` | blocking GET/POST; run on `spawn_blocking` from async |
 | `url`, `iri-string` (validation) | `lgwks_std::http::validate_url` | `http` | absolute http(s) only |
 | `tokio` | `lgwks_bot::rt` | `rt` | `lgwks_deps` owns the optional storefront edge; bot reaches it through its `tokio` feature |

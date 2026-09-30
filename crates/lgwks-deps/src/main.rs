@@ -626,7 +626,7 @@ fn report_check_with_invariants(
                     out,
                     "OK  {} — {} semantic approvals; {} invariants resolve ({} resolved, {} attested by a recorded run)",
                     root.display(),
-                    register.entries.len(),
+                    register.entry_count(),
                     invariant.audit.registered(),
                     invariant.audit.resolved(),
                     invariant.audit.attested()
@@ -836,7 +836,7 @@ fn report_check(
     };
     let named = root.unwrap_or(Path::new("."));
     if refusals.is_empty() {
-        report_ok(named, contract.entries.len(), out)
+        report_ok(named, contract.entry_count(), out)
     } else {
         report_refusals(named, contract, refusals, err)
     }
@@ -907,9 +907,7 @@ fn print_check_json(
     payload.insert(
         "approvals".to_owned(),
         // Bounded by the register's entry count, which is a file length.
-        Value::Number(serde_json_number(
-            register.map_or(0, |contract| contract.entries.len()),
-        )),
+        Value::Number(serde_json_number(register.map_or(0, Contract::entry_count))),
     );
     payload.insert("refusals".to_owned(), Value::Array(refusal_rows));
     payload.insert(
@@ -933,7 +931,7 @@ fn print_check_json(
         if let Some(audit) = json.audit {
             for outcome in audit.outcomes() {
                 let mut row = Map::new();
-                row.insert("id".to_owned(), Value::String(outcome.id.clone()));
+                row.insert("id".to_owned(), Value::String(outcome.id().to_owned()));
                 row.insert(
                     "status".to_owned(),
                     Value::String(outcome.status.as_str().to_owned()),
@@ -952,7 +950,7 @@ fn print_check_json(
         invariant_payload.insert(
             "registered".to_owned(),
             Value::Number(serde_json_number(
-                json.register.map_or(0, |register| register.entries.len()),
+                json.register.map_or(0, InvariantRegister::entry_count),
             )),
         );
         // Counts, not a verdict. There is no `enforced` key and there must

@@ -143,6 +143,18 @@ fn assert_refused_subject(outcome: &Outcome) -> TestResult {
     Ok(())
 }
 
+/// Copies selected fixture files into a disposable workspace tree.
+fn copy_fixture_files(source: &Path, target: &Path, files: &[&str]) -> TestResult {
+    for file in files {
+        let destination = target.join(file);
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(source.join(file), destination)?;
+    }
+    Ok(())
+}
+
 #[test]
 fn debug_reports_default_sdk_bootstrap_in_json() -> TestResult {
     let root = workspace_root()?;
@@ -204,6 +216,95 @@ fn auditing_the_clean_repository_succeeds() -> TestResult {
         outcome.stdout.contains(clean().to_string_lossy().as_ref()),
         "the success line names the audited root: {:?}",
         outcome.stdout
+    );
+    Ok(())
+}
+
+/// The original defect's user-visible counterexample and its single-key control.
+#[test]
+fn conflicting_approval_keys_cannot_admit_a_real_path_edge() -> TestResult {
+    let scratch = Scratch::new("duplicate-approval")?;
+    let subject_root = scratch.path().join("subject");
+    let helper_root = scratch.path().join("helper");
+    copy_fixture_files(
+        &subject(),
+        &subject_root,
+        &["Cargo.toml", "Cargo.lock", "src/lib.rs"],
+    )?;
+    copy_fixture_files(&helper(), &helper_root, &["Cargo.toml", "src/lib.rs"])?;
+    let register = scratch.path().join("APPROVED.toml");
+    let prefix = concat!(
+        "[policy]\n",
+        "enforce = true\n",
+        "[[approved]]\n",
+        "crate = \"helper\"\n",
+        "tier = \"boundary\"\n",
+        "version = \"*\"\n",
+        "owner = \"subject\"\n",
+        "capability = \"fixture.helper\"\n",
+        "source = \"path\"\n",
+        "allowed_consumers = \"subject,other\"\n",
+    );
+    let suffix = concat!(
+        "allowed_kinds = \"normal\"\n",
+        "reason = \"This path fixture needs an explicit external package boundary.\"\n",
+        "approved_by = \"reviewer\"\n",
+        "approved_on = \"2026-09-20\"\n",
+        "review = \"tests/check_cli.rs\"\n",
+    );
+    std::fs::write(&register, format!("{prefix}{suffix}"))?;
+    let valid = check_from(
+        &subject_root,
+        &[
+            "check",
+            argument(&subject_root)?,
+            "--contract",
+            argument(&register)?,
+        ],
+    )?;
+    assert_eq!(
+        valid.code,
+        Some(0),
+        "one valid approval assignment must admit the actual edge (stderr {:?})",
+        valid.stderr
+    );
+    assert!(
+        valid.stderr.is_empty(),
+        "valid control must be quiet: {:?}",
+        valid.stderr
+    );
+
+    let conflicting = format!("{prefix}allowed_consumers = \"subject\"\n{suffix}");
+    std::fs::write(&register, conflicting)?;
+    let refused = check_from(
+        &subject_root,
+        &[
+            "check",
+            argument(&subject_root)?,
+            "--contract",
+            argument(&register)?,
+        ],
+    )?;
+    assert_eq!(
+        refused.code,
+        Some(2),
+        "the real check command must refuse a conflicting approval (stdout {:?}, stderr {:?})",
+        refused.stdout,
+        refused.stderr
+    );
+    assert!(
+        refused.stdout.is_empty(),
+        "a refused contract emits no success output: {:?}",
+        refused.stdout
+    );
+    assert!(
+        refused
+            .stderr
+            .contains("duplicate key \"allowed_consumers\"")
+            && refused.stderr.contains("first assignment is at line 10")
+            && refused.stderr.contains("line 11"),
+        "the CLI refusal must name the field and both positions: {:?}",
+        refused.stderr
     );
     Ok(())
 }

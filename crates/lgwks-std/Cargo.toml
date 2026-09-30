@@ -90,3 +90,12 @@ workspace = true
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
+
+[[example]]
+name = "pattern-workloads"
+required-features = ["pattern"]
+
+[[test]]
+name = "pattern_external"
+path = "tests/pattern_external.rs"
+required-features = ["pattern"]

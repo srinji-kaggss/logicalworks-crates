@@ -128,7 +128,7 @@ lgwks_std = { version = "0.8", default-features = false, features = ["core"] }
 | `trace` (default) | trace | Structured logging plus default debugger install | tracing, tracing-subscriber stack |
 | `random` | random, id | UUID v4, OS entropy | getrandom |
 | `hash` | hash | BLAKE3 content-addressable hashing | blake3 |
-| `pattern` | pattern | Linear-time compiled regex | regex |
+| `pattern` | pattern | Compiled regex with explicit compile, input and replacement-output limits | regex |
 | `json` | json | JSON serialization | serde, serde_json |
 | `ron` | ron | Rusty Object Notation | serde, ron |
 | `wire` | wire | Zero-copy binary serialization | rkyv |
@@ -153,7 +153,7 @@ lgwks_std = { version = "0.8", default-features = false, features = ["core"] }
 | `random` | OS entropy via `getrandom` | `getrandom` |
 | `id` | UUID v4 generation and parsing | `uuid` |
 | `hash` | BLAKE3 content-addressable hashing | `blake3` |
-| `pattern` | Compiled regex matching (linear-time guarantee) | `regex` |
+| `pattern` | Compiled regex matching: single search is O(m*n); complete greedy iteration may be O(m*n^2). `Regex::with_config` bounds source-pattern bytes, compiled size, nesting, input bytes and replacement output bytes. | `regex` |
 | `json` | JSON encoding and decoding via serde | `serde_json` |
 | `ron` | RON encoding and decoding via serde | `ron` |
 | `wire` | Zero-copy binary wire serialization via rkyv | `rkyv` |

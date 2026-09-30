@@ -636,6 +636,44 @@ struct CaptureFiles {
     paths: Vec<PathBuf>,
 }
 
+/// Calls the operating system unless one test has armed a single-use fault.
+fn remove_capture(path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(error) = tests::take_fault(tests::FaultPoint::Unlink) {
+        return Err(error);
+    }
+    std::fs::remove_file(path)
+}
+
+/// Observes the direct child without treating an observation error as absence.
+fn observe_child(
+    child: &mut std::process::Child,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    #[cfg(test)]
+    if let Some(error) = tests::take_fault(tests::FaultPoint::WaitObservation) {
+        return Err(error);
+    }
+    child.try_wait()
+}
+
+/// Requests termination and preserves an OS refusal for the cleanup owner.
+fn terminate_child(child: &mut std::process::Child) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(error) = tests::take_fault(tests::FaultPoint::Kill) {
+        return Err(error);
+    }
+    child.kill()
+}
+
+/// Waits for a direct child; an error leaves it in the retryable owner.
+fn reap_child(child: &mut std::process::Child) -> std::io::Result<std::process::ExitStatus> {
+    #[cfg(test)]
+    if let Some(error) = tests::take_fault(tests::FaultPoint::Reap) {
+        return Err(error);
+    }
+    child.wait()
+}
+
 impl CaptureFiles {
     /// Starts an empty cleanup owner before acquiring the first file.
     fn new() -> Self {
@@ -644,6 +682,8 @@ impl CaptureFiles {
 
     /// Records a newly acquired path before another operation can fail.
     fn own(&mut self, path: PathBuf) {
+        #[cfg(test)]
+        tests::record_capture(path.clone());
         self.paths.push(path);
     }
 
@@ -653,7 +693,7 @@ impl CaptureFiles {
         let mut failures = Vec::new();
         let mut pending = Vec::new();
         for path in self.paths.drain(..) {
-            match std::fs::remove_file(&path) {
+            match remove_capture(&path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
@@ -703,7 +743,7 @@ impl CleanupObligation {
     /// ```
     pub fn retry_cleanup(&mut self) -> Result<bool, std::io::Error> {
         if let Some(child) = self.child.as_mut() {
-            match child.kill() {
+            match terminate_child(child) {
                 Ok(()) => {}
                 Err(kill_error) => match child.try_wait() {
                     Ok(Some(_)) => self.child = None,
@@ -712,7 +752,7 @@ impl CleanupObligation {
                 },
             }
             if let Some(child) = self.child.as_mut() {
-                match child.try_wait()? {
+                match observe_child(child)? {
                     Some(_) => self.child = None,
                     None => return Ok(false),
                 }
@@ -799,6 +839,17 @@ fn run_bounded(
     /// collision is a retried name, never another call's file truncated.
     fn capture(name: &str) -> Result<(PathBuf, File), MetadataError> {
         use std::io::ErrorKind;
+        #[cfg(test)]
+        {
+            let fault = if name == "stdout" {
+                tests::FaultPoint::CaptureStdout
+            } else {
+                tests::FaultPoint::CaptureStderr
+            };
+            if let Some(error) = tests::take_fault(fault) {
+                return Err(MetadataError::Spawn(error));
+            }
+        }
         // Bounded: each attempt draws a fresh distinguisher, so exhaustion
         // is a refusal shape, not a spin.
         for _ in 0..CAPTURE_ATTEMPTS {
@@ -851,7 +902,22 @@ fn run_bounded(
 
     /// Read at most one byte past budget: anything longer is an overflow,
     /// and the retained bytes are dropped with the Vec, never decoded.
-    fn read_capped(path: &Path, stream_cap: usize) -> Result<(Vec<u8>, bool), MetadataError> {
+    fn read_capped(
+        path: &Path,
+        stream_cap: usize,
+        _stream: &'static str,
+    ) -> Result<(Vec<u8>, bool), MetadataError> {
+        #[cfg(test)]
+        {
+            let fault = if _stream == "stdout" {
+                tests::FaultPoint::ReadStdout
+            } else {
+                tests::FaultPoint::ReadStderr
+            };
+            if let Some(error) = tests::take_fault(fault) {
+                return Err(MetadataError::Spawn(error));
+            }
+        }
         let limit = u64::try_from(stream_cap).unwrap_or(u64::MAX);
         let file = File::open(path).map_err(MetadataError::Spawn)?;
         let mut kept = Vec::new();
@@ -900,13 +966,20 @@ fn run_bounded(
         Err(error) => return Err(cleanup_error(Some(error), None, None, &mut captures)),
     };
     captures.own(stderr_path.clone());
-    let mut child = match Command::new(program)
-        .args(args)
-        .current_dir(dir)
-        .stdout(Stdio::from(stdout_file))
-        .stderr(Stdio::from(stderr_file))
-        .spawn()
-    {
+    #[cfg(test)]
+    let spawn_fault = tests::take_fault(tests::FaultPoint::Spawn);
+    #[cfg(not(test))]
+    let spawn_fault: Option<std::io::Error> = None;
+    let spawned = match spawn_fault {
+        Some(error) => Err(error),
+        None => Command::new(program)
+            .args(args)
+            .current_dir(dir)
+            .stdout(Stdio::from(stdout_file))
+            .stderr(Stdio::from(stderr_file))
+            .spawn(),
+    };
+    let mut child = match spawned {
         Ok(child) => child,
         Err(error) => {
             return Err(cleanup_error(
@@ -925,7 +998,7 @@ fn run_bounded(
     // File sizes only grow while the child lives, so a stat past budget
     // stands against every later one.
     let outcome = loop {
-        match child.try_wait() {
+        match observe_child(&mut child) {
             Err(error) => break Err(MetadataError::Spawn(error)),
             Ok(Some(status)) => break Ok(status),
             Ok(None) if std::time::Instant::now() >= deadline => {
@@ -933,6 +1006,13 @@ fn run_bounded(
             }
             Ok(None) => {
                 let limit = u64::try_from(stream_cap).unwrap_or(u64::MAX);
+                #[cfg(test)]
+                let stdout_stat_fault = tests::take_fault(tests::FaultPoint::StatStdout);
+                #[cfg(not(test))]
+                let stdout_stat_fault: Option<std::io::Error> = None;
+                if let Some(error) = stdout_stat_fault {
+                    break Err(MetadataError::Spawn(error));
+                }
                 let stdout_size = match std::fs::metadata(&stdout_path) {
                     Ok(size) => size,
                     Err(error) => break Err(MetadataError::Spawn(error)),
@@ -942,6 +1022,13 @@ fn run_bounded(
                         stream: "stdout",
                         limit: stream_cap,
                     });
+                }
+                #[cfg(test)]
+                let stderr_stat_fault = tests::take_fault(tests::FaultPoint::StatStderr);
+                #[cfg(not(test))]
+                let stderr_stat_fault: Option<std::io::Error> = None;
+                if let Some(error) = stderr_stat_fault {
+                    break Err(MetadataError::Spawn(error));
                 }
                 let stderr_size = match std::fs::metadata(&stderr_path) {
                     Ok(size) => size,
@@ -959,8 +1046,8 @@ fn run_bounded(
     };
     let status = match outcome {
         Err(cause) => {
-            let process_error = match child.kill() {
-                Ok(()) => child.wait().err(),
+            let process_error = match terminate_child(&mut child) {
+                Ok(()) => reap_child(&mut child).err(),
                 Err(kill_error) => match child.try_wait() {
                     Ok(Some(_)) => None,
                     Ok(None) | Err(_) => Some(kill_error),
@@ -976,18 +1063,18 @@ fn run_bounded(
                 None => Err(cleanup_error(Some(cause), None, None, &mut captures)),
             };
         }
-        Ok(status) => match child.wait() {
+        Ok(status) => match reap_child(&mut child) {
             Ok(_) => status,
             Err(error) => {
                 return Err(cleanup_error(None, Some(error), Some(child), &mut captures));
             }
         },
     };
-    let (stdout, stdout_overflow) = match read_capped(&stdout_path, stream_cap) {
+    let (stdout, stdout_overflow) = match read_capped(&stdout_path, stream_cap, "stdout") {
         Ok(output) => output,
         Err(error) => return Err(cleanup_error(Some(error), None, None, &mut captures)),
     };
-    let (stderr, stderr_overflow) = match read_capped(&stderr_path, stream_cap) {
+    let (stderr, stderr_overflow) = match read_capped(&stderr_path, stream_cap, "stderr") {
         Ok(output) => output,
         Err(error) => return Err(cleanup_error(Some(error), None, None, &mut captures)),
     };
@@ -1150,6 +1237,66 @@ pub fn workspace_members(root: &Path) -> Result<Vec<Member>, MetadataError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum FaultPoint {
+        CaptureStdout,
+        CaptureStderr,
+        Spawn,
+        WaitObservation,
+        StatStdout,
+        StatStderr,
+        ReadStdout,
+        ReadStderr,
+        Kill,
+        Reap,
+        Unlink,
+    }
+
+    thread_local! {
+        static FAULTS: RefCell<VecDeque<FaultPoint>> = const { RefCell::new(VecDeque::new()) };
+        static OWNED_CAPTURES: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn take_fault(point: FaultPoint) -> Option<std::io::Error> {
+        FAULTS.with(|faults| {
+            if faults.borrow().front() == Some(&point) {
+                faults.borrow_mut().pop_front();
+                Some(std::io::Error::other(format!(
+                    "injected metadata fault at {point:?}"
+                )))
+            } else {
+                None
+            }
+        })
+    }
+
+    fn arm_faults(points: &[FaultPoint]) {
+        FAULTS.with(|faults| *faults.borrow_mut() = points.iter().copied().collect());
+        OWNED_CAPTURES.with(|paths| paths.borrow_mut().clear());
+    }
+
+    pub(super) fn record_capture(path: PathBuf) {
+        OWNED_CAPTURES.with(|paths| paths.borrow_mut().push(path));
+    }
+
+    fn captured_paths() -> Vec<PathBuf> {
+        OWNED_CAPTURES.with(|paths| std::mem::take(&mut *paths.borrow_mut()))
+    }
+
+    fn assert_paths_removed(paths: &[PathBuf]) -> TestResult {
+        for path in paths {
+            assert_eq!(
+                std::fs::metadata(path).err().map(|error| error.kind()),
+                Some(std::io::ErrorKind::NotFound),
+                "capture path should be gone: {}",
+                path.display()
+            );
+        }
+        Ok(())
+    }
 
     /// Test bodies propagate with `?` rather than panicking: `unwrap` is
     /// forbidden workspace-wide, and a failing edge extraction should surface
@@ -1677,6 +1824,111 @@ mod tests {
             obligation.retry_cleanup()?,
             "observed process absence and empty capture ownership complete cleanup"
         );
+        Ok(())
+    }
+
+    /// Every fallible collection stage retains and resolves the resources it
+    /// already acquired. The injected errors are single-use and thread-local;
+    /// the process and capture files are real operating-system resources.
+    #[test]
+    fn injected_collection_fault_matrix_keeps_cleanup_owned_and_truthful() -> TestResult {
+        let (small_program, small_args) = small_answer();
+        let (sleep_program, sleep_args) = sleeper();
+        let stages = [
+            (FaultPoint::CaptureStdout, false),
+            (FaultPoint::CaptureStderr, false),
+            (FaultPoint::Spawn, false),
+            (FaultPoint::WaitObservation, true),
+            (FaultPoint::StatStdout, true),
+            (FaultPoint::StatStderr, true),
+            (FaultPoint::ReadStdout, false),
+            (FaultPoint::ReadStderr, false),
+        ];
+        for (fault, running_child) in stages {
+            arm_faults(&[fault]);
+            let (program, args) = if running_child {
+                (sleep_program, sleep_args.as_slice())
+            } else {
+                (small_program, small_args.as_slice())
+            };
+            let result = run_bounded(
+                program,
+                args,
+                Path::new("."),
+                Duration::from_secs(3),
+                1024 * 1024,
+            );
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => return Err(format!("fault {fault:?} unexpectedly passed").into()),
+            };
+            assert!(
+                matches!(error, MetadataError::Spawn(_)),
+                "fault {fault:?} should remain the primary collection error: {error}"
+            );
+            let paths = captured_paths();
+            assert_paths_removed(&paths)?;
+            assert!(
+                FAULTS.with(|faults| faults.borrow().is_empty()),
+                "fault {fault:?} was not reached"
+            );
+        }
+
+        for failure in [FaultPoint::Kill, FaultPoint::Reap] {
+            arm_faults(&[FaultPoint::WaitObservation, failure]);
+            let error = match run_bounded(
+                sleep_program,
+                &sleep_args,
+                Path::new("."),
+                Duration::from_secs(3),
+                1024 * 1024,
+            ) {
+                Err(error) => error,
+                Ok(_) => return Err(format!("fault {failure:?} unexpectedly passed").into()),
+            };
+            let MetadataError::ProcessCleanup {
+                process,
+                mut obligation,
+                ..
+            } = error
+            else {
+                return Err(format!("fault {failure:?} did not expose an obligation").into());
+            };
+            assert!(process.is_some(), "fault {failure:?} must remain visible");
+            assert!(
+                obligation.retry_cleanup()?,
+                "retry should finish owned cleanup"
+            );
+            assert_paths_removed(&captured_paths())?;
+            assert!(FAULTS.with(|faults| faults.borrow().is_empty()));
+        }
+
+        arm_faults(&[FaultPoint::Unlink]);
+        let error = match run_bounded(
+            small_program,
+            &small_args,
+            Path::new("."),
+            Duration::from_secs(3),
+            1024 * 1024,
+        ) {
+            Err(error) => error,
+            Ok(_) => return Err("unlink fault unexpectedly passed".into()),
+        };
+        let MetadataError::ProcessCleanup {
+            captures,
+            mut obligation,
+            ..
+        } = error
+        else {
+            return Err("unlink fault did not expose an unresolved cleanup owner".into());
+        };
+        assert_eq!(captures.len(), 1, "the unlink failure is retained");
+        let retained = obligation.captures.paths.clone();
+        assert_eq!(retained.len(), 1, "the unresolved path stays owned");
+        assert!(std::fs::metadata(&retained[0]).is_ok());
+        assert!(obligation.retry_cleanup()?);
+        assert_paths_removed(&retained)?;
+        assert!(FAULTS.with(|faults| faults.borrow().is_empty()));
         Ok(())
     }
 
