@@ -434,9 +434,71 @@ absence is recorded as open work in `experience/invariants/sdk.yaml`, not as a
 design position. Whenever it lands, grants keep coming from a `GrantSet` the
 caller holds and never from the spec, so wire data cannot choose what a bot
 reaches. The builder chain is the DSL. There is deliberately no `bot!`
-proc-macro: it would drag `syn` into every consumer (the dependency policy
-restricts `syn` to the `lgwks_deps` gate tool) and hide the per-call
-`Auth::check` that auditors read.
+proc-macro: it would hide the per-call `Auth::check` that auditors read. The
+orchestration *between* calls is a different matter, and has one:
+[`script!`](#orchestration-script).
+
+## Orchestration: `script!`
+
+`script!` (feature `script`, on by default) writes orchestration the way it is
+said: indented flows of `each`, `within`, `retry`, `together`, `step`, `for` and
+`if`, which expand to plain `async fn`s over `lgwks_bot::script`. It exists
+because orchestration is where generated code fails most: fan-outs with no
+bound, retries with no budget, waits with no deadline, work that loses track of
+which tenant it is for, and a system nobody can see the shape of. The language
+has no way to write the first three, and makes the last two automatic.
+
+```rust
+use lgwks_bot::script::{FlowError, Scope, Tenant};
+
+lgwks_bot::script! {
+    /// Square every number, four at a time; each attempt gets a second and
+    /// a failure worth retrying is retried under the same key.
+    pub flow squares(numbers: Vec<u64>) -> u64:
+        let squared = each number in numbers, at most 4 at once:
+            retry up to 3 times, waiting 10ms:
+                within 1s:
+                    number.saturating_mul(number)
+        give back squared.iter().sum()
+}
+
+fn main() -> Result<(), FlowError> {
+    let scope = Scope::root(Tenant::new("acme")?);
+    let total = lgwks_bot::block_on(squares(&scope, vec![1, 2, 3]))?;
+    assert_eq!(total, 14);
+    assert!(ARCHITECTURE.to_string().contains("each number in numbers, at most 4 at once"));
+    Ok(())
+}
+```
+
+What every flow gets without asking:
+
+- **Bounds.** `each` refuses to compile without `at most N at once`; `retry`
+  without `up to N times`. Both are range-checked at compile time.
+- **One tenant, one scope.** Every flow takes a `Scope` first. A step's
+  `scope.key()` is BLAKE3 over its tenant and its *structural* path
+  (`crawl/each:page#41/retry`), never a line number, so the key an effect is
+  deduplicated by survives an edit, a retry and a restart, and two tenants
+  never share one.
+- **Stop reaches everything.** The scope carries a `CancellationToken`; a
+  supervisor's shutdown, a failed sibling or a caller's cancel stops every
+  body beneath it, and no new step starts after a stop.
+- **Located failures.** A `FlowError` names the path it happened at and
+  whether it is worth retrying (`is_retryable`).
+- **A map.** Every script emits `ARCHITECTURE`: its flows, their signatures,
+  which flows each one `run`s and the tree of blocks, as text or JSON.
+- **Refusals.** `.unwrap()`, `.expect()`, `panic!` and friends, `loop`,
+  `while`, `spawn`, unbounded channels, `block_on`, `thread::sleep`, `unsafe`
+  and machine-specific absolute paths are compile errors naming what to write
+  instead.
+
+`each` runs its bodies on the calling task, not as spawned tasks, so a body may
+borrow the flow's locals: no `Arc`, no `clone`, no `'static`. It polls at most
+128 bodies before it yields to the executor. The language reference is the
+[`lgwks_macros`](https://docs.rs/lgwks_macros) crate documentation;
+`examples/script_tenants.rs` crawls 10,000 pages for two tenants at once and
+prints the counts, the timing against a hand-written `join_all_bounded`, and
+the map.
 
 ## Async runtime surface
 

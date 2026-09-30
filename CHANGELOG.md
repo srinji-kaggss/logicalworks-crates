@@ -8,6 +8,33 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### lgwks_bot Added
+
+- `script!` and the `script` module (feature `script`, default on):
+  orchestration written as indented flows (`each x in xs, at most N at once:`,
+  `within 2s:`, `retry up to 3 times, waiting 100ms:`, `together:`, `step`,
+  `for`, `if`/`else`, `run`, `give back`, `fail with`). Every flow takes a
+  tenant `Scope`; every step has a stable `StepKey` over its tenant and
+  structural path; failures are `FlowError`s located at a path and classed as
+  retryable or not; every script emits an `ARCHITECTURE` map as text or JSON.
+  `each` runs bodies on the calling task, so they may borrow locals. Measured on
+  `examples/script_tenants` (release, two tenants x 10,000 one-millisecond
+  pages, 256 in flight each): 148,000-153,000 pages/s against
+  153,000-163,000 for the same crawl written by hand on `join_all_bounded`, and
+  12-13 MB peak RSS.
+
+### lgwks_macros 0.1.0 Added
+
+- New crate: the syntax of `lgwks_bot::script!`. Parses indentation from token
+  spans, expands each block to one call into `lgwks_bot::script`, and refuses
+  unbounded, panicking, blocking or machine-specific code with a compile error
+  naming the replacement.
+
+### lgwks_deps Added
+
+- Feature `macro`: `syn`, `proc-macro2` and `quote` (new edge, registered in
+  `contract/APPROVED.toml`) re-exported for first-party proc-macro crates.
+
 ## [lgwks_std 0.7.0 / lgwks_bot 0.5.0 / lgwks_deps 0.1.13] - 2026-09-28
 
 The first upload of this train. It carries everything below, including the

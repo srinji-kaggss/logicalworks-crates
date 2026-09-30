@@ -1,0 +1,25 @@
+[package]
+name = "lgwks_macros"
+description = "The script! orchestration language for lgwks_bot: indented, Python/AppleScript-like flows that expand to bounded, deadline-carrying, tenant-keyed async Rust and an architecture map."
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "Apache-2.0"
+repository = "https://github.com/srinji-kaggss/logicalworks-crates"
+documentation = "https://docs.rs/lgwks_macros"
+homepage = "https://github.com/srinji-kaggss/logicalworks-crates/tree/main/crates/lgwks-macros"
+readme = "README.md"
+categories = ["development-tools::procedural-macro-helpers", "asynchronous"]
+keywords = ["orchestration", "workflow", "dsl", "async", "macro"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+# The Rust grammar, token streams and quasi-quoting, through the storefront that
+# owns those edges (`contract/APPROVED.toml`: syn, proc-macro2, quote). No other
+# feature of `lgwks_deps` is selected, so this pulls no runtime.
+lgwks_deps = { workspace = true, default-features = false, features = ["macro"] }
+
+[lints]
+workspace = true

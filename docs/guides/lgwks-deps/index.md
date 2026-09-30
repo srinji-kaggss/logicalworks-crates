@@ -114,7 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 `check_dependencies(root)` returns `Result<(Contract, Vec<Refusal>), GateError>`
-(`crates/lgwks-deps/src/lib.rs:547`). An empty refusal list is a pass. A
+(`crates/lgwks-deps/src/lib.rs:553`). An empty refusal list is a pass. A
 `GateError` is a different thing from a refusal: the module documentation lists
 a missing register, unparseable metadata, an unparseable register, and an
 unreadable lock file as errors, and all four are fail-closed, because "a gate

@@ -1,0 +1,75 @@
+//! `script!`: orchestration written the way it is said.
+//!
+//! Re-exported as `lgwks_bot::script!`; use it from there. This crate is the
+//! syntax. The semantics live in `lgwks_bot::script`, and every block below
+//! expands to one call into it.
+//!
+//! ```text
+//! lgwks_bot::script! {
+//!     /// Fetch every page for a tenant and report their sizes.
+//!     pub flow crawl(site: &Site, paths: Vec<String>) -> Vec<usize>:
+//!         let pages = each path in paths, at most 16 at once:
+//!             retry up to 3 times, waiting 200ms:
+//!                 within 5s:
+//!                     site.fetch(scope.key(), &path).await.or_retry()?
+//!         give back pages.iter().map(|page| page.len()).collect()
+//! }
+//! ```
+//!
+//! # The blocks
+//!
+//! | Written | Means |
+//! |---|---|
+//! | `[pub] flow name(inputs) [-> Output]:` | an `async fn` taking the tenant [`Scope`] first and returning `Result<Output, FlowError>` |
+//! | `each x in xs, at most N at once:` | every item, `N` at a time, results in input order, first failure stops the rest |
+//! | `within 2s:` | the block, or `TimedOut` when the deadline passes |
+//! | `retry up to 3 times[, waiting 100ms]:` | the block again while it fails transiently, same key each attempt |
+//! | `together:` | each line underneath concurrently; `let x = ..` lines bind their result |
+//! | `step name:` | a named scope: its own key and error location |
+//! | `for x in xs:` | every item in turn, each in its own scope |
+//! | `if cond:` / `else if cond:` / `else:` | as written |
+//! | `let x = <block>:` | the block's last line becomes `x` |
+//! | `run other(args)` | call another flow in this scope, await it, propagate its failure |
+//! | `give back value` | return from the flow |
+//! | `fail with reason` / `fail transiently with reason` | stop with a permanent / retryable failure |
+//!
+//! Any other line is Rust, passed through as written. Inside every flow
+//! `scope` is the current [`Scope`], and `.or_fail()` / `.or_retry()` turn a
+//! foreign error into a flow failure.
+//!
+//! # What it refuses
+//!
+//! Each of these is a compile error naming the replacement: `each` without
+//! `at most N at once`; bounds outside `1..=65536` (fan-out) or `1..=1000`
+//! (attempts); zero durations; `unwrap`, `expect`, `panic!` and friends;
+//! `loop`, `while`, `spawn`, `unbounded_channel`, `block_on`, `thread::sleep`,
+//! `unsafe`; absolute paths from one machine; `give back` from inside a block
+//! whose value is its own last line; and a flow that promises an output but
+//! ends without one.
+//!
+//! Every script also emits `ARCHITECTURE`: the flows it declares and the tree
+//! of blocks inside each, compiled from the same tokens.
+//!
+//! [`Scope`]: https://docs.rs/lgwks_bot/latest/lgwks_bot/script/struct.Scope.html
+
+mod emit;
+mod lines;
+mod refuse;
+
+use lgwks_deps::proc_macro2::TokenStream;
+
+/// Expand an indented orchestration script into `async fn`s over
+/// `lgwks_bot::script` and an `ARCHITECTURE` map. See the crate
+/// documentation for the language.
+#[proc_macro]
+pub fn script(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let lines = lines::split(TokenStream::from(input));
+    let expanded = lines::tree(lines).and_then(emit::script);
+    match expanded {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+#[cfg(test)]
+mod tests;

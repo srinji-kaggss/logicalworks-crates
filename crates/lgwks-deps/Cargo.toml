@@ -26,6 +26,13 @@ keywords = ["dependencies", "audit", "supply-chain", "cargo", "debug"]
 [features]
 default = ["scan"]
 scan = ["dep:syn", "dep:proc-macro2"]
+# Proc-macro authoring storefront: the Rust grammar (`syn`), token streams
+# (`proc-macro2`) and quasi-quoting (`quote`) a first-party proc-macro crate
+# needs. `lgwks_macros` is the one consumer; it reaches all three through the
+# re-exports below, so this crate stays the only author of each edge. Default
+# off: selecting `scan` does not pull `quote`, and a runtime consumer pulls
+# none of the three.
+macro = ["dep:syn", "dep:proc-macro2", "dep:quote"]
 # Storefront features. `lgwks_deps` is the install-and-select surface:
 # the end user enables exactly the third-party capability they want, and the
 # default build pulls none of them. gpui is Zed's GPU desktop UI framework;
@@ -81,6 +88,7 @@ process-group-probe = ["dep:nix", "nix/signal"]
 lgwks_std = { workspace = true, features = ["json"] }
 syn = { version = "2", features = ["full", "visit", "parsing"], optional = true }
 proc-macro2 = { version = "1", features = ["span-locations"], optional = true }
+quote = { version = "1", optional = true }
 gpui = { version = "0.2", optional = true }
 appcui = { version = "=0.5.1", default-features = false, optional = true }
 # Bevy's ECS and the three crates that make it a runtime. `default-features =
