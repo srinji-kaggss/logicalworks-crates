@@ -36,9 +36,10 @@ use std::path::Path;
 
 /// A directory held open, for handle-relative access to what it contains.
 ///
-/// Cheap to clone: a clone is another reference to the *same* directory, which
-/// is what makes this usable as a walk cursor. Dropping every clone closes the
-/// descriptor.
+/// Usable as a walk cursor: [`Dir::try_clone`] gives another reference to the
+/// *same* directory, and dropping every one closes its own descriptor. It is
+/// deliberately not `Clone` — see that method for why duplicating the
+/// descriptor can fail and is not allowed to be silently swallowed.
 #[cfg(unix)]
 #[derive(Debug)]
 pub struct Dir {
