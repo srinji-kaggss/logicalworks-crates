@@ -34,6 +34,10 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
   errors remain visible, and any incomplete collection is a refusal, never an
   empty or partial graph. · why: #143 R14, #159 M1-M3 · enforced by:
   `lgwks_deps::metadata::tests`
+- **INV-DEP-9** Each selected Bevy runtime feature (`bevy-app`, `bevy-time`,
+  `bevy-state`) exposes its promised public import path; a deselected path is
+  absent from the facade. · why: #169 · enforced by:
+  `crates/lgwks-deps/tests/storefront_consumers.rs`
 ## lgwks_bot — durable execution
 
 Each of these was a shipped defect. Treat the list as the spec.
