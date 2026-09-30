@@ -101,12 +101,12 @@ pub struct Options {
     /// Total request timeout, covering connect, TLS, send, and receive.
     pub timeout: Duration,
     /// `User-Agent` header sent with every request.
-    pub user_agent: String,
+    user_agent: String,
     /// Extra headers sent with every request as `(name, value)` pairs, e.g.
     /// `("Authorization", "Bearer ...")`. Names and values must be valid
     /// header bytes; an invalid pair is a caller bug and the request errors
     /// rather than silently dropping the header.
-    pub headers: Vec<(String, String)>,
+    headers: Vec<(String, String)>,
     /// Ceiling on the response body in bytes, enforced while reading. See
     /// [`DEFAULT_MAX_BODY_BYTES`] for the default and the reason there is no
     /// unbounded value, and [`BodyPolicy`] for what happens at the ceiling.
@@ -205,9 +205,9 @@ pub struct Response {
     /// HTTP status code, including 4xx/5xx.
     pub status: u16,
     /// Response headers in wire order as `(name, value)` pairs.
-    pub headers: Vec<(String, String)>,
+    headers: Vec<(String, String)>,
     /// Response body bytes, at most [`Options::max_body_bytes`] long.
-    pub body: Vec<u8>,
+    body: Vec<u8>,
     /// Whether [`Response::body`] is the whole body or a prefix of it.
     pub truncation: Truncation,
 }
