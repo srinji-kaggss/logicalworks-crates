@@ -123,18 +123,26 @@ The binary diagnoses. It never approves. Approval is a committed diff in
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (contract, refusals) = lgwks_deps::check_dependencies(Path::new("."))?;
+    let ((contract, refusals), unresolved) =
+        lgwks_deps::check_dependencies(Path::new("."))?.into_parts();
+    if let Some(cleanup) = unresolved {
+        eprintln!("warning: {cleanup}");
+    }
     println!(
         "{} approved edges, {} refusals",
-        contract.entries.len(),
+        contract.entry_count(),
         refusals.len()
     );
     Ok(())
 }
 ```
 
-`check_dependencies(root)` returns `Result<(Contract, Vec<Refusal>), GateError>`
-(`crates/lgwks-deps/src/lib.rs:604`). An empty refusal list is a pass. A
+`check_dependencies(root)` returns
+`Result<metadata::Collected<(Contract, Vec<Refusal>)>, GateError>`. An empty
+refusal list is a pass. `Collected` carries the verdict and, beside it, any Cargo
+capture file that could not be removed after a complete metadata read: the graph
+was read in full, so the leftover file is a warning to report, not a reason to
+discard the verdict. A
 `GateError` is a different thing from a refusal: the module documentation lists
 a missing register, unparseable metadata, an unparseable register, and an
 unreadable lock file as errors, and all four are fail-closed, because "a gate

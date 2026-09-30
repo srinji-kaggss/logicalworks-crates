@@ -677,12 +677,16 @@ impl ParseError {
     /// This refusal as a located [`Diagnostic`], for a tool that reports every
     /// outcome in one shape.
     ///
-    /// Every refusal is a [`Severity::Error`], and none of them is a position
-    /// inside the file: a source too large, a grammar that produced no tree, and
-    /// a tree carrying recovery nodes are all conditions of the whole file
-    /// rather than of a line. The span is therefore zero-width at the end of
-    /// `source`, so a renderer underlines nothing rather than pointing at an
-    /// invented line.
+    /// Every refusal is a [`Severity::Error`]. An [`InvalidSyntax`] refusal
+    /// points at the earliest recovery node it retained, using that node's byte
+    /// span in `source`, so a renderer underlines the text the grammar rejected.
+    /// The other refusals are conditions of the whole file (a source too large,
+    /// a grammar that produced no tree, a tree over the node bound), so their
+    /// span is zero-width at the end of `source` rather than an invented line.
+    /// `source` must be the text that was parsed; each span end is clamped into
+    /// it.
+    ///
+    /// [`InvalidSyntax`]: ParseError::InvalidSyntax
     ///
     /// ```
     /// use lgwks_ast::{ParseError, Severity};
@@ -694,7 +698,19 @@ impl ParseError {
     /// ```
     #[must_use]
     pub fn to_diagnostic(&self, path: impl Into<std::path::PathBuf>, source: &str) -> Diagnostic {
-        Diagnostic::new(self.to_string(), diagnostic::end_of(source))
+        let span = match *self {
+            Self::InvalidSyntax {
+                ref diagnostics, ..
+            } => diagnostics
+                .iter()
+                .min_by_key(|found| found.start_byte)
+                .map_or_else(
+                    || diagnostic::end_of(source),
+                    |first| diagnostic::span_of(source, first.start_byte..first.end_byte),
+                ),
+            _ => diagnostic::end_of(source),
+        };
+        Diagnostic::new(self.to_string(), span)
             .in_file(path)
             .with_severity(Severity::Error)
     }
@@ -743,7 +759,11 @@ pub enum ContentDetection {
 }
 
 /// Node count, deepest depth, recovery state, and completeness from one traversal.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// There is no `Default`: every value comes from a walk, so `complete` always
+/// says whether that walk visited the whole tree. A default would be a value no
+/// walk produced, with `complete == false` reading as a partial inspection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct AstMetrics {
     /// Nodes visited.
@@ -1022,9 +1042,12 @@ fn inspect_ast_with_pending<'t, L: LanguageExt>(
     stop_after_nodes: Option<usize>,
 ) -> (AstMetrics, usize, Vec<SyntaxDiagnostic>, bool) {
     let mut metrics = AstMetrics {
+        nodes: 0,
+        max_depth: 0,
+        has_syntax_issues: false,
         complete: true,
         node_limit: stop_after_nodes,
-        ..AstMetrics::default()
+        stop_reason: None,
     };
     let mut diagnostics = Vec::new();
     let mut diagnostics_truncated = false;
@@ -1388,6 +1411,46 @@ mod tests {
                     if diagnostics.iter().any(|diagnostic| diagnostic.kind == SyntaxIssueKind::Missing)
             ),
             "an omitted let semicolon is reported as MISSING"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_invalid_syntax_diagnostic_points_at_the_earliest_recovery_node()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let source = "fn main() {}\nfn broken( {\nfn also( {\n";
+        let refusal = match try_parse(source, Language::Rust) {
+            Err(refusal @ ParseError::InvalidSyntax { .. }) => refusal,
+            other => {
+                return Err(format!("expected InvalidSyntax, got {:?}", other.err()).into());
+            }
+        };
+        let reported = refusal.to_diagnostic("broken.rs", source);
+        assert_eq!(reported.severity(), Severity::Error);
+        assert_eq!(
+            reported.span().start.line,
+            2,
+            "the rendered refusal names the first broken line, not end of file"
+        );
+        assert!(
+            reported.span().byte_range().start < source.len(),
+            "the span is inside the source"
+        );
+        assert!(
+            reported.render().starts_with("broken.rs:2:"),
+            "the rendered form carries the location: {}",
+            reported.render()
+        );
+
+        let whole_file = ParseError::AstTooLarge {
+            language: "Rust",
+            observed: 9,
+            limit: 8,
+        }
+        .to_diagnostic("big.rs", source);
+        assert!(
+            whole_file.span().is_empty() && whole_file.span().start.byte == source.len(),
+            "a whole-file refusal stays zero-width at the end"
         );
         Ok(())
     }

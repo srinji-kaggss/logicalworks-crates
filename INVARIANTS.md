@@ -32,8 +32,12 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
   temporary-disk quota, and a descendant may retain an inherited capture
   descriptor after the direct child exits. Termination and capture-removal OS
   errors remain visible, and any incomplete collection is a refusal, never an
-  empty or partial graph. · why: #143 R14, #159 M1-M3 · enforced by:
-  `lgwks_deps::metadata::tests`
+  empty or partial graph. A capture that cannot be removed after a complete
+  read is reported beside the result (`metadata::Collected`), never dropped and
+  never in place of a valid graph; a refusal decided afterwards keeps it
+  attached. A cleanup refusal names the failed step, the pid and each OS error.
+  · why: #143 R14, #159 M1-M3, #193 · enforced by: `lgwks_deps::metadata::tests`,
+  `metadata::tests::a_refusal_after_collection_keeps_the_unresolved_cleanup_attached`
 - **INV-DEP-9** Each selected Bevy runtime feature (`bevy-app`, `bevy-time`,
   `bevy-state`) exposes its promised public import path; a deselected path is
   absent from the facade. · why: #169 · enforced by:
@@ -145,9 +149,13 @@ Each of these was a shipped defect. Treat the list as the spec.
   `Authorization`, `Cookie` and `Proxy-Authorization`; a 307/308 of a POST is
   refused rather than replaying the body. Idempotency keys
   remain singular and receiver-defined. `EINTR` is its own failure class at
-  every stage and is never presented as proof of no effect. · why: #163
-  N1/N2/N3, #190 review (ureq forwarded custom headers cross-origin) ·
-  enforced by:
+  every stage and is never presented as proof of no effect. `timeout` bounds
+  each phase of each hop; `deadline`, when set, bounds the whole call from the
+  first lookup to the last body byte across every hop, and its expiry is the
+  `Deadline` stage. · why: #163 N1/N2/N3, #190 review (ureq forwarded custom
+  headers cross-origin), #191 · enforced by:
+  `http::tests::a_deadline_bounds_the_whole_redirect_chain`,
+  `http::tests::a_deadline_bounds_a_trickled_body`,
   `http::tests::a_cross_origin_redirect_carries_no_caller_header`,
   `http::tests::a_same_origin_redirect_keeps_ordinary_headers_but_not_credentials`,
   `http::tests::a_method_keeping_redirect_of_a_post_is_refused`,
@@ -220,7 +228,11 @@ Each of these was a shipped defect. Treat the list as the spec.
   while canonical targets identify visits. Reports expose the applied depth
   and symlink policy, and completeness means complete within that policy.
   Bounded walks charge entries and path bytes before retention and mark any
-  budget-limited prefix incomplete. Strict failures preserve path, stage and
+  budget-limited prefix incomplete. Completeness does not depend on
+  filesystem iteration order, except that following symlinks without sorting
+  charges an aliased directory through whichever alias is met first; which
+  entries an incomplete report retains, in the directory where a budget ran
+  out, does. Strict failures preserve path, stage and
   the original I/O source. `available_space` is an advisory snapshot, never a
   reservation or write guarantee. · why: #166 · enforced by:
   `lgwks_std::fs::tests` and the public API doctest
@@ -258,6 +270,14 @@ Each of these was a shipped defect. Treat the list as the spec.
   `lgwks_std::fs::capability::tests::a_readless_write_request_is_refused_rather_than_truncating`,
   `lgwks_std::fs::capability::tests::create_refuses_to_follow_a_final_symlink`
 
+- **INV-FS-6** A capability listing is bounded by `ListLimits` (entries and
+  name bytes), charged before a name is kept, and says when it was truncated.
+  It returns only UTF-8 names, the one name type every `Dir` method accepts,
+  and counts the rest as unaddressable; a listing with either is not complete.
+  · why: #192 · enforced by:
+  `lgwks_std::fs::capability::tests::a_listing_is_bounded_by_entries_and_name_bytes`,
+  `lgwks_std::fs::capability::tests::a_non_utf8_name_is_counted_not_returned`
+
   Known limit, stated rather than left to be discovered:
   `fs::capability::Dir::entry_names` is Linux-only. `getdents64` is the only
   syscall that lists a descriptor, the BSDs expose no equivalent, and calling
@@ -275,8 +295,11 @@ Each of these was a shipped defect. Treat the list as the spec.
   leaves detection incomplete. Bounded AST metrics identify partial walks, and
   checked syntax diagnostics preserve recovery kind and original-source byte
   spans under a fixed ceiling that keeps the earliest in source order. The
-  refusal and the rendered report walk the same node set, root included.
-  · why: #165 A1–A4 · enforced by:
+  refusal and the rendered report walk the same node set, root included. A
+  rendered `InvalidSyntax` refusal points at the earliest retained recovery
+  node; `AstMetrics` has no `Default`, so every value came from a walk.
+  · why: #165 A1–A4, #194 · enforced by:
+  `lgwks_ast::tests::an_invalid_syntax_diagnostic_points_at_the_earliest_recovery_node`,
   `lgwks_ast::tests::duplicate_and_permuted_candidates_parse_once_and_preserve_ambiguity`,
   `lgwks_ast::tests::incomplete_candidate_inspection_is_not_reported_as_unique`,
   `lgwks_ast::tests::inspection_metrics_name_complete_exact_and_over_limit_walks`,

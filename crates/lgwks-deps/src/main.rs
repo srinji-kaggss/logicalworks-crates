@@ -31,6 +31,7 @@ use lgwks_deps::{
     contract::Contract,
     invariants::Register as InvariantRegister,
     invariants::{Audit as InvariantAudit, SCOPE as INVARIANT_SCOPE},
+    metadata::Collected,
     repository_root,
 };
 
@@ -54,9 +55,10 @@ USAGE
                                        PATH/contract/APPROVED.toml. Diagnosis
                                        only — a build always reads the register
                                        committed beside the code it builds.
-             [--json]                  emit one JSON object on stdout and
-                                       nothing on stderr; the exit code still
-                                       carries the verdict
+             [--json]                  emit one JSON object on stdout; stderr
+                                       carries only a WARN line when a Cargo
+                                       capture file could not be removed. The
+                                       exit code still carries the verdict
   `check` parses its own arguments in one pass, and refuses rather than
   guesses: a missing or repeated --contract value, an unknown --flag, or a
   second PATH exits 2 without auditing anything. --contract's FILE is a
@@ -307,7 +309,7 @@ fn handle_invariants(
         Ok(root) => root,
         Err(error) => return refuse(&error.to_string(), err),
     };
-    match audit_invariant_root(&root) {
+    match audit_invariant_root(&root, err)? {
         Ok(None) => {
             writeln!(
                 out,
@@ -424,20 +426,43 @@ fn main() -> ExitCode {
 fn audit_root(
     root: &Path,
     contract_override: &Option<PathBuf>,
-) -> Result<(Contract, Vec<Refusal>), String> {
+    err: &mut impl io::Write,
+) -> io::Result<Result<(Contract, Vec<Refusal>), String>> {
     let outcome = match contract_override.as_ref() {
         Some(path) => check_dependencies_against(root, path),
         None => check_dependencies(root),
     };
-    outcome.map_err(|error| error.to_string())
+    match outcome {
+        Ok(collected) => warn_unresolved(collected, err).map(Ok),
+        Err(error) => Ok(Err(error.to_string())),
+    }
+}
+
+/// The verdict from a complete Cargo metadata read, printing any capture
+/// cleanup that could not be confirmed after it.
+///
+/// The warning goes to stderr in both output modes, so `--json` stdout stays
+/// one document. The verdict and exit code do not change: the graph was read
+/// in full, and the leftover path is named so an operator can remove it.
+fn warn_unresolved<T>(collected: Collected<T>, err: &mut impl io::Write) -> io::Result<T> {
+    let (value, unresolved) = collected.into_parts();
+    if let Some(cleanup) = unresolved {
+        writeln!(err, "WARN  cargo metadata: {cleanup}")?;
+    }
+    Ok(value)
 }
 
 /// Reads the optional invariant register, flattening its structured error for
 /// the human-facing command while retaining the structured library API.
 fn audit_invariant_root(
     root: &Path,
-) -> Result<Option<(InvariantRegister, InvariantAudit)>, String> {
-    check_invariants(root).map_err(|error| error.to_string())
+    err: &mut impl io::Write,
+) -> io::Result<Result<Option<(InvariantRegister, InvariantAudit)>, String>> {
+    match check_invariants(root) {
+        Ok(Some(collected)) => warn_unresolved(collected, err).map(|audit| Ok(Some(audit))),
+        Ok(None) => Ok(Ok(None)),
+        Err(error) => Ok(Err(error.to_string())),
+    }
 }
 
 /// Prints every refusal and returns the verdict's exit code.
@@ -522,8 +547,8 @@ fn run_check(
             );
         }
     };
-    let dependency = audit_root(&root, &contract_override);
-    match audit_invariant_root(&root) {
+    let dependency = audit_root(&root, &contract_override, err)?;
+    match audit_invariant_root(&root, err)? {
         Ok(None) => match dependency {
             Ok((register, refusals)) => report_check(
                 Some(&root),

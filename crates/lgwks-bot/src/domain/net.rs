@@ -1,7 +1,7 @@
 //! `net` owns the network endpoint domain. Requires `bot.net`.
 //!
-//! Bound to [`lgwks_std::http`]: a poll is one GET with a 10s timeout and a
-//! declared body ceiling. Reachable endpoints report status and a 4 KiB body
+//! Bound to [`lgwks_std::http`]: a poll is one GET, redirects and body
+//! included, bounded by a 10s deadline, with a declared body ceiling. Reachable endpoints report status and a 4 KiB body
 //! preview; transport failure reports unreachable with status 0 (so a bot can
 //! condition on downtime); a malformed URL is a spec bug and errors.
 //!
@@ -69,7 +69,18 @@ pub struct NetState {
     /// and decoded lossily, so a large or non-UTF-8 response still yields a
     /// bounded preview rather than failing the probe: a body worth watching is
     /// exactly the one too big to hold.
-    pub body: String,
+    ///
+    /// Crate-private so the bound is a property of every value a consumer can
+    /// hold: read it through [`NetState::body`].
+    pub(crate) body: String,
+}
+
+impl NetState {
+    /// Response body, at most [`BODY_PREVIEW`] characters of it.
+    #[must_use]
+    pub fn body(&self) -> &str {
+        &self.body
+    }
 }
 
 impl Endpoint {
@@ -96,8 +107,11 @@ impl verb::Observe for Endpoint {
         // the probe can use and nothing more. Preview rather than the refusing
         // default: a body larger than a preview is the normal case for a live
         // endpoint, and refusing it would trade a status code for nothing.
+        // The deadline, not only the per-phase timeout: a redirect chain would
+        // otherwise give each hop's every phase its own ten seconds.
         let options = Options::default()
             .timeout(Duration::from_secs(POLL_TIMEOUT_SECS))
+            .deadline(Duration::from_secs(POLL_TIMEOUT_SECS))
             .max_body_bytes(BODY_PREVIEW_BYTES)
             .body_policy(BodyPolicy::Preview);
         let exchange =

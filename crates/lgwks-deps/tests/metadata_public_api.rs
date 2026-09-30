@@ -36,7 +36,11 @@ fn downstream_can_read_metadata_edges_and_workspace_members() -> Result<(), Box<
         .parent()
         .and_then(Path::parent)
         .ok_or("the crate manifest must be nested in the workspace")?;
-    let members = metadata::workspace_members(workspace_root)?;
+    let (members, unresolved) = metadata::workspace_members(workspace_root)?.into_parts();
+    assert!(
+        unresolved.is_none(),
+        "a clean collection leaves no cleanup to report"
+    );
     let member = members
         .iter()
         .find(|member| member.name() == "lgwks_deps")

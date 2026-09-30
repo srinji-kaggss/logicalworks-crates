@@ -175,7 +175,9 @@ name beneath it from that one descriptor, so a name swapped underneath the walk
 cannot redirect it — the failure is `ENOENT` on the entry that changed, which
 `walk_dir_tolerant`'s omissions already have a place to record. Its
 `entry_names` is Linux-only, because listing a descriptor needs `getdents64` and
-the BSDs have no equivalent syscall; every other operation is `*at(2)`.
+the BSDs have no equivalent syscall; every other operation is `*at(2)`. A listing
+is bounded by `ListLimits` and returns UTF-8 names only, the name type every
+other `Dir` method takes, counting any other name as unaddressable.
 
 ## Time profile and migration
 

@@ -93,6 +93,83 @@ pub enum SymlinkPolicy {
     FollowFinal,
 }
 
+/// Ceilings on one directory listing: how many names it keeps and how many
+/// name bytes, so a directory an attacker can fill cannot make a listing
+/// allocate without bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ListLimits {
+    /// Maximum entries counted, addressable or not.
+    pub max_entries: usize,
+    /// Maximum cumulative bytes of the names kept.
+    pub max_name_bytes: usize,
+}
+
+impl ListLimits {
+    /// Explicit ceilings for one listing.
+    #[must_use]
+    pub const fn new(max_entries: usize, max_name_bytes: usize) -> Self {
+        Self {
+            max_entries,
+            max_name_bytes,
+        }
+    }
+}
+
+impl Default for ListLimits {
+    /// 65,536 entries and 16 MiB of names: wider than any directory a person
+    /// makes, far below what a hostile one can hold.
+    fn default() -> Self {
+        Self::new(65_536, 16 << 20)
+    }
+}
+
+/// One bounded directory listing.
+///
+/// Names are `String`s because that is the only name type the rest of
+/// [`Dir`] accepts: every method takes one `&str` component. A name that is
+/// not UTF-8 cannot be passed back to any of them, so it is counted as
+/// unaddressable rather than returned as a name nothing here can open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Listing {
+    /// Addressable names, sorted, without `.` and `..`.
+    names: Vec<String>,
+    /// Entries whose names are not UTF-8.
+    unaddressable: usize,
+    /// Whether a ceiling stopped the listing before the directory ended.
+    truncated: bool,
+}
+
+impl Listing {
+    /// Addressable names, sorted bytewise. When the listing is truncated these
+    /// are the names the directory yielded first, which is filesystem order:
+    /// a truncated listing is not reproducible across filesystems, a complete
+    /// one is.
+    #[must_use]
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
+
+    /// Entries seen whose names are not UTF-8 and so cannot be opened here.
+    #[must_use]
+    pub fn unaddressable(&self) -> usize {
+        self.unaddressable
+    }
+
+    /// Whether a ceiling stopped the listing early.
+    #[must_use]
+    pub fn is_truncated(&self) -> bool {
+        self.truncated
+    }
+
+    /// Whether every entry was listed and every one is addressable.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        !self.truncated && self.unaddressable == 0
+    }
+}
+
 /// What an entry's name denotes, stated without following it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -408,19 +485,7 @@ impl Dir {
             .map_err(errno_to_io)
     }
 
-    /// Every name in this directory, in filesystem order.
-    ///
-    /// The listing is one `getdents64` sequence against this descriptor, so a
-    /// concurrent rename cannot make the names belong to a different
-    /// directory than the one opened.
-    ///
-    /// # Errors
-    ///
-    /// The OS error when the directory cannot be read. A *single* entry that
-    /// cannot be stated is not an error: it is skipped, because inventing a
-    /// name for it would be worse than omitting one, and the caller can
-    /// re-stat any name it was actually given.
-    /// Every name in this directory, in filesystem order.
+    /// The names in this directory, bounded by `limits`.
     ///
     /// Linux-only, and for a concrete reason: listing a descriptor means
     /// `getdents64`, which exists only on Linux. The BSDs have no equivalent
@@ -435,9 +500,13 @@ impl Dir {
     /// `/proc/self/fd/N` is a symlink that resolves to the directory itself as a
     /// file, which `read_dir` refuses with `ENOTDIR`.
     ///
-    /// The listing is of *this* directory, and it is rewound first, so it does
-    /// not depend on whether the descriptor has read or created anything
-    /// earlier. `.` and `..` are omitted, matching `std::fs::read_dir`.
+    /// The listing is one `getdents64` sequence against this descriptor, so a
+    /// concurrent rename cannot make the names belong to a different directory
+    /// than the one opened. It is rewound first, so it does not depend on
+    /// whether the descriptor has read or created anything earlier. `.` and
+    /// `..` are omitted, matching `std::fs::read_dir`. Each entry is charged to
+    /// `limits` before it is kept; the first one that would exceed a ceiling
+    /// ends the listing, which [`Listing::is_truncated`] then reports.
     ///
     /// # Errors
     ///
@@ -446,9 +515,8 @@ impl Dir {
     /// discarded: a truncated list that looks complete is worse than an error,
     /// and this is the one place a caller cannot otherwise tell a short read
     /// from a small directory.
-    ///
     #[cfg(target_os = "linux")]
-    pub fn entry_names(&self) -> io::Result<Vec<OsString>> {
+    pub fn entry_names(&self, limits: ListLimits) -> io::Result<Listing> {
         use std::mem::MaybeUninit;
 
         /// One page is the kernel's own `getdents64` granularity. A wide
@@ -467,7 +535,13 @@ impl Dir {
 
         let mut buffer = [MaybeUninit::<u8>::uninit(); DIRENT_BUFFER_BYTES];
         let mut directory = rustix::fs::RawDir::new(self.fd.as_fd(), &mut buffer);
-        let mut names = Vec::new();
+        let mut listing = Listing {
+            names: Vec::new(),
+            unaddressable: 0,
+            truncated: false,
+        };
+        let mut entries = 0_usize;
+        let mut name_bytes = 0_usize;
         while let Some(entry) = directory.next() {
             let entry = entry.map_err(errno_to_io)?;
             let name = entry.file_name().to_bytes();
@@ -479,17 +553,34 @@ impl Dir {
             if name == b"." || name == b".." {
                 continue;
             }
-            names.push(OsString::from_vec(name.to_vec()));
+            if entries >= limits.max_entries {
+                listing.truncated = true;
+                break;
+            }
+            entries = entries.saturating_add(1);
+            match std::str::from_utf8(name) {
+                Ok(text) => {
+                    let charged = name_bytes.saturating_add(text.len());
+                    if charged > limits.max_name_bytes {
+                        listing.truncated = true;
+                        break;
+                    }
+                    name_bytes = charged;
+                    listing.names.push(text.to_owned());
+                }
+                Err(_) => listing.unaddressable = listing.unaddressable.saturating_add(1),
+            }
         }
-        Ok(names)
+        listing.names.sort_unstable();
+        Ok(listing)
     }
 
-    /// Every name in this directory.
+    /// The names in this directory.
     ///
     /// Listing a descriptor needs `getdents64`, which is Linux-only; see the
-    /// Unix implementation for why there is no portable form here.
+    /// Linux implementation for why there is no portable form here.
     #[cfg(not(target_os = "linux"))]
-    pub fn entry_names(&self) -> io::Result<Vec<OsString>> {
+    pub fn entry_names(&self, _limits: ListLimits) -> io::Result<Listing> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "fs::capability::Dir::entry_names needs getdents64, which is Linux-only",
@@ -593,7 +684,7 @@ mod unsupported {
         }
 
         /// Always reports [`io::ErrorKind::Unsupported`].
-        pub fn entry_names(&self) -> io::Result<Vec<std::ffi::OsString>> {
+        pub fn entry_names(&self, _limits: super::ListLimits) -> io::Result<super::Listing> {
             Err(unsupported("Dir::entry_names"))
         }
     }
@@ -1072,11 +1163,14 @@ mod tests {
         let dir = Dir::open(tmp.path())?;
         dir.create_dir("a")?;
         dir.create_new("b.txt")?;
-        let mut names = dir.entry_names()?;
-        names.sort();
-        assert_eq!(names, vec![OsString::from("a"), OsString::from("b.txt")]);
+        let listing = dir.entry_names(ListLimits::default())?;
+        assert_eq!(listing.names(), ["a", "b.txt"]);
+        assert!(listing.is_complete());
         assert!(
-            !names.iter().any(|name| name == "." || name == ".."),
+            !listing
+                .names()
+                .iter()
+                .any(|name| name == "." || name == ".."),
             "`.` and `..` are not entries a caller can act on"
         );
         Ok(())
@@ -1096,18 +1190,15 @@ mod tests {
         let dir = Dir::open(tmp.path())?;
         dir.create_dir("a")?;
         dir.create_new("b.txt")?;
-        let mut names = dir.entry_names()?;
-        names.sort();
+        let names = dir.entry_names(ListLimits::default())?;
         assert_eq!(
-            names,
-            vec![OsString::from("a"), OsString::from("b.txt")],
+            names.names(),
+            ["a", "b.txt"],
             "a Dir that created entries must still list them"
         );
-        let mut again = dir.entry_names()?;
-        again.sort();
+        let again = dir.entry_names(ListLimits::default())?;
         assert_eq!(
-            again,
-            vec![OsString::from("a"), OsString::from("b.txt")],
+            again, names,
             "a second listing must be identical, not a continuation"
         );
         Ok(())
@@ -1123,7 +1214,53 @@ mod tests {
     fn an_empty_directory_lists_nothing() -> io::Result<()> {
         let tmp = tempfile::tempdir()?;
         let dir = Dir::open(tmp.path())?;
-        assert_eq!(dir.entry_names()?, Vec::<OsString>::new());
+        let listing = dir.entry_names(ListLimits::default())?;
+        assert!(listing.names().is_empty() && listing.is_complete());
+        Ok(())
+    }
+
+    /// Both ceilings stop the listing before the entry that would exceed
+    /// them, and the listing says so rather than looking complete (#192).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_listing_is_bounded_by_entries_and_name_bytes() -> io::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let dir = Dir::open(tmp.path())?;
+        for index in 0..10 {
+            dir.create_new(&format!("entry-{index}"))?;
+        }
+        let by_count = dir.entry_names(ListLimits::new(4, usize::MAX))?;
+        assert_eq!(by_count.names().len(), 4);
+        assert!(by_count.is_truncated() && !by_count.is_complete());
+
+        // Each name is 7 bytes, so 20 bytes keeps two and refuses the third.
+        let by_bytes = dir.entry_names(ListLimits::new(usize::MAX, 20))?;
+        assert_eq!(by_bytes.names().len(), 2);
+        assert!(by_bytes.is_truncated());
+
+        let exact = dir.entry_names(ListLimits::new(10, 70))?;
+        assert_eq!(exact.names().len(), 10, "exact ceilings admit everything");
+        assert!(exact.is_complete());
+        Ok(())
+    }
+
+    /// A name that is not UTF-8 cannot be passed to any `Dir` method, so it
+    /// is counted as unaddressable instead of returned as a name (#192).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_non_utf8_name_is_counted_not_returned() -> io::Result<()> {
+        use std::os::unix::ffi::OsStrExt;
+        let tmp = tempfile::tempdir()?;
+        std::fs::write(
+            tmp.path().join(std::ffi::OsStr::from_bytes(b"bad-\xff")),
+            b"",
+        )?;
+        std::fs::write(tmp.path().join("good"), b"")?;
+        let dir = Dir::open(tmp.path())?;
+        let listing = dir.entry_names(ListLimits::default())?;
+        assert_eq!(listing.names(), ["good"]);
+        assert_eq!(listing.unaddressable(), 1);
+        assert!(!listing.is_truncated() && !listing.is_complete());
         Ok(())
     }
 

@@ -24,10 +24,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let root = manifest_dir.join("..").join("..").canonicalize()?;
     let contract = root.join(lgwks_deps::CONTRACT_PATH);
-    let (_register, refusals) = lgwks_deps::check_dependencies_against(&root, &contract)?;
+    let ((_register, refusals), unresolved) =
+        lgwks_deps::check_dependencies_against(&root, &contract)?.into_parts();
     assert!(refusals.is_empty(), "unregistered edges: {refusals:?}");
     let stdout = io::stdout();
     let mut out = stdout.lock();
+    if let Some(cleanup) = unresolved {
+        writeln!(out, "warning: {cleanup}")?;
+    }
     writeln!(out, "lgwks_deps check ok at {}", root.display())?;
     Ok(())
 }

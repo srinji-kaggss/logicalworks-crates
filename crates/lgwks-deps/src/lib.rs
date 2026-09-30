@@ -601,7 +601,13 @@ fn ensure_contract_file(path: &Path) -> Result<(), GateError> {
 }
 
 /// Audits the repository rooted at `root`, reading its lock file and register.
-pub fn check_dependencies(root: &Path) -> Result<(Contract, Vec<Refusal>), GateError> {
+///
+/// The verdict comes back inside a [`metadata::Collected`]: a Cargo capture
+/// file that could not be removed after a complete read is reported beside the
+/// verdict rather than replacing it.
+pub fn check_dependencies(
+    root: &Path,
+) -> Result<metadata::Collected<(Contract, Vec<Refusal>)>, GateError> {
     check_dependencies_against(root, &root.join(CONTRACT_PATH))
 }
 
@@ -613,15 +619,17 @@ pub fn check_dependencies(root: &Path) -> Result<(Contract, Vec<Refusal>), GateE
 pub fn check_dependencies_against(
     root: &Path,
     contract_path: &Path,
-) -> Result<(Contract, Vec<Refusal>), GateError> {
+) -> Result<metadata::Collected<(Contract, Vec<Refusal>)>, GateError> {
     let lock_path = root.join("Cargo.lock");
     let contract_path = contract_path.to_path_buf();
     ensure_contract_file(&contract_path)?;
     let register = Contract::parse(&read(&contract_path)?).map_err(GateError::Contract)?;
     read(&lock_path)?;
     let edges = metadata::read(root).map_err(GateError::Metadata)?;
-    let refusals = audit_direct(&edges, &register);
-    Ok((register, refusals))
+    Ok(edges.map(|edges| {
+        let refusals = audit_direct(&edges, &register);
+        (register, refusals)
+    }))
 }
 
 /// Resolves the optional invariant register beside `root` against the
@@ -637,7 +645,7 @@ pub fn check_dependencies_against(
 /// executes nothing — and [`invariants::SCOPE`] is the sentence that says so.
 pub fn check_invariants(
     root: &Path,
-) -> Result<Option<(invariants::Register, invariants::Audit)>, GateError> {
+) -> Result<Option<metadata::Collected<(invariants::Register, invariants::Audit)>>, GateError> {
     invariants::check(root).map_err(GateError::Invariant)
 }
 

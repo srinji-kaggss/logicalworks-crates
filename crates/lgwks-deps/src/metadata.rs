@@ -280,21 +280,31 @@ impl fmt::Display for MetadataError {
                 ref cause,
                 ref process,
                 ref captures,
-                ..
-            } => match cause.as_deref() {
-                Some(cause) => write!(
-                    f,
-                    "{cause}; cleanup unconfirmed (process: {}, capture errors: {})",
-                    process.is_some(),
-                    captures.len()
-                ),
-                None => write!(
-                    f,
-                    "cleanup unconfirmed (process: {}, capture errors: {})",
-                    process.is_some(),
-                    captures.len()
-                ),
-            },
+                ref obligation,
+            } => {
+                if let Some(cause) = cause.as_deref() {
+                    write!(f, "{cause}; ")?;
+                }
+                write!(f, "cleanup unconfirmed")?;
+                let report = &obligation.report;
+                if let Some(ref error) = *process {
+                    let step = report.step.map_or("stop", CleanupStep::verb);
+                    match report.pid {
+                        Some(pid) => write!(f, "; could not {step} cargo (pid {pid}): {error}")?,
+                        None => write!(f, "; could not {step} cargo: {error}")?,
+                    }
+                }
+                let mut paths = report.capture_paths.iter();
+                for error in captures.iter() {
+                    match paths.next() {
+                        Some(path) => {
+                            write!(f, "; could not remove {}: {error}", path.display())?;
+                        }
+                        None => write!(f, "; could not remove a capture file: {error}")?,
+                    }
+                }
+                Ok(())
+            }
             #[cfg(not(target_family = "wasm"))]
             Self::Entropy(ref error) => write!(
                 f,
@@ -318,7 +328,14 @@ impl std::error::Error for MetadataError {
             | Self::Schema(_)
             | Self::Timeout { .. }
             | Self::OutputTooLarge { .. } => None,
+            // The primary failure first: it is why collection stopped, and the
+            // cleanup errors are what it left behind.
             Self::ProcessCleanup {
+                cause: Some(ref cause),
+                ..
+            } => Some(&**cause),
+            Self::ProcessCleanup {
+                cause: None,
                 ref process,
                 ref captures,
                 ..
@@ -627,6 +644,31 @@ struct BoundedOutput {
     stdout: Vec<u8>,
     /// At most the per-stream budget of stderr bytes.
     stderr: Vec<u8>,
+    /// A capture-removal failure after complete output, reported beside it.
+    unresolved: Option<Unresolved>,
+}
+
+/// Capture removals that failed after a complete collection, and the owner
+/// that can retry them.
+#[derive(Debug)]
+struct Unresolved {
+    /// Every removal failure, in the order of the obligation's report.
+    captures: Vec<std::io::Error>,
+    /// The owner of the paths that could not be removed.
+    obligation: Box<CleanupObligation>,
+}
+
+impl Unresolved {
+    /// The cleanup failure as a refusal, with `cause` as its primary failure
+    /// when collection was refused afterwards.
+    fn into_error(self, cause: Option<MetadataError>) -> MetadataError {
+        MetadataError::ProcessCleanup {
+            cause: cause.map(Box::new),
+            process: None,
+            captures: self.captures,
+            obligation: self.obligation,
+        }
+    }
 }
 
 /// Owns capture pathnames from the instant a capture file is created through
@@ -724,6 +766,61 @@ pub struct CleanupObligation {
     child: Option<std::process::Child>,
     /// Capture paths whose removal remains unresolved.
     captures: CaptureFiles,
+    /// What failed when the obligation was created, fixed so the refusal's
+    /// text does not change as retries make progress.
+    report: CleanupReport,
+}
+
+/// The facts a cleanup refusal names: which step failed, on which process, and
+/// which capture paths could not be removed.
+#[derive(Debug)]
+struct CleanupReport {
+    /// The process step that failed, if one did.
+    step: Option<CleanupStep>,
+    /// The direct child's process id, while the obligation still owns it.
+    pid: Option<u32>,
+    /// Capture paths whose removal failed, in the order of the retained errors.
+    capture_paths: Vec<PathBuf>,
+}
+
+/// A process-cleanup step that can fail and leave the child owned.
+#[derive(Debug, Clone, Copy)]
+enum CleanupStep {
+    /// Sending the kill request.
+    Kill,
+    /// Waiting for the exited child to be reaped.
+    Reap,
+}
+
+impl CleanupStep {
+    /// The verb a refusal uses for this step.
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Kill => "kill",
+            Self::Reap => "reap",
+        }
+    }
+}
+
+impl CleanupObligation {
+    /// Takes ownership of an unresolved child and capture set, recording what
+    /// failed at this moment for the refusal's text.
+    fn new(
+        step: Option<CleanupStep>,
+        child: Option<std::process::Child>,
+        captures: &mut CaptureFiles,
+    ) -> Self {
+        let paths = std::mem::take(&mut captures.paths);
+        Self {
+            report: CleanupReport {
+                step,
+                pid: child.as_ref().map(std::process::Child::id),
+                capture_paths: paths.clone(),
+            },
+            child,
+            captures: CaptureFiles { paths },
+        }
+    }
 }
 
 impl CleanupObligation {
@@ -932,7 +1029,7 @@ fn run_bounded(
     /// Keeps the original failure distinct from any cleanup failure.
     fn cleanup_error(
         cause: Option<MetadataError>,
-        process: Option<std::io::Error>,
+        process: Option<(CleanupStep, std::io::Error)>,
         child: Option<std::process::Child>,
         captures: &mut CaptureFiles,
     ) -> MetadataError {
@@ -943,16 +1040,15 @@ fn run_bounded(
         {
             return cause;
         }
+        let (step, process) = match process {
+            Some((step, error)) => (Some(step), Some(error)),
+            None => (None, None),
+        };
         MetadataError::ProcessCleanup {
             cause: cause.map(Box::new),
             process,
             captures: capture_errors,
-            obligation: Box::new(CleanupObligation {
-                child,
-                captures: CaptureFiles {
-                    paths: std::mem::take(&mut captures.paths),
-                },
-            }),
+            obligation: Box::new(CleanupObligation::new(step, child, captures)),
         }
     }
 
@@ -1048,10 +1144,12 @@ fn run_bounded(
     let status = match outcome {
         Err(cause) => {
             let process_error = match terminate_child(&mut child) {
-                Ok(()) => reap_child(&mut child).err(),
+                Ok(()) => reap_child(&mut child)
+                    .err()
+                    .map(|error| (CleanupStep::Reap, error)),
                 Err(kill_error) => match child.try_wait() {
                     Ok(Some(_)) => None,
-                    Ok(None) | Err(_) => Some(kill_error),
+                    Ok(None) | Err(_) => Some((CleanupStep::Kill, kill_error)),
                 },
             };
             return match process_error {
@@ -1067,7 +1165,12 @@ fn run_bounded(
         Ok(status) => match reap_child(&mut child) {
             Ok(_) => status,
             Err(error) => {
-                return Err(cleanup_error(None, Some(error), Some(child), &mut captures));
+                return Err(cleanup_error(
+                    None,
+                    Some((CleanupStep::Reap, error)),
+                    Some(child),
+                    &mut captures,
+                ));
             }
         },
     };
@@ -1095,24 +1198,20 @@ fn run_bounded(
     if let Some(cause) = overflow {
         return Err(cleanup_error(Some(cause), None, None, &mut captures));
     }
+    // Both streams are read in full and the child is reaped, so the output is
+    // complete. A capture that cannot be removed now is reported beside it,
+    // not in place of it: the graph is valid, and the leftover path is owned
+    // by the obligation for a retry.
     let cleanup_errors = captures.cleanup();
-    if !cleanup_errors.is_empty() {
-        return Err(MetadataError::ProcessCleanup {
-            cause: None,
-            process: None,
-            captures: cleanup_errors,
-            obligation: Box::new(CleanupObligation {
-                child: None,
-                captures: CaptureFiles {
-                    paths: std::mem::take(&mut captures.paths),
-                },
-            }),
-        });
-    }
+    let unresolved = (!cleanup_errors.is_empty()).then(|| Unresolved {
+        captures: cleanup_errors,
+        obligation: Box::new(CleanupObligation::new(None, None, &mut captures)),
+    });
     Ok(BoundedOutput {
         status,
         stdout,
         stderr,
+        unresolved,
     })
 }
 
@@ -1124,7 +1223,7 @@ fn run_bounded(
 /// invoked as `check crates/thing` would report a manifest that plainly exists
 /// as missing, and every fixture test built on a relative path would pass on
 /// that refusal rather than on the rule it meant to exercise.
-fn read_metadata(root: &Path) -> Result<CargoMetadata, MetadataError> {
+fn read_metadata(root: &Path) -> Result<Collected<CargoMetadata>, MetadataError> {
     let manifest = manifest_path(root)?;
     let output = run_bounded(
         "cargo",
@@ -1141,12 +1240,94 @@ fn read_metadata(root: &Path) -> Result<CargoMetadata, MetadataError> {
         METADATA_TIMEOUT,
         METADATA_STREAM_CAP,
     )?;
+    let collected = Collected {
+        value: output.stdout,
+        unresolved: output.unresolved,
+    };
     if !output.status.success() {
-        return Err(MetadataError::Cargo(
-            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        ));
+        let refusal =
+            MetadataError::Cargo(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+        return Err(collected.refuse(refusal));
     }
-    lgwks_std::json::from_slice(&output.stdout).map_err(MetadataError::Json)
+    collected.try_map(|stdout| lgwks_std::json::from_slice(&stdout).map_err(MetadataError::Json))
+}
+
+/// A complete collection, and any capture cleanup that could not be confirmed
+/// after it.
+///
+/// Cargo's output was read in full and its process reaped, so the value is the
+/// whole answer. A capture file that could not then be removed is reported
+/// beside it as [`MetadataError::ProcessCleanup`], whose obligation still owns
+/// the path for a retry, rather than turning a valid graph into a refusal.
+/// [`Collected::into_parts`] is the only way to the value, so a caller takes
+/// the cleanup in the same move and cannot borrow past it.
+///
+/// ```rust
+/// use lgwks_deps::metadata::{self, Collected, DirectEdge};
+///
+/// fn edges(root: &std::path::Path) -> Result<Vec<DirectEdge>, metadata::MetadataError> {
+///     let (edges, unresolved) = metadata::read(root)?.into_parts();
+///     if let Some(cleanup) = unresolved {
+///         eprintln!("warning: {cleanup}");
+///     }
+///     Ok(edges)
+/// }
+/// ```
+#[derive(Debug)]
+#[must_use = "a collection may carry a cleanup failure that must be reported"]
+pub struct Collected<T> {
+    /// The complete result.
+    value: T,
+    /// Capture removals that failed after the result was complete.
+    unresolved: Option<Unresolved>,
+}
+
+impl<T> Collected<T> {
+    /// The result, and the cleanup that could not be confirmed after it as a
+    /// [`MetadataError::ProcessCleanup`] with no primary cause.
+    pub fn into_parts(self) -> (T, Option<MetadataError>) {
+        (
+            self.value,
+            self.unresolved
+                .map(|unresolved| unresolved.into_error(None)),
+        )
+    }
+
+    /// Transforms the result and keeps the cleanup beside it.
+    pub fn map<U>(self, transform: impl FnOnce(T) -> U) -> Collected<U> {
+        Collected {
+            value: transform(self.value),
+            unresolved: self.unresolved,
+        }
+    }
+
+    /// Transforms the result; a refusal keeps the cleanup failure attached.
+    fn try_map<U>(
+        self,
+        transform: impl FnOnce(T) -> Result<U, MetadataError>,
+    ) -> Result<Collected<U>, MetadataError> {
+        match transform(self.value) {
+            Ok(value) => Ok(Collected {
+                value,
+                unresolved: self.unresolved,
+            }),
+            Err(refusal) => Err(Self::attach(refusal, self.unresolved)),
+        }
+    }
+
+    /// A refusal decided after collection, with any cleanup failure attached so
+    /// neither is lost.
+    fn refuse(self, refusal: MetadataError) -> MetadataError {
+        Self::attach(refusal, self.unresolved)
+    }
+
+    /// `refusal` as the primary cause of an unresolved cleanup, if there is one.
+    fn attach(refusal: MetadataError, unresolved: Option<Unresolved>) -> MetadataError {
+        match unresolved {
+            Some(unresolved) => unresolved.into_error(Some(refusal)),
+            None => refusal,
+        }
+    }
 }
 
 /// The manifest Cargo must read, resolved before the child can reinterpret it.
@@ -1167,9 +1348,10 @@ fn manifest_path(root: &Path) -> Result<std::path::PathBuf, MetadataError> {
     })
 }
 
-/// Runs locked Cargo metadata and returns every direct workspace edge.
-pub fn read(root: &Path) -> Result<Vec<DirectEdge>, MetadataError> {
-    direct_edges(read_metadata(root)?)
+/// Runs locked Cargo metadata and returns every direct workspace edge, with
+/// any capture cleanup that could not be confirmed after a complete read.
+pub fn read(root: &Path) -> Result<Collected<Vec<DirectEdge>>, MetadataError> {
+    read_metadata(root)?.try_map(direct_edges)
 }
 
 /// One workspace member, with the directory holding its manifest.
@@ -1211,9 +1393,16 @@ impl Member {
 /// A member whose `manifest_path` Cargo omitted is `Schema`: the directory is
 /// the whole point of this call, and a member the audit cannot locate must be
 /// a refusal rather than a member it quietly cannot resolve scopes against.
-pub fn workspace_members(root: &Path) -> Result<Vec<Member>, MetadataError> {
-    let metadata = read_metadata(root)?;
-    let workspace = validated_workspace(&metadata)?;
+///
+/// A capture cleanup that could not be confirmed after a complete read is
+/// carried beside the members; see [`Collected`].
+pub fn workspace_members(root: &Path) -> Result<Collected<Vec<Member>>, MetadataError> {
+    read_metadata(root)?.try_map(|metadata| located_members(&metadata))
+}
+
+/// Every workspace member with its validated manifest directory, by name.
+fn located_members(metadata: &CargoMetadata) -> Result<Vec<Member>, MetadataError> {
+    let workspace = validated_workspace(metadata)?;
     let mut located = Vec::new();
     for package in workspace.packages {
         let manifest_dir = workspace
@@ -1856,10 +2045,11 @@ mod tests {
     fn a_dropped_obligation_kills_and_reaps_its_child() -> TestResult {
         let child = std::process::Command::new("sleep").arg("30").spawn()?;
         let pid = child.id().to_string();
-        drop(CleanupObligation {
-            child: Some(child),
-            captures: CaptureFiles::new(),
-        });
+        drop(CleanupObligation::new(
+            Some(CleanupStep::Kill),
+            Some(child),
+            &mut CaptureFiles::new(),
+        ));
         // `kill -0` succeeds for any process that still has a table entry,
         // zombies included, so a failure here means killed *and* reaped.
         let alive = std::process::Command::new("kill")
@@ -1881,10 +2071,11 @@ mod tests {
             .arg("--list")
             .spawn()?;
         let _status = child.wait()?;
-        let mut obligation = CleanupObligation {
-            child: Some(child),
-            captures: CaptureFiles::new(),
-        };
+        let mut obligation = CleanupObligation::new(
+            Some(CleanupStep::Kill),
+            Some(child),
+            &mut CaptureFiles::new(),
+        );
         assert!(
             obligation.retry_cleanup()?,
             "observed process absence and empty capture ownership complete cleanup"
@@ -1951,6 +2142,7 @@ mod tests {
                 Err(error) => error,
                 Ok(_) => return Err(format!("fault {failure:?} unexpectedly passed").into()),
             };
+            let text = error.to_string();
             let MetadataError::ProcessCleanup {
                 process,
                 mut obligation,
@@ -1960,6 +2152,19 @@ mod tests {
                 return Err(format!("fault {failure:?} did not expose an obligation").into());
             };
             assert!(process.is_some(), "fault {failure:?} must remain visible");
+            let verb = if failure == FaultPoint::Kill {
+                "kill"
+            } else {
+                "reap"
+            };
+            let pid = obligation
+                .report
+                .pid
+                .ok_or("an owned child keeps its pid in the report")?;
+            assert!(
+                text.contains(&format!("could not {verb} cargo (pid {pid}): ")),
+                "the refusal names the step, the pid and the OS error: {text}"
+            );
             assert!(
                 retry_until_resolved(&mut obligation)?,
                 "retry should finish owned cleanup"
@@ -1968,18 +2173,26 @@ mod tests {
             assert!(FAULTS.with(|faults| faults.borrow().is_empty()));
         }
 
+        // Output read in full and child reaped, then one unlink fails: the
+        // output is returned, and the failure is reported beside it (#193).
         arm_faults(&[FaultPoint::Unlink]);
-        let error = match run_bounded(
+        let output = run_bounded(
             small_program,
             &small_args,
             Path::new("."),
             Duration::from_secs(3),
             1024 * 1024,
-        ) {
-            Err(error) => error,
-            Ok(_) => return Err("unlink fault unexpectedly passed".into()),
-        };
+        )
+        .map_err(|error| format!("a complete collection was refused over cleanup: {error}"))?;
+        assert!(output.status.success(), "the child's own verdict is kept");
+        assert!(!output.stdout.is_empty(), "the complete output is kept");
+        let unresolved = output
+            .unresolved
+            .ok_or("the unlink failure must be reported beside the output")?;
+        let error = unresolved.into_error(None);
+        let text = error.to_string();
         let MetadataError::ProcessCleanup {
+            cause,
             captures,
             mut obligation,
             ..
@@ -1987,13 +2200,67 @@ mod tests {
         else {
             return Err("unlink fault did not expose an unresolved cleanup owner".into());
         };
+        assert!(cause.is_none(), "nothing was refused before the cleanup");
         assert_eq!(captures.len(), 1, "the unlink failure is retained");
         let retained = obligation.captures.paths.clone();
         assert_eq!(retained.len(), 1, "the unresolved path stays owned");
+        assert!(
+            text.contains(&format!("could not remove {}: ", retained[0].display())),
+            "the report names the path it could not remove: {text}"
+        );
         assert!(std::fs::metadata(&retained[0]).is_ok());
         assert!(retry_until_resolved(&mut obligation)?);
         assert_paths_removed(&retained)?;
         assert!(FAULTS.with(|faults| faults.borrow().is_empty()));
+        Ok(())
+    }
+
+    /// A refusal decided after a complete read (Cargo's non-zero status, a
+    /// JSON or schema error) keeps an unresolved capture cleanup attached, so
+    /// neither the refusal nor the leftover path is lost.
+    #[test]
+    fn a_refusal_after_collection_keeps_the_unresolved_cleanup_attached() -> TestResult {
+        let path = std::env::temp_dir().join(format!(
+            "lgwks-deps-attach-{}.capture",
+            lgwks_std::hex::encode(lgwks_std::random::bytes::<8>()?)
+        ));
+        std::fs::write(&path, b"{}")?;
+        let mut captures = CaptureFiles::new();
+        captures.own(path.clone());
+        let collected = Collected {
+            value: (),
+            unresolved: Some(Unresolved {
+                captures: vec![std::io::Error::other("injected unlink failure")],
+                obligation: Box::new(CleanupObligation::new(None, None, &mut captures)),
+            }),
+        };
+        let refusal = collected.refuse(MetadataError::Cargo("refused".to_owned()));
+        let text = refusal.to_string();
+        let MetadataError::ProcessCleanup {
+            cause,
+            mut obligation,
+            ..
+        } = refusal
+        else {
+            return Err("the cleanup failure was dropped by the refusal".into());
+        };
+        assert!(
+            cause.as_deref().is_some_and(
+                |error| matches!(*error, MetadataError::Cargo(ref message) if message == "refused")
+            ),
+            "the refusal is the primary cause"
+        );
+        assert!(
+            text.starts_with(
+                "cargo metadata refused: refused; cleanup unconfirmed; could not remove "
+            ),
+            "both are reported, refusal first: {text}"
+        );
+        assert!(
+            obligation.retry_cleanup()?,
+            "the retained owner still removes the path"
+        );
+        assert_paths_removed(&[path])?;
         Ok(())
     }
 

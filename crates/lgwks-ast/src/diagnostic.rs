@@ -266,9 +266,14 @@ impl<'src> LineIndex<'src> {
         self.line_starts.partition_point(|start| *start <= byte)
     }
 
-    /// The 1-based position of `byte` within the file, clamped to the source.
+    /// The 1-based position of `byte` within the file, clamped to the source
+    /// and floored to a character boundary.
+    ///
+    /// A span can come from another copy of the text than the one passed here,
+    /// so an offset inside a multi-byte character is possible; it resolves to
+    /// that character's first byte rather than panicking on the slice below.
     fn position(&self, byte: usize) -> Pos {
-        let byte = byte.min(self.source.len());
+        let byte = self.source.floor_char_boundary(byte);
         let line = self.line_of(byte);
         // `line_starts` always holds at least one entry and `line_of` returns a
         // count in `1..=line_starts.len()`, so the index is in range. A byte
@@ -483,6 +488,14 @@ fn labeled(path: PathBuf) -> PathBuf {
 #[must_use]
 pub fn end_of(source: &str) -> Span {
     LineIndex::new(source).span(source.len()..source.len())
+}
+
+/// The span of `range` in `source`, each end clamped into the source.
+///
+/// How a checked parse's [`SyntaxDiagnostic`](crate::SyntaxDiagnostic) byte
+/// offsets become the line and column a renderer points at.
+pub(crate) fn span_of(source: &str, range: Range<usize>) -> Span {
+    LineIndex::new(source).span(range)
 }
 
 // The fixtures here are Rust source, so the tests need the Rust grammar. The
@@ -728,6 +741,17 @@ mod line_index_tests {
         let span = index.span(usize::MAX..usize::MAX);
         assert!(span.start.byte <= source.len(), "start clamped");
         assert!(span.end.byte <= source.len(), "end clamped");
+    }
+
+    #[test]
+    fn an_offset_inside_a_character_is_floored_to_its_first_byte() {
+        let source = "\u{e9}\u{e9}\nb";
+        let index = LineIndex::new(source);
+        let span = index.span(1..3);
+        assert_eq!(span.start.byte, 0, "inside the first character");
+        assert_eq!(span.start.column, 1, "columns are 1-based");
+        assert_eq!(span.end.byte, 2, "inside the second character");
+        assert_eq!(span.end.column, 2, "the second character's column");
     }
 
     #[test]
