@@ -846,6 +846,7 @@ mod tests {
                     "lgwks_std",
                     "syn",
                     "proc-macro2",
+                    "quote",
                     "gpui",
                     "appcui",
                     "bevy_ecs",

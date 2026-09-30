@@ -70,8 +70,26 @@ lgwks_bot::script! {
 
     /// Sleep a millisecond per item on real timers, 256 at a time.
     flow timers(count: u32) -> usize:
-        let done = each item in 0..count, at most 256 at once:
+        let done = each item in 0..count:
             sleep(Duration::from_millis(1)).await
+            item
+        give back done.len()
+
+    /// Every block nested at once, fan-out sized by the machine: the shape a
+    /// spawned tenant runs.
+    flow spread(count: u32) -> usize:
+        let done = each item in 0..count:
+            retry up to 3 times, waiting 1ms:
+                within 1s:
+                    sleep(Duration::from_millis(1)).await
+                    item
+        give back done.len()
+
+    /// Item 3 cancels its own scope; its siblings sleep past the stop.
+    flow stop_from_body(count: u32) -> usize:
+        let done = each item in 0..count:
+            if item == 3 { scope.cancel(); }
+            sleep(Duration::from_millis(50)).await
             item
         give back done.len()
 
@@ -199,6 +217,53 @@ fn a_fan_out_over_real_timers_finishes_and_yields_to_its_executor() -> TestResul
     Ok(())
 }
 
+/// Regression: `retry` once took an `AsyncFnMut(&Scope, u32)` body, whose
+/// higher-ranked future made any flow nesting it inside `each` fail to be
+/// `Send`, so a tenant's flow could not be spawned. Spawning is the proof:
+/// this file does not compile if a flow stops being `Send`.
+#[test]
+fn a_flow_nesting_every_block_is_send_and_runs_spawned_per_tenant() -> TestResult {
+    let runtime = lgwks_bot::Runtime::new()?;
+    let counts = runtime.block_on(async {
+        let mut tenants = lgwks_bot::rt::task::JoinSet::new();
+        for name in ["acme", "globex"] {
+            tenants.spawn(async move {
+                let scope = Scope::root(Tenant::new(name)?);
+                spread(&scope, 2_000).await
+            });
+        }
+        let mut counts = Vec::new();
+        while let Some(joined) = tenants.join_next().await {
+            counts.push(joined.map_err(|error| error.to_string())??);
+        }
+        Ok::<_, Box<dyn Error>>(counts)
+    })?;
+    assert_eq!(counts, [2_000, 2_000], "both tenants ran every item");
+    Ok(())
+}
+
+/// An `each` body shares its step's stop, so cancelling from inside one ends
+/// the whole fan-out as a `break` ends a loop: no sibling runs on, and the
+/// stop is reported at the fan-out rather than lost.
+#[test]
+fn cancelling_inside_a_body_stops_the_whole_fan_out() -> TestResult {
+    let scope = acme()?;
+    let started = std::time::Instant::now();
+    let stopped = lgwks_bot::block_on(stop_from_body(&scope, 100));
+    let Err(ref error) = stopped else {
+        return Err(format!("expected a stop, got {stopped:?}").into());
+    };
+    assert!(error.is_cancelled(), "reported as a stop: {error}");
+    assert_eq!(error.at(), "stop_from_body/each:item", "at the fan-out");
+    assert!(
+        started.elapsed() < Duration::from_millis(40),
+        "siblings were dropped, not waited for: {:?}",
+        started.elapsed()
+    );
+    assert!(!scope.is_cancelled(), "the caller's scope is untouched");
+    Ok(())
+}
+
 #[test]
 fn a_supervisor_owns_a_flow_and_its_shutdown_stops_it() -> TestResult {
     let runtime = lgwks_bot::Runtime::new()?;
@@ -248,6 +313,8 @@ fn the_script_emits_a_map_of_the_orchestration_it_declares() -> TestResult {
             "ladder",
             "classify",
             "timers",
+            "spread",
+            "stop_from_body",
             "until_stopped",
         ],
         "every flow, in declaration order"

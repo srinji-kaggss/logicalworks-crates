@@ -1,0 +1,8 @@
+{
+  "name": "orchestration-bench-node",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "effect": "3.22.2"
+  }
+}

@@ -8,7 +8,7 @@
 //! lgwks_bot::script! {
 //!     /// Fetch every page for a tenant and report their sizes.
 //!     pub flow crawl(site: &Site, paths: Vec<String>) -> Vec<usize>:
-//!         let pages = each path in paths, at most 16 at once:
+//!         let pages = each path in paths:
 //!             retry up to 3 times, waiting 200ms:
 //!                 within 5s:
 //!                     site.fetch(scope.key(), &path).await.or_retry()?
@@ -21,9 +21,10 @@
 //! | Written | Means |
 //! |---|---|
 //! | `[pub] flow name(inputs) [-> Output]:` | an `async fn` taking the tenant [`Scope`] first and returning `Result<Output, FlowError>` |
-//! | `each x in xs, at most N at once:` | every item, `N` at a time, results in input order, first failure stops the rest |
+//! | `each x in xs:` | every item, as many at once as the machine sustains, results in input order, first failure stops the rest |
+//! | `each x in xs, at most (limit) at once:` | the same, under a limit that comes from somewhere named (an upstream's quota) |
 //! | `within 2s:` | the block, or `TimedOut` when the deadline passes |
-//! | `retry up to 3 times[, waiting 100ms]:` | the block again while it fails transiently, same key each attempt |
+//! | `retry up to 3 times[, waiting 100ms]:` | the block again while it fails transiently, same key each attempt, within the run's retry budget |
 //! | `together:` | each line underneath concurrently; `let x = ..` lines bind their result |
 //! | `step name:` | a named scope: its own key and error location |
 //! | `for x in xs:` | every item in turn, each in its own scope |
@@ -39,9 +40,9 @@
 //!
 //! # What it refuses
 //!
-//! Each of these is a compile error naming the replacement: `each` without
-//! `at most N at once`; bounds outside `1..=65536` (fan-out) or `1..=1000`
-//! (attempts); zero durations; `unwrap`, `expect`, `panic!` and friends;
+//! Each of these is a compile error naming the replacement: a concurrency
+//! bound typed as a number (the runtime sizes fan-out to the host); attempts
+//! outside `1..=1000`; zero durations; `unwrap`, `expect`, `panic!` and friends;
 //! `loop`, `while`, `spawn`, `unbounded_channel`, `block_on`, `thread::sleep`,
 //! `unsafe`; absolute paths from one machine; `give back` from inside a block
 //! whose value is its own last line; and a flow that promises an output but

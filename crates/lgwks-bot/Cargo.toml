@@ -125,6 +125,11 @@ path = "examples/bounded_fanout.rs"
 required-features = ["rt", "time", "sync"]
 
 [[example]]
+name = "compare_orchestration"
+path = "examples/compare_orchestration.rs"
+required-features = ["script", "rt", "time", "sync", "macros"]
+
+[[example]]
 name = "script_tenants"
 path = "examples/script_tenants.rs"
 required-features = ["script"]

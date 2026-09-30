@@ -24,19 +24,19 @@ fn expand(source: &str) -> Result<String, String> {
 /// that names the replacement.
 const REFUSALS: [(&str, &str, &str); 20] = [
     (
-        "each without a bound",
-        "flow f(xs: Vec<u8>):\n    each x in xs:\n        x\n",
-        "each` needs a bound",
+        "typed concurrency",
+        "flow f(xs: Vec<u8>):\n    each x in xs, at most 16 at once:\n        x\n",
+        "typed concurrency number",
     ),
     (
         "zero fan-out",
         "flow f(xs: Vec<u8>):\n    each x in xs, at most 0 at once:\n        x\n",
-        "outside 1..=65536",
+        "typed concurrency number",
     ),
     (
         "fan-out past the ceiling",
         "flow f(xs: Vec<u8>):\n    each x in xs, at most 70000 at once:\n        x\n",
-        "outside 1..=65536",
+        "typed concurrency number",
     ),
     (
         "zero attempts",
@@ -55,8 +55,9 @@ const REFUSALS: [(&str, &str, &str); 20] = [
     ),
     (
         "unwrap",
-        "flow f(text: String):\n    let n: u8 = text.parse().unwrap()\n",
-        "`.unwrap()` ends the program",
+        // Spaced as written by hand: the refusal reads tokens, not text.
+        "flow f(text: String):\n    let n: u8 = text.parse(). unwrap ()\n",
+        "unwrap()` ends the program",
     ),
     (
         "expect",
@@ -142,7 +143,7 @@ fn every_refusal_names_its_replacement() -> Result<(), String> {
 #[test]
 fn a_valid_script_expands_to_calls_into_the_runtime_and_a_map() -> Result<(), String> {
     let source = "pub flow crawl(paths: Vec<String>) -> Vec<usize>:\n\
-                  \x20   let sizes = each path in paths, at most 16 at once:\n\
+                  \x20   let sizes = each path in paths:\n\
                   \x20       retry up to 3 times, waiting 200ms:\n\
                   \x20           within 1.5s:\n\
                   \x20               path.len()\n\
@@ -168,9 +169,11 @@ fn a_valid_script_expands_to_calls_into_the_runtime_and_a_map() -> Result<(), St
 
 #[test]
 fn step_labels_carry_structure_never_line_numbers() -> Result<(), String> {
-    let near = expand("flow f(xs: Vec<u8>):\n    each x in xs, at most 2 at once:\n        x\n")?;
-    let far =
-        expand("\n\n\n\nflow f(xs: Vec<u8>):\n    each x in xs, at most 2 at once:\n        x\n")?;
+    let near =
+        expand("flow f(xs: Vec<u8>):\n    each x in xs, at most (width) at once:\n        x\n")?;
+    let far = expand(
+        "\n\n\n\nflow f(xs: Vec<u8>):\n    each x in xs, at most (width) at once:\n        x\n",
+    )?;
     let label = |text: &str| {
         text.split("\"each:")
             .nth(1)

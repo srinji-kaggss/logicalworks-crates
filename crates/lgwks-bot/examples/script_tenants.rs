@@ -28,8 +28,15 @@ use lgwks_bot::script::{FlowError, Scope, StepKey, Tenant};
 /// Pages per tenant.
 const PAGES: u32 = 10_000;
 
-/// Pages in flight per tenant.
-const IN_FLIGHT: usize = 256;
+/// The bound `each` chooses when none is written: 64 waits per available
+/// core. The hand-written crawl is given the same number so the comparison is
+/// of the orchestration, not of the bound.
+fn machine_bound() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .saturating_mul(64)
+        .min(lgwks_bot::script::MAX_IN_FLIGHT)
+}
 
 /// A remote site that deduplicates requests by idempotency key.
 #[derive(Default)]
@@ -85,10 +92,11 @@ impl Site {
 }
 
 lgwks_bot::script! {
-    /// Fetch every page, 256 at a time; each attempt gets one second and a
-    /// busy site is retried up to three times under the same key.
+    /// Fetch every page, as many at once as this machine sustains; each
+    /// attempt gets one second and a busy site is retried up to three times
+    /// under the same key.
     pub flow crawl(site: &Site, pages: Vec<u32>) -> u64:
-        let sizes = each page in pages, at most 256 at once:
+        let sizes = each page in pages:
             retry up to 3 times, waiting 5ms:
                 within 1s:
                     site.fetch(scope.key(), page).await?
@@ -122,7 +130,7 @@ async fn crawl_by_hand(site: Arc<Site>, tenant: &str, pages: Vec<u32>) -> Result
         }
     });
     let mut total: u64 = 0;
-    for outcome in join_all_bounded(IN_FLIGHT, futures).await {
+    for outcome in join_all_bounded(machine_bound(), futures).await {
         total = total.saturating_add(outcome?);
     }
     Ok(total)
@@ -186,9 +194,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     writeln!(
         out,
         "   time: script! {scripted:.2?} ({} pages/s), by hand {by_hand:.2?} ({} pages/s), \
-         {IN_FLIGHT} in flight per tenant",
+         {} in flight per tenant (chosen by the machine)",
         rate(scripted),
         rate(by_hand),
+        machine_bound(),
     )?;
     writeln!(out, "\n{ARCHITECTURE}")?;
     Ok(())
