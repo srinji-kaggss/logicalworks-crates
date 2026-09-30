@@ -90,13 +90,15 @@ the Node pool 30,000 and Go errgroup 375,000. The two hand-written Rust ways
 were the exception: `join_all_bounded` ran 348,000 at 9.5 ms and `JoinSet`
 348,000 at 9.4 ms, no slower than their 334,000 and 316,000 here. So `script!`
 is the only Rust way that slowed. An `each` drives all its bodies on one task
-(see below), which is the likely reason a busy host costs it more than it costs
-ways that spawn a task per body; no variant isolates that factor. Every yes/no
-verdict in the invariants table was the same in both runs; some counts behind
-them moved, for example Trio's storm attempts (326 then 368) and the bodies
-left live by `JoinSet` and `join_all_bounded`. Lines are the code the author
-writes for the orchestration, counted between the `BEGIN`/`END` markers with
-comments and blanks left out.
+(see below), so one fan-out uses one core, as asyncio and Trio do on their
+single-threaded loops, and those three lost the most (loaded throughput 0.61,
+0.68 and 0.63 of idle). That is the likely reason `script!` slowed where the
+hand-written Rust ways, which spread bodies across tokio's worker threads, did
+not; no variant isolates that factor. Every yes/no verdict in the invariants
+table was the same in both runs; some counts behind them moved, for example
+Trio's storm attempts (326 then 368) and the bodies left live by `JoinSet` and
+`join_all_bounded`. Lines are the code the author writes for the orchestration,
+counted between the `BEGIN`/`END` markers with comments and blanks left out.
 
 Median (min-max) of 5 runs per cell.
 
