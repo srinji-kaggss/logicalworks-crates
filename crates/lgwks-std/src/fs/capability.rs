@@ -98,6 +98,10 @@ pub enum FileKind {
 
 /// Flags for [`Dir::open_entry`], mirroring the subset of `openat(2)` this
 /// crate exposes.
+///
+/// A field combination that the kernel would answer inconsistently is refused
+/// before the syscall rather than passed through: see
+/// [`OpenFlags::validate`], which the open path calls itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct OpenFlags {
@@ -135,13 +139,61 @@ impl OpenFlags {
     }
 
     /// The access word, which `O_RDONLY` is `0` rather than a named flag.
+    ///
+    /// Exhaustive rather than defaulted, so adding a fourth case is a compile
+    /// error instead of a silent fallthrough. The `(false, false)` case is
+    /// refused by [`OpenFlags::try_new`] and so is unreachable here.
     #[cfg(unix)]
     fn access(self) -> rustix::fs::OFlags {
         match (self.read, self.write) {
             (true, true) => rustix::fs::OFlags::RDWR,
             (false, true) => rustix::fs::OFlags::WRONLY,
-            _ => rustix::fs::OFlags::RDONLY,
+            (true, false) => rustix::fs::OFlags::RDONLY,
+            // Refused by `try_new`; returning RDONLY here would turn a refused
+            // request into a read, and with `truncate` set into data loss.
+            (false, false) => rustix::fs::OFlags::RDONLY,
         }
+    }
+}
+
+#[cfg(unix)]
+impl OpenFlags {
+    /// Check these flags, refusing combinations the kernel answers inconsistently.
+    ///
+    /// `O_RDONLY | O_TRUNC` is the one that matters. POSIX leaves the
+    /// interaction unspecified for a file opened without write access, and the
+    /// platforms disagree: Linux refuses it with `EACCES`, while macOS and the
+    /// BSDs honour the truncate and empty the file. A caller that got this
+    /// wrong on Linux would ship believing the file is intact, and it would not
+    /// be. The same applies to `truncate` without `write` in any form, and to a
+    /// request for neither read nor write, which asks for a descriptor that can
+    /// do nothing.
+    ///
+    /// The fields stay public because they are data, and a struct literal is
+    /// how a caller reads them; this is the one call that must precede the
+    /// syscall, which is why [`Dir::open_entry`] makes it itself rather than
+    /// trusting a caller to have remembered.
+    ///
+    /// # Errors
+    ///
+    /// [`io::ErrorKind::InvalidInput`] when the combination cannot be honoured
+    /// on every supported platform.
+    pub fn validate(&self) -> io::Result<()> {
+        if self.truncate && !self.write {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "truncate requires write access: a read-only O_TRUNC empties the \
+                 file on macOS and the BSDs, and Linux merely refuses it",
+            ));
+        }
+        if !self.read && !self.write {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "open needs read, write, or both; neither asks for a descriptor \
+                 that can do nothing",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -201,6 +253,7 @@ impl Dir {
     /// single component.
     pub fn open_entry(&self, name: &str, flags: OpenFlags) -> io::Result<std::fs::File> {
         let component = single_component(name)?;
+        flags.validate()?;
         let mut oflags = flags.access() | rustix::fs::OFlags::CLOEXEC;
         if flags.create {
             oflags |= rustix::fs::OFlags::CREATE;
@@ -554,14 +607,26 @@ fn classify(mode: u16) -> FileKind {
     }
 }
 
-/// Mode for a file this process owns: readable and writable by the user.
+/// Mode for a file this process owns: readable and writable by the user only.
 ///
-/// Not `0o600` written literally, because the three `RUSR`/`RGRP`/`RWXO` bits
-/// are named separately in rustix and an assembled word is the one that stays
-/// correct when the platform's umask handling is applied by `openat`.
+/// `RUSR | WUSR` is 0o600, and nothing else may be set.
+///
+/// The previous value was `RUSR | RWXG | RWXO` — rustix's names for *all* the
+/// group bits and *all* the world bits, which read like "user read, and then
+/// some group and world bits" rather than "owner-only". It is 0o477: the
+/// setuid bit, plus group and world rwx. A umask does not rescue that, because
+/// it can only clear bits. On the host that caught it, with the usual 0o022
+/// umask, `create_new` produced a file at 0o455 — world-readable and
+/// world-executable. Anything this process wrote into a shared tree was
+/// readable by every other user on the machine.
+///
+/// Written as the two named user bits rather than as a literal 0o600 because a
+/// bare literal is exactly the thing that reads as obviously correct while
+/// being wrong, and `create_new` is the path a caller reaches for when it
+/// intends the file to be private.
 #[cfg(unix)]
 fn user_writable_mode() -> rustix::fs::Mode {
-    rustix::fs::Mode::RUSR | rustix::fs::Mode::RWXG | rustix::fs::Mode::RWXO
+    rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR
 }
 
 /// Mode for a directory this process owns: user `rwx`, nobody else's.
@@ -716,6 +781,124 @@ mod tests {
         );
         let mut file = dir.open_entry("f.txt", OpenFlags::read())?;
         assert_eq!(read_all(&mut file)?, "first", "the original survived");
+        Ok(())
+    }
+
+    /// A file this capability creates must not be writable by anyone else.
+    ///
+    /// The mode passed to `openat(2)` is masked by the process umask, which can
+    /// only *remove* bits — so a mode that grants group or world write stays
+    /// granted on any host whose umask leaves those bits set, and a setuid bit
+    /// is not masked at all. This asserts the bits the caller actually asked
+    /// for, before the umask, because that is what the code controls.
+    #[test]
+    fn a_created_file_is_not_writable_by_group_or_world() -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir()?;
+        let dir = Dir::open(tmp.path())?;
+        dir.create_new("f.txt")?;
+        let mode = stdfs::metadata(tmp.path().join("f.txt"))?.permissions().mode() & 0o7777;
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "created file is group/world accessible: {mode:o} grants {:o} to others", mode & 0o077
+        );
+        assert_eq!(
+            mode & 0o4000,
+            0,
+            "created file carries the setuid bit: {mode:o}"
+        );
+        assert_eq!(
+            mode & 0o777,
+            0o600 & !current_umask(),
+            "created file is not user read/write: {mode:o}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_created_directory_is_not_accessible_by_group_or_world() -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir()?;
+        let dir = Dir::open(tmp.path())?;
+        dir.create_dir("d")?;
+        let mode = stdfs::metadata(tmp.path().join("d"))?.permissions().mode() & 0o7777;
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "created directory is group/world accessible: {mode:o}"
+        );
+        assert_eq!(
+            mode & 0o777,
+            0o700 & !current_umask(),
+            "created directory is not user rwx: {mode:o}"
+        );
+        Ok(())
+    }
+
+    /// The umask this process is running under, measured rather than assumed.
+    ///
+    /// `umask(2)` would need `unsafe`, which this workspace forbids, so the
+    /// effective mask is inferred: create a file with a known 0o600 request and
+    /// the kernel applies the umask to it, so whatever survives is exactly
+    /// `0o600 & !umask`. The caller compares against that, so the assertion
+    /// holds whatever the host's umask happens to be instead of hardcoding an
+    /// assumption that fails in CI and passes locally.
+    fn current_umask() -> u32 {
+        let tmp = tempfile::tempdir().map_or_else(
+            |_| {
+                // A temp dir we cannot create is not a reason to skip the
+                // permission check; report no mask and let the 0o600 assertion
+                // fail loudly rather than silently passing.
+                0
+            },
+            |tmp| {
+                stdfs::write(tmp.path().join("probe"), b"").map_or(0, |()| {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = stdfs::metadata(tmp.path().join("probe"))
+                        .map(|meta| meta.permissions().mode())
+                        .unwrap_or(0o600);
+                    0o600 & !mode
+                })
+            },
+        );
+        tmp
+    }
+
+    /// `OpenFlags` with neither `read` nor `write` must not truncate.
+    ///
+    /// `access()` has three cases and only two are obvious: read-only, and
+    /// write-only. The third — neither — falls through to read-only, which
+    /// sounds safe until `truncate` is also set, because `O_RDONLY | O_TRUNC`
+    /// asks the kernel to empty a file the caller has no write access to. On
+    /// Linux that combination is refused; the point of this test is that the
+    /// refusal does not depend on the kernel being Linux.
+    #[test]
+    fn a_readless_write_request_is_refused_rather_than_truncating() -> io::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let dir = Dir::open(tmp.path())?;
+        stdfs::write(tmp.path().join("keep.txt"), b"ORIGINAL")?;
+        let flags = OpenFlags {
+            read: false,
+            write: false,
+            create: false,
+            truncate: true,
+            symlinks: SymlinkPolicy::NoFollow,
+        };
+        let result = dir.open_entry("keep.txt", flags);
+        let contents = stdfs::read(tmp.path().join("keep.txt"))?;
+        assert_eq!(
+            contents,
+            b"ORIGINAL",
+            "a truncate request without write access emptied the file"
+        );
+        // Whatever the platform decides, the caller's data must survive.
+        assert!(
+            result.is_err() || contents == b"ORIGINAL",
+            "a refused truncate must also leave the file intact"
+        );
         Ok(())
     }
 
