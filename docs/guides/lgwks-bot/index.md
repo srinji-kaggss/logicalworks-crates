@@ -52,11 +52,11 @@ a future. See [failures](failures.md) for why the refusal is not a failed tick.
 
 ## Supported versions
 
-`crates/lgwks-bot/Cargo.toml` declares version `0.4.2` and `rust-version =
+`crates/lgwks-bot/Cargo.toml` declares version `0.7.0` and `rust-version =
 "1.98"`, edition 2024.
 
-The version in the manifest is not the whole story. Five modules on `main` are
-absent from the `lgwks_bot-v0.4.2` tag:
+The version in the manifest is not the whole story. Five modules first shipped
+in `lgwks_bot-v0.5.0` and are absent from the older `lgwks_bot-v0.4.2` tag:
 
 | Module | In the 0.4.2 tag | Verified by |
 |---|---|---|
@@ -67,7 +67,7 @@ absent from the `lgwks_bot-v0.4.2` tag:
 | `frontier` | no | same |
 
 Everything else in this guide describes symbols the 0.4.2 tag exports. The two
-pages that cover the unreleased modules say so at the top:
+pages that cover the newer modules say so at the top:
 [sessions](sessions.md) and [resolution](resolution.md).
 
 ## Install and import

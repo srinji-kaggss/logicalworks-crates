@@ -46,11 +46,11 @@ it needs both halves:
 
 ```toml
 [dependencies]
-lgwks_std = { version = "0.8.0", default-features = false, features = ["core"] }
+lgwks_std = { version = "0.9.0", default-features = false, features = ["core"] }
 ```
 
 `default-features = false` removes `trace`. `features = ["core"]` puts the core
-modules back. A bare `lgwks_std = "0.8.0"` is **not** zero-dependency: it is
+modules back. A bare `lgwks_std = "0.9.0"` is **not** zero-dependency: it is
 `core` plus `trace`.
 
 This is checkable rather than assertable. From a clean project:

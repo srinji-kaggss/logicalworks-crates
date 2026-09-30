@@ -8,6 +8,14 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+## [lgwks_std 0.9.0 / lgwks_deps 0.3.0 / lgwks_bot 0.7.0 / lgwks_macros 0.1.1] - 2026-09-30
+
+The second cut of the day, for the #157, #158, #159, #161, #162, #167 and #168
+work that landed in #197. `lgwks_std` and `lgwks_deps` each carry a break, so
+they take the minor position. `lgwks_bot` re-exports `lgwks_std::json` and
+depends on `lgwks_deps`, so it moves with them. `lgwks_macros` only raises its
+`lgwks_deps` requirement and takes a patch. `lgwks_ast` does not move.
+
 ### lgwks_std Breaking
 
 - `pattern::PatternError` fields `pattern` and `message` are private; read them
@@ -66,6 +74,16 @@ explicitly under that crate.
   (capture, spawn, wait, stat, read, kill, reap, unlink). Each stage either
   removes its capture files or leaves them in a retryable `CleanupObligation`.
   (#159)
+
+### lgwks_bot Changed
+
+- Depends on `lgwks_std 0.9` and `lgwks_deps 0.3`. `lgwks_bot::json` is
+  `lgwks_std::json`, so its serializers now accept unsized values and its
+  decoders borrow from their input, as described above.
+
+### lgwks_macros Changed
+
+- Depends on `lgwks_deps 0.3`. The `script!` syntax is unchanged.
 
 ## [lgwks_std 0.8.0 / lgwks_ast 0.3.0 / lgwks_deps 0.2.0 / lgwks_bot 0.6.0 / lgwks_macros 0.1.0] - 2026-09-30
 
