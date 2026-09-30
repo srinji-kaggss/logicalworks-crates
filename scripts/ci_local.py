@@ -21,6 +21,23 @@ Usage::
     ./scripts/ci-local.sh --lane ID    one lane (what CI runs per step)
     ./scripts/ci-local.sh --list       print lane ids and surfaces
     ./scripts/ci-local.sh --receipt    also write evidence/ci-local-*.md
+    ./scripts/ci-local.sh --jobs 1     one lane at a time, output streamed
+
+How a multi-lane run is scheduled, and why (the gate must finish in under
+five minutes of wall time; measured 2026-09-30 it took 17 min 24 s):
+
+* Lanes that share a feature set carry the same ``group`` in the manifest.
+  Groups run concurrently, lanes within a group in order. Each group builds in
+  its own target directory (``<target>/gate-<group>``), because cargo holds one
+  lock per target directory for a whole build, and one shared directory
+  serialized ~440 s of compiles no matter how many lanes ran at once.
+* Every lane's ``TMPDIR`` is a RAM-backed volume (an APFS RAM disk on macOS,
+  ``/dev/shm`` on Linux). The simulation suites write a real file journal and
+  ``sync_all`` it; on a physical disk those syncs queue behind each other
+  (macOS issues ``F_FULLFSYNC``), and the ``sim_scale`` binary took 104 s on
+  disk against 21.6 s on a RAM disk, same 164 tests, same syscalls.
+* A lane's output goes to ``<target>/gate-logs/<lane>.log``; a lane that fails
+  prints the tail of its log and the path.
 
 Exit codes: 0 every applicable lane passed; 1 a lane failed or was blocked;
 2 usage or manifest error.
@@ -29,6 +46,8 @@ Exit codes: 0 every applicable lane passed; 1 a lane failed or was blocked;
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
+import contextlib
 import hashlib
 import importlib
 import json
@@ -36,9 +55,11 @@ import os
 import platform
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 from dataclasses import dataclass, field
@@ -72,6 +93,7 @@ class Lane:
     platforms: tuple[str, ...] = ()
     fast: bool = False
     reason: str = ""
+    group: str | None = None
 
 
 @dataclass
@@ -82,6 +104,7 @@ class LaneResult:
     ended: str
     detail: str = ""
     exit_code: int | None = None
+    seconds: float = 0.0
 
 
 def _as_tuple(value: object, where: str) -> tuple[str, ...]:
@@ -132,6 +155,7 @@ def load_lanes(root: Path) -> tuple[dict, list[Lane]]:
                 platforms=_as_tuple(raw.get("platforms"), f"{where} platforms"),
                 fast=bool(raw.get("fast", False)),
                 reason=str(raw.get("reason", "")),
+                group=raw.get("group"),
             )
         )
     return table, lanes
@@ -182,7 +206,7 @@ def _iter_rust_sources(root: Path):
             yield path
 
 
-def builtin_unwrap_scan(root: Path) -> tuple[int, str]:
+def builtin_unwrap_scan(root: Path, env: dict[str, str], out=None) -> tuple[int, str]:
     """Ban ``.unwrap()`` in ``crates/*/src`` outside each file's ``mod tests``."""
     hits: list[str] = []
     for path in _iter_rust_sources(root):
@@ -199,7 +223,7 @@ def builtin_unwrap_scan(root: Path) -> tuple[int, str]:
     return 0, "no unwrap outside tests"
 
 
-def builtin_suppressions(root: Path) -> tuple[int, str]:
+def builtin_suppressions(root: Path, env: dict[str, str], out=None) -> tuple[int, str]:
     """Every ``#[allow]`` / ``#[expect]`` carries a ``reason =`` in the next lines."""
     pattern = re.compile(r"^[ \t]*#!?\[(allow|expect)\(")
     hits: list[str] = []
@@ -220,7 +244,7 @@ def builtin_suppressions(root: Path) -> tuple[int, str]:
     return 0, "every suppression names a reason"
 
 
-def builtin_artifacts(root: Path) -> tuple[int, str]:
+def builtin_artifacts(root: Path, env: dict[str, str], out=None) -> tuple[int, str]:
     """Derived output must not be tracked or staged (issue #127, defect 3)."""
     offenders: list[str] = []
 
@@ -248,7 +272,7 @@ def builtin_artifacts(root: Path) -> tuple[int, str]:
     return 0, "no derived build output tracked or staged"
 
 
-def builtin_contract_drift(root: Path) -> tuple[int, str]:
+def builtin_contract_drift(root: Path, env: dict[str, str], out=None) -> tuple[int, str]:
     """README dependency philosophy and version pins track the manifests."""
     manifest_path = root / "crates/lgwks-std/Cargo.toml"
     readme_path = root / "crates/lgwks-std/README.md"
@@ -306,7 +330,7 @@ def builtin_contract_drift(root: Path) -> tuple[int, str]:
     return 0, "README dependency philosophy and version pins track the manifests"
 
 
-def builtin_invariants(root: Path) -> tuple[int, str]:
+def builtin_invariants(root: Path, env: dict[str, str], out=None) -> tuple[int, str]:
     """Every `enforced by:` reference in INVARIANTS.md resolves to a real test.
 
     An invariant that names its own enforcement is a claim a reader can check.
@@ -489,7 +513,7 @@ def builtin_invariants(root: Path) -> tuple[int, str]:
     return 0, f"{referenced} INVARIANTS.md enforcement references resolve to real tests; {note}"
 
 
-def builtin_docsrs_metadata(root: Path) -> tuple[int, str]:
+def builtin_docsrs_metadata(root: Path, env: dict[str, str], out=None) -> tuple[int, str]:
     """Every ``[package.metadata.docs.rs]`` names a feature set that builds."""
     commands: list[tuple[str, list[str]]] = []
     for manifest in sorted((root / "crates").glob("*/Cargo.toml")):
@@ -512,18 +536,18 @@ def builtin_docsrs_metadata(root: Path) -> tuple[int, str]:
     if not commands:
         return 0, "no crate declares [package.metadata.docs.rs]"
 
-    env = os.environ.copy()
+    env = env.copy()
     env["RUSTDOCFLAGS"] = "-D warnings --cfg docsrs"
     log = [f"cargo doc plans: {len(commands)}"]
     for label, argv in commands:
         log.append(f"  {label}: {' '.join(argv)}")
-        code = _run_argv(argv, root, env)
+        code = _run_argv(argv, root, env, out)
         if code != 0:
             return 1, "\n".join(log + [f"failed (exit {code}): {' '.join(argv)}"])
     return 0, "\n".join(log)
 
 
-def builtin_readme_quickstart(root: Path) -> tuple[int, str]:
+def builtin_readme_quickstart(root: Path, env: dict[str, str], out=None) -> tuple[int, str]:
     """Root README quickstart is byte-identical to the compiled example."""
     readme = (root / "README.md").read_text(encoding="utf-8")
     if "## Quickstart" not in readme:
@@ -546,9 +570,9 @@ def builtin_readme_quickstart(root: Path) -> tuple[int, str]:
     return 0, "README quickstart matches the compiled example"
 
 
-def builtin_debug_e2e(root: Path) -> tuple[int, str]:
+def builtin_debug_e2e(root: Path, env: dict[str, str], out=None) -> tuple[int, str]:
     """Drive the public debugger doctor through success and fail-closed paths."""
-    base_env = _child_env(root)
+    base_env = env.copy()
     base_env["LGWKS_LOG"] = "info"
     base_env["LGWKS_LOG_FORMAT"] = "json"
     command = [
@@ -625,9 +649,8 @@ def builtin_debug_e2e(root: Path) -> tuple[int, str]:
     )
 
 
-def builtin_simulation_evidence(root: Path) -> tuple[int, str]:
+def builtin_simulation_evidence(root: Path, env: dict[str, str], out=None) -> tuple[int, str]:
     """Prove deterministic simulation coverage by executable and source views."""
-    env = _child_env(root)
     listed = _run_capture(
         ["cargo", "nextest", "list", "--workspace", "--locked", "--message-format", "json", "--cargo-quiet"],
         root,
@@ -728,12 +751,67 @@ def _git(root: Path, args: list[str]) -> str | None:
     return completed.stdout
 
 
-def _run_argv(argv: list[str], root: Path, env: dict[str, str]) -> int:
+# Every child the gate starts leads its own process group and is recorded here,
+# so stopping the gate stops what it started. Before this, killing ci_local.py
+# left its nextest run building and testing on, holding the target lock and the
+# CPU that the next run then measured against.
+_CHILDREN: set[subprocess.Popen] = set()
+_CHILDREN_LOCK = threading.Lock()
+# Set once the gate is stopping: no new child starts after it, so a group that
+# is between lanes cannot launch the next one into a scratch volume being torn down.
+_STOPPING = threading.Event()
+
+
+def _spawn(argv: list[str], root: Path, env: dict[str, str], out=None) -> int:
+    """Run ``argv`` in its own process group, bounded by one hour."""
+    if _STOPPING.is_set():
+        return 130
     try:
-        completed = subprocess.run(argv, cwd=root, env=env, timeout=3600, check=False)
-    except (OSError, subprocess.TimeoutExpired):
+        child = subprocess.Popen(
+            argv,
+            cwd=root,
+            env=env,
+            stdout=out,
+            stderr=subprocess.STDOUT if out is not None else None,
+            start_new_session=True,
+        )
+    except OSError:
         return 125
-    return completed.returncode
+    with _CHILDREN_LOCK:
+        _CHILDREN.add(child)
+    try:
+        return child.wait(timeout=3600)
+    except subprocess.TimeoutExpired:
+        _stop(child)
+        return 125
+    finally:
+        with _CHILDREN_LOCK:
+            _CHILDREN.discard(child)
+
+
+def _stop(child: subprocess.Popen) -> None:
+    """Terminate a child's whole process group, then reap it."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(child.pid, signal.SIGTERM)
+    try:
+        child.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(child.pid, signal.SIGKILL)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            child.wait(timeout=10)
+
+
+def _stop_all_children() -> None:
+    _STOPPING.set()
+    with _CHILDREN_LOCK:
+        live = list(_CHILDREN)
+    for child in live:
+        _stop(child)
+
+
+def _run_argv(argv: list[str], root: Path, env: dict[str, str], out=None) -> int:
+    return _spawn(argv, root, env, out)
 
 
 def _run_capture(
@@ -765,39 +843,115 @@ def _run_capture(
         )
 
 
-def _run_command(command: str, root: Path, env: dict[str, str]) -> int:
-    try:
-        completed = subprocess.run(
-            ["bash", "-c", command],
-            cwd=root,
-            env=env,
-            timeout=3600,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return 125
-    return completed.returncode
+def _run_command(command: str, root: Path, env: dict[str, str], out=None) -> int:
+    return _spawn(["bash", "-c", command], root, env, out)
 
 
 def _stamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def _child_env(root: Path) -> dict[str, str]:
+def _child_env(root: Path, scratch: Path | None = None, target: Path | None = None) -> dict[str, str]:
     env = os.environ.copy()
     cargo = Path.home() / ".cargo" / "bin"
     env["PATH"] = f"{cargo}{os.pathsep}{env.get('PATH', '')}"
     env["CARGO_INCREMENTAL"] = "0"
     env["CARGO_TERM_COLOR"] = "never"
     env.setdefault("RUST_BACKTRACE", "1")
+    if scratch is not None:
+        env["TMPDIR"] = f"{scratch}{os.sep}"
+    if target is not None:
+        env["CARGO_TARGET_DIR"] = str(target)
     return env
+
+
+# ── scratch ─────────────────────────────────────────────────────────────────
+
+SCRATCH_PREFIX = "lgwks-gate-"
+# 4 GiB of 512-byte sectors. A RAM disk takes memory only as it is written; the
+# simulation suites leave ~400 KB behind and peak far below this.
+RAM_DISK_SECTORS = 8 * 1024 * 1024
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _owner_pid(name: str) -> int | None:
+    suffix = name[len(SCRATCH_PREFIX):]
+    return int(suffix) if suffix.isdigit() else None
+
+
+def _reclaim_stale_scratch() -> None:
+    """Remove scratch volumes whose gate process is gone (kill -9, power loss)."""
+    if sys.platform == "darwin":
+        for volume in Path("/Volumes").glob(f"{SCRATCH_PREFIX}*"):
+            pid = _owner_pid(volume.name)
+            if pid is not None and not _pid_alive(pid):
+                _capture(["diskutil", "eject", str(volume)], Path("/"))
+    shm = Path("/dev/shm")
+    if shm.is_dir():
+        for directory in shm.glob(f"{SCRATCH_PREFIX}*"):
+            pid = _owner_pid(directory.name)
+            if pid is not None and not _pid_alive(pid):
+                shutil.rmtree(directory, ignore_errors=True)
+
+
+@contextlib.contextmanager
+def gate_scratch(wanted: bool):
+    """Yield a RAM-backed directory for the run's TMPDIR, or None.
+
+    None means the lanes use the ordinary temporary directory; the run is then
+    slower, never different. Creating the volume is best-effort for the same
+    reason: a host that cannot make one still runs every lane.
+    """
+    if not wanted:
+        yield None
+        return
+    _reclaim_stale_scratch()
+    name = f"{SCRATCH_PREFIX}{os.getpid()}"
+    if sys.platform == "darwin" and shutil.which("hdiutil") and shutil.which("diskutil"):
+        attached = _capture(["hdiutil", "attach", "-nomount", f"ram://{RAM_DISK_SECTORS}"], Path("/"))
+        device = next((word for word in attached.split() if word.startswith("/dev/disk")), None)
+        if device is not None:
+            erased = subprocess.run(
+                ["diskutil", "erasevolume", "APFS", name, device],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+            volume = Path("/Volumes") / name
+            try:
+                if erased.returncode == 0 and volume.is_dir():
+                    yield volume
+                    return
+            finally:
+                _capture(["hdiutil", "detach", device, "-force"], Path("/"))
+    shm = Path("/dev/shm")
+    if sys.platform.startswith("linux") and shm.is_dir() and os.access(shm, os.W_OK):
+        directory = shm / name
+        directory.mkdir(exist_ok=True)
+        try:
+            yield directory
+        finally:
+            shutil.rmtree(directory, ignore_errors=True)
+        return
+    yield None
 
 
 # ── execution ───────────────────────────────────────────────────────────────
 
 
-def run_lane(lane: Lane, root: Path) -> LaneResult:
+def run_lane(lane: Lane, root: Path, env: dict[str, str] | None = None, log: Path | None = None) -> LaneResult:
     started = _stamp()
+    clock = time.monotonic()
     if not platform_applies(lane):
         return LaneResult(lane.id, SKIP, started, _stamp(), f"out of scope for {sys.platform}; declared for {list(lane.platforms)}")
     missing = missing_needs(lane, root)
@@ -808,21 +962,94 @@ def run_lane(lane: Lane, root: Path) -> LaneResult:
             detail += f" ({lane.reason})"
         return LaneResult(lane.id, status, started, _stamp(), detail)
 
-    env = _child_env(root)
-    if lane.builtin is not None:
-        fn = BUILTINS.get(lane.builtin)
-        if fn is None:
-            return LaneResult(lane.id, FAIL, started, _stamp(), f"unknown builtin {lane.builtin!r}", 2)
-        try:
-            code, detail = fn(root)
-        except Exception as error:  # noqa: BLE001 - a checker crash is a failed lane
-            code, detail = 1, f"builtin {lane.builtin} raised {type(error).__name__}: {error}"
-    else:
-        code = _run_command(lane.command or "", root, env)
-        detail = "" if code == 0 else f"exit {code}"
+    env = env if env is not None else _child_env(root)
+    with contextlib.ExitStack() as stack:
+        out = None
+        if log is not None:
+            log.parent.mkdir(parents=True, exist_ok=True)
+            out = stack.enter_context(log.open("w", encoding="utf-8"))
+        if lane.builtin is not None:
+            fn = BUILTINS.get(lane.builtin)
+            if fn is None:
+                return LaneResult(lane.id, FAIL, started, _stamp(), f"unknown builtin {lane.builtin!r}", 2)
+            try:
+                code, detail = fn(root, env, out)
+            except Exception as error:  # noqa: BLE001 - a checker crash is a failed lane
+                code, detail = 1, f"builtin {lane.builtin} raised {type(error).__name__}: {error}"
+            if out is not None:
+                out.write(detail + "\n")
+        else:
+            code = _run_command(lane.command or "", root, env, out)
+            detail = "" if code == 0 else f"exit {code}"
 
     status = PASS if code == 0 else FAIL
-    return LaneResult(lane.id, status, started, _stamp(), detail, code)
+    return LaneResult(lane.id, status, started, _stamp(), detail, code, time.monotonic() - clock)
+
+
+def _log_tail(log: Path, lines: int = 150) -> str:
+    try:
+        text = log.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    return "\n".join(text[-lines:])
+
+
+def _target_base(root: Path) -> Path:
+    configured = os.environ.get("CARGO_TARGET_DIR")
+    base = Path(configured) if configured else root / "target"
+    return base if base.is_absolute() else root / base
+
+
+def _report(result: LaneResult, log: Path | None, lock: threading.Lock) -> None:
+    line = f"<== {result.lane_id}: {result.status} ({result.seconds:.1f} s)"
+    if result.detail:
+        line += f" — {result.detail.splitlines()[0]}"
+    bad = result.status in (FAIL, BLOCKED)
+    with lock:
+        print(line, file=sys.stderr if bad else sys.stdout, flush=True)
+        if bad and log is not None and log.exists():
+            print(f"---- last lines of {log} ----", file=sys.stderr)
+            print(_log_tail(log), file=sys.stderr, flush=True)
+
+
+def run_parallel(selected: list[Lane], root: Path, scratch: Path | None, jobs: int) -> list[LaneResult]:
+    """Run lane groups concurrently; lanes inside one group run in order."""
+    groups: dict[str, list[Lane]] = {}
+    for lane in selected:
+        key = f"gate-{lane.group}" if lane.group else f"lane-{lane.id}"
+        groups.setdefault(key, []).append(lane)
+    # Cargo groups first: they are the long poles, so they must not queue
+    # behind one-second checkers when `jobs` is below the group count.
+    ordered = sorted(groups.items(), key=lambda item: not item[0].startswith("gate-"))
+    base = _target_base(root)
+    logs = base / "gate-logs"
+    lock = threading.Lock()
+    results: dict[str, LaneResult] = {}
+
+    def run_group(key: str, lanes: list[Lane]) -> None:
+        target = base / key if key.startswith("gate-") else None
+        env = _child_env(root, scratch, target)
+        for lane in lanes:
+            if _STOPPING.is_set():
+                return
+            with lock:
+                print(f"==> {lane.id}" + (f"  [{key}]" if target else ""), flush=True)
+            log = logs / f"{lane.id}.log"
+            result = run_lane(lane, root, env, log)
+            results[lane.id] = result
+            _report(result, log, lock)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(jobs, len(ordered)))) as pool:
+        futures = [pool.submit(run_group, key, lanes) for key, lanes in ordered]
+        try:
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
+        except BaseException:
+            # Stop the children before the pool's exit waits on the threads
+            # that are waiting on them.
+            _stop_all_children()
+            raise
+    return [results[lane.id] for lane in selected if lane.id in results]
 
 
 # ── receipt ─────────────────────────────────────────────────────────────────
@@ -954,10 +1181,10 @@ def _capture(argv: list[str], root: Path) -> str:
 def _print_table(results: list[LaneResult]) -> None:
     print()
     print("─" * 60)
-    print(f"{'lane':<22} {'result':<8} detail")
+    print(f"{'lane':<22} {'result':<8} {'secs':>7}  detail")
     for result in results:
         detail = result.detail.replace("\n", " ")[:60]
-        print(f"{result.lane_id:<22} {result.status:<8} {detail}")
+        print(f"{result.lane_id:<22} {result.status:<8} {result.seconds:>7.1f}  {detail}")
     counts = {status: 0 for status in (PASS, FAIL, BLOCKED, SKIP)}
     for result in results:
         counts[result.status] = counts.get(result.status, 0) + 1
@@ -975,6 +1202,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fast", action="store_true", help="run only the lanes marked fast")
     parser.add_argument("--list", action="store_true", help="print lane ids and exit")
     parser.add_argument("--receipt", action="store_true", help="write evidence/ci-local-<commit>.md")
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=0,
+        help="lane groups run at once (default: all; 1 runs lanes in order with output streamed)",
+    )
     args = parser.parse_args(argv)
 
     root = (args.root or Path(__file__).resolve().parents[1]).resolve()
@@ -1018,15 +1251,42 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  mode:    {'fast' if args.fast else ('lane=' + ','.join(args.lane) if args.lane else 'full')}")
     print(f"  started: {_stamp()}")
 
+    # SIGTERM runs the same cleanup as Ctrl-C: children stopped, scratch detached.
+    def terminate(signum, _frame):
+        raise KeyboardInterrupt(f"signal {signum}")
+
+    with contextlib.suppress(ValueError):
+        signal.signal(signal.SIGTERM, terminate)
+
+    parallel = len(selected) > 1 and args.jobs != 1
+    wall = time.monotonic()
     results: list[LaneResult] = []
-    for lane in selected:
-        print(f"\n==> {lane.id}", flush=True)
-        result = run_lane(lane, root)
-        results.append(result)
-        stream = sys.stderr if result.status in (FAIL, BLOCKED) else sys.stdout
-        print(f"<== {lane.id}: {result.status}" + (f" — {result.detail.splitlines()[0]}" if result.detail else ""), file=stream, flush=True)
+    interrupted = False
+    with gate_scratch(any(lane.group for lane in selected)) as scratch:
+        try:
+            print(f"  scratch: {scratch or 'system temporary directory'}")
+            print(f"  mode:    {'parallel groups' if parallel else 'one lane at a time'}", flush=True)
+            if parallel:
+                results = run_parallel(selected, root, scratch, args.jobs or len(selected))
+            else:
+                lock = threading.Lock()
+                env = _child_env(root, scratch)
+                for lane in selected:
+                    print(f"\n==> {lane.id}", flush=True)
+                    result = run_lane(lane, root, env)
+                    results.append(result)
+                    _report(result, None, lock)
+        except KeyboardInterrupt:
+            interrupted = True
+        finally:
+            # Children first, then the scratch volume they write into.
+            _stop_all_children()
+    if interrupted:
+        print("ci-local: interrupted; every child process was stopped", file=sys.stderr)
+        return 130
 
     _print_table(results)
+    print(f"wall: {time.monotonic() - wall:.1f} s")
 
     if args.receipt:
         evidence = root / "evidence"

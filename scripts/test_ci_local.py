@@ -20,11 +20,13 @@ Run::
 from __future__ import annotations
 
 import os
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -537,6 +539,119 @@ class CoordinatorCli(unittest.TestCase):
             self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
             self.assertIn("alpha: pass", done.stdout)
             self.assertNotIn("beta", done.stdout.split("─")[-1])
+
+
+class CoordinatorScheduling(unittest.TestCase):
+    """Parallel groups, failure output, and ownership of what the gate starts."""
+
+    TWO_GROUPS = """
+        [toolchain]
+        rust = "0.0.0"
+
+        [[lane]]
+        id = "slow-one"
+        surfaces = "local"
+        required = true
+        group = "first"
+        command = "{one}"
+
+        [[lane]]
+        id = "slow-two"
+        surfaces = "local"
+        required = true
+        group = "second"
+        command = "{two}"
+        """
+
+    def test_groups_run_concurrently(self):
+        """Lanes in different groups are in flight at the same time.
+
+        Each lane records when it started and ended; the two intervals must
+        overlap. Wall time alone cannot show this: it includes creating the
+        RAM scratch volume, which varies by host.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stamp = "python3 -c 'import time; print(time.time())'"
+            lane = lambda name: f"{stamp} > {root}/{name}.start; sleep 2; {stamp} > {root}/{name}.end"
+            write_manifest(root, self.TWO_GROUPS.format(one=lane("one"), two=lane("two")))
+            init_repo(root)
+            (root / "keep.txt").write_text("ok\n", encoding="utf-8")
+            seed(root)
+
+            done = run_cli(root=root)
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            self.assertIn("slow-one: pass", done.stdout)
+            self.assertIn("slow-two: pass", done.stdout)
+            read = lambda name: float((root / name).read_text(encoding="utf-8"))
+            one = (read("one.start"), read("one.end"))
+            two = (read("two.start"), read("two.end"))
+            self.assertLess(max(one[0], two[0]), min(one[1], two[1]), f"lanes ran in series: {one} {two}")
+
+    def test_a_failing_lane_prints_its_own_output(self):
+        """A lane's output goes to its log; a failure brings the log back."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_manifest(
+                root,
+                self.TWO_GROUPS.format(one="echo the-reason-it-failed; exit 3", two="true"),
+            )
+            init_repo(root)
+            (root / "keep.txt").write_text("ok\n", encoding="utf-8")
+            seed(root)
+
+            done = run_cli(root=root)
+            self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+            self.assertIn("slow-one: fail", done.stderr)
+            self.assertIn("the-reason-it-failed", done.stderr)
+            self.assertIn("slow-two: pass", done.stdout)
+
+    def test_stopping_the_gate_stops_what_it_started(self):
+        """SIGTERM to the gate leaves no lane process running behind it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pidfile = root / "child.pid"
+            write_manifest(
+                root,
+                self.TWO_GROUPS.format(one=f"echo $$ > {pidfile}; exec sleep 60", two="sleep 60"),
+            )
+            init_repo(root)
+            (root / "keep.txt").write_text("ok\n", encoding="utf-8")
+            seed(root)
+
+            base = os.environ.copy()
+            gate = subprocess.Popen(
+                [sys.executable, str(CI_LOCAL), "--root", str(root)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=base,
+            )
+            try:
+                deadline = time.monotonic() + 60
+                while not pidfile.exists() or not pidfile.read_text(encoding="utf-8").strip():
+                    self.assertLess(time.monotonic(), deadline, "the lane never started")
+                    time.sleep(0.05)
+                child = int(pidfile.read_text(encoding="utf-8"))
+                gate.send_signal(signal.SIGTERM)
+                gate.communicate(timeout=60)
+            finally:
+                if gate.poll() is None:
+                    gate.kill()
+                    gate.communicate()
+            self.assertEqual(gate.returncode, 130)
+            deadline = time.monotonic() + 10
+            while alive(child) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertFalse(alive(child), f"lane process {child} outlived the gate")
+
+
+def alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 def re_escape(value: str) -> str:

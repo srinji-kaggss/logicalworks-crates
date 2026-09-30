@@ -36,6 +36,11 @@
 #             failing it. Omitted means every host.
 #   fast      true when the lane belongs to the `--fast` set.
 #   reason    why a lane is optional or platform-bound.
+#   group     lanes that build the same feature sets. A multi-lane local run
+#             executes groups concurrently, each in its own target directory,
+#             and a group's lanes in the order listed here, so later lanes reuse
+#             what earlier ones built. A lane with no group builds nothing.
+#             CI ignores the field: every CI job is its own machine.
 
 [toolchain]
 rust = "1.98.0"
@@ -66,6 +71,7 @@ ci_step = "Verify invariant enforcement references resolve"
 
 [[lane]]
 id = "deps-register"
+group = "workspace"
 surfaces = "local ci"
 required = true
 fast = true
@@ -90,6 +96,7 @@ ci_step = "Forbid unwrap outside tests"
 
 [[lane]]
 id = "compile"
+group = "workspace"
 surfaces = "local ci"
 required = true
 fast = true
@@ -106,6 +113,7 @@ ci_step = "Check formatting"
 
 [[lane]]
 id = "tests"
+group = "workspace"
 surfaces = "local ci"
 required = true
 # The storefront consumer builds run in their own lane and CI job: they are
@@ -116,6 +124,7 @@ ci_step = "Run all workspace tests"
 
 [[lane]]
 id = "storefront-consumers"
+group = "storefront"
 surfaces = "local ci"
 required = true
 command = "cargo nextest run --locked -p lgwks_deps --test storefront_consumers"
@@ -123,6 +132,7 @@ ci_step = "Build storefront consumers"
 
 [[lane]]
 id = "simulation-evidence"
+group = "workspace"
 surfaces = "local ci"
 required = true
 builtin = "simulation-evidence"
@@ -131,6 +141,7 @@ needs = ["bin:cargo-nextest"]
 
 [[lane]]
 id = "tests-bot-nodefault"
+group = "bot-nodefault"
 surfaces = "local ci"
 required = true
 command = "cargo nextest run -p lgwks_bot --all-targets --locked --no-default-features"
@@ -138,6 +149,7 @@ ci_step = "Run lgwks-bot no-default-feature tests"
 
 [[lane]]
 id = "tests-std-full"
+group = "bot-full"
 surfaces = "local ci"
 required = true
 command = "cargo nextest run -p lgwks_std --all-targets --locked --features full"
@@ -145,6 +157,7 @@ ci_step = "Run lgwks-std full-feature tests"
 
 [[lane]]
 id = "tests-bot-full"
+group = "bot-full"
 surfaces = "local ci"
 required = true
 command = "cargo nextest run -p lgwks_bot --all-targets --locked --features full"
@@ -152,6 +165,7 @@ ci_step = "Run lgwks-bot async runner tests"
 
 [[lane]]
 id = "doc-tests"
+group = "workspace"
 surfaces = "local ci"
 required = true
 # nextest does not run doc tests, so this lane stays on cargo test by
@@ -161,6 +175,7 @@ ci_step = "Doc tests"
 
 [[lane]]
 id = "debug-e2e"
+group = "workspace"
 surfaces = "local ci"
 required = true
 builtin = "debug-e2e"
@@ -185,6 +200,7 @@ reason = "dedicated PR check row whose job name exposes the successful end-to-en
 
 [[lane]]
 id = "lint"
+group = "clippy"
 surfaces = "local ci"
 required = true
 fast = true
@@ -193,6 +209,7 @@ ci_step = "Clippy all workspace targets"
 
 [[lane]]
 id = "docs-all-features"
+group = "docs"
 surfaces = "local ci"
 required = true
 command = "./scripts/doc-lanes.sh all-features"
@@ -231,6 +248,7 @@ ci_step = "Requirements sentences unedited without supersession"
 
 [[lane]]
 id = "package-smoke"
+group = "workspace"
 surfaces = "local ci"
 required = true
 command = "./scripts/lgwks-std-package-smoke.sh"
@@ -243,6 +261,7 @@ needs = ["script:scripts/lgwks-std-package-smoke.sh"]
 
 [[lane]]
 id = "clippy-feature-matrix"
+group = "clippy"
 surfaces = "local ci"
 required = true
 command = """\
@@ -255,6 +274,7 @@ ci_step = "Clippy feature matrix"
 
 [[lane]]
 id = "clippy-nodefault"
+group = "clippy"
 surfaces = "local ci"
 required = true
 command = """\
@@ -266,6 +286,7 @@ ci_step = "Clippy no default features"
 
 [[lane]]
 id = "clippy-process-only"
+group = "clippy"
 surfaces = "local ci"
 required = true
 command = "cargo clippy --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --no-default-features --features process -- -D warnings"
@@ -273,6 +294,7 @@ ci_step = "Clippy process-only"
 
 [[lane]]
 id = "feat-std"
+group = "check"
 surfaces = "local ci"
 required = true
 command = """\
@@ -291,6 +313,7 @@ ci_step = "Check lgwks-std feature matrix"
 
 [[lane]]
 id = "feat-deps-base"
+group = "check"
 surfaces = "local ci"
 required = true
 command = "cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets"
@@ -298,6 +321,7 @@ ci_step = "Check lgwks-deps"
 
 [[lane]]
 id = "feat-deps-tokio"
+group = "check"
 surfaces = "local ci"
 required = true
 command = "cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features tokio"
@@ -305,6 +329,7 @@ ci_step = "Check lgwks-deps storefront engine feature"
 
 [[lane]]
 id = "feat-deps-gpui"
+group = "check"
 surfaces = "local ci"
 required = true
 command = "cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features gpui"
@@ -312,6 +337,7 @@ ci_step = "Check lgwks-deps GPUI storefront feature"
 
 [[lane]]
 id = "feat-deps-ml"
+group = "check"
 surfaces = "local ci"
 required = true
 command = "cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features ml-candle,ml-tokenizers"
@@ -319,6 +345,7 @@ ci_step = "Check lgwks-deps ML storefront features"
 
 [[lane]]
 id = "feat-bot"
+group = "check"
 surfaces = "local ci"
 required = true
 command = """\
@@ -331,6 +358,7 @@ ci_step = "Check lgwks-bot async feature matrix"
 
 [[lane]]
 id = "feat-ast"
+group = "check"
 surfaces = "local ci"
 required = true
 command = """\
@@ -348,6 +376,7 @@ ci_step = "Check lgwks-ast feature matrix"
 # `[target.wasm32-wasip1] rustflags` table is ignored by cargo. (#195)
 [[lane]]
 id = "wasi-boundary"
+group = "check"
 surfaces = "local ci"
 required = false
 command = """\
@@ -375,6 +404,7 @@ reason = "CI runs it as a bash loop that reports every grammar; local reports th
 
 [[lane]]
 id = "docs-nodefault"
+group = "docs"
 surfaces = "local ci"
 required = true
 command = "./scripts/doc-lanes.sh no-default-features"
@@ -383,6 +413,7 @@ needs = ["script:scripts/doc-lanes.sh"]
 
 [[lane]]
 id = "docs-default"
+group = "docs"
 surfaces = "local ci"
 required = true
 command = "./scripts/doc-lanes.sh default"
@@ -391,6 +422,7 @@ needs = ["script:scripts/doc-lanes.sh"]
 
 [[lane]]
 id = "docs-per-feature"
+group = "docs"
 surfaces = "local ci"
 required = true
 command = "./scripts/doc-lanes.sh per-feature"
@@ -399,6 +431,7 @@ needs = ["script:scripts/doc-lanes.sh"]
 
 [[lane]]
 id = "docsrs-metadata"
+group = "docs"
 surfaces = "local ci"
 required = true
 builtin = "docsrs-metadata"
@@ -443,11 +476,12 @@ needs = ["module:yaml"]
 # A local run never covers these. The receipt names them. On a host outside
 # `platforms` the lane is `skip` (out of scope), never `pass`.
 
-# The GPUI Windows renderer builds only on a Windows host. The check runs inside
-# the AppCUI job's Windows leg; naming it here puts it in the one gate table, so
+# The GPUI Windows renderer builds only on a Windows host. The check runs as the
+# GPUI Windows renderer job; naming it here puts it in the one gate table, so
 # parity sees it and `ci_local.py` runs it on a Windows machine. (#195)
 [[lane]]
 id = "gpui-windows"
+group = "check"
 surfaces = "local ci"
 required = false
 command = "cargo check --locked --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml --no-default-features --features gpui --example gpui"
@@ -471,11 +505,12 @@ reason = "native storefront; three unnamed run steps, so it binds to the job nam
 
 [[lane]]
 id = "gpui-macos"
+group = "check"
 surfaces = "local ci"
 required = false
 command = """\
 cargo check --locked -p lgwks_deps --all-targets --features gpui && \
-cargo check --locked --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml --no-default-features --features gpui --example gpui\
+cargo check --locked --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml --target-dir \"${CARGO_TARGET_DIR:-target}\" --no-default-features --features gpui --example gpui\
 """
 ci_step = "Check normal GPUI renderer feature"
 platforms = ["darwin"]
@@ -484,6 +519,7 @@ reason = "needs the Xcode Metal toolchain"
 
 [[lane]]
 id = "candle-metal"
+group = "check"
 surfaces = "local ci"
 required = false
 command = "cargo check --locked -p lgwks_deps --all-targets --features ml-candle-metal,ml-tokenizers"

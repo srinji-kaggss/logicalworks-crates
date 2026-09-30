@@ -9,98 +9,114 @@
 ))]
 
 use std::fs;
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::Path;
+use std::process::{Command, Output};
 
 use lgwks_bot::Runtime;
 use lgwks_bot::rt::process::ProcessSpec;
 use lgwks_bot::rt::supervise::{Supervisor, TaskOutcome};
 use lgwks_bot::rt::time::{Instant, sleep};
 
-#[test]
-fn public_process_description_rejects_direct_execution() -> Result<(), Box<dyn std::error::Error>> {
-    // Wall-clock nanos plus a monotone sequence. Not a process or thread id
-    // (both are reused by the OS) and not `lgwks_std::random` (that module is
-    // behind the `random`/`ephemeral` features, and the feature matrix builds
-    // this test without them).
+type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+// Shared with the storefront consumer probes: one definition of where a
+// nested build puts its artifacts. A probe used to build into its own scratch
+// directory, compiling `lgwks_bot` and every dependency cold: two probes,
+// ~41 s each, the longest tests in the suite.
+#[path = "../../lgwks-deps/tests/support/target_dir.rs"]
+mod target_dir;
+
+use target_dir::{workspace_root, workspace_target_dir};
+
+/// Type-checks a one-file consumer of `lgwks_bot` and returns cargo's output.
+///
+/// The probe starts from the workspace lockfile, so it resolves the versions
+/// the workspace build compiled rather than whatever the local registry cache
+/// holds newest. Scratch is named by wall-clock nanos plus a sequence, not a
+/// process or thread id (both are reused) and not `lgwks_std::random` (behind
+/// features this test is built without).
+fn compile_probe(
+    name: &str,
+    dependency: &str,
+    main: &str,
+) -> Result<Output, Box<dyn std::error::Error>> {
     static DIR_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_nanos())
         .unwrap_or(0);
     let seq = DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!("lgwks-bot-t22-{nanos}-{seq}"));
+    let root = std::env::temp_dir().join(format!("{name}-{nanos}-{seq}"));
     fs::create_dir_all(root.join("src"))?;
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    fs::copy(
+        workspace_root()?.join("Cargo.lock"),
+        root.join("Cargo.lock"),
+    )?;
     fs::write(
         root.join("Cargo.toml"),
         format!(
-            "[package]\nname = \"t22-process-probe\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\nlgwks_bot = {{ path = \"{}\", features = [\"process\"] }}\n",
+            "[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\nlgwks_bot = {{ path = \"{}\"{dependency} }}\n",
             manifest_dir.display()
         ),
     )?;
-    fs::write(
-        root.join("src/main.rs"),
+    fs::write(root.join("src/main.rs"), main)?;
+    let output = Command::new(env!("CARGO"))
+        .args(["check", "--offline", "--manifest-path"])
+        .arg(root.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", workspace_target_dir()?)
+        .output();
+    fs::remove_dir_all(&root)?;
+    Ok(output?)
+}
+
+/// The probe was refused by the compiler for the reason named, not by cargo
+/// for some other one. A bare `!status.success()` also passed when the probe
+/// never reached rustc at all: an offline resolution failure, a lock error, a
+/// missing toolchain.
+fn assert_refused_for(output: &Output, code: &str, symbol: &str) {
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success(),
+        "the probe unexpectedly compiled:\n{text}"
+    );
+    assert!(
+        text.contains(&format!("error[{code}]")) && text.contains(symbol),
+        "the probe failed, but not with {code} naming `{symbol}`:\n{text}"
+    );
+}
+
+#[test]
+fn public_process_description_rejects_direct_execution() -> TestResult {
+    let output = compile_probe(
+        "t22-process-probe",
+        ", features = [\"process\"]",
         "use lgwks_bot::rt::process::Command;\n\nfn main() {\n    let mut command = Command::new(\"true\");\n    let _ = command.spawn();\n}\n",
     )?;
-
-    let status = Command::new("cargo")
-        .args(["check", "--manifest-path"])
-        .arg(root.join("Cargo.toml"))
-        .arg("--offline")
-        .env("CARGO_TARGET_DIR", root.join("target"))
-        .status()?;
-    let cleanup = fs::remove_dir_all(&root);
-    cleanup?;
-
-    assert!(
-        !status.success(),
-        "direct execution of the public process description unexpectedly compiled"
-    );
+    assert_refused_for(&output, "E0603", "Command");
     Ok(())
 }
 
 #[test]
-fn the_guaranteed_task_set_does_not_expose_detach_all() -> Result<(), Box<dyn std::error::Error>> {
+fn the_guaranteed_task_set_does_not_expose_detach_all() -> TestResult {
     // A public consumer must not be able to detach work from the facade that
     // promises to own it. This is a real downstream compile probe, not a
     // source-text check: the method must be absent from the exported type.
-    static DIR_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_nanos())
-        .unwrap_or(0);
-    let seq = DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!("lgwks-bot-taskset-probe-{nanos}-{seq}"));
-    fs::create_dir_all(root.join("src"))?;
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    fs::write(
-        root.join("Cargo.toml"),
-        format!(
-            "[package]\nname = \"lgwks-bot-taskset-probe\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\nlgwks_bot = {{ path = \"{}\" }}\n",
-            manifest_dir.display()
-        ),
-    )?;
-    fs::write(
-        root.join("src/main.rs"),
+    let output = compile_probe(
+        "lgwks-bot-taskset-probe",
+        "",
         "use lgwks_bot::rt::task::JoinSet;\nfn main() { let mut tasks = JoinSet::<()>::new(); tasks.detach_all(); }\n",
     )?;
-    let result = Command::new("cargo")
-        .args(["check", "--manifest-path"])
-        .arg(root.join("Cargo.toml"))
-        .arg("--offline")
-        .env("CARGO_TARGET_DIR", root.join("target"))
-        .output()?;
-    fs::remove_dir_all(&root)?;
-    assert!(
-        !result.status.success(),
-        "the public owned-task facade unexpectedly compiled detach_all"
-    );
+    assert_refused_for(&output, "E0599", "detach_all");
     Ok(())
 }
 
 #[test]
-fn supervisor_is_the_sanctioned_process_runner() -> Result<(), Box<dyn std::error::Error>> {
+fn supervisor_is_the_sanctioned_process_runner() -> TestResult {
     let runtime = Runtime::new()?;
     let outcome = runtime.block_on(async {
         let mut supervisor = Supervisor::default();
