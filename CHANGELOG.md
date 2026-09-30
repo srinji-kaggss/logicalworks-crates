@@ -8,6 +8,13 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+## [lgwks_std 0.10.0 / lgwks_ast 0.4.0 / lgwks_deps 0.4.0 / lgwks_bot 0.8.0 / lgwks_macros 0.1.2] - 2026-09-30
+
+The third cut of the day, for the #191-#194 review fixes that landed in #199.
+`lgwks_std`, `lgwks_deps`, `lgwks_ast` and `lgwks_bot` each carry a break, so
+each takes the minor position. `lgwks_macros` only raises its `lgwks_deps`
+requirement and takes a patch.
+
 ### lgwks_std Breaking
 
 - `fs::capability::Dir::entry_names` takes `ListLimits` and returns a
@@ -69,6 +76,10 @@ explicitly under that crate.
 - `domain::net::NetState::body` is a method; the field is crate-private, so a
   held value keeps the `BODY_PREVIEW` bound. A poll is bounded by a 10 s
   whole-call deadline, redirects included. (#191)
+
+### lgwks_macros Changed
+
+- Requires `lgwks_deps` 0.4. No change to the `script!` syntax.
 
 ## [lgwks_std 0.9.0 / lgwks_deps 0.3.0 / lgwks_bot 0.7.0 / lgwks_macros 0.1.1] - 2026-09-30
 
