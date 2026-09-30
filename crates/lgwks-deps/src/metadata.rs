@@ -2088,6 +2088,13 @@ mod tests {
     /// the process and capture files are real operating-system resources.
     #[test]
     fn injected_collection_fault_matrix_keeps_cleanup_owned_and_truthful() -> TestResult {
+        /// A ceiling, never the property under test: each injected fault fires
+        /// on its first observation, and the small answer must be allowed to
+        /// exit first. On hosted Windows that answer is a cold PowerShell start,
+        /// which took longer than the 3 s this used to allow, so the deadline
+        /// refusal landed before `ReadStdout` was reached. The same 30 s the
+        /// passthrough control allows.
+        const CEILING: Duration = Duration::from_secs(30);
         let (small_program, small_args) = small_answer();
         let (sleep_program, sleep_args) = sleeper();
         let stages = [
@@ -2107,13 +2114,7 @@ mod tests {
             } else {
                 (small_program, small_args.as_slice())
             };
-            let result = run_bounded(
-                program,
-                args,
-                Path::new("."),
-                Duration::from_secs(3),
-                1024 * 1024,
-            );
+            let result = run_bounded(program, args, Path::new("."), CEILING, 1024 * 1024);
             let error = match result {
                 Err(error) => error,
                 Ok(_) => return Err(format!("fault {fault:?} unexpectedly passed").into()),
@@ -2136,7 +2137,7 @@ mod tests {
                 sleep_program,
                 &sleep_args,
                 Path::new("."),
-                Duration::from_secs(3),
+                CEILING,
                 1024 * 1024,
             ) {
                 Err(error) => error,
@@ -2180,7 +2181,7 @@ mod tests {
             small_program,
             &small_args,
             Path::new("."),
-            Duration::from_secs(3),
+            CEILING,
             1024 * 1024,
         )
         .map_err(|error| format!("a complete collection was refused over cleanup: {error}"))?;
