@@ -29,7 +29,7 @@
 //! [`Truncation::Cut`]: crate::http::Truncation::Cut
 
 use std::fmt;
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 use std::time::Duration;
 
 use iri_string::types::UriAbsoluteStr;
@@ -101,12 +101,12 @@ pub struct Options {
     /// Total request timeout, covering connect, TLS, send, and receive.
     pub timeout: Duration,
     /// `User-Agent` header sent with every request.
-    pub user_agent: String,
+    user_agent: String,
     /// Extra headers sent with every request as `(name, value)` pairs, e.g.
     /// `("Authorization", "Bearer ...")`. Names and values must be valid
     /// header bytes; an invalid pair is a caller bug and the request errors
     /// rather than silently dropping the header.
-    pub headers: Vec<(String, String)>,
+    headers: Vec<(String, String)>,
     /// Ceiling on the response body in bytes, enforced while reading. See
     /// [`DEFAULT_MAX_BODY_BYTES`] for the default and the reason there is no
     /// unbounded value, and [`BodyPolicy`] for what happens at the ceiling.
@@ -158,6 +158,30 @@ impl Options {
         self
     }
 
+    /// Append a header sent with every request.
+    ///
+    /// A `(name, value)` pair. Both must be valid header bytes; an invalid pair
+    /// is a caller bug and the request errors rather than silently dropping the
+    /// header. Appending is the only way to add one, so the set of headers a
+    /// request carries is the set this method was called with.
+    #[must_use]
+    pub fn header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push((name.to_owned(), value.to_owned()));
+        self
+    }
+
+    /// The `User-Agent` header sent with this request.
+    #[must_use]
+    pub fn user_agent(&self) -> &str {
+        &self.user_agent
+    }
+
+    /// The extra headers sent with this request, in the order they were added.
+    #[must_use]
+    pub fn headers(&self) -> &[(String, String)] {
+        &self.headers
+    }
+
     /// Attach an idempotency key (`Idempotency-Key` header) so a retried
     /// request is deduplicated by the receiver. Pair with
     /// [`crate::retry::RetryPolicy`] and a caller-generated key
@@ -181,14 +205,26 @@ pub struct Response {
     /// HTTP status code, including 4xx/5xx.
     pub status: u16,
     /// Response headers in wire order as `(name, value)` pairs.
-    pub headers: Vec<(String, String)>,
+    headers: Vec<(String, String)>,
     /// Response body bytes, at most [`Options::max_body_bytes`] long.
-    pub body: Vec<u8>,
+    body: Vec<u8>,
     /// Whether [`Response::body`] is the whole body or a prefix of it.
     pub truncation: Truncation,
 }
 
 impl Response {
+    /// The response headers, in wire order, as `(name, value)` pairs.
+    #[must_use]
+    pub fn headers(&self) -> &[(String, String)] {
+        &self.headers
+    }
+
+    /// The body bytes: the whole body, or the prefix the ceiling allowed.
+    #[must_use]
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
     /// The body as UTF-8, or [`crate::http::Error::Transport`]
     /// when it is not valid UTF-8.
     pub fn text(&self) -> Result<&str, Error> {
@@ -221,6 +257,18 @@ pub enum Error {
     InvalidUrl,
     /// The request hit [`Options::timeout`](crate::http::Options::timeout).
     Timeout,
+    /// A signal interrupted the request before it completed (`EINTR`).
+    ///
+    /// Not a transport failure and not a timeout: the connection was not
+    /// refused, reset or severed, and nothing about the exchange says it
+    /// failed. It is reported separately because this is the one error a
+    /// caller may retry without risking a second effect — a transport failure
+    /// during a `POST` may have arrived after the server acted, whereas an
+    /// interrupted request is one the kernel has not finished relaying.
+    ///
+    /// A signal handler installed with `SA_RESTART` lets the read resume and
+    /// this variant never appears; it is reported for the handlers that do not.
+    Interrupted,
     /// The response body reached [`Options::max_body_bytes`] without ending,
     /// under [`BodyPolicy::Whole`]. The ceiling is reported, the bytes read are
     /// not: they are a prefix, and handing a prefix to a caller that asked for
@@ -243,6 +291,7 @@ impl fmt::Display for Error {
                 write!(f, "invalid http(s) URL (absolute http(s) URI required)")
             }
             Self::Timeout => write!(f, "request timed out"),
+            Self::Interrupted => write!(f, "request interrupted by a signal"),
             Self::BodyTooLarge { limit } => write!(
                 f,
                 "response body reached the declared {limit}-byte ceiling; raise \
@@ -435,6 +484,21 @@ fn probe_for_more(reader: &mut impl Read) -> Result<Truncation, Error> {
 fn map_error(error: ureq::Error) -> Error {
     match error {
         ureq::Error::Timeout(_) => Error::Timeout,
+        // A signal interrupted the request. ureq's TCP transport maps only
+        // `TimedOut` and `WouldBlock` to its timeout variant, so `EINTR`
+        // arrives here as a transport error — which is both wrong and, under
+        // load, frequent: the kernel delivers signals to whichever thread they
+        // land on, and a process running many requests will have one land
+        // inside a socket read.
+        //
+        // It is not a broken connection, so it is not `Transport`. The
+        // distinction matters to a caller with a retry policy: `Transport` is
+        // terminal for a POST whose effect may have landed, while an
+        // interruption is the one failure that is safe to retry. Collapsing
+        // the two into a string is what made a signal look like an outage.
+        ureq::Error::Io(io_error) if io_error.kind() == ErrorKind::Interrupted => {
+            Error::Interrupted
+        }
         // ureq's `BadUri` message embeds the raw URI. `validate_url` rejects the
         // shapes that reach it, but collapse it to the class-only variant
         // anyway: a caller that logs the returned error must not receive the
@@ -812,9 +876,60 @@ mod tests {
         let Err(error) = get_with(&format!("http://127.0.0.1:{port}/"), &options) else {
             return Err("a silent server must hit the read timeout".into());
         };
-        assert_eq!(error, Error::Timeout);
+        // A signal can interrupt the read on the way to the timeout, and the
+        // kernel may deliver it before the deadline. That is a real and
+        // different outcome — see `an_interrupted_request_is_not_a_transport
+        // failure` — so this test asserts the classification the caller
+        // branches on rather than a single exact variant: both mean "the
+        // server did not answer within the bound", and neither is a broken
+        // connection that a retry policy should treat as terminal.
+        assert!(
+            matches!(error, Error::Timeout | Error::Interrupted),
+            "a silent server yields Timeout or Interrupted, not {error:?}"
+        );
         drop(handle);
         Ok(())
+    }
+
+    /// An interrupted request is not reported as a broken connection.
+    ///
+    /// ureq's TCP transport maps `TimedOut` and `WouldBlock` to its timeout
+    /// variant and lets `EINTR` through as an I/O error, which arrived here as
+    /// `Transport("io: Interrupted system call")`. That is the wrong class: a
+    /// caller with a retry policy treats a transport failure as possibly-post
+    /// -action and will not retry it, while an interrupted request is the one
+    /// failure that is safe to retry. Signals land on whichever thread they
+    /// land on, so under load this was frequent enough to break CI.
+    #[test]
+    fn an_interrupted_request_is_not_a_transport_failure() {
+        assert_eq!(
+            map_error(ureq::Error::Io(std::io::Error::from_raw_os_error(
+                libc_eintr(),
+            ))),
+            Error::Interrupted,
+            "EINTR must not be reported as a transport failure"
+        );
+        // A genuine transport error still is one, so the split is meaningful
+        // rather than the whole enum collapsing to Interrupted.
+        assert!(matches!(
+            map_error(ureq::Error::Io(std::io::Error::from_raw_os_error(
+                libc_econnreset(),
+            ))),
+            Error::Transport(_)
+        ));
+    }
+
+    /// `EINTR` as this platform reports it.
+    fn libc_eintr() -> i32 {
+        // Spelled rather than computed: these are the two error numbers the
+        // mapping is about, and deriving them would need libc, which this
+        // workspace forbids.
+        4
+    }
+
+    /// `ECONNRESET` as this platform reports it.
+    fn libc_econnreset() -> i32 {
+        104
     }
 
     // ── Body ceilings ───────────────────────────────────────────────────────

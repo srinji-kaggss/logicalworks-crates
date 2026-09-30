@@ -101,7 +101,7 @@ lgwks_std = { version = "0.7", default-features = false, features = ["core"] }
 
 | Feature | Modules | What it adds | External deps |
 |---------|---------|-------------|---------------|
-| `core` (default) | encoding, fs, glob, hex, leb128, retry, task, time | — | **0** |
+| `core` (default) | encoding, fs, glob, hex, leb128, retry, similarity, task, time | — | **0** |
 | `trace` (default) | trace | Structured logging plus default debugger install | tracing, tracing-subscriber stack |
 | `random` | random, id | UUID v4, OS entropy | getrandom |
 | `hash` | hash | BLAKE3 content-addressable hashing | blake3 |
@@ -111,7 +111,8 @@ lgwks_std = { version = "0.7", default-features = false, features = ["core"] }
 | `wire` | wire | Zero-copy binary serialization | rkyv |
 | `http` | http | Blocking HTTPS client (rustls-only TLS) | ureq, iri-string |
 | `online` | online | TCP reachability probing | none |
-| `fs-raw` | fs | Bytes available on a filesystem, unprivileged | rustix |
+| `fs-raw` | fs | Bytes available on a filesystem, unprivileged; handle-relative `fs::capability::Dir` for trees being rewritten while you walk them | rustix |
+| `process` | process | Signal a whole process group; observe a child's exit without releasing its pid | rustix |
 | `full` | all of the above | — | all of the above |
 
 ## Module reference
@@ -119,12 +120,12 @@ lgwks_std = { version = "0.7", default-features = false, features = ["core"] }
 | Module | What it does | Replaces |
 |--------|-------------|----------|
 | `encoding` | Base64 and percent-encoding | `base64`, `percent-encoding` |
-| `fs` | Recursive directory walking with sandbox enforcement | `walkdir` |
+| `fs` | Recursive directory walking for trusted trees, with omissions reported rather than hidden | `walkdir` |
 | `glob` | Shell-style glob matching (DP algorithm, O(M*N)) | `glob` |
 | `hex` | Hex encode and decode | `hex` |
 | `leb128` | LEB128 variable-length integer encoding | — |
 | `retry` | Retry budgets: attempts, exponential backoff with caller jitter, deadlines | — |
-| `task` | Single-threaded executor: `block_on`, concurrent `join_all`, off-thread `spawn_blocking` | — |
+| `task` | Executor that drives futures on the current thread: `block_on`, interleaved `join_all`, off-thread `spawn_blocking` | — |
 | `time` | RFC 3339 timestamps, calendar math | `chrono`, `time` |
 | `random` | OS entropy via `getrandom` | `getrandom` |
 | `id` | UUID v4 generation and parsing | `uuid` |
@@ -135,6 +136,23 @@ lgwks_std = { version = "0.7", default-features = false, features = ["core"] }
 | `wire` | Zero-copy binary wire serialization via rkyv | `rkyv` |
 | `http` | Blocking HTTP GET/POST with strict URL validation | `ureq`, `iri-string` |
 | `online` | TCP reachability probing, zero-dep | — |
+| `similarity` | Edit-distance and cosine scorers, weighted composition, acceptance thresholds | — |
+| `process` | Process-group signalling and unreaped exit observation (Unix-only) | — |
+| `fs::capability` | Handle-relative `openat`/`statat`/`unlinkat`/`mkdirat` access (Unix-only) | — |
+
+## Threat models: which walk to use
+
+`fs::walk_dir` identifies files by path and says so: INV-FS-2 records that its
+identity rechecks are best-effort, and the module header repeats it. That is the
+right tradeoff for a tree you trust and the wrong one for a directory another
+process can rewrite mid-walk.
+
+For that, use `fs::capability::Dir`. It opens a directory once and resolves every
+name beneath it from that one descriptor, so a name swapped underneath the walk
+cannot redirect it — the failure is `ENOENT` on the entry that changed, which
+`walk_dir_tolerant`'s omissions already have a place to record. Its
+`entry_names` is Linux-only, because listing a descriptor needs `getdents64` and
+the BSDs have no equivalent syscall; every other operation is `*at(2)`.
 
 ## Dependency philosophy
 
@@ -151,7 +169,7 @@ Cargo metadata; Cargo.lock preserves the exact transitive provenance.
 - **getrandom** — zero deps in std-only mode
 - **ureq** — blocking HTTP client, rustls-only TLS stack plus small leaves
 - **iri-string** — zero-dep URI validation leaf at default features
-- **rustix** — safe POSIX syscall surface for the `fs-raw` primitive; Unix-only, optional
+- **rustix** — safe POSIX syscall surface for the `fs-raw` and `process` primitives; Unix-only, optional
 - **tracing** — default-on structured event facade for library diagnostics.
 - **tracing-subscriber** — default debugger bootstrap. `install_default("service")`
   installs env-filtered compact output, and `LGWKS_LOG_FORMAT=json` switches the

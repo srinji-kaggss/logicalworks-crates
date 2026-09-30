@@ -1,9 +1,21 @@
 //! `fs` owns recursive filesystem walking and directory traversal, enforcing
-//! INV-FS-SAFE-WALK: directory walking respects depth bounds, handles symlink
+//! INV-FS-2: directory walking respects depth bounds, handles symlink
 //! loops defensively, applies best-effort root-bounded symlink policy, and
 //! requires zero external dependencies like `walkdir`. This path-based API is
 //! for trusted trees, not a race-safe sandbox against hostile concurrent path
-//! replacement. Use a handle-relative OS capability API for that threat model.
+//! replacement. For that threat model use `fs::capability::Dir`, which opens a
+//! directory once and resolves every name beneath it with `openat`/`statat`
+//! from that one descriptor, so a name replaced mid-walk cannot redirect the
+//! walk off the tree it was admitted to. It is behind the `fs-raw` feature,
+//! which is why the path is written out rather than linked: an intra-doc link
+//! from this always-on module to a default-off one resolves in one feature set
+//! and dangles in every other, and this module is on in all of them.
+
+/// Handle-relative filesystem access, for trees that are being rewritten while
+/// you read them. Unix-only; other targets report
+/// [`std::io::ErrorKind::Unsupported`].
+#[cfg(feature = "fs-raw")]
+pub mod capability;
 
 use std::collections::HashSet;
 use std::fs::{self, DirEntry};

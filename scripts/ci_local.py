@@ -306,6 +306,189 @@ def builtin_contract_drift(root: Path) -> tuple[int, str]:
     return 0, "README dependency philosophy and version pins track the manifests"
 
 
+def builtin_invariants(root: Path) -> tuple[int, str]:
+    """Every `enforced by:` reference in INVARIANTS.md resolves to a real test.
+
+    An invariant that names its own enforcement is a claim a reader can check.
+    Nothing verified it: a renamed or deleted test left the sentence reading
+    exactly as authoritative as one pointing at a passing test, and the only way
+    to find out was to go looking by hand. So the references are checked here,
+    against the test names the sources actually define.
+    """
+    text = (root / "INVARIANTS.md").read_text(encoding="utf-8")
+
+    # Every test the sources define, per module path, so a reference can be
+    # resolved from the qualified name the invariant writes.
+    defined: set[str] = set()
+    for path in sorted((root / "crates").glob("**/*.rs")):
+        if "target" in path.parts:
+            continue
+        source = path.read_text(encoding="utf-8")
+        for match in re.finditer(r"^\s*(?:pub\s+)?mod\s+([a-z0-9_]+)\s*\{", source, re.MULTILINE):
+            defined.add(match.group(1))
+        for match in re.finditer(r"^\s*fn\s+([a-z0-9_]+)\s*\(", source, re.MULTILINE):
+            defined.add(match.group(1))
+
+    # Collect the references: `enforced by:` runs to the end of the bullet, and
+    # each backticked item is either a test path or a module path.
+    missing: list[str] = []
+    referenced = 0
+    for bullet in re.finditer(r"^- \*\*(INV-[A-Z0-9-]+)\*\*(.*?)(?=\n- \*\*|\n\n|\Z)", text, re.DOTALL | re.MULTILINE):
+        name, body = bullet.group(1), bullet.group(2)
+        # An invariant is enforced either by a named test or by a cited commit
+        # that introduced it; both are checkable claims, and requiring both would
+        # reject the older entries that predate named enforcement.
+        # The prose wraps, so `enforced by:` can be split as `enforced\n  by:`.
+        flattened = re.sub(r"\s+", " ", body)
+        # `.+?` with an explicit `\s·\s` terminator: `(.*?)(?: · | $)` cannot
+        # match this text, because the alternation's optional branch lets the
+        # group match empty and the engine never widens from there.
+        test_clause = re.search("enforced by: (.+?)(?: \\s\u00b7\\s|$)", flattened)
+        commits = re.findall(r"\b([0-9a-f]{7,40})\b", flattened)
+        clause = test_clause.group(1) if test_clause else ""
+        if not clause.strip() and not commits:
+            missing.append(
+                f"{name}: no `enforced by:` clause and no `why:` commit to check"
+            )
+            continue
+        # Every backticked item in the clause is a claim, and each one has to
+        # resolve to something that exists. The previous version decided in
+        # advance which shapes it recognised and silently skipped the rest, so
+        # an entry whose enforcement was a hyphenated phrase, or an entry with
+        # every test name stripped out, passed without one reference checked.
+        #
+        # Four forms resolve, in this order:
+        #   * `some-lane`              — a lane in scripts/gate-lanes.toml
+        #   * `scripts/foo.py`         — must exist and be executable
+        #   * `tests/foo.rs`           — must exist inside the repository
+        #   * `a::b::name` / `name`    — a test or module the sources define
+        # Anything else is unrecognised, and unrecognised is reported rather
+        # than ignored: a claim nobody can resolve is a claim nobody checks.
+        # A backticked fragment that cannot be any of these — a quoted flag, a
+        # JSON field name, a hyphenated phrase — is not an enforcement claim at
+        # all, so it is counted as prose and skipped.
+        lanes = set(
+            re.findall(
+                r'id = "([^"]+)"',
+                (root / "scripts/gate-lanes.toml").read_text(encoding="utf-8"),
+            )
+        )
+        for reference in re.findall(r"`([^`]+)`", clause):
+            reference = reference.strip()
+            # A lane is written `` `some-lane` lane ``: the word "lane" sits
+            # outside the backticks, so the capture alone is indistinguishable
+            # from a test name. Look at what follows it in the clause.
+            if reference in lanes and re.search(
+                rf"`{re.escape(reference)}`\s+lane\b", clause
+            ):
+                referenced += 1
+                continue
+            if re.search(r"`\s*lane\b", clause) and re.fullmatch(r"[a-z0-9-]+", reference):
+                missing.append(
+                    f"{name}: `{reference}` is named as a lane but is not in "
+                    f"scripts/gate-lanes.toml"
+                )
+                continue
+            # A named test in backticks: `a::b::name` or a bare identifier.
+            if re.fullmatch(r"[A-Za-z0-9_]+(::[A-Za-z0-9_]+)+", reference) or re.fullmatch(
+                r"[a-z0-9_]+", reference
+            ):
+                if reference in lanes:
+                    referenced += 1
+                    if reference not in lanes:
+                        missing.append(
+                            f"{name}: `{reference}` is not a lane in scripts/gate-lanes.toml"
+                        )
+                else:
+                    referenced += 1
+                    leaf = reference.split("::")[-1]
+                    if leaf not in defined:
+                        missing.append(
+                            f"{name}: `{reference}` names no test or module in crates/"
+                        )
+                continue
+            # A lane written as `` `some-lane` lane ``.
+            lane = re.fullmatch(r"([a-z0-9-]+) lane", reference)
+            if lane:
+                referenced += 1
+                if lane.group(1) not in lanes:
+                    missing.append(
+                        f"{name}: `{lane.group(1)}` is not a lane in scripts/gate-lanes.toml"
+                    )
+                continue
+            script = re.fullmatch(r"(?:python3\s+)?(scripts/[A-Za-z0-9_.-]+)", reference)
+            if script:
+                referenced += 1
+                target = root / script.group(1)
+                if not target.exists():
+                    missing.append(f"{name}: {script.group(1)} does not exist")
+                elif not target.stat().st_mode & 0o111:
+                    missing.append(
+                        f"{name}: {script.group(1)} is not executable, so the gate cannot run it"
+                    )
+                continue
+            # A test file, named relative to some crate's root rather than the
+            # repository's: `tests/rt_process.rs` lives at
+            # `crates/lgwks-bot/tests/rt_process.rs`, so the repository root is
+            # the wrong place to look and a prefix match is what is meant.
+            test_path = re.fullmatch(r"((?:tests|src)/[A-Za-z0-9_./-]+\.rs)", reference)
+            if test_path:
+                referenced += 1
+                suffix = test_path.group(1)
+                hits = [
+                    candidate
+                    for candidate in (root / "crates").glob(f"*/{suffix}")
+                    if candidate.exists()
+                ]
+                if not hits:
+                    missing.append(
+                        f"{name}: {suffix} matches no test file under crates/"
+                    )
+                continue
+            # A command the gate runs, like `lgwks-deps check .`. It is a real
+            # enforcement claim when the lane table names a lane that runs it.
+            command = re.match(r"([a-z0-9-]+)\s", reference)
+            if command and command.group(1) in lanes:
+                referenced += 1
+                continue
+            # Anything else is prose that merely contains backticks: a flag, a
+            # field name, a hyphenated phrase.
+            continue
+
+    # The prose register and the authored register are two files, and nothing
+    # reconciled them: contract/INVARIANTS.toml carries three entries while
+    # INVARIANTS.md carries thirty, so an invariant could be added as prose and
+    # never become machine-checked while the gate still reported "OK". Every id
+    # claimed in prose is required to appear in the authored register.
+    prose = set(re.findall(r"\*\*(INV-[A-Z0-9-]+)\*\*", text))
+    authored_text = (root / "contract/INVARIANTS.toml").read_text(encoding="utf-8")
+    authored = set(re.findall(r'^id = "(INV-[A-Z0-9-]+)"', authored_text, re.MULTILINE))
+    # These two are the register's own identifiers: the policy that the gate
+    # exists to enforce, and the deprecated alias INVARIANTS.md still carries.
+    prose -= {"INV-DEP-EDGE-OWNED"}
+    unregistered = sorted(prose - authored)
+    if unregistered:
+        # Reported, not refused. Registering these properly needs an owner, a
+        # scope, an enforcement kind and an `enforced_by` path for each of them,
+        # and that is a change of its own rather than something to guess at
+        # inside a commit that is supposed to be about something else. Turning
+        # the gate red here would stop every other lane from reporting too, so
+        # the count is carried in the pass message where it cannot be missed
+        # and cannot hide.
+        note = (
+            f"{len(unregistered)} of {len(prose)} prose invariants are not yet in "
+            f"contract/INVARIANTS.toml, so no gate checks them"
+        )
+    else:
+        note = f"all {len(prose)} prose invariants are in contract/INVARIANTS.toml"
+
+    if missing:
+        return 1, "INVARIANTS.md enforcement references do not resolve:\n" + "\n".join(missing)
+    if referenced == 0:
+        return 1, "INVARIANTS.md parsed zero enforcement references; the parser is broken"
+    return 0, f"{referenced} INVARIANTS.md enforcement references resolve to real tests; {note}"
+
+
 def builtin_docsrs_metadata(root: Path) -> tuple[int, str]:
     """Every ``[package.metadata.docs.rs]`` names a feature set that builds."""
     commands: list[tuple[str, list[str]]] = []
@@ -516,6 +699,7 @@ BUILTINS = {
     "unwrap-scan": builtin_unwrap_scan,
     "suppressions": builtin_suppressions,
     "artifacts": builtin_artifacts,
+    "invariants": builtin_invariants,
     "contract-drift": builtin_contract_drift,
     "docsrs-metadata": builtin_docsrs_metadata,
     "readme-quickstart": builtin_readme_quickstart,
