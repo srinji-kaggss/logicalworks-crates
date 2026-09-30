@@ -4178,7 +4178,7 @@ checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
 
 [[package]]
 name = "lgwks_ast"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "ast-grep-core",
  "ast-grep-language",
@@ -4187,7 +4187,7 @@ dependencies = [
 
 [[package]]
 name = "lgwks_bot"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "lgwks_deps",
  "lgwks_macros",
@@ -4196,7 +4196,7 @@ dependencies = [
 
 [[package]]
 name = "lgwks_deps"
-version = "0.1.13"
+version = "0.2.0"
 dependencies = [
  "appcui",
  "bevy_app",
@@ -4225,7 +4225,7 @@ dependencies = [
 
 [[package]]
 name = "lgwks_std"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "blake3",
  "getrandom 0.4.3",
@@ -9369,7 +9369,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "709fe23a0424b6a435d82152b1bd3fdfb0833487d5fa90d05d42762a9891fef5"
 dependencies = [
  "stable_deref_trait",
- "yoke-derive 0.8.3",
+ "yoke-derive 0.8.4",
  "zerofrom",
 ]
 
@@ -9387,9 +9387,9 @@ dependencies = [
 
 [[package]]
 name = "yoke-derive"
-version = "0.8.3"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33811428bee40dbceb6d545e95754741d17a6aef9a4849f0fd62e2ba4f412a78"
+checksum = "ec8ebde2db3681e8c9980cc27822030e68752690ddfa9473e739aeb4dbde6d71"
 dependencies = [
  "proc-macro2",
  "quote",

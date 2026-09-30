@@ -29,10 +29,11 @@ what is implied.
 
 | Crate | `Cargo.toml` version | Newest tag | Checked |
 |---|---|---|---|
-| `lgwks_std` | 0.7.0 | `lgwks_std-v0.6.6` | Manifest raised in the 2026-09-28 cut (breaking; supersedes the unpublished 0.6.7); no tag until upload |
-| `lgwks_bot` | 0.5.0 | `lgwks_bot-v0.4.2` | Manifest raised in the 2026-09-21 cut; no tag for it yet, and the 0.4.2 tag's surface differs from `main` (below) |
-| `lgwks_ast` | 0.2.2 | `lgwks_ast-v0.2.2` | Tag exists in this repository |
-| `lgwks_deps` | 0.1.13 | `lgwks_deps-v0.1.12` | Manifest raised in the 2026-09-21 cut; no tag for it yet |
+| `lgwks_std` | 0.8.0 | `lgwks_std-v0.7.0` | Manifest raised in the 2026-09-30 cut (breaking); 0.7.0 is on crates.io; no 0.8.0 tag until upload |
+| `lgwks_bot` | 0.6.0 | `lgwks_bot-v0.5.0` | Manifest raised in the 2026-09-30 cut; 0.5.0 is on crates.io; `main` adds `script` (below) |
+| `lgwks_ast` | 0.3.0 | `lgwks_ast-v0.2.2` | Manifest raised in the 2026-09-30 cut (breaking); 0.2.2 is on crates.io |
+| `lgwks_deps` | 0.2.0 | `lgwks_deps-v0.1.13` | Manifest raised in the 2026-09-30 cut (breaking); 0.1.13 is on crates.io |
+| `lgwks_macros` | 0.1.0 | none | New in the 2026-09-30 cut; not on crates.io until upload |
 
 Those are source tags, and a source tag is not a registry upload.
 `docs/releasing.md` keeps the two apart and warns that a release created before
@@ -40,18 +41,14 @@ the upload is a claim the registry does not support. Confirm the version you are
 installing against docs.rs or `cargo tree` in your own project before relying on
 a symbol.
 
-### `lgwks_bot` is the one crate whose `main` runs ahead of its newest tag
+### `lgwks_bot` on `main` runs one module ahead of its newest tag
 
-The newest `lgwks_bot` tag is `lgwks_bot-v0.4.2`, and its `lib.rs` exports
-`cap`, `domain`, `error`, `gate`, `json`, `rt`, `spec`, and `verb`. `main`
-exports those plus `broker`, `effect`, `frontier`, `interface`, `journal`,
-`language`, `retry`, `semantic`, and `session`. If you install
-`lgwks_bot = "0.4.2"`, none of those nine is there.
-
-The manifest reads `0.5.0` because the release commit for the 2026-09-21 cut has
-landed, but no `lgwks_bot-v0.5.0` tag exists and nothing has been uploaded, so
-`0.5.0` is not installable either. Until the tag exists, `main` is the only place
-those nine modules can be read.
+The newest `lgwks_bot` tag is `lgwks_bot-v0.5.0`, which is also the version on
+crates.io. Its `lib.rs` exports `broker`, `cap`, `domain`, `effect`, `error`,
+`frontier`, `gate`, `interface`, `journal`, `json`, `language`, `retry`, `rt`,
+`semantic`, `session`, `spec` and `verb`. `main` adds `script` (the `script!`
+macro, feature `script`), which needs `lgwks_macros` and is not installable
+until the 2026-09-30 cut is uploaded.
 
 The pages in this tree that document the newer surface are marked at the top:
 

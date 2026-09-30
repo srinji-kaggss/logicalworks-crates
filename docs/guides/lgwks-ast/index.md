@@ -21,19 +21,19 @@ build enables seven:
 
 ```toml
 [dependencies]
-lgwks_ast = "0.2.2"    # rust, python, typescript, javascript, go, java, swift
+lgwks_ast = "0.3.0"    # rust, python, typescript, javascript, go, java, swift
 ```
 
 Add the rest by name, or take everything:
 
 ```toml
 [dependencies]
-lgwks_ast = { version = "0.2.2", features = ["lang-c", "lang-cpp", "lang-scala", "lang-kotlin", "lang-tsx"] }
+lgwks_ast = { version = "0.3.0", features = ["lang-c", "lang-cpp", "lang-scala", "lang-kotlin", "lang-tsx"] }
 ```
 
 ```toml
 [dependencies]
-lgwks_ast = { version = "0.2.2", features = ["full"] }
+lgwks_ast = { version = "0.3.0", features = ["full"] }
 ```
 
 `full` enables all 28 grammars. A language whose feature is off does not exist in
