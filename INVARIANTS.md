@@ -27,10 +27,17 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
   directory is a workspace member's; sharing a member's name is not
   membership, and an unlocatable path fails closed to external. · why: #143
   R13 · enforced by: `lgwks_deps::metadata::tests`, `lgwks-deps check .`
-- **INV-DEP-8** Cargo metadata runs under a deadline with per-stream byte
-  budgets; a hung or flooding child is killed and reaped, and a collection
-  failure is a refusal, never an empty graph. · why: #143 R14 · enforced by:
+- **INV-DEP-8** Cargo metadata collection has an elapsed deadline and a
+  per-stream retained-byte cap sampled every poll quantum; this is not a hard
+  temporary-disk quota, and a descendant may retain an inherited capture
+  descriptor after the direct child exits. Termination and capture-removal OS
+  errors remain visible, and any incomplete collection is a refusal, never an
+  empty or partial graph. · why: #143 R14, #159 M1-M3 · enforced by:
   `lgwks_deps::metadata::tests`
+- **INV-DEP-9** Each selected Bevy runtime feature (`bevy-app`, `bevy-time`,
+  `bevy-state`) exposes its promised public import path; a deselected path is
+  absent from the facade. · why: #169 · enforced by:
+  `crates/lgwks-deps/tests/storefront_consumers.rs`
 ## lgwks_bot — durable execution
 
 Each of these was a shipped defect. Treat the list as the spec.
@@ -80,12 +87,102 @@ Each of these was a shipped defect. Treat the list as the spec.
 
 ## lgwks_std
 
+- **INV-STD-SIM-1** The documented `Geometry::score` accepts both `[f64; 4]`
+  and `BoundingBox`. · why: #160 S3 · enforced by:
+  `tests/similarity_public_api.rs`
+- **INV-STD-RETRY** `RetryPolicy` remains a pure, allocation-free policy:
+  `delay(0)` is the backoff after the first failure, exponential scaling
+  reaches the exact `max_delay` cap for every retry index without work
+  proportional to that index, and jitter applies the documented inclusive
+  modulo formula across the complete `Duration` range. The one-word entropy
+  mapping is modulo-biased and does not promise uniformity. Zero attempts have
+  an effective floor of one at construction and use, while deadline equality
+  refuses an attempt, including the initial one. · why: #164 · enforced by:
+  `lgwks_std::retry::tests`
+- **INV-HEX-1** `hex::decode_into` requires exact destination length and validates
+  the entire input before writing, so every refusal leaves the destination
+  unchanged. · enforced by: `hex::tests::decode_into_validates_exact_length_and_preserves_output_on_failure`
+- **INV-ENCODING-1** Percent escape errors report original-input byte offsets;
+  UTF-8 errors name offsets in decoded bytes and never present them as source
+  coordinates. · enforced by: `encoding::tests::percent_refuses_a_non_hex_escape`
+  and `encoding::tests::percent_refuses_escapes_that_decode_to_invalid_utf8`
+- **INV-ID-1** UUID v4 masks apply to generated IDs only; parsing and raw-byte
+  construction preserve arbitrary UUID values, and malformed hex reports both
+  group start and invalid character offsets. · enforced by: `id::tests`
+- **INV-LEB128-1** Integer decoders accept only minimal encodings and return the
+  consumed prefix length; trailing input remains with the caller. · enforced by:
+  `leb128::tests::distinguishes_prefix_trailing_bytes_from_nonminimal_and_truncated_input`
+- **INV-TIME-1** RFC 3339 parsing validates offset component bounds and refuses
+  leap-second labels the `SystemTime` profile cannot preserve; checked Unix
+  conversion and canonical formatting report range failures instead of
+  manufacturing the epoch or extended-year RFC text. Civil-to-day conversion
+  narrows only after the complete mathematical count is computed. · why: #153
+  T1–T5 · enforced by: `tests/sim_time_profile.rs`
+  (`invalid_numeric_offsets_name_the_field_and_byte`,
+  `leap_second_labels_are_explicitly_unsupported`,
+  `checked_unix_conversion_never_substitutes_epoch`,
+  `rfc_year_boundaries_refuse_extended_output_without_clamping`,
+  `calendar_roundtrips_endpoints_neighbors_and_overflow_transition`) and
+  `time::parse::tests::conversion_seam_preserves_platform_range_failure`
+- **INV-STD-HTTP-1** HTTP failures retain a machine-readable class and observed
+  stage; a body or EOF-probe timeout is never EOF, preview completion, or proof
+  of no effect. Response header bytes and multiplicity survive, while the
+  String view is explicitly lossy and map-ordered. Redirects are explicit and
+  bounded to ten hops; target provenance redacts userinfo, query and fragment.
+  A redirect hop to another origin (scheme, host, effective port) carries none
+  of the caller's headers; a same-origin hop carries them all but
+  `Authorization`, `Cookie` and `Proxy-Authorization`; a 307/308 of a POST is
+  refused rather than replaying the body. Idempotency keys
+  remain singular and receiver-defined. `EINTR` is its own failure class at
+  every stage and is never presented as proof of no effect. · why: #163
+  N1/N2/N3, #190 review (ureq forwarded custom headers cross-origin) ·
+  enforced by:
+  `http::tests::a_cross_origin_redirect_carries_no_caller_header`,
+  `http::tests::a_same_origin_redirect_keeps_ordinary_headers_but_not_credentials`,
+  `http::tests::a_method_keeping_redirect_of_a_post_is_refused`,
+  `http::tests::an_interruption_is_classified_the_same_way_at_every_stage`,
+  `http::tests::body_timeout_preserves_stage_and_class`,
+  `http::tests::eof_probe_timeout_preserves_stage_and_class`,
+  `http::tests::legal_header_bytes_and_repeated_values_are_preserved`, and
+  `http::tests::redirect_loop_refuses_at_the_configured_limit`
+- **INV-STD-ONLINE-1** Resolved reachability candidates share one monotonic
+  connection budget and at most 64 addresses are attempted; each is offered an
+  equal share of what remains, so a blackholed candidate cannot starve the
+  ones after it. Synchronous
+  `ToSocketAddrs` work is outside that budget and is not promised preemptible;
+  the literal `is_online` endpoints share the same budget. The Boolean result
+  remains a TCP heuristic, not application health. · why: #163 N4 · enforced
+  by: `online::tests::address_candidates_share_one_remaining_budget`,
+  `online::tests::a_blackholed_candidate_does_not_starve_the_next` and
+  `online::tests::resolver_delay_is_outside_the_connection_budget`
+- **INV-GLOB-1** Glob matching is anchored and operates on Unicode scalar
+  values without normalization: `?` and classes consume one scalar, `/` is
+  excluded from `?`, `*`, and all classes (including negated classes), `*`
+  stays within a segment, and `**` may cross separators. Matching is
+  case-sensitive; leading dots are ordinary; backslash is literal; `**` in a
+  component and unmatched `[` are accepted only by the named legacy dialect.
+  Strict compilation reports malformed classes, descending ranges, and
+  component-invalid `**` as typed errors. Compilation is O(M); each token
+  transition is O(N) over the finite Unicode scalar alphabet; reusable
+  scratch retains one scalar index and two rolling rows in O(N), with no row
+  allocation per token. · enforced by: `glob::tests` work-growth, scratch
+  capacity, Unicode, strict-error and exact double-star cases, plus
+  `tests/glob_public.rs`
 - **INV-FS-2** A successful strict directory walk has no known omissions; a
   tolerant walk returns each known omission alongside its entries, and an
   unresolved root is always refused. Path-based identity rechecks are
   best-effort only and do not promise race-safe containment against hostile
   concurrent replacement. · why: #143 R15/R16 · enforced by:
   `lgwks_std::fs::tests`
+- **INV-FS-5** Walk output uses absolute paths rooted at the canonicalized
+  input root; descendants reached through symlinks retain the logical alias,
+  while canonical targets identify visits. Reports expose the applied depth
+  and symlink policy, and completeness means complete within that policy.
+  Bounded walks charge entries and path bytes before retention and mark any
+  budget-limited prefix incomplete. Strict failures preserve path, stage and
+  the original I/O source. `available_space` is an advisory snapshot, never a
+  reservation or write guarantee. · why: #166 · enforced by:
+  `lgwks_std::fs::tests` and the public API doctest
 
 - **INV-FS-3** Handle-relative access resolves every name below one admitted
   directory from that directory's descriptor, so a name replaced mid-walk
@@ -132,6 +229,20 @@ Each of these was a shipped defect. Treat the list as the spec.
   retains pending traversal state proportional to active depth, not sibling
   fan-out; the byte and node ceilings remain separate from parser allocation.
   · why: #143 R17 · enforced by: `lgwks_ast::tests::a_small_node_budget_does_not_retain_a_wide_sibling_frontier`
+- **INV-AST-2** Content detection parses each distinct compiled candidate once;
+  only invalid syntax is negative evidence, while parser or budget refusal
+  leaves detection incomplete. Bounded AST metrics identify partial walks, and
+  checked syntax diagnostics preserve recovery kind and original-source byte
+  spans under a fixed ceiling that keeps the earliest in source order. The
+  refusal and the rendered report walk the same node set, root included.
+  · why: #165 A1–A4 · enforced by:
+  `lgwks_ast::tests::duplicate_and_permuted_candidates_parse_once_and_preserve_ambiguity`,
+  `lgwks_ast::tests::incomplete_candidate_inspection_is_not_reported_as_unique`,
+  `lgwks_ast::tests::inspection_metrics_name_complete_exact_and_over_limit_walks`,
+  `lgwks_ast::tests::syntax_diagnostics_stop_at_the_declared_bound`,
+  `lgwks_ast::tests::a_truncated_syntax_report_keeps_the_earliest_errors_in_source_order`,
+  `lgwks_ast::tests::the_refusal_and_the_report_count_the_same_recovery_nodes`, and
+  `tests/content_detection.rs`
 
 ## Docs
 

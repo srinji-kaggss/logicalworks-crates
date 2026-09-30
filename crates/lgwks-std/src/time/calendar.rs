@@ -12,11 +12,10 @@
 //! `clippy::arithmetic_side_effects`; the comment at each site names the bound
 //! that makes the choice exact rather than merely non-panicking.
 //!
-//! The domain the rest of the crate exercises is the four-digit RFC 3339 year
-//! `0..=9999` enforced by [`super::parse`], where no intermediate comes within
-//! twelve orders of magnitude of an `i64` bound. The wider `i64` domain is
-//! still total: [`civil_from_days`] is exact for every `i64` day count, and
-//! [`days_from_civil`] saturates only past ±2.5e16 years.
+//! The parser accepts four-digit RFC 3339 years. These public conversions also
+//! cover the wider `i64` day/year domains: [`civil_from_days`] is exact for
+//! every `i64` day count, and [`days_from_civil`] computes in `i128` before
+//! saturating only when its final day count is outside `i64`.
 
 /// Days in one 400-year Gregorian era: `365 * 400 + 97` leap days.
 const DAYS_PER_ERA: i64 = 146_097;
@@ -81,21 +80,23 @@ pub fn days_in_month(year: i64, month: u32) -> u32 {
     try_days_in_month(year, month).unwrap_or(0)
 }
 
-/// Splits a civil year into a 400-year era index and a `0..=399` year within
-/// that era.
+/// Days since 1970-01-01 for a proleptic Gregorian date.
 ///
-/// January and February are counted as the tail of the *previous* era year: the
-/// calendar is re-based onto a March-start year so that February (the month
-/// whose length is the only one that varies) sits at the end of the cycle,
-/// where a single linear day-of-year formula can absorb it.
+/// `month` must be in `1..=12` and `day` a valid day of that month; the RFC
+/// 3339 parser enforces both before calling. Under those preconditions the
+/// complete mathematical count is computed before the result is narrowed to
+/// `i64`; only a final value outside that range is saturated.
 ///
-/// `div_euclid` floors toward negative infinity, which is the era boundary the
-/// algorithm needs for years before era 0; `saturating_mul(400)` cannot
-/// saturate because `|era * 400| <= |adjusted_year| + 399`.
-fn civil_to_era(year: i64, month: u32) -> (i64, i64) {
-    // `saturating_sub` differs from `-` only at `i64::MIN`, one year below the
-    // smallest representable astronomical year; the result there is still a
-    // total, monotone day count.
+/// Invalid month/day values are outside the contract; this function does not
+/// validate them. Its `i128` intermediates are wide enough for every `i64`
+/// year and `u32` month/day.
+#[must_use]
+pub fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    // Valid inputs have month in 1..=12 and day within that month. Even for
+    // the full i64 year domain, each mathematical intermediate fits i128.
+    let year = i128::from(year);
+    let month = i128::from(month);
+    let day = i128::from(day);
     let adjusted_year = if month <= 2 {
         year.saturating_sub(1)
     } else {
@@ -103,56 +104,32 @@ fn civil_to_era(year: i64, month: u32) -> (i64, i64) {
     };
     let era = adjusted_year.div_euclid(400);
     let year_of_era = adjusted_year.saturating_sub(era.saturating_mul(400));
-    (era, year_of_era)
-}
-
-/// Days since 1970-01-01 for a proleptic Gregorian date.
-///
-/// `month` must be in `1..=12` and `day` a valid day of that month; the RFC
-/// 3339 parser enforces both before calling, and every caller in this module
-/// passes a day in `1..=31`. Under those preconditions the result is exact for
-/// any representable civil date, i.e. for `|year|` up to about 2.5e16.
-///
-/// # Saturation
-///
-/// `era * 146_097` is the only step that can leave `i64`, and it does so only
-/// once the day count itself is out of range: it saturates for `|year|` beyond
-/// roughly 2.5e16 (±25 quadrillion years), and the result is then clamped to
-/// `i64::MAX` or `i64::MIN` on the same side as `year`, because the day count
-/// is strictly increasing in `year` (a year is 365 or 366 days). The clamp is
-/// exact to within the final `719_468`-day epoch shift; no RFC 3339 stamp and
-/// no `SystemTime` an operating system can produce comes within fifteen orders
-/// of magnitude of the boundary.
-#[must_use]
-pub fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
-    let (era, year_of_era) = civil_to_era(year, month);
-    // March is month 0 of the re-based year, so Jan/Feb wrap to 10 and 11. The
-    // `saturating_*` pair cannot saturate for a `month` in `1..=12`; for an
-    // out-of-range month it keeps the function total and monotone.
     let month_prime = if month > 2 {
         month.saturating_sub(3)
     } else {
         month.saturating_add(9)
     };
-    // `month_prime` is `0..=11`, so `153 * month_prime + 2` is at most 1685 and
-    // the quotient is `0..=336`. Adding `day - 1` keeps the intermediate within
-    // one `u32` of the `i64` range, so nothing here can saturate.
-    let day_of_year = divide(
-        i64::from(month_prime).saturating_mul(153).saturating_add(2),
-        5,
-    )
-    .saturating_add(i64::from(day))
-    .saturating_sub(1);
-    // `year_of_era` is `0..=399`, so this is `0..=145_635` plus `day_of_year`.
+    let day_of_year = month_prime
+        .saturating_mul(153)
+        .saturating_add(2)
+        .checked_div(5)
+        .unwrap_or(0)
+        .saturating_add(day)
+        .saturating_sub(1);
     let day_of_era = year_of_era
         .saturating_mul(365)
-        .saturating_add(divide(year_of_era, 4))
-        .saturating_sub(divide(year_of_era, 100))
+        .saturating_add(year_of_era.checked_div(4).unwrap_or(0))
+        .saturating_sub(year_of_era.checked_div(100).unwrap_or(0))
         .saturating_add(day_of_year);
-    // The single step that can leave `i64`; see the saturation note above.
-    era.saturating_mul(DAYS_PER_ERA)
+    let days = era
+        .saturating_mul(i128::from(DAYS_PER_ERA))
         .saturating_add(day_of_era)
-        .saturating_sub(EPOCH_ERA_OFFSET)
+        .saturating_sub(i128::from(EPOCH_ERA_OFFSET));
+    i64::try_from(days).unwrap_or(if days.is_negative() {
+        i64::MIN
+    } else {
+        i64::MAX
+    })
 }
 
 /// Splits days-since-1970-01-01 into a 400-year era index and a `0..146_097`

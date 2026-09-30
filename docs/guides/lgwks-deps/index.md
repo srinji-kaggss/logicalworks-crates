@@ -27,7 +27,7 @@ a runtime library has no use for it.
 | Embedding `check_dependencies`, leaner | `cargo add lgwks_deps --no-default-features` | no |
 | Choosing a third-party stack | `cargo add lgwks_deps --no-default-features --features tokio` | no |
 
-`scan` gates one module (`crates/lgwks-deps/src/lib.rs:76`) and the CLI's source
+`scan` gates one module (`crates/lgwks-deps/src/lib.rs:79`) and the CLI's source
 detectors, and nothing else. `check_dependencies` is not behind it: the embed
 example further down runs against a `default-features = false` build. If you are
 here for the storefront, disable defaults and select the engine you want.
@@ -41,13 +41,33 @@ by the gate as second edges.
 | Feature | Re-exports | Default |
 |---|---|---|
 | `tokio` | `lgwks_deps::tokio` | off |
+| `tokio-time` | `lgwks_deps::tokio::time` | off |
+| `tokio-sync` | `lgwks_deps::tokio::sync` | off |
+| `tokio-macros` | `lgwks_deps::tokio` | off |
+| `tokio-io` | `lgwks_deps::tokio::io` | off |
+| `tokio-net` | `lgwks_deps::tokio::net` | off |
+| `tokio-process` | `lgwks_deps::tokio::process` | off |
+| `tokio-fs` | `lgwks_deps::tokio::fs` | off |
+| `tokio-signal` | `lgwks_deps::tokio::signal` | off |
+| `tokio-full` | `lgwks_deps::tokio` | off |
+| `bevy-ecs` | `lgwks_deps::bevy_ecs` | off |
+| `bevy-app` | `lgwks_deps::bevy_app` | off |
+| `bevy-time` | `lgwks_deps::bevy_time` | off |
+| `bevy-state` | `lgwks_deps::bevy_state` | off |
 | `gpui` | `lgwks_deps::gpui` | off |
 | `appcui` | `lgwks_deps::appcui` | off |
 | `ml-candle` | `candle_core`, `candle_nn`, `candle_transformers` | off |
 | `ml-candle-metal` | as `ml-candle`, plus Candle's macOS Metal backend | off |
 | `ml-tokenizers` | `lgwks_deps::tokenizers` | off |
-| `process-group-probe` | `lgwks_deps::process_group::exists` | off |
+| `process-group-probe` | `lgwks_deps::process_group::exists` (Unix only) | off |
 | `scan` | the gate's Rust source detectors | on |
+
+The facade-only consumer matrix compiles GPUI examples on Linux, macOS, and
+Windows, Candle Metal only on macOS, and the process-group probe only on Unix.
+It does not treat those platform-bound combinations as all-target features.
+
+For `tokio-macros`, alias `lgwks_deps::tokio` as `tokio` at the consumer crate
+root before using Tokio's `#[tokio::main]` or `#[tokio::test]` macro.
 
 ```toml
 [dependencies]
@@ -114,7 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 `check_dependencies(root)` returns `Result<(Contract, Vec<Refusal>), GateError>`
-(`crates/lgwks-deps/src/lib.rs:574`). An empty refusal list is a pass. A
+(`crates/lgwks-deps/src/lib.rs:604`). An empty refusal list is a pass. A
 `GateError` is a different thing from a refusal: the module documentation lists
 a missing register, unparseable metadata, an unparseable register, and an
 unreadable lock file as errors, and all four are fail-closed, because "a gate

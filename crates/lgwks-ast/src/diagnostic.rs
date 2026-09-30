@@ -387,8 +387,10 @@ pub fn recovery_count<L: LanguageExt>(root: &AstNode<'_, L>) -> usize {
 /// [`inspect_ast`](crate::inspect_ast) preserves. Callers that present results
 /// in source order sort afterwards.
 ///
-/// The root itself is not visited: a caller asking about `root`'s own kind has
-/// [`AstNode`] directly.
+/// The root is visited first, then every descendant. `inspect_ast` charges and
+/// inspects the root too, so the two walks agree on which nodes exist: a tree
+/// whose root is itself a recovery node is counted here exactly as it is
+/// refused by [`try_parse`](crate::try_parse).
 fn visit_each_node<'t, L: LanguageExt>(
     root: &AstNode<'t, L>,
     visit: &mut dyn FnMut(&AstNode<'t, L>),
@@ -407,6 +409,7 @@ fn visit_each_node_measuring<'t, L: LanguageExt>(
     visit: &mut dyn FnMut(&AstNode<'t, L>),
     mut peak: Option<&mut usize>,
 ) {
+    visit(root);
     let mut frames = vec![(root.clone(), root.children().len())];
     while let Some(frame) = frames.last_mut() {
         let Some(child_index) = frame.1.checked_sub(1) else {

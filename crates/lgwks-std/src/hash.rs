@@ -67,23 +67,15 @@ impl Digest {
 
     /// Parse a 64-character hex string into a digest.
     ///
-    /// Upper and lower case are both accepted. Length is validated first, so a
-    /// short or long input reports [`DigestParseError::WrongLength`] with the
-    /// observed length rather than a hex offset rebased onto a string that was
-    /// never the right shape. The decoded bytes are then moved into the fixed
-    /// 32-byte array without a panic path: the conversion is fallible in the
-    /// type system, and although the length check above makes it infallible in
-    /// practice, a failure maps back to the same `WrongLength` rather than
-    /// aborting the process.
+    /// Upper and lower case are both accepted. Length is validated first, then
+    /// the fixed-size hex decoder fills the digest bytes without a temporary
+    /// heap allocation.
     pub fn from_hex(text: &str) -> Result<Self, DigestParseError> {
         if text.len() != 64 {
             return Err(DigestParseError::WrongLength { len: text.len() });
         }
-        let bytes = crate::hex::decode(text).map_err(DigestParseError::Hex)?;
-        let raw: [u8; 32] = bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| DigestParseError::WrongLength { len: bytes.len() })?;
+        let mut raw = [0; 32];
+        crate::hex::decode_into(text, &mut raw).map_err(DigestParseError::Hex)?;
         Ok(Self(raw))
     }
 }
@@ -120,13 +112,15 @@ impl std::error::Error for DigestParseError {}
 
 impl core::fmt::Debug for Digest {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Digest({})", self.to_hex())
+        f.write_str("Digest(")?;
+        crate::hex::write_lowercase(&self.0, f)?;
+        f.write_str(")")
     }
 }
 
 impl core::fmt::Display for Digest {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(&self.to_hex())
+        crate::hex::write_lowercase(&self.0, f)
     }
 }
 

@@ -1,566 +1,947 @@
-//! `glob` owns shell-style path pattern matching and enforces
-//! INV-GLOB-SEPARATOR: a single `*`, a `?`, and a character class never cross a
-//! `/`, and only `**` does, so a pattern cannot silently reach into a
-//! subdirectory the author did not name.
+//! Pure matching of Unicode text against the `lgwks_std` glob dialect.
 //!
-//! Retires the `glob` crate, declared in 2 manifests and reached from 3 call
-//! sites. The intended use here is pattern *matching*
-//! against paths the caller already has, not filesystem traversal, so directory
-//! walking is deliberately out of scope: matching is pure and testable,
-//! traversal is an I/O concern that belongs to the caller.
+//! `?` and classes consume one Unicode scalar value; `*` consumes zero or more
+//! scalar values except `/`; `**` may consume `/`. Matching is case-sensitive,
+//! does not normalize Unicode, and treats a backslash as an ordinary literal.
+//! Leading dots are ordinary characters. These are text semantics, not
+//! grapheme-cluster or native `OsStr` path semantics.
 //!
-//! An unterminated `[` is treated as a literal bracket rather than an error.
-//! That is the POSIX `fnmatch` behaviour and the upstream crate's, and matching
-//! it keeps the migration a substitution instead of a semantic change.
+//! The checked
+//! [GlobPattern::compile](crate::glob::GlobPattern::compile) entry accepts the
+//! strict dialect:
+//! unclosed or empty classes, descending ranges, and `**` embedded inside a
+//! path component are errors.
+//! [GlobDialect::Legacy](crate::glob::GlobDialect::Legacy) preserves the
+//! earlier boolean matcher's literal unclosed brackets, descending-range no-match, and
+//! `**` anywhere behavior. The one-call [`matches`] function continues to use
+//! that named legacy dialect for source compatibility.
+//!
+//! This module replaces only the matching portion of the upstream `glob`
+//! crate. It does not walk directories or implement POSIX shell expansion.
+//! The upstream crate rejects unclosed classes and constrains `**`; this
+//! dialect deliberately keeps the documented `a/**/b`, `**/b`, `a/**`, and
+//! legacy `a**b` forms. `globset` targets compiled sets of filesystem patterns,
+//! which is a different job and adds an external dependency. A compiled NFA
+//! with two rolling rows keeps this crate's zero-dependency single-pattern
+//! contract while bounding each token transition to one path scan.
 
-// ── Token Parsing ───────────────────────────────────────────────────────────
+use core::fmt;
 
-/// One lexed element of a glob pattern.
-///
-/// Tokens borrow from the pattern bytes, so tokenizing allocates nothing per
-/// token and the whole token list dies with the caller's `&str`. The separator
-/// policy of INV-GLOB-SEPARATOR is encoded in *which* token a sequence becomes:
-/// [`Token::Star`] and [`Token::Question`] refuse to cross `/`, and only the
-/// four double-star forms may.
+/// Selects the syntax accepted while compiling a glob.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GlobDialect {
+    /// Reject malformed classes, descending ranges, and component-embedded `**`.
+    Strict,
+    /// Preserve the historical `matches` behavior for migration.
+    Legacy,
+}
+
+/// A reason a strict glob pattern could not be compiled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PatternErrorKind {
+    /// A `[` had no matching `]`.
+    UnclosedClass,
+    /// A range's first scalar sorts after its last scalar.
+    DescendingRange,
+    /// A `**` sequence was not a complete path component.
+    DoubleStarPlacement,
+}
+
+/// A pattern compilation failure with a byte offset into the pattern.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PatternError {
+    /// The syntax error category.
+    pub kind: PatternErrorKind,
+    /// The UTF-8 byte offset where the invalid syntax begins.
+    pub byte_offset: usize,
+}
+
+impl fmt::Display for PatternError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let reason = match self.kind {
+            PatternErrorKind::UnclosedClass => "character class is not closed",
+            PatternErrorKind::DescendingRange => "character class range is descending",
+            PatternErrorKind::DoubleStarPlacement => "** must occupy a complete path component",
+        };
+        write!(formatter, "{reason} at byte {}", self.byte_offset)
+    }
+}
+
+impl std::error::Error for PatternError {}
+
+/// One inclusive Unicode scalar interval compiled from a class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScalarRange {
+    /// Lowest included Unicode scalar.
+    start: char,
+    /// Highest included Unicode scalar.
+    end: char,
+}
+
+/// One compiled transition in the pattern automaton.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Token<'a> {
-    /// A single byte that must equal the path byte at this position.
-    Literal(u8),
-    /// `?` matches exactly one path byte, never `/`.
+enum Token {
+    /// One exact Unicode scalar.
+    Literal(char),
+    /// Exactly one non-separator scalar.
     Question,
-    /// `*` matches zero or more path bytes, stopping at any `/`.
+    /// Zero or more non-separator scalars.
     Star,
-    /// `**` matches zero or more path bytes, `/` included.
+    /// Zero or more scalars, including separators.
     DoubleStar,
-    /// `**/` is a leading `**` that also consumes the `/` after it, so the
-    /// enclosing directory may be omitted entirely.
+    /// Zero or more scalars ending at a separator, or no directory prefix.
     DoubleStarSlash,
-    /// `/**` is a trailing `**` preceded by the `/` that introduces it.
+    /// A separator followed by zero or more scalars.
     SlashDoubleStar,
-    /// `/**/` matches one or more path segments; the separators on both sides are
-    /// part of the token, which is what lets `a/**/b` match `a/b`.
+    /// A separator-delimited run with an endpoint after a separator.
     SlashDoubleStarSlash,
-    /// A `[...]` class, or a literal `[` when the class is unterminated.
+    /// One scalar in or outside the inclusive ranges.
     Class {
-        /// The class contents between the brackets, with any leading `!`/`^`
-        /// negation marker already stripped. Ranges (`a-z`) are kept verbatim
-        /// and interpreted later by `match_range_or_single`.
-        body: &'a [u8],
-        /// Whether a member of `body` *fails* the match, as written `[!...]`
-        /// or `[^...]`.
+        /// Sorted scalar ranges accepted by this class.
+        ranges: Vec<ScalarRange>,
+        /// Whether a scalar outside the ranges is accepted.
         negated: bool,
     },
 }
 
-/// Lexes a `[...]` class starting at `pattern[0]`.
+/// A reusable, validated glob pattern.
 ///
-/// Returns [`Token::Class`] and the number of bytes consumed, or a literal `[`
-/// consuming one byte when no closing `]` exists. The literal-bracket fallback
-/// is POSIX `fnmatch` behaviour and keeps an unterminated class from turning a
-/// whole pattern into an error.
-///
-/// The consumed count is `end + 1` (the bracket plus its closing `]`); `end` is
-/// a valid index below `pattern.len()`, so the addition cannot overflow, and
-/// saturating expresses that bound without a panic path.
-fn parse_class_token<'a>(pattern: &'a [u8]) -> (Token<'a>, usize) {
-    if let Some(end) = class_end(pattern) {
-        let raw_body = &pattern[1..end];
-        // A leading `!` or `^` negates the class and is not part of its body.
-        let (negated, body) = match raw_body.first() {
-            Some(&(b'!' | b'^')) => (true, &raw_body[1..]),
-            _ => (false, raw_body),
-        };
-        (Token::Class { body, negated }, end.saturating_add(1))
-    } else {
-        (Token::Literal(b'['), 1)
+/// Pattern storage is O(M), including the token list and compiled class
+/// intervals. A caller that matches many paths should retain this value and a
+/// [`GlobScratch`] to amortize compilation and matching allocations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GlobPattern {
+    /// The compiled sequence of matching transitions.
+    tokens: Vec<Token>,
+}
+
+impl GlobPattern {
+    /// Compiles the strict dialect and returns malformed syntax as a typed error.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lgwks_std::glob::{GlobPattern, GlobScratch};
+    ///
+    /// let pattern = GlobPattern::compile("src/**/[a-z]?.rs")?;
+    /// let mut scratch = GlobScratch::new();
+    /// assert!(pattern.is_match_with("src/l1.rs", &mut scratch));
+    /// assert!(pattern.is_match_with("src/sub/l1.rs", &mut scratch));
+    /// assert!(!pattern.is_match_with("src/sub/lib1.rs", &mut scratch));
+    /// # Ok::<(), lgwks_std::glob::PatternError>(())
+    /// ```
+    pub fn compile(pattern: &str) -> Result<Self, PatternError> {
+        Self::compile_with_dialect(pattern, GlobDialect::Strict)
+    }
+
+    /// Compiles a pattern under an explicitly selected syntax policy.
+    ///
+    /// Use [`GlobDialect::Legacy`] when migrating callers that rely on the old
+    /// permissive forms. New consumers should prefer [`Self::compile`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lgwks_std::glob::{GlobDialect, GlobPattern};
+    ///
+    /// let old_pattern = GlobPattern::compile_with_dialect("a**b", GlobDialect::Legacy)?;
+    /// assert!(old_pattern.is_match("a/x/b"));
+    /// # Ok::<(), lgwks_std::glob::PatternError>(())
+    /// ```
+    pub fn compile_with_dialect(pattern: &str, dialect: GlobDialect) -> Result<Self, PatternError> {
+        let mut work = Work::default();
+        compile_pattern(pattern, dialect, &mut work)
+    }
+
+    /// Matches a path using newly allocated temporary matching scratch.
+    #[must_use]
+    pub fn is_match(&self, path: &str) -> bool {
+        self.is_match_with(path, &mut GlobScratch::new())
+    }
+
+    /// Matches a path while reusing scalar indexing and rolling-row storage.
+    ///
+    /// After the scratch capacities are sufficient for the path, matching
+    /// performs no allocation per token. The caller owns the scratch lifetime;
+    /// scratch contains only the last path and is overwritten on the next call.
+    #[must_use]
+    pub fn is_match_with(&self, path: &str, scratch: &mut GlobScratch) -> bool {
+        scratch.match_path(self, path)
     }
 }
 
-/// Recognises the four-byte `/**/` token.
+/// Reusable matching memory owned by the caller.
 ///
-/// Checked before the three-byte forms because `/**/` shares its `/**` prefix
-/// with [`Token::SlashDoubleStar`]; the longest form must win or `a/**/b` would
-/// be lexed as `/**` followed by a literal `/`.
-///
-/// Returns the token and its length, or `None` when the pattern does not start
-/// with `/**/`.
-fn match_four_byte_prefix<'a>(pattern: &'a [u8]) -> Option<(Token<'a>, usize)> {
-    if pattern.starts_with(b"/**/") {
-        Some((Token::SlashDoubleStarSlash, 4))
-    } else {
-        None
+/// Its buffers are O(N): Unicode scalar indexing plus two rolling DP rows.
+/// Reusing it avoids allocating a row for each token or retaining path state in
+/// the compiled pattern.
+#[derive(Debug, Default)]
+pub struct GlobScratch {
+    /// Unicode scalar indexing for the current path.
+    scalars: Vec<char>,
+    /// Reachable offsets after the previous token.
+    previous: Vec<u8>,
+    /// Reachable offsets while processing the current token.
+    next: Vec<u8>,
+    /// Test-only measurements of parser and transition work.
+    work: Work,
+}
+
+impl GlobScratch {
+    /// Creates empty scratch buffers.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            scalars: Vec::new(),
+            previous: Vec::new(),
+            next: Vec::new(),
+            work: Work::new(),
+        }
+    }
+
+    /// Runs the two-row automaton, counting each inspected state as work.
+    fn match_path(&mut self, pattern: &GlobPattern, path: &str) -> bool {
+        self.scalars.clear();
+        self.scalars.extend(path.chars());
+        let row_len = self.scalars.len().saturating_add(1);
+        self.previous.resize(row_len, 0);
+        self.next.resize(row_len, 0);
+        self.previous.fill(0);
+        self.previous[0] = 1;
+        self.work.reset();
+
+        for token in &pattern.tokens {
+            self.next.fill(0);
+            step_token(
+                token,
+                &self.scalars,
+                &self.previous,
+                &mut self.next,
+                &mut self.work,
+            );
+            core::mem::swap(&mut self.previous, &mut self.next);
+        }
+        self.previous[self.scalars.len()] != 0
     }
 }
 
-/// Recognises the three-byte `/**` and `**/` tokens.
-///
-/// Both are tried here because each needs the neighbour separator that a bare
-/// `**` would otherwise consume, and the token list must carry that separator
-/// as part of the token so the DP steps stay single-pass.
-///
-/// Returns the token and its length, or `None` when neither prefix is present.
-fn match_three_byte_prefix<'a>(pattern: &'a [u8]) -> Option<(Token<'a>, usize)> {
-    if pattern.starts_with(b"/**") {
-        Some((Token::SlashDoubleStar, 3))
-    } else if pattern.starts_with(b"**/") {
-        Some((Token::DoubleStarSlash, 3))
-    } else {
-        None
-    }
+/// Counts deterministic parser and transition operations in test builds only.
+#[derive(Debug, Default)]
+struct Work {
+    /// Parser inspections, included only in unit-test builds.
+    #[cfg(test)]
+    parse: usize,
+    /// DP and class lookup inspections, included only in unit-test builds.
+    #[cfg(test)]
+    transition: usize,
 }
 
-/// Recognises any multi-character `*`-based token at the head of a pattern.
-///
-/// Applies the prefix matchers longest-first (`/**/`, then `/**` or `**/`,
-/// then a bare `**`) so no shorter token can shadow a longer one.
-///
-/// Returns the token and its length, or `None` when the head is not a
-/// double-star form and the caller must fall back to single-character lexing.
-fn match_special_prefix<'a>(pattern: &'a [u8]) -> Option<(Token<'a>, usize)> {
-    if let Some(tok) = match_four_byte_prefix(pattern) {
-        Some(tok)
-    } else if let Some(tok) = match_three_byte_prefix(pattern) {
-        Some(tok)
-    } else if pattern.starts_with(b"**") {
-        Some((Token::DoubleStar, 2))
-    } else {
-        None
+impl Work {
+    /// Creates an empty operation counter.
+    const fn new() -> Self {
+        Self {
+            #[cfg(test)]
+            parse: 0,
+            #[cfg(test)]
+            transition: 0,
+        }
     }
-}
 
-/// Lexes the single-character token at `pattern[0]`.
-///
-/// `*` and `?` are one byte; `[` delegates to [`parse_class_token`] so a class
-/// is consumed whole; every other byte (including `/`, which is an ordinary
-/// literal here) becomes [`Token::Literal`].
-///
-/// # Panics
-///
-/// Panics if `pattern` is empty. Every caller checks for an empty slice or has
-/// already consumed a token boundary, so `pattern[0]` always exists.
-fn match_single_char_token<'a>(pattern: &'a [u8]) -> (Token<'a>, usize) {
-    match pattern[0] {
-        b'*' => (Token::Star, 1),
-        b'?' => (Token::Question, 1),
-        b'[' => parse_class_token(pattern),
-        ch => (Token::Literal(ch), 1),
+    /// Clears operation counts before one observable match.
+    fn reset(&mut self) {
+        #[cfg(test)]
+        {
+            self.transition = 0;
+        }
     }
-}
 
-/// Lexes the next token from the front of `pattern`.
-///
-/// Returns the token and the number of bytes it consumed, or `None` at the end
-/// of the pattern. Multi-byte `*` forms are tried first so the longest match
-/// always wins.
-fn next_token<'a>(pattern: &'a [u8]) -> Option<(Token<'a>, usize)> {
-    if pattern.is_empty() {
-        return None;
+    /// Records one parser inspection in test builds.
+    fn parser_step(&mut self) {
+        #[cfg(test)]
+        {
+            self.parse = self.parse.saturating_add(1);
+        }
     }
-    if let Some(tok) = match_special_prefix(pattern) {
-        Some(tok)
-    } else {
-        Some(match_single_char_token(pattern))
-    }
-}
 
-/// Lexes an entire pattern into a token list.
-///
-/// Consumes the pattern front to back, and advances by exactly the byte count
-/// each token reports, so the list covers the pattern without gaps or overlap.
-/// The returned tokens borrow from `pattern`; nothing is copied.
-///
-/// Terminates because every token consumes at least one byte.
-fn tokenize<'a>(mut pattern: &'a [u8]) -> Vec<Token<'a>> {
-    let mut tokens = Vec::new();
-    while let Some((tok, consumed)) = next_token(pattern) {
-        tokens.push(tok);
-        pattern = &pattern[consumed..];
-    }
-    tokens
-}
-
-// ── DP Matching ─────────────────────────────────────────────────────────────
-
-/// Advances the DP row for one [`Token::Literal`].
-///
-/// `dp` is the previous row: `dp[n]` means "the first `n` path bytes matched the
-/// tokens consumed so far". A literal only extends a match whose next byte
-/// equals it exactly, and, because it is a literal, it may be a `/`.
-///
-/// `next` must be at least as long as `dp` and indexed by the same offsets; it
-/// is only ever written, never read, so a caller may pass a fresh `false` row.
-/// Both `j - 1` subtractions are guarded by the loop starting at 1, so they are
-/// saturating only to keep the arithmetic total, not to correct an underflow.
-fn step_literal(literal: u8, path: &[u8], dp: &[bool], next: &mut [bool]) {
-    for j in 1..=path.len() {
-        if dp[j.saturating_sub(1)] && path[j.saturating_sub(1)] == literal {
-            next[j] = true;
+    /// Records one transition inspection in test builds.
+    fn transition_step(&mut self) {
+        #[cfg(test)]
+        {
+            self.transition = self.transition.saturating_add(1);
         }
     }
 }
 
-/// Advances the DP row for one [`Token::Question`].
-///
-/// `?` matches exactly one path byte, and never `/`; that refusal is what
-/// INV-GLOB-SEPARATOR requires of a single wildcard, so a `?` cannot silently
-/// step into a subdirectory. See [`step_literal`] for the row convention.
-fn step_question(path: &[u8], dp: &[bool], next: &mut [bool]) {
-    for j in 1..=path.len() {
-        if dp[j.saturating_sub(1)] && path[j.saturating_sub(1)] != b'/' {
-            next[j] = true;
+/// Compiles chars and class ranges once; tokens borrow no caller data.
+fn compile_pattern(
+    pattern: &str,
+    dialect: GlobDialect,
+    work: &mut Work,
+) -> Result<GlobPattern, PatternError> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut next_close = vec![chars.len(); chars.len().saturating_add(1)];
+    let mut nearest = chars.len();
+    for index in (0..chars.len()).rev() {
+        work.parser_step();
+        if chars[index] == ']' {
+            nearest = index;
         }
+        next_close[index] = nearest;
     }
-}
 
-/// Advances the DP row for one [`Token::Class`].
-///
-/// A class consumes exactly one non-separator byte, like [`Token::Question`],
-/// and then asks `scan_class_body` whether that byte is a member. `negated`
-/// inverts the membership test, so `[!a-z]` accepts anything outside the range
-/// except `/`. See [`step_literal`] for the row convention.
-fn step_class(body: &[u8], negated: bool, path: &[u8], dp: &[bool], next: &mut [bool]) {
-    for j in 1..=path.len() {
-        if dp[j.saturating_sub(1)] && path[j.saturating_sub(1)] != b'/' {
-            let matches_body = scan_class_body(body, path[j.saturating_sub(1)]);
-            let hit = if negated { !matches_body } else { matches_body };
-            if hit {
-                next[j] = true;
+    let mut star_cursor = 0;
+    while star_cursor < chars.len() {
+        work.parser_step();
+        if chars[star_cursor] == '[' {
+            let (_, _, close) = class_bounds(&chars, &next_close, star_cursor);
+            star_cursor = if close < chars.len() {
+                close.saturating_add(1)
+            } else if dialect == GlobDialect::Strict {
+                chars.len()
+            } else {
+                star_cursor.saturating_add(1)
+            };
+        } else if chars[star_cursor] == '*'
+            && chars.get(star_cursor.saturating_add(1)) == Some(&'*')
+        {
+            let run_start = star_cursor;
+            while chars.get(star_cursor) == Some(&'*') {
+                work.parser_step();
+                star_cursor = star_cursor.saturating_add(1);
             }
+            let left_boundary = run_start == 0 || chars[run_start.saturating_sub(1)] == '/';
+            let right_boundary = star_cursor == chars.len() || chars.get(star_cursor) == Some(&'/');
+            if dialect == GlobDialect::Strict
+                && (star_cursor.saturating_sub(run_start) != 2 || !left_boundary || !right_boundary)
+            {
+                return Err(PatternError {
+                    kind: PatternErrorKind::DoubleStarPlacement,
+                    byte_offset: byte_offset(&chars, run_start),
+                });
+            }
+        } else {
+            star_cursor = star_cursor.saturating_add(1);
         }
     }
-}
 
-/// Advances the DP row for one [`Token::Star`].
-///
-/// `*` matches a run of zero or more bytes but stops at the first `/`, so from
-/// each reachable offset the star can carry the match forward only until the
-/// next separator. The inner loop breaks at that separator, leaving every byte
-/// beyond it unreachable, which is exactly the separator invariant.
-///
-/// `for reach in j + 1..=path.len()`: `j` is at most `path.len()`, so the start
-/// stays within the length-plus-one indexing range of `next` and cannot
-/// overflow.
-fn step_star(path: &[u8], dp: &[bool], next: &mut [bool]) {
-    for j in 0..=path.len() {
-        if dp[j] {
-            next[j] = true;
-            for reach in j.saturating_add(1)..=path.len() {
-                if path[reach.saturating_sub(1)] == b'/' {
-                    break;
+    let mut tokens = Vec::with_capacity(chars.len());
+    let mut index = 0;
+    while index < chars.len() {
+        work.parser_step();
+        if starts_with(&chars, index, &['/', '*', '*', '/']) {
+            tokens.push(Token::SlashDoubleStarSlash);
+            index = index.saturating_add(4);
+        } else if starts_with(&chars, index, &['/', '*', '*']) {
+            tokens.push(Token::SlashDoubleStar);
+            index = index.saturating_add(3);
+        } else if starts_with(&chars, index, &['*', '*', '/']) {
+            tokens.push(Token::DoubleStarSlash);
+            index = index.saturating_add(3);
+        } else if starts_with(&chars, index, &['*', '*']) {
+            let previous_is_separator = index == 0 || chars[index.saturating_sub(1)] == '/';
+            let after = index.saturating_add(2);
+            let next_is_separator = after == chars.len() || chars.get(after) == Some(&'/');
+            if dialect == GlobDialect::Strict && !(previous_is_separator && next_is_separator) {
+                return Err(PatternError {
+                    kind: PatternErrorKind::DoubleStarPlacement,
+                    byte_offset: byte_offset(&chars, index),
+                });
+            }
+            tokens.push(Token::DoubleStar);
+            index = after;
+        } else if chars[index] == '*' {
+            tokens.push(Token::Star);
+            index = index.saturating_add(1);
+        } else if chars[index] == '?' {
+            tokens.push(Token::Question);
+            index = index.saturating_add(1);
+        } else if chars[index] == '[' {
+            let (negated, content, close) = class_bounds(&chars, &next_close, index);
+            if close == chars.len() {
+                if dialect == GlobDialect::Strict {
+                    return Err(PatternError {
+                        kind: PatternErrorKind::UnclosedClass,
+                        byte_offset: byte_offset(&chars, index),
+                    });
                 }
-                next[reach] = true;
+                tokens.push(Token::Literal('['));
+                index = index.saturating_add(1);
+            } else {
+                let ranges = compile_class(&chars[content..close], dialect, index, work)?;
+                tokens.push(Token::Class { ranges, negated });
+                index = close.saturating_add(1);
             }
+        } else {
+            tokens.push(Token::Literal(chars[index]));
+            index = index.saturating_add(1);
         }
     }
+    Ok(GlobPattern { tokens })
 }
 
-/// Advances the DP row for one [`Token::DoubleStar`].
-///
-/// A bare `**` matches any run of bytes including separators, so once any offset
-/// is reachable every later offset is reachable too. The scan therefore carries
-/// a single `any` flag forward instead of looping per offset, which keeps the
-/// step linear in the path length.
-fn step_double_star(path: &[u8], dp: &[bool], next: &mut [bool]) {
-    let mut any = false;
-    for j in 0..=path.len() {
-        any |= dp[j];
-        if any {
-            next[j] = true;
-        }
+/// Tests a short token prefix without allocating a suffix or rescanning input.
+fn starts_with(chars: &[char], offset: usize, prefix: &[char]) -> bool {
+    chars.get(offset..offset.saturating_add(prefix.len())) == Some(prefix)
+}
+
+/// Resolves one class opener using the precomputed linear-time close index.
+fn class_bounds(chars: &[char], next_close: &[usize], opening: usize) -> (bool, usize, usize) {
+    let mut content = opening.saturating_add(1);
+    let negated = matches!(chars.get(content), Some('!' | '^'));
+    if negated {
+        content = content.saturating_add(1);
     }
+    let mut closing_search = content;
+    if chars.get(closing_search) == Some(&']') {
+        closing_search = closing_search.saturating_add(1);
+    }
+    let close = next_close
+        .get(closing_search)
+        .copied()
+        .unwrap_or(chars.len());
+    (negated, content, close)
 }
 
-/// Advances the DP row for one [`Token::DoubleStarSlash`] (`**/`).
-///
-/// The token owns the `/` that follows the `**`, so from each reachable offset
-/// it can resume at that offset (covering zero directories) or at any offset
-/// after a separator. Unlike [`Token::Star`] the inner scan does not break on
-/// `/`; `**/` is allowed to cross separators, which is what makes `**/b` match
-/// `x/y/b`.
-///
-/// `for reach in j + 1..=path.len()` is bounded by the path length, so it
-/// cannot overflow and always indexes within `next`.
-fn step_double_star_slash(path: &[u8], dp: &[bool], next: &mut [bool]) {
-    for j in 0..=path.len() {
-        if dp[j] {
-            next[j] = true;
-            for reach in j.saturating_add(1)..=path.len() {
-                if path[reach.saturating_sub(1)] == b'/' {
-                    next[reach] = true;
-                }
+/// Converts a scalar offset to the public UTF-8 byte-offset convention.
+fn byte_offset(chars: &[char], scalar_offset: usize) -> usize {
+    chars
+        .get(..scalar_offset)
+        .unwrap_or(chars)
+        .iter()
+        .map(|ch| ch.len_utf8())
+        .sum()
+}
+
+/// Compiles the members of one class into intervals sorted for binary lookup.
+fn compile_class(
+    body: &[char],
+    dialect: GlobDialect,
+    class_offset: usize,
+    work: &mut Work,
+) -> Result<Vec<ScalarRange>, PatternError> {
+    let mut ranges = Vec::with_capacity(body.len());
+    let mut index = 0;
+    while index < body.len() {
+        work.parser_step();
+        if index.saturating_add(2) < body.len() && body[index.saturating_add(1)] == '-' {
+            let start = body[index];
+            let end = body[index.saturating_add(2)];
+            if start > end && dialect == GlobDialect::Strict {
+                return Err(PatternError {
+                    kind: PatternErrorKind::DescendingRange,
+                    byte_offset: class_offset,
+                });
             }
-        }
-    }
-}
-
-/// Advances the DP row for one [`Token::SlashDoubleStar`] (`/**`).
-///
-/// The leading `/` is part of the token, so this step is a *literal* separator:
-/// it extends only to immediately after a `/`, and from there the trailing `**`
-/// accepts everything to the end of the path. That is why `a/**` matches `a`
-/// (zero trailing segments) as well as `a/b/c`.
-///
-/// `next[j + 1..=path.len()]` is guarded by `j < path.len()`, so the range is
-/// non-empty and both bounds are within `next`.
-fn step_slash_double_star(path: &[u8], dp: &[bool], next: &mut [bool]) {
-    for j in 0..=path.len() {
-        if dp[j] {
-            next[j] = true;
-            if j < path.len() && path[j] == b'/' {
-                for slot in &mut next[j.saturating_add(1)..=path.len()] {
-                    *slot = true;
-                }
+            if start <= end {
+                ranges.push(ScalarRange { start, end });
             }
+            index = index.saturating_add(3);
+        } else {
+            ranges.push(ScalarRange {
+                start: body[index],
+                end: body[index],
+            });
+            index = index.saturating_add(1);
         }
     }
+    radix_sort_ranges(&mut ranges, work);
+    merge_overlapping_ranges(&mut ranges, work);
+    Ok(ranges)
 }
 
-/// Advances the DP row for one [`Token::SlashDoubleStarSlash`] (`/**/`).
-///
-/// Both separators belong to the token, so it requires at least one full
-/// segment: a `/` must follow the reachable offset, and the match resumes
-/// immediately after it. The trailing scan then allows any further bytes,
-/// including more separators, so `a/**/b` matches `a/x/y/b`.
-///
-/// The `next[j + 1]` write is guarded by `j < path.len()`, and the loop
-/// `reach in j + 2..=path.len()` is bounded by the path length, so neither index
-/// can exceed the row.
-fn step_slash_double_star_slash(path: &[u8], dp: &[bool], next: &mut [bool]) {
-    for j in 0..=path.len() {
-        if dp[j] && j < path.len() && path[j] == b'/' {
-            next[j.saturating_add(1)] = true;
-            for reach in j.saturating_add(2)..=path.len() {
-                if path[reach.saturating_sub(1)] == b'/' {
-                    next[reach] = true;
-                }
+/// Merges overlapping intervals so binary-search membership remains monotone.
+fn merge_overlapping_ranges(ranges: &mut Vec<ScalarRange>, work: &mut Work) {
+    let mut written = 0_usize;
+    for read in 0..ranges.len() {
+        work.parser_step();
+        let range = ranges[read];
+        if written > 0 && range.start <= ranges[written.saturating_sub(1)].end {
+            let previous = &mut ranges[written.saturating_sub(1)];
+            if range.end > previous.end {
+                previous.end = range.end;
             }
+        } else {
+            ranges[written] = range;
+            written = written.saturating_add(1);
         }
+    }
+    ranges.truncate(written);
+}
+
+/// Sorts scalar intervals in linear time using six fixed-width radix passes.
+fn radix_sort_ranges(ranges: &mut Vec<ScalarRange>, work: &mut Work) {
+    if ranges.len() < 2 {
+        return;
+    }
+    let mut output = vec![ranges[0]; ranges.len()];
+    for shift in [0_u32, 8, 16, 24, 32, 40] {
+        let mut counts = [0_usize; 256];
+        for range in ranges.iter() {
+            work.parser_step();
+            let bucket = range_bucket(*range, shift);
+            counts[bucket] = counts[bucket].saturating_add(1);
+        }
+        let mut positions = [0_usize; 256];
+        let mut start = 0;
+        for bucket in 0..counts.len() {
+            work.parser_step();
+            positions[bucket] = start;
+            start = start.saturating_add(counts[bucket]);
+        }
+        for range in ranges.iter() {
+            work.parser_step();
+            let bucket = range_bucket(*range, shift);
+            let position = positions[bucket];
+            output[position] = *range;
+            positions[bucket] = position.saturating_add(1);
+        }
+        core::mem::swap(ranges, &mut output);
     }
 }
 
-/// Dispatches one token to the step function that knows how to advance it.
-///
-/// Every token advances exactly one DP row, so the traversal in [`matches`]
-/// stays a single pass over the token list regardless of which token is next.
-/// Matching on `*token` reads the token by value: every field of [`Token`] is
-/// `Copy`, so this copies a byte or a pair of small values and never moves
-/// borrowed pattern data.
-fn step_token(token: &Token<'_>, path: &[u8], dp: &[bool], next: &mut [bool]) {
+/// Returns the current radix bucket for the lexicographic `(start, end)` key.
+fn range_bucket(range: ScalarRange, shift: u32) -> usize {
+    let start = u64::from(u32::from(range.start));
+    let end = u64::from(u32::from(range.end));
+    let key = (start << 21) | end;
+    usize::from(u8::try_from((key >> shift) & 0xff).unwrap_or(0))
+}
+
+/// Advances one compiled token over one path using the rolling previous row.
+fn step_token(token: &Token, path: &[char], previous: &[u8], next: &mut [u8], work: &mut Work) {
     match *token {
-        Token::Literal(literal) => step_literal(literal, path, dp, next),
-        Token::Question => step_question(path, dp, next),
-        Token::Class { body, negated } => step_class(body, negated, path, dp, next),
-        Token::Star => step_star(path, dp, next),
-        Token::DoubleStar => step_double_star(path, dp, next),
-        Token::DoubleStarSlash => step_double_star_slash(path, dp, next),
-        Token::SlashDoubleStar => step_slash_double_star(path, dp, next),
-        Token::SlashDoubleStarSlash => step_slash_double_star_slash(path, dp, next),
+        Token::Literal(literal) => {
+            for offset in 0..path.len() {
+                work.transition_step();
+                if previous[offset] != 0 && path[offset] == literal {
+                    next[offset.saturating_add(1)] = 1;
+                }
+            }
+        }
+        Token::Question => {
+            for offset in 0..path.len() {
+                work.transition_step();
+                if previous[offset] != 0 && path[offset] != '/' {
+                    next[offset.saturating_add(1)] = 1;
+                }
+            }
+        }
+        Token::Class {
+            ref ranges,
+            negated,
+        } => {
+            for offset in 0..path.len() {
+                work.transition_step();
+                let member = class_contains(ranges, path[offset], work);
+                if previous[offset] != 0 && path[offset] != '/' && (member != negated) {
+                    next[offset.saturating_add(1)] = 1;
+                }
+            }
+        }
+        Token::Star => {
+            for offset in 0..=path.len() {
+                work.transition_step();
+                let zero_or_more = previous[offset] != 0
+                    || (offset > 0
+                        && next[offset.saturating_sub(1)] != 0
+                        && path[offset.saturating_sub(1)] != '/');
+                next[offset] = u8::from(zero_or_more);
+            }
+        }
+        Token::DoubleStar => {
+            let mut reachable = false;
+            for offset in 0..=path.len() {
+                work.transition_step();
+                reachable |= previous[offset] != 0;
+                next[offset] = u8::from(reachable);
+            }
+        }
+        Token::DoubleStarSlash => {
+            let mut reachable = false;
+            for offset in 0..=path.len() {
+                work.transition_step();
+                if offset > 0 && path[offset.saturating_sub(1)] == '/' {
+                    reachable |= previous[offset.saturating_sub(1)] != 0;
+                    next[offset] = u8::from(reachable);
+                }
+                next[offset] |= previous[offset];
+                reachable |= previous[offset] != 0;
+            }
+        }
+        Token::SlashDoubleStar => {
+            let mut can_extend = false;
+            for offset in 0..=path.len() {
+                work.transition_step();
+                if offset > 0 {
+                    can_extend |= previous[offset.saturating_sub(1)] != 0
+                        && path[offset.saturating_sub(1)] == '/';
+                }
+                next[offset] = u8::from(can_extend || previous[offset] != 0);
+            }
+        }
+        Token::SlashDoubleStarSlash => {
+            let mut started = false;
+            for offset in 1..=path.len() {
+                work.transition_step();
+                let separator = path[offset.saturating_sub(1)] == '/';
+                started |= previous[offset.saturating_sub(1)] != 0 && separator;
+                next[offset] = u8::from(started && separator);
+            }
+        }
     }
 }
 
-/// Reports whether `path` matches `pattern`.
+/// Looks up one scalar in pre-sorted, disjointness-independent intervals.
+fn class_contains(ranges: &[ScalarRange], value: char, work: &mut Work) -> bool {
+    if ranges.len() <= 16 {
+        ranges.iter().any(|range| {
+            work.transition_step();
+            range.start <= value && value <= range.end
+        })
+    } else {
+        ranges
+            .binary_search_by(|range| {
+                work.transition_step();
+                if value < range.start {
+                    core::cmp::Ordering::Greater
+                } else if value > range.end {
+                    core::cmp::Ordering::Less
+                } else {
+                    core::cmp::Ordering::Equal
+                }
+            })
+            .is_ok()
+    }
+}
+
+/// Reports whether `path` matches `pattern` using the historical permissive dialect.
 ///
-/// Supported syntax: `?` for one non-separator character, `*` for any run of
-/// non-separator characters, `**` for any run including separators, and
-/// `[abc]` / `[a-z]` / `[!a-z]` character classes.
-///
-/// Guaranteed $O(M \times N)$ time and $O(N)$ memory via deterministic DP.
+/// This one-call convenience function retains the old behavior: `?` and
+/// classes consume one Unicode scalar, `*` stops at `/`, `**` may cross `/`,
+/// unmatched `[` is literal, and `**` may occur within a component. It compiles
+/// O(M) pattern storage and allocates O(N) scratch. For repeated matches, use
+/// [`GlobPattern`] and reuse [`GlobScratch`].
 #[must_use]
 pub fn matches(pattern: &str, path: &str) -> bool {
-    let tokens = tokenize(pattern.as_bytes());
-    let path_bytes = path.as_bytes();
-    // Row `n` of the DP means "the first `n` path bytes are matched by the
-    // tokens consumed so far", so the row needs one slot past the path length.
-    // A path length is at most `isize::MAX`, which leaves room for the extra
-    // slot; saturating keeps the expression total on a length that large.
-    let row_len = path_bytes.len().saturating_add(1);
-    let mut dp = vec![false; row_len];
-    // The empty prefix always matches, before any token has been consumed.
-    dp[0] = true;
-
-    for token in &tokens {
-        let mut next = vec![false; row_len];
-        step_token(token, path_bytes, &dp, &mut next);
-        dp = next;
-    }
-
-    dp[path_bytes.len()]
+    let Ok(compiled) = GlobPattern::compile_with_dialect(pattern, GlobDialect::Legacy) else {
+        return false;
+    };
+    compiled.is_match(path)
 }
-
-// ── Character classes ───────────────────────────────────────────────────────
-
-/// Returns the offset of the first content byte of a class opened at
-/// `pattern[0]`.
-///
-/// Skips the opening `[`, then an optional `!` or `^` negation marker, then a
-/// leading `]`, which POSIX treats as a literal member rather than the class
-/// terminator. That last case is what makes `[]]` a class containing `]`.
-///
-/// The increments are bounded by `pattern.len()`, so neither can overflow;
-/// saturating_add keeps them total without a panic path.
-fn skip_class_prefix(pattern: &[u8]) -> usize {
-    let mut idx = 1;
-    if matches!(pattern.get(idx), Some(b'!' | b'^')) {
-        idx = idx.saturating_add(1);
-    }
-    if pattern.get(idx) == Some(&b']') {
-        idx = idx.saturating_add(1);
-    }
-    idx
-}
-
-/// Finds the next `]` at or after `start`.
-///
-/// Returns its offset, or `None` when the pattern ends first. `start` is
-/// clamped by the range expression itself, so an out-of-range start simply
-/// yields `None` rather than panicking.
-fn find_closing_bracket(pattern: &[u8], start: usize) -> Option<usize> {
-    (start..pattern.len()).find(|&idx| pattern[idx] == b']')
-}
-
-/// Index of the `]` that closes the class opening at `pattern[0]`, or `None` if
-/// the class is unterminated. A `]` in the first content position is a literal,
-/// per POSIX.
-fn class_end(pattern: &[u8]) -> Option<usize> {
-    let start = skip_class_prefix(pattern);
-    find_closing_bracket(pattern, start)
-}
-
-/// Tries to read a `a-z` range at `body[idx]`, falling back to a single member.
-///
-/// Returns whether the candidate was accepted, together with how many body
-/// bytes the attempt consumed: three for a range (`lo`, `-`, `hi`) and one for
-/// every other byte. Consuming one byte on a non-range is what lets a trailing
-/// dash such as `[a-]` be read as the literal `-` on the next iteration.
-///
-/// A range is only recognised when `idx + 2` is a valid body index, which is
-/// exactly the guard below; saturating keeps that guard total, and because a
-/// saturated offset always fails the comparison it degrades to the single-byte
-/// branch rather than misreading a range.
-fn match_range_or_single(body: &[u8], candidate: u8, idx: usize) -> (bool, usize) {
-    if idx.saturating_add(2) < body.len() && body[idx.saturating_add(1)] == b'-' {
-        let in_range = body[idx] <= candidate && candidate <= body[idx.saturating_add(2)];
-        (in_range, 3)
-    } else {
-        let is_match = body[idx] == candidate;
-        (is_match, 1)
-    }
-}
-
-/// Reports whether `candidate` is a member of a class body.
-///
-/// Walks left to right so that ranges and literals are interpreted in the order
-/// they were written, stopping at the first member that accepts `candidate`.
-/// The step is always at least one byte, so the scan terminates without
-/// consuming more than the body; a saturated offset would end the loop, which
-/// is the correct outcome for a body that long.
-fn scan_class_body(body: &[u8], candidate: u8) -> bool {
-    let mut idx = 0;
-    while idx < body.len() {
-        let (matched, step) = match_range_or_single(body, candidate, idx);
-        if matched {
-            return true;
-        }
-        idx = idx.saturating_add(step);
-    }
-    false
-}
-
-// ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn an_empty_pattern_matches_only_an_empty_path() {
-        assert!(matches("", ""));
-        assert!(!matches("", "a"));
+    fn empty_and_literal_inputs_keep_exact_results() {
+        assert!(matches("", ""), "empty pattern matches the empty path");
+        assert!(!matches("", "a"), "empty pattern rejects non-empty path");
+        assert!(matches("hello", "hello"), "literal text matches itself");
+        assert!(
+            !matches("hello", "world"),
+            "different literal text does not match"
+        );
+        assert!(!matches("hello", "hello/world"), "matching is anchored");
+        assert!(matches("[", "["), "literal bracket remains matchable");
+        assert!(
+            matches("[abc", "[abc"),
+            "legacy unclosed bracket remains literal"
+        );
     }
 
     #[test]
-    fn a_literal_pattern_matches_only_itself() {
-        assert!(matches("hello", "hello"));
-        assert!(!matches("hello", "world"));
-        assert!(!matches("hello", "hello/world"));
+    fn question_and_star_preserve_separator_boundaries() {
+        assert!(matches("a?c", "abc"), "question consumes one scalar");
+        assert!(matches("a*c", "abbc"), "star consumes a same-segment run");
+        assert!(!matches("a?c", "a/c"), "question never consumes slash");
+        assert!(!matches("a*c", "a/b/c"), "single star never crosses slash");
+        assert!(
+            matches("*.rs", ".hidden.rs"),
+            "leading dots are ordinary text"
+        );
+        assert!(matches("a\\b", "a\\b"), "backslash is an ordinary literal");
     }
 
     #[test]
-    fn question_mark_matches_one_non_separator() {
-        assert!(matches("a?c", "abc"));
-        assert!(matches("a?c", "a.c"));
-        assert!(!matches("a?c", "a/c"));
-        assert!(!matches("a?c", "ac"));
-        assert!(!matches("a?c", "abbc"));
+    fn classes_are_scalar_ordered_and_never_match_slash() {
+        assert!(matches("[é]", "é"), "a class matches one multibyte scalar");
+        assert!(
+            matches("[zyxwvutsrqponmlkjihgfedcba]", "a"),
+            "large unordered classes are compiled for logarithmic lookup"
+        );
+        assert!(
+            matches("[a-zb-c]", "y"),
+            "overlapping ranges merge before binary-search membership"
+        );
+        assert!(matches("[অ-ঊ]", "ঈ"), "Bengali range follows scalar order");
+        assert!(
+            matches("[😀-🙏]", "😃"),
+            "supplementary range follows scalar order"
+        );
+        assert!(
+            !matches("?", "e\u{301}"),
+            "question does not collapse a decomposed two-scalar sequence"
+        );
+        assert!(
+            matches("??", "e\u{301}"),
+            "two questions consume the decomposed base and combining scalar"
+        );
+        assert!(
+            !matches("?", "éx"),
+            "one question does not consume two scalars"
+        );
+        assert!(!matches("??", "é"), "two questions do not match one scalar");
+        assert!(!matches("[!a]", "/"), "negated classes still exclude slash");
+        assert!(!matches("[a-z]", "/"), "ranges exclude slash");
+        assert!(!matches("?", "/"), "question excludes slash");
+        assert!(!matches("*", "a/b"), "star does not cross slash");
     }
 
     #[test]
-    fn star_does_not_cross_a_separator() {
-        assert!(matches("a*c", "ac"));
-        assert!(matches("a*c", "abc"));
-        assert!(matches("a*c", "abbc"));
-        assert!(!matches("a*c", "a/c"));
-        assert!(!matches("a*c", "a/b/c"));
-        assert!(matches("*.rs", "main.rs"));
-        assert!(!matches("*.rs", "src/main.rs"));
+    fn double_star_legacy_forms_keep_exact_directory_reach() {
+        assert!(
+            matches("a/**/b", "a/b"),
+            "double-star slash accepts zero directories"
+        );
+        assert!(
+            matches("a/**/b", "a/x/y/b"),
+            "double-star slash accepts nested directories"
+        );
+        assert!(
+            matches("**/b", "b"),
+            "leading double-star slash accepts no directory"
+        );
+        assert!(
+            matches("**/b", "a/b"),
+            "leading double-star slash accepts one directory"
+        );
+        assert!(
+            matches("**/b", "x/y/b"),
+            "leading double-star slash accepts nested directories"
+        );
+        assert!(
+            matches("a/**", "a"),
+            "trailing slash double-star accepts no suffix"
+        );
+        assert!(
+            matches("a**b", "a/x/y/b"),
+            "legacy embedded double-star may cross slash"
+        );
+        assert!(
+            !GlobPattern::compile("a**b").is_ok(),
+            "strict dialect rejects embedded double-star"
+        );
     }
 
     #[test]
-    fn double_star_crosses_separators() {
-        assert!(matches("a/**/b", "a/b"));
-        assert!(matches("a/**/b", "a/x/b"));
-        assert!(matches("a/**/b", "a/x/y/z/b"));
-        assert!(matches("**/b", "b"));
-        assert!(matches("**/b", "a/b"));
-        assert!(matches("**/b", "x/y/b"));
-        assert!(matches("a/**", "a"));
-        assert!(matches("a/**", "a/b"));
-        assert!(matches("a/**", "a/b/c"));
+    fn checked_compilation_reports_each_malformed_pattern_class() {
+        assert_eq!(
+            GlobPattern::compile("[abc").map(|_| ()),
+            Err(PatternError {
+                kind: PatternErrorKind::UnclosedClass,
+                byte_offset: 0,
+            }),
+            "strict compilation reports an unclosed class offset"
+        );
+        assert_eq!(
+            GlobPattern::compile("[]").map(|_| ()),
+            Err(PatternError {
+                kind: PatternErrorKind::UnclosedClass,
+                byte_offset: 0,
+            }),
+            "strict compilation reports the unclosed leading-bracket class"
+        );
+        assert_eq!(
+            GlobPattern::compile("[z-a]").map(|_| ()),
+            Err(PatternError {
+                kind: PatternErrorKind::DescendingRange,
+                byte_offset: 0,
+            }),
+            "strict compilation reports a descending range"
+        );
+        assert!(
+            !matches("[z-a]", "a"),
+            "legacy descending range remains a no-match class"
+        );
+        assert!(
+            matches("[]]", "]"),
+            "leading close bracket remains a class member"
+        );
+        assert!(
+            matches("[!]]", "a"),
+            "negated leading close bracket class remains valid"
+        );
     }
 
     #[test]
-    fn double_star_matches_nothing_in_between() {
-        assert!(matches("a**b", "ab"));
-        assert!(matches("a**b", "axb"));
-        assert!(matches("a**b", "a/b"));
-        assert!(matches("a**b", "a/x/y/b"));
+    fn compiled_and_one_call_paths_have_identical_public_semantics() -> Result<(), PatternError> {
+        let pattern = GlobPattern::compile_with_dialect("a**[b-d]?", GlobDialect::Legacy)?;
+        let mut scratch = GlobScratch::new();
+        for (path, expected) in [("axy/bc", true), ("abz", true), ("a/x/dé", true)] {
+            assert_eq!(
+                matches("a**[b-d]?", path),
+                expected,
+                "one-call result is stable"
+            );
+            assert_eq!(
+                pattern.is_match_with(path, &mut scratch),
+                expected,
+                "compiled result matches one-call result"
+            );
+        }
+        Ok(())
     }
 
     #[test]
-    fn a_class_never_matches_a_separator() {
-        assert!(!matches("[/]", "/"));
-        assert!(!matches("[a/z]", "/"));
-        assert!(!matches("[!a]", "/"));
+    fn each_transition_has_linear_measured_work_for_n_2n_4n() -> Result<(), PatternError> {
+        let pattern = GlobPattern::compile_with_dialect("*a*", GlobDialect::Legacy)?;
+        let mut previous = 0_usize;
+        for size in [256_usize, 512, 1024] {
+            let path = "a".repeat(size);
+            let mut scratch = GlobScratch::new();
+            assert!(
+                pattern.is_match_with(&path, &mut scratch),
+                "repeated a path matches"
+            );
+            let measured = scratch.work.transition;
+            assert!(
+                measured <= pattern.tokens.len().saturating_mul(size.saturating_add(1)),
+                "work is bounded by token_count * scalar_count: {measured}"
+            );
+            if previous != 0 {
+                assert!(
+                    measured
+                        <= previous
+                            .saturating_mul(2)
+                            .saturating_add(pattern.tokens.len()),
+                    "doubling input does not produce quadratic work: {previous} -> {measured}"
+                );
+            }
+            previous = measured;
+        }
+        Ok(())
     }
 
     #[test]
-    fn a_negated_class_excludes_its_members() {
-        assert!(!matches("[!abc]", "a"));
-        assert!(!matches("[!abc]", "b"));
-        assert!(!matches("[!abc]", "c"));
-        assert!(matches("[!abc]", "d"));
-        assert!(!matches("[^abc]", "a"));
-        assert!(matches("[^abc]", "d"));
+    fn every_double_star_transition_scales_linearly() -> Result<(), PatternError> {
+        for source in ["**", "**/x", "a/**", "a/**/b"] {
+            let pattern = GlobPattern::compile_with_dialect(source, GlobDialect::Legacy)?;
+            let mut previous = 0_usize;
+            for size in [256_usize, 512, 1024] {
+                let path = format!("a/{}/b", "x/".repeat(size.div_ceil(2)));
+                let mut scratch = GlobScratch::new();
+                let matched = pattern.is_match_with(&path, &mut scratch);
+                assert_eq!(
+                    matched,
+                    source != "**/x",
+                    "double-star transition preserves expected path result"
+                );
+                let measured = scratch.work.transition;
+                assert!(
+                    measured
+                        <= pattern
+                            .tokens
+                            .len()
+                            .saturating_mul(path.chars().count().saturating_add(1)),
+                    "{source} transition work is linear: {measured}"
+                );
+                if previous != 0 {
+                    assert!(
+                        measured
+                            <= previous
+                                .saturating_mul(2)
+                                .saturating_add(pattern.tokens.len()),
+                        "{source} work growth is linear: {previous} -> {measured}"
+                    );
+                }
+                previous = measured;
+            }
+        }
+        Ok(())
     }
 
     #[test]
-    fn a_trailing_dash_in_a_class_is_a_literal() {
-        assert!(matches("[a-]", "a"));
-        assert!(matches("[a-]", "-"));
-        assert!(!matches("[a-]", "b"));
+    fn unmatched_class_parser_work_is_linear_and_controls_are_explicit() -> Result<(), PatternError>
+    {
+        let mut previous = 0_usize;
+        for size in [256_usize, 512, 1024] {
+            let source = "[".repeat(size);
+            let mut work = Work::default();
+            let pattern = compile_pattern(&source, GlobDialect::Legacy, &mut work)?;
+            let measured = work.parse;
+            assert!(
+                measured <= size.saturating_mul(3),
+                "parser inspections remain linear: {measured}"
+            );
+            if previous != 0 {
+                assert!(
+                    measured <= previous.saturating_mul(2).saturating_add(3),
+                    "doubling pattern does not cause suffix rescans: {previous} -> {measured}"
+                );
+            }
+            assert_eq!(
+                pattern.tokens.len(),
+                size,
+                "each unmatched bracket remains a literal"
+            );
+            previous = measured;
+        }
+        assert!(
+            GlobPattern::compile("[abc]").is_ok(),
+            "normal class control compiles"
+        );
+        assert!(
+            matches("[abc", "[abc"),
+            "literal malformed-class control uses legacy behavior"
+        );
+        assert_eq!(
+            GlobPattern::compile("[abc").map(|_| ()),
+            Err(PatternError {
+                kind: PatternErrorKind::UnclosedClass,
+                byte_offset: 0,
+            }),
+            "strict malformed-class control is explicit"
+        );
+        Ok(())
     }
 
     #[test]
-    fn an_unterminated_class_is_a_literal_bracket() {
-        assert!(matches("[abc", "[abc"));
-        assert!(!matches("[abc", "a"));
-    }
-
-    #[test]
-    fn backtracking_terminates_on_a_pathological_pattern() {
-        // Pathological regex/glob backtracking case: a*a*a*a*b on aaaaaaa...
-        let pattern = "a*a*a*a*a*a*b";
-        let path = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        assert!(!matches(pattern, path));
+    fn scratch_capacity_is_reused_without_per_token_row_allocations() -> Result<(), PatternError> {
+        let pattern = GlobPattern::compile_with_dialect("*a**/b[0-9]?", GlobDialect::Legacy)?;
+        let mut scratch = GlobScratch::new();
+        assert!(
+            pattern.is_match_with("a/x/b7é", &mut scratch),
+            "first match succeeds"
+        );
+        let capacities = (
+            scratch.scalars.capacity(),
+            scratch.previous.capacity(),
+            scratch.next.capacity(),
+        );
+        for _ in 0..8 {
+            assert!(
+                pattern.is_match_with("a/x/b7é", &mut scratch),
+                "reused match succeeds"
+            );
+            assert_eq!(
+                (
+                    scratch.scalars.capacity(),
+                    scratch.previous.capacity(),
+                    scratch.next.capacity()
+                ),
+                capacities,
+                "scalar and two-row capacities remain fixed after warm capacity"
+            );
+        }
+        assert_eq!(
+            pattern.tokens.len(),
+            6,
+            "compiled pattern storage is counted separately"
+        );
+        Ok(())
     }
 }

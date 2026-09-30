@@ -5,6 +5,7 @@
 //! pair as RFC 3339 UTC text.
 
 use super::calendar::civil_from_days;
+use super::error::{FormatError, UnixTimeError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Nanoseconds in one second.
@@ -50,97 +51,112 @@ fn digit_byte(value: u32) -> u8 {
 /// nanosecond remainder points *forward* in time. That normalisation is what
 /// lets [`from_unix_parts`] invert this exactly.
 ///
-/// # Saturation
-///
-/// `Duration::as_secs` is a `u64`, so a `SystemTime` more than `i64::MAX`
-/// seconds from the epoch (about 292 billion years) has no `i64` second count
-/// and is reported as `i64::MAX`. No operating-system clock and no RFC 3339
-/// stamp reaches that point.
-#[must_use]
-pub fn unix_parts(at: SystemTime) -> (i64, u32) {
+/// Returns an error when the instant is outside the signed Unix-seconds range.
+pub fn unix_parts(at: SystemTime) -> Result<(i64, u32), UnixTimeError> {
     match at.duration_since(UNIX_EPOCH) {
-        Ok(duration_since_epoch) => (
-            i64::try_from(duration_since_epoch.as_secs()).unwrap_or(i64::MAX),
-            duration_since_epoch.subsec_nanos(),
-        ),
-        Err(before) => split_pre_epoch(before.duration()),
+        Ok(duration) => {
+            let seconds = i64::try_from(duration.as_secs()).map_err(|_| {
+                UnixTimeError::SystemTimeOutsideI64Range {
+                    before_epoch: false,
+                }
+            })?;
+            Ok((seconds, duration.subsec_nanos()))
+        }
+        Err(before) => {
+            let duration = before.duration();
+            if duration.as_secs() == i64::MAX.unsigned_abs().saturating_add(1)
+                && duration.subsec_nanos() == 0
+            {
+                return Ok((i64::MIN, 0));
+            }
+            let whole = i64::try_from(duration.as_secs())
+                .map_err(|_| UnixTimeError::SystemTimeOutsideI64Range { before_epoch: true })?;
+            let nanos = duration.subsec_nanos();
+            let seconds = if nanos == 0 {
+                whole.checked_neg()
+            } else {
+                whole.checked_neg().and_then(|value| value.checked_sub(1))
+            }
+            .ok_or(UnixTimeError::SystemTimeOutsideI64Range { before_epoch: true })?;
+            Ok((
+                seconds,
+                if nanos == 0 {
+                    0
+                } else {
+                    NANOS_PER_SECOND.saturating_sub(nanos)
+                },
+            ))
+        }
     }
 }
 
-/// Splits a duration measured *backwards* from the epoch into a signed second
-/// count and a forward nanosecond remainder.
-///
-/// `UNIX_EPOCH - 1.5s` is the instant `-2s + 0.5s`: the second count rounds
-/// down to `-2` and the remainder is `500_000_000`. Keeping the remainder
-/// non-negative is what makes the pair round-trip through
-/// [`from_unix_parts`], and what makes `to_rfc3339` render a pre-epoch instant
-/// with the same fractional digits it was parsed from.
-fn split_pre_epoch(duration: Duration) -> (i64, u32) {
-    // `Duration::as_secs` is a `u64`; see `unix_parts` for the saturation note.
-    let whole_seconds = i64::try_from(duration.as_secs()).unwrap_or(i64::MAX);
-    let nanos = duration.subsec_nanos();
-    if nanos == 0 {
-        // Whole-second instant: `UNIX_EPOCH - whole_seconds` has no fraction to
-        // normalise, so no second needs to be borrowed.
-        (whole_seconds.saturating_neg(), 0)
-    } else {
-        // `nanos` is `1..1_000_000_000`, so exactly one second is borrowed and
-        // the forward remainder is `1_000_000_000 - nanos`, in
-        // `1..1_000_000_000`.
-        (
-            whole_seconds.saturating_neg().saturating_sub(1),
-            NANOS_PER_SECOND.saturating_sub(nanos),
-        )
-    }
+/// Lossy compatibility form of [`unix_parts`], which clamps an instant beyond
+/// the signed Unix-seconds range. Prefer the checked function for decisions or
+/// serialized output.
+#[deprecated(note = "lossy; use unix_parts and handle UnixTimeError")]
+#[must_use]
+pub fn unix_parts_lossy(at: SystemTime) -> (i64, u32) {
+    unix_parts(at).unwrap_or_else(|error| match error {
+        UnixTimeError::SystemTimeOutsideI64Range { before_epoch: true } => (i64::MIN, 0),
+        UnixTimeError::SystemTimeOutsideI64Range {
+            before_epoch: false,
+        }
+        | UnixTimeError::SecondsOverflow { .. }
+        | UnixTimeError::SystemTimeOutOfRange { .. } => (i64::MAX, 0),
+    })
 }
 
-/// Converts seconds and nanoseconds into a `SystemTime`.
+/// Converts seconds and nanoseconds into a [`SystemTime`], or returns why the
+/// requested instant cannot be represented.
 ///
 /// The inverse of [`unix_parts`] for every pair that function can produce:
 /// `nanos` is read as a forward remainder, and a negative `secs` borrows a
 /// second when `nanos` is non-zero.
 ///
-/// Returns `UNIX_EPOCH` when the instant falls outside the range the platform
-/// clock can represent; see [`try_from_unix_parts`] for the fallible form and
-/// for how narrow that range is.
-#[must_use]
-pub fn from_unix_parts(secs: i64, nanos: u32) -> SystemTime {
-    try_from_unix_parts(secs, nanos).unwrap_or(UNIX_EPOCH)
-}
-
-/// Converts seconds and nanoseconds into a `SystemTime`, or [`None`] when the
-/// instant is outside the range the platform clock can represent.
+/// Nanosecond values at or above one billion are normalized into seconds. If
+/// that carry overflows or the platform clock rejects the resulting instant,
+/// the error preserves the failed input or normalized pair.
 ///
-/// This is the fallible form of [`from_unix_parts`]; the normalisation rules
-/// are documented there.
+/// ```rust
+/// use lgwks_std::time::format::{from_unix_parts, to_rfc3339};
 ///
-/// A `nanos` value of `1_000_000_000` or more is folded into whole seconds
-/// rather than passed to `Duration::new`, which would panic on it.
-#[must_use]
-pub fn try_from_unix_parts(secs: i64, nanos: u32) -> Option<SystemTime> {
-    // Fold any nanosecond overflow into whole seconds up front, so
-    // `Duration::new`, which panics when `nanos >= 1_000_000_000`, never sees an
-    // out-of-range count. The divisor is a non-zero constant, so neither
-    // `checked_*` fails.
+/// let instant = from_unix_parts(0, 0)?;
+/// assert_eq!(to_rfc3339(instant)?, "1970-01-01T00:00:00Z");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn from_unix_parts(secs: i64, nanos: u32) -> Result<SystemTime, UnixTimeError> {
     let carry = nanos.checked_div(NANOS_PER_SECOND).unwrap_or(0);
     let fraction = nanos.checked_rem(NANOS_PER_SECOND).unwrap_or(0);
-    // `carry` is `0..=4`, so this can only fail for `secs` already at `i64::MAX`.
-    let secs = secs.checked_add(i64::from(carry))?;
-    if secs >= 0 {
-        // Guarded non-negative, so the widening to `u64` is exact.
-        let whole = u64::try_from(secs).unwrap_or(0);
+    let normalized_secs =
+        secs.checked_add(i64::from(carry))
+            .ok_or(UnixTimeError::SecondsOverflow {
+                seconds: secs,
+                nanoseconds: nanos,
+            })?;
+    let instant = if normalized_secs >= 0 {
+        let whole = u64::try_from(normalized_secs).unwrap_or(0);
         UNIX_EPOCH.checked_add(Duration::new(whole, fraction))
     } else if fraction == 0 {
-        UNIX_EPOCH.checked_sub(Duration::new(secs.unsigned_abs(), 0))
+        UNIX_EPOCH.checked_sub(Duration::new(normalized_secs.unsigned_abs(), 0))
     } else {
-        // `secs < 0` here, so `unsigned_abs() >= 1` and the borrow cannot
-        // underflow; `fraction` is `1..1_000_000_000`, so the forward remainder
-        // is exact.
         UNIX_EPOCH.checked_sub(Duration::new(
-            secs.unsigned_abs().saturating_sub(1),
+            normalized_secs.unsigned_abs().saturating_sub(1),
             NANOS_PER_SECOND.saturating_sub(fraction),
         ))
-    }
+    };
+    instant.ok_or(UnixTimeError::SystemTimeOutOfRange {
+        seconds: normalized_secs,
+        nanoseconds: fraction,
+    })
+}
+
+/// Lossy compatibility form of [`from_unix_parts`]. It returns the Unix epoch
+/// when the input is outside the platform clock's range. Prefer the checked
+/// function for correctness-sensitive code.
+#[deprecated(note = "lossy; use from_unix_parts and handle UnixTimeError")]
+#[must_use]
+pub fn from_unix_parts_lossy(secs: i64, nanos: u32) -> SystemTime {
+    from_unix_parts(secs, nanos).unwrap_or(UNIX_EPOCH)
 }
 
 /// Appends the low two decimal digits of `value`, most significant first.
@@ -198,24 +214,9 @@ fn write_fraction(out: &mut String, nanos: u32) {
     }
 }
 
-/// Appends `YYYY-MM-DD` for a proleptic Gregorian date.
-///
-/// A year in `0..=9999` takes the fixed four-digit path. Any other year (only
-/// reachable from [`to_rfc3339`] for instants billions of years from the epoch)
-/// falls back to `format_args!("{year:04}")`, which prints the sign and pads
-/// the magnitude, so a negative year renders as `-001`.
+/// Appends `YYYY-MM-DD` for an RFC 3339 year already checked in `0..=9999`.
 fn write_civil(out: &mut String, year: i64, month: u32, day: u32) {
-    if (0..=9999).contains(&year) {
-        // Guarded non-negative and below 10_000, so the narrowing is exact.
-        write_four_digits(out, u32::try_from(year).unwrap_or(0));
-    } else {
-        use std::fmt::Write;
-        // `String`'s `fmt::Write` implementation formats into an in-memory
-        // buffer and cannot fail, so there is no error to report. Binding the
-        // `Result` consumes it without an `expect`, which would be a panic path
-        // in library code.
-        let _written = out.write_fmt(format_args!("{year:04}"));
-    }
+    write_four_digits(out, u32::try_from(year).unwrap_or(0));
     out.push('-');
     write_two_digits(out, month);
     out.push('-');
@@ -249,17 +250,19 @@ fn write_optional_fraction(out: &mut String, nanos: u32) {
 
 /// Formats a `SystemTime` as an RFC 3339 UTC string with fractional seconds.
 ///
-/// The result is always UTC (`Z`) and always round-trips through
-/// [`super::parse::parse_rfc3339`]: the fraction is omitted when zero and
-/// trailing zeros are trimmed otherwise, which is exactly the set of forms the
-/// parser accepts.
-#[must_use]
-pub fn to_rfc3339(at: SystemTime) -> String {
-    let (secs, nanos) = unix_parts(at);
+/// The result is UTC (`Z`) and round-trips through
+/// [`super::parse::parse_rfc3339`] when the UTC year is within `0000..=9999`.
+/// Instants outside that range, or outside the signed Unix-seconds domain, are
+/// refused instead of emitting extended-year text or a saturated timestamp.
+pub fn to_rfc3339(at: SystemTime) -> Result<String, FormatError> {
+    let (secs, nanos) = unix_parts(at).map_err(FormatError::UnixTime)?;
     // Floor division maps an epoch-second count onto the civil day that
     // contains it, for negative (pre-epoch) seconds too. The divisor is a
     // non-zero constant, so `div_euclid` cannot trap.
     let (year, month, day) = civil_from_days(secs.div_euclid(SECONDS_PER_DAY));
+    if !(0..=9999).contains(&year) {
+        return Err(FormatError::YearOutsideRfc3339 { year });
+    }
     // The remainder is in `0..SECONDS_PER_DAY`, so the narrowing to `u32` is
     // exact.
     let rem = u32::try_from(secs.rem_euclid(SECONDS_PER_DAY)).unwrap_or(0);
@@ -273,5 +276,5 @@ pub fn to_rfc3339(at: SystemTime) -> String {
     write_civil(&mut out, year, month, day);
     write_time_parts(&mut out, hour, min, sec);
     write_optional_fraction(&mut out, nanos);
-    out
+    Ok(out)
 }

@@ -63,7 +63,8 @@
 use std::fmt;
 
 use lgwks_std::similarity::{
-    EditDistance, Geometry, Jaccard, PathSimilarity, Similarity, Weighted, WeightedError,
+    BoundingBox, EditDistance, Geometry, Jaccard, PathSimilarity, Similarity, Weighted,
+    WeightedError,
 };
 
 /// The largest text length the default fingerprint will compare.
@@ -498,7 +499,9 @@ impl Similarity for GeometryComponent {
         // element at the origin rather than a fact nobody looked at. If that
         // ever stops being true the field has to become an `Option`, because a
         // sentinel value is not a presence rule.
-        self.metric.score(&left.bounds, &right.bounds)
+        let left_bounds = BoundingBox::from(left.bounds);
+        let right_bounds = BoundingBox::from(right.bounds);
+        self.metric.score(&left_bounds, &right_bounds)
     }
 }
 

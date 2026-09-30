@@ -1,0 +1,100 @@
+[package]
+name = "storefront-matrix-consumer"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[features]
+default = ["appcui"]
+appcui = ["lgwks_deps/appcui"]
+bevy-ecs = ["lgwks_deps/bevy-ecs"]
+gpui = ["lgwks_deps/gpui"]
+ml-candle = ["lgwks_deps/ml-candle"]
+ml-candle-metal = ["lgwks_deps/ml-candle-metal"]
+ml-tokenizers = ["lgwks_deps/ml-tokenizers"]
+process-group-probe = ["lgwks_deps/process-group-probe"]
+all-storefront = [
+    "appcui",
+    "bevy-ecs",
+    "gpui",
+    "ml-candle",
+    "ml-candle-metal",
+    "ml-tokenizers",
+    "process-group-probe",
+    "tokio-base",
+    "tokio-time",
+    "tokio-sync",
+    "tokio-macros",
+    "tokio-io",
+    "tokio-net",
+    "tokio-process",
+    "tokio-fs",
+    "tokio-signal",
+    "tokio-full",
+]
+tokio-base = ["lgwks_deps/tokio"]
+tokio-time = ["lgwks_deps/tokio-time"]
+tokio-sync = ["lgwks_deps/tokio-sync"]
+tokio-macros = ["lgwks_deps/tokio-macros"]
+tokio-io = ["lgwks_deps/tokio-io"]
+tokio-net = ["lgwks_deps/tokio-net"]
+tokio-process = ["lgwks_deps/tokio-process"]
+tokio-fs = ["lgwks_deps/tokio-fs"]
+tokio-signal = ["lgwks_deps/tokio-signal"]
+tokio-full = ["lgwks_deps/tokio-full"]
+
+[dependencies]
+lgwks_deps = { path = "../../..", default-features = false }
+
+[[example]]
+name = "appcui"
+required-features = ["appcui"]
+[[example]]
+name = "bevy_ecs"
+required-features = ["bevy-ecs"]
+[[example]]
+name = "gpui"
+required-features = ["gpui"]
+[[example]]
+name = "ml_candle"
+required-features = ["ml-candle"]
+[[example]]
+name = "ml_candle_metal"
+required-features = ["ml-candle-metal"]
+[[example]]
+name = "ml_tokenizers"
+required-features = ["ml-tokenizers"]
+[[example]]
+name = "process_group_probe"
+required-features = ["process-group-probe"]
+[[example]]
+name = "tokio_base"
+required-features = ["tokio-base"]
+[[example]]
+name = "tokio_time"
+required-features = ["tokio-time"]
+[[example]]
+name = "tokio_sync"
+required-features = ["tokio-sync"]
+[[example]]
+name = "tokio_macros"
+required-features = ["tokio-macros"]
+[[example]]
+name = "tokio_io"
+required-features = ["tokio-io"]
+[[example]]
+name = "tokio_net"
+required-features = ["tokio-net"]
+[[example]]
+name = "tokio_process"
+required-features = ["tokio-process"]
+[[example]]
+name = "tokio_fs"
+required-features = ["tokio-fs"]
+[[example]]
+name = "tokio_signal"
+required-features = ["tokio-signal"]
+[[example]]
+name = "tokio_full"
+required-features = ["tokio-full"]

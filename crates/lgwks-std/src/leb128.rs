@@ -1,6 +1,9 @@
-//! `leb128` owns variable-length integer encoding and decoding for WebAssembly
-//! and canonical binary serialization, enforcing INV-LEB128-MINIMAL: all
-//! decoders reject non-minimal or overflowing encodings to prevent malleability.
+//! `leb128` owns minimal signed and unsigned LEB128 encoding and prefix
+//! decoding. It accepts the canonical minimal subset used by WebAssembly, not
+//! WebAssembly's full padded-integer dialect: non-minimal and overflowing
+//! encodings are rejected to prevent multiple byte strings naming one value.
+//! Every decoder returns `(value, consumed)` and leaves trailing bytes for the
+//! caller.
 
 use std::error::Error;
 use std::fmt;
@@ -136,8 +139,9 @@ fn decode_u64_byte(
     }
 }
 
-/// Decodes an unsigned 64-bit integer from unsigned LEB128 bytes.
-/// Returns the decoded integer and the number of bytes consumed.
+/// Decodes one minimal unsigned 64-bit LEB128 value from the input prefix.
+/// Returns the decoded integer and the number of bytes consumed; trailing bytes
+/// are not inspected.
 pub fn decode_u64(input: &[u8]) -> Result<(u64, usize), DecodeError> {
     let mut result: u64 = 0;
     for (index, &byte) in input.iter().enumerate() {
@@ -229,8 +233,9 @@ fn decode_u32_byte(
     }
 }
 
-/// Decodes an unsigned 32-bit integer from unsigned LEB128 bytes.
-/// Returns the decoded integer and the number of bytes consumed.
+/// Decodes one minimal unsigned 32-bit LEB128 value from the input prefix.
+/// Returns the decoded integer and the number of bytes consumed; trailing bytes
+/// are not inspected.
 pub fn decode_u32(input: &[u8]) -> Result<(u32, usize), DecodeError> {
     let mut result: u32 = 0;
     for (index, &byte) in input.iter().enumerate() {
@@ -355,8 +360,9 @@ fn decode_i64_byte(
     }
 }
 
-/// Decodes a signed 64-bit integer from signed LEB128 bytes.
-/// Returns the decoded integer and the number of bytes consumed.
+/// Decodes one minimal signed 64-bit LEB128 value from the input prefix.
+/// Returns the decoded integer and the number of bytes consumed; trailing bytes
+/// are not inspected.
 pub fn decode_i64(input: &[u8]) -> Result<(i64, usize), DecodeError> {
     let mut result: u64 = 0;
     let mut prev_byte: u8 = 0;
@@ -477,8 +483,9 @@ fn decode_i32_byte(
     }
 }
 
-/// Decodes a signed 32-bit integer from signed LEB128 bytes.
-/// Returns the decoded integer and the number of bytes consumed.
+/// Decodes one minimal signed 32-bit LEB128 value from the input prefix.
+/// Returns the decoded integer and the number of bytes consumed; trailing bytes
+/// are not inspected.
 pub fn decode_i32(input: &[u8]) -> Result<(i32, usize), DecodeError> {
     let mut result: u32 = 0;
     let mut prev_byte: u8 = 0;
@@ -572,6 +579,30 @@ mod tests {
         assert_eq!(
             decode_i64(&non_minimal_signed),
             Err(DecodeError::NonMinimal { at: 1 })
+        );
+    }
+
+    #[test]
+    fn distinguishes_prefix_trailing_bytes_from_nonminimal_and_truncated_input() {
+        assert_eq!(
+            decode_u64(&[0x00, 0x7f]),
+            Ok((0, 1)),
+            "unsigned prefix decoding leaves the trailing byte untouched"
+        );
+        assert_eq!(
+            decode_i64(&[0x7f, 0x00]),
+            Ok((-1, 1)),
+            "signed prefix decoding leaves the trailing byte untouched"
+        );
+        assert_eq!(
+            decode_u64(&[0x80]),
+            Err(DecodeError::UnexpectedEnd { at: 1 }),
+            "unterminated continuation is distinct from trailing data"
+        );
+        assert_eq!(
+            decode_u64(&[0x80, 0x00]),
+            Err(DecodeError::NonMinimal { at: 1 }),
+            "a terminated padded zero is nonminimal"
         );
     }
 

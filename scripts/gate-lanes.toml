@@ -438,7 +438,10 @@ reason = "native storefront; three unnamed run steps, so it binds to the job nam
 id = "gpui-macos"
 surfaces = "local ci"
 required = false
-command = "cargo check --locked -p lgwks_deps --all-targets --features gpui"
+command = """\
+cargo check --locked -p lgwks_deps --all-targets --features gpui && \
+cargo check --locked --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml --no-default-features --features gpui --example gpui\
+"""
 ci_step = "Check normal GPUI renderer feature"
 platforms = ["darwin"]
 needs = ["bin:xcodebuild"]

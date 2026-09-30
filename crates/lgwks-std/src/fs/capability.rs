@@ -33,11 +33,23 @@
 //! [`OpenFlags`]: struct.OpenFlags.html
 //! [`SymlinkPolicy`]: enum.SymlinkPolicy.html
 
+#[cfg(unix)]
 use std::ffi::OsString;
+#[cfg(unix)]
 use std::io;
+#[cfg(unix)]
 use std::os::fd::AsFd;
+#[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
+#[cfg(unix)]
 use std::path::Path;
+
+// The same surface on every target: elsewhere each method reports
+// `Unsupported`, which is what the module and `fs` docs promise. Without this
+// re-export the stub was compiled and unreachable, so `--features fs-raw` on a
+// non-Unix target offered no `Dir` at all.
+#[cfg(not(unix))]
+pub use unsupported::Dir;
 
 /// A directory held open, for handle-relative access to what it contains.
 ///
@@ -527,10 +539,11 @@ mod unsupported {
     use std::io;
     use std::path::Path;
 
-    use super::{FileKind, OpenFlags, SymlinkPolicy};
+    use super::{FileKind, OpenFlags};
 
     /// Handle-relative filesystem access. Unix-only.
     #[derive(Debug)]
+    #[non_exhaustive]
     pub struct Dir;
 
     impl Dir {
@@ -585,16 +598,13 @@ mod unsupported {
         }
     }
 
+    /// The refusal every stub returns, naming the method that was called.
     fn unsupported(name: &'static str) -> io::Error {
         io::Error::new(
             io::ErrorKind::Unsupported,
             format!("fs::capability::Dir::{name} is Unix-only"),
         )
     }
-
-    /// Unused on this target; kept so the enum documents every kind everywhere.
-    #[expect(dead_code, reason = "platform parity: the enum is read on Unix")]
-    fn _kinds_are_platform_independent(_: SymlinkPolicy, _: FileKind) {}
 }
 
 /// Reject anything that is not one plain component of a name.

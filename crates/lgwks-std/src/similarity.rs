@@ -253,6 +253,12 @@ impl From<[f64; 4]> for BoundingBox {
     }
 }
 
+impl From<BoundingBox> for [f64; 4] {
+    fn from(value: BoundingBox) -> Self {
+        value.to_array()
+    }
+}
+
 /// Geometric similarity over normalized bounding boxes.
 ///
 /// The Euclidean distance between the four coordinates is mapped with

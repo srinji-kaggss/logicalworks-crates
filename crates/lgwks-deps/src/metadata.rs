@@ -129,15 +129,26 @@ impl DependencySource {
 /// name. A path edge Cargo cannot locate — no `path` key, no declaring
 /// manifest directory, or an escape past the root — is external, never
 /// internal by name.
+///
+/// Read approval-relevant identity through accessors so callers cannot mutate
+/// the graph after Cargo's metadata has been parsed:
+///
+/// ```rust
+/// use lgwks_deps::metadata::DirectEdge;
+///
+/// fn approval_identity(edge: &DirectEdge) -> (&str, &str, &str) {
+///     (edge.consumer(), edge.package(), edge.requirement())
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DirectEdge {
     /// Workspace package declaring the dependency.
-    pub consumer: String,
+    pub(crate) consumer: String,
     /// Upstream package name, independent of a local rename.
-    pub package: String,
+    pub(crate) package: String,
     /// Manifest semver requirement exactly as Cargo reports it.
-    pub requirement: String,
+    pub(crate) requirement: String,
     /// Normal, build, or development edge.
     pub kind: DependencyKind,
     /// Registry, Git, or path origin.
@@ -148,6 +159,26 @@ pub struct DirectEdge {
     pub workspace: bool,
     /// Repository declared by a workspace path target, when present.
     pub target_repository: Option<String>,
+}
+
+impl DirectEdge {
+    /// Workspace package that authored this dependency declaration.
+    #[must_use]
+    pub fn consumer(&self) -> &str {
+        &self.consumer
+    }
+
+    /// Cargo package name, independent of a local dependency rename.
+    #[must_use]
+    pub fn package(&self) -> &str {
+        &self.package
+    }
+
+    /// Manifest semver requirement exactly as Cargo reported it.
+    #[must_use]
+    pub fn requirement(&self) -> &str {
+        &self.requirement
+    }
 }
 
 /// Failure to obtain or decode Cargo's authored dependency graph.
@@ -176,20 +207,37 @@ pub enum MetadataError {
     Json(lgwks_std::json::Error),
     /// Cargo returned an internally inconsistent field.
     Schema(String),
-    /// Cargo did not finish before the deadline. The child was killed and
-    /// reaped: no survivor, no partial graph.
+    /// Cargo did not finish before the collection deadline. Termination and
+    /// capture cleanup are reported separately by `ProcessCleanup` if either
+    /// cannot be confirmed.
     Timeout {
         /// The deadline that fired.
         after: Duration,
     },
-    /// One of Cargo's output streams exceeded its byte budget. The child was
-    /// killed and reaped; the retained prefix is dropped, never decoded as
-    /// a graph.
+    /// One of Cargo's sampled output files exceeded its retained-byte budget.
+    /// Termination and capture cleanup are reported separately by
+    /// `ProcessCleanup` if either cannot be confirmed.
     OutputTooLarge {
         /// Which stream overflowed: `stdout` or `stderr`.
         stream: &'static str,
         /// The per-stream budget in bytes.
         limit: usize,
+    },
+    /// A collection failure and its cleanup failures. The primary failure is
+    /// retained independently from termination, reaping and capture removal.
+    ProcessCleanup {
+        /// The failure that caused collection to stop.
+        cause: Option<Box<Self>>,
+        /// Direct-child termination or reaping could not be confirmed.
+        process: Option<std::io::Error>,
+        /// Capture paths that could not be reclaimed.
+        captures: Vec<std::io::Error>,
+        /// A live owner for any unresolved child or capture cleanup.
+        ///
+        /// Boxed because it owns a `std::process::Child`, which is large on
+        /// Windows: carried inline it made every `Result<_, MetadataError>`
+        /// exceed clippy's `result_large_err` bound on that target alone.
+        obligation: Box<CleanupObligation>,
     },
     /// OS entropy could not be read, so no capture file could be named.
     /// Cargo was never started: without a distinguisher the call refuses
@@ -218,14 +266,34 @@ impl fmt::Display for MetadataError {
             Self::Cargo(ref error) => write!(f, "cargo metadata refused: {error}"),
             Self::Json(ref error) => write!(f, "cargo metadata JSON: {error}"),
             Self::Schema(ref error) => write!(f, "cargo metadata schema: {error}"),
-            Self::Timeout { after } => write!(
-                f,
-                "cargo metadata timed out after {after:?}: child killed and reaped"
-            ),
-            Self::OutputTooLarge { stream, limit } => write!(
-                f,
-                "cargo metadata {stream} exceeded {limit} bytes: child killed and reaped"
-            ),
+            Self::Timeout { after } => {
+                write!(
+                    f,
+                    "cargo metadata collection deadline expired after {after:?}"
+                )
+            }
+            Self::OutputTooLarge { stream, limit } => {
+                write!(f, "cargo metadata {stream} exceeded {limit} retained bytes")
+            }
+            Self::ProcessCleanup {
+                ref cause,
+                ref process,
+                ref captures,
+                ..
+            } => match cause.as_deref() {
+                Some(cause) => write!(
+                    f,
+                    "{cause}; cleanup unconfirmed (process: {}, capture errors: {})",
+                    process.is_some(),
+                    captures.len()
+                ),
+                None => write!(
+                    f,
+                    "cleanup unconfirmed (process: {}, capture errors: {})",
+                    process.is_some(),
+                    captures.len()
+                ),
+            },
             #[cfg(not(target_family = "wasm"))]
             Self::Entropy(ref error) => write!(
                 f,
@@ -249,6 +317,14 @@ impl std::error::Error for MetadataError {
             | Self::Schema(_)
             | Self::Timeout { .. }
             | Self::OutputTooLarge { .. } => None,
+            Self::ProcessCleanup {
+                ref process,
+                ref captures,
+                ..
+            } => match process.as_ref().or_else(|| captures.first()) {
+                Some(error) => Some(error),
+                None => None,
+            },
         }
     }
 }
@@ -462,12 +538,12 @@ fn direct_edges(metadata: CargoMetadata) -> Result<Vec<DirectEdge>, MetadataErro
 
 /// Elapsed-deadline budget for the Cargo subprocess: `cargo metadata` on
 /// this workspace answers in about a second, so a healthy run never notices
-/// the 120s ceiling, while a hung Cargo is killed and reaped instead of
-/// hanging the gate (issue #143 R14).
+/// the 120s collection ceiling. The ceiling bounds collection polling; OS
+/// termination and reap failures are reported separately (issue #159).
 const METADATA_TIMEOUT: Duration = Duration::from_secs(120);
-/// Per-stream byte budget for the Cargo subprocess: real answers are tens of
-/// kilobytes, so a flooding Cargo is killed and reaped instead of retaining
-/// unbounded output (issue #143 R14).
+/// Per-stream retained-byte budget for the Cargo subprocess. The 5ms polling
+/// interval makes disk growth between samples possible, so this is not a hard
+/// on-disk quota (issue #159 M3).
 const METADATA_STREAM_CAP: usize = 8 * 1024 * 1024;
 /// Exclusive-create attempts per capture file: each attempt draws a fresh
 /// distinguisher, so this bound is never reached by chance, only by a
@@ -482,6 +558,130 @@ struct BoundedOutput {
     stdout: Vec<u8>,
     /// At most the per-stream budget of stderr bytes.
     stderr: Vec<u8>,
+}
+
+/// Owns capture pathnames from the instant a capture file is created through
+/// every later fallible collection step.
+#[derive(Debug)]
+struct CaptureFiles {
+    /// Paths whose names this call created exclusively.
+    paths: Vec<PathBuf>,
+}
+
+impl CaptureFiles {
+    /// Starts an empty cleanup owner before acquiring the first file.
+    fn new() -> Self {
+        Self { paths: Vec::new() }
+    }
+
+    /// Records a newly acquired path before another operation can fail.
+    fn own(&mut self, path: PathBuf) {
+        self.paths.push(path);
+    }
+
+    /// Removes every owned path and returns every failure except confirmed
+    /// absence. Failed removals remain visible to the caller.
+    fn cleanup(&mut self) -> Vec<std::io::Error> {
+        let mut failures = Vec::new();
+        let mut pending = Vec::new();
+        for path in self.paths.drain(..) {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    failures.push(error);
+                    pending.push(path);
+                }
+            }
+        }
+        self.paths = pending;
+        failures
+    }
+}
+
+impl Drop for CaptureFiles {
+    /// Retries cleanup on early return; this fallback never reports success.
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
+/// Retains ownership of a direct child or capture whose cleanup was not
+/// confirmed. Keep this value and retry until it reports `true`.
+#[must_use = "dropping an unresolved cleanup obligation abandons further observation"]
+#[derive(Debug)]
+pub struct CleanupObligation {
+    /// The child whose termination or reap remains unresolved.
+    child: Option<std::process::Child>,
+    /// Capture paths whose removal remains unresolved.
+    captures: CaptureFiles,
+}
+
+impl CleanupObligation {
+    /// Attempts direct-child termination/reap and capture removal once.
+    /// Returns `true` only when no owned child or capture path remains.
+    ///
+    /// ```rust
+    /// use lgwks_deps::metadata::MetadataError;
+    ///
+    /// fn retry_cleanup(error: MetadataError) -> Result<bool, std::io::Error> {
+    ///     match error {
+    ///         MetadataError::ProcessCleanup { mut obligation, .. } => {
+    ///             obligation.retry_cleanup()
+    ///         }
+    ///         _ => Ok(true),
+    ///     }
+    /// }
+    /// ```
+    pub fn retry_cleanup(&mut self) -> Result<bool, std::io::Error> {
+        if let Some(child) = self.child.as_mut() {
+            match child.kill() {
+                Ok(()) => {}
+                Err(kill_error) => match child.try_wait() {
+                    Ok(Some(_)) => self.child = None,
+                    Ok(None) => return Err(kill_error),
+                    Err(observation_error) => return Err(observation_error),
+                },
+            }
+            if let Some(child) = self.child.as_mut() {
+                match child.try_wait()? {
+                    Some(_) => self.child = None,
+                    None => return Ok(false),
+                }
+            }
+        }
+        if let Some(error) = self.captures.cleanup().into_iter().next() {
+            return Err(error);
+        }
+        Ok(self.captures.paths.is_empty())
+    }
+}
+
+/// How many poll quanta a dropped obligation waits for its child to exit.
+///
+/// Twenty 5 ms quanta: long enough for a killed child to be reaped on a loaded
+/// host, short enough that dropping an error never stalls the caller for more
+/// than a tenth of a second.
+const DROP_CLEANUP_QUANTA: usize = 20;
+
+/// A dropped obligation makes a last, bounded attempt to kill and reap.
+///
+/// The shipped gate reports a `ProcessCleanup` refusal as text and drops the
+/// error, so without this the Cargo child it names was never killed or reaped
+/// by anyone. A killed child is not reaped the instant the signal is sent, so
+/// one `try_wait` would usually leave a zombie; this repeats the same `kill`
+/// plus `try_wait` a retry makes for at most twenty poll quanta and then gives
+/// up, because a destructor must not block without bound. Capture files have
+/// their own `Drop`.
+impl Drop for CleanupObligation {
+    fn drop(&mut self) {
+        for _ in 0..DROP_CLEANUP_QUANTA {
+            if matches!(self.retry_cleanup(), Ok(true)) {
+                return;
+            }
+            poll_quantum();
+        }
+    }
 }
 
 /// One deadline-poll quantum.
@@ -503,15 +703,18 @@ fn poll_quantum() {
 /// The child writes to two capture files, never to pipes: a flood cannot
 /// block the child on a full pipe, and no reader thread can be held open by
 /// a grandchild that inherited a descriptor. Each poll quantum stats both
-/// files, and the first one past budget kills and reaps before returning
-/// [`MetadataError::OutputTooLarge`]; the deadline does the same with
-/// [`MetadataError::Timeout`]. A refusal carries no partial graph: the gate
-/// reports the failure rather than decoding a prefix of it.
+/// files, and the first one past budget requests direct-child termination
+/// before returning [`MetadataError::OutputTooLarge`]; the deadline does the
+/// same with [`MetadataError::Timeout`]. Termination, reap and capture-removal
+/// failures are retained in [`MetadataError::ProcessCleanup`]. A refusal
+/// carries no partial graph: the gate reports the failure rather than
+/// decoding a prefix of it.
 ///
-/// The kill targets the direct child. An orphaned grandchild keeps whatever
-/// capture file it inherited until it exits, but it cannot stall this call:
-/// every path ends at the deadline, and the files are unlinked before
-/// returning.
+/// The kill targets the direct child only. A descendant may keep an inherited
+/// capture descriptor and continue writing after the direct child's exit; the
+/// sampled retained-byte cap does not bound that writer's disk use or reclaim
+/// its open file immediately. The supported profile is trusted Cargo and its
+/// direct child, not hostile descendant containment.
 fn run_bounded(
     program: &str,
     args: &[OsString],
@@ -578,14 +781,6 @@ fn run_bounded(
         Ok(format!("{nanos}-{seq}"))
     }
 
-    /// Best-effort unlink: the capture files must not outlive the call, and
-    /// a file already gone (or never created) is the desired end state.
-    fn unlink(path: &Path) {
-        if std::fs::remove_file(path).is_err() {
-            // Already gone; absence is what every path wants.
-        }
-    }
-
     /// Read at most one byte past budget: anything longer is an overflow,
     /// and the retained bytes are dropped with the Vec, never decoded.
     fn read_capped(path: &Path, stream_cap: usize) -> Result<(Vec<u8>, bool), MetadataError> {
@@ -599,19 +794,61 @@ fn run_bounded(
         Ok((kept, overflow))
     }
 
-    let (stdout_path, stdout_file) = capture("stdout")?;
-    let (stderr_path, stderr_file) = capture("stderr")?;
-    let mut child = Command::new(program)
+    /// Keeps the original failure distinct from any cleanup failure.
+    fn cleanup_error(
+        cause: Option<MetadataError>,
+        process: Option<std::io::Error>,
+        child: Option<std::process::Child>,
+        captures: &mut CaptureFiles,
+    ) -> MetadataError {
+        let capture_errors = captures.cleanup();
+        if process.is_none()
+            && capture_errors.is_empty()
+            && let Some(cause) = cause
+        {
+            return cause;
+        }
+        MetadataError::ProcessCleanup {
+            cause: cause.map(Box::new),
+            process,
+            captures: capture_errors,
+            obligation: Box::new(CleanupObligation {
+                child,
+                captures: CaptureFiles {
+                    paths: std::mem::take(&mut captures.paths),
+                },
+            }),
+        }
+    }
+
+    let mut captures = CaptureFiles::new();
+    let (stdout_path, stdout_file) = match capture("stdout") {
+        Ok(capture) => capture,
+        Err(error) => return Err(cleanup_error(Some(error), None, None, &mut captures)),
+    };
+    captures.own(stdout_path.clone());
+    let (stderr_path, stderr_file) = match capture("stderr") {
+        Ok(capture) => capture,
+        Err(error) => return Err(cleanup_error(Some(error), None, None, &mut captures)),
+    };
+    captures.own(stderr_path.clone());
+    let mut child = match Command::new(program)
         .args(args)
         .current_dir(dir)
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file))
         .spawn()
-        .map_err(|error| {
-            unlink(&stdout_path);
-            unlink(&stderr_path);
-            MetadataError::Spawn(error)
-        })?;
+    {
+        Ok(child) => child,
+        Err(error) => {
+            return Err(cleanup_error(
+                Some(MetadataError::Spawn(error)),
+                None,
+                None,
+                &mut captures,
+            ));
+        }
+    };
     let deadline = std::time::Instant::now()
         .checked_add(timeout)
         .unwrap_or_else(std::time::Instant::now);
@@ -620,40 +857,29 @@ fn run_bounded(
     // File sizes only grow while the child lives, so a stat past budget
     // stands against every later one.
     let outcome = loop {
-        match child.try_wait().map_err(MetadataError::Spawn)? {
-            Some(status) => break Ok(status),
-            None if std::time::Instant::now() >= deadline => {
-                // Best effort: the child may have exited between the
-                // poll and the kill, in which case there is nothing to
-                // signal and the reap below collects it.
-                if child.kill().is_err() {
-                    // Already gone; the reap below is still required.
-                }
+        match child.try_wait() {
+            Err(error) => break Err(MetadataError::Spawn(error)),
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if std::time::Instant::now() >= deadline => {
                 break Err(MetadataError::Timeout { after: timeout });
             }
-            None => {
+            Ok(None) => {
                 let limit = u64::try_from(stream_cap).unwrap_or(u64::MAX);
-                let over = |path: &Path| {
-                    std::fs::metadata(path)
-                        .ok()
-                        .is_some_and(|sized| sized.len() > limit)
+                let stdout_size = match std::fs::metadata(&stdout_path) {
+                    Ok(size) => size,
+                    Err(error) => break Err(MetadataError::Spawn(error)),
                 };
-                // The kill targets the direct child; an orphaned grandchild
-                // keeps its capture file, but the size check already fired
-                // and the files are unlinked before returning either way.
-                if over(&stdout_path) {
-                    if child.kill().is_err() {
-                        // Already gone; the reap below is still required.
-                    }
+                if stdout_size.len() > limit {
                     break Err(MetadataError::OutputTooLarge {
                         stream: "stdout",
                         limit: stream_cap,
                     });
                 }
-                if over(&stderr_path) {
-                    if child.kill().is_err() {
-                        // Already gone; the reap below is still required.
-                    }
+                let stderr_size = match std::fs::metadata(&stderr_path) {
+                    Ok(size) => size,
+                    Err(error) => break Err(MetadataError::Spawn(error)),
+                };
+                if stderr_size.len() > limit {
                     break Err(MetadataError::OutputTooLarge {
                         stream: "stderr",
                         limit: stream_cap,
@@ -663,35 +889,68 @@ fn run_bounded(
             }
         }
     };
-    // Reaped exactly once, on every path. A reap error here would mean the
-    // single owner lost its child without waiting, which this shape makes
-    // unrepresentable; the branch records the impossibility rather than
-    // inventing a recovery.
-    if child.wait().is_err() {
-        // Unreachable: no second waiter exists.
-    }
     let status = match outcome {
-        Err(refusal) => {
-            unlink(&stdout_path);
-            unlink(&stderr_path);
-            return Err(refusal);
+        Err(cause) => {
+            let process_error = match child.kill() {
+                Ok(()) => child.wait().err(),
+                Err(kill_error) => match child.try_wait() {
+                    Ok(Some(_)) => None,
+                    Ok(None) | Err(_) => Some(kill_error),
+                },
+            };
+            return match process_error {
+                Some(error) => Err(cleanup_error(
+                    Some(cause),
+                    Some(error),
+                    Some(child),
+                    &mut captures,
+                )),
+                None => Err(cleanup_error(Some(cause), None, None, &mut captures)),
+            };
         }
-        Ok(status) => status,
+        Ok(status) => match child.wait() {
+            Ok(_) => status,
+            Err(error) => {
+                return Err(cleanup_error(None, Some(error), Some(child), &mut captures));
+            }
+        },
     };
-    let (stdout, stdout_overflow) = read_capped(&stdout_path, stream_cap)?;
-    let (stderr, stderr_overflow) = read_capped(&stderr_path, stream_cap)?;
-    unlink(&stdout_path);
-    unlink(&stderr_path);
-    if stdout_overflow {
-        return Err(MetadataError::OutputTooLarge {
+    let (stdout, stdout_overflow) = match read_capped(&stdout_path, stream_cap) {
+        Ok(output) => output,
+        Err(error) => return Err(cleanup_error(Some(error), None, None, &mut captures)),
+    };
+    let (stderr, stderr_overflow) = match read_capped(&stderr_path, stream_cap) {
+        Ok(output) => output,
+        Err(error) => return Err(cleanup_error(Some(error), None, None, &mut captures)),
+    };
+    let overflow = if stdout_overflow {
+        Some(MetadataError::OutputTooLarge {
             stream: "stdout",
             limit: stream_cap,
-        });
-    }
-    if stderr_overflow {
-        return Err(MetadataError::OutputTooLarge {
+        })
+    } else if stderr_overflow {
+        Some(MetadataError::OutputTooLarge {
             stream: "stderr",
             limit: stream_cap,
+        })
+    } else {
+        None
+    };
+    if let Some(cause) = overflow {
+        return Err(cleanup_error(Some(cause), None, None, &mut captures));
+    }
+    let cleanup_errors = captures.cleanup();
+    if !cleanup_errors.is_empty() {
+        return Err(MetadataError::ProcessCleanup {
+            cause: None,
+            process: None,
+            captures: cleanup_errors,
+            obligation: Box::new(CleanupObligation {
+                child: None,
+                captures: CaptureFiles {
+                    paths: std::mem::take(&mut captures.paths),
+                },
+            }),
         });
     }
     Ok(BoundedOutput {
@@ -762,13 +1021,29 @@ pub fn read(root: &Path) -> Result<Vec<DirectEdge>, MetadataError> {
 /// Scope resolution needs the directory: a scope of `lgwks_bot::verb` is only
 /// real if `verb` is a module of *that* package, and the package name alone
 /// does not say where its sources are.
+///
+/// ```rust
+/// use lgwks_deps::metadata::Member;
+///
+/// fn package_name(member: &Member) -> &str {
+///     member.name()
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Member {
     /// Package name as the manifest declares it.
-    pub name: String,
+    pub(crate) name: String,
     /// Directory holding the member's `Cargo.toml`, as Cargo reported it.
     pub manifest_dir: PathBuf,
+}
+
+impl Member {
+    /// Cargo package name for this workspace member.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 /// Runs locked Cargo metadata and returns its workspace members.
@@ -1184,6 +1459,76 @@ mod tests {
             String::from_utf8_lossy(&output.stdout).contains("{\"ok\":true}"),
             "the probe bytes must survive: {:?}",
             String::from_utf8_lossy(&output.stdout)
+        );
+        Ok(())
+    }
+
+    /// A capture name stays owned across a subsequent early return and its
+    /// actual temporary file is reclaimed by the RAII fallback.
+    #[test]
+    fn an_owned_capture_is_removed_on_early_return() -> TestResult {
+        use std::fs::OpenOptions;
+
+        let token = lgwks_std::random::bytes::<16>()?;
+        let path = std::env::temp_dir().join(format!(
+            "lgwks-deps-test-{}.capture",
+            lgwks_std::hex::encode(token)
+        ));
+        let _file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        let mut captures = CaptureFiles::new();
+        captures.own(path.clone());
+        drop(_file);
+        drop(captures);
+        assert_eq!(
+            std::fs::metadata(&path).err().map(|error| error.kind()),
+            Some(std::io::ErrorKind::NotFound),
+            "the acquired capture pathname must be reclaimed on scope exit"
+        );
+        Ok(())
+    }
+
+    /// Dropping an unresolved obligation kills and reaps its child, so a
+    /// refusal the caller only prints does not leave Cargo running.
+    #[cfg(unix)]
+    #[test]
+    fn a_dropped_obligation_kills_and_reaps_its_child() -> TestResult {
+        let child = std::process::Command::new("sleep").arg("30").spawn()?;
+        let pid = child.id().to_string();
+        drop(CleanupObligation {
+            child: Some(child),
+            captures: CaptureFiles::new(),
+        });
+        // `kill -0` succeeds for any process that still has a table entry,
+        // zombies included, so a failure here means killed *and* reaped.
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .stderr(std::process::Stdio::null())
+            .status()?;
+        assert!(
+            !alive.success(),
+            "the dropped obligation's child {pid} is still in the process table"
+        );
+        Ok(())
+    }
+
+    /// An already-exited real child is cleared only after the OS reports its
+    /// status; a failed kill is not itself treated as proof of absence.
+    #[test]
+    fn cleanup_obligation_confirms_an_already_exited_child() -> TestResult {
+        let mut child = std::process::Command::new(std::env::current_exe()?)
+            .arg("--list")
+            .spawn()?;
+        let _status = child.wait()?;
+        let mut obligation = CleanupObligation {
+            child: Some(child),
+            captures: CaptureFiles::new(),
+        };
+        assert!(
+            obligation.retry_cleanup()?,
+            "observed process absence and empty capture ownership complete cleanup"
         );
         Ok(())
     }

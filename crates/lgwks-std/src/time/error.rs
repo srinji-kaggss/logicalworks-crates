@@ -17,12 +17,99 @@ pub enum Field {
     Hour,
     /// Minute of hour, `0..=59`.
     Minute,
-    /// Second of minute, `0..=60`.
+    /// Second of minute, `0..=59` in the `SystemTime` profile.
     Second,
     /// Offset hours.
     OffsetHour,
     /// Offset minutes.
     OffsetMinute,
+}
+
+/// Why conversion between Unix parts and the platform clock was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UnixTimeError {
+    /// Adding the nanosecond carry exceeded the signed seconds domain.
+    SecondsOverflow {
+        /// The input seconds.
+        seconds: i64,
+        /// The input nanoseconds.
+        nanoseconds: u32,
+    },
+    /// The platform clock cannot represent the requested instant.
+    SystemTimeOutOfRange {
+        /// The normalized input seconds.
+        seconds: i64,
+        /// The normalized nanosecond remainder.
+        nanoseconds: u32,
+    },
+    /// A `SystemTime` has more than `i64` seconds of distance from the epoch.
+    SystemTimeOutsideI64Range {
+        /// Whether the instant precedes the Unix epoch.
+        before_epoch: bool,
+    },
+}
+
+impl fmt::Display for UnixTimeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::SecondsOverflow {
+                seconds,
+                nanoseconds,
+            } => write!(
+                formatter,
+                "Unix seconds overflow while normalizing ({seconds}, {nanoseconds})"
+            ),
+            Self::SystemTimeOutOfRange {
+                seconds,
+                nanoseconds,
+            } => write!(
+                formatter,
+                "platform SystemTime cannot represent ({seconds}, {nanoseconds})"
+            ),
+            Self::SystemTimeOutsideI64Range { before_epoch } => write!(
+                formatter,
+                "SystemTime {} the epoch is outside the i64 Unix-seconds range",
+                if before_epoch { "before" } else { "after" }
+            ),
+        }
+    }
+}
+
+impl Error for UnixTimeError {}
+
+/// Why canonical RFC 3339 formatting was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FormatError {
+    /// The platform clock instant cannot be converted to `i64` Unix parts.
+    UnixTime(UnixTimeError),
+    /// RFC 3339's four-digit year range does not include this UTC year.
+    YearOutsideRfc3339 {
+        /// The UTC calendar year.
+        year: i64,
+    },
+}
+
+impl fmt::Display for FormatError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::UnixTime(error) => write!(formatter, "cannot format instant: {error}"),
+            Self::YearOutsideRfc3339 { year } => write!(
+                formatter,
+                "UTC year {year} is outside RFC 3339's four-digit year range 0000..=9999"
+            ),
+        }
+    }
+}
+
+impl Error for FormatError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match *self {
+            Self::UnixTime(ref error) => Some(error),
+            Self::YearOutsideRfc3339 { .. } => None,
+        }
+    }
 }
 
 /// The lower-case name of a field as it appears in an error message.
@@ -95,6 +182,13 @@ pub enum ParseError {
         /// Offset of fractional dot.
         at: usize,
     },
+    /// Leap seconds are not represented by the `SystemTime` profile.
+    UnsupportedLeapSecond {
+        /// Offset where the `60` second field begins.
+        at: usize,
+    },
+    /// The parsed UTC instant is outside the platform `SystemTime` range.
+    UnrepresentableInstant(UnixTimeError),
     /// No timezone indicator (`Z` or `±HH:MM`) was present at the end.
     MissingOffset {
         /// Offset where offset was expected.
@@ -183,9 +277,23 @@ impl fmt::Display for ParseError {
                 at,
             } => fmt_out_of_range(formatter, field, value, min, max, at),
             Self::FractionWidth { digits, at } => fmt_fraction_width(formatter, digits, at),
+            Self::UnsupportedLeapSecond { at } => write!(
+                formatter,
+                "leap second is unsupported by the SystemTime profile at offset {at}"
+            ),
+            Self::UnrepresentableInstant(error) => {
+                write!(formatter, "parsed instant is not representable: {error}")
+            }
             Self::MissingOffset { at } => fmt_missing_offset(formatter, at),
         }
     }
 }
 
-impl Error for ParseError {}
+impl Error for ParseError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match *self {
+            Self::UnrepresentableInstant(ref error) => Some(error),
+            _ => None,
+        }
+    }
+}

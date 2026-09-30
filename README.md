@@ -66,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut out = std::io::stdout().lock();
 
     // Core primitives: zero-config, zero external deps by default.
-    let now = lgwks_std::time::now_rfc3339();
+    let now = lgwks_std::time::now_rfc3339()?;
     writeln!(out, "now: {now} hex: {}", lgwks_std::hex::encode(b"hi"))?;
 
     // bot: capability-gated actors. Grants are required to build, not only to
@@ -148,7 +148,7 @@ lgwks-deps check .        # audit, and refuse any unowned external edge
   tool across several languages. → `lgwks_ast` gives one AST type and one
   diagnostic type across every grammar you enable
 - Reporting a parse failure with a real span. → `lgwks_ast` diagnostics carry
-  file, range, and severity
+  the recovery-node kind and bounded byte ranges into the original source
 
 ### Logging you can query
 

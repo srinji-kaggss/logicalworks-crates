@@ -154,10 +154,13 @@ fn parse_minute(bytes: &[u8]) -> Result<u32, ParseError> {
     Ok(min_val)
 }
 
-/// Parses the 2-digit second component (0..=60, including leap second).
+/// Parses the 2-digit second component and refuses leap-second labels.
 fn parse_second(bytes: &[u8]) -> Result<u32, ParseError> {
     let sec_val = parse_digit_field(bytes, 17, 2, Field::Second)?;
-    check_range(Field::Second, sec_val, 0, 60, 17)?;
+    if sec_val == 60 {
+        return Err(ParseError::UnsupportedLeapSecond { at: 17 });
+    }
+    check_range(Field::Second, sec_val, 0, 59, 17)?;
     Ok(sec_val)
 }
 
@@ -198,8 +201,8 @@ fn compute_fraction(bytes: &[u8], start: usize, digits: usize) -> u32 {
 /// Collects and scales fractional digits after the decimal dot.
 ///
 /// Advances `cursor` past the run of digits and reports the run's width, which
-/// must be `1..=9`: RFC 3339 permits truncation, but not an empty fraction nor
-/// more precision than a nanosecond.
+/// must be `1..=9`: this SystemTime profile is limited to nanosecond precision;
+/// RFC 3339 itself permits an arbitrary number of fractional digits.
 fn parse_fraction_digits(
     bytes: &[u8],
     cursor: &mut usize,
@@ -249,15 +252,37 @@ fn parse_numeric_offset(
     cursor: usize,
     sign_negative: bool,
 ) -> Result<i64, ParseError> {
-    if cursor.saturating_add(6) != bytes.len() {
+    let end = cursor
+        .checked_add(6)
+        .ok_or(ParseError::MissingOffset { at: cursor })?;
+    if end > bytes.len() {
         Err(ParseError::MissingOffset { at: cursor })
+    } else if end < bytes.len() {
+        let byte = bytes
+            .get(end)
+            .copied()
+            .ok_or(ParseError::MissingOffset { at: cursor })?;
+        Err(ParseError::Malformed { at: end, byte })
     } else {
         let offset_hour = parse_digit_field(bytes, cursor.saturating_add(1), 2, Field::OffsetHour)?;
         expect_byte(bytes, cursor.saturating_add(3), b':')?;
         let offset_minute =
             parse_digit_field(bytes, cursor.saturating_add(4), 2, Field::OffsetMinute)?;
-        // Both fields are two digits, so the magnitude is at most
-        // `99 * 60 + 99` and neither operation can saturate.
+        check_range(
+            Field::OffsetHour,
+            offset_hour,
+            0,
+            23,
+            cursor.saturating_add(1),
+        )?;
+        check_range(
+            Field::OffsetMinute,
+            offset_minute,
+            0,
+            59,
+            cursor.saturating_add(4),
+        )?;
+        // The checked fields are at most 23 hours and 59 minutes.
         let magnitude = i64::from(offset_hour)
             .saturating_mul(60)
             .saturating_add(i64::from(offset_minute));
@@ -280,17 +305,39 @@ fn parse_offset(bytes: &[u8], cursor: usize) -> Result<i64, ParseError> {
     match bytes.get(cursor).copied() {
         None => Err(ParseError::MissingOffset { at: cursor }),
         Some(b'Z' | b'z') if cursor.saturating_add(1) == bytes.len() => Ok(0),
+        Some(b'Z' | b'z') => {
+            let at = cursor.saturating_add(1);
+            match bytes.get(at).copied() {
+                Some(byte) => Err(ParseError::Malformed { at, byte }),
+                None => Err(ParseError::MissingOffset { at }),
+            }
+        }
         Some(b'+') => parse_numeric_offset(bytes, cursor, false),
         Some(b'-') => parse_numeric_offset(bytes, cursor, true),
         Some(byte) => Err(ParseError::Malformed { at: cursor, byte }),
     }
 }
 
+/// Converts normalized Unix parts and retains platform conversion refusal.
+fn checked_system_time(seconds: i64, nanoseconds: u32) -> Result<SystemTime, ParseError> {
+    preserve_system_time_error(from_unix_parts(seconds, nanoseconds))
+}
+
+/// Maps a checked conversion refusal into the parser's public error surface.
+fn preserve_system_time_error(
+    conversion: Result<SystemTime, super::error::UnixTimeError>,
+) -> Result<SystemTime, ParseError> {
+    conversion.map_err(ParseError::UnrepresentableInstant)
+}
+
 /// Parses RFC 3339 formatted text into a [`SystemTime`].
 ///
 /// The instant is normalised to UTC: a numeric `±HH:MM` offset is subtracted
 /// from the civil time rather than stored, so two stamps naming the same
-/// instant compare equal whatever offset they were written with.
+/// instant compare equal whatever offset they were written with. The original
+/// offset spelling and the provenance of `-00:00` are not retained. This
+/// SystemTime profile supports at most nine fractional digits and refuses all
+/// leap-second labels because `SystemTime` cannot represent them separately.
 ///
 /// # Errors
 ///
@@ -306,8 +353,8 @@ pub fn parse_rfc3339(text: &str) -> Result<SystemTime, ParseError> {
     let offset_minutes = parse_offset(bytes, cursor)?;
 
     // Every field is bounded before it gets here: a four-digit year is at most
-    // `2_932_896` days from the epoch, each clock field is two digits, and the
-    // offset is at most `99 * 60 + 99` minutes. The largest intermediate is
+    // `2_932_896` days from the epoch, each clock field is in range, and the
+    // offset is at most 23:59. The largest intermediate is
     // therefore about `2.53e11`, sixteen orders of magnitude below `i64::MAX`,
     // so no `saturating_*` below can saturate.
     let secs = days_from_civil(year, month, day)
@@ -316,5 +363,40 @@ pub fn parse_rfc3339(text: &str) -> Result<SystemTime, ParseError> {
         .saturating_add(i64::from(minute).saturating_mul(60))
         .saturating_add(i64::from(second))
         .saturating_sub(offset_minutes.saturating_mul(60));
-    Ok(from_unix_parts(secs, nanos))
+    checked_system_time(secs, nanos)
+}
+
+#[cfg(test)]
+/// Focused parser-conversion regressions.
+mod tests {
+    use super::{checked_system_time, preserve_system_time_error};
+    use crate::time::{ParseError, UnixTimeError};
+
+    #[test]
+    /// Keeps conversion-seam failures typed for the parser.
+    fn conversion_seam_preserves_platform_range_failure() {
+        assert_eq!(
+            checked_system_time(i64::MAX, 1_000_000_000),
+            Err(ParseError::UnrepresentableInstant(
+                UnixTimeError::SecondsOverflow {
+                    seconds: i64::MAX,
+                    nanoseconds: 1_000_000_000,
+                }
+            )),
+            "parser conversion errors must remain typed instead of becoming epoch success"
+        );
+        assert_eq!(
+            preserve_system_time_error(Err(UnixTimeError::SystemTimeOutOfRange {
+                seconds: i64::MAX,
+                nanoseconds: 0,
+            })),
+            Err(ParseError::UnrepresentableInstant(
+                UnixTimeError::SystemTimeOutOfRange {
+                    seconds: i64::MAX,
+                    nanoseconds: 0,
+                }
+            )),
+            "a platform range refusal must remain visible in ParseError"
+        );
+    }
 }

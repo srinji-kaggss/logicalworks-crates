@@ -54,6 +54,42 @@ explicitly under that crate.
 - Feature `macro`: `syn`, `proc-macro2` and `quote` (new edge, registered in
   `contract/APPROVED.toml`) re-exported for first-party proc-macro crates.
 
+### lgwks_std Breaking
+
+- `time::format::from_unix_parts`, `unix_parts`, `to_rfc3339`, and
+  `time::now_rfc3339` now return `Result` so clock-range failures and
+  out-of-range RFC 3339 years are visible. Migrate by handling `?` or matching
+  `UnixTimeError` / `FormatError`; the old lossy behavior is available only as
+  explicitly named, deprecated `*_lossy` functions.
+  Replace `try_from_unix_parts` with checked `from_unix_parts`; replace calls
+  that intentionally relied on the old infallible epoch fallback with
+  `from_unix_parts_lossy`.
+- `time::parse_rfc3339` rejects offset hours above 23, offset minutes above 59,
+  leap-second labels, and platform-unrepresentable instants. Its SystemTime
+  profile is UTC-normalized, nanosecond-limited, and does not retain original
+  offset spelling or `-00:00` provenance.
+- `glob::matches` now interprets `?` and character classes as Unicode scalar
+  values rather than UTF-8 bytes. ASCII results and literals are unchanged;
+  callers that relied on multiple wildcards consuming one multibyte scalar
+  should update their pattern. `GlobPattern::compile` offers checked strict
+  syntax, while `GlobDialect::Legacy` preserves permissive bracket and `**`
+  forms during migration.
+- `http` failures are one structured `Error::Failure { stage, kind, cause }`
+  with `FailureStage` and `FailureKind` (including `Interrupted` for `EINTR`,
+  at every stage); the `Error::Timeout`, `Error::Interrupted` and
+  `Error::Transport(String)` variants are removed. Match on `kind` instead of
+  display text. `Options::user_agent` is now a builder
+  (`user_agent(self, value) -> Self`) rather than a getter, and
+  `Options::header` takes `impl Into<String>`. `Options::redirect_policy`,
+  `Response::header_values`, `final_target` and `redirect_chain` are added.
+- `http` redirects are explicit (`RedirectPolicy::{NoFollow, Follow,
+  FollowAtMost}`, at most ten hops) and are followed by this crate, not ureq: a
+  hop to another origin carries none of the caller's headers (ureq forwarded
+  every header but `Authorization` and `Cookie`, so an `X-Api-Key` reached any
+  host a server redirected to), a same-origin hop drops `Authorization`,
+  `Cookie` and `Proxy-Authorization`, and a 307/308 of a POST is refused
+  rather than replaying its body.
+
 ## [lgwks_std 0.7.0 / lgwks_bot 0.5.0 / lgwks_deps 0.1.13] - 2026-09-28
 
 The first upload of this train. It carries everything below, including the
