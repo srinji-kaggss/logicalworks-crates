@@ -321,18 +321,18 @@ pub mod percent {
     pub enum DecodeError {
         /// A `%` was not followed by two hex digits.
         TruncatedEscape {
-            /// Zero-based offset of the offending `%`.
+            /// Zero-based offset of the `%` in the original input.
             at: usize,
         },
-        /// A `%` was followed by something other than hex digits.
+        /// A `%` was followed by a byte other than an ASCII hex digit.
         NotHexDigit {
-            /// Zero-based offset of the offending `%`.
+            /// Zero-based offset of the invalid digit in the original input.
             at: usize,
         },
         /// The decoded bytes are not valid UTF-8.
         NotUtf8 {
-            /// Offset where invalid UTF-8 byte sequence began.
-            at: usize,
+            /// Offset where the invalid byte sequence begins in the decoded bytes.
+            decoded_at: usize,
         },
     }
 
@@ -343,12 +343,12 @@ pub mod percent {
                     write!(f, "escape at offset {at} needs two hex digits")
                 }
                 Self::NotHexDigit { at } => {
-                    write!(f, "escape at offset {at} is not hex")
+                    write!(f, "non-hex escape byte at input offset {at}")
                 }
-                Self::NotUtf8 { at } => {
+                Self::NotUtf8 { decoded_at } => {
                     write!(
                         f,
-                        "decoded bytes are not valid UTF-8 starting at offset {at}"
+                        "decoded bytes are not valid UTF-8 starting at decoded offset {decoded_at}"
                     )
                 }
             }
@@ -359,20 +359,16 @@ pub mod percent {
 
     /// Decodes the two hex characters of one `%` escape.
     ///
-    /// `escape` is the two bytes that followed the `%` and `pos` is the offset
-    /// of that `%`, so the underlying hex decoder's own offsets are rebased
-    /// into the caller's coordinate space. Both offsets lie inside the same
-    /// input, so their sum is far below `usize::MAX` and cannot saturate.
-    fn decode_escape_pair(escape: &[u8], pos: usize) -> Result<u8, DecodeError> {
-        let decoded = crate::hex::decode(escape).map_err(|hex_err| match hex_err {
-            crate::hex::DecodeError::NotHexDigit { at: hex_at, .. } => DecodeError::NotHexDigit {
-                at: pos.saturating_add(hex_at),
-            },
-            crate::hex::DecodeError::OddLength { at: hex_at, .. } => DecodeError::NotHexDigit {
-                at: pos.saturating_add(hex_at),
-            },
+    /// Invalid-digit offsets point to the offending original-input byte,
+    /// including both bytes after the `%` in that same coordinate space.
+    fn decode_escape_pair(escape: &[u8], percent_at: usize) -> Result<u8, DecodeError> {
+        let high = crate::hex::decode_nibble(escape[0]).ok_or(DecodeError::NotHexDigit {
+            at: percent_at.saturating_add(1),
         })?;
-        Ok(decoded[0])
+        let low = crate::hex::decode_nibble(escape[1]).ok_or(DecodeError::NotHexDigit {
+            at: percent_at.saturating_add(2),
+        })?;
+        Ok((high << 4) | low)
     }
 
     /// Consumes one input position, copying a literal byte or decoding an
@@ -403,9 +399,10 @@ pub mod percent {
     /// Literal bytes pass through unchanged, escapes are case-insensitive, and
     /// the result must be valid UTF-8: a sequence of escapes that decodes to an
     /// invalid byte string is reported as [`DecodeError::NotUtf8`] with the
-    /// offset where the invalid sequence began, never as replacement
-    /// characters. The loop is bounded because each step advances the cursor by
-    /// at least one byte.
+    /// decoded-byte offset where the invalid sequence began, never as
+    /// replacement characters. This decoded coordinate is deliberately not
+    /// reported as an original-input offset. The loop is bounded because each
+    /// step advances the cursor by at least one byte.
     pub fn decode(text: &str) -> Result<String, DecodeError> {
         let bytes = text.as_bytes();
         let mut out = Vec::with_capacity(bytes.len());
@@ -414,7 +411,7 @@ pub mod percent {
             decode_step(bytes, &mut cursor, &mut out)?;
         }
         String::from_utf8(out).map_err(|utf8_err| DecodeError::NotUtf8 {
-            at: utf8_err.utf8_error().valid_up_to(),
+            decoded_at: utf8_err.utf8_error().valid_up_to(),
         })
     }
 }
@@ -528,13 +525,29 @@ mod tests {
             percent::decode("hello%"),
             Err(percent::DecodeError::TruncatedEscape { at: 5 })
         );
+        assert_eq!(
+            percent::decode("é%"),
+            Err(percent::DecodeError::TruncatedEscape { at: 2 })
+        );
+        assert_eq!(
+            percent::decode("é%2"),
+            Err(percent::DecodeError::TruncatedEscape { at: 2 })
+        );
     }
 
     #[test]
     fn percent_refuses_a_non_hex_escape() {
         assert_eq!(
             percent::decode("hello%2z"),
-            Err(percent::DecodeError::NotHexDigit { at: 6 })
+            Err(percent::DecodeError::NotHexDigit { at: 7 })
+        );
+        assert_eq!(
+            percent::decode("ok%G0"),
+            Err(percent::DecodeError::NotHexDigit { at: 3 })
+        );
+        assert_eq!(
+            percent::decode("ok%2G"),
+            Err(percent::DecodeError::NotHexDigit { at: 4 })
         );
     }
 
@@ -542,7 +555,11 @@ mod tests {
     fn percent_refuses_escapes_that_decode_to_invalid_utf8() {
         assert_eq!(
             percent::decode("%FF%FE"),
-            Err(percent::DecodeError::NotUtf8 { at: 0 })
+            Err(percent::DecodeError::NotUtf8 { decoded_at: 0 })
+        );
+        assert_eq!(
+            percent::decode("a%20%FF"),
+            Err(percent::DecodeError::NotUtf8 { decoded_at: 2 })
         );
     }
 }

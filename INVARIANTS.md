@@ -92,6 +92,19 @@ Each of these was a shipped defect. Treat the list as the spec.
   an effective floor of one at construction and use, while deadline equality
   refuses an attempt, including the initial one. · why: #164 · enforced by:
   `lgwks_std::retry::tests`
+- **INV-HEX-1** `hex::decode_into` requires exact destination length and validates
+  the entire input before writing, so every refusal leaves the destination
+  unchanged. · enforced by: `hex::tests::decode_into_validates_exact_length_and_preserves_output_on_failure`
+- **INV-ENCODING-1** Percent escape errors report original-input byte offsets;
+  UTF-8 errors name offsets in decoded bytes and never present them as source
+  coordinates. · enforced by: `encoding::tests::percent_refuses_a_non_hex_escape`
+  and `encoding::tests::percent_refuses_escapes_that_decode_to_invalid_utf8`
+- **INV-ID-1** UUID v4 masks apply to generated IDs only; parsing and raw-byte
+  construction preserve arbitrary UUID values, and malformed hex reports both
+  group start and invalid character offsets. · enforced by: `id::tests`
+- **INV-LEB128-1** Integer decoders accept only minimal encodings and return the
+  consumed prefix length; trailing input remains with the caller. · enforced by:
+  `leb128::tests::distinguishes_prefix_trailing_bytes_from_nonminimal_and_truncated_input`
 - **INV-FS-2** A successful strict directory walk has no known omissions; a
   tolerant walk returns each known omission alongside its entries, and an
   unresolved root is always refused. Path-based identity rechecks are
