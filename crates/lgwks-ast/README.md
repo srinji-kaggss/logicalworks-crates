@@ -13,20 +13,30 @@ than each declaring `thiserror`.
 ## Usage
 
 ```rust
-use lgwks_ast::{Language, try_parse, inspect_ast};
+use lgwks_ast::{Language, inspect_ast, try_parse};
 
-// Identify by extension — the cheap, always-on path.
-let language = Language::of_path("src/lib.rs").expect("rust grammar is compiled in");
+fn main() -> Result<(), lgwks_ast::ParseError> {
 
-// Content sniffing is opt-in, because it costs one full parse per candidate:
-// let language = try_detect_content(source, &[Language::Rust, Language::Python])?;
+    // Identify by extension — the cheap, always-on path.
+    let language = Language::of_path("src/lib.rs");
+    assert_eq!(language, Some(Language::Rust), "`.rs` resolves without parsing");
 
-// Checked parse: oversized bytes, recovery nodes, and over-budget trees are
-// refused before any consumer sees the tree.
-let parsed = try_parse("fn f() {}", language).expect("valid rust parses");
-let metrics = inspect_ast(&parsed.root(), None);
-assert!(metrics.nodes > 1);
+    // Content sniffing is opt-in, because it costs one full parse per candidate:
+    // let detected = try_detect_content(source, &[Language::Rust, Language::Python])?;
+
+    // Checked parse: oversized bytes, recovery nodes, and over-budget trees are
+    // refused before any consumer sees the tree.
+    let parsed = try_parse("fn f() {}", Language::Rust)?;
+    let metrics = inspect_ast(&parsed.root(), None);
+    assert!(metrics.nodes > 1, "a `fn` item is more than one node");
+    Ok(())
+}
 ```
+
+Every line of that block is compiled and run as a doctest, against this crate's
+own feature set. `try_parse` returns `Result<Parsed, ParseError>` — the `?` is
+required, not decorative; binding it directly and calling `.root()` does not
+compile.
 
 Consumers do not depend on `ast-grep` directly; the grammar types
 (`AstGrep`, `Node`, `StrDoc`, `SupportLang`) are re-exported here as
@@ -83,7 +93,7 @@ affected.
 | `lang-go` | Go | `go` | yes |
 | `lang-java` | Java | `java` | yes |
 | `lang-swift` | Swift | `swift` | yes |
-| `lang-tsx` | TSX | `tsx` | no |
+| `lang-tsx` | TSX (parsed by the TypeScript grammar; shares it with `lang-typescript`) | `tsx` | no |
 | `lang-c` | C | `c`, `h` | no |
 | `lang-cpp` | C++ | `cpp`, `hpp`, `cc`, `cxx`, `hh`, `hxx` | no |
 | `lang-csharp` | C# | `cs` | no |
@@ -117,13 +127,20 @@ anything else is a caller-registered parser. Register one with `CustomLang` and
 parse it through `try_parse_with`, under the same byte bound, node bound, and
 recovery refusal as a built-in:
 
-```rust
+```rust ignore
 use lgwks_ast::{CustomLang, try_parse_with};
+use some_sql_grammar::LANGUAGE; // the caller's own grammar crate
 
-let sql = CustomLang::new("sql", tree_sitter_sequel::LANGUAGE.into())
-    .with_extensions(&["sql"]);
-let parsed = try_parse_with("SELECT 1", &sql, sql.name()).expect("valid SQL");
+let sql = CustomLang::new("sql", LANGUAGE.into()).with_extensions(&["sql"]);
+let parsed = try_parse_with("SELECT 1", &sql, sql.name())?;
 ```
+
+This block is `ignore`d, and that is the honest encoding of what it shows:
+`LANGUAGE` comes from a grammar crate **the caller** depends on, which this
+crate deliberately does not, so no doctest here could compile it. What the
+block does prove is compiled — [`try_parse_with`] accepts a `CustomLang` under
+the same byte, node and recovery bounds as a built-in grammar, and the
+surrounding `#[test]`s exercise it with an in-crate grammar.
 
 `TSLanguage` is re-exported, so a consumer adds only the grammar crate, never
 `ast-grep-core` directly. A grammar crate is a third-party edge like any
@@ -151,9 +168,16 @@ upstream as a pull request.
 - `MAX_DETECT_BYTES`: 64 KiB per content-detection probe. `try_detect_content`
   tries each caller-named candidate in full, so the probe is bounded well below
   `MAX_SOURCE_BYTES`; `detect` never parses at all.
+- `MAX_SHEBANG_BYTES`: 256 bytes — the `#!` line is the only part of a file
+  `of_shebang` reads, and a script whose first line is longer than that is
+  treated as unidentified rather than scanned further.
 - `try_parse` refuses an `ERROR`/`MISSING` recovery node: a recoverable tree
   is not proof of valid syntax. `parse` is the unchecked escape hatch for
   diagnostics and tests that inspect malformed trees on purpose.
+- A tree is not only accepted or refused. `diagnostics` and `to_diagnostic`
+  turn a refused or suspect parse into a `Diagnostic` carrying a byte offset, a
+  1-based line and column, and a caret span, so a caller reports *where* the
+  source stopped making sense rather than only that it did.
 
 ## The other crates
 

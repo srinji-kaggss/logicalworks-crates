@@ -1,6 +1,6 @@
 [package]
 name = "lgwks_ast"
-description = "One multi-language AST parser: language identification from path or shebang, tree-sitter grammar selection by cargo feature, and bounded traversal. Includes a typed-diagnostic derive."
+description = "One multi-language AST parser: language identification from path or shebang, tree-sitter grammar selection by cargo feature, bounded traversal, and span-carrying diagnostics. Includes a typed-diagnostic derive."
 version = "0.2.2"
 edition = "2024"
 rust-version = "1.98"
@@ -15,7 +15,9 @@ keywords = ["parser", "ast", "tree-sitter", "static-analysis", "code-analysis"]
 # INV-AST-ONE-PARSER: this crate is the only multi-language AST
 # parser. Code tools identify a language, select a grammar, and parse through
 # it; they do not each depend on ast-grep and rebuild the language/extension
-# tables. The only external edges are ast-grep-core and ast-grep-language.
+# tables. Three external edges: ast-grep-core and ast-grep-language for the
+# grammars, and `thiserror` for the shared diagnostic derive this crate
+# re-exports so a downstream crate can derive without its own edge.
 #
 # The crate also owns the shared typed-diagnostic
 # derive (`thiserror`), used by `ParseError` and re-exported so downstream
@@ -40,6 +42,11 @@ default = [
 lang-rust = ["ast-grep-language/tree-sitter-rust"]
 lang-python = ["ast-grep-language/tree-sitter-python"]
 lang-typescript = ["ast-grep-language/tree-sitter-typescript"]
+# TSX is not a separate upstream grammar: ast-grep parses `.tsx` with the
+# TypeScript parser, so this feature forwards to the same crate as
+# `lang-typescript` and pulls nothing further. It exists as its own feature
+# because a `.tsx` file is a distinct thing to *select*, and a caller building
+# a React tool should not have to know that upstream reuses one parser.
 lang-tsx = ["ast-grep-language/tree-sitter-typescript"]
 lang-javascript = ["ast-grep-language/tree-sitter-javascript"]
 lang-go = ["ast-grep-language/tree-sitter-go"]

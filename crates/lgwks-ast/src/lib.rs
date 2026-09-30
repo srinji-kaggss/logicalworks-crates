@@ -1,3 +1,4 @@
+#![doc = include_str!("../README.md")]
 //! `lgwks_ast` owns the single multi-language AST parser.
 //!
 //! Code tools that consume this crate, a safety linter and a graph extractor
@@ -9,6 +10,14 @@
 //!
 //! Enforced invariant **INV-AST-ONE-PARSER**: a consumer identifies, selects,
 //! and parses through this crate and does not depend on `ast-grep` directly.
+//!
+//! ## The README is compiled
+//!
+//! This module documentation is generated from `README.md`, so the usage
+//! example above is built and run as a doctest on every `cargo test` rather
+//! than being prose that can quietly rot. `cargo test -p lgwks_ast --doc`
+//! therefore fails if the example stops compiling or stops asserting what the
+//! text above it claims.
 //!
 //! ## Code observability
 //!
@@ -24,13 +33,20 @@
 //! ## Grammar selection
 //!
 //! One cargo feature per grammar forwards to `ast-grep-language`. The default
-//! enables the seven languages the safety detectors parse; every remaining
-//! grammar ast-grep-language ships (C#, CSS, Dart, Elixir, Haskell, HCL,
-//! HTML, JSON, Lua, Markdown, Nix, PHP, Ruby, Solidity, YAML, and the rest)
-//! is its own opt-in `lang-*` feature, and `full` enables all 28. A language
-//! whose feature is off is not in [`Language::ALL`] and is never returned by
-//! [`Language::of_path`], so no consumer pays to compile a grammar it cannot
-//! select.
+//! enables seven widely-used languages — Rust, Python, TypeScript, JavaScript,
+//! Go, Java and Swift — and every remaining grammar ast-grep-language ships
+//! (C#, CSS, Dart, Elixir, Haskell, HCL, HTML, JSON, Lua, Markdown, Nix, PHP,
+//! Ruby, Solidity, YAML, and the rest) is its own opt-in `lang-*` feature, and
+//! `full` enables all 28. A language whose feature is off is not in
+//! [`Language::ALL`] and is never returned by [`Language::of_path`], so no
+//! consumer pays to compile a grammar it cannot select.
+//!
+//! Two notes on reading that table. `lang-tsx` is a *selection*, not a separate
+//! grammar: ast-grep parses `.tsx` with the TypeScript parser, so it forwards to
+//! the same crate as `lang-typescript` and pulls nothing further. And a `#!`
+//! line resolves a language where a filename cannot — see
+//! [`Language::of_shebang`], which is how an extensionless `bin/deploy` is
+//! identified at all.
 //!
 //! ## Custom languages
 //!
@@ -61,12 +77,24 @@
 //! trial-parses each candidate grammar in full, so the caller names a small
 //! candidate set and the probe source is held to [`MAX_DETECT_BYTES`]. The
 //! extension-only [`detect`] never parses.
+//!
+//! ## The README is compiled
+//!
+//! `README.md` is attached to this crate root as its documentation, so the
+//! usage example it opens with is built and run as a doctest on every
+//! `cargo test -p lgwks_ast --doc` instead of being prose that can rot. When
+//! the example above stops compiling — as it did while `try_parse` was
+//! documented as if it were infallible — that doctest is what catches it.
 
 // Lint contract (missing_docs deny, unsafe_code forbid, broken intra-doc
 // links deny) comes from the workspace root.
 
 /// Typed diagnostics: [`ParseError`] and the shared error derive.
 pub mod error;
+
+/// Spans, severities, and [`diagnostics`](diagnostic::diagnostics): what a tool
+/// reports on code, as opposed to what a parse refuses.
+pub mod diagnostic;
 
 /// Root re-export required by the `thiserror` derive's absolute expansion path.
 ///
@@ -83,6 +111,14 @@ use ast_grep_core::tree_sitter::LanguageExt;
 pub use ast_grep_core::tree_sitter::{StrDoc, TSLanguage};
 pub use ast_grep_core::{AstGrep, Node};
 pub use ast_grep_language::SupportLang;
+
+/// The diagnostic types a tool reports with, re-exported at the crate root.
+///
+/// A tool reporting on code needs [`Diagnostic`], [`Span`], [`Pos`] and
+/// [`Severity`] in almost every signature it writes, and reaching into
+/// `lgwks_ast::diagnostic::` for all four is a tax on the common case. The
+/// module stays public for a caller who prefers the longer path.
+pub use diagnostic::{Diagnostic, Pos, Severity, Span};
 
 /// One parsed source file, owning its tree. Defaults to a built-in [`Language`];
 /// a caller-registered grammar parses to `Parsed<CustomLang>`.
@@ -105,6 +141,14 @@ pub const MAX_AST_NODES: usize = 2_000_000;
 /// below [`MAX_SOURCE_BYTES`]; a language probe only needs enough bytes to
 /// show one clean reading.
 pub const MAX_DETECT_BYTES: usize = 64 * 1024;
+
+/// Longest `#!` line [`Language::of_shebang`] will read (256 bytes).
+///
+/// A real shebang is a path and an interpreter, and the longest in ordinary use
+/// is well under 128 bytes. The bound is what makes the read safe to point at
+/// an arbitrary file: a binary whose first "line" is a megabyte of non-newline
+/// bytes is refused in constant time rather than scanned.
+pub const MAX_SHEBANG_BYTES: usize = 256;
 
 /// Define `Language` and its lookup tables from one row per grammar.
 ///
@@ -247,6 +291,167 @@ impl Language {
             .iter()
             .copied()
             .find(|language| any_extension_matches(language.extensions(), extension))
+    }
+}
+
+// ── Shebangs ───────────────────────────────────────────────────────────────
+
+/// The interpreter a `#!` line names, reduced to the last path component.
+///
+/// `#!/usr/bin/env python3`, `#!/usr/bin/python3 -u`, and `#!/opt/py/bin/python`
+/// all name a Python interpreter, which is the part a language table can be
+/// keyed on. Taking the last component also drops the `-u` and `-Es` flags an
+/// interpreter line commonly carries, which are options to that interpreter and
+/// not part of its name.
+fn interpreter_from_shebang(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("#!")?;
+    // A shebang line is `interpreter [optional single arg]`. The argument is
+    // separated by whitespace, and everything after the first run of it is an
+    // option to the interpreter rather than part of its name.
+    let mut words = rest.split_ascii_whitespace();
+    let first = words.next()?;
+    let named = if is_env(first) {
+        // `env` runs a program named by its own arguments, so the interpreter is
+        // the first *program* argument. `env -S python3` and `env -Spython3`
+        // both spell that the split-S form used by coreutils.
+        program_after_env(words)?
+    } else {
+        first
+    };
+    let name = named.rsplit('/').next()?;
+    // An interpreter with no name in it is not a shebang this can read.
+    (!name.is_empty()).then_some(name)
+}
+
+/// Whether an interpreter path is `env` rather than a language runtime.
+fn is_env(path: &str) -> bool {
+    path == "env" || path.ends_with("/env")
+}
+
+/// The program `env` was asked to run, from the words after it.
+///
+/// `env` accepts option flags before the program name, and the split-S form
+/// (`-S python3`, `-Spython3`) that lets a shebang carry arguments is written
+/// either way in the wild. Both are peeled here so the caller sees the program
+/// name and nothing else.
+fn program_after_env<'a>(mut words: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    for word in words.by_ref() {
+        // A glued split-S argument carries the program on the flag itself:
+        // `env -Spython3 -u` runs `python3 -u`.
+        if let Some(glued) = word.strip_prefix("-S") {
+            if !glued.is_empty() {
+                return Some(glued);
+            }
+            continue;
+        }
+        // A bare option, with or without a one-letter bundle like `-iu`.
+        if word.starts_with('-') {
+            continue;
+        }
+        return Some(word);
+    }
+    None
+}
+
+/// Whether an interpreter name is `name` itself, or a versioned spelling of it.
+///
+/// Whether an interpreter name is the language `name`, allowing a version.
+///
+/// A shebang spells the interpreter the way the language names itself, which is
+/// not how the file extension is spelled: `python3` is the interpreter and `py`
+/// is the extension. So the comparison is against the language's canonical name
+/// with a version allowed on the end.
+///
+/// Two guards keep the looser match honest. The part left over after the name
+/// must be a version and nothing else — digits and dots only, and at least one
+/// digit — so `python3-config` and `cabal` are not Python. And a name of a
+/// single character is never matched this way, so `c` cannot claim the head of
+/// an unrelated interpreter.
+fn is_versioned_name_of(interpreter: &str, name: &str) -> bool {
+    if interpreter.eq_ignore_ascii_case(name) {
+        return true;
+    }
+    if name.len() < MIN_SHEBANG_NAME_BYTES {
+        return false;
+    }
+    let Some(remainder) = interpreter.get(..name.len()) else {
+        return false;
+    };
+    if !remainder.eq_ignore_ascii_case(name) {
+        return false;
+    }
+    interpreter
+        .get(name.len()..)
+        .is_some_and(is_version_suffix)
+}
+
+/// Shortest language name this will match an interpreter against.
+///
+/// Two characters, so a one-letter name cannot swallow the head of an unrelated
+/// interpreter.
+const MIN_SHEBANG_NAME_BYTES: usize = 2;
+
+/// Whether `rest` is a version suffix: at least one digit, and nothing but
+/// digits and dots after it.
+///
+/// One character is enough, because the single most common shebang on a Unix
+/// system is `python3` and the single most common versioned interpreter name is
+/// exactly that. A bare trailing dot is not a version, since `python.` names
+/// nothing.
+fn is_version_suffix(rest: &str) -> bool {
+    rest.starts_with(|first: char| first.is_ascii_digit())
+        && rest.chars().all(|part| part.is_ascii_digit() || part == '.')
+}
+
+impl Language {
+    /// Language named by the `#!` line of `source`, or `None` when it has no
+    /// shebang or names an interpreter with no compiled grammar.
+    ///
+    /// The path-based [`Language::of_path`] cannot route an extensionless
+    /// executable, and scripts are routinely shipped exactly that way: a
+    /// `bin/deploy` with `#!/usr/bin/env python3` has no extension to read. This
+    /// reads the first line and matches the interpreter against the same table
+    /// `of_path` uses, so a shebang and a filename resolve to the same
+    /// [`Language`] rather than through two tables that can disagree.
+    ///
+    /// The interpreter is matched against the language's canonical name with a
+    /// version allowed, so `python3`, `python3.12` and `python` all resolve to
+    /// Python — see [`is_versioned_name_of`] for why that is one rule rather
+    /// than a second table of interpreter names to keep in step with this one.
+    ///
+    /// This is a heuristic and is documented as one: a file whose first line is
+    /// `#!/usr/bin/env c` is probably not C, and the ambiguity is the caller's
+    /// to resolve through [`try_detect_content`], which parses rather than reads
+    /// a name. Where a shebang and an extension disagree, this returns the
+    /// shebang; call [`Language::of_path`] when the filename must win.
+    ///
+    /// Only the first line is examined, and only when it is under
+    /// [`MAX_SHEBANG_BYTES`]. A file whose first line is longer than that is
+    /// refused rather than scanned, so a binary presented as text costs a
+    /// bounded read.
+    ///
+    /// ```
+    /// use lgwks_ast::Language;
+    ///
+    /// assert_eq!(Language::of_shebang("#!/usr/bin/env python3\n"), Some(Language::Python));
+    /// assert_eq!(Language::of_shebang("#!/bin/sh\n"), None); // no grammar for sh
+    /// assert_eq!(Language::of_shebang("fn main() {}\n"), None); // no shebang at all
+    /// ```
+    #[must_use]
+    pub fn of_shebang(source: &str) -> Option<Self> {
+        let first = source.split_once('\n').map_or(source, |(line, _)| line);
+        if first.len() > MAX_SHEBANG_BYTES {
+            return None;
+        }
+        let interpreter = interpreter_from_shebang(first)?;
+        // Matched against the language's canonical name, not its extensions.
+        // `python3` is the interpreter and `py` is the extension, so matching
+        // an interpreter against extensions would never resolve it: the
+        // extension is an abbreviation of the name, not a prefix of it.
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|language| is_versioned_name_of(interpreter, language.name()))
     }
 }
 
@@ -396,6 +601,94 @@ pub enum ParseError {
         /// The applied bound.
         limit: usize,
     },
+}
+
+/// Every recovery node in `tree`, as a located diagnostic.
+///
+/// This is the form of [`diagnostic::diagnostics`] a caller should reach for.
+/// The free function takes the source as an argument, and every span it reports
+/// is a byte offset into *that* string — so handing it the wrong one yields
+/// positions that are silently off by some amount rather than loudly wrong.
+/// Here the source is read out of the tree, which is the only place it can be
+/// correct by construction.
+///
+/// A [`Parsed`] owns its text, so this borrows the tree and nothing else. A
+/// clean tree yields an empty `Vec`; a tree carrying recovery nodes yields one
+/// [`Diagnostic`] per node, in source order.
+///
+/// `language` names the grammar in each message, and is the name the caller
+/// parsed with — the same string [`try_parse_with`] takes. A caller of the
+/// built-in grammars passes `language.name()`; ast-grep's own `Language` trait
+/// carries no display name, so this crate cannot recover one from the tree.
+///
+/// ```
+/// use lgwks_ast::Language;
+///
+/// let source = "fn main() {}\nfn broken( {\n";
+/// let language = Language::Rust;
+/// let tree = lgwks_ast::parse(source, language);
+/// // The source comes from the tree, so no span can resolve wrongly.
+/// let found = lgwks_ast::tree_diagnostics("main.rs", &tree, language.name());
+/// assert!(!found.is_empty());
+/// assert_eq!(found[0].span.start.line, 2);
+/// ```
+#[must_use]
+pub fn tree_diagnostics<L: LanguageExt>(
+    path: impl Into<std::path::PathBuf>,
+    tree: &Parsed<L>,
+    language: &str,
+) -> Vec<Diagnostic> {
+    diagnostic::diagnostics(path, &tree.root(), tree_source(tree), language)
+}
+
+/// How many recovery nodes `tree` carries.
+///
+/// The count behind [`has_syntax_issues`], which collapses the same question to
+/// one sticky bit and cannot say where the damage is.
+#[must_use]
+pub fn tree_recovery_count<L: LanguageExt>(tree: &Parsed<L>) -> usize {
+    diagnostic::recovery_count(&tree.root())
+}
+
+/// The text `tree` was parsed from.
+///
+/// [`Parsed`] is a type alias for ast-grep's own `Root`, whose `doc` field is
+/// private, so this reaches the source through a node's public [`Doc`] surface.
+/// The tree owns a copy of its text, so the result is never stale and never a
+/// re-read from disk.
+fn tree_source<L: LanguageExt>(tree: &Parsed<L>) -> &str {
+    use ast_grep_core::Doc;
+    tree.root().get_doc().get_source()
+}
+
+impl ParseError {
+    /// This refusal as a located [`Diagnostic`], for a tool that reports every
+    /// outcome in one shape.
+    ///
+    /// Every refusal is a [`Severity::Error`], and none of them is a position
+    /// inside the file: a source too large, a grammar that produced no tree, and
+    /// a tree carrying recovery nodes are all conditions of the whole file
+    /// rather than of a line. The span is therefore zero-width at the end of
+    /// `source`, so a renderer underlines nothing rather than pointing at an
+    /// invented line.
+    ///
+    /// ```
+    /// use lgwks_ast::{ParseError, Severity};
+    ///
+    /// let refusal = ParseError::SourceTooLarge { actual: 9, limit: 8 };
+    /// let reported = refusal.to_diagnostic("big.rs", "too big");
+    /// assert_eq!(reported.severity, Severity::Error);
+    /// assert!(reported.span.is_empty());
+    /// ```
+    #[must_use]
+    pub fn to_diagnostic(&self, path: impl Into<std::path::PathBuf>, source: &str) -> Diagnostic {
+        Diagnostic {
+            file: path.into(),
+            severity: Severity::Error,
+            message: self.to_string(),
+            span: diagnostic::end_of(source),
+        }
+    }
 }
 
 /// Node count, deepest depth, and recovery state from one traversal.
@@ -645,10 +938,12 @@ pub fn child_text_with_kind<L: LanguageExt>(
 /// The name a definition node declares, if a direct child kind in
 /// `name_kinds` names it.
 ///
-/// Retained with [`callee_name`] and [`child_text_with_kind`] as the
-/// name-resolution surface existing callers rely on; those callers are being
-/// migrated onto this crate, so removing these would turn that migration into
-/// a rewrite.
+/// With [`callee_name`] and [`child_text_with_kind`], the name-resolution
+/// surface. These three are the only way to read a declared name without
+/// writing a tree walk by hand, so they stay on the surface deliberately. That
+/// is a judgement about this crate's own API, not a claim about callers: no
+/// crate in this workspace depends on `lgwks_ast` today, and these three carry
+/// no callers outside this crate's tests.
 #[must_use]
 pub fn definition_name<L: LanguageExt>(
     node: &AstNode<'_, L>,
@@ -719,6 +1014,41 @@ mod tests {
         assert!(
             metrics.has_syntax_issues,
             "reverse-sibling traversal encounters the last root child first"
+        );
+    }
+
+    #[test]
+    fn a_completed_walk_retains_one_frame_per_active_ancestor() {
+        // The other half of INV-AST-1, and the half the budget test above
+        // cannot reach. That test stops at the cap before descending, so it
+        // proves the early break is cheap; it says nothing about the steady
+        // state, which is the path every real walk takes (the production cap is
+        // 2,000,000 nodes and is never hit). This one runs to completion.
+        //
+        // A deep, narrow tree: each level has one child, so the number of active
+        // ancestors is the depth, and the frames retained must be that depth
+        // rather than the total node count.
+        let depth = 200;
+        let source = format!("{}fn f() {{}}{}", "fn f() {".repeat(depth), "}".repeat(depth));
+        let parsed = parse(&source, Language::Rust);
+        let (metrics, peak_frames) = inspect_ast_with_pending(&parsed.root(), None);
+
+        assert!(
+            metrics.max_depth > 50,
+            "the fixture is {} deep, so the walk really does descend",
+            metrics.max_depth
+        );
+        assert_eq!(
+            peak_frames, metrics.max_depth,
+            "retained {peak_frames} frames for a tree {} deep; the walk is not \
+             retaining exactly the active ancestors",
+            metrics.max_depth
+        );
+        assert!(
+            metrics.nodes > peak_frames.saturating_mul(4),
+            "retained {peak_frames} frames for a tree of {} nodes, which is a \
+             sibling frontier rather than a depth",
+            metrics.nodes
         );
     }
 
@@ -799,6 +1129,74 @@ mod tests {
     fn detect_is_extension_only_and_never_trial_parses() {
         assert_eq!(detect("probe.rs"), Some(Language::Rust));
         assert_eq!(detect("noextension"), None);
+    }
+
+    #[test]
+    fn a_shebang_names_the_language_of_an_extensionless_file() {
+        // The case the crates.io description promises: a script with no
+        // extension to read. Python and Rust are both default-on, so these hold
+        // at every feature set that has any grammar at all.
+        assert_eq!(Language::of_shebang("#!/usr/bin/env python3\n"), Some(Language::Python));
+        assert_eq!(Language::of_shebang("#!/usr/bin/env rust\n"), Some(Language::Rust));
+        // A version-pinned interpreter names the same language.
+        assert_eq!(
+            Language::of_shebang("#!/usr/bin/python3.12\n"),
+            Some(Language::Python)
+        );
+        // `node` is a runtime name, not a language name this table claims.
+        // Guessing here would attach a grammar to a name the caller never gave.
+        assert_eq!(Language::of_shebang("#!/usr/bin/env node\n"), None);
+        // An interpreter with no compiled grammar is unknown, not a guess.
+        assert_eq!(Language::of_shebang("#!/bin/sh\n"), None);
+        // No shebang at all.
+        assert_eq!(Language::of_shebang("fn main() {}\n"), None);
+        // A `#!` that is not at the start is a comment, not a shebang.
+        assert_eq!(Language::of_shebang(" #!/usr/bin/env python3\n"), None);
+    }
+
+    #[test]
+    fn an_interpreter_flag_is_not_part_of_the_language_name() {
+        // `-u`, `-Es` and friends are options to the interpreter, not part of
+        // its name. `#!/usr/bin/python3 -u` runs python.
+        assert_eq!(Language::of_shebang("#!/usr/bin/python3 -u\n"), Some(Language::Python));
+        // `env` takes the interpreter as its argument, and may itself take a
+        // `-S` style option before it, spelled either way in the wild.
+        assert_eq!(
+            Language::of_shebang("#!/usr/bin/env -S python3 -u\n"),
+            Some(Language::Python)
+        );
+        assert_eq!(
+            Language::of_shebang("#!/usr/bin/env -Spython3 -u\n"),
+            Some(Language::Python)
+        );
+        // A flag to `env` rather than to the interpreter is still peeled.
+        assert_eq!(Language::of_shebang("#!/usr/bin/env -i python3\n"), Some(Language::Python));
+    }
+
+    #[test]
+    fn a_shebang_is_bounded_before_it_is_read() {
+        // A binary whose first line is a megabyte of non-newline bytes must be
+        // refused in constant time, not scanned.
+        let long = format!("#!{}\n", "/usr/bin/".repeat(MAX_SHEBANG_BYTES));
+        assert!(long.len() > MAX_SHEBANG_BYTES);
+        assert_eq!(Language::of_shebang(&long), None);
+    }
+
+    #[test]
+    fn an_empty_shebang_is_not_a_language() {
+        assert_eq!(Language::of_shebang("#!\n"), None);
+        assert_eq!(Language::of_shebang("#!"), None);
+        assert_eq!(Language::of_shebang("#! \n"), None);
+    }
+
+    #[test]
+    fn a_shebang_and_a_path_resolve_to_the_same_language() {
+        // One table, not two that can disagree: `deploy` and `deploy.py` must
+        // not resolve to different languages.
+        let by_path = detect("deploy.py");
+        let by_shebang = Language::of_shebang("#!/usr/bin/env python3\n");
+        assert_eq!(by_path, by_shebang);
+        assert!(by_shebang.is_some());
     }
 
     #[test]
