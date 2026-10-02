@@ -38,6 +38,18 @@ explicitly under that crate.
   `cargo run -p lgwks_bot --features process --example review_pr -- <repo> <pr>
   <EVENT> <body>` runs the whole path; `LGWKS_REVIEW_PUBLISH=0` is a
   draft-only profile.
+- `domain::gh::MAX_REVIEWS_PER_PULL` and `GhError::ReviewCeiling` (#151):
+  `--paginate` follows GitHub's review pages until the client is done, so the
+  review list used to grow with a pull request's history rather than with any
+  bound of this crate's own. A review read now refuses a list longer than the
+  declared ceiling — a *typed refusal*, not a shortened list. The distinction
+  matters because a truncated list that decoded cleanly is indistinguishable
+  from the whole history, and a verification built on it would report "no
+  matching review" for a review that exists on a page nobody read. Exactly the
+  ceiling is accepted; one more is refused, naming the endpoint, the count and
+  the ceiling. This is a bound, not a truncation: a build without the
+  `process` feature still refuses every call with `NoRunner` rather than
+  reporting an empty snapshot, an empty review list, or review id `0`.
 
 - `task::{Host, Task, Report}`, the front door (#87 step 1): build a `Host` once
   (tenant, stop token, admission ceiling, default deadline, trail capacity, all

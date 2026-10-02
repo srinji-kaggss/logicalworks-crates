@@ -246,6 +246,22 @@ impl ReviewOutcome {
     pub const fn is_unknown(&self) -> bool {
         matches!(self, Self::Unknown { .. })
     }
+
+    /// Why the publication outcome could not be established, when it was not.
+    ///
+    /// `None` for every other variant. Present because an `Unknown` is a
+    /// *successful* run whose report carries no located error at all: the
+    /// information a caller needs is in the outcome, and a consumer that only
+    /// read `Report::error` would find nothing there and have to conclude the
+    /// run said nothing at all. It is a fact about the outcome, not about
+    /// execution, which is why it lives here and not on the report.
+    #[must_use]
+    pub fn unknown_reason(&self) -> Option<&str> {
+        match *self {
+            Self::Unknown { ref reason, .. } => Some(reason),
+            Self::Published { .. } | Self::TargetMoved { .. } | Self::Refused { .. } => None,
+        }
+    }
 }
 
 // ── The task body ───────────────────────────────────────────────────────────

@@ -222,15 +222,34 @@ for arg in "$@"; do
 done
 printf '%s\n' "$line" >> "$log"
 
+# Every field is read once, in one `sed`, into a single line that is then cut
+# with shell parameter expansion. A saturation family runs four calls per review
+# and each of those used to fork `sed` three or more times, so the fixture's own
+# bookkeeping dominated the measurement; the behaviour file is one short line, so
+# reading it once per invocation is the same work for a fraction of the forks.
+#
+# The result is a flat `key=value` line, which the cut below relies on: the
+# fixture writes the behaviour file itself, so the separator is one this file
+# controls rather than one parsed from arbitrary input.
+flatten() {
+  sed -e 's/,/\n/g' "$behaviour" | sed -n 's/.*"\([A-Za-z_]*\)":"\{0,1\}\([^,"}]*\).*/\1=\2/p'
+}
+BEHAVIOUR=$(flatten)
+
 # One scalar field out of the behaviour file. A quoted string keeps its
 # spaces, because the shell splits on them otherwise.
+#
+# Read once per invocation rather than per lookup: a key present under neither
+# shape yields the empty string, which is exactly what the callers treat as
+# "unspecified".
 field() {
-  quoted=$(sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" "$behaviour" | head -n 1)
-  if [ -n "$quoted" ]; then
-    printf '%s' "$quoted"
+  rest=${BEHAVIOUR#*"$1="}
+  if [ "$rest" = "$BEHAVIOUR" ]; then
+    printf ''
     return
   fi
-  sed -n "s/.*\"$1\":[^0-9a-zA-Z]*\([^\",}]*\).*/\1/p" "$behaviour" | head -n 1
+  value=${rest%%[!a-zA-Z0-9:._-]*}
+  printf '%s' "$value"
 }
 
 # The staged payload, when this call has one.
@@ -279,27 +298,36 @@ fi
 if [ "$method" = "POST" ]; then
   create=$(field create)
   case "$create" in
-    accept)
-      # The receiver applies the review: it records what was asked for in its
-      # own store, so a later read-back returns it. That is the whole point of
-      # a receiver-backed fixture — the read-back is not a canned answer, it is
-      # the state the write actually produced, which is what makes the
-      # lost-response test discriminating rather than circular.
-      id=$(field next_review_id)
+    accept|accept_then_drop)
+      # A real receiver assigns a fresh id per accepted create. The counter is a
+      # single append, so two concurrent creates cannot be handed the same id —
+      # and a test that checks two identities verify *distinct* reviews depends
+      # on that being true rather than on the ids happening to differ.
+      printf 'x' >> "$dir/creates"
+      seen=$(wc -c < "$dir/creates" | tr -d ' ')
+      id=$(( $(field next_review_id) + seen - 1 ))
       state=$(field created_state)
       event=$(printf '%s' "$payload" | sed -n 's/.*"event":"\([A-Z_]*\)".*/\1/p')
       if [ -n "$event" ]; then state="$event"; fi
+      # The record is rendered from the *payload the adapter sent*, not from the
+      # scenario's defaults. That is what makes the read-back a real
+      # observation: a receiver that answered from its own configuration would
+      # verify a body the adapter never published, and the lost-response test
+      # would pass without the write having produced anything.
+      body=$(printf '%s' "$payload" | sed -n 's/.*"body":"\([^"]*\)".*/\1/p')
+      commit=$(printf '%s' "$payload" | sed -n 's/.*"commit_id":"\([^"]*\)".*/\1/p')
       printf '%s\n' "$payload" > "$dir/applied-$id.json"
-      printf '{"id":%s,"commit_id":"%s","state":"%s","body":"%s"}\n' \
-        "$id" "$(field head_sha)" "$state" "$(field created_body)"
-      exit 0
-      ;;
-    accept_then_drop)
+      if [ -f "$dir/reviews.jsonl" ]; then printf ',' >> "$dir/reviews.jsonl"; fi
+      printf '{"id":%s,"commit_id":"%s","state":"%s","body":"%s"}' \
+        "$id" "$commit" "$state" "$body" >> "$dir/reviews.jsonl"
+      if [ "$create" = "accept" ]; then
+        printf '{"id":%s,"commit_id":"%s","state":"%s","body":"%s"}\n' \
+          "$id" "$commit" "$state" "$body"
+        exit 0
+      fi
       # The effect lands and the *response* is lost: the review is recorded in
       # the receiver, then the connection dies before anything is printed. This
       # is the case the whole reconciliation path exists for.
-      id=$(field next_review_id)
-      printf '%s\n' "$payload" > "$dir/applied-$id.json"
       printf 'connection reset by peer\n' >&2
       exit 7
       ;;
@@ -339,25 +367,13 @@ if [ "$is_reviews" -eq 1 ]; then
         exit 0
         ;;
     esac
-    # The list is built from what the receiver actually applied, so a scenario
-    # that posted one review reads back exactly that review. `sh` is not asked
-    # to parse JSON: each applied payload is copied verbatim, and only its id,
-    # commit, state and body are re-emitted from the fields the receiver also
-    # stored beside it.
+    # The list is the receiver's own store, copied verbatim. `sh` is not asked to
+    # parse JSON on the way out: each accepted create appended its rendered
+    # record to `reviews.jsonl`, so a scenario that posted one review reads back
+    # exactly that review and a receiver with many reviews does not pay a
+    # `sed` per stored review on every read.
     printf '['
-    first=1
-    for applied in "$dir"/applied-*.json; do
-      [ -e "$applied" ] || continue
-      id=$(basename "$applied" .json)
-      id=${id#applied-}
-      body=$(sed -n 's/.*"body":"\([^"]*\)".*/\1/p' "$applied" | head -n 1)
-      event=$(sed -n 's/.*"event":"\([A-Z_]*\)".*/\1/p' "$applied" | head -n 1)
-      commit=$(sed -n 's/.*"commit_id":"\([^"]*\)".*/\1/p' "$applied" | head -n 1)
-      if [ "$first" -eq 0 ]; then printf ','; fi
-      first=0
-      printf '{"id":%s,"commit_id":"%s","state":"%s","body":"%s"}' \
-        "$id" "$commit" "$event" "$body"
-    done
+    if [ -f "$dir/reviews.jsonl" ]; then cat "$dir/reviews.jsonl"; fi
     # Filler reviews, for the review-ceiling probe. They are real records on
     # another commit: what matters is that the adapter would have had to read
     # them to call the list complete, so returning only the prefix would be a
@@ -365,8 +381,11 @@ if [ "$is_reviews" -eq 1 ]; then
     filler=$(field filler_reviews)
     i=0
     while [ -n "${filler:-}" ] && [ "$i" -lt "$filler" ] 2>/dev/null; do
-      if [ "$first" -eq 0 ]; then printf ','; fi
-      first=0
+      if [ "$i" -eq 0 ] && [ ! -f "$dir/reviews.jsonl" ]; then
+        :
+      else
+        printf ','
+      fi
       printf '{"id":%s,"commit_id":"%s","state":"COMMENT","body":"history"}' \
         "$((7000 + i))" "ccccccccccccccccccccccccccccccccccccccc"
       i=$((i + 1))
