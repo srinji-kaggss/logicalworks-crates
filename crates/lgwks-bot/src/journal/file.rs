@@ -304,92 +304,138 @@ fn scan(
     let mut entries = Vec::new();
     let mut position = previous;
     let mut offset = 0u64;
-    let mut index = 0u64;
     loop {
-        let mut prefix = [0u8; LENGTH_BYTES];
-        match read_exact_or_eof(reader, &mut prefix)? {
-            None => return Ok((entries, ScanStop::Complete(offset))),
-            Some(read_len) if read_len < LENGTH_BYTES => {
-                return Ok((entries, ScanStop::Torn(offset)));
-            }
-            Some(_) => {
-                let requested = u64::try_from(entries.len())
-                    .unwrap_or(u64::MAX)
-                    .saturating_add(1);
-                if requested > u64::try_from(max_events).unwrap_or(u64::MAX) {
-                    return Err(JournalError::CapacityExceeded {
-                        resource: JournalLimitKind::Events,
-                        limit: u64::try_from(max_events).unwrap_or(u64::MAX),
-                        requested,
-                    });
-                }
+        match read_frame(reader, entries.len(), max_events, position, offset)? {
+            FrameRead::Done(stop) => return Ok((entries, stop)),
+            FrameRead::Event {
+                entry,
+                position: next,
+                length,
+            } => {
+                entries.push(entry);
+                position = next;
+                offset = offset.saturating_add(length);
             }
         }
-        let payload_len = usize::try_from(u32::from_be_bytes(prefix)).unwrap_or(usize::MAX);
-        if payload_len == 0 || payload_len > MAX_FRAME_BYTES {
-            // A complete prefix that names an impossible frame is not a torn
-            // append: a write leaves only a prefix of its bytes, so the
-            // length a writer did complete is the length it intended, and
-            // that is always a frame this journal writes. Refuse, never
-            // trim: the bytes after this point may be acknowledged.
-            return Err(JournalError::Corrupt(Box::new(Corruption::new(
-                index,
-                CorruptionKind::Framed,
-            ))));
-        }
-        let mut payload = vec![0u8; payload_len];
-        if let FramePiece::Interrupted = read_exact_classified(reader, &mut payload)? {
-            // The declared payload ran past the end of the file. Whether that
-            // is an interrupted append or a lying length is decided in
-            // `resolve_ambiguous_tail`, on the frame's own stored head — not
-            // here, and never by trusting the prefix.
-            return Ok((
-                entries,
-                ScanStop::AmbiguousTail {
-                    offset,
-                    declared_len: payload_len,
-                },
-            ));
-        }
-        let mut head = [0u8; HEAD_BYTES];
-        if let FramePiece::Interrupted = read_exact_classified(reader, &mut head)? {
-            return Ok((entries, ScanStop::Torn(offset)));
-        }
-
-        let event: EffectEvent = from_bytes::<EffectEvent, WireError>(&payload).map_err(|_| {
-            JournalError::Corrupt(Box::new(Corruption::new(
-                index,
-                CorruptionKind::Undecodable,
-            )))
-        })?;
-        let head_digest = chain(position, &event)?;
-        let recomputed = JournalPosition {
-            sequence: position.sequence().saturating_add(1),
-            head: head_digest,
-        };
-        let recorded = JournalPosition {
-            sequence: recomputed.sequence(),
-            head: lgwks_std::hash::Digest::from_bytes(head),
-        };
-        if recorded != recomputed {
-            return Err(JournalError::Corrupt(Box::new(Corruption::new(
-                index,
-                CorruptionKind::Chain(ChainBreak::Disagreement {
-                    at: recorded.sequence(),
-                    recorded,
-                    recomputed,
-                }),
-            ))));
-        }
-        entries.push(JournalEntry::new(recorded, event));
-        position = recorded;
-        let frame_len = LENGTH_BYTES
-            .saturating_add(payload_len)
-            .saturating_add(HEAD_BYTES);
-        let frame_len = u64::try_from(frame_len).unwrap_or(u64::MAX);
-        offset = offset.saturating_add(frame_len);
-        index = index.saturating_add(1);
     }
+}
+
+/// What one pass of the journal's frame loop found.
+enum FrameRead {
+    /// The scan stops here; `scan` returns what it has read so far.
+    Done(ScanStop),
+    /// One whole frame was read, decoded and chain-checked.
+    Event {
+        /// The entry it carries, at the position its head verifies.
+        entry: JournalEntry,
+        /// The position the next frame is expected at.
+        position: JournalPosition,
+        /// Its length on disk, so the caller can keep a running offset.
+        length: u64,
+    },
+}
+
+/// Reads one frame, decodes it, and checks it against the running chain.
+///
+/// `position` is where the frame's predecessor ended and `offset` is how many
+/// bytes precede it, so a stop can name where it stopped even when it stops
+/// before reading anything.
+///
+/// A helper rather than the loop body inline: as one block the loop read the
+/// length prefix, read the payload, read the stored head, decoded the event and
+/// recomputed the chain -- five fallible steps. The order is the contract and is
+/// now stated where it is enforced: a frame whose declared payload runs past the
+/// end of the file is an ambiguous tail rather than a torn one, and that is
+/// decided on the frame's own stored head, never on the prefix that named it.
+fn read_frame(
+    reader: &mut impl Read,
+    already_read: usize,
+    max_events: usize,
+    position: JournalPosition,
+    offset: u64,
+) -> Result<FrameRead, JournalError> {
+    lgwks_std::trace::warn!(
+        operation = "read_frame",
+        "operation refused its request; the typed error carries the facts"
+    );
+    let index = u64::try_from(already_read).unwrap_or(u64::MAX);
+    let mut prefix = [0u8; LENGTH_BYTES];
+    match read_exact_or_eof(reader, &mut prefix)? {
+        None => return Ok(FrameRead::Done(ScanStop::Complete(offset))),
+        Some(read_len) if read_len < LENGTH_BYTES => {
+            return Ok(FrameRead::Done(ScanStop::Torn(offset)));
+        }
+        Some(_) => {
+            let requested = index.saturating_add(1);
+            if requested > u64::try_from(max_events).unwrap_or(u64::MAX) {
+                return Err(JournalError::CapacityExceeded {
+                    resource: JournalLimitKind::Events,
+                    limit: u64::try_from(max_events).unwrap_or(u64::MAX),
+                    requested,
+                });
+            }
+        }
+    }
+    let payload_len = usize::try_from(u32::from_be_bytes(prefix)).unwrap_or(usize::MAX);
+    if payload_len == 0 || payload_len > MAX_FRAME_BYTES {
+        // A complete prefix that names an impossible frame is not a torn
+        // append: a write leaves only a prefix of its bytes, so the length a
+        // writer did complete is the length it intended, and that is always a
+        // frame this journal writes. Refuse, never trim: the bytes after this
+        // point may be acknowledged.
+        return Err(JournalError::Corrupt(Box::new(Corruption::new(
+            index,
+            CorruptionKind::Framed,
+        ))));
+    }
+    let mut payload = vec![0u8; payload_len];
+    if let FramePiece::Interrupted = read_exact_classified(reader, &mut payload)? {
+        // The declared payload ran past the end of the file. Whether that
+        // is an interrupted append or a lying length is decided in
+        // `resolve_ambiguous_tail`, on the frame's own stored head -- not
+        // here, and never by trusting the prefix.
+        return Ok(FrameRead::Done(ScanStop::AmbiguousTail {
+            offset,
+            declared_len: payload_len,
+        }));
+    }
+    let mut head = [0u8; HEAD_BYTES];
+    if let FramePiece::Interrupted = read_exact_classified(reader, &mut head)? {
+        return Ok(FrameRead::Done(ScanStop::Torn(offset)));
+    }
+    let event: EffectEvent = from_bytes::<EffectEvent, WireError>(&payload).map_err(|_| {
+        JournalError::Corrupt(Box::new(Corruption::new(
+            index,
+            CorruptionKind::Undecodable,
+        )))
+    })?;
+    let head_digest = chain(position, &event)?;
+    let recomputed = JournalPosition {
+        sequence: position.sequence().saturating_add(1),
+        head: head_digest,
+    };
+    let recorded = JournalPosition {
+        sequence: recomputed.sequence(),
+        head: lgwks_std::hash::Digest::from_bytes(head),
+    };
+    if recorded != recomputed {
+        return Err(JournalError::Corrupt(Box::new(Corruption::new(
+            index,
+            CorruptionKind::Chain(ChainBreak::Disagreement {
+                at: recorded.sequence(),
+                recorded,
+                recomputed,
+            }),
+        ))));
+    }
+    let frame_len = LENGTH_BYTES
+        .saturating_add(payload_len)
+        .saturating_add(HEAD_BYTES);
+    Ok(FrameRead::Event {
+        entry: JournalEntry::new(recorded, event),
+        position: recorded,
+        length: u64::try_from(frame_len).unwrap_or(u64::MAX),
+    })
 }
 
 /// Read `buf.len()` bytes, or fewer at end of file, reporting how many.
