@@ -57,7 +57,7 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
 
 Each of these was a shipped defect. Treat the list as the spec.
 
-- **INV-BOT-21** One declared clock governs every deadline this crate
+- **INV-BOT-30** One declared clock governs every deadline this crate
   evaluates, and pausing it never disables the wall-clock watchdog.
   `rt::clock::Clock` is the authority; `rt::time::Deadline` names the clock that
   governs a deadline rather than an opaque process-local `Instant`. A
@@ -79,7 +79,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `the_elapsed_ceiling_saturates_instead_of_wrapping_into_the_past`,
   `an_over_advanced_clock_saturates_rather_than_wrapping`,
   `distinct_seeds_give_distinct_clock_traces`).
-- **INV-BOT-22** Inspection reads the owner's own state; it is never a second
+- **INV-BOT-31** Inspection reads the owner's own state; it is never a second
   ledger. `Supervisor::snapshot` is built from the same admission and reporting
   fields the permits and `Stats` are built from, so what it reports and what the
   supervisor admits are one fact read twice: a snapshot that says a free permit

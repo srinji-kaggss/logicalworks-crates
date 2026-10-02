@@ -138,7 +138,7 @@ program still on real time. This crate already has wall-clock budgets
 (`Supervisor`'s cooperative drain grace, a process deadline), so a "paused"
 runtime would still hang on any of them. A declared clock names which clock
 governs each deadline and keeps the watchdog separate — the property
-`INV-BOT-21` states and `tests/sim_clock.rs` proves.
+`INV-BOT-30` states and `tests/sim_clock.rs` proves.
 
 **What this does not claim.** A declared clock determinizes *which deadline is
 eligible*. It does not make poll order across workers deterministic, it does not
