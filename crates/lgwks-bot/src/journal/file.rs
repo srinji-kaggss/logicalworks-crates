@@ -30,6 +30,40 @@
 //!   never trimmed, because the frame may have been acknowledged, and an
 //!   acknowledgment the journal quietly rewrites is not a record.
 //!
+//! # The acknowledged-final-frame case that is still repaired rather than refused
+//!
+//! The rule above holds for a frame whose length field is *true*. It does **not**
+//! currently hold for the last case, and the exception is stated here rather
+//! than left to be discovered, because a doc claim that reads as universal while
+//! one reachable shape truncates is worse than a smaller true claim.
+//!
+//! If the final frame is **acknowledged and complete**, and its stored length is
+//! then changed from `L` to `L + 1`, the tail claims one more payload byte than
+//! the disk holds. Two files are byte-identical here: an append a writer never
+//! finished, and a complete frame whose prefix lies. `resolve_ambiguous_tail`
+//! discriminates them by trying the bytes actually present (the tail minus a
+//! head) as a frame — if they decode, chain from the committed history and
+//! reproduce the stored head exactly, the complete frame was already on disk and
+//! its prefix lied, and the file is **refused with
+//! [`JournalError::Corrupt`] and left untouched**. Anything else was never a
+//! complete frame, and is repaired as the torn tail it is.
+//!
+//! The reported defect is in that middle step: a tail of `L + 1 - 32` bytes is
+//! a whole frame **except** for its final 32-byte head, so the
+//! minus-a-head reconstruction cannot reproduce the stored head it is checked
+//! against, and the case falls to the torn-tail arm and is **truncated**. That
+//! truncates bytes an acknowledged writer committed, which is the reasoning the
+//! "never trimmed" rule above exists to forbid.
+//!
+//! **This is an open finding, not a documented behaviour.** Owner
+//! [#143](https://github.com/srinji-kaggss/logicalworks-crates/issues/143); the
+//! concrete `L -> L+1` trace is in that issue's Sep-27 comment. The fix must
+//! make the public regression *discriminate* the two dispositions — a real
+//! acknowledged frame whose length moved must be refused, and only a genuinely
+//! partial tail may be truncated — without weakening the no-resend safety the
+//! refusal exists for. Until it lands, **unattended durable automation stays
+//! held**; do not read the sentence above as a claim that it does not.
+//!
 //! # Bounds
 //!
 //! One frame may not exceed [`MAX_FRAME_BYTES`]; a journal whose events were
