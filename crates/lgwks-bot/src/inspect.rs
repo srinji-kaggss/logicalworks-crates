@@ -51,6 +51,14 @@
 //! [`Verdict::InfrastructureFailure`] is where such a refusal is reported
 //! rather than manufactured into a clean result.
 //!
+//! [`Verdict::Clean`]: crate::inspect::Verdict::Clean
+//! [`Verdict::Violations`]: crate::inspect::Verdict::Violations
+//! [`Verdict::Unsupported`]: crate::inspect::Verdict::Unsupported
+//! [`Verdict::Undecidable`]: crate::inspect::Verdict::Undecidable
+//! [`Verdict::Incomplete`]: crate::inspect::Verdict::Incomplete
+//! [`Verdict::InfrastructureFailure`]: crate::inspect::Verdict::InfrastructureFailure
+//! [`ASSURANCE`]: crate::inspect::ASSURANCE
+//!
 //! # Example
 //!
 //! ```

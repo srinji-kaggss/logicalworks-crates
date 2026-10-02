@@ -2,7 +2,7 @@
 //! the existing verbs, so a bot can reach it the way it reaches every other
 //! domain.
 //!
-//! The operation itself lives in [`crate::inspect`] and never executes the
+//! The operation itself lives in [`crate::inspect`](mod@crate::inspect) and never executes the
 //! subject. This module is the *wiring*: it turns that operation into
 //! something a [`BotSpec`](crate::BotSpec) or a native bot can call through the
 //! same registry and admission path every other domain uses, and into a
@@ -33,6 +33,12 @@
 //! library load, and none of those happens here. The read is bounded by
 //! `Budgets::max_source_bytes` before it happens, so an artifact past the budget
 //! is refused rather than loaded to be refused.
+//!
+//! [`Subject`]: crate::domain::inspect::Subject
+//! [`Subject::poll`]: crate::verb::Observe::poll
+//! [`Inspector`]: crate::domain::inspect::Inspector
+//! [`Auth`]: crate::cap::Auth
+//! [`Inspection`]: crate::inspect::Inspection
 
 use crate::cap::{Auth, Cap};
 use crate::effect::InputIdentity;
