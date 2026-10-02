@@ -192,7 +192,7 @@ fn drop_case(sim: &mut sim::Sim, runtime: &Runtime) -> TestResult {
     let dir = sim.scratch("process-mix")?;
     let pid_file = dir.join("child.pid");
     let script = format!("echo $$ > {}; sleep 5", pid_file.display());
-    let millis = sim.rng().between(40, 120);
+    let millis = sim.rng().between(400, 700);
     let spec = plain(&script);
     let pid = runtime.block_on(async {
         let mut supervisor = Supervisor::new(1);

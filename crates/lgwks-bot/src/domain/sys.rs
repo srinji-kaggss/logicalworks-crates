@@ -1,12 +1,12 @@
 //! `sys` owns the system process domain. Requires `bot.sys`.
 //!
 //! With the `process` feature the domain runs a real child through
-//! [`Supervisor::run_process`](crate::rt::supervise::Supervisor::run_process) and
-//! reports what it observed: exit code or signal, captured stdout and stderr
-//! with their truncation accounting, whether a deadline stopped it, and the
-//! process-group cleanup receipt. Without the feature the domain keeps its
-//! refusal: there is no runner to bind to, and a process-control capability
-//! that cannot run a process reports that rather than pretending.
+//! `Supervisor::run_process` and reports what it observed: exit code or signal,
+//! captured stdout and stderr with their truncation accounting, whether a
+//! deadline stopped it, and the process-group cleanup receipt. Without the
+//! feature the domain keeps its refusal: there is no runner to bind to, and a
+//! process-control capability that cannot run a process reports that rather
+//! than pretending.
 //!
 //! Three facts this domain is careful to report truthfully:
 //!

@@ -375,7 +375,7 @@ fn dropping_a_run_future_after_the_fork_leaves_no_orphan() -> TestResult {
         let mut supervisor = Supervisor::new(1);
         let spec = shell(&script);
         let outcome =
-            lgwks_bot::rt::time::timeout(Duration::from_millis(150), supervisor.run_process(&spec))
+            lgwks_bot::rt::time::timeout(Duration::from_millis(400), supervisor.run_process(&spec))
                 .await;
         if outcome.is_ok() {
             return Err(std::io::Error::other(

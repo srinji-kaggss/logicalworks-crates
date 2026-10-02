@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Monotone per-process sequence, so two scratch directories in one binary
-/// never share a path even if the clock does not move between them.
+/// never share a path even if the random tag does.
 static DIR_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// A temporary directory a scenario's own commands write pid files into.
@@ -23,9 +23,11 @@ pub struct PidDir(PathBuf);
 impl PidDir {
     /// Create the directory for a test called `name`.
     pub fn new(name: &str) -> std::io::Result<Self> {
-        let pid = std::process::id();
+        let tag = lgwks_std::random::bytes::<8>()
+            .map(u64::from_le_bytes)
+            .map_or(0, |tag| tag);
         let seq = DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("lgwks-bot-proc-{pid}-{seq}-{name}"));
+        let path = std::env::temp_dir().join(format!("lgwks-bot-proc-{tag:016x}-{seq}-{name}"));
         std::fs::create_dir_all(&path)?;
         Ok(Self(path))
     }
