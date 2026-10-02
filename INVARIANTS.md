@@ -398,7 +398,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   disposition, output or located error, and every report says no external
   effect is known. · why: #87 step 1 (T01–T04, T36) · enforced by:
   `tests/task_front_door.rs` and `tests/sim_task.rs`
-- **INV-BOT-21** The task front door's nine-axis evidence: a drawn scale of
+- **INV-BOT-70** The task front door's nine-axis evidence: a drawn scale of
   concurrent `Host::run` never exceeds the admission ceiling and returns every
   permit (100/1,000/10,000 tiers with recovery); two hosts with different
   tenants over one shared task name and step path produce distinct step keys,
