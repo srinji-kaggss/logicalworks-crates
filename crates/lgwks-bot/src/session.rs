@@ -764,6 +764,21 @@ fn validate_ask_node(
     Ok(())
 }
 
+/// Checks both edges of a branch, in the order the branch names them.
+///
+/// A helper for the pair rather than two calls: the branch's whole contract is
+/// that both targets resolve, and a reader checking one edge had no reason to
+/// look for the other three lines below it.
+fn check_edge_pair(
+    nodes: &BTreeMap<NodeId, NodeKind>,
+    node_id: &str,
+    first: &str,
+    second: &str,
+) -> Result<(), BotError> {
+    check_target(nodes, node_id, first)?;
+    check_target(nodes, node_id, second)
+}
+
 /// A declared flow node and its closed operation kind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(crate = "lgwks_std::json::serde", rename_all = "snake_case")]
@@ -1726,10 +1741,11 @@ fn validate_node(
             ref then,
             ref otherwise,
         } => {
+            // In this order, so a refusal names the variable before the
+            // predicate it is read by, and the predicate before either edge.
             validate_variable_reference(spec, node_id, var)?;
             validate_predicate(spec, node_id, when)?;
-            check_target(&spec.nodes, node_id, then)?;
-            check_target(&spec.nodes, node_id, otherwise)?;
+            check_edge_pair(&spec.nodes, node_id, then, otherwise)?;
         }
         NodeKind::Handoff { .. } => {}
         NodeKind::Refer { ref text, .. } => {
