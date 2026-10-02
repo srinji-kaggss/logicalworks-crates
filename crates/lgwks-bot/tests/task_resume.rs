@@ -36,7 +36,7 @@ use std::time::Duration;
 
 use lgwks_bot::effect::RunId;
 use lgwks_bot::script::{FlowError, Scope, remember};
-use lgwks_bot::task::{Disposition, EffectKnowledge, Host, StoreError, Task, task};
+use lgwks_bot::task::{Disposition, EffectKnowledge, Host, RunStore, StoreError, Task, task};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -72,7 +72,7 @@ async fn three_step_body(scope: Scope, dir: PathBuf) -> Result<u32, FlowError> {
 
 /// The task those three steps make, built fresh per call because a run reads its
 /// tenant and its store from the host, not from the task.
-fn three_step_task() -> Result<Task<fn(Scope, PathBuf) -> ThreeFuture>, FlowError> {
+fn three_step_task() -> Result<ThreeTask, FlowError> {
     task("three", boxed_three_step_body)
 }
 
@@ -90,6 +90,10 @@ fn boxed_three_step_body(scope: Scope, dir: PathBuf) -> ThreeFuture {
 /// the only spelling of "a task body" that can be named in a signature. The
 /// front door's own test proves the unboxed form.
 type ThreeFuture = Pin<Box<dyn Future<Output = Result<u32, FlowError>>>>;
+
+/// The task type [`three_step_body`] builds: a named function pointer returning a
+/// named future, so one body has one type every call site can pass.
+type ThreeTask = Task<fn(Scope, PathBuf) -> ThreeFuture>;
 
 /// A host for `tenant` with a durable store under `dir`.
 fn stored_host(tenant: &str, dir: &Path) -> Result<Host, Box<dyn Error>> {
@@ -411,35 +415,48 @@ fn wait_for_marker(path: &Path, within: Duration) -> TestResult {
     Ok(())
 }
 
-/// Two tenants, one run id: one resumes and one is refused.
+/// Two tenants over one shared store file: the owner resumes, the other is refused.
+///
+/// The store is shared deliberately. With one file per tenant, a foreign run id
+/// is simply absent and the test would prove nothing about isolation; with one
+/// file, tenant B can see that tenant A's run exists and is still refused it.
 #[test]
 fn two_tenants_resuming_one_run_id_stay_isolated() -> TestResult {
     let scratch = Scratch::new("tenants")?;
-    let store_dir = scratch.join("store");
-    let alpha = stored_host("alpha", &store_dir)?;
-    let beta = stored_host("beta", &store_dir)?;
+    let shared = scratch.join("shared.runstore");
     let input = scratch.path().to_path_buf();
 
+    let alpha = Host::builder("alpha")?
+        .store(RunStore::open(&shared)?)
+        .build()?;
     let seeded = lgwks_bot::block_on(alpha.run(&three_step_task()?, input.clone()));
+    assert_eq!(seeded.output(), Some(&10));
     let run = seeded.run_id().ok_or("a stored run must name its run id")?;
 
+    // The owner replays its own records.
     let mine = lgwks_bot::block_on(alpha.resume(run, &three_step_task()?, input.clone()));
     assert_eq!(mine.output(), Some(&10));
 
+    // A second tenant over the same bytes is refused, and the refusal names the
+    // tenant that owns the run.
+    let beta = Host::builder("beta")?
+        .store(RunStore::open(&shared)?)
+        .build()?;
     let theirs = lgwks_bot::block_on(beta.resume(run, &three_step_task()?, input));
-    assert_ne!(
+    assert_eq!(
         theirs.disposition(),
-        Disposition::Succeeded,
+        Disposition::Refused,
         "another tenant must not be served another tenant's records"
     );
-    let text = format!("{:?}", theirs.error()).to_lowercase();
+    let text = format!("{:?}", theirs.error());
     assert!(
-        text.contains("beta"),
-        "the refusal must name the store that was asked, got: {text}"
+        text.contains("alpha") && text.contains("beta"),
+        "the refusal must name both tenants, got: {text}"
     );
-    assert!(
-        text.contains("cannot attribute"),
-        "the refusal must say why, got: {text}"
+    assert_eq!(
+        ran(scratch.path(), "alpha")?,
+        1,
+        "the refused resume ran no step"
     );
 
     assert_eq!(
@@ -448,7 +465,16 @@ fn two_tenants_resuming_one_run_id_stay_isolated() -> TestResult {
             .ok_or("a stored host keeps a store")?
             .record_count(run),
         3,
-        "alpha's three records must survive the foreign refusal"
+        "alpha's three records must survive the foreign refusal untouched"
+    );
+    assert_eq!(
+        alpha
+            .run_store()
+            .ok_or("a store keeps a handle")?
+            .tenant_of(run)
+            .as_deref(),
+        Some("alpha"),
+        "the run is still attributed to the tenant that minted it"
     );
     Ok(())
 }

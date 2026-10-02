@@ -130,6 +130,11 @@ path = "examples/compare_orchestration.rs"
 required-features = ["script", "rt", "time", "sync", "macros"]
 
 [[example]]
+name = "resume_cost"
+path = "examples/resume_cost.rs"
+required-features = ["script", "ephemeral"]
+
+[[example]]
 name = "script_tenants"
 path = "examples/script_tenants.rs"
 required-features = ["script"]

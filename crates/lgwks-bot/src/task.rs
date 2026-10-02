@@ -882,23 +882,28 @@ impl Host {
         let started = Instant::now();
         let task_name = task.name_owned();
 
-        // A resume this store cannot attribute is refused before admission, so
-        // the refusal is a `Refused` with no body and no step rather than a fresh
-        // run recording another host's identity under this tenant.
+        // A resume this store knows belongs to another tenant is refused before
+        // admission, so the refusal is a `Refused` with no body and no step rather
+        // than a record written under the wrong tenant. A run the store has
+        // *never seen* is not refused: a process killed before its first record
+        // left no evidence at all, and refusing that resume would make the
+        // exactly-at-least-once step unrecoverable. The store still refuses to
+        // *read* another tenant's records; this only governs whether the run id
+        // may be adopted.
         if let Some(run) = resume
             && let Some(store) = self.inner.store.as_ref()
-            && !store.knows_run(run)
+            && let Some(owner) = store.tenant_of(run)
+            && owner != self.inner.tenant.as_str()
         {
             self.inner.refused.fetch_add(1, Ordering::Relaxed);
-            let error = StoreError::UnknownRun {
-                run: run.id().to_hex(),
-                tenant: self.inner.tenant.as_str().to_owned(),
+            let error = StoreError::ForeignTenant {
+                owner,
+                asked: self.inner.tenant.as_str().to_owned(),
             };
-            let disposition = Disposition::Refused;
             return self.report(Terminal {
                 started,
                 task: task_name.clone(),
-                disposition,
+                disposition: Disposition::Refused,
                 output: None,
                 error: Some(FlowError::Failed {
                     at: Arc::from(task_name.as_str()),
