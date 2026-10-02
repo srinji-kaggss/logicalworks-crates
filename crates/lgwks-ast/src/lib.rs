@@ -1415,6 +1415,51 @@ mod tests {
         Ok(())
     }
 
+    /// Issue #211: a `MISSING` diagnostic's span is zero-width, and the README
+    /// must not call it a caret span that underlines the fault.
+    ///
+    /// This is the negative control for the documentation repair. The shipped
+    /// README promised diagnostics carry "a caret span, so a caller reports
+    /// where the source stopped making sense", but a `MISSING` node marks an
+    /// insertion point rather than text: it has no bytes to underline. The
+    /// measured width is asserted here rather than asserted in prose, so a
+    /// future change to the span calculation has to update this test and the
+    /// sentence together instead of silently making the docs true or false.
+    #[test]
+    fn a_missing_recovery_node_carries_a_zero_width_span() -> Result<(), Box<dyn std::error::Error>>
+    {
+        // A missing `;` after a `let` binding: the grammar recovered by
+        // inserting the token, so there is no source text at the node.
+        let source = "fn main() {\n    let x = 1\n}\n";
+        let diagnostics = match try_parse(source, Language::Rust) {
+            Err(ParseError::InvalidSyntax { diagnostics, .. }) => diagnostics,
+            other => {
+                return Err(format!("expected InvalidSyntax, got {:?}", other.err()).into());
+            }
+        };
+        let missing = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.kind == SyntaxIssueKind::Missing)
+            .ok_or("an omitted semicolon must produce a MISSING node")?;
+        assert_eq!(
+            missing.start_byte, missing.end_byte,
+            "a MISSING node marks an insertion point, so its span must be empty"
+        );
+        assert_eq!(
+            source.get(missing.start_byte..missing.end_byte).map(str::len),
+            Some(0),
+            "the span must cover no source text, so it cannot underline anything"
+        );
+
+        // The offset is still addressable, so the line and column a caller
+        // renders from it remain meaningful even though the span is empty.
+        assert!(
+            missing.start_byte <= source.len() && source.is_char_boundary(missing.start_byte),
+            "the insertion point is a character boundary inside the source"
+        );
+        Ok(())
+    }
+
     #[test]
     fn an_invalid_syntax_diagnostic_points_at_the_earliest_recovery_node()
     -> Result<(), Box<dyn std::error::Error>> {
