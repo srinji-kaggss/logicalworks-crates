@@ -10,6 +10,28 @@ explicitly under that crate.
 
 ### lgwks_bot Added
 
+- Host-held resumable runs (#87 step 5). `HostBuilder::run_store(dir)` installs a
+  durable, file-backed per-step record store — `task::RunStore`, chain-framed and
+  `fsync`-ed per record, opened and replayed at installation so a refusal happens
+  before a run claims durability. `script::remember(&scope, "step", || async
+  { .. })` returns a committed step's decoded value **without polling its
+  future**, and otherwise runs the future, syncs the record, and returns it.
+  `Host::run` mints a `RunId` when a store is installed; `Report::run_id()` names
+  it; `Host::resume(run_id, &task, input)` re-runs the body with recorded steps
+  replayed, and `Host::resume_ticket` takes a `Report::ticket()` naming the run,
+  its owning tenant, its disposition and the step path it stopped at. Records are
+  keyed by tenant, so resuming another tenant's run id is a typed `Refused`; a
+  broken chain is refused rather than trimmed; an interrupted final append is the
+  only thing dropped; and the three ceilings (per-record bytes, records per run,
+  total bytes) are typed refusals that leave the store byte-identical.
+  `Report::effects()` gains `EffectKnowledge::StepRecords { records }` beside
+  `None`; without a store the report says `None`, names no run, and offers no
+  ticket, so no in-memory sink is ever reported as durable. Documented honestly:
+  a step that ran but whose record did not land re-runs on resume — exactly-once
+  for a recorded step, at-least-once for an unrecorded one — and an external
+  effect still needs the effect journal. Migration: none; every added item is
+  additive, and a host that installs no store behaves exactly as before.
+  INV-BOT-21.
 - `task::{Host, Task, Report}`, the front door (#87 step 1): build a `Host` once
   (tenant, stop token, admission ceiling, default deadline, trail capacity, all
   finite and readable through `Host::limits`), define a `Task` with `task(name,

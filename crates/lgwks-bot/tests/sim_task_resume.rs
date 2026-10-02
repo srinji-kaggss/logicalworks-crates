@@ -344,8 +344,10 @@ fn tenants_stay_isolated(band: Band) -> TestResult {
         // Every tenant's run id is offered to every tenant's handle on that one
         // file. The owner attributes it to itself; every other tenant is refused
         // the record and refuses to adopt the run.
-        for &(ref owner_name, run) in &runs {
-            for &(ref asker_name, _) in runs.iter() {
+        for entry in &runs {
+            let (ref owner_name, run) = *entry;
+            for other in &runs {
+                let (ref asker_name, _) = *other;
                 let asker = Host::builder(asker_name)?
                     .store(RunStore::open(&shared_path)?)
                     .build()?;

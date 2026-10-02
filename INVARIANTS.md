@@ -391,6 +391,32 @@ Each of these was a shipped defect. Treat the list as the spec.
   disposition, output or located error, and every report says no external
   effect is known. · why: #87 step 1 (T01–T04, T36) · enforced by:
   `tests/task_front_door.rs` and `tests/sim_task.rs`
+- **INV-BOT-21** A durable claim is backed by a store that outlives the process, and
+  every part of it says which. A host with `run_store` installed mints a `RunId`,
+  records each `remember` step's value with an `fsync` *before* returning it, and
+  reports the run's identity and step count in `EffectKnowledge::StepRecords`; a
+  host with no store reports `EffectKnowledge::None`, no `run_id` and no ticket,
+  and its durable steps simply re-run. A resume under a run id another tenant owns
+  is a typed `Refused`, never another tenant's records. Committed records are
+  chain-verified and a broken chain is refused, not trimmed; an interrupted final
+  append is the one thing dropped, because it was never acknowledged. Each of the
+  three ceilings (per-record bytes, records per run, total bytes) is a typed
+  refusal naming the bound, and a refusal leaves the store byte-identical. A step
+  that ran but whose record did not land re-runs on resume, so the durable
+  guarantee is exactly-once for a *recorded* step and at-least-once for an
+  unrecorded one; an external effect a step performs still needs the effect
+  journal, not this. · why: #87 step 5 (host-held continuation) · enforced by:
+  `tests/task_resume.rs` (`a_killed_process_resumes_without_rerunning_finished_steps`,
+  `a_run_without_a_store_claims_no_durability`,
+  `two_tenants_resuming_one_run_id_stay_isolated`,
+  `a_torn_final_record_is_dropped_and_earlier_ones_survive`,
+  `a_store_corrupt_before_the_tail_is_refused_not_trimmed`,
+  `an_oversized_record_is_refused_naming_the_ceiling`,
+  `a_duplicate_append_of_the_same_record_is_a_no_op`) and
+  `tests/sim_task_resume.rs` (`crash_points_resume_to_the_same_output`,
+  `finished_steps_run_once`, `tenants_stay_isolated`, `same_seed_replays`),
+  which sweeps every step boundary of every seeded run twice for an identical
+  trace hash.
 
 ## Open questions for the Director
 

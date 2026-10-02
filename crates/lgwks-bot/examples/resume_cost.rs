@@ -24,9 +24,6 @@ use lgwks_bot::task::{Host, task};
 /// How many `remember` calls each measurement performs.
 const STEPS: usize = 2_000;
 
-/// How many runs the peak-RSS measurement performs.
-const RUNS: usize = 10_000;
-
 /// A percentile of a sorted sample, by nearest rank.
 ///
 /// Nearest rank rather than interpolation: the report then names a sample that
@@ -73,7 +70,11 @@ fn report(label: &str, summary: &Summary) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let scratch = std::env::temp_dir().join(format!("lgwks-resume-bench-{}", std::process::id()));
+    // Random bytes rather than a process id: the OS reuses ids, so two benchmark
+    // runs on one machine would share a directory and read each other's records.
+    let unique = lgwks_std::random::bytes::<8>()?;
+    let hex: String = unique.iter().map(|byte| format!("{byte:02x}")).collect();
+    let scratch = std::env::temp_dir().join(format!("lgwks-resume-bench-{hex}"));
     std::fs::create_dir_all(&scratch)?;
 
     // A scratch scope built by hand, so the "no store" measurement runs the same
@@ -114,29 +115,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     report("stored ", &Summary::of(&mut stored));
 
-    // Measurement 3: 10,000 runs through one store, for peak RSS.
-    let before = peak_rss_bytes();
-    let mass_host = Host::builder("bench")?.run_store(&store_dir)?.build()?;
-    let mass_start = Instant::now();
-    for index in 0..RUNS {
-        let report = lgwks_bot::block_on(
-            mass_host.run(&one_step_task()?, u32::try_from(index).unwrap_or_default()),
-        );
-        if !report.disposition().is_success() {
-            return Err(format!("run {index} failed: {:?}", report.error()).into());
-        }
-    }
-    let after = peak_rss_bytes();
-    let mut out = std::io::stdout().lock();
-    let _written = writeln!(
-        out,
-        "{RUNS} runs through one store: wall={}ms peak-rss-before={}B peak-rss-after={}B \
-         delta={}B",
-        mass_start.elapsed().as_millis(),
-        before,
-        after,
-        after.saturating_sub(before)
-    );
     drop(std::fs::remove_dir_all(&scratch));
     Ok(())
 }
@@ -157,32 +135,4 @@ fn boxed_body(scope: Scope, value: u32) -> StepFuture {
     Box::pin(
         async move { remember(&scope, "v", || async move { Ok::<_, FlowError>(value) }).await },
     )
-}
-
-/// Peak resident set size in bytes, or zero where the platform does not report it.
-///
-/// Two sources, because the measurement has to run on both a Linux CI box and a
-/// developer Mac and neither `/proc` nor `ps` is present on both. Where neither
-/// answers, the number is zero and the report says so rather than printing a
-/// plausible-looking guess: an unmeasured RSS reported as a measurement is worse
-/// than an absent one.
-fn peak_rss_bytes() -> u64 {
-    if let Ok(text) = std::fs::read_to_string("/proc/self/status")
-        && let Some(kib) = text.lines().find_map(|line| {
-            let rest = line.strip_prefix("VmHWM:")?;
-            rest.split_whitespace().next()?.parse::<u64>().ok()
-        })
-    {
-        return kib.saturating_mul(1024);
-    }
-    // macOS and the BSDs: `ps -o rss=` is in kilobytes.
-    std::process::Command::new("ps")
-        .args(["-o", "rss=", "-p"])
-        .arg(std::process::id().to_string())
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .and_then(|text| text.trim().parse::<u64>().ok())
-        .map_or(0, |kib| kib.saturating_mul(1024))
 }

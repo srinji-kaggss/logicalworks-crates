@@ -31,7 +31,6 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Child;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use lgwks_bot::effect::RunId;
@@ -102,20 +101,20 @@ fn stored_host(tenant: &str, dir: &Path) -> Result<Host, Box<dyn Error>> {
 
 /// A unique scratch directory under the system temp dir, removed on drop.
 ///
-/// Named by a process-wide counter and the process id rather than by the clock,
-/// so two tests never collide and a failure leaves a directory a reader can
-/// open. Nothing here writes inside the repository, which is what keeps the suite
+/// Named by random bytes rather than by a clock or a process id, so two runs
+/// never collide and a failure leaves a directory a reader can open. Nothing here writes inside the repository, which is what keeps the suite
 /// portable across hosts and CI checkouts.
 struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(tag: &str) -> Result<Self, Box<dyn Error>> {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let unique = NEXT.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "lgwks-resume-{tag}-{}-{unique}",
-            std::process::id()
-        ));
+        // Random bytes, not a process id: the OS reuses an id, so two tests in
+        // two processes would collide on the same directory and one would delete
+        // the other's store mid-run. The estate's one entropy source is
+        // `lgwks_std::random`, behind this crate's `ephemeral` feature.
+        let unique = lgwks_std::random::bytes::<8>()?;
+        let hex: String = unique.iter().map(|byte| format!("{byte:02x}")).collect();
+        let path = std::env::temp_dir().join(format!("lgwks-resume-{tag}-{hex}"));
         if path.exists() {
             std::fs::remove_dir_all(&path)?;
         }
@@ -743,6 +742,94 @@ fn the_store_is_opened_at_installation_not_at_the_first_step() -> TestResult {
             "a foreign file is refused as not a store, got: {error}"
         ),
         Ok(_) => return Err("a foreign file must not be accepted as a run store".into()),
+    }
+    Ok(())
+}
+
+/// How many runs the resident-set measurement performs.
+const RSS_RUNS: usize = 10_000;
+
+/// The environment variable that runs the ten-thousand-run measurement.
+///
+/// Ten thousand `sync_all`-ed appends is several minutes, which is the right cost
+/// for a measurement and the wrong cost for every ordinary test run. The test is
+/// therefore opt-in and says so in its result: an ordinary run skips it and prints
+/// why, rather than quietly reporting a bound it never checked. CI's `scale` lane
+/// sets the variable, so the measurement is run where a number is expected.
+const RSS_ENV: &str = "LGWKS_RESUME_RSS_RUNS";
+
+/// Peak resident set size of this process, or `None` where nothing reports it.
+///
+/// `/proc/self/status` only, and `None` — never a fabricated number — elsewhere.
+/// The gate's rule against naming a process to ask it a question is the reason the
+/// `ps` route is not taken here; a measurement that reports zero on macOS is
+/// honest, and one that guessed would not be.
+fn peak_rss_bytes() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/self/status").ok()?;
+    text.lines()
+        .find_map(|line| {
+            let rest = line.strip_prefix("VmHWM:")?;
+            rest.split_whitespace().next()?.parse::<u64>().ok()
+        })
+        .map(|kib| kib.saturating_mul(1024))
+}
+
+/// Ten thousand runs through one store stay inside a bounded resident set.
+///
+/// The bound is the point: the store's index is derived from the file and is
+/// bounded by the record ceiling, so ten thousand one-record runs cost ten
+/// thousand records and not ten thousand live handles. The ceiling is generous —
+/// 512 MiB — because the assertion is about the *shape* of the growth, not about
+/// a machine's allocator; a design that retained every run's body would exceed it
+/// long before ten thousand.
+#[test]
+fn peak_rss_is_bounded_over_ten_thousand_runs() -> TestResult {
+    if std::env::var_os(RSS_ENV).is_none() {
+        // Not a silent pass: the test *names* the fact it did not measure, so a
+        // reader of the result sees a skipped measurement rather than a bound
+        // nobody checked.
+        return Err(format!(
+            "{RSS_ENV} is not set, so the ten-thousand-run resident-set measurement did not run"
+        )
+        .into());
+    }
+    const CEILING_BYTES: u64 = 512 * 1024 * 1024;
+    let scratch = Scratch::new("rss")?;
+    let store_dir = scratch.join("store");
+    let host = stored_host("rss", &store_dir)?;
+
+    // Warm the allocator and the store so the measurement covers steady-state
+    // growth rather than first-touch page faults.
+    for _ in 0..32 {
+        let report =
+            lgwks_bot::block_on(host.run(&three_step_task()?, scratch.path().to_path_buf()));
+        assert!(report.disposition().is_success());
+    }
+    let before = peak_rss_bytes();
+
+    let mut succeeded = 0usize;
+    for _ in 0..RSS_RUNS {
+        let report =
+            lgwks_bot::block_on(host.run(&three_step_task()?, scratch.path().to_path_buf()));
+        if !report.disposition().is_success() {
+            return Err(format!("a run failed: {:?}", report.error()).into());
+        }
+        succeeded = succeeded.saturating_add(1);
+    }
+    assert_eq!(succeeded, RSS_RUNS);
+
+    if let (Some(before), Some(after)) = (before, peak_rss_bytes()) {
+        assert!(
+            after <= CEILING_BYTES,
+            "peak RSS after {RSS_RUNS} runs was {after} bytes, over the {CEILING_BYTES}-byte \
+                 ceiling (baseline {before} bytes)"
+        );
+        let growth = after.saturating_sub(before);
+        assert!(
+            growth <= CEILING_BYTES,
+            "peak RSS grew {growth} bytes over {RSS_RUNS} runs, over the {CEILING_BYTES}-byte \
+                 ceiling"
+        );
     }
     Ok(())
 }
