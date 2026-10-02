@@ -1208,9 +1208,9 @@ impl Contract {
     /// Finds the approval for a resolved Cargo package name.
     ///
     /// Matching is byte-exact against the Cargo-authored package name, plus any
-    /// explicitly authored [`Entry::admits`] alias. Returns the first match
-    /// only; a package that backs several capabilities has several entries, so
-    /// callers that need all of them use `approvals_for`.
+    /// explicitly authored alias. Returns the first match only; a package that
+    /// backs several capabilities has several entries, so callers that need all
+    /// of them use `approvals_for`.
     #[must_use]
     pub fn approval_for(&self, krate: &str) -> Option<&Entry> {
         self.entries.iter().find(|entry| entry.admits(krate))
