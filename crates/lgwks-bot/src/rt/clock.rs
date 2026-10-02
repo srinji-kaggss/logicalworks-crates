@@ -172,11 +172,13 @@ pub enum ClockError {
 impl fmt::Display for ClockError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            Self::NotVirtual => formatter.write_str(
-                "the clock follows real time and cannot be advanced by a caller",
-            ),
+            Self::NotVirtual => formatter
+                .write_str("the clock follows real time and cannot be advanced by a caller"),
             Self::OutOfRange { requested, .. } => {
-                write!(formatter, "advancing the logical clock by {requested:?} leaves the representable range")
+                write!(
+                    formatter,
+                    "advancing the logical clock by {requested:?} leaves the representable range"
+                )
             }
         }
     }
@@ -246,42 +248,60 @@ impl Clock {
 
     /// Move a caller-advanceable clock forward.
     ///
-    /// Saturating at [`Clock::elapsed_ceiling`]: a clock that reached the
-    /// ceiling reports it rather than wrapping to a value in the past, because a
-    /// deadline computed from a wrapped clock fires immediately and is
-    /// indistinguishable from one that legitimately expired.
+    /// An advance that would carry the clock past [`Clock::elapsed_ceiling`]
+    /// **saturates at the ceiling** rather than refusing: a deadline computed from
+    /// a wrapped clock fires immediately and is indistinguishable from one that
+    /// legitimately expired, so landing on the ceiling is the honest answer to
+    /// "advance further". The return value is where the clock actually landed, so
+    /// a caller that asked for more and got less can see it.
+    ///
+    /// A clock already sitting at the ceiling refuses, because there is nothing
+    /// left to land on and reporting success would be a lie about movement that
+    /// did not happen.
     ///
     /// # Errors
     ///
     /// [`ClockError::NotVirtual`] on a wall clock, and
-    /// [`ClockError::OutOfRange`] when the advance would leave the range. In
+    /// [`ClockError::OutOfRange`] when the clock is already at its ceiling. In
     /// both cases the clock is unchanged.
     pub fn advance(&self, by: Duration) -> Result<Duration, ClockError> {
         if self.inner.source == TimeSource::Wall {
             return Err(ClockError::NotVirtual);
         }
-        let headroom = Self::elapsed_ceiling().checked_sub(self.now());
-        let Some(headroom) = headroom else {
+        let now = self.now();
+        if now >= Self::elapsed_ceiling() {
             return Err(ClockError::OutOfRange {
                 requested: by,
                 ceiling: Duration::ZERO,
             });
-        };
-        let by = by.min(headroom);
-        // `fetch_add` on a saturating basis: the CAS loop is the only way to
-        // saturate atomically, and the load is re-read each attempt so a
-        // concurrent advance from another task cannot lose an update.
-        let mut current = self.inner.elapsed.load(Ordering::Relaxed);
+        }
+        // Clamped rather than refused: see the saturation contract above.
+        let by = duration_to_nanos(by.min(Self::elapsed_ceiling().saturating_sub(now)));
+        // `fetch_add` would wrap; a compare-exchange loop is the only way to
+        // saturate atomically, and it re-reads on each attempt so a concurrent
+        // advance from another task cannot lose an update.
+        let mut current = duration_to_nanos(now);
         loop {
-            let next = nanos_to_duration(current).saturating_add(by);
+            let next = current.saturating_add(by);
             match self.inner.elapsed.compare_exchange_weak(
                 current,
-                duration_to_nanos(next),
+                next,
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => return Ok(next),
-                Err(observed) => current = observed,
+                Ok(_) => return Ok(nanos_to_duration(next)),
+                Err(observed) => {
+                    // Another task advanced past the ceiling between the check
+                    // above and this attempt. Refuse rather than move: the
+                    // clock is at a horizon the caller was told about.
+                    if observed >= duration_to_nanos(Self::elapsed_ceiling()) {
+                        return Err(ClockError::OutOfRange {
+                            requested: nanos_to_duration(by),
+                            ceiling: Duration::ZERO,
+                        });
+                    }
+                    current = observed;
+                }
             }
         }
     }
@@ -303,7 +323,9 @@ impl Clock {
     /// timestamp.
     #[must_use]
     pub fn snapshot(&self) -> ClockSnapshot {
-        ClockSnapshot { elapsed: self.now() }
+        ClockSnapshot {
+            elapsed: self.now(),
+        }
     }
 
     /// A wall-clock watchdog that keeps running while logical time is frozen.

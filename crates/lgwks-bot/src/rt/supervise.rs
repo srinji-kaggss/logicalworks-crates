@@ -716,8 +716,13 @@ pub struct Supervisor {
     /// Terminal outcomes not yet drained by the caller. Capped at the in-flight
     /// ceiling; see [`Stats::reports_dropped`].
     reports: VecDeque<TaskOutcome>,
-    /// The retention cap for [`Self::reports`].
+    /// The retention cap for [`Self::reports`], and the in-flight ceiling this
+    /// supervisor was built with.
     report_cap: usize,
+    /// The in-flight ceiling as the caller declared it, retained so
+    /// [`Supervisor::snapshot`] can report the bound the caller asked for rather
+    /// than re-deriving it from the clamped permit pool.
+    max_in_flight: usize,
     /// Next [`TaskId`] to hand out. Saturating, like the counters.
     next_task: u64,
     /// Tasks started. Saturating.
@@ -881,6 +886,7 @@ impl Supervisor {
             identities: BTreeMap::new(),
             reports: VecDeque::new(),
             report_cap: bound,
+            max_in_flight: bound,
             next_task: 0,
             spawned: 0,
             completed: 0,
@@ -962,6 +968,65 @@ impl Supervisor {
     #[must_use]
     pub fn pending_cleanup_count(&self) -> usize {
         self.cleanup_owners.pending_count()
+    }
+
+    /// A bounded, point-in-time view of what this supervisor owns right now.
+    ///
+    /// Reads the supervisor's own admission and reporting fields directly — the
+    /// same fields [`Supervisor::stats`] and the permit pool are built from — so
+    /// what it reports and what the supervisor does cannot drift apart. It
+    /// allocates a `Vec` proportional to the in-flight ceiling and retains
+    /// nothing afterwards.
+    ///
+    /// # What it deliberately does not carry
+    ///
+    /// Terminal outcomes stay in the report stream ([`Supervisor::next_report`]),
+    /// where the retention cap already governs them. A snapshot with its own copy
+    /// of them would be a second ledger, and two ledgers disagree.
+    ///
+    /// ```
+    /// # use lgwks_bot::rt::supervise::Supervisor;
+    /// # async fn example() {
+    /// let mut supervisor = Supervisor::new(2);
+    /// let snapshot = supervisor.snapshot();
+    /// assert_eq!(snapshot.max_in_flight, 2);
+    /// assert_eq!(snapshot.free(), 2, "a fresh supervisor holds both permits");
+    /// assert_eq!(snapshot.next_action(), supervisor::NextAction::Admit);
+    /// # }
+    /// # mod supervisor { pub use lgwks_bot::rt::supervise::NextAction; }
+    /// ```
+    #[must_use]
+    pub fn snapshot(&self) -> SupervisorSnapshot {
+        let live_limit = self.report_cap;
+        let mut live: Vec<LiveTask> = Vec::new();
+        let mut live_truncated: usize = 0;
+        // Spawn order, from the supervisor's own identity map: the engine's join
+        // order is arbitrary, and a listing that reordered itself between two
+        // reads could not be asserted against.
+        let mut ordered: Vec<TaskId> = self.identities.values().copied().collect();
+        ordered.sort_unstable_by_key(|task| task.get());
+        for (index, task) in ordered.into_iter().enumerate() {
+            if index < live_limit {
+                live.push(LiveTask {
+                    task,
+                    state: TaskState::Running { permit: index },
+                });
+            } else {
+                live_truncated = live_truncated.saturating_add(1);
+            }
+        }
+        #[cfg(all(unix, feature = "process"))]
+        let pending_cleanups = self.cleanup_owners.pending_count();
+        SupervisorSnapshot {
+            max_in_flight: self.max_in_flight,
+            stats: self.stats(),
+            live,
+            live_truncated,
+            cancelled: self.token.is_cancelled(),
+            reports_pending: self.reports.len(),
+            #[cfg(all(unix, feature = "process"))]
+            pending_cleanups,
+        }
     }
 
     /// The oldest terminal outcome this supervisor has not yet handed over.
@@ -1619,6 +1684,250 @@ impl Supervisor {
                 self.reports_dropped = self.reports_dropped.saturating_add(1);
             }
             Retention::Capped | Retention::Draining => self.reports.push_back(outcome),
+        }
+    }
+}
+
+/// What one task a [`Supervisor`] owns is currently doing, as the owner reads
+/// it.
+///
+/// A sum type rather than a status flag, because the states this supervisor can
+/// be in call for different responses: a task that is `Running` needs nothing, a
+/// `Blocked` one needs the reason, and a `Retained` report is authoritative
+/// evidence the caller has not read yet. A flag set that could express only
+/// "busy" would report the last one as idle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TaskState {
+    /// Placed and holding a permit, not yet returned.
+    Running {
+        /// Which admission permit of the ceiling the task holds.
+        ///
+        /// Always some slot of the in-flight bound; a task that holds none has
+        /// not been placed, which is not a state this enum can express.
+        permit: usize,
+    },
+    /// The body returned and the outcome is waiting to be joined.
+    ///
+    /// Distinct from `Running` because the task's *work* is done and its permit
+    /// is not yet released: the bound is still charged until the reap that
+    /// follows. A caller watching capacity must see the difference, or it will
+    /// conclude a saturated supervisor has free slots it does not have.
+    Finished,
+    /// The terminal outcome is retained and readable through
+    /// [`Supervisor::next_report`].
+    Retained {
+        /// How many retained reports are queued ahead of this one, so a caller
+        /// reading the whole stream knows what it is skipping.
+        ahead: usize,
+    },
+}
+
+impl TaskState {
+    /// Whether the task is still doing work.
+    #[must_use]
+    pub const fn is_running(self) -> bool {
+        matches!(self, Self::Running { .. })
+    }
+}
+
+/// A bounded, point-in-time view of one [`Supervisor`].
+///
+/// This is **not** a second ledger. Every counter here is read from the same
+/// fields the supervisor's own admission and reporting paths use, at the
+/// instant of the call, and the snapshot owns nothing: no background sampler, no
+/// retained history, no queue. That is the whole point — an inspection surface
+/// that maintained its own state could disagree with the owner, and a
+/// disagreement between the thing that runs work and the thing that reports on it
+/// is worse than no inspection at all.
+///
+/// # Bounds
+///
+/// [`Self::live`] is capped at [`Self::live_limit`], and [`Self::live_truncated`]
+/// says when it was. The live set is exactly the in-flight ceiling, which is
+/// itself bounded, so the cap is a defence against a caller that raised the
+/// ceiling rather than a routine truncation.
+///
+/// Terminal outcomes are **not** in this snapshot. They are already retained,
+/// already bounded by the report cap, and already drainable through
+/// [`Supervisor::next_report`]; a snapshot that carried its own copy of them
+/// would be the second source of truth this type refuses to be. A caller that
+/// needs the authoritative terminal record reads the report stream.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct SupervisorSnapshot {
+    /// The declared in-flight ceiling, as the supervisor holds it.
+    max_in_flight: usize,
+    /// The supervisor's own counters at this instant.
+    stats: Stats,
+    /// Live tasks, at most `live_limit` of them, in [`TaskId`] order.
+    live: Vec<LiveTask>,
+    /// How many live tasks the cap excluded.
+    live_truncated: usize,
+    /// Whether the supervisor has stopped admitting.
+    cancelled: bool,
+    /// Terminal outcomes waiting to be drained through
+    /// [`Supervisor::next_report`].
+    reports_pending: usize,
+    /// Cleanup obligations still charged to this supervisor's capacity.
+    #[cfg(all(unix, feature = "process"))]
+    pending_cleanups: usize,
+}
+
+impl SupervisorSnapshot {
+    /// The declared in-flight ceiling this supervisor was built with.
+    #[must_use]
+    pub const fn max_in_flight(&self) -> usize {
+        self.max_in_flight
+    }
+
+    /// The supervisor's own counters at the instant of the snapshot.
+    #[must_use]
+    pub const fn stats(&self) -> Stats {
+        self.stats
+    }
+
+    /// The live tasks, in spawn order, at most [`Self::live_limit`] of them.
+    ///
+    /// A borrow rather than the vector itself: the listing is a snapshot of the
+    /// supervisor's state, and handing out the `Vec` would hand out the right to
+    /// edit what a reader believes it observed. Nothing a caller does to the
+    /// returned slice can change what the supervisor does next, and that is the
+    /// whole claim of this type.
+    #[must_use]
+    pub fn live(&self) -> &[LiveTask] {
+        &self.live
+    }
+
+    /// How many live tasks the cap excluded from [`Self::live`].
+    ///
+    /// Non-zero means the listing is a bounded prefix, and a caller drawing
+    /// conclusions about capacity from it must account for what it did not see.
+    #[must_use]
+    pub const fn live_truncated(&self) -> usize {
+        self.live_truncated
+    }
+
+    /// Whether the supervisor has stopped admitting.
+    #[must_use]
+    pub const fn is_cancelled(&self) -> bool {
+        self.cancelled
+    }
+
+    /// Terminal outcomes waiting to be drained through
+    /// [`Supervisor::next_report`].
+    ///
+    /// The authoritative record is that stream; this is how many are queued, so a
+    /// caller can size its drain before starting it.
+    #[must_use]
+    pub const fn reports_pending(&self) -> usize {
+        self.reports_pending
+    }
+
+    /// Cleanup obligations still charged to this supervisor's capacity.
+    #[cfg(all(unix, feature = "process"))]
+    #[must_use]
+    pub const fn pending_cleanups(&self) -> usize {
+        self.pending_cleanups
+    }
+
+    /// The largest number of live tasks this snapshot can carry.
+    ///
+    /// Equal to the supervisor's in-flight ceiling, so a caller can size a
+    /// buffer for [`Self::live`] once instead of guessing.
+    #[must_use]
+    pub const fn live_limit(&self) -> usize {
+        self.max_in_flight
+    }
+
+    /// Whether the live listing came back empty and nothing was truncated.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.live.is_empty() && self.live_truncated == 0
+    }
+
+    /// Permits currently taken, from the live set.
+    ///
+    /// Equal to the number of `Running` entries, which is why it is derived here
+    /// rather than tracked separately: a second counter would be a second thing
+    /// that can disagree with the first.
+    #[must_use]
+    pub fn occupied(&self) -> usize {
+        self.live
+            .iter()
+            .filter(|task| task.state.is_running())
+            .count()
+    }
+
+    /// Permits this supervisor has free right now.
+    #[must_use]
+    pub fn free(&self) -> usize {
+        self.max_in_flight.saturating_sub(self.occupied())
+    }
+
+    /// The next action the supervisor can take, as one value.
+    ///
+    /// The decision an owner actually has to make, rather than the four counters
+    /// it is derived from. "Admission closed" is the one answer a caller that was
+    /// about to spawn must not have to infer from three places.
+    #[must_use]
+    pub fn next_action(&self) -> NextAction {
+        if self.cancelled {
+            NextAction::Stopped
+        } else if self.free() > 0 {
+            NextAction::Admit
+        } else {
+            NextAction::WaitForCapacity
+        }
+    }
+}
+
+/// What a [`Supervisor`] will accept next, from one snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NextAction {
+    /// There is a free permit; a spawn would start.
+    Admit,
+    /// Every permit is taken; a spawn would block until one is released.
+    WaitForCapacity,
+    /// The supervisor is cancelled and admits nothing further.
+    ///
+    /// A spawn would be refused rather than queued, so a caller that retries here
+    /// waits for something that will never happen.
+    Stopped,
+}
+
+/// One live task inside a [`SupervisorSnapshot`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LiveTask {
+    /// The supervisor's stable identity for this task, in spawn order.
+    pub task: TaskId,
+    /// What the task is currently doing.
+    pub state: TaskState,
+}
+
+impl Default for SupervisorSnapshot {
+    fn default() -> Self {
+        Self {
+            max_in_flight: 1,
+            stats: Stats {
+                spawned: 0,
+                completed: 0,
+                succeeded: 0,
+                failed: 0,
+                cancelled: 0,
+                aborted: 0,
+                panicked: 0,
+                refused: 0,
+                reports_dropped: 0,
+            },
+            live: Vec::new(),
+            live_truncated: 0,
+            cancelled: false,
+            reports_pending: 0,
+            #[cfg(all(unix, feature = "process"))]
+            pending_cleanups: 0,
         }
     }
 }
