@@ -102,6 +102,31 @@ Each of these was a shipped defect. Treat the list as the spec.
 
 ## lgwks_std
 
+- **INV-STD-SIM-2** A score and a refusal are different things. Raw cosine keeps
+  its `[-1, 1]` domain and the shared `Similarity` contract reads it through the
+  explicit, named `(raw + 1) / 2` mapping, so every implementation behind the
+  trait satisfies its `[0.0, 1.0]` and identity laws. A weight total below `1.0`
+  is a declared evidence deficit and is never renormalized or presented as
+  identity. Any refused component withdraws the whole composed verdict at every
+  threshold including `0.0`, is attributed to its component index, and its
+  weight is not redistributed onto a surviving neighbour; all-zero effective
+  evidence is an explicit `InsufficientEvidence`. The infallible `Similarity`
+  and `Weighted::is_accepted` methods remain lossy for source compatibility and
+  are not the authority-facing path. An edit or set budget is charged against
+  the *normalized* unit — the lower-case-expanded scalar count — and a set
+  budget is charged before dedup and before the quadratic scan. The lossy path
+  heuristic is not reachable as an exact-match proof. · why: #160 S1/S2/S4 ·
+  enforced by: `tests/similarity_evidence_contract.rs`
+  (`cosine_trait_impl_stays_inside_the_documented_unit_interval`,
+  `a_refused_component_is_not_accepted_at_threshold_zero`,
+  `all_zero_weight_refuses_regardless_of_threshold`,
+  `typed_refusals_carry_component_identity_through_composition`,
+  `bounded_jaccard_refuses_before_the_quadratic_scan`,
+  `budget_refusal_precedes_amplification_and_is_measurable`,
+  `the_edit_budget_charges_the_normalized_unit_not_the_raw_scalar_count`,
+  `the_heuristic_path_score_is_never_an_exact_match_proof`), `similarity.rs`
+  (`every_evidence_error_variant_is_exercised_by_a_test`), and
+  `tests/sim_similarity_sweep.rs` (`the_same_seed_replays_to_the_same_trace`)
 - **INV-STD-SIM-1** The documented `Geometry::score` accepts both `[f64; 4]`
   and `BoundingBox`. · why: #160 S3 · enforced by:
   `tests/similarity_public_api.rs`
@@ -200,9 +225,29 @@ Each of these was a shipped defect. Treat the list as the spec.
   component-invalid `**` as typed errors. Compilation is O(M); each token
   transition is O(N) over the finite Unicode scalar alphabet; reusable
   scratch retains one scalar index and two rolling rows in O(N), with no row
-  allocation per token. · enforced by: `glob::tests` work-growth, scratch
-  capacity, Unicode, strict-error and exact double-star cases, plus
-  `tests/glob_public.rs`
+  allocation per token. A compiled `GlobPattern` carries no caller data and
+  holds no interior mutability, so one pattern serves any number of concurrent
+  callers; the mutable half is the caller-owned `GlobScratch`, which
+  `is_match_with` takes by `&mut`. · enforced by: `glob::tests` work-growth,
+  scratch capacity, Unicode, strict-error and exact double-star cases, plus
+  `tests/glob_public.rs` and `tests/sim_shared_policy_tiers.rs`
+  (`one_shared_matcher_evidence_policy_and_retry_policy_serve_every_tier`,
+  `the_shared_values_are_reachable_through_an_arc_clone`)
+- **INV-STD-SHARED-POLICY** One compiled matcher, one evidence policy and one
+  retry policy serve 100, 1 000 and 10 000 concurrent callers with answers
+  bit-identical to the single-threaded reference, zero divergence at every tier,
+  and memory that does not scale with the caller count. Each caller owns its
+  scratch; the shared values carry no caller data. A host that cannot reach a
+  tier reports the requested tier and the level reached. A checked composition
+  is `Send + Sync` because it is immutable and its components are, so the
+  sharing claim is on the types rather than inferred from a run that did not
+  crash; two tenants' policies over one input never cross. · why: the reviewer
+  note on #154 item 7 and the hyperscale axis · enforced by:
+  `tests/sim_shared_policy_tiers.rs`
+  (`one_shared_matcher_evidence_policy_and_retry_policy_serve_every_tier`,
+  `the_shared_values_are_reachable_through_an_arc_clone`),
+  `glob::tests::a_compiled_pattern_is_shareable_across_threads_by_construction`,
+  and `tests/sim_tenant_isolation.rs`
 - **INV-CODEC-1** JSON and RON text/slice decoders preserve input borrowing
   where their decoders support it; escaped text that needs allocation is not
   reported as borrowed. RON writer failures distinguish serialization from I/O
