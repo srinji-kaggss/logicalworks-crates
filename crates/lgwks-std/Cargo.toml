@@ -1,6 +1,6 @@
 [package]
 name = "lgwks_std"
-description = "Everyday Rust primitives with no async runtime required: codecs, timestamps, ids, hashing, regex, JSON/RON/wire, HTTP, and default structured-debugging install. One audited stack per feature."
+description = "Everyday Rust primitives with no async runtime required: codecs, timestamps, ids, hashing, regex, JSON/RON/wire, HTTP, and default structured-debugging install. One audited stack per feature — a stack is not always one crate (json is serde + serde_json, ron is serde + ron, http is ureq + iri-string)."
 version = "0.10.0"
 edition = "2024"
 rust-version = "1.98"

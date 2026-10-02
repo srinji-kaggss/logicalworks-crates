@@ -4,7 +4,7 @@ Everyday Rust primitives with no async runtime required, each behind one
 audited dependency stack. The package is `lgwks_std` (underscore) in the
 directory `crates/lgwks-std` (hyphen), used as `use lgwks_std::...`.
 
-Current version: `0.7.0`. MSRV: Rust 1.98.0, edition 2024
+Current version: `0.10.0`. MSRV: Rust 1.98.0, edition 2024
 (`crates/lgwks-std/Cargo.toml`).
 
 ## Install
