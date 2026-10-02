@@ -407,6 +407,35 @@ Each of these was a shipped defect. Treat the list as the spec.
   · why: #118 item 1 · enforced by: `tests/ambiguous_commit.rs`
   (`a_committed_outcome_with_a_lost_reply_settles_without_resending`,
   `an_unknown_outcome_that_did_not_commit_reports_occurrence_and_records_on_retry`)
+- **INV-BOT-23** The committed record can be replayed without materializing it:
+  `FileJournal::replay` streams frames from its own read-only descriptor,
+  retaining at most one event, applies the same frame validation and event
+  ceiling `open` does, and yields exactly the acknowledged history. The
+  materialized `events()` view and the stream agree on every seed. · why: #122
+  item 2 · enforced by `tests/sim_journal_liveness.rs`
+  (`streaming_replay_r00..r15`)
+- **INV-BOT-24** A durable journal reserves room for the whole external handoff
+  — intent, preparation and settlement — before the first rung is written, so
+  it never leaves an attempt admitted and unable to settle. A journal with no
+  settlement room refuses the handoff with `CapacityExceeded` and writes
+  nothing. · why: #122 item 2 / #156 · enforced by
+  `ecs::tests::an_external_handoff_reserves_settlement_capacity_before_any_rung`
+- **INV-BOT-25** Applied-key membership is answered by index, not by scanning a
+  growing vector: the contract identity keeps the latest key per action and the
+  event identity keeps `(action, digest)` membership, so a run that applied N
+  distinct keys does O(N) work rather than the removed `Vec`'s Θ(N²)
+  membership-before-push. Both indexes retain one entry per action / per
+  distinct event for the controller's life, the same horizon the vector had, so
+  the #101 redelivery and #129 new-episode semantics are preserved. · why: #122
+  item 2 / #156 · enforced by
+  `ecs::tests::applied_membership_answers_at_scale_where_a_scan_would_be_quadratic`
+- **INV-BOT-26** The durable write is performed by the storage owner thread, not
+  the thread that awaits the append: a parked device leaves the runtime and an
+  unrelated ready task free to progress, and a release from an independent
+  thread is what lets the append finish. A dropped waiter still poisons the
+  handle. · why: #122 item 4 / #156 · enforced by `tests/journal_liveness.rs`
+  (`a_slow_store_lets_the_runtime_and_the_release_progress`,
+  `a_cancelled_append_leaves_the_runtime_and_the_handle_live`)
 
 ## Open questions for the Director
 

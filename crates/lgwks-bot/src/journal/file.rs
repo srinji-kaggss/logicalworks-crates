@@ -856,6 +856,146 @@ impl FileView {
     }
 }
 
+/// A bounded, streaming replay of a journal file.
+///
+/// [`FileJournal::open`] must materialize the complete history, because the
+/// append fence, the ladder index and the outcome index are all built from it.
+/// A caller that only needs to *fold* the record — a recovery pass, an audit, a
+/// migration — does not need that, and this is the door for it: it reads one
+/// frame at a time from its own read-only descriptor and retains at most one
+/// decoded event, so its memory is the largest single frame rather than the
+/// whole log.
+///
+/// It applies the same frame validation the open scan does — an impossible or
+/// lying length prefix and a head that does not follow are refusals, an early
+/// end is a torn tail that ends the stream — so a streamed replay cannot accept
+/// bytes the handle would refuse. It is bounded by [`MAX_JOURNAL_EVENTS`]; a
+/// file longer than that ends the stream with
+/// [`JournalError::CapacityExceeded`] rather than continuing past the ceiling.
+pub struct Replay {
+    /// The streaming frame reader, on its own descriptor.
+    reader: BufReader<File>,
+    /// The position the next event must chain from.
+    position: JournalPosition,
+    /// How many events the stream has already yielded, for the event ceiling.
+    yielded: u64,
+    /// Whether the stream has reached its end (clean, torn, or refused).
+    done: bool,
+}
+
+impl Replay {
+    /// Open a fresh read-only descriptor at `path` and stream its frames.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::Storage`] when the file cannot be opened or seeks.
+    fn open(path: &Path) -> Result<Self, JournalError> {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .open(path)
+            .map_err(JournalError::Storage)?;
+        file.seek_read_zero()?;
+        Ok(Self {
+            reader: BufReader::new(file),
+            position: JournalPosition::genesis(),
+            yielded: 0,
+            done: false,
+        })
+    }
+
+    /// Read exactly one more committed event, or end the stream.
+    ///
+    /// `None` means the acknowledged prefix is exhausted at a clean end or a
+    /// torn tail, which is never an error: the tail was never acknowledged, so
+    /// the stream of committed events is complete without it.
+    fn read_one(&mut self) -> Option<Result<EffectEvent, JournalError>> {
+        let index = self.yielded;
+        let mut prefix = [0u8; LENGTH_BYTES];
+        match read_exact_or_eof(&mut self.reader, &mut prefix) {
+            Err(error) => return Some(Err(error)),
+            Ok(None) => return None,
+            Ok(Some(read_len)) if read_len < LENGTH_BYTES => return None,
+            Ok(Some(_)) => {}
+        }
+        let limit = u64::try_from(MAX_JOURNAL_EVENTS).unwrap_or(u64::MAX);
+        if index >= limit {
+            return Some(Err(JournalError::CapacityExceeded {
+                resource: JournalLimitKind::Events,
+                limit,
+                requested: index.saturating_add(1),
+            }));
+        }
+        let payload_len = usize::try_from(u32::from_be_bytes(prefix)).unwrap_or(usize::MAX);
+        if payload_len == 0 || payload_len > MAX_FRAME_BYTES {
+            return Some(Err(JournalError::Corrupt(Box::new(Corruption::new(
+                index,
+                CorruptionKind::Framed,
+            )))));
+        }
+        let mut payload = vec![0u8; payload_len];
+        match read_exact_classified(&mut self.reader, &mut payload) {
+            Ok(FramePiece::Interrupted) => return None,
+            Err(error) => return Some(Err(error)),
+            Ok(FramePiece::Filled) => {}
+        }
+        let mut head = [0u8; HEAD_BYTES];
+        match read_exact_classified(&mut self.reader, &mut head) {
+            Ok(FramePiece::Interrupted) => return None,
+            Err(error) => return Some(Err(error)),
+            Ok(FramePiece::Filled) => {}
+        }
+        let event: EffectEvent = match from_bytes::<EffectEvent, WireError>(&payload) {
+            Ok(event) => event,
+            Err(_) => {
+                return Some(Err(JournalError::Corrupt(Box::new(Corruption::new(
+                    index,
+                    CorruptionKind::Undecodable,
+                )))));
+            }
+        };
+        let head_digest = match chain(self.position, &event) {
+            Ok(digest) => digest,
+            Err(error) => return Some(Err(error)),
+        };
+        let recorded = JournalPosition {
+            sequence: self.position.sequence().saturating_add(1),
+            head: lgwks_std::hash::Digest::from_bytes(head),
+        };
+        let recomputed = JournalPosition {
+            sequence: recorded.sequence(),
+            head: head_digest,
+        };
+        if recorded != recomputed {
+            return Some(Err(JournalError::Corrupt(Box::new(Corruption::new(
+                index,
+                CorruptionKind::Chain(ChainBreak::Disagreement {
+                    at: recorded.sequence(),
+                    recorded,
+                    recomputed,
+                }),
+            )))));
+        }
+        self.position = recorded;
+        self.yielded = self.yielded.saturating_add(1);
+        Some(Ok(event))
+    }
+}
+
+impl Iterator for Replay {
+    type Item = Result<EffectEvent, JournalError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        let item = self.read_one();
+        if item.is_none() {
+            self.done = true;
+        }
+        item
+    }
+}
+
 impl FileJournal {
     /// Open the journal at `path`, creating the file when it does not exist
     /// and replaying it when it does.
@@ -1031,6 +1171,23 @@ impl FileJournal {
     /// The committed events, in append order.
     pub fn events(&self) -> impl Iterator<Item = &EffectEvent> {
         self.committed.iter().map(JournalEntry::event)
+    }
+
+    /// Stream the committed events from the file, frame by frame.
+    ///
+    /// This is the bounded replay path: unlike [`Self::events`], which borrows
+    /// the history `open` already materialized, a `Replay` reads from its own
+    /// descriptor and retains one event at a time, so a caller folding a large
+    /// log pays for the largest frame rather than the whole history. What it
+    /// yields is exactly the acknowledged prefix: a torn tail ends the stream
+    /// and an impossible or lying frame refuses it, the same dispositions the
+    /// open scan gives them.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::Storage`] when the read-only descriptor cannot be opened.
+    pub fn replay(&self) -> Result<Replay, JournalError> {
+        Replay::open(&self.path)
     }
 
     /// What the journal has learned about each attempt.
@@ -1246,8 +1403,10 @@ impl FileJournal {
     /// Returned alongside the journal rather than only as
     /// [`Self::release_storage`] because the caller that most needs to un-stick
     /// the device is the one awaiting an append on it, and that caller holds
-    /// the journal's borrow for the whole wait.
-    fn storage_gate(&self) -> StorageGate {
+    /// the journal's borrow for the whole wait. It is the instrument a
+    /// slow-store liveness test releases from an independent thread.
+    #[must_use]
+    pub fn storage_gate(&self) -> StorageGate {
         StorageGate {
             shared: Arc::clone(&self.storage.shared),
             signal: Arc::clone(&self.storage.signal),
@@ -1393,6 +1552,14 @@ impl EffectJournal for FileJournal {
         key: crate::effect::EffectKey,
     ) -> Result<Option<(JournalPosition, EffectEvidence)>, JournalError> {
         Ok(self.outcomes.get(&key).copied())
+    }
+
+    /// Reserve room for the whole three-rung handoff before any of it is
+    /// written, so an attempt can never be left admitted and unprepared to
+    /// settle. The ceiling is the same [`MAX_JOURNAL_EVENTS`] the appends
+    /// enforce, checked here against the count this serialized path reads.
+    fn reserve_handoff_capacity(&self, rungs: u64) -> Result<(), JournalError> {
+        self.bound_events(rungs)
     }
 
     /// Append one event at `expected_tail`, or refuse.

@@ -49,6 +49,21 @@ explicitly under that crate.
   Concurrent verb calls on one `Process` share a bounded slot pool
   (`DEFAULT_MAX_CONCURRENT`, set with `Process::max_concurrent`), claimed
   before the fork, so a burst of calls never forks a burst of children.
+- `FileJournal::replay` returns a `Replay` that streams the committed frames
+  from its own read-only descriptor, one event at a time, so a caller that only
+  folds the record pays for the largest frame rather than the whole history.
+  It applies the same frame validation `open` does and is bounded by
+  `MAX_JOURNAL_EVENTS`; the materialized `events()` view is unchanged (#122
+  item 2).
+- `StorageGate::storage_gate` is public, so a slow-store liveness test can
+  release a parked device from its own thread rather than from the runtime
+  awaiting the append (#156).
+- `EffectJournal::reserve_handoff_capacity` reserves room for a whole external
+  handoff — intent, preparation and the settlement that lands after the effect
+  has left the process — before the first rung is written. The default is
+  permissive; `FileJournal` refuses the handoff against its event ceiling, so a
+  durable journal can never leave an attempt admitted and unable to settle
+  (#122 item 2 / #156).
 
 ### lgwks_bot Changed
 
