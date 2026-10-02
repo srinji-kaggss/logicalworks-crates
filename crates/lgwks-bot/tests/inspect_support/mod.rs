@@ -20,6 +20,7 @@ pub mod sim;
 use std::cell::RefCell;
 use std::error::Error;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use lgwks_bot::domain::inspect::Subject;
 use lgwks_bot::inspect::Inspection;
@@ -155,12 +156,17 @@ pub fn spec_for(artifact: &str) -> TestResult<BotSpec> {
     Ok(BotSpec::from_json(&json)?)
 }
 
+/// Hands out a distinct artifact suffix per call.
+///
+/// A monotonic counter rather than a process id: the OS reuses process ids, so
+/// a pid is not an identity — the same rule `lgwks_std::random` exists for, and
+/// the one this fixture must not assume.
+static ARTIFACTS: AtomicUsize = AtomicUsize::new(1);
+
 /// Write `subject` to a unique temp artifact and return its path string.
 pub fn artifact_for(label: &str, subject: &str) -> TestResult<String> {
-    let path = std::env::temp_dir().join(format!(
-        "lgwks-inspect-wiring-{label}-{}.rs",
-        std::process::id()
-    ));
+    let mark = ARTIFACTS.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("lgwks-inspect-wiring-{label}-{mark}.rs"));
     std::fs::write(&path, subject)?;
     Ok(path.to_string_lossy().into_owned())
 }

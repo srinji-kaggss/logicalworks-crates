@@ -57,6 +57,11 @@ agent_contracts:
     own.
   - The report serializes through the shared JSON facade with its digest, spans,
     rule revision and coverage intact.
+  - The operation is reachable on the existing verbs: a `Query` over supplied
+    bytes, and an `Observe` source that reads the artifact under `bot.fs`, both
+    through the registry and admission path every other domain uses, plus a
+    `Host`-run `Task`. Every door returns the one report; a host bounds how many
+    inspections run at once.
 probes:
   - id: hostile-corpus-never-executes
     action: Inspect a corpus of infinite loop, panic, abort, immediate exit,
@@ -78,3 +83,20 @@ probes:
   - id: round-trip-preserves-identity
     action: Serialize a report and decode it; assert the digest, spans, rule
       revision and coverage survive.
+  - id: every-door-one-report
+    action: Run the same seeded subject through the free function, the Query
+      verb, the Observe source behind a bot and the Host task; assert all four
+      return the identical report, and that a spec naming the source without
+      `bot.fs` is an admission need rather than a poll.
+  - id: bounded-host-admission
+    action: Drive 100, 1,000 and 10,000 inspections through one host with a
+      small admission ceiling on a fixed worker pool; assert every run succeeds
+      and the peak in-flight count never exceeds the ceiling.
+  - id: two-tenants-one-artifact-name
+    action: Run two tenants inspecting the same artifact name over different
+      bytes; assert each report carries its own subject digest and the two do
+      not collide.
+  - id: linear-retained-counters
+    action: Inspect subjects of increasing size and assert the retained findings,
+      output bytes and visited nodes grow with the input rather than jumping,
+      using the operation's own Resources counters.

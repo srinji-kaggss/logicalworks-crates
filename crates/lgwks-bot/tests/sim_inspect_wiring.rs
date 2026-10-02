@@ -1,4 +1,3 @@
-#![cfg(all(feature = "inspect", feature = "script"))]
 //! Deterministic simulation of the inspection *wiring* (R8, #150).
 //!
 //! The core operation's input space is simulated in `sim_inspect.rs`. This file
@@ -7,6 +6,7 @@
 //! `Observe` source behind a bot, and the `Host` task — must return the same
 //! report. A failure prints its seed, and the same seed reproduces the same
 //! source, the same reports and the same trace hash.
+#![cfg(all(feature = "inspect", feature = "script"))]
 
 mod inspect_support;
 

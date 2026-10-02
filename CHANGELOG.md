@@ -28,6 +28,16 @@ explicitly under that crate.
   Host-only, like `process`/`fs`/`net`: it draws native tree-sitter grammars, so
   it is not in the default feature set; `full` enables it.
 
+- `domain::inspect`, the same operation wired onto the verbs and the task front
+  door (#150, R8): `Inspector` is a `Query` over an `InspectionJob` (caller-
+  supplied bytes, no capability), and `Subject` is an `Observe` source that
+  reads the artifact under `bot.fs` (bounded before the read), so a `BotSpec` or
+  a native bot reaches `inspect` through the registry and admission path every
+  other domain uses, and `inspection_task` exposes it as a `Host`-run `Task`.
+  Every door returns the operation's own `Inspection`. The `inspect_scale`
+  example is the print-only measurement harness (per-tier latency percentiles
+  and per-size `Resources` counters) for `/usr/bin/time -l`.
+
 - `task::{Host, Task, Report}`, the front door (#87 step 1): build a `Host` once
   (tenant, stop token, admission ceiling, default deadline, trail capacity, all
   finite and readable through `Host::limits`), define a `Task` with `task(name,

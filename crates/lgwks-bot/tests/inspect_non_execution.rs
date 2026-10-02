@@ -1,4 +1,3 @@
-#![cfg(feature = "inspect")]
 //! Non-execution acceptance for R8 (issue #150).
 //!
 //! A hostile corpus is inspected and **independent observers** establish that
@@ -8,6 +7,7 @@
 //! infinite loop, a panic, an abort and an immediate exit. The oracle is the
 //! invocation path itself, not only the returned verdict: a mutant that ran the
 //! subject would trip the marker, the listener or the process.
+#![cfg(feature = "inspect")]
 
 use std::io::ErrorKind;
 use std::net::TcpListener;

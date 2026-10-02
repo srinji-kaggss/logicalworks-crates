@@ -1,4 +1,3 @@
-#![cfg(all(feature = "inspect", feature = "script"))]
 //! Wiring acceptance for #150/R8: the inspection operation reached through the
 //! same registry/admission path every other domain uses, and through a
 //! [`Host`]-run task, producing the *identical* [`Inspection`].
@@ -9,6 +8,7 @@
 //! operation's own report. A second scanner, a second entry point with its own
 //! rules, or a divergence between the domain read and the supplied bytes would
 //! fail these assertions.
+#![cfg(all(feature = "inspect", feature = "script"))]
 
 mod inspect_support;
 

@@ -1,4 +1,3 @@
-#![cfg(feature = "inspect")]
 //! Deterministic simulation of the inspection input space (R8).
 //!
 //! One seed drives the generated subject, so a failure prints its seed and the
@@ -9,6 +8,7 @@
 //!
 //! This file is where half or more of the tests added for #150 live, as the
 //! worker contract requires.
+#![cfg(feature = "inspect")]
 
 use lgwks_bot::inspect::{Budgets, IncompleteReason, InspectRequest, Verdict, inspect};
 

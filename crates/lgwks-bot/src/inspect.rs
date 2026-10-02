@@ -1296,8 +1296,11 @@ mod tests {
     #[test]
     fn a_subject_executing_mutant_fails_the_non_execution_oracle()
     -> Result<(), Box<dyn std::error::Error>> {
-        let marker =
-            std::env::temp_dir().join(format!("lgwks-inspect-mutant-{}", std::process::id()));
+        // A monotonic counter, not a pid: process ids are reused by the OS and
+        // are not an identity.
+        static MUTANT_MARKERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let mark = MUTANT_MARKERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let marker = std::env::temp_dir().join(format!("lgwks-inspect-mutant-{mark}"));
         let shown = marker.display();
         let source = format!("fn main() {{ std::fs::remove_file(\"{shown}\").unwrap(); }}\n");
         let request = InspectRequest::new("src/main.rs", &source);

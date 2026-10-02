@@ -1,10 +1,10 @@
-#![cfg(feature = "inspect")]
 //! Public-API acceptance for typed in-process structural inspection (R8).
 //!
 //! Every test here drives the shipped operation through its public interface.
 //! `inspect` is a host-only feature (it draws native grammars through
 //! `lgwks_ast`), so these compile only in an `inspect` build and the gate's
 //! `full` lane is what exercises them.
+#![cfg(feature = "inspect")]
 
 use lgwks_bot::inspect::{
     Budgets, IncompleteReason, InspectRequest, Inspection, MAX_PREVIEW_BYTES, RuleSet, Scope,

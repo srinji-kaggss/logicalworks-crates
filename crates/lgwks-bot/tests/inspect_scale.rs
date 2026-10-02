@@ -1,4 +1,3 @@
-#![cfg(all(feature = "inspect", feature = "script"))]
 //! Hyperscale and allocation acceptance for #150/R8.
 //!
 //! The hyperscale sweep drives 100, 1,000 and 10,000 inspections through one
@@ -9,6 +8,7 @@
 //! across input sizes to show the retained output and visited nodes grow with
 //! the input rather than jumping; the accompanying `inspect_scale` example
 //! prints the same counters and is run under `/usr/bin/time -l` for peak RSS.
+#![cfg(all(feature = "inspect", feature = "script"))]
 
 use std::error::Error;
 use std::num::NonZeroUsize;
