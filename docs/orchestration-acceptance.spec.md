@@ -8,11 +8,27 @@ A passing existing workflow does not execute tests that have not been added.
 Candidate regressions now exist near T07, T09–T12, T14, T19 and T20, in
 `crates/lgwks-bot/tests/durable_dispatch.rs` and
 `crates/lgwks-bot/tests/process_ownership.rs`, and the design they enforce is
-described in [effect-kernel.md](effect-kernel.md). Those are unit and
+described in [effect-kernel.md](effect-kernel.md). **T22 additionally has
+candidate tests** in `crates/lgwks-bot/tests/t22_process_surface.rs`
+(`public_process_description_rejects_direct_execution`,
+`the_guaranteed_task_set_does_not_expose_detach_all` and
+`supervisor_is_the_sanctioned_process_runner`). Those are unit and
 integration journeys against the public surface. They are not this
 specification's acceptance run: no row below is marked accepted, and the
 externally bounded subprocess and OS-containment evidence the rows require has
-not been collected. T21 and T22 remain without candidate tests.
+not been collected.
+
+**A candidate test is presence, not acceptance, and T22 is where that is
+easiest to get wrong.** `t22_process_surface.rs` type-checks single-file
+consumers against the real workspace lockfile and asserts that `ProcessSpec`
+exposes no `spawn`/`status`/`output` and that the task set has no `detach_all`.
+What it does **not** do is the external observation the row asks for: it proves
+a compile-time refusal, not that a sanctioned run was executed and observed. A
+compile failure caused by missing dependencies is not a passing API-negative
+test either — that failure mode is indistinguishable from the intended one
+unless the probe also asserts the *positive* case compiles, which
+`supervisor_is_the_sanctioned_process_runner` is for. The full
+externally-evidenced campaign for T21 and T22 remains unaccepted.
 
 ## Evidence model
 

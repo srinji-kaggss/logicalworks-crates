@@ -10,17 +10,17 @@
 //! warmed six-token match cost at least six allocations and a warmed
 //! twelve-token match at least twelve. After warm capacity both are zero.
 
-#[path = "support/downstream_probe.rs"]
-mod downstream_probe;
+#[path = "support/consumer_probe.rs"]
+mod consumer_probe;
 
-use downstream_probe::{measurement, run_downstream_probe};
+use consumer_probe::{build_and_run, manifest, measurement};
 
 /// A downstream binary with a counting global allocator observes the
 /// allocation contract of the compiled glob matcher.
 #[test]
 fn consumer_counts_no_allocation_per_token_after_warm_capacity()
 -> Result<(), Box<dyn std::error::Error>> {
-    let stdout = run_downstream_probe("glob_alloc_probe", GLOB_ALLOCATION_PROBE, &[])?;
+    let stdout = build_and_run(&manifest("glob_alloc_probe", &[]), GLOB_ALLOCATION_PROBE)?;
     assert!(
         !stdout.trim().is_empty(),
         "the probe reported nothing:\n{stdout}"

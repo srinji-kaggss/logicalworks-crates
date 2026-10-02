@@ -1,10 +1,37 @@
 # The async surface as an SDK
 
-Status: **design contract; task-first facade not implemented**. Reviewed against
-`51897f8c0cda627d3b3abcee28bda6ebb690f7a1`, 2026-09-21.
+Status: **design contract; step 1 of the front door has since shipped.** Reviewed
+against `51897f8c0cda627d3b3abcee28bda6ebb690f7a1`, 2026-09-21.
 Tracking: [#87](https://github.com/srinji-kaggss/logicalworks-crates/issues/87).
-This revision replaces the earlier scope-first proposal; it does not declare
-its proposed symbols available in any `lgwks_bot` version or on main.
+This revision replaces the earlier scope-first proposal.
+
+**What has changed since this page was written, so it is not read as the
+current SDK.** `lgwks_bot::task` now ships `Host`, `Task` and `Report` — build
+a `Host` once with a tenant, stop token, admission ceiling, deadline and trail
+capacity, define a `Task` with `task(name, body)`, and `host.run(&task,
+input).await` returns a `Report` carrying the disposition, the typed output, the
+located error and a bounded step trail (INV-BOT-20, exercised by
+`tests/task_front_door.rs` and `tests/sim_task.rs`). **Bodies are polled on the
+calling task, so they need not be `Send` and inputs may borrow** — which is the
+property this document argued for and which `async-parity.md` §5a now records as
+the only shipped route for a non-`Send` future.
+
+So this page is **half historical**. The contract and the reasoning below are
+still the design of record and the rest of #87 is still open, but:
+
+- The symbols below are **not** all proposals any more; the ones in
+  `lgwks_bot::task` ship, with the names that module actually uses.
+- **Do not read a symbol spelling below as the available API.** Where this page
+  and `lgwks_bot::task` disagree, `lgwks_bot::task` is what a consumer compiles
+  against. A proposed spelling that never shipped is a design record, not an
+  API.
+- `Bot::from_spec` also now materializes a validated `BotSpec` through the same
+  registry and assembly path a native bot uses
+  (`tests/spec_materialize.rs`), so the "no second interpreter" clause below is
+  implemented rather than merely required.
+
+Everything after this paragraph is the design as written on 2026-09-21 and is
+retained for the reasoning, not as an inventory of what exists.
 
 ## The contract
 

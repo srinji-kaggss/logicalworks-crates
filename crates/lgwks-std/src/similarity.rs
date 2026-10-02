@@ -22,7 +22,7 @@
 //! is never presented as an identity score.
 //!
 //! A refusal is not a measurement. Every checked scorer reports one through a
-//! typed error, and [`Weighted::try_is_accepted`] carries component identity,
+//! typed error, and [`CheckedEvidence::verdict`] carries component identity,
 //! the refusal, and applicability through to the acceptance decision, so an
 //! unavailable component cannot satisfy a threshold — including a threshold of
 //! zero. All-zero effective evidence is [`EvidenceError::InsufficientEvidence`]
@@ -33,6 +33,10 @@
 //! authority-facing path; the checked composition is.
 //!
 //! [`Similarity`]: crate::similarity::Similarity
+//! [`Cosine::try_score`]: crate::similarity::Cosine::try_score
+//! [`Cosine::normalized_score`]: crate::similarity::Cosine::normalized_score
+//! [`CheckedEvidence::verdict`]: crate::similarity::CheckedEvidence::verdict
+//! [`EvidenceError::InsufficientEvidence`]: crate::similarity::EvidenceError::InsufficientEvidence
 //!
 //! # Example
 //!
@@ -73,7 +77,7 @@ use core::marker::PhantomData;
 /// Every implementation returns `1.0` for identical values, `0.0` for values
 /// with no similarity, and a finite result in `[0.0, 1.0]`. Implementations
 /// that can refuse document the infallible mapping in their own `impl` block;
-/// [`Weighted::try_is_accepted`] is the path that preserves the refusal.
+/// [`CheckedEvidence::verdict`] is the path that preserves the refusal.
 pub trait Similarity {
     /// The value type accepted by this scorer.
     type Value: ?Sized;
@@ -952,7 +956,7 @@ impl<Value: ?Sized> Weighted<Value> {
     ///
     /// This is the infallible adapter: a refused component reaches it as `0.0`,
     /// so an unavailable component satisfies a threshold of `0.0`. Prefer
-    /// [`Self::try_is_accepted`], which retains the refusal.
+    /// [`CheckedEvidence::verdict`], which retains the refusal.
     #[must_use]
     pub fn is_accepted(&self, left: &Value, right: &Value) -> bool {
         self.score(left, right) >= self.threshold

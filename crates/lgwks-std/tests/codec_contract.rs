@@ -1,10 +1,8 @@
 //! Public-consumer regression checks for codec coordinate contracts.
 #![forbid(unsafe_code)]
 
-#[path = "support/downstream_probe.rs"]
-mod downstream_probe;
-
-use downstream_probe::run_downstream_probe;
+#[path = "support/consumer_probe.rs"]
+mod consumer_probe;
 
 #[cfg(all(feature = "hash", feature = "random"))]
 use lgwks_std::hash::Digest;
@@ -82,7 +80,11 @@ fn consumer_preserves_uuid_digest_and_minimal_leb_profiles()
 #[test]
 fn consumer_counts_no_allocation_on_fixed_size_codec_paths()
 -> Result<(), Box<dyn std::error::Error>> {
-    let stdout = run_downstream_probe("codec_alloc_probe", ALLOCATION_PROBE, &["hash", "random"])?;
+    let manifest = format!(
+        "[package]\nname = \"alloc_probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nlgwks_std = {{ path = {:?}, default-features = false, features = [\"hash\", \"random\"] }}\n",
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    );
+    let stdout = crate::consumer_probe::build_and_run(&manifest, ALLOCATION_PROBE)?;
     for expected in [
         "uuid-parse 0",
         "uuid-display 0",

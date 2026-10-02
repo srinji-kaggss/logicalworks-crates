@@ -41,10 +41,10 @@
 //! requested tier and the level reached, so "10 000" is never claimed when it
 //! was not run.
 
-#[path = "support/downstream_probe.rs"]
-mod downstream_probe;
+#[path = "support/consumer_probe.rs"]
+mod consumer_probe;
 
-use downstream_probe::{measurement, run_downstream_probe};
+use consumer_probe::{build_and_run, manifest, measurement};
 use lgwks_std::glob::{GlobDialect, GlobPattern, GlobScratch};
 use lgwks_std::retry::RetryPolicy;
 use lgwks_std::similarity::{CheckedEvidence, EditDistance, EvidenceVerdict};
@@ -390,7 +390,10 @@ fn one_shared_matcher_evidence_policy_and_retry_policy_serve_every_tier()
     // The same tiers inside a downstream consumer package, whose stdout is
     // returned as a value rather than printed. Every number the issue asks for
     // is read back out of it and asserted here.
-    let stdout = run_downstream_probe("shared_policy_tiers_probe", SHARED_POLICY_TIER_PROBE, &[])?;
+    let stdout = build_and_run(
+        &manifest("shared_policy_tiers_probe", &[]),
+        SHARED_POLICY_TIER_PROBE,
+    )?;
     assert!(
         !stdout.trim().is_empty(),
         "the downstream tier probe reported nothing:\n{stdout}"
