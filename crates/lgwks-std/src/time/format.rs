@@ -53,9 +53,18 @@ fn digit_byte(value: u32) -> u8 {
 ///
 /// Returns an error when the instant is outside the signed Unix-seconds range.
 pub fn unix_parts(at: SystemTime) -> Result<(i64, u32), UnixTimeError> {
+    #[cfg(feature = "trace")]
+    crate::trace::warn!(
+        operation = "unix_parts",
+        "operation refused its request; the typed error carries the facts"
+    );
     match at.duration_since(UNIX_EPOCH) {
         Ok(duration) => {
-            let seconds = i64::try_from(duration.as_secs()).map_err(|_| {
+            // Checked rather than converted-and-mapped: the only way the
+            // conversion fails is a whole-second count past `i64::MAX`, so the
+            // condition names exactly that and the variant carries no detail the
+            // check has not already stated.
+            let seconds = i64::try_from(duration.as_secs()).map_err(|_out_of_range| {
                 UnixTimeError::SystemTimeOutsideI64Range {
                     before_epoch: false,
                 }
@@ -69,8 +78,17 @@ pub fn unix_parts(at: SystemTime) -> Result<(i64, u32), UnixTimeError> {
             {
                 return Ok((i64::MIN, 0));
             }
-            let whole = i64::try_from(duration.as_secs())
-                .map_err(|_| UnixTimeError::SystemTimeOutsideI64Range { before_epoch: true })?;
+            // One whole-second count does not fit `i64`, and the guard above
+            // answers exactly it. Any other value is a whole number of seconds
+            // that `i64::MAX` is seven orders of magnitude larger than, so the
+            // conversion is total here and the error it cannot produce is
+            // named rather than discarded.
+            let whole = match i64::try_from(duration.as_secs()) {
+                Ok(whole) => whole,
+                Err(_out_of_range) => {
+                    return Err(UnixTimeError::SystemTimeOutsideI64Range { before_epoch: true });
+                }
+            };
             let nanos = duration.subsec_nanos();
             let seconds = if nanos == 0 {
                 whole.checked_neg()
