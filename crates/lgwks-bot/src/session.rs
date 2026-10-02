@@ -1639,11 +1639,16 @@ fn declared_template_reads(
     text: &str,
     field: &'static str,
 ) -> Result<BTreeSet<String>, BotError> {
-    let compiled =
-        CompiledTemplate::compile(text).map_err(|_error| BotError::MalformedTemplate {
+    let compiled = CompiledTemplate::compile(text).map_err(|_placeholder| {
+        // `compile` already refuses with `MalformedTemplate`, naming the
+        // placeholder `"<runtime>"` because it does not know its caller. The
+        // only thing this adds is which node and field it was reached through,
+        // so the cause carries no detail that is not already in the variant.
+        BotError::MalformedTemplate {
             node: node_id.to_owned(),
             field,
-        })?;
+        }
+    })?;
     let mut names = BTreeSet::new();
     for part in compiled.parts() {
         if let TemplatePart::Variable(name) = *part
@@ -1942,11 +1947,14 @@ fn validate_template(
         operation = "validate_template",
         "operation refused its request; the typed error carries the facts"
     );
-    let compiled =
-        CompiledTemplate::compile(template).map_err(|_error| BotError::MalformedTemplate {
+    let compiled = CompiledTemplate::compile(template).map_err(|_placeholder| {
+        // As above: the cause is the same variant with a placeholder node, and
+        // the caller knows the real one.
+        BotError::MalformedTemplate {
             node: node_id.to_owned(),
             field,
-        })?;
+        }
+    })?;
     let mut literals = 0usize;
     for part in compiled.parts() {
         match *part {
@@ -2354,16 +2362,19 @@ impl VarScope {
         };
         // One decoder, not two: `VarType::decode_answer` is the same reading of
         // an answer that flow validation runs, so a value this store accepts is
-        // a value the declaration would have accepted. The variant is dropped
-        // here because the scope's contract is a single "cannot hold this"
-        // error; the distinction between a non-integer and an out-of-range one
-        // is a resolver's business and is kept there.
-        let value = declared.decode_answer(answer).map_err(|_rejection| {
-            BotError::InvalidVariableValue {
-                variable: name.to_owned(),
-                value: answer.to_owned(),
-            }
-        })?;
+        // a value the declaration would have accepted. The rejection is carried
+        // into the error rather than dropped: the scope's contract is one
+        // "cannot hold this" error, and naming *why* keeps a caller from having
+        // to guess between a non-integer, an out-of-range integer, a bad boolean
+        // and an undeclared choice.
+        let value =
+            declared
+                .decode_answer(answer)
+                .map_err(|rejection| BotError::InvalidVariableValue {
+                    variable: name.to_owned(),
+                    value: answer.to_owned(),
+                    reason: rejection.to_string(),
+                })?;
         let bytes = value.rendered_bytes();
         if bytes > value_bytes {
             return Err(BotError::ValueTooLarge {

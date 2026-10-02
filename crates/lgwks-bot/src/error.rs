@@ -468,6 +468,12 @@ pub enum BotError {
         variable: String,
         /// The answer that failed conversion.
         value: String,
+        /// Why the conversion refused.
+        ///
+        /// Carried rather than dropped: "cannot be assigned to variable x" and
+        /// "it is not a decimal integer" are different facts, and a caller that
+        /// only sees the first has to guess which of the four reasons it was.
+        reason: String,
     },
     /// A session has already reached a terminal outcome.
     SessionTerminated,
@@ -1200,10 +1206,16 @@ impl fmt::Display for BotError {
             Self::InvalidVariableValue {
                 ref variable,
                 ref value,
+                ref reason,
             } => write!(
                 f,
-                "value {value:?} cannot be assigned to variable {}",
-                Escaped(variable)
+                // `reason` is untrusted like the other two: it is the decoder's
+                // own rendering, and a caller may reach it through an answer that
+                // reached the declaration. Escaped for the same reason `value`
+                // renders through `Debug` and `variable` through `Escaped`.
+                "value {value:?} cannot be assigned to variable {}: {}",
+                Escaped(variable),
+                Escaped(reason)
             ),
             Self::SessionTerminated => f.write_str("session has already terminated"),
             Self::SessionNotAwaitingAnswer => f.write_str("session is not awaiting an answer"),
@@ -1575,6 +1587,7 @@ mod tests {
             BotError::InvalidVariableValue {
                 variable: payload.clone(),
                 value: payload.clone(),
+                reason: payload.clone(),
             },
             BotError::ResolverReturnedInvalidOption { node: payload },
         ]
