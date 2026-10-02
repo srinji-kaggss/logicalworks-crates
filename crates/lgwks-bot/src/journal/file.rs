@@ -45,14 +45,39 @@
 //!
 //! The [`EffectJournal::compare_and_append`] fence is a fence over positions,
 //! and this adapter adds a byte-length staleness check: an append from a view
-//! that no longer matches the file is refused. What no std-only adapter can
-//! provide is mutual exclusion between two live writers, because the platform's
-//! advisory locks are outside `std`; concurrent controllers on one file remain
-//! a caller obligation. The stored heads make any interleaving they produce
-//! detectable on the next open rather than silently accepted, and detection
-//! here is permanent: [`JournalError::Corrupt`] is never trimmed and no tool
-//! in this module rewrites refused bytes, so a bricked file stays bricked
-//! until an operator takes it in hand.
+//! that no longer matches the file is refused.
+//!
+//! On top of that, [`FileJournal::open`] takes the file's **exclusive advisory
+//! lock** through `File::try_lock` *before* it reads, scans or repairs a byte,
+//! and refuses a second opener with [`JournalError::Locked`] rather than
+//! scanning a file somebody else is writing. The lock lives for the lifetime of
+//! the returned journal, and a writer that dies releases it, so the next
+//! `open` succeeds.
+//!
+//! What that lock is, stated precisely, because the difference matters:
+//!
+//! - It is an **advisory** lock. It binds writers that come through
+//!   [`FileJournal::open`]. A writer that never asks for the lock is outside
+//!   its reach entirely, and a hostile editor that truncates or rewrites the
+//!   file behind the owner's back is not detected by it.
+//! - It is **lifetime-scoped and local**. It is an operating-system file lock
+//!   on one host. It is not a distributed lease, and two controllers on two
+//!   hosts pointed at one network file are not serialized by it.
+//! - It depends on the **filesystem** implementing advisory locks. A
+//!   filesystem that does not is not refused; see [`JournalError::Locked`],
+//!   which states this.
+//!
+//! Both limits are stated on the error rather than hidden. The stored heads
+//! additionally make an interleaved write detectable on the next open rather
+//! than silently accepted, and that detection is permanent:
+//! [`JournalError::Corrupt`] is never trimmed and no tool in this module
+//! rewrites refused bytes, so a bricked file stays bricked until an operator
+//! takes it in hand.
+//!
+//! The cross-process half of this — that the fence actually holds between two
+//! live processes and is reacquired when the holder dies — is exercised by
+//! `tests/journal_writer_fence.rs`, which re-executes this test binary as a
+//! second process rather than simulating one.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
