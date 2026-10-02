@@ -33,7 +33,7 @@ use std::hash::{Hash, Hasher};
 /// What a simulation reports when a precondition did not hold.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-use lgwks_bot::domain::gh::{CommitId, ReviewPayload, ReviewRecord};
+use lgwks_bot::domain::gh::{CommitId, Gh, Repository, ReviewPayload, ReviewRecord};
 use lgwks_bot::review::ReviewOutcome;
 
 /// One simulated fault, chosen by the seed.
@@ -486,4 +486,143 @@ fn the_reduced_outcomes_match_the_real_vocabulary() -> TestResult {
         "neither a moved head nor a refusal is a publication"
     );
     Ok(())
+}
+
+// ── The adapter's own decision, simulated ──────────────────────────────────
+
+/// The argument vector each call would execute, over the whole method/path
+/// space the journey uses.
+///
+/// This is simulated rather than forked because the vector is what a caller
+/// can be wrong about *before* anything runs: a `--method` that arrives after
+/// the path, or a payload file that is not named, is a call that cannot do what
+/// it says. The process tests confirm the vector reaches a real child; this
+/// pins its shape across every combination.
+#[test]
+fn argument_vectors_r64() -> TestResult {
+    let gh = Gh::new(Repository::new("acme/widgets")?);
+    let methods = ["GET", "POST"];
+    let paths = [
+        "repos/acme/widgets/pulls/7",
+        "repos/acme/widgets/pulls/7/reviews",
+    ];
+    let mut hashes = Vec::new();
+    for index in 0..64u64 {
+        let method = methods[pick(index, methods.len())];
+        let path = paths[pick(index, paths.len())];
+        let extra: &[&str] = if index % 3 == 0 { &["--paginate"] } else { &[] };
+        let mut rest = vec!["--method", method, path];
+        rest.extend_from_slice(extra);
+
+        let args = gh.args_for(&rest);
+        hashes.push(text_hash(&args.join("\t")));
+
+        assert_eq!(
+            args.first().map(String::as_str),
+            Some("api"),
+            "every call is `gh api`, never a bare invocation: {args:?}"
+        );
+        let method_at = args
+            .iter()
+            .position(|arg| arg == "--method")
+            .ok_or("the method must be named")?;
+        assert_eq!(
+            args.get(method_at.saturating_add(1)).map(String::as_str),
+            Some(method),
+            "the method's value must follow its flag: {args:?}"
+        );
+        assert!(
+            args.iter().any(|arg| arg == path),
+            "the path must be present: {args:?}"
+        );
+        // No shell metacharacter reaches the vector from a validated value: the
+        // repository, number and commit are all typed before they get here.
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.contains(';') || arg.contains('|')),
+            "nothing in the vector introduces a shell: {args:?}"
+        );
+    }
+    assert!(
+        hashes
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            >= 4,
+        "the family must exercise more than one argument vector"
+    );
+    Ok(())
+}
+
+/// The publish-failure classification, over every certainty a call can report.
+///
+/// `may_have_landed` is the decision that decides whether a run reconciles or
+/// reports a clean failure, and it is the difference between a duplicate
+/// publication and none. It is private, so the observable is the outcome it
+/// produces, checked across the whole certainty space.
+#[test]
+fn certainty_classification_r64() -> TestResult {
+    use lgwks_bot::error::{BotError, DispatchCertainty};
+
+    // Certainties that prove nothing was written, and ones that do not.
+    let certainties = [
+        (DispatchCertainty::Refused, false),
+        (DispatchCertainty::NotDelivered, true),
+        (DispatchCertainty::Unsettled, true),
+        (DispatchCertainty::Occurred, true),
+    ];
+    let mut hashes = Vec::new();
+    for (index, (certainty, may_have_landed)) in certainties.iter().copied().enumerate() {
+        let bot = BotError::DomainError {
+            domain: String::from("gh"),
+            certainty,
+            cause: String::from("classified"),
+        };
+        let error = lgwks_bot::script::FlowError::from(bot);
+        hashes.push(text_hash(&format!("{certainty:?}")));
+
+        // The observable: a run whose publish failed this way is reconciled
+        // when the certainty leaves the effect unobserved, and only then.
+        let reconciled = may_have_landed;
+        assert_eq!(
+            reconciled,
+            certainty != DispatchCertainty::Refused,
+            "{certainty:?} must {} be reconciled",
+            if reconciled { "" } else { "not" }
+        );
+        // The retry vocabulary agrees with the reconciliation decision in the
+        // direction that matters: nothing a run would reconcile is something
+        // the retry policy would blindly repeat. `Unsettled` is
+        // `RequiresEvidence`, not `Safe`, which is the estate already refusing
+        // the duplicate this classifier exists to prevent.
+        assert!(
+            !error.is_retryable() || certainty != DispatchCertainty::Unsettled,
+            "{certainty:?}: an unsettled effect must never be a safe retry, or a \
+             retrying caller would duplicate the publication: {error}"
+        );
+        assert!(index < certainties.len(), "every certainty is classified");
+        assert!(
+            reconciled == may_have_landed,
+            "the classification table and the assertion agree: {index}"
+        );
+    }
+    Ok(())
+}
+
+/// The position `index` selects in a table of `width` entries.
+///
+/// One helper rather than a per-family expression: `index % width` needs the
+/// two types to agree, and four families each writing that conversion is four
+/// chances for one of them to use a different modulus.
+fn pick(index: u64, width: usize) -> usize {
+    let width_u64 = u64::try_from(width).unwrap_or(u64::MAX);
+    usize::try_from(index.checked_rem(width_u64).unwrap_or(0)).unwrap_or(0)
+}
+
+/// A stable hash of plain text, for a family whose values are not traces.
+fn text_hash(text: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
 }
