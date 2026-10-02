@@ -13,24 +13,10 @@ use std::error::Error;
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 
-use lgwks_deps::contract::Contract;
-use lgwks_deps::metadata::{self, DirectEdge};
-use lgwks_deps::{Refusal, audit_direct};
+#[path = "support/deps_sim.rs"]
+mod deps_sim;
 
-#[path = "support/sim.rs"]
-mod sim;
-
-use sim::Rng;
-
-type TestResult = Result<(), Box<dyn Error>>;
-
-/// A coin from a high bit.
-///
-/// The LCG's low bit alternates every step, so a low-bit coin would make every
-/// derived set phase-locked and a sweep would never exercise a mismatch.
-fn coin(rng: &mut Rng) -> bool {
-    (rng.next_u64() >> 40) & 1 == 1
-}
+use deps_sim::{REGISTRY, Rng, TestResult, alias_line, code_for, coin, edge, register};
 
 /// Counts of each verdict seen while folding a family into a trace hash.
 #[derive(Default)]
@@ -55,56 +41,6 @@ impl Tally {
     }
 }
 
-/// One edge with every authored dimension spelled out.
-fn edge(
-    package: &str,
-    features: &[&str],
-    uses_default_features: bool,
-    optional: bool,
-    target: Option<&str>,
-    rename: Option<&str>,
-) -> Result<DirectEdge, Box<dyn Error>> {
-    let features = features
-        .iter()
-        .map(|feature| format!("\"{feature}\""))
-        .collect::<Vec<_>>()
-        .join(",");
-    let target = target.map_or("null".to_owned(), |value| format!("\"{value}\""));
-    let rename = rename.map_or("null".to_owned(), |value| format!("\"{value}\""));
-    let document = format!(
-        r#"{{"packages":[{{"id":"app","name":"app","repository":null,"manifest_path":"/repo/Cargo.toml","dependencies":[{{"name":"{package}","source":"registry+https://github.com/rust-lang/crates.io-index","req":"1.0","kind":null,"rename":{rename},"optional":{optional},"uses_default_features":{uses_default_features},"features":[{features}],"target":{target},"path":null}}]}}],"workspace_members":["app"]}}"#
-    );
-    let mut edges = metadata::parse(&document)?;
-    edges
-        .pop()
-        .ok_or_else(|| "the fixture edge must parse".into())
-}
-
-/// A register with one approval carrying the given policy lines.
-fn register(package: &str, aliases: Option<&str>, policy: &str) -> Result<Contract, Box<dyn Error>> {
-    let aliases = aliases.map_or(String::new(), |value| format!("aliases = \"{value}\"\n"));
-    let text = format!(
-        concat!(
-            "[policy]\nschema = 2\nenforce = true\n\n",
-            "[[approved]]\n",
-            "crate = \"{package}\"\ntier = \"boundary\"\nversion = \"1.0\"\nowner = \"app\"\n",
-            "capability = \"engine.core\"\nsource = \"registry\"\n{aliases}{policy}",
-            "allowed_consumers = \"app\"\nallowed_kinds = \"normal\"\n",
-            "reason = \"The engine supplies a capability the standard library cannot express.\"\n",
-            "approved_by = \"reviewer\"\napproved_on = \"2026-09-30\"\nreview = \"tests/sim_dependency_policy.rs\"\n",
-        ),
-        package = package,
-        aliases = aliases,
-        policy = policy,
-    );
-    Ok(Contract::parse(&text)?)
-}
-
-/// 0 admitted, 1 any refusal.
-fn verdict(refusals: &[Refusal]) -> u8 {
-    u8::from(!refusals.is_empty())
-}
-
 /// Runs one identity family for `seed`: approved spelling vs observed spelling.
 fn identity_family(seed: u64) -> Result<(u64, Tally), Box<dyn Error>> {
     // The observed name is one of two fold-alikes; the approved name is one of
@@ -121,9 +57,9 @@ fn identity_family(seed: u64) -> Result<(u64, Tally), Box<dyn Error>> {
         } else {
             None
         };
-        let register = register(approved, alias, "")?;
-        let edge = edge(observed, &[], true, false, None, None)?;
-        let code = verdict(&audit_direct(&[edge], &register));
+        let approval = register(approved, "registry", &alias_line(alias))?;
+        let observed_edge = edge(observed, Some(REGISTRY), &[], true, false, None, None)?;
+        let code = code_for(&approval, observed_edge);
         let admits = approved == observed || alias == Some(observed);
         tally.record(
             code,
@@ -142,17 +78,25 @@ fn feature_family(seed: u64) -> Result<(u64, Tally), Box<dyn Error>> {
     let mut hasher = DefaultHasher::new();
     let mut tally = Tally::default();
     for _ in 0..256 {
-        let allowed: Vec<&str> = universe.iter().copied().filter(|_| coin(&mut rng)).collect();
-        let enabled: Vec<&str> = universe.iter().copied().filter(|_| coin(&mut rng)).collect();
+        let allowed: Vec<&str> = universe
+            .iter()
+            .copied()
+            .filter(|_| coin(&mut rng))
+            .collect();
+        let enabled: Vec<&str> = universe
+            .iter()
+            .copied()
+            .filter(|_| coin(&mut rng))
+            .collect();
         let constrained = !allowed.is_empty();
         let policy = if constrained {
             format!("features = \"{}\"\n", allowed.join(","))
         } else {
             String::new()
         };
-        let register = register("engine", None, &policy)?;
-        let edge = edge("engine", &enabled, true, false, None, None)?;
-        let code = verdict(&audit_direct(&[edge], &register));
+        let approval = register("engine", "registry", &policy)?;
+        let observed = edge("engine", Some(REGISTRY), &enabled, true, false, None, None)?;
+        let code = code_for(&approval, observed);
         let expected = !constrained || enabled.iter().all(|feature| allowed.contains(feature));
         tally.record(
             code,
@@ -194,9 +138,17 @@ fn dimension_family(seed: u64) -> Result<(u64, Tally), Box<dyn Error>> {
         if target_policy {
             writeln!(policy, "target = \"{}\"", target_value.unwrap_or(""))?;
         }
-        let register = register("engine", None, &policy)?;
-        let edge = edge("engine", &[], def_edge, opt_edge, target_edge, None)?;
-        let code = verdict(&audit_direct(&[edge], &register));
+        let approval = register("engine", "registry", &policy)?;
+        let observed = edge(
+            "engine",
+            Some(REGISTRY),
+            &[],
+            def_edge,
+            opt_edge,
+            target_edge,
+            None,
+        )?;
+        let code = code_for(&approval, observed);
         let expected = (!def_policy || def_edge == def_value)
             && (!opt_policy || opt_edge == opt_value)
             && (!target_policy || target_edge.unwrap_or("") == target_value.unwrap_or(""));
