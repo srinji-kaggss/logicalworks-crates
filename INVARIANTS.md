@@ -407,50 +407,54 @@ Each of these was a shipped defect. Treat the list as the spec.
   · why: #118 item 1 · enforced by: `tests/ambiguous_commit.rs`
   (`a_committed_outcome_with_a_lost_reply_settles_without_resending`,
   `an_unknown_outcome_that_did_not_commit_reports_occurrence_and_records_on_retry`)
-- **INV-BOT-23** The committed record can be replayed without materializing it:
+- **INV-BOT-40** The committed record can be replayed without materializing it:
   `FileJournal::replay` streams frames from its own read-only descriptor,
   retaining at most one event, applies the same frame validation and event
   ceiling `open` does, and yields exactly the acknowledged history. The
   materialized `events()` view and the stream agree on every seed. · why: #122
-  item 2 · enforced by `tests/sim_journal_liveness.rs`
+  item 2 · enforced by: `tests/sim_journal_liveness.rs`
   (`streaming_replay_r00..r15`)
-- **INV-BOT-24** A durable journal reserves room for the whole external handoff
+- **INV-BOT-41** A durable journal reserves room for the whole external handoff
   — intent, preparation and settlement — before the first rung is written, so
   it never leaves an attempt admitted and unable to settle. A journal with no
   settlement room refuses the handoff with `CapacityExceeded` and writes
-  nothing. · why: #122 item 2 / #156 · enforced by
+  nothing. · why: #122 item 2 / #156 · enforced by:
   `ecs::tests::an_external_handoff_reserves_settlement_capacity_before_any_rung`
-- **INV-BOT-25** Applied-key membership is answered by index, not by scanning a
+- **INV-BOT-42** Applied-key membership is answered by index, not by scanning a
   growing vector: the contract identity keeps the latest key per action and the
   event identity keeps `(action, digest)` membership, so a run that applied N
   distinct keys does O(N) work rather than the removed `Vec`'s Θ(N²)
   membership-before-push. Both indexes retain one entry per action / per
   distinct event for the controller's life, the same horizon the vector had, so
   the #101 redelivery and #129 new-episode semantics are preserved. · why: #122
-  item 2 / #156 · enforced by
+  item 2 / #156 · enforced by:
   `ecs::tests::applied_membership_answers_at_scale_where_a_scan_would_be_quadratic`
-- **INV-BOT-26** The durable write is performed by the storage owner thread, not
+- **INV-BOT-43** The durable write is performed by the storage owner thread, not
   the thread that awaits the append: a parked device leaves the runtime and an
   unrelated ready task free to progress, and a release from an independent
   thread is what lets the append finish. A dropped waiter still poisons the
-  handle. · why: #122 item 4 / #156 · enforced by `tests/journal_liveness.rs`
+  handle. · why: #122 item 4 / #156 · enforced by: `tests/journal_liveness.rs`
   (`a_slow_store_lets_the_runtime_and_the_release_progress`,
   `a_cancelled_append_leaves_the_runtime_and_the_handle_live`)
-- **INV-BOT-27** A real process kill while an append is in flight, against a
+- **INV-BOT-44** A real process kill while an append is in flight, against a
   store that has not answered, leaves a clean journal: the reopen reports no
   committed event and no torn tail, and the retry lands exactly once. The kill
   is a real `SIGKILL` of a child that handed the storage owner the append and
-  then parked. · why: #122 item 2 / #156 · enforced by
+  then parked. · why: #122 item 2 / #156 · enforced by:
   `tests/durable_crash_observation.rs`
   (`a_real_kill_mid_append_leaves_no_duplicate_and_no_lost_receipt`)
-- **INV-BOT-28** Concurrent tenant appends over separate files stay isolated,
-  and one acknowledged append's latency tails stay bounded on the shipped path
-  where the write and `sync_all` run on the storage owner. 100 tenant journals
-  append concurrently and each holds only its own events; 1,024 appends yield a
-  measured p50/p95/p99. · why: #122 item 2 / #156 · enforced by
-  `tests/journal_scale.rs`
-  (`concurrent_tenant_appends_at_100_stay_isolated`,
-  `append_latency_tails_are_bounded`)
+- **INV-BOT-45** Concurrent tenant appends over separate files stay isolated,
+  lose nothing and duplicate nothing, and one acknowledged append's latency
+  tails stay bounded on the shipped path where the write and `sync_all` run on
+  the storage owner. The tiered sweep runs 100, 1,000 and 10,000 concurrent
+  tenant journals; a tier the host cannot reach is clamped to the level the
+  process really can, and the requested, reached and ceiling levels are recorded
+  together with the p50/p95/p99 append latency and the peak RSS, so no reader is
+  told a concurrency number nobody ran (the INV-BOT-16 rule). · why: #122 item 2
+  / #156 · enforced by: `tests/journal_scale.rs`
+  (`concurrent_tenant_appends_scale_with_isolation`,
+  `append_latency_tails_are_bounded`) and `tests/sim_journal_liveness.rs`
+  (`tenant_tiers_replay_at_the_level_the_sim_can_drive`)
 
 ## Open questions for the Director
 
