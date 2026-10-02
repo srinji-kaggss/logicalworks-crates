@@ -17,13 +17,16 @@
 //! host, not to the handle.
 //!
 //! ```no_run
-//! use lgwks_bot::script::FlowError;
+//! use lgwks_bot::script::{FlowError, Scope};
 //! use lgwks_bot::task::{Host, Report, task};
 //!
-//! # async fn run() -> Result<(), FlowError> {
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let host = Host::builder("acme")?.build()?;
-//! let greeting = task("greet", |_scope, name: &str| async move {
-//!     Ok(format!("hello, {name}"))
+//! let greeting = task("greet", |_scope: Scope, name: &str| {
+//!     // The borrowed input is read before the future is built, so the future
+//!     // owns what it returns.
+//!     let greeting = format!("hello, {name}");
+//!     async move { Ok::<_, FlowError>(greeting) }
 //! })?;
 //!
 //! let report: Report<String> = host.run(&greeting, "world").await;
@@ -291,16 +294,16 @@ impl<F: fmt::Debug> fmt::Debug for Task<F> {
 /// # Example
 ///
 /// ```
-/// use lgwks_bot::script::FlowError;
+/// use lgwks_bot::script::{FlowError, Scope};
 /// use lgwks_bot::task::task;
 ///
 /// # fn main() -> Result<(), FlowError> {
-/// let sum = task("sum", |_scope, values: Vec<u32>| async move {
-///     Ok(values.iter().copied().sum::<u32>())
+/// let sum = task("sum", |_scope: Scope, values: Vec<u32>| async move {
+///     Ok::<_, FlowError>(values.iter().copied().sum::<u32>())
 /// })?;
 /// assert_eq!(sum.name(), "sum");
 ///
-/// let refused = task("", |_scope, ()| async { Ok(()) });
+/// let refused = task("", |_scope: Scope, ()| async { Ok::<_, FlowError>(()) });
 /// assert!(refused.is_err(), "an empty logical name is refused");
 /// # Ok(())
 /// # }
@@ -494,7 +497,7 @@ impl<O> Report<O> {
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let host = Host::builder("acme")?
-///     .max_concurrent_tasks(8)
+///     .max_concurrent_tasks(std::num::NonZeroUsize::new(8).ok_or("a non-zero ceiling")?)
 ///     .default_deadline(std::time::Duration::from_secs(5))
 ///     .build()?;
 ///
