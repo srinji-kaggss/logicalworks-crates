@@ -4189,6 +4189,7 @@ dependencies = [
 name = "lgwks_bot"
 version = "0.8.0"
 dependencies = [
+ "lgwks_ast",
  "lgwks_deps",
  "lgwks_macros",
  "lgwks_std",

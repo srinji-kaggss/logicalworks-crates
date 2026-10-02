@@ -423,6 +423,46 @@ Each of these was a shipped defect. Treat the list as the spec.
   enforced by:
   `rt::supervise::tests::an_unsignalable_present_group_stays_pending_rather_than_failed`
   and `rt::supervise::tests::an_unexpected_signal_error_is_a_failed_cleanup`
+- **INV-BOT-21** A structural inspection reads and parses the subject's bytes
+  and never executes them: no compile, import, build-script evaluation,
+  dependency install, shell invocation or dynamic-library load of the subject,
+  and the subject's instructions remain data. It parses through `lgwks_ast`
+  (never a second parser) and walks with budgets on **separate** axes — source
+  bytes, nodes, depth, work, retained findings and emitted output — refusing
+  before avoidable amplification. Its verdict is typed: a supported and
+  complete clean scope is `Clean`, and an unsupported grammar or rule set, an
+  unconfirmable declared version, a budget exhaustion or parse recovery, and an
+  infrastructure failure are distinct non-clean arms. Rule support is reported
+  per rule and is separate from grammar support; a `Clean` result claims only
+  that the configured rules did not match, never that the subject is safe. The
+  one operation is reachable through the same registry/admission path every
+  other domain uses — a [`Query`](crate::verb::Query) over supplied bytes
+  (`domain::inspect::Inspector`) and an [`Observe`](crate::verb::Observe)
+  source that reads the artifact under `bot.fs` (`domain::inspect::Subject`) —
+  and as a `Host`-run `Task`, and every door returns the operation's own report;
+  the artifact-read source is admitted, or refused, exactly like any other
+  capped domain.
+  · why: #150 (R8) · enforced by:
+  `tests/inspect_non_execution.rs` (independent filesystem, process-liveness and
+  TCP-listener observers over a hostile corpus),
+  `a_parser_fault_is_an_infrastructure_failure_not_a_clean_report`,
+  `an_eager_traversal_mutant_fails_the_node_budget_oracle`,
+  `a_subject_executing_mutant_fails_the_non_execution_oracle`,
+  `both_entry_points_produce_the_identical_inspection`,
+  `a_spec_naming_the_inspection_source_without_bot_fs_is_an_admission_need`,
+  `two_tenants_inspecting_the_same_artifact_stay_isolated`,
+  `host_bounded_admission_holds_at_every_tier`,
+  `retained_counters_grow_with_the_input`,
+  `a_match_longer_than_the_preview_budget_is_truncated_with_its_full_span_kept`,
+  `tests/inspect.rs::every_budget_has_its_own_refusal`,
+  `tests/inspect.rs::invalid_syntax_is_incomplete_and_never_a_clean_report`,
+  `tests/inspect.rs::a_declared_language_version_is_undecidable_not_clean`,
+  `tests/inspect.rs::the_report_round_trips_and_preserves_identity_spans_and_coverage`,
+  `sim_seeded_subjects_agree_across_every_entry_point`,
+  `sim_same_seed_same_trace_hash`,
+  `sim_seeded_multitenant_reports_stay_isolated`,
+  and `tests/sim_inspect.rs` (`sim_seeded_fragments_match_the_rule_model`,
+  `sim_same_seed_same_trace`, `sim_node_budget_tiers_refuse_deterministically`)
 - **INV-BOT-20** A task run on a `Host` takes at most one admission permit per
   host for its whole tree: a nested `host.run` from inside a body that already
   holds that host's permit is charged to the parent, so nesting at any depth
