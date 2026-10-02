@@ -10,6 +10,27 @@ explicitly under that crate.
 
 ### lgwks_bot Added
 
+- `rt::clock`: one declared logical clock (`Clock`) and the wall-clock watchdog
+  (`WallClock`) that pausing it cannot disable. `Clock::wall` follows real time
+  and refuses a caller advance with a named reason; `Clock::virtual_at` is
+  caller-advanceable, so retry, sleep, readiness and continuation deadlines are
+  exactly drivable from a test. An advance past the declared ceiling saturates
+  rather than wrapping, and a clock already at the ceiling refuses rather than
+  reporting movement it did not make. `ClockSnapshot` is a **duration**, not an
+  instant: what survives a restart is the remaining budget, which means the same
+  thing on another host (#152).
+- `rt::time::Deadline`: a deadline that names the clock governing it, carrying
+  both the logical bound (`elapsed`, `remaining`, `is_exhausted`, driven by the
+  declared clock) and the independent wall watchdog (`watchdog`,
+  `watchdog_exceeded`, real time). Additive; no existing signature changed (#152).
+- `Supervisor::snapshot` -> `SupervisorSnapshot`: a bounded, point-in-time view
+  of live capacity, the declared ceiling, the supervisor's own counters, whether
+  admission is closed, and the next eligible action (`NextAction::Admit`,
+  `WaitForCapacity`, `Stopped`). It reads the owner's own admission and reporting
+  fields, so it is never a second ledger; terminal outcomes stay in the report
+  stream where the retention cap already governs them. The live listing is capped
+  at the in-flight ceiling and reports how many it excluded, and every field is
+  private behind an accessor. Additive (#152).
 - `task::{Host, Task, Report}`, the front door (#87 step 1): build a `Host` once
   (tenant, stop token, admission ceiling, default deadline, trail capacity, all
   finite and readable through `Host::limits`), define a `Task` with `task(name,

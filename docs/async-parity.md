@@ -5,7 +5,9 @@ runtime crates a consumer would otherwise reach for, measured against their
 current exported surfaces rather than against advertised feature lists.
 
 Status: audited 2026-09-20 for the 0.4.0 release. Three gaps were found and
-closed; four remain open and are named in §4.
+closed; two more were closed by #152 (virtual time and task introspection, both
+in a deliberately different shape — §4.1), and the two that remain open are named
+in §4.
 
 ## 1. Method
 
@@ -34,7 +36,7 @@ reason to leave.
 | `yield_now` | ✅ | ✅ | ✅ | ✅ |
 | Cancellation token | ✅ `tokio-util` | ❌ | ✅ | ✅ **closed 0.4.0** |
 | `sleep`/`timeout`/`interval` | ✅ | ✅ | ✅ | ✅ `rt::time` |
-| Virtual / paused test clock | ✅ `pause`+`advance` | ❌ | ❌ | ❌ **open** |
+| Virtual / paused test clock | ✅ `pause`+`advance` | ❌ | ❌ | ✅ **closed 0.9.0** — `rt::clock`, a *declared* clock; see §4.1 |
 | `mpsc`/`oneshot`/`broadcast`/`watch` | ✅ | ✅ | ✅ | ✅ `rt::sync` |
 | Bounded `mpsc` | ✅ | ✅ | ✅ | ✅ |
 | `Mutex`/`RwLock`/`Semaphore`/`Notify`/`Barrier`/`OnceCell` | ✅ | ✅ | ✅ | ✅ |
@@ -47,7 +49,7 @@ reason to leave.
 | Runtime shutdown with timeout | ✅ | ❌ | ❌ | ✅ `shutdown_timeout` |
 | Shutdown without waiting | ✅ `shutdown_background` | ❌ | ❌ | ❌ minor |
 | Move a blocking call off a worker | ✅ `block_in_place` | ❌ | ❌ | ❌ minor |
-| Task id / introspection | ✅ `task::id` | ❌ | ❌ | ❌ minor |
+| Task id / introspection | ✅ `task::id` | ❌ | ❌ | ✅ **closed 0.9.0** — `Supervisor::snapshot`; see §4.1 |
 | `#[main]` / `#[test]` attribute | ✅ | ✅ | ❌ | ❌ **by design** |
 | `tracing` integration | ✅ feature | ❌ | ❌ | ✅ via `lgwks_std::trace` |
 
@@ -104,25 +106,50 @@ consumer could open a socket or a pipe and still not read from it without naming
 storefront change, because `io-util` was reachable only by enabling the entire
 networking stack: `tokio-io` is now its own rung and `tokio-net` builds on it.
 
-## 4. The four that remain open
+## 4. The two that remain open
 
 These are stated rather than left implied, because a capability assumed to
 exist costs a search that cannot succeed.
 
-1. **Virtual time.** `tokio::time::pause`/`advance` let a test drive timers
-   without wall-clock waits. `rt::time` does not expose them, so a test of a
-   timed bot waits in real time. This is the one gap with a known path in this
-   workspace:
-   `docs/bevy-admission.md` §5 already adopted `bevy_time` for exactly this, and
-   `Time<Virtual>` is the intended clock root (`docs/bot-on-ecs.md` §10 step 4).
-   Until then the gap is real.
-2. **`block_in_place`.** For CPU-bound work inside an async task on a
+1. **`block_in_place`.** For CPU-bound work inside an async task on a
    multi-thread runtime. `lgwks_std::task::spawn_blocking` covers the common
    case; this covers the case where the future cannot be `'static`.
-3. **`shutdown_background`.** `shutdown_timeout` exists; the non-waiting form
+2. **`shutdown_background`.** `shutdown_timeout` exists; the non-waiting form
    does not.
-4. **Task introspection** (`task::id`, per-task metrics). No crate in this
-   workspace needs it yet.
+
+## 4.1 What "closed" means for virtual time and introspection (#152)
+
+`tokio::time::pause`/`advance` work by replacing the engine's timer driver.
+This crate does not, and the difference is the point rather than a gap.
+
+**What shipped.** `rt::clock::Clock` is a *declared* clock: `Clock::wall`
+follows real time, `Clock::virtual_at` is driven by the caller, and
+`rt::time::Deadline` names the clock that governs a deadline instead of an
+opaque `Instant`. `Supervisor::snapshot` reads the supervisor's own admission
+and reporting fields for a bounded view of live capacity and the next eligible
+action.
+
+**Why not the engine's `pause`.** It would require enabling `tokio/test-util`,
+which is a new feature edge on the `tokio` edge this workspace admits by exact
+allowlist (`contract/APPROVED.toml`, INV-DEP-3) — not a decision a parity review
+makes on its own. And it would be the *wrong* shape for this crate: `pause`
+swaps the engine's timer and leaves every `std::time::Instant` reading in the
+program still on real time. This crate already has wall-clock budgets
+(`Supervisor`'s cooperative drain grace, a process deadline), so a "paused"
+runtime would still hang on any of them. A declared clock names which clock
+governs each deadline and keeps the watchdog separate — the property
+`INV-BOT-21` states and `tests/sim_clock.rs` proves.
+
+**What this does not claim.** A declared clock determinizes *which deadline is
+eligible*. It does not make poll order across workers deterministic, it does not
+make an external system deterministic, and it does not measure cross-host clock
+skew. Those are named in `rt::clock`'s module docs as explicitly out of scope.
+
+**The remaining gap, stated.** There is no way to advance the *engine's* timer
+from the public surface. A test that needs a real `sleep` to resolve without a
+real wait still waits. That is the honest residual of not taking a new
+dependency edge, and it is the one thing a future admission of `tokio/test-util`
+would buy.
 
 ## 5. Three deliberate divergences
 

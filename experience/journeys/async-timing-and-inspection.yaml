@@ -1,0 +1,119 @@
+id: async-timing-and-inspection
+actor: agent-or-human-dev
+job: Control an async bot's deadlines in a test, and see what it is doing right
+  now, without believing a number that was measured on a different timeline or a
+  ledger that could disagree with the thing it reports on.
+prior_knowledge:
+  - Has written an async test and learned that `sleep` is a real wait. Has not
+    asked which clock the deadline under test is measured against.
+  - Assumes pausing time pauses everything. This is the assumption that is
+    wrong, and this journey is where it is corrected.
+  - Assumes an inspection API is a log. It is not: it is a bounded read of the
+    owner's own state.
+start:
+  installation: lgwks-bot built with the `rt`, `time` and `sync` features; a
+    runtime the test owns.
+  state: a supervisor with an in-flight ceiling, some tasks on it, and a
+    deadline the test wants to control.
+success:
+  visible_outcome: a test drives a retry, a sleep, a readiness wait and a
+    continuation deadline to exactly the instant it chose, in microseconds; it
+    reads live capacity and the next eligible action from the same owner that
+    admits the work; and a wall-clock watchdog still fires for a subprocess that
+    has stopped answering, with logical time frozen.
+states:
+  - name: wall
+    expectation: a production clock follows real monotonic time and refuses a
+      caller advance with a named reason, so a test cannot mistake the wrong
+      clock for a full one.
+  - name: virtual
+    expectation: a caller-advanceable clock makes every deadline exactly
+      drivable, and advancing it is saturating rather than wrapping — a clock
+      that reached its ceiling reports it instead of jumping into the past where
+      a deadline would fire immediately.
+  - name: restarted
+    expectation: what survives a restart is the remaining budget, a duration that
+      means the same thing on another host, never a process-local instant.
+  - name: admitted
+    expectation: the snapshot reports a free permit and the next action is
+      `Admit`; a spawn after that reading starts.
+  - name: saturated
+    expectation: the snapshot reports zero free permits and `WaitForCapacity`;
+      a spawn is refused as `AtCapacity`. The two are the same fact read twice.
+  - name: stopped
+    expectation: after cancellation the snapshot says `Stopped`, a spawn is
+      refused as `Cancelled`, and the terminal record is still readable from the
+      report stream — an inspection surface that only works while everything is
+      fine is not one.
+invariants:
+  - Pausing logical time never disables the wall-clock watchdog. A subprocess
+    that stopped answering, a blocking callback that will never return and a
+    store whose fsync is stuck are not waiting for time; only real elapsed time
+    says so.
+  - The inspection snapshot reads the owner's own admission and reporting
+    fields. It is not a second ledger, and terminal outcomes stay in the report
+    stream where the retention cap already governs them.
+  - The live listing is capped at the in-flight ceiling and says how many it
+    excluded. A caller drawing conclusions about capacity from it must be able
+    to tell a bounded prefix from the whole thing.
+  - Counters may saturate; identity allocation never silently aliases.
+  - Determinism claimed by a logical clock is about which deadline is eligible,
+    never about poll order across workers, observed external order, or clock
+    skew between hosts. Those are not claimed and not tested.
+trust_boundaries:
+  - "The declared clock governs this crate's deadlines; the engine's timer still
+    governs when a future wakes. They are two facts, and neither is readable as
+    the other."
+  - A caller that reads a snapshot cannot change what the supervisor does next.
+    A read with a side effect could not be used from a monitoring loop.
+agent_contracts:
+  - "Clock::advance saturates at the ceiling and returns where it landed, so a
+    caller that asked for more than there is can see it."
+  - A clock already at its ceiling refuses, because reporting success would be a
+    lie about movement that did not happen.
+  - "ClockSnapshot is a duration. It carries no epoch and no host identity, so
+    it cannot be mistaken for a cross-host timestamp."
+probes:
+  - id: same-seed-same-clock-trace
+    action: Sweep 64 seeds over advance/budget/watchdog scenarios twice; assert
+      the same seed produces the same trace hash and the same receipt, and that
+      no seed drove the wall watchdog past its bound.
+  - id: distinct-seeds-distinct-traces
+    action: Sweep the same band; assert most seeds give distinct hashes, so the
+      family is not replaying one constant scenario.
+  - id: wall-clock-refuses-a-caller-advance
+    action: Call `advance` on a wall clock; assert `NotVirtual`, that the clock
+      did not move, and that the message says why in text a log line can carry.
+  - id: restart-restores-the-remaining-budget
+    action: Advance a virtual clock, snapshot it, resume a fresh clock from the
+      snapshot's elapsed duration; assert the remaining budget is identical and
+      was never a stored instant.
+  - id: paused-clock-leaves-the-watchdog-alone
+    action: Take a watchdog, advance logical time by three days, assert the
+      watchdog moved by far less than a second.
+  - id: ceiling-saturates-instead-of-wrapping
+    action: Advance past the representable ceiling; assert the clock lands on the
+      ceiling, and that a clock already there refuses rather than wrapping.
+  - id: snapshot-and-admission-agree
+    action: Fill a supervisor to its ceiling behind a gate, read the snapshot,
+      then attempt the spawn the snapshot predicted; assert the snapshot said
+      `WaitForCapacity` and the supervisor refused as `AtCapacity`.
+  - id: live-listing-is-bounded
+    action: Read the listing at a known ceiling; assert the length is within
+      `live_limit`, the truncation count is reported, and every entry carries the
+      permit it holds in spawn order.
+  - id: cancellation-closes-admission
+    action: Cancel a saturated supervisor; assert `next_action` is `Stopped`, a
+      spawn is refused as `Cancelled`, and the drained outcomes are two distinct
+      identities that did not alias.
+  - id: undrained-loses-detail-not-memory
+    action: Spawn six bodies into a ceiling of two without draining; assert the
+      dropped counter is non-zero, every task is still accounted as finished, and
+      the retained list holds exactly the tasks the cap kept.
+  - id: repeated-reads-do-not-accumulate
+    action: Take sixty-four snapshots of a one-task supervisor; assert every one
+      reports one task and that the permit was still available afterwards.
+  - id: budget-exhaustion-is-not-a-hang
+    action: Run a repeating body under an iteration budget; assert it ran exactly
+      its budget, reported completion rather than cancellation, and drained
+      clean.

@@ -49,9 +49,9 @@ crates/lgwks-bot/src/language.rs:580	pub fn with_aliases(aliases: Vec<Alias>) ->
 crates/lgwks-bot/src/language.rs:603	pub fn learn(&mut self, question: &str, utterance: &str, option: &str) -> Option<Alias> {
 crates/lgwks-bot/src/language.rs:616	pub fn forget(&mut self, question: &str, utterance: &str) -> Option<Alias> {
 crates/lgwks-bot/src/language.rs:641	pub fn aliases(&self) -> Vec<Alias> {
-crates/lgwks-bot/src/rt/mod.rs:76	//! This is not a scheduler with realtime guarantees. Future completion order
-crates/lgwks-bot/src/rt/mod.rs:94	#[cfg(feature = "sync")]
-crates/lgwks-bot/src/rt/mod.rs:105	pub mod signal;
+crates/lgwks-bot/src/rt/mod.rs:80	//! This is not a scheduler with realtime guarantees. Future completion order
+crates/lgwks-bot/src/rt/mod.rs:100	#[cfg(feature = "sync")]
+crates/lgwks-bot/src/rt/mod.rs:111	pub mod signal;
 crates/lgwks-bot/src/rt/process.rs:45	Capture(NonZeroUsize),
 crates/lgwks-bot/src/rt/process.rs:352	pub struct ProcessRun {
 crates/lgwks-bot/src/rt/process.rs:453	pub enum ProcessRunError {
@@ -60,14 +60,14 @@ crates/lgwks-bot/src/rt/runtime.rs:105	if self.worker_threads.is_some() && worke
 crates/lgwks-bot/src/rt/supervise.rs:9	//! # Why a task cannot leak
 crates/lgwks-bot/src/rt/supervise.rs:92	//! permits inside a task this supervisor owns can deadlock with itself. The
 crates/lgwks-bot/src/rt/supervise.rs:148	const YIELD_INTERVAL: u64 = 32;
-crates/lgwks-bot/src/rt/supervise.rs:829	const COOPERATIVE_DRAIN_GRACE: Duration = Duration::from_millis(50);
-crates/lgwks-bot/src/rt/supervise.rs:873	pub fn new(max_in_flight: usize) -> Self {
-crates/lgwks-bot/src/rt/supervise.rs:1170	pub async fn spawn_process(&mut self, spec: &ProcessSpec) -> io::Result<TaskId> {
-crates/lgwks-bot/src/rt/supervise.rs:1232	pub async fn run_process(&mut self, spec: &ProcessSpec) -> Result<ProcessRun, ProcessRunError> {
-crates/lgwks-bot/src/rt/supervise.rs:2328	pub async fn repeat<F, Fut>(token: &CancellationToken, budget: Budget, mut body: F) -> Outcome
-crates/lgwks-bot/src/rt/supervise.rs:2341	let deadline = match budget {
-crates/lgwks-bot/src/rt/supervise.rs:2364	match token.run_until_cancelled(body(iterations)).await {
-crates/lgwks-bot/src/rt/supervise.rs:2389	mod tests {
+crates/lgwks-bot/src/rt/supervise.rs:834	const COOPERATIVE_DRAIN_GRACE: Duration = Duration::from_millis(50);
+crates/lgwks-bot/src/rt/supervise.rs:878	pub fn new(max_in_flight: usize) -> Self {
+crates/lgwks-bot/src/rt/supervise.rs:1235	pub async fn spawn_process(&mut self, spec: &ProcessSpec) -> io::Result<TaskId> {
+crates/lgwks-bot/src/rt/supervise.rs:1297	pub async fn run_process(&mut self, spec: &ProcessSpec) -> Result<ProcessRun, ProcessRunError> {
+crates/lgwks-bot/src/rt/supervise.rs:2637	pub async fn repeat<F, Fut>(token: &CancellationToken, budget: Budget, mut body: F) -> Outcome
+crates/lgwks-bot/src/rt/supervise.rs:2650	let deadline = match budget {
+crates/lgwks-bot/src/rt/supervise.rs:2673	match token.run_until_cancelled(body(iterations)).await {
+crates/lgwks-bot/src/rt/supervise.rs:2698	mod tests {
 crates/lgwks-bot/src/rt/task.rs:170	where
 crates/lgwks-bot/src/semantic.rs:13	//! This tier is consulted only when the lexicon returns [`Resolution::Absent`] —
 crates/lgwks-bot/src/semantic.rs:117	pub trait Embedder {
