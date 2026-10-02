@@ -8,6 +8,37 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### lgwks_std Added
+
+- `tests/fixtures/wire/consumer_record_v1.hex` is a retained archive that pins
+  an application schema and the effective rkyv format (pointer width 32,
+  little-endian, `u32` alignment 4). `tests/wire_fixture.rs` reads it on every
+  target whose format matches and reproduces it byte for byte, so a format or
+  schema drift is caught on every OS rather than inferred from the host.
+  `tests/wire_feature_unification.rs` builds a separate consumer crate that
+  selects `rkyv/pointer_width_16`, `rkyv/big_endian` and `rkyv/unaligned` and
+  proves `wire::format_descriptor()` and the emitted bytes move with the
+  unified features, and `tests/sim_wire.rs`
+  checks 64 seeded nested values for byte-repeatability, round-trip and refusal
+  of truncated or misaligned archives. (#167)
+- The HTTP body ceiling is measured, not merely asserted (#163).
+  `tests/http_alloc.rs` builds a throwaway consumer crate with a counting global
+  allocator and reports separately the retained body bytes, retained header
+  bytes, the live heap held while a `Response` is alive, the peak heap during a
+  call, and an eager reader's peak. At a 3 003-byte ceiling the retained body is
+  324 bytes and the peak is ~267 KB whether the body is 3 KB or 3 MB, while an
+  eager reader of the same 3 MB reports a 3 MB peak — so the same metric
+  discriminates the mutant the ceiling exists to stop. `tests/sim_http.rs`
+  checks 48 seeded scripts per family against a model: ceiling outcomes at
+  non-power-of-two sizes, a transport torn before its declared length,
+  and two tenants polling one endpoint concurrently without header bleed.
+  `http::tests::the_read_window_is_a_fixed_chunk_and_capacity_is_clamped_to_the_ceiling`
+  records that the body reader is handed one `READ_CHUNK_BYTES` window and that
+  retained capacity clamps to the ceiling. No public behaviour changes; the
+  tests pin INV-STD-HTTP-2.
+- `online::tests::a_whole_probe_fits_one_wall_clock_budget` observes, from
+  outside the injected dial, that one probe's resolved candidates share a single
+  wall-clock budget rather than restarting per address. (#163)
 ### Documentation
 
 - **#155/#170 — documentation claims reconciled to the code at this revision.**

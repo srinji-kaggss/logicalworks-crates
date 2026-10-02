@@ -244,4 +244,36 @@ mod tests {
         assert!(!probe(SlowResolver, Duration::from_millis(10)));
         assert!(started.elapsed() >= Duration::from_millis(80));
     }
+
+    /// A whole multi-candidate failure is bounded by one wall clock, observed
+    /// from outside the injected dial: the budget is spent across candidates
+    /// rather than restarting per address.
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the injected dial sleeps out each share so the shared wall-clock bound can be observed"
+    )]
+    fn a_whole_probe_fits_one_wall_clock_budget() {
+        let candidates = [
+            SocketAddr::from(([192, 0, 2, 1], 443)),
+            SocketAddr::from(([198, 51, 100, 1], 443)),
+            SocketAddr::from(([203, 0, 113, 1], 443)),
+            SocketAddr::from(([192, 0, 2, 2], 443)),
+        ];
+        let timeout = Duration::from_millis(120);
+        let started = Instant::now();
+        let result = probe_candidates_with(candidates.into_iter(), timeout, |_, share| {
+            std::thread::sleep(share);
+            false
+        });
+        let elapsed = started.elapsed();
+        assert!(
+            !result,
+            "every candidate fails, so the probe reports unreachable"
+        );
+        assert!(
+            elapsed <= timeout + Duration::from_millis(80),
+            "the four candidates share one budget of {timeout:?}, not four: {elapsed:?}"
+        );
+    }
 }
