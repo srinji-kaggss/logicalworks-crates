@@ -344,6 +344,16 @@ Each of these was a shipped defect. Treat the list as the spec.
   the level reached and the ceiling together, so a reader is never told a
   concurrency number nobody ran. · enforced by: `tests/sim_scale::tier_r*`
   (`tier-requested`, `tier-reached`, `tier-ceiling` in the trace)
+- **INV-BOT-17** A `BotSpec` materializes into a runnable bot only through the same
+  `assemble`/`build` path a native bot uses, so the two produce the same operation
+  trace. Authority comes only from the caller's `GrantSet`: a spec cannot grant
+  itself reach. Admission is all-or-nothing and reports every presently knowable
+  unmet need in one `NeedSet` (unknown source or action domain, a constructor that
+  rejects its target, a missing capability, an unknown condition), each attributed
+  to its chain and action; a duplicate registry identifier and an unsupported spec
+  version are typed refusals; and a refused materialization polls nothing and
+  executes nothing. · why: #87 step 3 · enforced by:
+  `tests/spec_materialize.rs` and `tests/sim_spec_materialize.rs`
 - **INV-GOV-2** A product requirement is superseded, never edited: a changed
   normative sentence with no Supersession log entry fails the gate. · enforced
   by: `python3 scripts/check-requirements.py` (`requirements` lane)

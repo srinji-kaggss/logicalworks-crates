@@ -224,26 +224,28 @@ pub mod script;
 pub mod semantic;
 /// Synchronous validated guidance flows and session runner.
 pub mod session;
-/// The serializable spec contract and the builder that assembles bots.
+/// The serializable spec contract, the materializer that walks one against a
+/// registry, and the builder that assembles bots.
 ///
-/// `BotSpec` is validate-only today: there is no `from_spec` materializer, so a
-/// spec that validates still has to be built through `Bot::builder`, which
-/// takes verbs rather than wire data. The half of that which now exists is the
-/// [`DomainRegistry`] — the list of `domain_id -> constructor` entries a binary
-/// declares, written with [`domains!`](crate::domains) — and the half that does
-/// not is the materializer that walks a spec against one. See
-/// [`DomainRegistry`] for what remains, which is more than plumbing.
+/// [`Bot::from_spec`] is the materializer: a [`BotSpec`] plus a
+/// [`DomainRegistry`] plus the caller's [`GrantSet`] produces a runnable
+/// [`Bot`] through the same `assemble`/`build` path a native bot uses, with no
+/// second interpreter and no second execution path. It is all-or-nothing: an
+/// unmet need is reported as a complete, attributed [`NeedSet`] and nothing is
+/// built, and admission validates a registry with a duplicate identifier rather
+/// than letting lookup depend on declaration order.
 ///
-/// The builder stays the only path that mints authority: grants come from a
-/// `GrantSet` the caller holds, never from the spec, so wire data still cannot
-/// choose what the bot is able to reach. There is deliberately no `bot!`
-/// proc-macro: it would drag the `syn` stack into every consumer and hide the
-/// per-call `Auth::check` that auditors read. [`domains!`](crate::domains)
-/// declares the registry as data instead, with no proc macro and no new
-/// dependency. Orchestration *between* verbs is a different job, and it does
-/// have a proc macro: `script!` (feature `script`) expands to plain calls into
-/// the `script` module, leaves every verb's `Auth::check` where it was, and
-/// reaches `syn` only on the host through the `lgwks_deps` storefront.
+/// The builder is not replaced, and it stays the only path that mints
+/// authority: grants come from a `GrantSet` the caller holds, never from the
+/// spec, so wire data cannot choose what the bot is able to reach. There is
+/// deliberately no `bot!` proc-macro: it would drag the `syn` stack into every
+/// consumer and hide the per-call `Auth::check` that auditors read.
+/// [`domains!`](crate::domains) declares the registry as data instead, with no
+/// proc macro and no new dependency. Orchestration *between* verbs is a
+/// different job, and it does have a proc macro: `script!` (feature `script`)
+/// expands to plain calls into the `script` module, leaves every verb's
+/// `Auth::check` where it was, and reaches `syn` only on the host through the
+/// `lgwks_deps` storefront.
 pub mod spec;
 /// The four verbs: Observe, Evaluate, Execute, Query. No fifth verb exists.
 pub mod verb;
@@ -253,7 +255,7 @@ pub use effect::{EventId, InputIdentity};
 pub use error::{BotError, DispatchCertainty, RetryClass};
 pub use gate::GrantSet;
 pub use language::{Alias, LanguageResolver};
-pub use registry::{Action, ActionCtor, DomainRegistry, Source, SourceCtor};
+pub use registry::{Action, ActionCtor, Condition, DomainRegistry, Source, SourceCtor};
 #[cfg(feature = "rt")]
 pub use rt::runtime::{Builder, Handle, Runtime, block_on};
 pub use semantic::{Embedder, EmbedderIdentity, SemanticError, SemanticPolicy, SemanticResolver};
@@ -267,7 +269,7 @@ pub use session::{
     TemplateInterpolator, TemplatePart, Terminal, TranscriptEntry, Value, ValueExpr, VarScope,
     VarType, Verdict,
 };
-pub use spec::{Bot, BotSpec};
+pub use spec::{Admission, Bot, BotSpec, Need, NeedSet};
 
 /// Write orchestration as indented blocks that expand to bounded,
 /// deadline-carrying, tenant-keyed flows over [`script`](mod@script), plus an

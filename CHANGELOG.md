@@ -8,6 +8,43 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### lgwks_bot Added
+
+- `Bot::from_spec` materializes a validated `BotSpec` against a `DomainRegistry`
+  into a runnable `Bot`, through the same `assemble`/`build` path a native bot
+  uses — no second interpreter and no second execution path — so a JSON-built bot
+  and a natively built one produce the same operation trace. Authority still
+  comes only from the caller's `GrantSet`, never from the document. Admission is
+  all-or-nothing and reports every presently knowable unmet need in one
+  attributed value (`Admission`, `NeedSet`, `Need`): an unknown source or action
+  domain, a constructor that rejects its target, a missing capability, or an
+  unknown condition. A duplicate registry identifier and an unsupported spec
+  version are typed refusals, and nothing is polled or executed on refusal. (#87)
+- `Condition`: an erased condition handle, so a materialized chain and a native
+  one share one condition erasure and one type-mismatch report.
+- `Source::condition` resolves a wire condition identifier against the source's
+  own output type, from the closed vocabulary `changed`, `always`,
+  `threshold::above(<n>)`, `threshold::below(<n>)`.
+
+### lgwks_bot Changed
+
+- `BotSpec` carries a `version`, defaulted to `BotSpec::CURRENT_VERSION` when
+  absent so a document written before the field existed still parses. A version
+  this build does not implement is refused by `BotSpec::from_json` and by
+  `Bot::from_spec`.
+
+### lgwks_bot Breaking
+
+- `Source::new` now requires `O::Output: Clone + PartialOrd + FromStr +
+  InputIdentity` (was `PartialEq` only). Every source usable in a chain already
+  satisfied `InputIdentity` and `PartialEq`; the added bounds are what let a
+  condition be built for the source's own output type from a wire identifier.
+- `BotSpec`, `ChainSpec` and `ActionSpec` no longer expose their string/collection
+  fields as `pub`: read them through `BotSpec::version`/`name`/`chains`,
+  `ChainSpec::source`/`target`/`on`, and `ActionSpec::domain`/`target`. The types
+  are `#[non_exhaustive]`, so a struct literal was already unavailable outside
+  the crate; only field reads change. Serde round-trips are unchanged.
+
 ## [lgwks_std 0.10.0 / lgwks_ast 0.4.0 / lgwks_deps 0.4.0 / lgwks_bot 0.8.0 / lgwks_macros 0.1.2] - 2026-09-30
 
 The third cut of the day, for the #191-#194 review fixes that landed in #199.

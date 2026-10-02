@@ -84,22 +84,29 @@ The two lists are looked up separately, so a source identifier never resolves as
 an action and an action identifier never resolves as a source. That is what keeps
 a read from becoming a write when a spec is written carelessly.
 
-## What is not here yet
+## The materializer
 
-`BotSpec::from_spec` — the materializer that would walk a spec against a registry
-and produce a runnable `Bot` — does not exist. Two obstacles stand in front of it,
-and neither is plumbing:
+`Bot::from_spec(spec, registry, grants, effects)` walks a `BotSpec` against this
+registry and produces a runnable `Bot`, through the **same** `assemble`/`build`
+path a native bot uses. The two obstacles that once stood in front of it are
+closed, and how they are closed is worth knowing because it fixes the shape of
+the wire contract:
 
-- **A condition has nowhere to put its parameters.** `ChainSpec::on` is
-  `Vec<(String, ActionSpec)>`, so a condition is a bare identifier. `Above<u16>`
-  needs a threshold, and the wire format has no slot for one. Expressing the
-  shipped conditions therefore needs a change to the spec format itself.
-- **An erased source states no durable type.** Once a source is a
-  `Box<dyn ObserveAny>`, nothing serializable says what its `Output` was.
-  `spec::Witness` is a `TypeId`, which is process-local, so a condition
-  constructor resolved from a document has no key to check against. Such a key
-  would be declared in this registry, and is not.
+- **A condition carries its parameters in its identifier.** `ChainSpec::on` is
+  still `Vec<(String, ActionSpec)>`, and the identifier is what names the
+  condition: `always`, `changed`, `threshold::above(5)`, `threshold::below(5)`.
+  The vocabulary is closed and resolved by the source itself, against the type
+  it actually produces.
+- **A source states its own durable type.** `Source::new` captures the output's
+  `InputIdentity::SCHEMA_ID` — a declared, versioned string, not a process-local
+  `TypeId` — alongside the change filter and the admitted-input identity, and it
+  is the source that answers `condition(identifier)` for its own output type.
+  A condition therefore resolves against the type it will really see.
 
-These are recorded as open in `experience/invariants/sdk.yaml` rather than left
-to be rediscovered. `crates/lgwks-bot/tests/registry.rs` enforces what the
-registry does claim.
+Because admission is all-or-nothing, a document with any unmet need is refused
+with one attributed `NeedSet`: an unknown source or action domain, a constructor
+that rejects its target, a missing capability, or an unknown condition. Nothing
+is polled and nothing is built. `experience/invariants/sdk.yaml` records the
+landed materializer. `crates/lgwks-bot/tests/registry.rs` and
+`crates/lgwks-bot/tests/spec_materialize.rs` enforce what the registry and the
+materializer claim.

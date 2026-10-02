@@ -15,7 +15,7 @@ states:
   - name: validated
     expectation: Required caps for the spec's domains are enumerable without executing.
   - name: materialized-or-blocked
-    expectation: Either the spec builds into a runnable bot, or the SDK says plainly that specs do not materialize here.
+    expectation: Either the spec builds into a runnable bot through `Bot::from_spec`, or the SDK reports one complete, attributed `NeedSet` naming every unmet need.
 invariants:
   - Malformed spec JSON fails with the field named, never a panic or empty output.
   - Validation performs zero side effects (no network, no spawn, no writes).

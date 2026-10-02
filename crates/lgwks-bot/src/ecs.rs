@@ -198,7 +198,11 @@ use super::journal::{
     AttemptStatus, DurabilityPromise, DurableAck, EffectEvent, EffectJournal, EventKind,
     JournalError, JournalPosition, recover,
 };
-use super::spec::{ChainEntry, Erased, ObserveAny, Witness, typed_entry};
+use super::registry::{DomainRegistry, Source};
+use super::spec::{
+    ActionSpec, Admission, BotSpec, ChainEntry, ChainSpec, Erased, Need, NeedSet, ObserveAny,
+    Witness, typed_entry,
+};
 use super::verb::EffectLifetime;
 use super::verb::{Evaluate, Execute, Observe};
 
@@ -1286,7 +1290,7 @@ struct Policy(RetryPolicy);
 
 /// One observation chain, holding the same erased halves a
 /// [`Chain`](crate::Chain) does.
-struct EcsChain {
+pub(crate) struct EcsChain {
     /// The observer. `Box<dyn ObserveAny>`'s `poll_any` is not `Send`, which is
     /// why this cannot live in a component.
     source: Box<dyn ObserveAny>,
@@ -1308,6 +1312,27 @@ struct EcsChain {
     /// and the rendezvous compares them. Neither half can be checked alone —
     /// both are erased — so the pair is the proof.
     witness: Witness,
+}
+
+impl EcsChain {
+    /// Assemble a chain from a registry-built source and its erased entries.
+    ///
+    /// The materializer's seam, and the only place a chain's metadata is taken
+    /// from something other than a concrete `S` parameter. The four pieces are
+    /// captured by [`Source::new`](crate::Source::new) at the one point where
+    /// `S::Output` was still a type parameter, so a chain built this way is the
+    /// same value a native chain erases to — the tick path cannot tell them
+    /// apart, which is exactly T25's claim.
+    fn from_registry(source: Source, entries: Vec<ChainEntry>) -> Self {
+        let (inner, same, identify, witness) = source.into_parts();
+        Self {
+            source: inner,
+            same,
+            identify,
+            witness,
+            entries,
+        }
+    }
 }
 
 /// Every chain, in declaration order.
@@ -1433,7 +1458,7 @@ const MAX_IN_FLIGHT_POLLS: usize = 32;
 /// Keeping them apart is what lets a state watch `0 → 1 → 0` fire three times
 /// while a redelivered [`EventId`](crate::effect::EventId) still retires.
 #[derive(Clone, Copy)]
-struct AdmittedInput {
+pub(crate) struct AdmittedInput {
     /// The content identity a dispatch digest binds.
     identity: [u8; 16],
     /// Whether `identity` names an event rather than only content.
@@ -1449,7 +1474,7 @@ struct AdmittedInput {
 /// distinguishable, which is the caller's to express via
 /// [`EventId`](crate::effect::EventId) or their own [`InputIdentity`] impl —
 /// content equality alone is not event identity (issue #101).
-fn identify_output<S>(value: &dyn Any) -> AdmittedInput
+pub(crate) fn identify_output<S>(value: &dyn Any) -> AdmittedInput
 where
     S: Observe,
     S::Output: InputIdentity + 'static,
@@ -1488,7 +1513,7 @@ where
 /// an unreadable value as unchanged would silently suppress an effect, and the
 /// failure mode this whole substrate is built to avoid is an effect that does
 /// not happen with nothing to show for it.
-fn same_output<S>(left: &dyn Any, right: &dyn Any) -> bool
+pub(crate) fn same_output<S>(left: &dyn Any, right: &dyn Any) -> bool
 where
     S: Observe + 'static,
     S::Output: PartialEq + InputIdentity + 'static,
@@ -3687,6 +3712,181 @@ impl EcsBot {
         }
     }
 
+    /// Materialize a runnable bot from a serializable spec and a registry.
+    ///
+    /// This is `from_spec`, and it is deliberately the *same* bot the builder
+    /// chain produces: the spec's sources and actions are built through the
+    /// registry, erased into [`EcsChain`]s, and handed to [`EcsBot::assemble`]
+    /// exactly as [`ObserveBuilder::build`](crate::spec::ObserveBuilder::build)
+    /// hands over a natively declared chain. There is no second interpreter and
+    /// no second execution path, so a materialized bot and a native one built
+    /// from the same domains produce the same operation trace (T25).
+    ///
+    /// # Authority
+    ///
+    /// A spec cannot grant itself anything. Capabilities come only from the
+    /// `grants` argument: the registry supplies constructors, never authority,
+    /// and every erased verb still checks its own caps at the call site against
+    /// the proof the bot mints from this set. This is what makes it safe to
+    /// accept a spec from wire data at all — naming a domain buys no reach.
+    ///
+    /// # All-or-nothing admission
+    ///
+    /// Nothing runs and nothing is half-built. Every presently knowable unmet
+    /// need is collected in one [`NeedSet`] — an unknown source or action
+    /// domain, a constructor that rejects its target, a missing capability, an
+    /// unknown condition — each attributed to the chain (and action) that needs
+    /// it, and the whole materialization is refused with [`Admission::Needs`].
+    /// A malformed document or registry is refused with [`Admission::Refused`]
+    /// before any need is computed. Because the refusal happens before the
+    /// builder runs, no source is polled and no action executes.
+    ///
+    /// # Errors
+    ///
+    /// [`Admission::Refused`] for a registry with a duplicate identifier, an
+    /// unsupported [`version`](BotSpec::version), an empty chain list, or the
+    /// builder's own admission (which an all-admitted spec does not reach);
+    /// [`Admission::Needs`] for the complete report of unmet needs.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use lgwks_bot::broker::Broker;
+    /// use lgwks_bot::effect::{EnvironmentId, FlowRevision, RunId};
+    /// use lgwks_bot::journal::MemoryJournal;
+    /// use lgwks_bot::spec::{Bot, BotSpec, EffectIdentity, EffectScope};
+    /// use lgwks_bot::{
+    ///     Action, Auth, BotError, Cap, EffectLifetime, Execute, GrantSet, Observe, Source, domains,
+    /// };
+    ///
+    /// /// A source that reports the count its target parsed to.
+    /// struct Counter(u16);
+    /// impl Counter {
+    ///     fn from_target(target: &str) -> Result<Source, BotError> {
+    ///         match target.parse::<u16>() {
+    ///             Ok(count) => Ok(Source::new(Self(count))),
+    ///             Err(_) => Err(BotError::IncompleteSpec { field: "target" }),
+    ///         }
+    ///     }
+    /// }
+    /// impl Observe for Counter {
+    ///     type Output = u16;
+    ///     fn required_caps(&self) -> &[Cap] { &[] }
+    ///     async fn poll(&self, call: (Auth, ())) -> Result<u16, BotError> {
+    ///         call.0.check(&[])?;
+    ///         Ok(self.0)
+    ///     }
+    ///     fn domain_id(&self) -> &str { "doc::counter" }
+    /// }
+    ///
+    /// /// An action that accepts a count.
+    /// struct Page;
+    /// impl Page {
+    ///     fn from_target(target: &str) -> Result<Action, BotError> {
+    ///         let _ = target;
+    ///         Ok(Action::new(Self))
+    ///     }
+    /// }
+    /// impl Execute for Page {
+    ///     type Input = u16;
+    ///     type Output = ();
+    ///     fn required_caps(&self) -> &[Cap] { &[] }
+    ///     fn effect_lifetime(&self) -> EffectLifetime { EffectLifetime::Local }
+    ///     async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
+    ///         call.0.check(&[])?;
+    ///         Ok(())
+    ///     }
+    ///     fn domain_id(&self) -> &str { "doc::page" }
+    /// }
+    ///
+    /// domains! {
+    ///     /// The domains this example runs.
+    ///     pub DOMAINS {
+    ///         observe { "doc::counter" => Counter::from_target, }
+    ///         execute { "doc::page" => Page::from_target, }
+    ///     }
+    /// }
+    ///
+    /// let spec = BotSpec::from_json(
+    ///     r#"{"version":1,"name":"doc",
+    ///         "chains":[{"source":"doc::counter","target":"3",
+    ///                    "on":[["always",{"domain":"doc::page","target":""}]]}]}"#,
+    /// )?;
+    ///
+    /// let environment = EnvironmentId::from_hex("2122232425262728292a2b2c2d2e2f30")?;
+    /// let mut broker = Broker::new();
+    /// broker.register(environment)?;
+    /// let effects = EffectScope::new(
+    ///     EffectIdentity::new(
+    ///         RunId::from_hex("0102030405060708090a0b0c0d0e0f10")?,
+    ///         environment,
+    ///         FlowRevision::from_tagged(
+    ///             "blake3_256",
+    ///             "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    ///         )?,
+    ///     ),
+    ///     broker,
+    ///     Box::new(MemoryJournal::new()),
+    /// );
+    ///
+    /// let mut bot = Bot::from_spec(&spec, &DOMAINS, &GrantSet::empty(), effects)?;
+    /// assert_eq!(bot.tick()?, 1);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn from_spec(
+        spec: &BotSpec,
+        registry: &DomainRegistry,
+        grants: &GrantSet,
+        effects: EffectScope,
+    ) -> Result<Self, Admission> {
+        // A registry that declares one identifier twice cannot be dispatched
+        // against: lookup would depend on declaration order. Refused before any
+        // chain is walked, because the repair is the registry's, not the
+        // document's.
+        registry.validate().map_err(Admission::Refused)?;
+        if spec.version != BotSpec::CURRENT_VERSION {
+            return Err(Admission::Refused(BotError::UnsupportedSpecVersion {
+                found: spec.version,
+                supported: BotSpec::CURRENT_VERSION,
+            }));
+        }
+        // A materialized bot with nothing to observe is almost always a
+        // truncated document rather than an intentional one; the builder
+        // tolerates it, the materializer does not.
+        if spec.chains.is_empty() {
+            return Err(Admission::Refused(BotError::IncompleteSpec {
+                field: "chains",
+            }));
+        }
+
+        // One pass over every chain, collecting *every* need rather than
+        // stopping at the first. Each chain that fully resolves contributes its
+        // erased form; a chain with any need contributes to the report and no
+        // chain at all. The two lists cannot disagree: `needs` non-empty means
+        // the build below is never reached.
+        let mut needs: Vec<Need> = Vec::new();
+        let mut chains: Vec<EcsChain> = Vec::with_capacity(spec.chains.len());
+        for (chain_index, chain) in spec.chains.iter().enumerate() {
+            if let Some(built) = materialize_chain(chain_index, chain, registry, grants, &mut needs)
+            {
+                chains.push(built);
+            }
+        }
+        if !needs.is_empty() {
+            return Err(Admission::Needs(NeedSet::new(needs)));
+        }
+
+        // The same `assemble` a native bot reaches, through the same builder.
+        let mut builder = Self::builder(spec.name.clone());
+        for chain in chains {
+            builder = builder.chain(chain);
+        }
+        builder
+            .with_effects(effects)
+            .build(grants)
+            .map_err(Admission::Refused)
+    }
+
     /// Take the journal back out of the bot.
     ///
     /// `None` when the ledger is not in the world, which is the state after a
@@ -4502,6 +4702,116 @@ impl EcsBot {
     }
 }
 
+/// Resolve one spec chain into an erased chain, or record every need it has.
+///
+/// Returns `None` when the chain contributed any need, so the caller knows not
+/// to build it; the needs are appended to `needs` in declaration order. The
+/// walk is deliberately exhaustive: an unknown source stops the chain (nothing
+/// downstream of a source this binary cannot build is knowable), but a known
+/// source with an unknown action still has its condition and its capability
+/// requirements checked, because those are facts about the document rather than
+/// about the missing action.
+fn materialize_chain(
+    chain_index: usize,
+    chain: &ChainSpec,
+    registry: &DomainRegistry,
+    grants: &GrantSet,
+    needs: &mut Vec<Need>,
+) -> Option<EcsChain> {
+    let before = needs.len();
+
+    let Some(source_ctor) = registry.source(&chain.source) else {
+        needs.push(Need::UnknownSource {
+            chain: chain_index,
+            domain: chain.source.clone(),
+        });
+        return None;
+    };
+    let source = match source_ctor(&chain.target) {
+        Ok(source) => source,
+        Err(cause) => {
+            needs.push(Need::SourceTargetRejected {
+                chain: chain_index,
+                domain: chain.source.clone(),
+                cause: cause.to_string(),
+            });
+            return None;
+        }
+    };
+    for shortage in grants.uncovered(source.required_caps(), &Demand::new(chain.source.clone())) {
+        needs.push(Need::MissingCapability {
+            chain: chain_index,
+            action: None,
+            domain: chain.source.clone(),
+            capability: shortage.required().clone(),
+        });
+    }
+
+    let mut entries: Vec<ChainEntry> = Vec::with_capacity(chain.on.len());
+    for (action_index, entry) in chain.on.iter().enumerate() {
+        let condition_id: &String = &entry.0;
+        let action_spec: &ActionSpec = &entry.1;
+        let action = match registry.action(&action_spec.domain) {
+            Some(ctor) => match ctor(&action_spec.target) {
+                Ok(action) => Some(action),
+                Err(cause) => {
+                    needs.push(Need::ActionTargetRejected {
+                        chain: chain_index,
+                        action: action_index,
+                        domain: action_spec.domain.clone(),
+                        cause: cause.to_string(),
+                    });
+                    None
+                }
+            },
+            None => {
+                needs.push(Need::UnknownAction {
+                    chain: chain_index,
+                    action: action_index,
+                    domain: action_spec.domain.clone(),
+                });
+                None
+            }
+        };
+        if let Some(ref action) = action {
+            for shortage in grants.uncovered(
+                action.required_caps(),
+                &Demand::new(action_spec.domain.clone()),
+            ) {
+                needs.push(Need::MissingCapability {
+                    chain: chain_index,
+                    action: Some(action_index),
+                    domain: action_spec.domain.clone(),
+                    capability: shortage.required().clone(),
+                });
+            }
+        }
+        let condition = match source.condition(condition_id) {
+            Ok(condition) => Some(condition),
+            Err(_) => {
+                needs.push(Need::UnknownCondition {
+                    chain: chain_index,
+                    action: action_index,
+                    condition: condition_id.clone(),
+                });
+                None
+            }
+        };
+        if let (Some(action), Some(condition)) = (action, condition) {
+            entries.push(ChainEntry::erased(
+                condition.into_evaluate_any(),
+                action.into_execute_any(),
+            ));
+        }
+    }
+
+    if needs.len() == before {
+        Some(EcsChain::from_registry(source, entries))
+    } else {
+        None
+    }
+}
+
 /// Builder for [`EcsBot`].
 pub struct EcsBuilder {
     /// The bot name.
@@ -4546,6 +4856,25 @@ impl EcsBuilder {
     #[must_use]
     pub fn with_effects(mut self, effects: EffectScope) -> Self {
         self.effects = Some(effects);
+        self
+    }
+
+    /// Append a fully-erased chain, as a materializer builds one.
+    ///
+    /// The native path finishes a chain through
+    /// [`ObserveBuilder::build`](crate::spec::ObserveBuilder::build), which
+    /// erases a concrete source and hands the result to
+    /// [`EcsBot::assemble`]. This is the other seam into the same list: a chain
+    /// whose source and entries are already erased, built from wire data by
+    /// [`Bot::from_spec`](crate::Bot::from_spec). Both reach `assemble`, so a
+    /// materialized bot and a native one are the same value and share one
+    /// execution path — there is no second interpreter here.
+    ///
+    /// Crate-internal: a caller outside cannot build an `EcsChain`, so this is
+    /// not a second public builder.
+    #[must_use]
+    pub(crate) fn chain(mut self, chain: EcsChain) -> Self {
+        self.chains.push(chain);
         self
     }
 

@@ -16,22 +16,22 @@ crates/lgwks-bot/src/cap.rs:202	pub struct Deficit {
 crates/lgwks-bot/src/cap.rs:288	pub fn to_grant_set(&self) -> GrantSet {
 crates/lgwks-bot/src/cap.rs:365	pub(crate) fn new(mut caps: Vec<Cap>) -> Self {
 crates/lgwks-bot/src/cap.rs:414	pub fn check(&self, required: &[Cap]) -> Result<(), BotError> {
-crates/lgwks-bot/src/ecs.rs:1265	struct TickError(Option<BotError>);
-crates/lgwks-bot/src/ecs.rs:1416	const MAX_IN_FLIGHT_POLLS: usize = 32;
-crates/lgwks-bot/src/ecs.rs:3188	RetryClass::Never => EntryState::Abandoned {
-crates/lgwks-bot/src/ecs.rs:3233	let mut first_error = None;
-crates/lgwks-bot/src/ecs.rs:3311	.is_some_and(|value| {
-crates/lgwks-bot/src/ecs.rs:3378	fn fire_plan(world: &mut World) {
-crates/lgwks-bot/src/ecs.rs:3598	match entry.condition.check_any(value) {
-crates/lgwks-bot/src/ecs.rs:3650	.initialize(world)
-crates/lgwks-bot/src/ecs.rs:3705	pub fn name(&self) -> &str {
-crates/lgwks-bot/src/ecs.rs:3820	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:3923	pub fn tick(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:4027	async fn run_steps(
-crates/lgwks-bot/src/ecs.rs:4647	pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
-crates/lgwks-bot/src/ecs.rs:4799	for chain in &chains {
-crates/lgwks-bot/src/ecs.rs:4816	world.insert_resource(Grants(grants.clone()));
-crates/lgwks-bot/src/error.rs:125	/// handed may be the one that owns the runtime's driver. Parked, that
+crates/lgwks-bot/src/ecs.rs:1269	struct TickError(Option<BotError>);
+crates/lgwks-bot/src/ecs.rs:1441	const MAX_IN_FLIGHT_POLLS: usize = 32;
+crates/lgwks-bot/src/ecs.rs:3213	RetryClass::Never => EntryState::Abandoned {
+crates/lgwks-bot/src/ecs.rs:3258	let mut first_error = None;
+crates/lgwks-bot/src/ecs.rs:3336	.is_some_and(|value| {
+crates/lgwks-bot/src/ecs.rs:3403	fn fire_plan(world: &mut World) {
+crates/lgwks-bot/src/ecs.rs:3623	match entry.condition.check_any(value) {
+crates/lgwks-bot/src/ecs.rs:3675	.initialize(world)
+crates/lgwks-bot/src/ecs.rs:3905	pub fn name(&self) -> &str {
+crates/lgwks-bot/src/ecs.rs:4020	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs.rs:4123	pub fn tick(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs.rs:4227	async fn run_steps(
+crates/lgwks-bot/src/ecs.rs:4976	pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
+crates/lgwks-bot/src/ecs.rs:5128	for chain in &chains {
+crates/lgwks-bot/src/ecs.rs:5145	world.insert_resource(Grants(grants.clone()));
+crates/lgwks-bot/src/error.rs:151	/// handed may be the one that owns the runtime's driver. Parked, that
 crates/lgwks-bot/src/gate.rs:12	pub struct GrantSet {
 crates/lgwks-bot/src/gate.rs:44	pub fn grant(mut self, cap: Cap) -> Self {
 crates/lgwks-bot/src/gate.rs:63	pub fn uncovered(&self, required: &[Cap], demand: &Demand) -> Vec<Shortage> {
@@ -93,9 +93,8 @@ crates/lgwks-bot/src/session.rs:2917	pub struct DecisionReceipt {
 crates/lgwks-bot/src/session.rs:3692	.ok_or(BotError::SessionBudgetExceeded {
 crates/lgwks-bot/src/session.rs:3848	fn record(&mut self, node_id: &str, role: &str, text: &str) -> Result<(), BotError> {
 crates/lgwks-bot/src/session.rs:3860	.saturating_add(role.len());
-crates/lgwks-bot/src/spec.rs:319	pub use crate::ecs::{
-crates/lgwks-bot/src/spec.rs:621	let auth: Auth = grants.issue(self.0.required_caps())?;
-crates/lgwks-bot/src/spec.rs:666	pub fn from_json(source: &str) -> Result<Self, BotError> {
+crates/lgwks-bot/src/spec.rs:455	pub use crate::ecs::{
+crates/lgwks-bot/src/spec.rs:771	let auth: Auth = grants.issue(self.0.required_caps())?;
 crates/lgwks-deps/src/lib.rs:15	//! remote CI. It reads `cargo metadata --no-deps`, not the transitive lockfile
 crates/lgwks-deps/src/lib.rs:79	pub mod scan;
 crates/lgwks-std/src/task.rs:265	/// Run `job` on a dedicated OS thread and return a future for its result.
