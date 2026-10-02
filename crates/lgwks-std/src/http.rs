@@ -535,6 +535,10 @@ fn failure_cause_source(cause: &FailureCause) -> &(dyn std::error::Error + 'stat
 ///
 /// A URL that fails here never reaches a socket.
 pub fn validate_url(url: &str) -> Result<(), Error> {
+    crate::trace::warn!(
+        operation = "validate_url",
+        "operation refused its request; the typed error carries the facts"
+    );
     UriAbsoluteStr::new(url).map_err(|_malformed| Error::InvalidUrl)?;
     let Some(scheme) = url.split_once(':').map(|(scheme, _)| scheme) else {
         return Err(Error::InvalidUrl);
@@ -703,6 +707,10 @@ fn response_of(
 /// and the caller asked for a body. Under [`BodyPolicy::Preview`] the prefix is
 /// the declared result.
 fn read_bounded(reader: &mut impl Read, options: &Options) -> Result<(Vec<u8>, Truncation), Error> {
+    crate::trace::warn!(
+        operation = "read_bounded",
+        "operation refused its request; the typed error carries the facts"
+    );
     let ceiling = options.max_body_bytes;
     let mut body = Vec::new();
     let mut chunk = [0_u8; READ_CHUNK_BYTES];
@@ -1123,6 +1131,10 @@ fn send_hop<'headers>(
 /// origin carries none. The hop count is bounded by [`redirect_limit`], and
 /// each hop's target is recorded, sanitized, in the response's chain.
 fn exchange(url: &str, method: Method<'_>, options: &Options) -> Result<Response, Error> {
+    crate::trace::warn!(
+        operation = "exchange",
+        "operation refused its request; the typed error carries the facts"
+    );
     validate_url(url)?;
     let limit = redirect_limit(options)?;
     let agent = agent(options);

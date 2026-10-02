@@ -154,6 +154,10 @@ pub fn decode(input: impl AsRef<[u8]>) -> Result<Vec<u8>, DecodeError> {
 /// # Ok::<(), lgwks_std::hex::DecodeError>(())
 /// ```
 pub fn decode_into(input: impl AsRef<[u8]>, output: &mut [u8]) -> Result<(), DecodeError> {
+    crate::trace::warn!(
+        operation = "decode_into",
+        "operation refused its request; the typed error carries the facts"
+    );
     let input = input.as_ref();
     check_even_length(input.len())?;
     let expected = input.len().checked_div(2).unwrap_or(0);

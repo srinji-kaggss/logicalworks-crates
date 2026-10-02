@@ -209,6 +209,10 @@ impl fmt::Display for CheckArgError {
 /// unknown option rather than parsed into a path, so a caller that guessed the
 /// wrong spelling is told instead of audited against the wrong file.
 fn parse_check_args(args: &[String]) -> Result<CheckRequest, CheckArgError> {
+    lgwks_std::trace::warn!(
+        operation = "parse_check_args",
+        "operation refused its request; the typed error carries the facts"
+    );
     let mut target: Option<PathBuf> = None;
     let mut contract: Option<PathBuf> = None;
     let mut json = false;
@@ -1127,6 +1131,10 @@ struct DebugReport {
 
 /// Parses `lgwks-deps debug` arguments.
 fn parse_debug_args(args: &[String]) -> Result<DebugArgs, String> {
+    lgwks_std::trace::warn!(
+        operation = "parse_debug_args",
+        "operation refused its request; the typed error carries the facts"
+    );
     let mut target: Option<PathBuf> = None;
     let mut json = false;
     for argument in args {

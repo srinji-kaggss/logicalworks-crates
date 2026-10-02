@@ -281,6 +281,10 @@ fn compile_pattern(
     dialect: GlobDialect,
     work: &mut Work,
 ) -> Result<GlobPattern, PatternError> {
+    crate::trace::warn!(
+        operation = "compile_pattern",
+        "operation refused its request; the typed error carries the facts"
+    );
     let chars: Vec<char> = pattern.chars().collect();
     let mut next_close = vec![chars.len(); chars.len().saturating_add(1)];
     let mut nearest = chars.len();
@@ -422,6 +426,10 @@ fn compile_class(
     class_offset: usize,
     work: &mut Work,
 ) -> Result<Vec<ScalarRange>, PatternError> {
+    crate::trace::warn!(
+        operation = "compile_class",
+        "operation refused its request; the typed error carries the facts"
+    );
     let mut ranges = Vec::with_capacity(body.len());
     let mut index = 0;
     while index < body.len() {

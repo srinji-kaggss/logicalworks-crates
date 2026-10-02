@@ -246,6 +246,10 @@ struct Place {
 ///
 /// The first line that is not valid script.
 pub(crate) fn script(nodes: Vec<Node>) -> Result<TokenStream> {
+    lgwks_std::trace::warn!(
+        operation = "script",
+        "operation refused its request; the typed error carries the facts"
+    );
     let mut output = TokenStream::new();
     let mut flows = Vec::new();
     let mut attributes: Vec<TokenTree> = Vec::new();
@@ -280,6 +284,10 @@ pub(crate) fn script(nodes: Vec<Node>) -> Result<TokenStream> {
 
 /// Expand one `flow name(params) -> Output:` and its body.
 fn flow(node: Node, attributes: Vec<TokenTree>) -> Result<(TokenStream, TokenStream)> {
+    lgwks_std::trace::warn!(
+        operation = "flow",
+        "operation refused its request; the typed error carries the facts"
+    );
     let Node { line, children } = node;
     let tokens = &line.tokens;
     let at_flow = tokens.iter().position(|token| is_ident(token, "flow"));
@@ -393,6 +401,10 @@ fn flow(node: Node, attributes: Vec<TokenTree>) -> Result<(TokenStream, TokenStr
 
 /// Expand a block of sibling nodes.
 fn block(nodes: &[Node], labels: &mut Labels, place: Place) -> Result<Body> {
+    lgwks_std::trace::warn!(
+        operation = "block",
+        "operation refused its request; the typed error carries the facts"
+    );
     let mut pieces: Vec<Piece> = Vec::new();
     let mut shapes = Shapes::default();
     let mut index: usize = 0;
@@ -519,6 +531,10 @@ fn simple(
     place: Place,
     run_shapes: &mut Shapes,
 ) -> Result<Piece> {
+    lgwks_std::trace::warn!(
+        operation = "simple",
+        "operation refused its request; the typed error carries the facts"
+    );
     let script = runtime();
     let tokens = &line.tokens;
     match keyword {

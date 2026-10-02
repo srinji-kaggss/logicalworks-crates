@@ -30,6 +30,10 @@ impl Tenant {
     ///
     /// [`FlowError::InvalidTenant`](crate::script::FlowError::InvalidTenant) naming what is wrong with the name.
     pub fn new(name: &str) -> Result<Self, FlowError> {
+        lgwks_std::trace::warn!(
+            operation = "new",
+            "operation refused its request; the typed error carries the facts"
+        );
         if name.is_empty() {
             return Err(FlowError::InvalidTenant {
                 reason: "the tenant name is empty",
@@ -212,6 +216,10 @@ impl Scope {
 
     /// A child scope at `path` with its own stop or this one's.
     fn descend(&self, path: Arc<str>, stop: Stop) -> Result<Self, FlowError> {
+        lgwks_std::trace::warn!(
+            operation = "descend",
+            "operation refused its request; the typed error carries the facts"
+        );
         self.checkpoint()?;
         if self.inner.depth >= MAX_DEPTH {
             return Err(FlowError::TooDeep {
@@ -304,6 +312,10 @@ impl Scope {
     ///
     /// [`FlowError::Cancelled`](crate::script::FlowError::Cancelled) at this scope's path.
     pub fn checkpoint(&self) -> Result<(), FlowError> {
+        lgwks_std::trace::warn!(
+            operation = "checkpoint",
+            "operation refused its request; the typed error carries the facts"
+        );
         if self.is_cancelled() {
             return Err(FlowError::Cancelled {
                 at: Arc::clone(&self.inner.path),

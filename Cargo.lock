@@ -4183,6 +4183,7 @@ dependencies = [
  "ast-grep-core",
  "ast-grep-language",
  "thiserror 2.0.20",
+ "tracing",
 ]
 
 [[package]]
@@ -4221,6 +4222,7 @@ name = "lgwks_macros"
 version = "0.1.2"
 dependencies = [
  "lgwks_deps",
+ "lgwks_std",
 ]
 
 [[package]]

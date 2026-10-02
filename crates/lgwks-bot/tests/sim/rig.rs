@@ -126,14 +126,21 @@ pub const ENV: &str = "2122232425262728292a2b2c2d2e2f30";
 /// writing different facts, which is precisely the false green the trace hash
 /// exists to catch.
 pub fn attempt_key_as(action: ActionId, n: u64) -> Result<EffectKey, Box<dyn Error>> {
+    let key_run = RunId::from_hex(RUN)?;
+    let key_action = action;
+    let key_attempt = AttemptId::from_decimal(&n.to_string())?;
+    let key_flow_revision = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
+    let key_digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
+    let key_environment = EnvironmentId::from_hex(ENV)?;
+    let key_epoch = EnvironmentEpoch::from_decimal("1")?;
     Ok(EffectKey::new(
-        RunId::from_hex(RUN)?,
-        action,
-        AttemptId::from_decimal(&n.to_string())?,
-        FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-        ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
-        EnvironmentId::from_hex(ENV)?,
-        EnvironmentEpoch::from_decimal("1")?,
+        key_run,
+        key_action,
+        key_attempt,
+        key_flow_revision,
+        key_digest,
+        key_environment,
+        key_epoch,
     ))
 }
 

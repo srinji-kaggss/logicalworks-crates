@@ -156,6 +156,10 @@ fn parse_minute(bytes: &[u8]) -> Result<u32, ParseError> {
 
 /// Parses the 2-digit second component and refuses leap-second labels.
 fn parse_second(bytes: &[u8]) -> Result<u32, ParseError> {
+    crate::trace::warn!(
+        operation = "parse_second",
+        "operation refused its request; the typed error carries the facts"
+    );
     let sec_val = parse_digit_field(bytes, 17, 2, Field::Second)?;
     if sec_val == 60 {
         return Err(ParseError::UnsupportedLeapSecond { at: 17 });

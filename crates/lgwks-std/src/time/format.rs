@@ -255,6 +255,10 @@ fn write_optional_fraction(out: &mut String, nanos: u32) {
 /// Instants outside that range, or outside the signed Unix-seconds domain, are
 /// refused instead of emitting extended-year text or a saturated timestamp.
 pub fn to_rfc3339(at: SystemTime) -> Result<String, FormatError> {
+    crate::trace::warn!(
+        operation = "to_rfc3339",
+        "operation refused its request; the typed error carries the facts"
+    );
     let (secs, nanos) = unix_parts(at).map_err(FormatError::UnixTime)?;
     // Floor division maps an epoch-second count onto the civil day that
     // contains it, for negative (pre-epoch) seconds too. The divisor is a

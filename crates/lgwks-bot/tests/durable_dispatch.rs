@@ -2011,6 +2011,10 @@ impl EffectJournal for FlakyReadJournal {
     }
 
     fn committed(&self) -> Result<Vec<EffectEvent>, JournalError> {
+        lgwks_std::trace::warn!(
+            operation = "committed",
+            "operation refused its request; the typed error carries the facts"
+        );
         if self.fail_reads.get() {
             return Err(JournalError::Storage(std::io::Error::other(
                 "transient read failure",
@@ -2020,6 +2024,10 @@ impl EffectJournal for FlakyReadJournal {
     }
 
     fn committed_entries(&self) -> Result<Vec<JournalEntry>, JournalError> {
+        lgwks_std::trace::warn!(
+            operation = "committed_entries",
+            "operation refused its request; the typed error carries the facts"
+        );
         if self.fail_reads.get() {
             return Err(JournalError::Storage(std::io::Error::other(
                 "transient read failure",

@@ -472,6 +472,10 @@ pub fn sweep<F>(band: Band, mut body: F) -> Result<Vec<u64>, Box<dyn Error>>
 where
     F: FnMut(&mut Sim) -> Result<(), Box<dyn Error>>,
 {
+    lgwks_std::trace::warn!(
+        operation = "sweep",
+        "operation refused its request; the typed error carries the facts"
+    );
     let mut hashes = Vec::with_capacity(usize::try_from(band.count).unwrap_or(0));
     for seed in band.seeds() {
         let mut sim = Sim::new(seed);

@@ -370,6 +370,10 @@ mod tests {
 
     impl std::io::Write for FailAfter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            crate::trace::warn!(
+                operation = "write",
+                "operation refused its request; the typed error carries the facts"
+            );
             if self.remaining == 0 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,

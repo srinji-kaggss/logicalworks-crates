@@ -816,6 +816,10 @@ impl BotSpec {
     /// diagnostic is the parser's positional message with control characters
     /// escaped, because an unknown field name is attacker-chosen.
     pub fn from_json(source: &str) -> Result<Self, BotError> {
+        lgwks_std::trace::warn!(
+            operation = "from_json",
+            "operation refused its request; the typed error carries the facts"
+        );
         if source.len() > MAX_SPEC_BYTES {
             return Err(BotError::SpecTooLarge {
                 bytes: source.len(),

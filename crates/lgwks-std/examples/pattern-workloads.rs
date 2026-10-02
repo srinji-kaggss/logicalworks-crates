@@ -51,6 +51,10 @@ fn run_scenario(
     pattern: &str,
     input: &str,
 ) -> Result<(), Box<dyn Error>> {
+    lgwks_std::trace::warn!(
+        operation = "run_scenario",
+        "operation refused its request; the typed error carries the facts"
+    );
     let facade = Regex::new(pattern)?;
     let engine = regex::Regex::new(pattern)?;
     let facade_spans = facade
@@ -171,6 +175,10 @@ fn emit<F>(output: &mut impl Write, workload: Workload<'_>, mut operation_fn: F)
 where
     F: FnMut() -> usize,
 {
+    lgwks_std::trace::warn!(
+        operation = "emit",
+        "operation refused its request; the typed error carries the facts"
+    );
     let mut elapsed = Vec::with_capacity(SAMPLES);
     let mut expected_work = None;
     for _ in 0..SAMPLES {

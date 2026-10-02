@@ -250,6 +250,10 @@ pub struct RepoPath(PathBuf);
 impl RepoPath {
     /// Parses an authored path, refusing anything that escapes the repository.
     fn parse(value: &str) -> Result<Self, PathRefusal> {
+        lgwks_std::trace::warn!(
+            operation = "parse",
+            "operation refused its request; the typed error carries the facts"
+        );
         let path = Path::new(value);
         if path.is_absolute() {
             return Err(PathRefusal::Absolute);
@@ -1047,6 +1051,10 @@ impl Register {
 /// enforcement kind and an unrelated evidence block is told about the
 /// enforcement kind.
 fn build(raw: &RawEntry) -> Result<Entry, ErrorKind> {
+    lgwks_std::trace::warn!(
+        operation = "build",
+        "operation refused its request; the typed error carries the facts"
+    );
     let id = raw
         .get("id")
         .map_or_else(|| "<unnamed>".to_owned(), str::to_owned);
@@ -1129,6 +1137,10 @@ fn build_evidence(
     enforcement: Enforcement,
     enforcer: Option<&EnforcedBy>,
 ) -> Result<Option<Evidence>, ErrorKind> {
+    lgwks_std::trace::warn!(
+        operation = "build_evidence",
+        "operation refused its request; the typed error carries the facts"
+    );
     let present: Vec<&str> = EVIDENCE_FIELDS
         .iter()
         .copied()
@@ -1806,6 +1818,10 @@ fn is_ignore_marker(text: &str) -> bool {
 pub fn check(
     root: &Path,
 ) -> Result<Option<crate::metadata::Collected<(Register, Audit)>>, InvariantError> {
+    lgwks_std::trace::warn!(
+        operation = "check",
+        "operation refused its request; the typed error carries the facts"
+    );
     let path = root.join(INVARIANTS_PATH);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,

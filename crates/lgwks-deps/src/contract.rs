@@ -590,6 +590,10 @@ fn handle_section_header(
     policy_declared: &mut bool,
     drafts: &mut Vec<RawEntry>,
 ) -> Result<bool, ContractError> {
+    lgwks_std::trace::warn!(
+        operation = "handle_section_header",
+        "operation refused its request; the typed error carries the facts"
+    );
     if line == "[policy]" {
         // A second `[policy]` is refused rather than merged. The two blocks are
         // read by the same reader, so a later one silently overwrites whatever
@@ -655,6 +659,10 @@ fn decode_enforce(value: &str, line_no: usize) -> Result<bool, ContractError> {
 /// stricter than TOML, which admits a raw tab, and it fails closed. Literal and
 /// multiline strings are outside this register subset and refused.
 fn decode_string(value: &str, key: &str, line: usize) -> Result<String, ContractError> {
+    lgwks_std::trace::warn!(
+        operation = "decode_string",
+        "operation refused its request; the typed error carries the facts"
+    );
     let invalid = |reason| ContractError::InvalidString {
         line,
         key: key.to_owned(),
@@ -733,6 +741,10 @@ fn apply_policy_pair(
     enforce: &mut bool,
     repository: &mut Option<String>,
 ) -> Result<(), ContractError> {
+    lgwks_std::trace::warn!(
+        operation = "apply_policy_pair",
+        "operation refused its request; the typed error carries the facts"
+    );
     if !POLICY_KEYS.contains(&key) {
         return Err(ContractError::UnknownKey {
             line: line_no,
@@ -772,6 +784,10 @@ fn apply_entry_pair(
     draft: &mut RawEntry,
     allowed_keys: &[&'static str],
 ) -> Result<(), ContractError> {
+    lgwks_std::trace::warn!(
+        operation = "apply_entry_pair",
+        "operation refused its request; the typed error carries the facts"
+    );
     let known = allowed_keys
         .iter()
         .find(|candidate| **candidate == key)

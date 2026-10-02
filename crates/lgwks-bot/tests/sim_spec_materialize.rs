@@ -327,6 +327,10 @@ fn describe(outcome: &Result<Bot, Admission>) -> String {
 
 /// One seed's whole scenario.
 fn one_seed(sim: &mut Sim) -> Result<(), Box<dyn Error>> {
+    lgwks_std::trace::warn!(
+        operation = "one_seed",
+        "operation refused its request; the typed error carries the facts"
+    );
     let (grants, spec, expected) = generate(sim);
 
     // The in-memory spec: succeed iff the model injected no need, and report

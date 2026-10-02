@@ -53,6 +53,10 @@ async fn next_outcome(
     supervisor: &mut Supervisor,
     budget: Duration,
 ) -> Result<TaskOutcome, String> {
+    lgwks_std::trace::warn!(
+        operation = "next_outcome",
+        "operation refused its request; the typed error carries the facts"
+    );
     let Some(deadline) = Instant::now().checked_add(budget) else {
         return Err(String::from("the deadline overflowed the clock"));
     };

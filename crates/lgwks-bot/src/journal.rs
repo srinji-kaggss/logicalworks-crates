@@ -1228,6 +1228,10 @@ fn next_allowed_of(last: Option<EventKind>) -> Option<EventKind> {
 /// [`ChainBreak`] naming the first entry whose recorded position is not the one
 /// its events produce.
 pub fn verify_chain(entries: &[JournalEntry]) -> Result<JournalPosition, ChainBreak> {
+    lgwks_std::trace::warn!(
+        operation = "verify_chain",
+        "operation refused its request; the typed error carries the facts"
+    );
     let mut position = JournalPosition::genesis();
     for entry in entries {
         let sequence = position.sequence().saturating_add(1);
@@ -1378,6 +1382,10 @@ impl EffectJournal for MemoryJournal {
         expected_tail: JournalPosition,
         event: &EffectEvent,
     ) -> Result<DurableAck, JournalError> {
+        lgwks_std::trace::warn!(
+            operation = "compare_and_append",
+            "operation refused its request; the typed error carries the facts"
+        );
         let actual = self.tail();
         if expected_tail != actual {
             return Err(JournalError::TailMismatch {
@@ -1473,14 +1481,21 @@ mod tests {
         attempt: &str,
         epoch: &str,
     ) -> Result<EffectKey, Box<dyn std::error::Error>> {
+        let key_run = RunId::from_hex(RUN)?;
+        let key_action = ActionId::from_hex(action)?;
+        let key_attempt = AttemptId::from_decimal(attempt)?;
+        let key_flow_revision = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
+        let key_digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
+        let key_environment = EnvironmentId::from_hex(ENV)?;
+        let key_epoch = EnvironmentEpoch::from_decimal(epoch)?;
         Ok(EffectKey::new(
-            RunId::from_hex(RUN)?,
-            ActionId::from_hex(action)?,
-            AttemptId::from_decimal(attempt)?,
-            FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-            ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
-            EnvironmentId::from_hex(ENV)?,
-            EnvironmentEpoch::from_decimal(epoch)?,
+            key_run,
+            key_action,
+            key_attempt,
+            key_flow_revision,
+            key_digest,
+            key_environment,
+            key_epoch,
         ))
     }
 

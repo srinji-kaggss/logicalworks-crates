@@ -71,6 +71,10 @@ impl Digest {
     /// the fixed-size hex decoder fills the digest bytes without a temporary
     /// heap allocation.
     pub fn from_hex(text: &str) -> Result<Self, DigestParseError> {
+        crate::trace::warn!(
+            operation = "from_hex",
+            "operation refused its request; the typed error carries the facts"
+        );
         if text.len() != 64 {
             return Err(DigestParseError::WrongLength { len: text.len() });
         }

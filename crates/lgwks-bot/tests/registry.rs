@@ -19,6 +19,10 @@ impl Repository {
     /// not be asked for it once erased, so the only observable way for a test to
     /// prove the target arrived is a constructor that acts on it.
     fn from_target(target: &str) -> Result<Source, BotError> {
+        lgwks_std::trace::warn!(
+            operation = "from_target",
+            "operation refused its request; the typed error carries the facts"
+        );
         if target.is_empty() {
             return Err(BotError::IncompleteSpec { field: "target" });
         }
@@ -49,6 +53,10 @@ struct SlackNotify;
 impl SlackNotify {
     /// Build one from the `target` its spec names.
     fn from_target(target: &str) -> Result<Action, BotError> {
+        lgwks_std::trace::warn!(
+            operation = "from_target",
+            "operation refused its request; the typed error carries the facts"
+        );
         if target.is_empty() {
             return Err(BotError::IncompleteSpec { field: "target" });
         }

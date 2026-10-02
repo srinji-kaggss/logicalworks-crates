@@ -76,6 +76,10 @@ async fn pid(path: &Path) -> Option<String> {
 }
 
 async fn outcome(supervisor: &mut Supervisor) -> Result<TaskOutcome, std::io::Error> {
+    lgwks_std::trace::warn!(
+        operation = "outcome",
+        "operation refused its request; the typed error carries the facts"
+    );
     let deadline = Instant::now()
         .checked_add(BUDGET)
         .ok_or_else(|| std::io::Error::other("clock deadline overflowed"))?;

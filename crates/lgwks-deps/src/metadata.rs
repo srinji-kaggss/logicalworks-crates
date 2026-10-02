@@ -488,6 +488,10 @@ fn lexical_join(base: &Path, relative: &str) -> Option<PathBuf> {
 /// hostile tree cannot change the answer between classification and audit.
 /// Anything unresolvable fails closed to external.
 fn direct_edges(metadata: CargoMetadata) -> Result<Vec<DirectEdge>, MetadataError> {
+    lgwks_std::trace::warn!(
+        operation = "direct_edges",
+        "operation refused its request; the typed error carries the facts"
+    );
     let workspace = validated_workspace(&metadata)?;
     let member_packages = workspace.packages;
     let member_dirs = workspace.member_dirs;
@@ -550,6 +554,10 @@ struct ValidatedWorkspace<'a> {
 
 /// Validates identity completeness before classifying any package or edge.
 fn validated_workspace(metadata: &CargoMetadata) -> Result<ValidatedWorkspace<'_>, MetadataError> {
+    lgwks_std::trace::warn!(
+        operation = "validated_workspace",
+        "operation refused its request; the typed error carries the facts"
+    );
     let mut package_ids = std::collections::BTreeSet::new();
     for package in &metadata.packages {
         if package.id.trim().is_empty() || package.name.trim().is_empty() {
@@ -681,6 +689,10 @@ struct CaptureFiles {
 
 /// Calls the operating system unless one test has armed a single-use fault.
 fn remove_capture(path: &Path) -> std::io::Result<()> {
+    lgwks_std::trace::warn!(
+        operation = "remove_capture",
+        "operation refused its request; the typed error carries the facts"
+    );
     #[cfg(test)]
     if let Some(error) = tests::take_fault(tests::FaultPoint::Unlink) {
         return Err(error);
@@ -692,6 +704,10 @@ fn remove_capture(path: &Path) -> std::io::Result<()> {
 fn observe_child(
     child: &mut std::process::Child,
 ) -> std::io::Result<Option<std::process::ExitStatus>> {
+    lgwks_std::trace::warn!(
+        operation = "observe_child",
+        "operation refused its request; the typed error carries the facts"
+    );
     #[cfg(test)]
     if let Some(error) = tests::take_fault(tests::FaultPoint::WaitObservation) {
         return Err(error);
@@ -701,6 +717,10 @@ fn observe_child(
 
 /// Requests termination and preserves an OS refusal for the cleanup owner.
 fn terminate_child(child: &mut std::process::Child) -> std::io::Result<()> {
+    lgwks_std::trace::warn!(
+        operation = "terminate_child",
+        "operation refused its request; the typed error carries the facts"
+    );
     #[cfg(test)]
     if let Some(error) = tests::take_fault(tests::FaultPoint::Kill) {
         return Err(error);
@@ -710,6 +730,10 @@ fn terminate_child(child: &mut std::process::Child) -> std::io::Result<()> {
 
 /// Waits for a direct child; an error leaves it in the retryable owner.
 fn reap_child(child: &mut std::process::Child) -> std::io::Result<std::process::ExitStatus> {
+    lgwks_std::trace::warn!(
+        operation = "reap_child",
+        "operation refused its request; the typed error carries the facts"
+    );
     #[cfg(test)]
     if let Some(error) = tests::take_fault(tests::FaultPoint::Reap) {
         return Err(error);
@@ -840,6 +864,10 @@ impl CleanupObligation {
     /// }
     /// ```
     pub fn retry_cleanup(&mut self) -> Result<bool, std::io::Error> {
+        lgwks_std::trace::warn!(
+            operation = "retry_cleanup",
+            "operation refused its request; the typed error carries the facts"
+        );
         if let Some(child) = self.child.as_mut() {
             match terminate_child(child) {
                 Ok(()) => {}
@@ -928,6 +956,10 @@ fn run_bounded(
     timeout: Duration,
     stream_cap: usize,
 ) -> Result<BoundedOutput, MetadataError> {
+    lgwks_std::trace::warn!(
+        operation = "run_bounded",
+        "operation refused its request; the typed error carries the facts"
+    );
     use std::fs::File;
     use std::io::Read as _;
     use std::process::Stdio;
@@ -936,6 +968,10 @@ fn run_bounded(
     /// return path. Creation uses `create_new`, so even a distinguisher
     /// collision is a retried name, never another call's file truncated.
     fn capture(name: &str) -> Result<(PathBuf, File), MetadataError> {
+        lgwks_std::trace::warn!(
+            operation = "capture",
+            "operation refused its request; the typed error carries the facts"
+        );
         use std::io::ErrorKind;
         #[cfg(test)]
         {
@@ -1005,6 +1041,10 @@ fn run_bounded(
         stream_cap: usize,
         _stream: &'static str,
     ) -> Result<(Vec<u8>, bool), MetadataError> {
+        lgwks_std::trace::warn!(
+            operation = "read_capped",
+            "operation refused its request; the typed error carries the facts"
+        );
         #[cfg(test)]
         {
             let fault = if _stream == "stdout" {
@@ -1224,6 +1264,10 @@ fn run_bounded(
 /// as missing, and every fixture test built on a relative path would pass on
 /// that refusal rather than on the rule it meant to exercise.
 fn read_metadata(root: &Path) -> Result<Collected<CargoMetadata>, MetadataError> {
+    lgwks_std::trace::warn!(
+        operation = "read_metadata",
+        "operation refused its request; the typed error carries the facts"
+    );
     let manifest = manifest_path(root)?;
     let output = run_bounded(
         "cargo",

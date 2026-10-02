@@ -10,6 +10,10 @@ use std::io;
 /// is rejected to avoid treating zero as the caller's process group.
 #[cfg(unix)]
 pub fn exists(pgid: i32) -> io::Result<bool> {
+    lgwks_std::trace::warn!(
+        operation = "exists",
+        "operation refused its request; the typed error carries the facts"
+    );
     use nix::errno::Errno;
     use nix::sys::signal::killpg;
     use nix::unistd::Pid;

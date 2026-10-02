@@ -18,6 +18,10 @@ pub(super) fn if_chain(
     place: Place,
     wants_value: bool,
 ) -> Result<(Piece, Shapes)> {
+    lgwks_std::trace::warn!(
+        operation = "if_chain",
+        "operation refused its request; the typed error carries the facts"
+    );
     let has_else = chain.last().is_some_and(|last| last.line.tokens.len() == 1);
     let branch_place = Place {
         nested: place.nested,
@@ -98,6 +102,10 @@ pub(super) fn each(
     children: &[Node],
     labels: &mut Labels,
 ) -> Result<(TokenStream, TokenStream)> {
+    lgwks_std::trace::warn!(
+        operation = "each",
+        "operation refused its request; the typed error carries the facts"
+    );
     let tokens = line.tokens.get(1..).unwrap_or_default();
     let Some(in_at) = tokens.iter().position(|token| is_ident(token, "in")) else {
         return Err(Error::new(
@@ -207,6 +215,10 @@ pub(super) fn retry(
     children: &[Node],
     labels: &mut Labels,
 ) -> Result<(TokenStream, TokenStream)> {
+    lgwks_std::trace::warn!(
+        operation = "retry",
+        "operation refused its request; the typed error carries the facts"
+    );
     let mut rest = line.tokens.get(1..).unwrap_or_default();
     if let [ref up, ref to, ref tail @ ..] = *rest
         && is_ident(up, "up")
@@ -266,6 +278,10 @@ pub(super) fn step(
     children: &[Node],
     labels: &mut Labels,
 ) -> Result<(TokenStream, TokenStream)> {
+    lgwks_std::trace::warn!(
+        operation = "step",
+        "operation refused its request; the typed error carries the facts"
+    );
     let name = match *line.tokens.get(1..).unwrap_or_default() {
         [ref only] => ident(only),
         _ => None,
@@ -304,6 +320,10 @@ pub(super) fn together(
     children: &[Node],
     labels: &mut Labels,
 ) -> Result<(Piece, TokenStream)> {
+    lgwks_std::trace::warn!(
+        operation = "together",
+        "operation refused its request; the typed error carries the facts"
+    );
     if line.tokens.len() != 1 {
         return Err(Error::new(
             line.span,
@@ -372,6 +392,10 @@ pub(super) fn for_loop(
     labels: &mut Labels,
     place: Place,
 ) -> Result<(Piece, TokenStream)> {
+    lgwks_std::trace::warn!(
+        operation = "for_loop",
+        "operation refused its request; the typed error carries the facts"
+    );
     let tokens = line.tokens.get(1..).unwrap_or_default();
     let Some(in_at) = tokens.iter().position(|token| is_ident(token, "in")) else {
         return Err(Error::new(
@@ -437,6 +461,10 @@ pub(super) fn nested_body(children: &[Node]) -> Result<(TokenStream, Shapes)> {
 
 /// Split `let <pattern> = <rest>` at its assignment `=`.
 pub(super) fn split_let(line: &Line) -> Result<(TokenStream, Vec<TokenTree>)> {
+    lgwks_std::trace::warn!(
+        operation = "split_let",
+        "operation refused its request; the typed error carries the facts"
+    );
     let tokens = line.tokens.get(1..).unwrap_or_default();
     let mut previous_joint = false;
     let mut at = None;

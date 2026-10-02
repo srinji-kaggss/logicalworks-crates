@@ -648,6 +648,10 @@ fn alloc_report() -> Result<String, Box<dyn std::error::Error>> {
 // ── Reporting ────────────────────────────────────────────────────────────────
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    lgwks_std::trace::warn!(
+        operation = "main",
+        "operation refused its request; the typed error carries the facts"
+    );
     let args: Vec<String> = std::env::args().skip(1).collect();
     let run_timings = !args.iter().any(|a| a == "--capcheck-only");
 

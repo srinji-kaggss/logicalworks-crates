@@ -64,6 +64,10 @@ impl Site {
     /// Fetch `page` under `key`: one millisecond, a transient failure on the
     /// first attempt of every 97th page, and a key seen before is a duplicate.
     async fn fetch(&self, key: StepKey, page: u32) -> Result<u64, FlowError> {
+        lgwks_std::trace::warn!(
+            operation = "fetch",
+            "operation refused its request; the typed error carries the facts"
+        );
         sleep(Duration::from_millis(1)).await;
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if page.is_multiple_of(97) && state.failed_once.insert(page) {
@@ -108,6 +112,10 @@ lgwks_bot::script! {
 /// touches (`Arc`, `'static`), spell out the retry and deadline, and invent
 /// its own key.
 async fn crawl_by_hand(site: Arc<Site>, tenant: &str, pages: Vec<u32>) -> Result<u64, FlowError> {
+    lgwks_std::trace::warn!(
+        operation = "crawl_by_hand",
+        "operation refused its request; the typed error carries the facts"
+    );
     let tenant = Arc::<str>::from(tenant);
     let futures = pages.into_iter().map(|page| {
         let site = Arc::clone(&site);
@@ -137,6 +145,10 @@ async fn crawl_by_hand(site: Arc<Site>, tenant: &str, pages: Vec<u32>) -> Result
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    lgwks_std::trace::warn!(
+        operation = "main",
+        "operation refused its request; the typed error carries the facts"
+    );
     let runtime = lgwks_bot::Runtime::new()?;
     let mut out = std::io::stdout().lock();
     let pages: Vec<u32> = (0..PAGES).collect();

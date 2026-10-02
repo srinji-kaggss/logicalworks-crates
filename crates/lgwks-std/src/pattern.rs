@@ -294,6 +294,10 @@ impl Regex {
     /// Compile with explicit compilation, input, and output ceilings.
     /// The returned [`BoundedRegex`] enforces those limits on every operation.
     pub fn with_config(pattern: &str, config: PatternConfig) -> Result<BoundedRegex, PatternError> {
+        crate::trace::warn!(
+            operation = "with_config",
+            "operation refused its request; the typed error carries the facts"
+        );
         if pattern.len() > config.pattern_limit {
             return Err(PatternError {
                 pattern: pattern.chars().take(64).collect(),
@@ -359,6 +363,10 @@ impl core::fmt::Debug for BoundedRegex {
 impl BoundedRegex {
     /// Reject input before handing it to the regex engine.
     fn check_input(&self, text: &str) -> Result<(), PatternRunError> {
+        crate::trace::warn!(
+            operation = "check_input",
+            "operation refused its request; the typed error carries the facts"
+        );
         if text.len() > self.config.input_limit {
             return Err(PatternRunError::InputTooLarge {
                 limit: self.config.input_limit,
@@ -446,6 +454,10 @@ impl BoundedRegex {
         replacement: &str,
         count: usize,
     ) -> Result<Cow<'t, str>, PatternRunError> {
+        crate::trace::warn!(
+            operation = "replace_matches",
+            "operation refused its request; the typed error carries the facts"
+        );
         self.check_input(text)?;
         let mut captures = self.engine.captures_iter(text);
         let Some(first) = captures.next() else {
@@ -520,6 +532,10 @@ impl BoundedString {
     /// many small matches reallocate on every append, which is quadratic
     /// copying, while an unclamped doubling could reserve twice the limit.
     fn push_str(&mut self, value: &str) -> Result<(), PatternRunError> {
+        crate::trace::warn!(
+            operation = "push_str",
+            "operation refused its request; the typed error carries the facts"
+        );
         let attempted = match self.value.len().checked_add(value.len()) {
             Some(attempted) => attempted,
             None => usize::MAX,

@@ -236,6 +236,10 @@ fn outcome_after(band: Band) -> TestResult {
 
 /// A recovered unknown is held, not resent.
 fn restart_holds(band: Band) -> TestResult {
+    lgwks_std::trace::warn!(
+        operation = "restart_holds",
+        "operation refused its request; the typed error carries the facts"
+    );
     sim::assert_replays(band, |sim| {
         let run = Run::new();
         drop(run.never()?.tick());

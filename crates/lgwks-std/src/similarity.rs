@@ -385,6 +385,10 @@ impl Cosine {
 
     /// Calculates the cosine similarity, or reports why it is undefined.
     pub fn try_score(&self, left: &[f32], right: &[f32]) -> Result<f64, CosineError> {
+        crate::trace::warn!(
+            operation = "try_score",
+            "operation refused its request; the typed error carries the facts"
+        );
         if left.len() != right.len() {
             return Err(CosineError::DimensionMismatch {
                 left: left.len(),
@@ -489,6 +493,10 @@ impl<Value: ?Sized> Weighted<Value> {
         components: Vec<(f64, Box<dyn Similarity<Value = Value>>)>,
         threshold: f64,
     ) -> Result<Self, WeightedError> {
+        crate::trace::warn!(
+            operation = "new",
+            "operation refused its request; the typed error carries the facts"
+        );
         if components.is_empty() {
             return Err(WeightedError::Empty);
         }
@@ -576,6 +584,10 @@ fn unit_score(candidate: f64) -> f64 {
 
 /// Normalizes text without allocating until the raw bound has been checked.
 fn normalize_text(input: &str, maximum: usize) -> Result<Vec<char>, EditDistanceError> {
+    crate::trace::warn!(
+        operation = "normalize_text",
+        "operation refused its request; the typed error carries the facts"
+    );
     let mut observed = 0usize;
     for _ in input.chars() {
         observed = observed.saturating_add(1);

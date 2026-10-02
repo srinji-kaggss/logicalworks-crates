@@ -848,6 +848,10 @@ fn detect_candidates(
     candidates: &[Language],
     mut parse_candidate: impl FnMut(Language) -> Result<(), ParseError>,
 ) -> Result<ContentDetection, ParseError> {
+    tracing::warn!(
+        operation = "detect_candidates",
+        "operation refused its request; the typed error carries the facts"
+    );
     let mut seen = vec![false; Language::ALL.len()];
     let mut unique_reading = None;
     let mut ambiguous = false;
@@ -950,6 +954,10 @@ fn parse_bounded<L: LanguageExt>(
     max_source_bytes: usize,
     max_ast_nodes: usize,
 ) -> Result<AstGrep<StrDoc<L>>, ParseError> {
+    tracing::warn!(
+        operation = "parse_bounded",
+        "operation refused its request; the typed error carries the facts"
+    );
     validate_source_size(code, max_source_bytes)?;
     let parsed = AstGrep::try_new(code, language.clone()).map_err(|detail| {
         ParseError::ParserUnavailable {
@@ -1446,7 +1454,9 @@ mod tests {
             "a MISSING node marks an insertion point, so its span must be empty"
         );
         assert_eq!(
-            source.get(missing.start_byte..missing.end_byte).map(str::len),
+            source
+                .get(missing.start_byte..missing.end_byte)
+                .map(str::len),
             Some(0),
             "the span must cover no source text, so it cannot underline anything"
         );
