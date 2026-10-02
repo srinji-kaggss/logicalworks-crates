@@ -2343,6 +2343,87 @@ mod tests {
         Ok(())
     }
 
+    /// The body reader is handed one fixed-size window per call, never the
+    /// declared body length, and the retained capacity is clamped to a
+    /// non-power-of-two ceiling.
+    ///
+    /// This is the *scratch* measurement the ceiling's contract names: the
+    /// window handed to the transport is the scratch the read path commits,
+    /// and it is `min(remaining, READ_CHUNK_BYTES)` — independent of how large
+    /// the body claims to be. A mutant that passed `remaining` straight through
+    /// would hand the reader `limit` bytes here and fail the `READ_CHUNK_BYTES`
+    /// bound for the 10 000-byte ceiling, which is why that ceiling is one of
+    /// the measured cases: it is the smallest that forces more than one chunk.
+    #[test]
+    fn the_read_window_is_a_fixed_chunk_and_capacity_is_clamped_to_the_ceiling()
+    -> Result<(), Box<dyn std::error::Error>> {
+        /// A reader that yields one byte per call and records the largest
+        /// buffer it was ever handed.
+        struct WindowRecorder {
+            /// The bytes still to yield.
+            remaining: usize,
+            /// The largest `read` window observed.
+            largest_window: usize,
+            /// Number of `read` calls, including the EOF probe.
+            reads: usize,
+        }
+
+        impl Read for WindowRecorder {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.largest_window = self.largest_window.max(buffer.len());
+                self.reads = self.reads.saturating_add(1);
+                if buffer.is_empty() || self.remaining == 0 {
+                    return Ok(0);
+                }
+                buffer[0] = b'x';
+                self.remaining = self.remaining.saturating_sub(1);
+                Ok(1)
+            }
+        }
+
+        for limit in [73_usize, 1000, 3003, 10_000] {
+            let mut reader = WindowRecorder {
+                remaining: limit,
+                largest_window: 0,
+                reads: 0,
+            };
+            let (body, truncation) = read_bounded(&mut reader, &ceiling(limit))?;
+            assert_eq!(
+                body.len(),
+                limit,
+                "the exact body is retained at a {limit}-byte ceiling"
+            );
+            assert_eq!(
+                body.capacity(),
+                limit,
+                "capacity is clamped to the non-power-of-two ceiling at {limit}: {}",
+                body.capacity()
+            );
+            assert_eq!(
+                truncation,
+                Truncation::Complete,
+                "an exactly-at-ceiling body ends on its own at {limit}"
+            );
+            assert!(
+                reader.largest_window <= READ_CHUNK_BYTES,
+                "the reader window is one fixed chunk at {limit}, not the body: {}",
+                reader.largest_window
+            );
+            if limit > READ_CHUNK_BYTES {
+                assert_eq!(
+                    reader.largest_window, READ_CHUNK_BYTES,
+                    "the first window of a body larger than one chunk is exactly one chunk"
+                );
+            }
+            assert_eq!(
+                reader.reads,
+                limit.saturating_add(1),
+                "one read per byte plus the single EOF probe at {limit}"
+            );
+        }
+        Ok(())
+    }
+
     /// An interruption is its own class at every stage, never a transport failure.
     ///
     /// ureq's TCP transport maps `TimedOut` and `WouldBlock` to its timeout
