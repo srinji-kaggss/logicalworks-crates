@@ -7,8 +7,8 @@
 //! `full` lane is what exercises them.
 
 use lgwks_bot::inspect::{
-    Budgets, IncompleteReason, InspectRequest, Inspection, RuleSet, Scope, UnsupportedReason,
-    Verdict, inspect,
+    Budgets, IncompleteReason, InspectRequest, Inspection, MAX_PREVIEW_BYTES, RuleSet, Scope,
+    UnsupportedReason, Verdict, inspect,
 };
 
 /// The subject every span assertion slices.
@@ -335,6 +335,47 @@ fn the_report_round_trips_and_preserves_identity_spans_and_coverage()
         decoded.findings().first().map(|found| found.byte_range()),
         report.findings().first().map(|found| found.byte_range()),
         "exact spans survive serialization"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_match_longer_than_the_preview_budget_is_truncated_with_its_full_span_kept()
+-> Result<(), Box<dyn std::error::Error>> {
+    // The macro-invocation node spans the whole `panic!(..)`, so a long message
+    // pushes the matched text past `MAX_PREVIEW_BYTES`: this is the only shipped
+    // rule whose match can exceed the preview budget, and it is why the budget
+    // exists.
+    let message = "x".repeat(MAX_PREVIEW_BYTES * 3);
+    let subject = format!("fn f() {{ panic!(\"{message}\"); }}\n");
+    let report = inspect(&InspectRequest::new("src/lib.rs", &subject));
+    let found = report
+        .findings()
+        .iter()
+        .find(|found| found.rule_id() == "rust/no-panic")
+        .ok_or("the long panic! must be reported")?;
+
+    assert!(
+        found.preview_truncated(),
+        "a match past the preview budget must report truncation"
+    );
+    assert_eq!(
+        found.preview().chars().count(),
+        MAX_PREVIEW_BYTES,
+        "the bounded preview keeps exactly the budget's worth of characters"
+    );
+    let (start, end) = found.byte_range();
+    assert!(
+        end.saturating_sub(start) > MAX_PREVIEW_BYTES,
+        "the exact span is the full match, not the preview: {start}..{end}"
+    );
+    assert!(
+        subject[start..end].starts_with(found.preview()),
+        "the preview is a prefix of the exact span it was cut from"
+    );
+    assert!(
+        subject[start..end].ends_with(")\");"),
+        "the span still reaches the end of the matched node"
     );
     Ok(())
 }

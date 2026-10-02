@@ -735,6 +735,16 @@ fn bounded_preview(source: &str, start: usize, end: usize) -> (String, bool) {
     (slice[..cutoff].to_owned(), truncated)
 }
 
+/// The parser this operation calls, as a seam.
+///
+/// The shipped value is [`lgwks_ast::try_parse`], and the only other value is a
+/// fault injected by the crate's own tests: R8 requires the
+/// [`Verdict::InfrastructureFailure`] arm to be exercised by a producer, not
+/// merely declared, and the compiled Rust grammar never fails. The seam is
+/// crate-private, so no caller can substitute a parser and no second parsing
+/// implementation exists.
+type ParseFn = fn(&str, Language) -> Result<lgwks_ast::Parsed, ParseError>;
+
 /// Inspect `request`'s subject in process and return a typed report.
 ///
 /// This is the whole operation: parse, walk, decide. It performs no effect
@@ -742,6 +752,35 @@ fn bounded_preview(source: &str, start: usize, end: usize) -> (String, bool) {
 /// code.
 #[must_use]
 pub fn inspect(request: &InspectRequest<'_>) -> Inspection {
+    inspect_with(request, lgwks_ast::try_parse)
+}
+
+/// The whole operation, parameterized on the parser it calls.
+///
+/// [`inspect`] passes the shipped parser; the crate's own tests pass a fault to
+/// exercise [`Verdict::InfrastructureFailure`]. Every budget is enforced.
+fn inspect_with(request: &InspectRequest<'_>, parse: ParseFn) -> Inspection {
+    inspect_mode(request, parse, true)
+}
+
+/// The whole operation, with the budget walk optionally disarmed.
+///
+/// `enforce` is `true` for every shipped path. The eager mutant the budget
+/// oracles are tested against is `false`: it still parses, counts and records,
+/// but never stops on a budget, so a test can show the behavioral oracle rejects
+/// it. It is `#[cfg(test)]` and cannot be reached from a shipped build.
+#[cfg(test)]
+fn inspect_eager(request: &InspectRequest<'_>) -> Inspection {
+    inspect_mode(request, lgwks_ast::try_parse, false)
+}
+
+/// Run one inspection, parsing through `parse` and enforcing budgets when
+/// `enforce` is set.
+fn inspect_mode(
+    request: &InspectRequest<'_>,
+    parse: ParseFn,
+    enforce: bool,
+) -> Inspection {
     let digest = hash::blake3(request.subject.as_bytes()).to_hex();
     let coverage = coverage_for(&request.rules, request.language, false);
     let base = |verdict: Verdict,
@@ -874,7 +913,7 @@ pub fn inspect(request: &InspectRequest<'_>) -> Inspection {
         );
     }
 
-    let parsed = match lgwks_ast::try_parse(request.subject, language) {
+    let parsed = match parse(request.subject, language) {
         Ok(parsed) => parsed,
         Err(ParseError::InvalidSyntax {
             diagnostics,
@@ -947,7 +986,7 @@ pub fn inspect(request: &InspectRequest<'_>) -> Inspection {
 
     // The parse succeeded, so every supported rule is now evaluated.
     let coverage = coverage_for(&request.rules, Some(language), true);
-    let walk = walk(&parsed, request.subject, &request.budgets);
+    let walk = walk(&parsed, request.subject, &request.budgets, enforce);
     let resources = Resources {
         nodes: walk.nodes,
         max_depth: walk.max_depth,
@@ -1019,7 +1058,12 @@ type Frame<'t> = (lgwks_ast::AstNode<'t>, usize, usize);
 /// The walk is iterative with one frame per active ancestor, so its resident
 /// state follows depth rather than sibling fan-out, and every budget is charged
 /// as the work happens rather than after it.
-fn walk(parsed: &lgwks_ast::Parsed, source: &str, budgets: &Budgets) -> WalkOutcome {
+fn walk(
+    parsed: &lgwks_ast::Parsed,
+    source: &str,
+    budgets: &Budgets,
+    enforce: bool,
+) -> WalkOutcome {
     let root = parsed.root();
     let mut outcome = WalkOutcome {
         nodes: 0,
@@ -1032,7 +1076,7 @@ fn walk(parsed: &lgwks_ast::Parsed, source: &str, budgets: &Budgets) -> WalkOutc
 
     // The root is visited first and charged like any other node, so a budget
     // that cannot even admit the root is a refusal rather than an empty walk.
-    if !charge_and_evaluate(&root, 1, source, budgets, &mut outcome) {
+    if !charge_and_evaluate(&root, 1, source, budgets, &mut outcome, enforce) {
         return outcome;
     }
     let root_children = root.children().len();
@@ -1048,7 +1092,7 @@ fn walk(parsed: &lgwks_ast::Parsed, source: &str, budgets: &Budgets) -> WalkOutc
             continue;
         };
         let depth = frame.2.saturating_add(1);
-        if !charge_and_evaluate(&child, depth, source, budgets, &mut outcome) {
+        if !charge_and_evaluate(&child, depth, source, budgets, &mut outcome, enforce) {
             return outcome;
         }
         let child_count = child.children().len();
@@ -1067,16 +1111,17 @@ fn charge_and_evaluate(
     source: &str,
     budgets: &Budgets,
     outcome: &mut WalkOutcome,
+    enforce: bool,
 ) -> bool {
     outcome.nodes = outcome.nodes.saturating_add(1);
-    if outcome.nodes > budgets.max_nodes {
+    if enforce && outcome.nodes > budgets.max_nodes {
         outcome.incomplete = Some(IncompleteReason::NodeBudgetExceeded {
             observed: outcome.nodes,
             limit: budgets.max_nodes,
         });
         return false;
     }
-    if depth > budgets.max_depth {
+    if enforce && depth > budgets.max_depth {
         outcome.max_depth = outcome.max_depth.max(depth);
         outcome.incomplete = Some(IncompleteReason::DepthBudgetExceeded {
             reached: depth,
@@ -1094,7 +1139,7 @@ fn charge_and_evaluate(
     let node_text: &str = text.as_ref();
     for rule in RULES {
         outcome.work = outcome.work.saturating_add(1);
-        if outcome.work > budgets.max_work {
+        if enforce && outcome.work > budgets.max_work {
             outcome.incomplete = Some(IncompleteReason::WorkBudgetExceeded {
                 observed: outcome.work,
                 limit: budgets.max_work,
@@ -1102,7 +1147,7 @@ fn charge_and_evaluate(
             return false;
         }
         if rule_matches(rule.rule_id, node_kind, node_text)
-            && !retain_finding(rule, node, source, budgets, outcome)
+            && !retain_finding(rule, node, source, budgets, outcome, enforce)
         {
             return false;
         }
@@ -1119,8 +1164,9 @@ fn retain_finding(
     source: &str,
     budgets: &Budgets,
     outcome: &mut WalkOutcome,
+    enforce: bool,
 ) -> bool {
-    if outcome.findings.len() >= budgets.max_findings {
+    if enforce && outcome.findings.len() >= budgets.max_findings {
         outcome.incomplete = Some(IncompleteReason::FindingsBudgetExceeded {
             limit: budgets.max_findings,
         });
@@ -1129,7 +1175,7 @@ fn retain_finding(
     let range = node.range();
     let (preview, preview_truncated) = bounded_preview(source, range.start, range.end);
     let cost = rule.rule_id.len().saturating_add(preview.len());
-    if outcome.output_bytes.saturating_add(cost) > budgets.max_output_bytes {
+    if enforce && outcome.output_bytes.saturating_add(cost) > budgets.max_output_bytes {
         outcome.incomplete = Some(IncompleteReason::OutputBudgetExceeded {
             limit: budgets.max_output_bytes,
         });
@@ -1144,4 +1190,163 @@ fn retain_finding(
         preview_truncated,
     });
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A wide subject, with one violation per line.
+    fn wide_subject() -> String {
+        (0..64)
+            .map(|index| format!("fn f{index}() {{ let x = unwrap(); }}\n"))
+            .collect()
+    }
+
+    /// R8: an infrastructure failure is its own arm, never a clean verdict.
+    ///
+    /// The compiled Rust grammar does not fail, so the crate-private parser
+    /// seam is the only producer of this arm. Injecting
+    /// [`ParseError::ParserUnavailable`] exercises the `Incomplete`-versus-
+    /// `InfrastructureFailure` fork by name: the operation reports the failure
+    /// and retains no finding, and never returns `Clean`.
+    #[test]
+    fn a_parser_fault_is_an_infrastructure_failure_not_a_clean_report()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request = InspectRequest::new("src/lib.rs", "fn f() { g().unwrap(); }");
+        let faulting: ParseFn = |_code, language| {
+            Err(ParseError::ParserUnavailable {
+                language: language.name(),
+                detail: "injected fault: no compiled parser".to_owned(),
+            })
+        };
+        let report = inspect_with(&request, faulting);
+        // Owned match: `report.verdict()` borrows, and binding a field out of a
+        // borrowed `#[non_exhaustive]` variant is the shape
+        // `clippy::pattern_type_mismatch` refuses. The clone is one small test
+        // value, which is cheaper than a suppression.
+        match report.verdict().clone() {
+            Verdict::InfrastructureFailure { cause } => assert!(
+                cause.contains("injected fault"),
+                "the failure must carry the parser's own detail: {cause:?}"
+            ),
+            other => {
+                return Err(
+                    format!("expected an infrastructure failure, got {other:?}").into()
+                );
+            }
+        }
+        assert!(
+            report.findings().is_empty(),
+            "an infrastructure failure retains no finding"
+        );
+        assert!(
+            !matches!(report.verdict(), Verdict::Clean { .. }),
+            "an infrastructure failure must never read as clean"
+        );
+        Ok(())
+    }
+
+    /// R8: an eager-traversal mutant fails the budget oracle.
+    ///
+    /// `inspect_eager` parses and walks exactly as the shipped operation does,
+    /// but does not stop when a budget is exhausted. A behavioral oracle — a
+    /// tiny node budget over a wide subject must refuse — rejects it where the
+    /// shipped operation passes the same oracle, which is the negative control
+    /// the issue asks for: the check is the returned verdict and the charged
+    /// node count, not the absence of a mutant API.
+    #[test]
+    fn an_eager_traversal_mutant_fails_the_node_budget_oracle() {
+        let source = wide_subject();
+        let request = InspectRequest::new("wide.rs", &source).budgets(Budgets::new().with_nodes(3));
+
+        let shipped = inspect(&request);
+        assert!(
+            matches!(
+                shipped.verdict(),
+                Verdict::Incomplete {
+                    reason: IncompleteReason::NodeBudgetExceeded { .. }
+                }
+            ),
+            "the oracle the mutant must fail: {:?}",
+            shipped.verdict()
+        );
+        assert!(
+            shipped.resources().nodes <= 4,
+            "the shipped walk stops at the bound plus its overflow witness: {}",
+            shipped.resources().nodes
+        );
+
+        let mutant = inspect_eager(&request);
+        assert!(
+            !matches!(
+                mutant.verdict(),
+                Verdict::Incomplete {
+                    reason: IncompleteReason::NodeBudgetExceeded { .. }
+                }
+            ),
+            "the counterfactual control: the eager walk must not report the budget refusal \
+             the shipped walk reports: {:?}",
+            mutant.verdict()
+        );
+        assert!(
+            mutant.resources().nodes > 3,
+            "and it must have walked past the cap, which is what makes the oracle behavioral: {}",
+            mutant.resources().nodes
+        );
+    }
+
+    /// R8: a subject-executing mutant fails the non-execution oracle.
+    ///
+    /// The mutant runs the subject — here a closure that performs the very
+    /// effect the subject's text describes — before inspecting. The oracle is
+    /// an independent filesystem observer: the marker the subject would delete
+    /// is gone after the mutant runs and present after the shipped operation,
+    /// so the oracle distinguishes the two by observed effect and not by an
+    /// API that happens to be absent.
+    #[test]
+    fn a_subject_executing_mutant_fails_the_non_execution_oracle()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let marker = std::env::temp_dir().join(format!(
+            "lgwks-inspect-mutant-{}",
+            std::process::id()
+        ));
+        let shown = marker.display();
+        let source =
+            format!("fn main() {{ std::fs::remove_file(\"{shown}\").unwrap(); }}\n");
+        let request = InspectRequest::new("src/main.rs", &source);
+
+        // The shipped operation never runs the subject: the marker it "would"
+        // delete is untouched.
+        std::fs::write(&marker, b"present")?;
+        let shipped = inspect(&request);
+        assert!(
+            marker.exists(),
+            "the shipped operation must not execute the subject: {:?}",
+            shipped.verdict()
+        );
+
+        // The executing mutant runs the subject's effect, and the same oracle
+        // that passed above now observes the marker gone.
+        let mutant = inspect_executing(&request, |_subject| {
+            let _removed = std::fs::remove_file(&marker);
+        });
+        assert!(
+            !marker.exists(),
+            "the executing mutant must trip the marker observer: {:?}",
+            mutant.verdict()
+        );
+        let _cleanup = std::fs::remove_file(&marker);
+        Ok(())
+    }
+
+    /// A test-only variant that executes the subject before inspecting.
+    ///
+    /// The `run_subject` closure stands in for whatever "execute" means; the
+    /// point is that the operation performs it, so the filesystem oracle has
+    /// something to observe. Never compiled outside tests.
+    fn inspect_executing<F: FnOnce(&str)>(request: &InspectRequest<'_>, run_subject: F) -> Inspection {
+        run_subject(request.subject);
+        inspect(request)
+    }
 }

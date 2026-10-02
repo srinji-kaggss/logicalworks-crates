@@ -157,6 +157,12 @@ pub mod domain {
     pub mod flow;
     pub mod fs;
     pub mod gh;
+    /// The structural-inspection domain (`inspect` feature): R8's operation as
+    /// an [`Observe`](crate::verb::Observe) source and a
+    /// [`Query`](crate::verb::Query), plus a [`Task`](crate::task::Task) a
+    /// [`Host`](crate::task::Host) can run.
+    #[cfg(feature = "inspect")]
+    pub mod inspect;
     pub mod net;
     pub mod notify;
     pub mod sys;
