@@ -28,7 +28,7 @@ reason to leave.
 | Owned runtime + builder | ✅ | ✅ | ✅ | ✅ `Runtime`/`Builder`/`Handle` |
 | `block_on` | ✅ | ✅ | ✅ | ✅ `rt::runtime::block_on` |
 | Spawn a `Send` task | ✅ | ✅ | ✅ | ❌ **by design** — `Supervisor::spawn`: bounded by an in-flight ceiling and reported, and it returns no handle to drop |
-| Spawn non-`Send` | ✅ `LocalSet` | ✅ `spawn_local` | ✅ | ❌ **by design** — a non-`Send` future is *driven* (await it, or `join_all_bounded`), never spawned |
+| Spawn non-`Send` | ✅ `LocalSet` | ✅ `spawn_local` | ✅ | ❌ **by design**, and neither escape route is a workaround: a non-`Send` future is awaited inline, or handed to a **caller-owned single-threaded driver**, not to `join_all_bounded` or `Supervisor::spawn` (both require `Send + 'static`) |
 | Structured task set | ✅ `JoinSet` | ✅ | ✅ | ✅ `rt::task::JoinSet` |
 | Off-thread blocking call | ✅ `spawn_blocking` | ✅ | ✅ | ✅ `lgwks_std::task::spawn_blocking` — not in `rt`, and it returns a future for the result rather than a handle |
 | `yield_now` | ✅ | ✅ | ✅ | ✅ |
@@ -68,12 +68,31 @@ that the handle's type could not be named at the call site, so it could not even
 be stored. The thesis — no verb here starts work and hands back a handle to it —
 decides both.
 
-What serves the thesis is *driving* instead of spawning: await the future, run
-it through `join_all_bounded`, or place it on a `Supervisor`, which owns it and
-reports how it ended. `tests/rt_async_tier.rs::a_non_send_future_is_driven_rather_than_spawned`
+What serves the thesis is *driving* instead of spawning: await the future
+directly. `tests/rt_async_tier.rs::a_non_send_future_is_driven_rather_than_spawned`
 polls a genuinely `!Send` future (`Rc<Cell<u8>>`) to completion on the calling
 thread. Asserting the bound exists would not have proved anything; the test
 compiles only because the future is not `Send`.
+
+**The two escape routes this page used to recommend do not exist, and naming
+them was a false claim about the API.** Both
+[`rt::task::join_all_bounded`](https://docs.rs/lgwks_bot) and
+`Supervisor::spawn` are declared `F: Future + Send + 'static` in this revision:
+`join_all_bounded` internally spawns onto a `JoinSet`, and a `Supervisor` owns
+its work as `Send` tasks. Neither accepts a borrowed or `!Send` future, so "run
+it through `join_all_bounded`, or place it on a `Supervisor`" was advice that
+does not compile for exactly the futures a `!Send` domain holds.
+
+What actually remains today is: **await it on the task that owns it.** A
+borrowed or non-`Send` future is driven inline, and any bounded fan-out over
+such futures is a caller's own single-threaded driver. That driver has no
+bounded-admission ceiling, no supervision and no structured reporting in this
+crate — those are the properties `join_all_bounded` and `Supervisor` provide for
+`Send` work, and they do not transfer. A composed borrowed/non-`Send` API with
+those properties is the open front door under #87
+(`docs/declarative-orchestration.spec.md`); it is **proposed, not shipped**, and
+this table does not claim its behaviour. Until it lands, a consumer needing
+bounded non-`Send` fan-out owns that machinery themselves.
 
 ### `CancellationToken`: the supervision rule named a type that did not exist
 
@@ -144,10 +163,47 @@ exist costs a search that cannot succeed.
   budget. Requiring a `Budget` before a loop can be written is a tighter
   contract than any runtime here imposes, and that is the point: the rule in
   this workspace is that no background task is untracked and no loop is
-  unbounded, so the
-  shipped API is one that cannot express either. A consumer who wants the looser
-  model still has a bare `JoinSet`, which tracks what it starts and aborts on
-  drop, but imposes no ceiling of its own.
+  unbounded. A consumer who wants the looser model still has a bare `JoinSet`,
+  which tracks what it starts and aborts on drop, but imposes no ceiling of its
+  own.
+
+## 5a. What "supervised" guarantees, and the five things it does not
+
+The phrase "cannot express an untracked task or an unbounded loop" is about the
+**API surface**, and it is true there. Read as a runtime claim it would be false,
+so the boundary is stated explicitly. Five distinct facts are easy to collapse
+and are kept apart:
+
+1. **Tracked lifetime ≠ termination.** Every supervised task is registered and
+   reported. Registration is a fact about bookkeeping, not about the task
+   having stopped. `TaskId` tells you what was tracked.
+2. **A cancellation *request* ≠ actual termination.** A cancellation token is a
+   signal a task observes at a poll boundary. Nothing forces a task to observe
+   it.
+3. **A non-yielding callback is not preemptible.** A `Future` that never
+   returns `Pending`, or a closure that never yields, holds its thread until it
+   finishes on its own terms. This runtime is cooperative; there is no
+   preemption here, and shutdown **waits** for such work rather than
+   interrupting it. `shutdown_timeout` bounds how long shutdown *waits*, and a
+   timed-out shutdown leaves the task running rather than terminating it.
+4. **Bounded APIs are bounded where they say they are.** `join_all_bounded`
+   bounds concurrent tasks by `limit`, and the `Supervisor` refuses past its
+   in-flight ceiling. The **low-level `rt::task::JoinSet` has no capacity
+   ceiling at all** — it tracks and aborts on drop, and a consumer can insert
+   unboundedly many tasks into it. A bound on one API is not a property of the
+   runtime.
+5. **Progress detail can be dropped; terminal state is authoritative.** The
+   per-task progress buffer is bounded and overflows *by design*: counters
+   increment and the retained detail is the most recent window, while the
+   terminal/Unknown state of a task stays retrievable. "The progress log is
+   bounded" is not "the task's outcome is bounded".
+
+So the accurate sentence is: *this crate offers a supervised API whose declared
+ceilings are real, and which cannot express an untracked task; it does not
+guarantee that a supervised task terminates when asked, and it makes no
+preemption claim.* Any stronger reading — that a bounded API cannot leak, that
+cancellation always wins, that shutdown implies termination — is not what the
+code does.
 
 ## 6. What parity is not claimed
 
