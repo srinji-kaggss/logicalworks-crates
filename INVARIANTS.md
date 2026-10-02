@@ -332,12 +332,13 @@ Each of these was a shipped defect. Treat the list as the spec.
   prose describing a journal with no lock, a registry that accepted duplicates,
   a 33-grammar matrix that has 28, a lint split that does not partition its
   corpus, and a portability verdict that rested on a three-OS *build* · enforced
-  by: `scripts/check-doc-citations.py` (citation layer: a cited line must exist
-  and still read as a person last checked it) and
-  `docs/std-ast-deps-closure-matrix.md` (claim layer: every one of the twenty
-  `lgwks_std` modules, `lgwks_ast` and `lgwks_deps` carries a state from the
-  fixed vocabulary `exercised` / `present` / `unexercised-gap` /
-  `assurance-gap` / `admitted-not-implemented`, plus the test that exists)
+  by: the `doc-citations` lane, which runs
+  python3 scripts/check-doc-citations.py (citation layer: a cited line must exist
+  and still read as a person last checked it). The claim layer is
+  docs/std-ast-deps-closure-matrix.md: every one of the twenty lgwks_std
+  modules, lgwks_ast and lgwks_deps carries a state from the fixed vocabulary
+  exercised / present / unexercised-gap / assurance-gap /
+  admitted-not-implemented, plus the test that exists
 
 ## Governance as code
 
