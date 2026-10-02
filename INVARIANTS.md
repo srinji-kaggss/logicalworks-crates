@@ -436,6 +436,13 @@ Each of these was a shipped defect. Treat the list as the spec.
   handle. · why: #122 item 4 / #156 · enforced by `tests/journal_liveness.rs`
   (`a_slow_store_lets_the_runtime_and_the_release_progress`,
   `a_cancelled_append_leaves_the_runtime_and_the_handle_live`)
+- **INV-BOT-27** A real process kill while an append is in flight, against a
+  store that has not answered, leaves a clean journal: the reopen reports no
+  committed event and no torn tail, and the retry lands exactly once. The kill
+  is a real `SIGKILL` of a child that handed the storage owner the append and
+  then parked. · why: #122 item 2 / #156 · enforced by
+  `tests/durable_crash_observation.rs`
+  (`a_real_kill_mid_append_leaves_no_duplicate_and_no_lost_receipt`)
 
 ## Open questions for the Director
 
