@@ -56,8 +56,22 @@ explicitly under that crate.
   absent so a document written before the field existed still parses. A version
   this build does not implement is refused by `BotSpec::from_json` and by
   `Bot::from_spec`.
+- `DomainRegistry::source` and `DomainRegistry::action` return `None` for an
+  identifier declared more than once, not the first matching constructor. An
+  ambiguous identifier no longer resolves by declaration order; `validate()`
+  already refused such a registry by name at every construction path, and this
+  closes the raw lookup so a caller that skips validation cannot reach an
+  ambiguous constructor either (#122). Migration: a caller that relied on the
+  first-wins result should pick the duplicate it means, or the registry should
+  be repaired; `validate()` reports both positions.
 
 ### lgwks_bot Fixed
+
+- The `registry` module documentation said "A duplicate is not refused: lookup
+  is in declaration order and the first entry wins", which had been false since
+  `DomainRegistry::validate` landed. It now states the truth: `validate` refuses
+  a duplicated identifier and names both positions, and the raw `source`/`action`
+  lookups refuse an ambiguous identifier too (#122).
 
 - A process group whose leader is an unreaped zombie reports `EPERM` on a
   further `killpg` (macOS/BSD). That is a still-present group, not a refused

@@ -391,6 +391,22 @@ Each of these was a shipped defect. Treat the list as the spec.
   disposition, output or located error, and every report says no external
   effect is known. · why: #87 step 1 (T01–T04, T36) · enforced by:
   `tests/task_front_door.rs` and `tests/sim_task.rs`
+- **INV-BOT-21** A registry identifier declared twice in one role has one
+  meaning: refused. `DomainRegistry::validate` names the identifier, role and
+  both positions before any build, and the raw `source`/`action` lookups never
+  resolve an ambiguous identifier to its first declaration, so dispatch never
+  depends on declaration order. One identifier used once per role stays valid.
+  · why: #122 item 1 · enforced by: `tests/registry.rs`
+  (`an_ambiguous_identifier_is_not_resolved_by_declaration_order`,
+  `a_duplicate_source_identifier_is_refused_with_both_positions`,
+  `refusal_is_independent_of_declaration_order`)
+- **INV-BOT-22** An append whose reply was lost but whose record committed is
+  reconciled by readback and settled, never resent and never stalled on; an
+  append that may have committed and did not reports the occurrence as certain
+  and lands its record on the retry without re-entering the action.
+  · why: #118 item 1 · enforced by: `tests/ambiguous_commit.rs`
+  (`a_committed_outcome_with_a_lost_reply_settles_without_resending`,
+  `an_unknown_outcome_that_did_not_commit_reports_occurrence_and_records_on_retry`)
 
 ## Open questions for the Director
 

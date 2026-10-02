@@ -27,11 +27,19 @@
 //!
 //! # Uniqueness
 //!
-//! Identifiers are expected to be unique within a list. A duplicate is not
-//! refused: lookup is in declaration order and the first entry wins. The check
-//! that would make this a compile error is a `const` assertion, and it is not
-//! written because `clippy::panic` is forbidden workspace-wide, which leaves no
-//! way to fail a `const` evaluation from this module.
+//! Identifiers are expected to be unique within a list, and
+//! [`DomainRegistry::validate`] refuses a list that declares one twice, naming
+//! the identifier, the role and both positions. Every construction path checks
+//! that first — [`DomainRegistry::build_source`], [`DomainRegistry::build_action`]
+//! and the spec materializer — so a duplicate refuses the whole registry rather
+//! than making dispatch depend on declaration order.
+//!
+//! The public lookups [`DomainRegistry::source`] and [`DomainRegistry::action`]
+//! refuse an ambiguous identifier exactly as they refuse an absent one: neither
+//! ever resolves to "whichever constructor was declared first", so a caller that
+//! skips [`DomainRegistry::validate`] still cannot reach an ambiguous
+//! constructor. One identifier used once per role is one domain with two roles,
+//! not a duplicate.
 
 use std::any::Any;
 
@@ -436,12 +444,21 @@ impl DomainRegistry {
     }
 
     /// The constructor registered for a source identifier, if any.
+    ///
+    /// `None` when the identifier is unknown *or* declared twice in the source
+    /// list. An ambiguous identifier is deliberately not resolved to the first
+    /// declaration: doing so would make which constructor a spec reaches depend
+    /// on declaration order. [`Self::validate`] distinguishes an ambiguity from
+    /// an absence by name.
     #[must_use]
     pub fn source(&self, domain_id: &str) -> Option<SourceCtor> {
         find(self.sources, domain_id)
     }
 
     /// The constructor registered for an action identifier, if any.
+    ///
+    /// `None` when the identifier is unknown *or* declared twice in the action
+    /// list, for the reason [`Self::source`] gives.
     #[must_use]
     pub fn action(&self, domain_id: &str) -> Option<ActionCtor> {
         find(self.actions, domain_id)
@@ -533,15 +550,25 @@ impl std::fmt::Debug for DomainRegistry {
 
 /// Find an identifier in a declaration list, in declaration order.
 ///
+/// `None` when the identifier is absent *or* declared more than once. The
+/// second case is the point: an ambiguous identifier must not resolve to
+/// whichever constructor the author happened to list first, because that makes
+/// dispatch depend on declaration order (issue #122). [`DomainRegistry::validate`]
+/// names the duplicate pair before any build, and refusing it here means a
+/// caller that reaches for `source`/`action` directly still cannot construct
+/// from an ambiguous list.
+///
 /// Linear because the list is a handful of entries and is read at most once per
 /// spec, not per tick. A map would be a second structure to keep in step with
 /// the first for no gain at this size.
 fn find<T: Copy>(entries: &[(&'static str, T)], domain_id: &str) -> Option<T> {
-    let mut found = None;
+    let mut found: Option<T> = None;
     for &(registered, ctor) in entries {
         if registered == domain_id {
+            if found.is_some() {
+                return None;
+            }
             found = Some(ctor);
-            break;
         }
     }
     found
