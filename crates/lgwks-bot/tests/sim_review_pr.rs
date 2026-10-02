@@ -23,6 +23,11 @@
 //! never exceeds one per identity, and a run never reports a publication it
 //! did not observe at the reviewed commit.
 
+// `review` sits on `script` and `process`, so this suite runs wherever the
+// journey's own types are compiled rather than against a build that cannot name
+// them — which would be a compile failure reported as a missing module.
+#![cfg(all(feature = "script", feature = "process"))]
+
 use std::hash::{Hash, Hasher};
 
 /// What a simulation reports when a precondition did not hold.

@@ -1288,6 +1288,7 @@ impl std::error::Error for GhError {
     }
 }
 
+#[cfg(feature = "script")]
 impl From<GhError> for crate::script::FlowError {
     /// A GitHub adapter failure inside a flow is a located failure carrying the
     /// adapter's own typed vocabulary as its cause.
