@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use lgwks_std::hash::{Digest, Hasher};
 
+use crate::effect::RunId;
 use crate::rt::sync::CancellationToken;
 
 use super::policy::Policy;
@@ -129,6 +130,8 @@ struct ScopeInner {
     policy: Arc<Policy>,
     /// The bounded record of which steps this root's steps entered.
     trail: Arc<Trail>,
+    /// The run this scope's records are keyed by, when a host minted one.
+    run: Option<RunId>,
 }
 
 impl Scope {
@@ -164,6 +167,21 @@ impl Scope {
         token: CancellationToken,
         trail: Arc<Trail>,
     ) -> Self {
+        Self::with_token_trail_and_run(tenant, token, trail, None)
+    }
+
+    /// A root scope whose durable steps are keyed by `run`.
+    ///
+    /// The form a resumable run uses: a host that installed a store mints or is
+    /// handed a run id and passes it here, so every step descended from this root
+    /// records against the same run without threading it by hand. `None` is the
+    /// local form, and a step under it is never durable.
+    pub(crate) fn with_token_trail_and_run(
+        tenant: Tenant,
+        token: CancellationToken,
+        trail: Arc<Trail>,
+        run: Option<RunId>,
+    ) -> Self {
         Self {
             inner: Arc::new(ScopeInner {
                 tenant,
@@ -172,6 +190,7 @@ impl Scope {
                 token,
                 policy: Arc::new(Policy::for_this_machine()),
                 trail,
+                run,
             }),
         }
     }
@@ -235,6 +254,7 @@ impl Scope {
                 },
                 policy: Arc::clone(&self.inner.policy),
                 trail: Arc::clone(&self.inner.trail),
+                run: self.inner.run,
             }),
         })
     }
@@ -262,6 +282,18 @@ impl Scope {
     #[must_use]
     pub fn tenant(&self) -> &Tenant {
         &self.inner.tenant
+    }
+
+    /// The run this scope's durable records are keyed by, when a host minted
+    /// one.
+    ///
+    /// `None` for every scope built by hand — [`Scope::root`] and
+    /// [`Scope::with_token`] — and for a run whose host has no store installed:
+    /// neither is ever durable, and a caller can read that here rather than
+    /// inferring it from a missing record.
+    #[must_use]
+    pub fn run(&self) -> Option<RunId> {
+        self.inner.run
     }
 
     /// The steps from the root to here, joined by `/`.

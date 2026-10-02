@@ -65,6 +65,7 @@ mod each;
 mod error;
 mod map;
 mod policy;
+pub(crate) mod run_store;
 pub(crate) mod scope;
 pub(crate) mod trail;
 
@@ -74,6 +75,7 @@ pub use control::{at_most, attempts, retry, within};
 pub use each::each;
 pub use error::{FlowError, OptionExt, ResultExt};
 pub use map::{Architecture, FlowShape, StepKind, StepShape};
+pub use run_store::{Appended, Durable, remember};
 pub use scope::{Scope, StepKey, Tenant};
 
 /// How many step paths a scope's trail retains unless a host says otherwise.

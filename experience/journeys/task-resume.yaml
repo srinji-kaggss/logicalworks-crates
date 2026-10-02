@@ -1,0 +1,80 @@
+id: task-resume
+actor: agent-or-human-dev
+job: Run a multi-step task that the process may die in the middle of, and pick it up
+  again without repeating the steps that already finished and without being told a
+  finished step finished when nothing durable was written.
+prior_knowledge:
+  - Knows the steps of their own task body; has not read the task module.
+  - Assumes a successful report means the work can be resumed, and assumes
+    "at-least-once" is free. Both are wrong without a store, and this journey is
+    where they learn which claim they are actually holding.
+start:
+  installation: lgwks-bot built with `script`; optionally a store directory the
+    process can write.
+  state: a task whose steps are durable work, and a process that may be killed
+    between two of them.
+success:
+  visible_outcome: after a kill -9, the same run id resumes: finished steps are
+    returned from the record without running, the interrupted step runs exactly
+    once, the final output equals the uninterrupted one, and a report that
+    stopped says where it stopped and carries the ticket that resumes it.
+states:
+  - name: unrecorded
+    expectation: no store installed, the report says so and offers no ticket; a
+      step re-runs on every call and nothing is claimed to be durable.
+  - name: recorded
+    expectation: a completed step with a committed record returns its decoded
+      value without the future being polled at all.
+  - name: interrupted
+    expectation: a report that ended refused/failed/timed out/cancelled names its
+      run id and the step path it stopped at, and that ticket resumes it.
+  - name: torn
+    expectation: an interrupted final append is dropped as the incomplete tail it
+      is, earlier records survive untouched, and the step re-runs once.
+  - name: refused
+    expectation: over-cap records, an unreadable store and another tenant's run
+      id are each a typed refusal naming the bound or the owner, never a silent
+      re-run and never a cross-tenant read.
+invariants:
+  - A step runs if and only if the store has no committed record for its key.
+  - A record is committed (written and synced) before its value is returned.
+  - Committed evidence is never truncated, compacted away or rewritten by a cap.
+  - Records are keyed by tenant; a run id belongs to the tenant that minted it.
+  - A step that ran but whose record did not land re-runs on resume, so a durable
+    run is at-least-once for an *unrecorded* step and exactly-once for a recorded
+    one. External effects still need the effect journal.
+trust_boundaries:
+  - "The store directory is the host's authority: a step key that is not in it has
+    not run, and a record that is in it is the truth about that step."
+  - The device is untrusted. An append either lands whole or is refused; the store
+    never claims a record it did not sync.
+recovery_contracts:
+  - Every refusal names the bound that was hit or the tenant that refused, and
+    says the repair (raise the cap, use the owning tenant, reopen the store).
+  - A resume never silently reruns a successful prefix; the replay is visible in
+    the trail as steps entered without a record lookup.
+  - A torn tail loses only its own incomplete record.
+agent_contracts:
+  - `remember` reports the disposition it observed: replayed, recorded, or the
+    step's own failure located at the step.
+  - The host claims durability only when a store is installed, and a report with
+    no store says so in the same field a reader checks.
+probes:
+  - id: kill9-resume-does-not-rerun-finished-steps
+    action: Spawn the test binary as a child with the store env set, let it record
+      two steps and exit hard at a marker file; kill -9 it; resume in the parent
+      under the same run id; assert marker counts of 1 for the finished steps, 1
+      for the interrupted step, and equal final output.
+  - id: same-seed-same-resume-trace
+    action: Sweep a band of seeds with seeded crash points at every step
+      boundary; run the sweep twice; assert identical trace hashes.
+  - id: two-tenants-one-run-id
+    action: Mint a run under tenant A, then resume it under a tenant-B host
+      concurrently with a tenant-A resume; assert the B resume is a typed refusal
+      and A's records are untouched.
+  - id: torn-tail-loses-only-its-own-record
+    action: Append a record, truncate the file mid-frame, reopen, and assert the
+      earlier record decodes and the torn one is ignored.
+  - id: caps-refuse-without-truncating
+    action: Lower the per-record, per-run and total-byte ceilings; assert each is a
+      typed refusal naming the bound, and that the earlier records still read.

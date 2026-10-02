@@ -91,15 +91,22 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
+use crate::effect::RunId;
 use crate::rt::runtime::{Handle, Runtime};
 use crate::rt::sync::{CancellationToken, OwnedSemaphorePermit, Semaphore};
 use crate::rt::task_local;
+use crate::script::run_store::Records;
 use crate::script::trail::Trail;
 use crate::script::{DEFAULT_TRAIL_STEPS, FlowError, MAX_IN_FLIGHT, Scope, Tenant, within};
 
 use self::name::TaskName;
 
 mod name;
+mod store;
+
+pub use store::{
+    MAX_RECORD_BYTES, MAX_RECORDS_PER_RUN, MAX_STORE_BYTES, RunStore, StoreError, StoreLimitKind,
+};
 
 /// The most top-level runs one host admits at once.
 ///
@@ -232,6 +239,19 @@ pub enum EffectKnowledge {
     /// No external effect is claimed. The run performed no journaled effect, so
     /// a successful return says what the body returned and nothing more.
     None,
+    /// The run's steps that called [`remember`](crate::script::remember) are
+    /// recorded durably under the run's [`RunId`], so a resume replays them
+    /// without re-running them.
+    ///
+    /// This is a statement about **this run's own step records**, not about any
+    /// remote state. A step that performs an external effect still needs the
+    /// effect journal, and a step whose record failed to land still re-runs — see
+    /// [`Report::ticket`] for the step a run stopped at.
+    StepRecords {
+        /// How many records this run committed over its whole life, including
+        /// the ones a previous attempt committed and this one replayed.
+        records: usize,
+    },
 }
 
 // ── Task ─────────────────────────────────────────────────────────────────────
@@ -349,6 +369,12 @@ pub struct Report<O> {
     tenant: Tenant,
     /// The task's name.
     task: TaskName,
+    /// The run this report's step records are keyed by, when a store was
+    /// installed. `None` for a run whose host holds only in-memory sinks, which
+    /// is exactly the run that can never be resumed.
+    run: Option<RunId>,
+    /// Where a stopped run stopped, for a caller that wants to resume it.
+    ticket: Option<Ticket>,
 }
 
 impl<O> Report<O> {
@@ -475,6 +501,104 @@ impl<O> Report<O> {
             .map(FlowError::at)
             .filter(|path| !path.is_empty())
     }
+
+    /// The run this report's records are keyed by.
+    ///
+    /// `Some` exactly when the host had a store installed, and `None` otherwise.
+    /// A `None` here is the whole honest statement of "this run kept nothing":
+    /// there is no in-memory sink pretending to be durable, and no ticket,
+    /// because there is nothing to resume from.
+    #[must_use]
+    pub const fn run_id(&self) -> Option<RunId> {
+        self.run
+    }
+
+    /// What a caller needs to resume this run.
+    ///
+    /// `Some` when the run has a store, ended in anything other than
+    /// [`Disposition::Succeeded`], and did not reach its own body (so the failure
+    /// has no step path to name). A run that failed *inside* a step has nothing
+    /// to resume to — the step re-runs under the same run id when the caller
+    /// calls [`Host::resume`] — so it carries no ticket and the caller uses
+    /// `run_id` directly.
+    #[must_use]
+    pub const fn ticket(&self) -> Option<&Ticket> {
+        self.ticket.as_ref()
+    }
+}
+
+// ── Ticket ──────────────────────────────────────────────────────────────────
+
+/// Everything needed to resume one stopped run.
+///
+/// A ticket is not a promise that resuming will succeed: the step it stopped at
+/// may fail again, and the store may have lost its last record. It is a
+/// statement about identity — *this* run, for *this* tenant, which stopped *here*
+/// — and [`Host::resume`] takes exactly that. Holding one across a process
+/// restart is the point; a run id alone would leave a caller to guess which
+/// tenant owns it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Ticket {
+    /// The run to resume.
+    run: RunId,
+    /// The tenant that owns it, and the only tenant that may resume it.
+    tenant: Tenant,
+    /// The task that was running.
+    task: TaskName,
+    /// How it ended, so a reader knows whether work was interrupted or refused.
+    disposition: Disposition,
+    /// The step path it stopped in, when the failure had one.
+    at: Option<Arc<str>>,
+}
+
+impl Ticket {
+    /// The run this ticket resumes.
+    #[must_use]
+    pub const fn run(&self) -> RunId {
+        self.run
+    }
+
+    /// The tenant that owns the run.
+    #[must_use]
+    pub fn tenant(&self) -> &Tenant {
+        &self.tenant
+    }
+
+    /// The task that was running.
+    #[must_use]
+    pub fn task(&self) -> &str {
+        self.task.as_str()
+    }
+
+    /// How that run ended.
+    #[must_use]
+    pub const fn disposition(&self) -> Disposition {
+        self.disposition
+    }
+
+    /// The step path the run stopped in, when the failure had one.
+    #[must_use]
+    pub fn stopped_at(&self) -> Option<&str> {
+        self.at.as_deref()
+    }
+}
+
+impl fmt::Display for Ticket {
+    /// `<tenant>/<run>: <disposition> at <path>` — one line a log or a resume
+    /// queue can carry.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{}/{}: {}",
+            self.tenant.as_str(),
+            self.run.id().to_hex(),
+            self.disposition.label()
+        )?;
+        if let Some(at) = self.at.as_deref() {
+            write!(formatter, " at {at}")?;
+        }
+        Ok(())
+    }
 }
 
 // ── Host ─────────────────────────────────────────────────────────────────────
@@ -554,6 +678,13 @@ struct Installation {
     admitted: AtomicU64,
     /// Every run refused at admission.
     refused: AtomicU64,
+    /// The durable step-record store, when one was installed.
+    ///
+    /// `None` is the honest local mode: no record survives the process, so no
+    /// report claims a run id and no ticket exists. A host with a store in hand
+    /// that behaved as though it had none would be claiming durability it does
+    /// not have, which is the one thing INV-BOT-21 forbids.
+    store: Option<store::RunStore>,
     /// The runtime [`Host::block_on`] drives on, built once on first use.
     reactor: Mutex<Option<Reactor>>,
 }
@@ -594,6 +725,7 @@ impl Host {
             max_concurrent: default_max_concurrent(),
             deadline: default_deadline(),
             progress: DEFAULT_TRAIL_STEPS,
+            store: None,
         })
     }
 
@@ -622,6 +754,17 @@ impl Host {
     #[must_use]
     pub fn token(&self) -> &CancellationToken {
         &self.inner.token
+    }
+
+    /// The durable step-record store this host installed, when it has one.
+    ///
+    /// `None` is a host that keeps nothing across a process boundary, and every
+    /// report it produces says so. The handle is a clone, so a caller that wants
+    /// to inspect the store from a different task reads the same index rather
+    /// than opening a second reader over the same file.
+    #[must_use]
+    pub fn run_store(&self) -> Option<&store::RunStore> {
+        self.inner.store.as_ref()
     }
 
     /// Stop every run under this host, including one waiting for a permit, and
@@ -661,8 +804,88 @@ impl Host {
         F: Fn(Scope, I) -> Fut,
         Fut: Future<Output = Result<O, FlowError>>,
     {
+        self.execute(task, input, None).await
+    }
+
+    /// [`Host::run`] under a run identity the caller already holds.
+    ///
+    /// The form a caller uses to keep its own identity across a restart: the run
+    /// id is the one it recorded, so the run's step records are found under the
+    /// same key and finished steps replay. A host with no store refuses, because
+    /// a run id with nothing keyed by it would claim a resume that cannot happen.
+    ///
+    /// # Errors
+    ///
+    /// Nothing here fails: with no store the body runs exactly as
+    /// [`Host::run`] would and the report carries no run id. The refusal a caller
+    /// needs is *not* silently swallowed — it is that [`Report::run_id`] is
+    /// `None`, which is the same statement this doc makes.
+    pub async fn resume<I, O, F, Fut>(&self, run: RunId, task: &Task<F>, input: I) -> Report<O>
+    where
+        F: Fn(Scope, I) -> Fut,
+        Fut: Future<Output = Result<O, FlowError>>,
+    {
+        self.execute(task, input, Some(run)).await
+    }
+
+    /// Resume from a [`Ticket`].
+    ///
+    /// The ticket names the run, so this is [`Host::resume`] with the identity
+    /// read off the ticket. A ticket for another tenant is a typed refusal on
+    /// this host's store rather than a silent new run: the caller's ticket says
+    /// the run exists and belongs elsewhere, and pretending it does not is how a
+    /// cross-tenant resume becomes a fresh run that overwrites another tenant's
+    /// records.
+    ///
+    /// # Errors
+    ///
+    /// [`FlowError`] when the ticket names a tenant other than this host's.
+    pub async fn resume_ticket<I, O, F, Fut>(
+        &self,
+        ticket: &Ticket,
+        task: &Task<F>,
+        input: I,
+    ) -> Result<Report<O>, FlowError>
+    where
+        F: Fn(Scope, I) -> Fut,
+        Fut: Future<Output = Result<O, FlowError>>,
+    {
+        if ticket.tenant() != &self.inner.tenant {
+            return Err(FlowError::Failed {
+                at: Arc::from(ticket.task()),
+                reason: format!(
+                    "the ticket names tenant {:?}, not {:?}; refusing to resume another \
+                     tenant's run",
+                    ticket.tenant().as_str(),
+                    self.inner.tenant.as_str()
+                ),
+            });
+        }
+        Ok(self.execute(task, input, Some(ticket.run())).await)
+    }
+
+    /// The one body of a run, shared by [`Host::run`] and [`Host::resume`].
+    ///
+    /// Split so there is exactly one place a run mints or adopts its identity,
+    /// builds its scope, installs the store and assembles its report — a second
+    /// copy of any of those is a second definition of what a resume means.
+    async fn execute<I, O, F, Fut>(
+        &self,
+        task: &Task<F>,
+        input: I,
+        resume: Option<RunId>,
+    ) -> Report<O>
+    where
+        F: Fn(Scope, I) -> Fut,
+        Fut: Future<Output = Result<O, FlowError>>,
+    {
         let started = Instant::now();
         let task_name = task.name_owned();
+
+        // The run identity, decided before admission so a refused run still has
+        // the identity a caller can ask about — a run refused at admission ran
+        // nothing, and a run id attached to it names a run with no records.
+        let run = self.adopt_run(resume);
 
         // Admission first, so a run that never starts is never counted as one
         // and never leaves a step in the trail.
@@ -673,14 +896,15 @@ impl Host {
                 if disposition == Disposition::Refused {
                     self.inner.refused.fetch_add(1, Ordering::Relaxed);
                 }
-                return self.report(
+                return self.report(Terminal {
                     started,
-                    task_name,
+                    task: task_name,
                     disposition,
-                    None,
-                    Some(failure.into_error()),
-                    TrailSnapshot::Empty,
-                );
+                    output: None,
+                    error: Some(failure.into_error()),
+                    trail: TrailSnapshot::Empty,
+                    run,
+                });
             }
         };
         // Dropped on every exit path from here on, including a future the caller
@@ -689,10 +913,11 @@ impl Host {
         let _admission = self.charge(permit);
 
         let trail = Trail::new(self.inner.limits.progress_capacity());
-        let root = Scope::with_token_and_trail(
+        let root = Scope::with_token_trail_and_run(
             self.inner.tenant.clone(),
             self.inner.token.child_token(),
             Arc::clone(&trail),
+            run,
         );
         let scope = match root.enter(task_name.as_str()) {
             Ok(scope) => scope,
@@ -701,14 +926,15 @@ impl Host {
             // in the instant between admission and entry. Either way the body
             // never ran, and the report says so rather than inventing a trail.
             Err(error) => {
-                return self.report(
+                return self.report(Terminal {
                     started,
-                    task_name,
-                    disposition_of(&error),
-                    None,
-                    Some(error),
-                    TrailSnapshot::Empty,
-                );
+                    task: task_name,
+                    disposition: disposition_of(&error),
+                    output: None,
+                    error: Some(error),
+                    trail: TrailSnapshot::Empty,
+                    run,
+                });
             }
         };
 
@@ -726,31 +952,103 @@ impl Host {
             charged
         };
         let body = (task.body)(scope.clone(), input);
-        let outcome = HELD_PERMITS
-            .scope(
-                charged,
-                within(
-                    &scope,
-                    BODY_STEP,
-                    self.inner.limits.default_deadline(),
-                    body,
-                ),
-            )
-            .await;
+        let deadline = self.inner.limits.default_deadline();
+        // Everything from here to the report is one `Box`: this frame is on the
+        // stack of every *nested* run, and depth-four nesting at an admission
+        // ceiling of one is a shipped property (T04). Holding the body future,
+        // both task-local scopes, the deadline wrapper and the report assembly
+        // inline makes each level's frame large enough that the default test
+        // thread's stack overflows at the depths the invariant names. One
+        // pointer per level is the difference between that and not.
+        // The store is installed for exactly this future and its descendants, so
+        // a durable step records against *this* run and a nested run under the
+        // same host inherits both. With no store the scope is entered with no
+        // run at all, which is what makes "no durability" the default rather
+        // than a claim.
+        let run_body = self.records(run);
+        let body_scope = scope.clone();
+        let outcome = Box::pin(async move {
+            let scope = body_scope;
+            match run_body {
+                Some(records) => {
+                    crate::script::run_store::within(
+                        records,
+                        HELD_PERMITS.scope(charged, within(&scope, BODY_STEP, deadline, body)),
+                    )
+                    .await
+                }
+                None => {
+                    HELD_PERMITS
+                        .scope(charged, within(&scope, BODY_STEP, deadline, body))
+                        .await
+                }
+            }
+        })
+        .await;
 
         let snapshot = trail.snapshot();
         let (disposition, output, error) = match outcome {
             Ok(value) => (Disposition::Succeeded, Some(value), None),
             Err(error) => (disposition_of(&error), None, Some(error.located(&scope))),
         };
-        self.report(
+        self.report(Terminal {
             started,
-            task_name,
+            task: task_name,
             disposition,
             output,
             error,
-            TrailSnapshot::Taken(snapshot),
-        )
+            trail: TrailSnapshot::Taken(snapshot),
+            run,
+        })
+    }
+
+    /// The run identity for a run, given the one a resume supplied.
+    ///
+    /// A resume keeps its own identity. A *fresh* run mints one only when a store
+    /// is installed **and** the crate was built with the `ephemeral` feature,
+    /// which is the estate's one entropy source. Without a store there is
+    /// nothing to key a record by, so a minted id would be an identity nothing
+    /// is stored under; without `ephemeral` there is no source to mint from, and
+    /// INV-RANDOM-ONE-SOURCE refuses a cheaper substitute. In either case
+    /// [`Report::run_id`] is `None` — a caller that wants a durable fresh run
+    /// builds with `ephemeral` (or supplies the run id through [`Host::resume`]).
+    fn adopt_run(&self, resume: Option<RunId>) -> Option<RunId> {
+        match (self.inner.store.is_some(), resume) {
+            (true, Some(run)) => Some(run),
+            (true, None) => self.mint_run(),
+            (false, _) => None,
+        }
+    }
+
+    /// A fresh run identity, or `None` when this build cannot mint one.
+    ///
+    /// The `ephemeral` gate is not incidental: it is the only feature that turns
+    /// on the estate's entropy source, and a run id derived from a clock or a
+    /// counter would make two runs indistinguishable — exactly what
+    /// `lgwks_std::random`'s invariant exists to refuse.
+    #[cfg(feature = "ephemeral")]
+    fn mint_run(&self) -> Option<RunId> {
+        RunId::mint().ok()
+    }
+
+    /// Without the entropy feature there is no source to mint from.
+    ///
+    /// A build that wants a durable fresh run enables `ephemeral`; a build that
+    /// only resumes supplied run ids needs nothing. Returning `None` keeps the
+    /// report honest rather than minting an identity the crate cannot vouch for.
+    #[cfg(not(feature = "ephemeral"))]
+    fn mint_run(&self) -> Option<RunId> {
+        None
+    }
+
+    /// The erased record store for this run, when there is one.
+    fn records(&self, run: Option<RunId>) -> Option<Records> {
+        // A store with no run cannot key a record, and a run with no store has
+        // nowhere to put one; both pairs mean the same thing — this run is not
+        // durable — so they are refused here rather than at the first step.
+        let store = self.inner.store.as_ref()?;
+        run?;
+        Some(Records(Arc::new(store.clone())))
     }
 
     /// Run `task` over `input` from synchronous code, driving it on a runtime
@@ -868,19 +1166,52 @@ impl Host {
     /// error exactly when it did not — is the field a hand-written literal at
     /// three call sites would get wrong, and a report that disagrees with itself
     /// is the one thing a caller cannot detect from the type.
-    fn report<O>(
-        &self,
-        started: Instant,
-        task: TaskName,
-        disposition: Disposition,
-        output: Option<O>,
-        error: Option<FlowError>,
-        trail: TrailSnapshot,
-    ) -> Report<O> {
+    fn report<O>(&self, terminal: Terminal<O>) -> Report<O> {
+        let Terminal {
+            started,
+            task,
+            disposition,
+            output,
+            error,
+            trail,
+            run,
+        } = terminal;
         let (steps, dropped_steps) = match trail {
             TrailSnapshot::Taken((paths, dropped)) => (paths, dropped),
             TrailSnapshot::Empty => (Vec::new(), 0),
         };
+        // The two claims a report makes about durability, both derived from one
+        // fact — whether this host holds a store — so they cannot disagree. A
+        // report with a store says how many records it has; one without says
+        // `None`, which is the honest "nothing survived" rather than a count of
+        // zero records that reads like a run that did nothing.
+        let effects = match (run, self.inner.store.as_ref()) {
+            (Some(run), Some(store)) => EffectKnowledge::StepRecords {
+                records: store.record_count(run),
+            },
+            _ => EffectKnowledge::None,
+        };
+        // A ticket names where a run stopped, so it exists for a stopped run
+        // that has a store. A succeeded run has nothing to resume; a run with no
+        // store has nothing to resume *from*. Both are absent, and a reader can
+        // tell the two apart by `run_id`, which is the field that says whether
+        // the run was durable at all.
+        let ticket = run.and_then(|run| {
+            if disposition.is_success() {
+                return None;
+            }
+            Some(Ticket {
+                run,
+                tenant: self.inner.tenant.clone(),
+                task: task.clone(),
+                disposition,
+                at: error
+                    .as_ref()
+                    .map(FlowError::at)
+                    .filter(|path| !path.is_empty())
+                    .map(Arc::from),
+            })
+        });
         Report {
             disposition,
             output,
@@ -889,9 +1220,11 @@ impl Host {
             steps,
             dropped_steps,
             progress_capacity: self.inner.limits.progress_capacity(),
-            effects: EffectKnowledge::None,
+            effects,
             tenant: self.inner.tenant.clone(),
             task,
+            run,
+            ticket,
         }
     }
 
@@ -1086,6 +1419,29 @@ fn disposition_of(error: &FlowError) -> Disposition {
     }
 }
 
+/// What a run ended with, assembled in one place.
+///
+/// Its own struct rather than eight parameters: the fields that must agree —
+/// an output exactly when it succeeded, an error exactly when it did not — are
+/// the ones a hand-written positional call gets wrong, and a report that
+/// disagrees with itself is the one thing a caller cannot detect from the type.
+struct Terminal<O> {
+    /// When the run started, for the elapsed measurement.
+    started: Instant,
+    /// The task that ran.
+    task: TaskName,
+    /// How it ended.
+    disposition: Disposition,
+    /// Its output, when it succeeded.
+    output: Option<O>,
+    /// Its located failure, when it did not.
+    error: Option<FlowError>,
+    /// Its step trail.
+    trail: TrailSnapshot,
+    /// The run id its records are keyed by.
+    run: Option<RunId>,
+}
+
 /// The step paths a report carries.
 ///
 /// A run that entered its task step has a ring to read and passes
@@ -1130,6 +1486,8 @@ pub struct HostBuilder {
     deadline: Duration,
     /// The step trail's capacity.
     progress: usize,
+    /// The durable step-record store, when the caller installed one.
+    store: Option<store::RunStore>,
 }
 
 impl HostBuilder {
@@ -1160,6 +1518,40 @@ impl HostBuilder {
     /// correctness.
     pub fn progress_capacity(mut self, steps: usize) -> Self {
         self.progress = steps;
+        self
+    }
+
+    /// Install a durable, file-backed per-step record store under `dir`.
+    ///
+    /// One file per tenant, named after it, so two tenants pointed at the same
+    /// directory never share a file. With a store installed, every step that
+    /// calls [`remember`](crate::script::remember) is recorded against this host's
+    /// run id, [`Report::run_id`] names it, and [`Host::resume`] replays the
+    /// recorded steps without polling their futures.
+    ///
+    /// The store is opened — and its existing records replayed — here, so a
+    /// refusal (an unreadable directory, a foreign file, a corrupt frame) happens
+    /// at installation rather than on the first step of a run that has already
+    /// claimed to be durable.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError`] when the store cannot be opened or replayed.
+    pub fn run_store(mut self, dir: impl AsRef<std::path::Path>) -> Result<Self, StoreError> {
+        self.store = Some(store::RunStore::open_in(
+            dir.as_ref(),
+            self.tenant.as_str(),
+        )?);
+        Ok(self)
+    }
+
+    /// Install a store this caller already opened.
+    ///
+    /// For a host whose store is opened once and shared, and for a caller that
+    /// wants the opened handle back for [`RunStore::tenant_of`] and the other
+    /// read-only queries.
+    pub fn store(mut self, store: store::RunStore) -> Self {
+        self.store = Some(store);
         self
     }
 
@@ -1217,6 +1609,7 @@ impl HostBuilder {
                 peak_in_flight: HighWater::default(),
                 admitted: AtomicU64::new(0),
                 refused: AtomicU64::new(0),
+                store: self.store,
                 reactor: Mutex::new(None),
             }),
         })
