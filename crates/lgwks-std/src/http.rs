@@ -1225,6 +1225,11 @@ fn next_hop<'body>(
     hops: u32,
     method: Method<'body>,
 ) -> Result<Hop<'body>, Error> {
+    #[cfg(feature = "trace")]
+    crate::trace::warn!(
+        operation = "next_hop",
+        "operation refused its request; the typed error carries the facts"
+    );
     let Some(location) = redirect_location(response)? else {
         return Ok(Hop::Final);
     };

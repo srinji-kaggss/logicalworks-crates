@@ -103,6 +103,10 @@ pub(super) fn each(
     labels: &mut Labels,
 ) -> Result<(TokenStream, TokenStream)> {
     lgwks_std::trace::warn!(
+        operation = "together_child",
+        "operation refused its request; the typed error carries the facts"
+    );
+    lgwks_std::trace::warn!(
         operation = "each",
         "operation refused its request; the typed error carries the facts"
     );
@@ -334,43 +338,7 @@ pub(super) fn together(
     let mut branches = Vec::new();
     let mut shapes = Shapes::default();
     for child in children {
-        let child_line = &child.line;
-        refuse::check(&child_line.tokens)?;
-        let (pattern, value) = if child_line.keyword().as_deref() == Some("let") {
-            let (pattern, rest) = split_let(child_line)?;
-            (pattern, rest)
-        } else {
-            (quote!(_), child_line.tokens.clone())
-        };
-        let value_line = Line {
-            tokens: value,
-            column: child_line.column,
-            number: child_line.number,
-            opens_block: child_line.opens_block,
-            span: child_line.span,
-        };
-        let branch = if value_line.opens_block {
-            let keyword = value_line.keyword().unwrap_or_default();
-            let (expr, shape) = construct_expr(&value_line, &keyword, &child.children, labels)?;
-            shapes.push(shape);
-            expr
-        } else {
-            if !child.children.is_empty() {
-                return Err(Error::new(
-                    child_line.span,
-                    "unexpected indent inside `together:`",
-                ));
-            }
-            match run_only(&value_line.tokens, labels, &mut shapes, &value_line)? {
-                Some(call) => call,
-                None => ok(&rewrite(
-                    &value_line.tokens,
-                    labels,
-                    &mut shapes,
-                    &value_line,
-                )?),
-            }
-        };
+        let (pattern, branch) = together_child(child, labels, &mut shapes)?;
         patterns.push(pattern);
         branches.push(quote!(async { #branch }));
     }
@@ -383,6 +351,53 @@ pub(super) fn together(
         piece,
         shape_tokens("Together", &count, "together", line, shapes.as_slice()),
     ))
+}
+
+/// Emits one `together:` child as a `(pattern, async body)` pair.
+///
+/// A helper rather than the loop body inline: as one block the loop carried
+/// four propagation operators across the refusal check, the `let` split, the
+/// block construct and the inline rewrite, so a caller reading the `together:`
+/// arm had to hold four distinct refusal paths to see what one child can refuse
+/// on.
+fn together_child(
+    child: &Node,
+    labels: &mut Labels,
+    shapes: &mut Shapes,
+) -> Result<(TokenStream, TokenStream)> {
+    let child_line = &child.line;
+    refuse::check(&child_line.tokens)?;
+    let (pattern, value) = if child_line.keyword().as_deref() == Some("let") {
+        let (pattern, rest) = split_let(child_line)?;
+        (pattern, rest)
+    } else {
+        (quote!(_), child_line.tokens.clone())
+    };
+    let value_line = Line {
+        tokens: value,
+        column: child_line.column,
+        number: child_line.number,
+        opens_block: child_line.opens_block,
+        span: child_line.span,
+    };
+    let branch = if value_line.opens_block {
+        let keyword = value_line.keyword().unwrap_or_default();
+        let (expr, shape) = construct_expr(&value_line, &keyword, &child.children, labels)?;
+        shapes.push(shape);
+        expr
+    } else {
+        if !child.children.is_empty() {
+            return Err(Error::new(
+                child_line.span,
+                "unexpected indent inside `together:`",
+            ));
+        }
+        match run_only(&value_line.tokens, labels, shapes, &value_line)? {
+            Some(call) => call,
+            None => ok(&rewrite(&value_line.tokens, labels, shapes, &value_line)?),
+        }
+    };
+    Ok((pattern, branch))
 }
 
 /// `for <pattern> in <items>:`, sequential, one scope per iteration.

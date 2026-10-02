@@ -252,11 +252,32 @@ pub(super) fn scaled(number: &str, scale: u128) -> Option<u128> {
     let mut total = whole.checked_mul(scale)?;
     let mut place = scale;
     for digit in fraction.chars() {
-        place = place.checked_div(10)?;
-        let value = u128::from(digit.to_digit(10)?);
-        total = total.checked_add(value.checked_mul(place)?)?;
+        let step = fraction_step(total, place, digit)?;
+        total = step.total;
+        place = step.place;
     }
     Some(total)
+}
+
+/// One decimal digit's contribution to a scaled number.
+struct FractionStep {
+    /// The running total with this digit folded in.
+    total: u128,
+    /// The place value the next digit would carry.
+    place: u128,
+}
+
+/// Folds one fraction digit into `total` at `place`.
+///
+/// A helper rather than the loop body inline: as one block the loop carried
+/// three propagation operators across the place division, the digit decode and
+/// the product, so "why does an over-long fraction refuse" meant reading all
+/// three to find the overflow check.
+fn fraction_step(total: u128, place: u128, digit: char) -> Option<FractionStep> {
+    let place = place.checked_div(10)?;
+    let value = u128::from(digit.to_digit(10)?);
+    let total = total.checked_add(value.checked_mul(place)?)?;
+    Some(FractionStep { total, place })
 }
 
 /// A `StepShape::new(..)` constant for the architecture map.
