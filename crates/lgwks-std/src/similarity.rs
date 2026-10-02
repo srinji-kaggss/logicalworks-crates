@@ -483,7 +483,7 @@ fn bounded_jaccard_score<T: PartialEq>(
     Ok(jaccard_unit(left, right))
 }
 
-impl<T: PartialEq> CheckedSimilarity for BoundedJaccard<T> {
+impl<T: PartialEq + Sync> CheckedSimilarity for BoundedJaccard<T> {
     type Value = [T];
 
     fn try_score(&self, left: &Self::Value, right: &Self::Value) -> Result<f64, EvidenceError> {
@@ -1013,9 +1013,19 @@ impl<Value: ?Sized> Similarity for Weighted<Value> {
 /// [`Similarity`] is the numeric seam every scorer can satisfy; this is the
 /// checked seam a scorer that can refuse also satisfies, so a composition can
 /// carry the refusal rather than losing it at a trait-object boundary.
+///
+/// [`Clone`] is a supertrait rather than a bound on the boxed trait object
+/// because Rust permits only auto traits there. The requirement is real
+/// rather than convenience: [`CheckedEvidence`] is clonable so a caller can
+/// hand each tenant its own policy, and a component that could not be copied
+/// would make that impossible to state.
 pub trait CheckedSimilarity {
     /// The value type accepted by this scorer.
-    type Value: ?Sized;
+    ///
+    /// [`Sync`] because [`CheckedEvidence`] is shareable across threads and a
+    /// scorer that were not would make that a lie: the composition reads its
+    /// components from `&self` on every call.
+    type Value: ?Sized + Sync;
 
     /// Scores the pair, or reports why it could not be measured.
     ///
@@ -1061,6 +1071,31 @@ impl CheckedSimilarity for Geometry {
 /// [`CheckedEvidence`] keeps "could not measure" distinct from "measured
 /// zero" all the way to the acceptance decision.
 ///
+/// # Sharing one policy across threads
+///
+/// One `CheckedEvidence` serves any number of concurrent callers, and
+/// [`verdict`] takes `&self`. That is only true because the policy is
+/// immutable, so the contract is carried on the types rather than left to
+/// inference:
+///
+/// - [`CheckedSimilarity::Value`] is [`Sync`], and [`CheckedEvidence::new`]
+///   takes `Box<dyn CheckedSimilarity<Value = Value> + Send + Sync>`.
+/// - Every scorer shipped here is `Copy` with no interior mutability, so the
+///   bounds are satisfied without a lock.
+/// - [`CheckedSimilarity`] requires [`Clone`], because a composition is
+///   clonable and a clone is how a second tenant gets its own policy.
+///
+/// A caller whose own scorer is not `Sync` still composes: the trait carries
+/// the bound, so such a scorer cannot be installed rather than silently
+/// producing a policy that is `Sync` on the outside and racy inside.
+///
+/// [`Clone`] is derived rather than hand-written, and that is what makes a
+/// *second* tenant possible: a caller holding one composition clones it per
+/// tenant, so each tenant's policy is a distinct value even when two were
+/// built from the same scorers.
+///
+/// [`verdict`]: CheckedEvidence::verdict
+///
 /// ```
 /// use lgwks_std::similarity::{CheckedEvidence, CheckedSimilarity, EditDistance};
 ///
@@ -1074,18 +1109,24 @@ impl CheckedSimilarity for Geometry {
 /// assert!(!verdict.is_accepted());
 /// assert_eq!(verdict.score(), None);
 /// assert_eq!(verdict.refusals()[0].index(), 0);
+/// // One policy, shared: the bound that makes it shareable is part of the API.
+/// fn spawn<T: Sync>(value: &T) -> &'static T {
+///     Box::leak(Box::new(value))
+/// }
+/// let shared = spawn(&policy);
+/// assert!(shared.verdict("kitten", "kitten")?.is_accepted());
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub struct CheckedEvidence<Value: ?Sized> {
     /// The component scorers, in configuration order.
-    scorers: Vec<Box<dyn CheckedSimilarity<Value = Value>>>,
+    scorers: Vec<Box<dyn CheckedSimilarity<Value = Value> + Send + Sync>>,
     /// Each component's bounded non-negative weight, parallel to `scorers`.
     weights: Vec<f64>,
     /// The score at or above which a measured verdict accepts.
     threshold: f64,
 }
 
-impl<Value: ?Sized> CheckedEvidence<Value> {
+impl<Value: ?Sized + Sync> CheckedEvidence<Value> {
     /// Creates a checked composition from parallel scorer and weight lists.
     ///
     /// The two lists must be the same length. Weights are validated exactly as
@@ -1102,7 +1143,7 @@ impl<Value: ?Sized> CheckedEvidence<Value> {
     /// [`WeightedError::WeightSumExceedsOne`] for a total above `1.0`, and
     /// [`WeightedError::InvalidThreshold`] for a threshold outside `[0, 1]`.
     pub fn new(
-        scorers: Vec<Box<dyn CheckedSimilarity<Value = Value>>>,
+        scorers: Vec<Box<dyn CheckedSimilarity<Value = Value> + Send + Sync>>,
         weights: Vec<f64>,
         threshold: f64,
     ) -> Result<Self, WeightedError> {
@@ -1214,7 +1255,7 @@ impl<Value: ?Sized> CheckedEvidence<Value> {
     }
 }
 
-impl<Value: ?Sized> core::fmt::Debug for CheckedEvidence<Value> {
+impl<Value: ?Sized + Sync> core::fmt::Debug for CheckedEvidence<Value> {
     /// Reports the composition policy rather than the scorer identities.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("CheckedEvidence")

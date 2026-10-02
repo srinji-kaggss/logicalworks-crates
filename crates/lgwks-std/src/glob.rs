@@ -117,10 +117,34 @@ enum Token {
 /// Pattern storage is O(M), including the token list and compiled class
 /// intervals. A caller that matches many paths should retain this value and a
 /// [`GlobScratch`] to amortize compilation and matching allocations.
+///
+/// # Sharing one pattern across threads
+///
+/// A `GlobPattern` is `Send + Sync` and holds no caller data, so one compiled
+/// pattern serves any number of concurrent callers. The mutable half is
+/// [`GlobScratch`], which [`is_match_with`](Self::is_match_with) takes by
+/// `&mut`: the pattern is what is shared, and the scratch is what a caller owns.
+/// Two callers sharing a scratch share one caller's path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GlobPattern {
     /// The compiled sequence of matching transitions.
     tokens: Vec<Token>,
+}
+
+/// The compile-time assertion that one pattern is shareable across threads.
+///
+/// A compile error, not a runtime note, if a future edit gives [`GlobPattern`]
+/// interior mutability or a non-`Send` field: the whole sharing contract above
+/// is that claim. It is asserted once here, and the same assertion is written
+/// independently against the published type by
+/// `tests/sim_shared_policy_tiers.rs`, which is what makes this one a check
+/// rather than a note. The test module below carries the matching runtime
+/// probe.
+#[cfg(test)]
+const fn assert_shared_across_threads() {
+    const fn assert<T: Send + Sync>() {}
+    assert::<GlobPattern>();
+    assert::<GlobScratch>();
 }
 
 impl GlobPattern {
@@ -968,6 +992,44 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn a_compiled_pattern_is_shareable_across_threads_by_construction() {
+        // The claim on `GlobPattern` is not a comment: the assertion is
+        // checked at compile time, and this is what keeps it from being
+        // deleted as an uncalled constant. It also proves the pattern is
+        // shareable across real OS threads, not only that the bounds hold.
+        assert_shared_across_threads();
+        let compiled = GlobPattern::compile_with_dialect(SHARED_PATTERN, GlobDialect::Legacy);
+        let Ok(pattern) = compiled else {
+            return;
+        };
+        let shared = std::sync::Arc::new(pattern);
+        let observed: Vec<bool> = (0..8)
+            .map(|index| {
+                let shared = std::sync::Arc::clone(&shared);
+                match std::thread::Builder::new()
+                    .name(format!("glob-share-{index}"))
+                    .stack_size(64 * 1024)
+                    .spawn(move || {
+                        let mut scratch = GlobScratch::new();
+                        let path = format!("a/{}b7z", "x/".repeat(index));
+                        shared.is_match_with(&path, &mut scratch)
+                    }) {
+                    Ok(joined) => joined.join().unwrap_or(false),
+                    Err(_) => false,
+                }
+            })
+            .collect();
+        assert!(
+            observed.iter().all(|matched| *matched),
+            "every caller must match the shared pattern identically: {observed:?}"
+        );
+    }
+
+    /// The pattern the shareability test above matches with, kept next to it so
+    /// the two cannot drift apart.
+    const SHARED_PATTERN: &str = "*a**/b[0-9]?";
 
     #[test]
     fn scratch_capacity_is_reused_without_per_token_row_allocations() -> Result<(), PatternError> {

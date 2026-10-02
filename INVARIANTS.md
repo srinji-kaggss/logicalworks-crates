@@ -209,9 +209,29 @@ Each of these was a shipped defect. Treat the list as the spec.
   component-invalid `**` as typed errors. Compilation is O(M); each token
   transition is O(N) over the finite Unicode scalar alphabet; reusable
   scratch retains one scalar index and two rolling rows in O(N), with no row
-  allocation per token. · enforced by: `glob::tests` work-growth, scratch
-  capacity, Unicode, strict-error and exact double-star cases, plus
-  `tests/glob_public.rs`
+  allocation per token. A compiled `GlobPattern` carries no caller data and
+  holds no interior mutability, so one pattern serves any number of concurrent
+  callers; the mutable half is the caller-owned `GlobScratch`, which
+  `is_match_with` takes by `&mut`. · enforced by: `glob::tests` work-growth,
+  scratch capacity, Unicode, strict-error and exact double-star cases, plus
+  `tests/glob_public.rs` and `tests/sim_shared_policy_tiers.rs`
+  (`one_shared_matcher_evidence_policy_and_retry_policy_serve_every_tier`,
+  `the_shared_values_are_reachable_through_an_arc_clone`)
+- **INV-STD-SHARED-POLICY** One compiled matcher, one evidence policy and one
+  retry policy serve 100, 1 000 and 10 000 concurrent callers with answers
+  bit-identical to the single-threaded reference, zero divergence at every tier,
+  and memory that does not scale with the caller count. Each caller owns its
+  scratch; the shared values carry no caller data. A host that cannot reach a
+  tier reports the requested tier and the level reached. A checked composition
+  is `Send + Sync` because it is immutable and its components are, so the
+  sharing claim is on the types rather than inferred from a run that did not
+  crash; two tenants' policies over one input never cross. · why: the reviewer
+  note on #154 item 7 and the hyperscale axis · enforced by:
+  `tests/sim_shared_policy_tiers.rs`
+  (`one_shared_matcher_evidence_policy_and_retry_policy_serve_every_tier`,
+  `the_shared_values_are_reachable_through_an_arc_clone`),
+  `glob::tests::a_compiled_pattern_is_shareable_across_threads_by_construction`,
+  and `tests/sim_tenant_isolation.rs`
 - **INV-CODEC-1** JSON and RON text/slice decoders preserve input borrowing
   where their decoders support it; escaped text that needs allocation is not
   reported as borrowed. RON writer failures distinguish serialization from I/O

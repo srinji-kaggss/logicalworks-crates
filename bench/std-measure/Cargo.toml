@@ -1,0 +1,31 @@
+[package]
+name = "lgwks-std-measure"
+description = "Before/after latency harness for the lgwks_std paths issues #153, #154, #160 and #164 changed. Not published; depends on nothing outside this repository."
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# This crate is its own workspace root, for the same reason `bench/` is: it is a
+# measurement instrument, not a consumer of `lgwks_std`, and Cargo would
+# otherwise attach it to `bench/`'s workspace and inherit that rig's release
+# profile and lockfile. Its own root keeps it invisible to both, and keeps the
+# estate's dependency contract (`contract/APPROVED.toml`, enforced by
+# `lgwks-deps check`, which discovers packages through `workspace_members`)
+# from ever seeing it.
+[workspace]
+
+[dependencies]
+# Default features only. The measured paths are `glob`, `similarity` and
+# `retry`, which live in `core`; turning on `full` would compile capability this
+# harness never calls, so a timing here could only ever be measuring extra code.
+lgwks_std = { path = "../../crates/lgwks-std" }
+
+[[bin]]
+name = "lgwks-std-measure"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+debug = true

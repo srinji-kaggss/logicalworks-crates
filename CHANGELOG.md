@@ -26,6 +26,27 @@ explicitly under that crate.
 
 ### lgwks_std Added
 
+- `glob`, `similarity` and `retry` now state their sharing contract on the
+  types rather than leaving it to inference, and it is checked. `GlobPattern`
+  and `RetryPolicy` are documented `Send + Sync`; `CheckedEvidence` is now
+  genuinely shareable, because `CheckedEvidence::new` takes
+  `Box<dyn CheckedSimilarity<Value = Value> + Send + Sync>` and
+  `CheckedSimilarity::Value` is `Sync` (#154 item 7, hyperscale axis).
+  **Migration:** a custom `CheckedSimilarity` implementation must now satisfy
+  `Send + Sync` (and its `Value` type must be `Sync`) to be installable in a
+  `CheckedEvidence`. A stateless `Copy` scorer satisfies both with no code
+  change; one that holds interior mutability is refused at compile time rather
+  than producing a policy that is thread-safe from the outside and racy inside.
+  A custom scorer used single-threaded behind `Weighted` is unaffected.
+- `bench/std-measure`, a before/after latency harness for the `lgwks_std` paths
+  issues #153, #154, #160 and #164 changed, committed with its raw sample
+  output in `bench/std-measure/results.txt`. It reproduces the #154 G2 table
+  (`*a*` at n = 256..2048 and the six-token pattern, p50/p95/p99 over raw
+  samples) and the #164 retry flat-latency rows, and adds the
+  `O(attempt)`-walking backoff the shipped shift-and-compare form replaced so
+  the flat-latency claim has something to be flat against. See
+  `bench/std-measure/README.md` for the exact command.
+
 - `similarity::CheckedSimilarity`, the checked scoring seam, and
   `similarity::CheckedEvidence`, the authority-facing composition that carries
   component identity, the refusal, and applicability through to the acceptance

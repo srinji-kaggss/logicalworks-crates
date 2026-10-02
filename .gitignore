@@ -10,6 +10,7 @@ graphify-out/
 # The benchmark rig is its own Cargo workspace, so a default `cargo run` there
 # creates a target directory the root `/target` rule does not cover.
 bench/target/
+bench/*/target/
 
 # Member crates can be built on their own (`cargo test -p lgwks_bot`), which
 # puts a target directory beside the crate rather than at the workspace root, so

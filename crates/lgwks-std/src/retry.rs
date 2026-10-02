@@ -38,6 +38,16 @@ use std::time::Duration;
 ///
 /// All fields are plain data so policies can cross crate boundaries (JSON,
 /// manifests, config files) without dragging an executor along.
+///
+/// # Sharing one policy across threads
+///
+/// A `RetryPolicy` is `Send + Sync` and holds no interior mutability, no clock
+/// and no counter, so one policy serves any number of concurrent callers and
+/// every one of them gets the same delay for the same `(attempt, entropy)`.
+/// The public fields are settable, so "share it" means share it before
+/// configuring it, or freeze the value in a binding the callers borrow; a
+/// caller that mutates a policy another thread is reading has made a data race
+/// in its own program, which is what the field mutability buys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RetryPolicy {
