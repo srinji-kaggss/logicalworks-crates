@@ -102,6 +102,31 @@ Each of these was a shipped defect. Treat the list as the spec.
 
 ## lgwks_std
 
+- **INV-STD-SIM-2** A score and a refusal are different things. Raw cosine keeps
+  its `[-1, 1]` domain and the shared `Similarity` contract reads it through the
+  explicit, named `(raw + 1) / 2` mapping, so every implementation behind the
+  trait satisfies its `[0.0, 1.0]` and identity laws. A weight total below `1.0`
+  is a declared evidence deficit and is never renormalized or presented as
+  identity. Any refused component withdraws the whole composed verdict at every
+  threshold including `0.0`, is attributed to its component index, and its
+  weight is not redistributed onto a surviving neighbour; all-zero effective
+  evidence is an explicit `InsufficientEvidence`. The infallible `Similarity`
+  and `Weighted::is_accepted` methods remain lossy for source compatibility and
+  are not the authority-facing path. An edit or set budget is charged against
+  the *normalized* unit — the lower-case-expanded scalar count — and a set
+  budget is charged before dedup and before the quadratic scan. The lossy path
+  heuristic is not reachable as an exact-match proof. · why: #160 S1/S2/S4 ·
+  enforced by: `tests/similarity_evidence_contract.rs`
+  (`cosine_trait_impl_stays_inside_the_documented_unit_interval`,
+  `a_refused_component_is_not_accepted_at_threshold_zero`,
+  `all_zero_weight_refuses_regardless_of_threshold`,
+  `typed_refusals_carry_component_identity_through_composition`,
+  `bounded_jaccard_refuses_before_the_quadratic_scan`,
+  `budget_refusal_precedes_amplification_and_is_measurable`,
+  `the_edit_budget_charges_the_normalized_unit_not_the_raw_scalar_count`,
+  `the_heuristic_path_score_is_never_an_exact_match_proof`), `similarity.rs`
+  (`every_evidence_error_variant_is_exercised_by_a_test`), and
+  `tests/sim_similarity_sweep.rs` (`the_same_seed_replays_to_the_same_trace`)
 - **INV-STD-SIM-1** The documented `Geometry::score` accepts both `[f64; 4]`
   and `BoundingBox`. · why: #160 S3 · enforced by:
   `tests/similarity_public_api.rs`

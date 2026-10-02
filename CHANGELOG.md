@@ -8,6 +8,58 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### lgwks_std Breaking
+
+- `similarity`: the `Similarity` implementation for `Cosine` now returns the
+  normalized `(raw + 1) / 2` score instead of raw cosine, so the trait's
+  documented `[0.0, 1.0]` interval holds for every implementation behind it
+  (#160 S1). **Migration:** a caller reading `Similarity::score` for a cosine
+  comparison and comparing against a raw-cosine threshold must call
+  `Cosine::try_score`, whose `[-1.0, 1.0]` domain is unchanged. The named
+  mapping is `Cosine::normalized_score`.
+- `similarity`: `ComponentOutcome` and `EvidenceVerdict` expose accessors
+  (`index`, `weight`, `score`, `reason`, `outcomes`) instead of public fields
+  (#160 S2). **Migration:** replace `verdict.score` with `verdict.score()` and
+  `outcome.index` with `outcome.index()`. The fields are private because an
+  outcome is a report about a measurement; a caller that could set a refused
+  component's score would defeat the contract.
+
+### lgwks_std Added
+
+- `similarity::CheckedSimilarity`, the checked scoring seam, and
+  `similarity::CheckedEvidence`, the authority-facing composition that carries
+  component identity, the refusal, and applicability through to the acceptance
+  decision (#160 S2). Any refused component withdraws the whole verdict at
+  every threshold including `0.0`; surviving weights are not renormalized, and
+  all-zero effective evidence is `EvidenceError::InsufficientEvidence`.
+- `similarity::EvidenceError`, the typed refusal shared by every checked
+  scorer: `DimensionMismatch`, `ZeroMagnitude`, `NonFinite`, `InputTooLong`,
+  `CollectionTooLong`, `InsufficientEvidence`, and `Composition` (#160 S2).
+- `similarity::{Evidence, ComponentOutcome, EvidenceVerdict}` (#160 S2).
+- `similarity::BoundedJaccard`, a set scorer that charges its element budget
+  before dedup and before the quadratic scan, so hostile input is refused
+  without paying the work it was trying to cause (#160 S4). `Jaccard` remains
+  available and is documented as unbounded.
+- `similarity::is_exact_path_match`, the exact path comparison that the lossy
+  `PathSimilarity` heuristic is not (#160 S4).
+- `similarity::EditDistance::normalized_length`, the unit the scorer's budget
+  actually charges: the lower-case-expanded scalar count, which differs from the
+  raw count because `İ` expands to two (#160 S4).
+- `glob::GlobPattern::token_count` and
+  `glob::GlobScratch::{scalar_capacity, row_capacity, row_count,
+  storage_bytes}`, so a caller can report pattern storage, scalar indexing, and
+  rolling rows separately rather than as one RSS figure (#154).
+
+### lgwks_std Fixed
+
+- `similarity`: a refused component can no longer become an acceptance. The
+  infallible `Weighted::is_accepted` still maps a refusal to `0.0` for source
+  compatibility and is documented as lossy; `CheckedEvidence::verdict` is the
+  path that retains it (#160 S2).
+- `similarity`: the `Similarity` implementation for `EditDistance` no longer
+  reports two identical over-limit inputs as `0.0` through the trait's identity
+  contract when the checked form refuses them (#160 S1).
+
 ### lgwks_bot Added
 
 - `task::{Host, Task, Report}`, the front door (#87 step 1): build a `Host` once

@@ -1517,6 +1517,117 @@ mod tests {
     }
 
     #[test]
+    fn every_evidence_error_variant_is_exercised_by_a_test() {
+        // Each variant of the refusal enum is produced here, so a new variant
+        // without a producer fails this test rather than sitting unreachable.
+        let produced: Vec<EvidenceError> = vec![
+            EvidenceError::from(EditDistanceError::InputTooLong {
+                maximum: 1,
+                observed: 2,
+            }),
+            EvidenceError::from(CosineError::DimensionMismatch { left: 1, right: 2 }),
+            EvidenceError::from(CosineError::ZeroMagnitude),
+            EvidenceError::from(CosineError::NonFinite),
+            EvidenceError::CollectionTooLong {
+                maximum: 1,
+                observed: 2,
+            },
+            EvidenceError::InsufficientEvidence {
+                total_weight: 0.0_f64.to_bits(),
+            },
+            EvidenceError::from(WeightedError::Empty),
+            EvidenceError::from(WeightedError::InvalidWeight { index: 0 }),
+            EvidenceError::from(WeightedError::WeightSumExceedsOne),
+            EvidenceError::from(WeightedError::InvalidThreshold),
+            EvidenceError::from(WeightedError::WeightCountMismatch {
+                scorers: 2,
+                weights: 1,
+            }),
+        ];
+        assert_eq!(
+            produced.len(),
+            11,
+            "every EvidenceError variant is produced exactly once"
+        );
+        // Each renders, and each conversion preserves the variant it came from.
+        for reason in &produced {
+            assert!(
+                !reason.to_string().is_empty(),
+                "{reason:?} must render a message"
+            );
+        }
+        assert_eq!(
+            EvidenceError::from(CosineError::ZeroMagnitude),
+            EvidenceError::ZeroMagnitude,
+            "a zero magnitude stays its own refusal through conversion"
+        );
+        assert_ne!(
+            EvidenceError::ZeroMagnitude.to_string(),
+            EvidenceError::NonFinite.to_string(),
+            "the two vector refusals must not render identically"
+        );
+        assert_ne!(
+            EvidenceError::InputTooLong {
+                maximum: 1,
+                observed: 2
+            }
+            .to_string(),
+            EvidenceError::CollectionTooLong {
+                maximum: 1,
+                observed: 2
+            }
+            .to_string(),
+            "the text and set budgets must name themselves apart"
+        );
+    }
+
+    #[test]
+    fn bounded_jaccard_refuses_before_the_quadratic_scan() -> Result<(), EvidenceError> {
+        let scorer = BoundedJaccard::<u32>::new(2);
+        assert_close(
+            CheckedSimilarity::try_score(&scorer, &[1, 2], &[2, 1])?,
+            1.0,
+        );
+        assert_eq!(
+            CheckedSimilarity::try_score(&scorer, &[1, 2, 3], &[1, 2]),
+            Err(EvidenceError::CollectionTooLong {
+                maximum: 2,
+                observed: 3
+            }),
+            "an over-budget set is refused with its limit, before dedup"
+        );
+        assert_close(Similarity::score(&scorer, &[], &[]), 1.0);
+        Ok(())
+    }
+
+    #[test]
+    fn the_normalized_budget_unit_is_the_expanded_scalar_count() -> Result<(), EditDistanceError> {
+        let tight = EditDistance::new(1);
+        assert_eq!(
+            tight.normalized_length("i"),
+            1,
+            "an ASCII scalar normalizes to itself"
+        );
+        assert_eq!(
+            tight.normalized_length("İ"),
+            2,
+            "`İ` lower-cases to two scalars, and that is the charged unit"
+        );
+        assert_eq!(
+            tight.try_score("İ", "i"),
+            Err(EditDistanceError::InputTooLong {
+                maximum: 1,
+                observed: 2
+            }),
+            "a budget of one refuses the expanded scalar, not the raw count"
+        );
+        let roomy = EditDistance::new(2);
+        // With room for the expansion, the pair is one edit over two scalars.
+        assert_close(roomy.try_score("İ", "i")?, 0.5);
+        Ok(())
+    }
+
+    #[test]
     fn jaccard_handles_boundary_sets() {
         let scorer = Jaccard::<&str>::new();
         assert_close(scorer.score(&[], &[]), 1.0);
