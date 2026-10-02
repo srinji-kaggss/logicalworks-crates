@@ -4,9 +4,9 @@
 //! `rename` are authored facts a capability policy has to see. The fixture is a
 //! real path-only workspace whose members each depend on one local `engine`
 //! package and vary exactly one dimension from `baseline`; `baseline.json` is the
-//! raw `cargo metadata` output, retained so the decode runs without Cargo and
-//! re-checked against a fresh run so the retained bytes cannot silently drift
-//! from what Cargo emits.
+//! retained `cargo metadata` output (its host-specific fixture root replaced by
+//! `__FIXTURE_ROOT__`), decoded without Cargo and re-checked against a fresh run
+//! so the retained bytes cannot silently drift from what Cargo emits.
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -16,15 +16,31 @@ use lgwks_deps::metadata::{self, DirectEdge};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
+/// The token `baseline.json` carries where a host's absolute fixture root would
+/// otherwise be. A retained capture holding a developer's `/Users/…` path only
+/// decoded on the machine that produced it; the token makes the same bytes
+/// portable to every checkout.
+const FIXTURE_ROOT_TOKEN: &str = "__FIXTURE_ROOT__";
+
 /// The fixture workspace root.
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cargo-metadata")
 }
 
-/// The retained raw metadata output, decoded through the public API.
-fn baseline() -> Result<Vec<DirectEdge>, Box<dyn Error>> {
+/// The retained raw metadata output, decoded through the public API with the
+/// placeholder root resolved to `root`. Every path-bearing field (`id`,
+/// `src_path`, `manifest_path`, dependency `path`, `target_directory`,
+/// `workspace_root`) is covered by the one substitution, because they all spell
+/// the same fixture root.
+fn baseline_at(root: &Path) -> Result<Vec<DirectEdge>, Box<dyn Error>> {
     let raw = std::fs::read_to_string(fixture().join("baseline.json"))?;
-    Ok(metadata::parse(&raw)?)
+    let resolved = raw.replace(FIXTURE_ROOT_TOKEN, &root.to_string_lossy());
+    Ok(metadata::parse(&resolved)?)
+}
+
+/// The retained output resolved against the fixture's own directory.
+fn baseline() -> Result<Vec<DirectEdge>, Box<dyn Error>> {
+    baseline_at(&fixture())
 }
 
 /// The single edge each dimension member authors, by consumer.
@@ -118,5 +134,80 @@ fn the_retained_metadata_matches_a_fresh_locked_run() -> TestResult {
         fresh, retained,
         "the retained baseline.json must match a fresh locked run"
     );
+    Ok(())
+}
+
+/// Copies the fixture workspace to `destination`, member directories and lock
+/// file included. Cargo's build output (`target/`) is derived and host-specific,
+/// so it is not copied: it is not part of the metadata subject.
+fn copy_fixture(source: &Path, destination: &Path) -> Result<(), Box<dyn Error>> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name.to_string_lossy() == "target" {
+            continue;
+        }
+        let to = destination.join(&name);
+        if entry.file_type()?.is_dir() {
+            copy_fixture(&entry.path(), &to)?;
+        } else {
+            std::fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// A distinguishable scratch name: wall-clock nanos plus a monotone sequence.
+/// A process id or a bare timestamp would be reused by the OS, so neither is an
+/// identity (INV-DEP-6).
+fn scratch_suffix() -> String {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos())
+        .unwrap_or(0);
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{nanos}-{sequence}")
+}
+
+/// The retained capture carries no host path: the same `baseline.json` decodes
+/// to the same edges after the fixture is copied to a different absolute
+/// directory and Cargo is re-run there. This is the portability proof for the
+/// hosted Linux runner, whose checkout root is not the developer's.
+#[test]
+fn the_retained_metadata_is_host_independent() -> TestResult {
+    let raw = std::fs::read_to_string(fixture().join("baseline.json"))?;
+    assert!(
+        !raw.contains("/Users/") && !raw.contains("/home/"),
+        "the retained baseline must carry no host path"
+    );
+
+    let root =
+        Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("cargo-metadata-{}", scratch_suffix()));
+    if root.exists() {
+        std::fs::remove_dir_all(&root)?;
+    }
+    copy_fixture(&fixture(), &root)?;
+
+    let retained = baseline_at(&root)?;
+    let manifest = root.join("Cargo.toml");
+    let output = Command::new(env!("CARGO"))
+        .args(["metadata", "--no-deps", "--format-version", "1", "--locked"])
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .current_dir(&root)
+        .output()?;
+    assert!(
+        output.status.success(),
+        "cargo metadata failed in the copied fixture: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let fresh = metadata::parse(&String::from_utf8(output.stdout)?)?;
+    assert_eq!(
+        fresh, retained,
+        "one retained baseline must decode identically at any absolute root"
+    );
+    std::fs::remove_dir_all(&root)?;
     Ok(())
 }

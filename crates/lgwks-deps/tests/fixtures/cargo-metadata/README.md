@@ -12,18 +12,24 @@ exactly one authored dimension from `baseline`:
 | `target_scope` | declared under `[target.'cfg(unix)'.dependencies]` |
 | `renamed` | `package = "engine"` under the local key `alias_engine` |
 
-`baseline.json` is the **raw, unedited** output of:
+`baseline.json` is Cargo's output with one edit: the absolute fixture root in
+every path-bearing field (`id`, `src_path`, `manifest_path`, dependency `path`,
+`target_directory` and `workspace_root`) is replaced by the fixed token
+`__FIXTURE_ROOT__`, so the retained bytes are identical on every checkout
+instead of naming the machine that captured them. Regenerate it with:
 
 ```sh
 cd crates/lgwks-deps/tests/fixtures/cargo-metadata
 cargo generate-lockfile          # writes Cargo.lock, committed
-cargo metadata --no-deps --format-version 1 --locked > baseline.json
+cargo metadata --no-deps --format-version 1 --locked \
+  | sed "s#$(pwd)#__FIXTURE_ROOT__#g" > baseline.json
 ```
 
-`baseline.json` is retained so the decode tests run without invoking Cargo, and
-`tests/metadata_dimensions.rs` additionally re-runs the command and compares the
-freshly decoded edges to the retained ones. The fixture is path-only, so the
-whole thing resolves, locks and compiles offline.
+`tests/metadata_dimensions.rs` substitutes the real fixture directory for the
+token when it loads the file, so the decode runs without invoking Cargo, and it
+additionally re-runs the command and compares the freshly decoded edges to the
+retained ones. The fixture is path-only, so the whole thing resolves, locks and
+compiles offline.
 
 `target_scope` is scoped to `cfg(unix)`, so the re-run comparison only asserts it
 on Unix hosts; the retained JSON always carries it.
