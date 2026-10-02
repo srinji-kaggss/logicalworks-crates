@@ -989,7 +989,7 @@ impl Supervisor {
     /// # async fn example() {
     /// let mut supervisor = Supervisor::new(2);
     /// let snapshot = supervisor.snapshot();
-    /// assert_eq!(snapshot.max_in_flight, 2);
+    /// assert_eq!(snapshot.max_in_flight(), 2);
     /// assert_eq!(snapshot.free(), 2, "a fresh supervisor holds both permits");
     /// assert_eq!(snapshot.next_action(), supervisor::NextAction::Admit);
     /// # }
