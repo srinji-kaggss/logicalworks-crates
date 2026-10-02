@@ -365,6 +365,10 @@ fn together_child(
     labels: &mut Labels,
     shapes: &mut Shapes,
 ) -> Result<(TokenStream, TokenStream)> {
+    lgwks_std::trace::warn!(
+        operation = "together_child",
+        "operation refused its request; the typed error carries the facts"
+    );
     let child_line = &child.line;
     refuse::check(&child_line.tokens)?;
     let (pattern, value) = if child_line.keyword().as_deref() == Some("let") {

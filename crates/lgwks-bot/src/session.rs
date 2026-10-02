@@ -598,12 +598,8 @@ impl Predicate {
     pub fn evaluate(&self, scope: &VarScope) -> Result<bool, BotError> {
         match *self {
             Self::Const(value) => Ok(value),
-            Self::Eq(ref left, ref right) => {
-                Ok(resolve_expr(left, scope)? == resolve_expr(right, scope)?)
-            }
-            Self::Ne(ref left, ref right) => {
-                Ok(resolve_expr(left, scope)? != resolve_expr(right, scope)?)
-            }
+            Self::Eq(ref left, ref right) => same_value(left, right, scope, true),
+            Self::Ne(ref left, ref right) => same_value(left, right, scope, false),
             Self::Lt(ref left, ref right) => {
                 compare_expr(left, right, scope, |ordering| ordering.is_lt())
             }
@@ -616,25 +612,60 @@ impl Predicate {
             Self::Ge(ref left, ref right) => {
                 compare_expr(left, right, scope, |ordering| ordering.is_ge())
             }
-            Self::And(ref items) => {
-                for item in items {
-                    if !item.evaluate(scope)? {
-                        return Ok(false);
-                    }
-                }
-                Ok(true)
-            }
-            Self::Or(ref items) => {
-                for item in items {
-                    if item.evaluate(scope)? {
-                        return Ok(true);
-                    }
-                }
-                Ok(false)
-            }
+            Self::And(ref items) => all_true(items, scope),
+            Self::Or(ref items) => any_true(items, scope),
             Self::Not(ref inner) => Ok(!inner.evaluate(scope)?),
         }
     }
+}
+
+/// Whether the two sides resolve to the same value, or to different ones.
+///
+/// `equal` is `true` for `Eq` and `false` for `Ne`, so one resolution path
+/// serves both: each side resolves exactly once, which matters because
+/// resolution is fallible and a side that resolved twice could fail twice.
+///
+/// This deliberately does not go through `compare_expr`. That one refuses a
+/// pair of different `Value` variants with `PredicateTypeMismatch`, where `==`
+/// here answers `false`; routing `Eq` through it would turn a comparison that
+/// has always answered into one that fails.
+fn same_value(
+    left: &ValueExpr,
+    right: &ValueExpr,
+    scope: &VarScope,
+    equal: bool,
+) -> Result<bool, BotError> {
+    let left_value = resolve_expr(left, scope)?;
+    let right_value = resolve_expr(right, scope)?;
+    Ok((left_value == right_value) == equal)
+}
+
+/// Every item must hold; evaluation stops at the first that does not.
+///
+/// `Ok(true)` on an empty list, the identity for `and`. The two short-circuit
+/// loops are helpers rather than arms because each was a loop with a
+/// propagation operator inside it, so the `match` above held three of them
+/// across two arms and a reader could not see the short-circuit rule without
+/// reading both loops in full.
+fn all_true(items: &[Predicate], scope: &VarScope) -> Result<bool, BotError> {
+    for item in items {
+        if !item.evaluate(scope)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Some item must hold; evaluation stops at the first that does.
+///
+/// `Ok(false)` on an empty list, the identity for `or`.
+fn any_true(items: &[Predicate], scope: &VarScope) -> Result<bool, BotError> {
+    for item in items {
+        if item.evaluate(scope)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// A declared flow node and its closed operation kind.
