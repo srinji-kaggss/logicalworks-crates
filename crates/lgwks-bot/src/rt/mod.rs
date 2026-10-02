@@ -11,6 +11,7 @@
 //! [`runtime`]: crate::rt::runtime
 //! [`task`]: crate::rt::task
 //! [`time`]: crate::rt::time
+//! [`clock`]: crate::rt::clock
 //! [`sync`]: crate::rt::sync
 //! [`Runtime`]: crate::rt::runtime::Runtime
 //! [`Handle`]: crate::rt::runtime::Handle
@@ -31,6 +32,9 @@
 //!   wrote — and nothing here returns a handle to a running task or process, so
 //!   nothing can be started and then forgotten.
 //! - [`time`] — `sleep`, `timeout`, `interval`, `Instant` (feature `time`).
+//! - [`clock`] — one declared logical clock that governs every deadline this
+//!   crate evaluates, plus the independent wall-clock watchdog that pausing it
+//!   cannot disable (feature `time`).
 //! - [`sync`] — `mpsc`, `oneshot`, `broadcast`, `watch`, `Mutex`, `RwLock`,
 //!   `Semaphore`, `Notify`, `Barrier` (feature `sync`).
 //! - `net` — async TCP/UDP and `lookup_host` (feature `net`).
@@ -77,6 +81,8 @@
 //! across worker threads is not deterministic; only the *result* order of
 //! [`join_all_bounded`](crate::rt::task::join_all_bounded) is.
 
+#[cfg(feature = "time")]
+pub mod clock;
 pub mod runtime;
 pub mod task;
 
