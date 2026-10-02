@@ -64,10 +64,10 @@ crates/lgwks-bot/src/rt/supervise.rs:829	const COOPERATIVE_DRAIN_GRACE: Duration
 crates/lgwks-bot/src/rt/supervise.rs:873	pub fn new(max_in_flight: usize) -> Self {
 crates/lgwks-bot/src/rt/supervise.rs:1170	pub async fn spawn_process(&mut self, spec: &ProcessSpec) -> io::Result<TaskId> {
 crates/lgwks-bot/src/rt/supervise.rs:1232	pub async fn run_process(&mut self, spec: &ProcessSpec) -> Result<ProcessRun, ProcessRunError> {
-crates/lgwks-bot/src/rt/supervise.rs:2309	pub async fn repeat<F, Fut>(token: &CancellationToken, budget: Budget, mut body: F) -> Outcome
-crates/lgwks-bot/src/rt/supervise.rs:2322	let deadline = match budget {
-crates/lgwks-bot/src/rt/supervise.rs:2345	match token.run_until_cancelled(body(iterations)).await {
-crates/lgwks-bot/src/rt/supervise.rs:2370	mod tests {
+crates/lgwks-bot/src/rt/supervise.rs:2328	pub async fn repeat<F, Fut>(token: &CancellationToken, budget: Budget, mut body: F) -> Outcome
+crates/lgwks-bot/src/rt/supervise.rs:2341	let deadline = match budget {
+crates/lgwks-bot/src/rt/supervise.rs:2364	match token.run_until_cancelled(body(iterations)).await {
+crates/lgwks-bot/src/rt/supervise.rs:2389	mod tests {
 crates/lgwks-bot/src/rt/task.rs:170	where
 crates/lgwks-bot/src/semantic.rs:13	//! This tier is consulted only when the lexicon returns [`Resolution::Absent`] —
 crates/lgwks-bot/src/semantic.rs:117	pub trait Embedder {

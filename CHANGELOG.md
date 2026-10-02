@@ -52,6 +52,13 @@ explicitly under that crate.
   further `killpg` (macOS/BSD). That is a still-present group, not a refused
   termination, so process-group cleanup reports `CleanupPending` and settles via
   the post-reap signal-zero probe instead of `CleanupFailed` (INV-BOT-19).
+- The drop-time group kill (a supervised run dropped mid-flight) was one
+  `killpg`. It now repeats while the unreaped leader still pins the group id,
+  so a member the first signal missed is reached. Known limit on macOS: a
+  child the leader is forking at the instant of the kill can still be created
+  after the leader dies, and the zombie leader then makes every further
+  `killpg` return `EPERM` without reaching it; Linux aborts such a fork. A
+  drop after the fork (T20) leaves no running member on either.
 
 ### lgwks_bot Breaking
 

@@ -2210,11 +2210,30 @@ impl<'ops> ProcessGroup<'ops> {
     }
 
     /// Signal the whole group as a drop-time safety fallback.
+    ///
+    /// One signal is not enough. A group signal reaches the members that exist
+    /// when it is sent, so a child the leader is forking at that instant can
+    /// miss it, outlive its killed parent and run on reparented to init — a
+    /// dropped run's `sh -c 'echo; sleep'` left exactly that `sleep` behind.
+    /// The kill therefore repeats, yielding the thread between attempts so a
+    /// fork in progress completes and is reached, for as long as the group is
+    /// still present (`Ok`, or `EPERM` for a zombie leader, INV-BOT-19). It
+    /// stops at absence or any other error, and never runs after the leader is
+    /// reaped, so the id it signals is still pinned (INV-BOT-12).
     fn kill(&self) {
         if self.leader_reaped || self.group <= 0 {
             return;
         }
-        let _outcome = self.signaller.signal(self.group);
+        for _ in 0..PROCESS_CLEANUP_ATTEMPTS {
+            match self.signaller.signal(self.group) {
+                Ok(()) => {}
+                Err(error)
+                    if error.kind() == io::ErrorKind::PermissionDenied
+                        || error.raw_os_error() == Some(1) => {}
+                Err(_) => return,
+            }
+            std::thread::yield_now();
+        }
     }
 
     /// Mark the group as already gone, so [`Drop`] does not signal it.

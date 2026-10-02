@@ -43,7 +43,7 @@ use lgwks_bot::{Auth, BotError, Cap, DispatchCertainty, Execute, GrantSet, Obser
 #[path = "support/process.rs"]
 mod process_probe;
 
-use process_probe::{PidDir, drop_after_pid, read_pid, wait_group_gone};
+use process_probe::{PidDir, drop_after_pid, read_pid, wait_group_gone, wait_group_stopped};
 
 /// What a test reports when a precondition did not hold.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -384,7 +384,9 @@ fn many_processes_stay_within_the_in_flight_bound() -> TestResult {
 fn dropping_a_run_future_after_the_fork_leaves_no_orphan() -> TestResult {
     let dir = PidDir::new("drop")?;
     let pid_file = dir.join("shell.pid");
-    let script = format!("echo $$ > {}; sleep 60", pid_file.display());
+    // The descendant is forked before the pid is written, so the drop lands
+    // after the fork (T20), never while one is in progress.
+    let script = format!("sleep 60 & echo $$ > {}; wait", pid_file.display());
     let runtime = lgwks_bot::Runtime::new()?;
     // The run future is dropped the moment its child reports its pid: the fork
     // has happened, the child is asleep, and the future goes away mid-flight.
@@ -403,8 +405,8 @@ fn dropping_a_run_future_after_the_fork_leaves_no_orphan() -> TestResult {
     let leader =
         leader.ok_or("the run future never started its child, or ended before the drop")?;
     assert!(
-        wait_group_gone(leader, BUDGET),
-        "dropping the run future must kill the process group it owned"
+        wait_group_stopped(leader, BUDGET),
+        "dropping the run future must kill every process of the group it owned"
     );
     Ok(())
 }
