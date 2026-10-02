@@ -318,22 +318,32 @@ fn a_cancelled_supervisor_refuses_before_starting_anything() -> TestResult {
 fn many_processes_stay_within_the_in_flight_bound() -> TestResult {
     const PROCESSES: usize = 200;
     const BOUND: usize = 16;
+    // `Stats::in_flight` counts tasks not yet reaped, which can briefly include
+    // one whose permit is already released, so it is not the live count. The
+    // children count themselves instead: each marks itself live, records how
+    // many live markers it saw, and moves its marker out before exiting. The
+    // highest record is a lower bound on the real concurrency, so it can only
+    // exceed the bound if the bound was not enforced.
+    let live = PidDir::new("bound-live")?;
+    let seen = PidDir::new("bound-seen")?;
+    let done = PidDir::new("bound-done")?;
+    let script = format!(
+        "touch {live}/$$; ls {live} | wc -l > {seen}/$$; sleep 0.02; mv {live}/$$ {done}/",
+        live = live.join("").display(),
+        seen = seen.join("").display(),
+        done = done.join("").display(),
+    );
     let runtime = lgwks_bot::Runtime::new()?;
-    let (high_water, completed, succeeded) = runtime.block_on(async {
+    let (completed, succeeded) = runtime.block_on(async {
         let mut supervisor = Supervisor::new(BOUND);
-        let mut high_water = 0_usize;
         for _ in 0..PROCESSES {
-            supervisor.spawn_process(&shell("exit 0")).await?;
-            let live = usize::try_from(supervisor.stats().in_flight()).unwrap_or(usize::MAX);
-            high_water = high_water.max(live);
+            supervisor.spawn_process(&shell(&script)).await?;
         }
         let deadline = std::time::Instant::now()
             .checked_add(BUDGET)
             .unwrap_or_else(std::time::Instant::now);
         while supervisor.stats().in_flight() > 0 {
             supervisor.reap();
-            let live = usize::try_from(supervisor.stats().in_flight()).unwrap_or(usize::MAX);
-            high_water = high_water.max(live);
             if std::time::Instant::now() >= deadline {
                 return Err(std::io::Error::other(
                     "processes did not settle within the budget",
@@ -342,8 +352,16 @@ fn many_processes_stay_within_the_in_flight_bound() -> TestResult {
             sleep(Duration::from_millis(2)).await;
         }
         let stats = supervisor.stats();
-        Ok::<_, std::io::Error>((high_water, stats.completed, stats.succeeded))
+        Ok::<_, std::io::Error>((stats.completed, stats.succeeded))
     })?;
+    let mut high_water = 0_usize;
+    let mut records = 0_usize;
+    for entry in std::fs::read_dir(seen.join(""))? {
+        let count = std::fs::read_to_string(entry?.path())?;
+        high_water = high_water.max(count.trim().parse::<usize>()?);
+        records = records.saturating_add(1);
+    }
+    assert_eq!(records, PROCESSES, "every child records what it saw");
     assert!(
         high_water <= BOUND,
         "the supervisor ran {high_water} processes at once against a bound of {BOUND}"

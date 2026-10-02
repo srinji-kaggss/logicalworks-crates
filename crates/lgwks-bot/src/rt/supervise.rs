@@ -673,7 +673,13 @@ pub struct Stats {
 }
 
 impl Stats {
-    /// Tasks started and not yet finished.
+    /// Tasks started and not yet reaped.
+    ///
+    /// This is accounting, not a live count: `completed` advances when a task
+    /// is joined (by [`Supervisor::reap`] or the reap every spawn performs), so
+    /// a task that has ended and released its permit counts here until then,
+    /// and the value can briefly exceed the in-flight bound. The bound itself
+    /// is enforced by the permits, which a task holds for its whole run.
     ///
     /// Saturated subtraction: `completed` cannot exceed `spawned` because both
     /// advance on the same path, but a counter pair that silently wrapped would
