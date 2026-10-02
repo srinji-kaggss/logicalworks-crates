@@ -49,6 +49,11 @@ explicitly under that crate.
   Concurrent verb calls on one `Process` share a bounded slot pool
   (`DEFAULT_MAX_CONCURRENT`, set with `Process::max_concurrent`), claimed
   before the fork, so a burst of calls never forks a burst of children.
+- The `compare_orchestration` example gains a `host` way — `Host::run` per item
+  with the host's admission ceiling as the fan-out bound and matched semantics
+  against the hand-written `JoinSet`+`Semaphore` and `join_all_bounded` ways —
+  and a `measure_overhead` example prints p50/p95/p99 for `Host::run` and
+  `sys::Process`.
 
 ### lgwks_bot Changed
 

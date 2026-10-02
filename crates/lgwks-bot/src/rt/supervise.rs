@@ -2423,6 +2423,27 @@ mod tests {
         assert_eq!(supervisor.stats().spawned, 0);
     }
 
+    #[cfg(all(not(unix), feature = "process"))]
+    #[test]
+    fn non_unix_process_group_run_is_refused_as_unsupported() {
+        let mut supervisor = Supervisor::new(1);
+        let result = block_on(supervisor.run_process(&ProcessSpec::new("unused")));
+        assert!(
+            result.as_ref().err().is_some_and(|error| match *error {
+                crate::rt::process::ProcessRunError::NotStarted { ref source } => {
+                    source.kind() == std::io::ErrorKind::Unsupported
+                }
+                _ => false,
+            }),
+            "the result-bearing runner must refuse on non-Unix before the fork, got {result:?}"
+        );
+        assert_eq!(
+            supervisor.stats().spawned,
+            0,
+            "a refused run must start nothing"
+        );
+    }
+
     /// Panic on the calling task, carrying `message` as the payload.
     ///
     /// `resume_unwind` and not `panic!`: the workspace forbids `panic` outright

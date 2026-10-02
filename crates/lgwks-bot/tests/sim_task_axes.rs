@@ -233,11 +233,7 @@ fn two_tenants_stay_isolated(band: Band) -> TestResult {
             "a key is scoped by its tenant, so a shared path keys apart"
         );
         for host in [&acme, &globex] {
-            load::assert_budget_whole(
-                host,
-                ceiling,
-                &format!("tenant {}", host.tenant()),
-            );
+            load::assert_budget_whole(host, ceiling, &format!("tenant {}", host.tenant()));
         }
         assert_eq!(
             acme.admission().admitted(),
@@ -418,9 +414,7 @@ fn names_inputs_and_limits(band: Band) -> TestResult {
                     NonZeroUsize::new(over).ok_or("the bound plus one is a nonzero limit")?;
                 assert!(
                     matches!(
-                        Host::builder("acme")?
-                            .max_concurrent_tasks(limit)
-                            .build(),
+                        Host::builder("acme")?.max_concurrent_tasks(limit).build(),
                         Err(HostError::Bound { .. })
                     ),
                     "an admission ceiling past the bound is refused"
@@ -428,7 +422,9 @@ fn names_inputs_and_limits(band: Band) -> TestResult {
             }
             3 => assert!(
                 matches!(
-                    Host::builder("acme")?.default_deadline(Duration::ZERO).build(),
+                    Host::builder("acme")?
+                        .default_deadline(Duration::ZERO)
+                        .build(),
                     Err(HostError::Bound { .. })
                 ),
                 "a zero deadline is refused at build time"

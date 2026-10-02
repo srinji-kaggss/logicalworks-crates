@@ -367,10 +367,17 @@ Each of these was a shipped defect. Treat the list as the spec.
   an exit of zero is reported as an exit of zero, never as a completed task.
   Concurrent verb calls on one `sys::Process` share one bounded slot pool,
   claimed before the fork, so a burst of calls never forks past the ceiling.
+  On a non-Unix target the supervised process surface is a typed pre-fork
+  refusal (`io::ErrorKind::Unsupported`, `DispatchCertainty::Refused`) rather
+  than a second spawn path. The drop-time group kill repeats only while the
+  unreaped leader pins the group id, so a member forked at the instant of the
+  kill can still outlive the leader on macOS/BSD (Linux aborts such a fork);
+  no bounded fix preserves INV-BOT-12, because after the leader is reaped the
+  numeric id may be reused and the cleanup owner is observation-only by design.
   · why: #151 sys part, T05/T19/T20/T35 · enforced by:
   `tests/sys_process_binding.rs` (including
   `concurrent_calls_on_one_process_share_its_ceiling`), `tests/sim_process.rs`,
-  and `rt::supervise::tests`
+  `tests/sys_process_portable.rs` (non-Unix), and `rt::supervise::tests`
 - **INV-BOT-19** After a delivered group signal, an `EPERM` from a further
   `killpg` against the still-present, unreaped group is an observation that the
   group is present, not a refused termination: cleanup stays pending and is
@@ -391,6 +398,18 @@ Each of these was a shipped defect. Treat the list as the spec.
   disposition, output or located error, and every report says no external
   effect is known. · why: #87 step 1 (T01–T04, T36) · enforced by:
   `tests/task_front_door.rs` and `tests/sim_task.rs`
+- **INV-BOT-21** The task front door's nine-axis evidence: a drawn scale of
+  concurrent `Host::run` never exceeds the admission ceiling and returns every
+  permit (100/1,000/10,000 tiers with recovery); two hosts with different
+  tenants over one shared task name and step path produce distinct step keys,
+  reports and budgets under concurrency; dropping or cancelling a suspended run
+  releases every permit and leaves nothing in flight; and task names, inputs
+  and host limits are accepted or refused exactly on their declared boundaries.
+  · why: #203 nine-axis review · enforced by:
+  `tests/sim_task_axes.rs` (`saturation_conserves_permits`,
+  `saturation_reaches_100_1000_and_10000_with_recovery`,
+  `two_tenants_stay_isolated`, `a_dropped_run_releases_everything`,
+  `names_inputs_and_limits`) and `examples/compare_orchestration.rs`
 
 ## Open questions for the Director
 

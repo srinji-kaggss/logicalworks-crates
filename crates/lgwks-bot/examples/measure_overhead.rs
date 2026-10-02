@@ -6,8 +6,10 @@
 //!
 //! Two lines are printed, one JSON object each: `host_run` (one `Host::run` of
 //! an immediately-ready body) and `process_run` (one `sys::Process` execute of
-//! `true`). Latency is in milliseconds per call, measured around the public
-//! entry point; `rss_kib` is this process's resident set after the sweep.
+//! `true`). Latency is in microseconds per call, measured around the public
+//! entry point. Peak RSS is read externally (`/usr/bin/time -l`), not from
+//! inside: a process id is an identity the OS reuses, which the estate's
+//! std-first gate refuses.
 //!
 //! This is a measurement, not a gate: the separate `sim_task_axes` tests assert
 //! the invariants, and this prints the numbers a reader needs to judge the
@@ -33,28 +35,17 @@ fn percentile(sorted: &[u64], permille: usize) -> u64 {
     sorted.get(rank).copied().unwrap_or(0)
 }
 
-/// This process's resident set in KiB, via `ps`. A measurement, not a bound.
-fn rss_kib() -> Option<u64> {
-    let pid = std::process::id().to_string();
-    let output = std::process::Command::new("ps")
-        .args(["-o", "rss=", "-p", &pid])
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
-}
-
 /// Summarise a sample as one JSON line, in microseconds.
 fn report(name: &str, mut samples: Vec<u64>, runs: usize) -> std::io::Result<()> {
     samples.sort_unstable();
     writeln!(
         std::io::stdout().lock(),
         "{{\"name\":\"{name}\",\"runs\":{runs},\"p50_us\":{},\"p95_us\":{},\"p99_us\":{},\
-         \"max_us\":{},\"rss_kib\":{}}}",
+         \"max_us\":{}}}",
         percentile(&samples, 500),
         percentile(&samples, 950),
         percentile(&samples, 990),
         percentile(&samples, 1_000),
-        rss_kib().map_or(0, |value| value),
     )
 }
 
