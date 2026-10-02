@@ -27,19 +27,32 @@
 //!
 //! # Uniqueness
 //!
-//! Identifiers are expected to be unique within a list, and
-//! [`DomainRegistry::validate`] refuses a list that declares one twice, naming
-//! the identifier, the role and both positions. Every construction path checks
-//! that first — [`DomainRegistry::build_source`], [`DomainRegistry::build_action`]
-//! and the spec materializer — so a duplicate refuses the whole registry rather
-//! than making dispatch depend on declaration order.
+//! Identifiers are expected to be unique within a role, and the boundary
+//! between "refused" and "first wins" is exactly this:
 //!
-//! The public lookups [`DomainRegistry::source`] and [`DomainRegistry::action`]
-//! refuse an ambiguous identifier exactly as they refuse an absent one: neither
-//! ever resolves to "whichever constructor was declared first", so a caller that
-//! skips [`DomainRegistry::validate`] still cannot reach an ambiguous
-//! constructor. One identifier used once per role is one domain with two roles,
-//! not a duplicate.
+//! - **Construction is validated.** [`DomainRegistry::validate`] refuses a
+//!   registry that declares one identifier twice in the same role, naming both
+//!   positions, and every build path — [`DomainRegistry::build_source`],
+//!   [`DomainRegistry::build_action`] and the `domains!` macro — goes through
+//!   it, so no registry with a duplicate can be constructed. Letting the first
+//!   declaration win would make dispatch depend on declaration order.
+//! - **The lookup accessors refuse ambiguity too.** [`DomainRegistry::source`]
+//!   and [`DomainRegistry::action`] return `None` for an identifier declared
+//!   more than once in their list, exactly as they do for an absent one; neither
+//!   ever resolves to "whichever constructor was declared first", so a caller
+//!   that skips [`DomainRegistry::validate`] still cannot reach an ambiguous
+//!   constructor. They are the accessors, not an alternative construction path.
+//!
+//! The two roles are checked independently: one identifier appearing once as a
+//! source and once as an action is one domain with two roles, not a duplicate.
+//!
+//! Exercised by `tests/registry.rs`:
+//! `a_duplicate_source_identifier_is_refused_with_both_positions`,
+//! `a_duplicate_action_identifier_is_refused_the_same_way`,
+//! `validate_names_the_first_duplicate_pair_and_passes_clean_lists` and
+//! `an_ambiguous_identifier_is_not_resolved_by_declaration_order`; the
+//! downstream consequence by `tests/spec_materialize.rs`'s
+//! `a_duplicate_registry_is_refused_naming_the_identifier`.
 
 use std::any::Any;
 

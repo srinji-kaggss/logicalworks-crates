@@ -1,0 +1,95 @@
+id: http-read-path-ceiling
+actor: agent-or-human-dev
+job: Fetch one HTTP response with a declared body ceiling, and know afterwards
+  exactly how much memory the exchange could commit regardless of what the
+  server sends, why a failure happened, and that nothing but the body's own
+  bytes reached the caller.
+prior_knowledge:
+  - Knows the URL and the size of response they can afford; has not read the
+    http module.
+  - Assumes a slow or oversized response makes the client hold the whole body
+    before deciding, and that a closed connection means the body was complete.
+    Both are wrong, and this journey is where they learn it.
+start:
+  installation: lgwks_std built with the http feature; a loopback or real endpoint.
+  state: a caller that must bound what one remote server can make this process
+    hold, and must be able to tell a cut body from a complete one.
+success:
+  visible_outcome: the response's body is at most the declared ceiling, a preview
+    says it was cut, a transport torn before its declared length is a typed
+    failure rather than a short success, and the peak heap is driven by the
+    engine's fixed buffering rather than by the server's declared size.
+states:
+  - name: within-ceiling
+    expectation: a body at or under the ceiling is kept whole and reported Complete.
+  - name: over-ceiling-whole
+    expectation: under BodyPolicy::Whole an over-ceiling body is refused with
+      BodyTooLarge carrying the limit, never returned as a prefix.
+  - name: over-ceiling-preview
+    expectation: under BodyPolicy::Preview the prefix is the result, reported Cut,
+      and the body bytes past the ceiling are never allocated.
+  - name: torn
+    expectation: a response closed before its declared Content-Length is a
+      Failure at the Body stage with a Transport kind, never a Complete short body.
+invariants:
+  - The body read window is one fixed chunk, never the declared body length.
+  - Retained body capacity is clamped to the declared ceiling, even at a
+    non-power-of-two ceiling.
+  - A body timeout or a torn transport is never EOF, a complete preview, or
+    proof of no effect.
+  - Two identities polling one endpoint keep their headers to themselves.
+trust_boundaries:
+  - The server authors its own response, including a lying Content-Length; the
+    client trusts none of it past the declared ceiling.
+  - A redirect target is another identity's claim and carries no caller header
+    from another origin.
+recovery_contracts:
+  - An over-ceiling refusal names the limit and the two ways forward (raise the
+    ceiling, or select Preview).
+  - An interrupted or torn read is a typed failure at its observed stage; a
+    retry is the caller's decision, keyed for idempotency.
+agent_contracts:
+  - get_with returns HTTP error statuses as a Response, and only transport,
+    timeout and invalid-URL conditions as Error.
+  - Response::text distinguishes invalid UTF-8 (a payload decode failure) from
+    transport failure; the exchange may still have completed.
+profiles:
+  - first-time-dev: starts from Options::default, sees a generous 8 MiB ceiling
+    and a typed error rather than a truncated body.
+  - expert-in-a-hurry: sets max_body_bytes and BodyPolicy::Preview and reads the
+    prefix plus Truncation in one place.
+  - anxious-user: reads exact typed stages and classes instead of parsing
+    display strings; a failure never claims no effect.
+  - misuser: sends a bogus/huge Content-Length; the ceiling holds regardless.
+  - ai-agent: drives the public API from a separate crate, measures the
+    allocator, and asserts the ceiling from outside.
+probes:
+  - id: ceiling-at-non-power-of-two
+    action: "Run `sim_http::seeded_ceiling_families_match_the_declared_outcome`:
+      for 48 seeds, serve a body at, under and over a non-power-of-two ceiling
+      under Whole and Preview and assert the exact body length, truncation, or
+      BodyTooLarge limit."
+  - id: read-window-and-capacity
+    action: "Run
+      `http::tests::the_read_window_is_a_fixed_chunk_and_capacity_is_clamped_to_the_ceiling`:
+      a recording reader proves the window is min(remaining, READ_CHUNK_BYTES)
+      and the retained capacity equals the non-power-of-two ceiling."
+  - id: torn-transport-is-refusal
+    action: "Run `sim_http::a_seeded_torn_transport_is_never_a_complete_body`: for
+      48 seeds, close the transport at a seeded byte count before the declared
+      length and assert a Body-stage Transport failure, or a Complete body only
+      when every declared byte arrived."
+  - id: tenant-isolation
+    action: "Run `sim_http::two_tenants_on_one_endpoint_stay_isolated`: two
+      identities poll one endpoint concurrently and each recorded request carries
+      only its own X-Tenant value."
+  - id: allocation-budget
+    action: "Run
+      `http_alloc::the_read_path_retains_the_ceiling_not_the_body`: a counting
+      global allocator measures retained bytes, header bytes, peak and eager
+      buffering separately at a 3003-byte ceiling, and a 3 MB preview peak stays
+      near the 3 KB case rather than near the body."
+  - id: eager-mutant-discriminated
+    action: "Within the allocation probe, an eager reader that reserves the
+      declared length and drains unbounded reports a peak at least the body size,
+      proving the same metric that bounds the real path would fail the mutant."

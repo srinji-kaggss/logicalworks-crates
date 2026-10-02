@@ -30,6 +30,40 @@
 //!   never trimmed, because the frame may have been acknowledged, and an
 //!   acknowledgment the journal quietly rewrites is not a record.
 //!
+//! # The acknowledged-final-frame case that is still repaired rather than refused
+//!
+//! The rule above holds for a frame whose length field is *true*. It does **not**
+//! currently hold for the last case, and the exception is stated here rather
+//! than left to be discovered, because a doc claim that reads as universal while
+//! one reachable shape truncates is worse than a smaller true claim.
+//!
+//! If the final frame is **acknowledged and complete**, and its stored length is
+//! then changed from `L` to `L + 1`, the tail claims one more payload byte than
+//! the disk holds. Two files are byte-identical here: an append a writer never
+//! finished, and a complete frame whose prefix lies. `resolve_ambiguous_tail`
+//! discriminates them by trying the bytes actually present (the tail minus a
+//! head) as a frame — if they decode, chain from the committed history and
+//! reproduce the stored head exactly, the complete frame was already on disk and
+//! its prefix lied, and the file is **refused with
+//! [`JournalError::Corrupt`] and left untouched**. Anything else was never a
+//! complete frame, and is repaired as the torn tail it is.
+//!
+//! The reported defect is in that middle step: a tail of `L + 1 - 32` bytes is
+//! a whole frame **except** for its final 32-byte head, so the
+//! minus-a-head reconstruction cannot reproduce the stored head it is checked
+//! against, and the case falls to the torn-tail arm and is **truncated**. That
+//! truncates bytes an acknowledged writer committed, which is the reasoning the
+//! "never trimmed" rule above exists to forbid.
+//!
+//! **This is an open finding, not a documented behaviour.** Owner
+//! [#143](https://github.com/srinji-kaggss/logicalworks-crates/issues/143); the
+//! concrete `L -> L+1` trace is in that issue's Sep-27 comment. The fix must
+//! make the public regression *discriminate* the two dispositions — a real
+//! acknowledged frame whose length moved must be refused, and only a genuinely
+//! partial tail may be truncated — without weakening the no-resend safety the
+//! refusal exists for. Until it lands, **unattended durable automation stays
+//! held**; do not read the sentence above as a claim that it does not.
+//!
 //! # Bounds
 //!
 //! One frame may not exceed [`MAX_FRAME_BYTES`]; a journal whose events were
@@ -45,14 +79,39 @@
 //!
 //! The [`EffectJournal::compare_and_append`] fence is a fence over positions,
 //! and this adapter adds a byte-length staleness check: an append from a view
-//! that no longer matches the file is refused. What no std-only adapter can
-//! provide is mutual exclusion between two live writers, because the platform's
-//! advisory locks are outside `std`; concurrent controllers on one file remain
-//! a caller obligation. The stored heads make any interleaving they produce
-//! detectable on the next open rather than silently accepted, and detection
-//! here is permanent: [`JournalError::Corrupt`] is never trimmed and no tool
-//! in this module rewrites refused bytes, so a bricked file stays bricked
-//! until an operator takes it in hand.
+//! that no longer matches the file is refused.
+//!
+//! On top of that, [`FileJournal::open`] takes the file's **exclusive advisory
+//! lock** through `File::try_lock` *before* it reads, scans or repairs a byte,
+//! and refuses a second opener with [`JournalError::Locked`] rather than
+//! scanning a file somebody else is writing. The lock lives for the lifetime of
+//! the returned journal, and a writer that dies releases it, so the next
+//! `open` succeeds.
+//!
+//! What that lock is, stated precisely, because the difference matters:
+//!
+//! - It is an **advisory** lock. It binds writers that come through
+//!   [`FileJournal::open`]. A writer that never asks for the lock is outside
+//!   its reach entirely, and a hostile editor that truncates or rewrites the
+//!   file behind the owner's back is not detected by it.
+//! - It is **lifetime-scoped and local**. It is an operating-system file lock
+//!   on one host. It is not a distributed lease, and two controllers on two
+//!   hosts pointed at one network file are not serialized by it.
+//! - It depends on the **filesystem** implementing advisory locks. A
+//!   filesystem that does not is not refused; see [`JournalError::Locked`],
+//!   which states this.
+//!
+//! Both limits are stated on the error rather than hidden. The stored heads
+//! additionally make an interleaved write detectable on the next open rather
+//! than silently accepted, and that detection is permanent:
+//! [`JournalError::Corrupt`] is never trimmed and no tool in this module
+//! rewrites refused bytes, so a bricked file stays bricked until an operator
+//! takes it in hand.
+//!
+//! The cross-process half of this — that the fence actually holds between two
+//! live processes and is reacquired when the holder dies — is exercised by
+//! `tests/journal_writer_fence.rs`, which re-executes this test binary as a
+//! second process rather than simulating one.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};

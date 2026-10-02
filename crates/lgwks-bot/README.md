@@ -748,9 +748,13 @@ Invariants (enforced by `crates/lgwks-bot/tests/rt_async_tier.rs` and
 
 ## The other crates
 
-Four crates ship from this repository. They share a release process, not a
-dependency graph: `lgwks_bot` and `lgwks_deps` depend on `lgwks_std`, and
-`lgwks_ast` stands alone.
+Five crates ship from this repository — the four in the table below plus
+`lgwks_macros`, a proc-macro crate carrying the syntax of `lgwks_bot::script!`
+which exists only because Rust requires a proc macro to live in its own crate.
+It is not a surface of its own; use it through `lgwks_bot`. They share a
+release process, not a dependency graph: `lgwks_bot` and `lgwks_deps` depend on
+`lgwks_std` (unconditionally, plus an optional `lgwks_macros` behind `bot`'s
+`script` feature), and `lgwks_ast` stands alone.
 
 | Crate | What it gives you |
 |---|---|

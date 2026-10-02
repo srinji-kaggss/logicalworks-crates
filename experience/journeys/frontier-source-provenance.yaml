@@ -1,0 +1,71 @@
+id: frontier-source-provenance
+actor: agent-or-human-doc-reader
+job: Read a frontier or comparison page and be able to tell, for every claim
+  about an external project, which release it was checked against, on what date,
+  and whether the project's own source actually supports it.
+prior_knowledge:
+  - Knows the domain claim; has not opened any external project's repository.
+  - Assumes a quoted sentence in the page is verbatim from the project, and that
+    a claim with no citation is still sourced. Both assumptions are what this
+    journey corrects.
+start:
+  installation: the repository checked out; network access to a project's own
+    repository, release notes or documentation.
+  state: a comparison page whose claims cite no version, no access date, and in
+    places no source at all.
+success:
+  visible_outcome: every external project on the page carries a pinned version or
+    tag and the access date; each claim is verified, corrected, or explicitly
+    marked unsourced; a quote matches its source; no claim about this crate is
+    dressed up as a measurement.
+states:
+  - name: sourced
+    expectation: the claim matches the project's own source at the pinned
+      version, and the version and access date appear next to it.
+  - name: corrected
+    expectation: the source contradicts the claim, and the page now states what
+      the source says, naming what the old text said and why it changed.
+  - name: unsourced
+    expectation: the project's own source does not carry the claim; the claim is
+      marked unsourced rather than deleted, so the reader sees both the idea and
+      its missing evidence.
+  - name: research-labelled
+    expectation: a paper, patent, leaderboard or RFC is labelled research, never
+      presented as a benchmark of this crate.
+invariants:
+  - A version number without an access date is not provenance.
+  - A quote that is not verbatim is not a quote.
+  - Unsourced is a finding to keep, not a gap to hide.
+  - A research anchor proves nothing about this crate's runtime.
+trust_boundaries:
+  - "An external project's source is authoritative for that project; this
+    repository is authoritative only for its own claims."
+  - A failed fetch is reported as a limit, never inferred into a claim.
+recovery_contracts:
+  - When a source is unreachable, say so on the page rather than skip the claim.
+  - When a claim cannot be sourced, mark it unsourced beside the claim.
+  - When text moves, re-resolve every repo-relative citation and review the diff.
+agent_contracts:
+  - The verification names the exact tag or version and the access date.
+  - A corrected claim keeps the original wording visible enough to audit.
+  - A page in a doc lane still builds after the edit.
+probes:
+  - id: version-and-date-present
+    action: Assert every external project row carries a version/tag and the
+      access date 2026-10-02.
+  - id: quote-matches-source
+    action: Diff each quoted spider-rs sentence against its README at the pinned
+      tag v2.52.2; assert the page quotes the tag's wording, not main's, and
+      names which text belongs to main.
+  - id: unsourced-is-kept
+    action: Assert the discord.py "undeclared event errors" and the Crawlee
+      Pydantic-extraction claims are marked unsourced rather than removed.
+  - id: contradicted-is-corrected
+    action: Assert smol's cancellation-token cell reads not-supported and the
+      async-std deprecation is stated from its own crate metadata.
+  - id: citations-resolve
+    action: Run the doc-citation check before and after; assert no citation
+      fails and no new unresolvable citation is introduced.
+  - id: no-invented-metrics
+    action: Assert the pages carry no new runtime number; every figure is
+      labelled research or a quoted project statistic.

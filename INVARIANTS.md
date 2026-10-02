@@ -164,6 +164,21 @@ Each of these was a shipped defect. Treat the list as the spec.
   `http::tests::eof_probe_timeout_preserves_stage_and_class`,
   `http::tests::legal_header_bytes_and_repeated_values_are_preserved`, and
   `http::tests::redirect_loop_refuses_at_the_configured_limit`
+- **INV-STD-HTTP-2** The HTTP body ceiling is a measured bound, not an
+  assertion. The body reader is handed one window of `min(remaining,
+  READ_CHUNK_BYTES)` per call, never the declared body length; retained `Vec`
+  capacity clamps to the declared ceiling at non-power-of-two sizes; retained
+  header value bytes and the live heap held while a `Response` is alive are
+  countable separately; the peak heap of a call is dominated by the engine's
+  fixed buffering rather than by the body, so a preview of a body thousands of
+  times the ceiling peaks within a fixed slack of a call whose body is at the
+  ceiling; and an eager reader that reserves the declared length and drains the
+  transport is measurably outside that bound. · why: #163 A5 · enforced by:
+  `http::tests::the_read_window_is_a_fixed_chunk_and_capacity_is_clamped_to_the_ceiling`,
+  `tests/sim_http.rs` (`seeded_ceiling_families_match_the_declared_outcome`,
+  `a_seeded_torn_transport_is_never_a_complete_body`,
+  `two_tenants_on_one_endpoint_stay_isolated`), and `tests/http_alloc.rs`
+  (`the_read_path_retains_the_ceiling_not_the_body`).
 - **INV-STD-ONLINE-1** Resolved reachability candidates share one monotonic
   connection budget and at most 64 addresses are attempted; each is offered an
   equal share of what remains, so a blackholed candidate cannot starve the
@@ -172,8 +187,9 @@ Each of these was a shipped defect. Treat the list as the spec.
   the literal `is_online` endpoints share the same budget. The Boolean result
   remains a TCP heuristic, not application health. · why: #163 N4 · enforced
   by: `online::tests::address_candidates_share_one_remaining_budget`,
-  `online::tests::a_blackholed_candidate_does_not_starve_the_next` and
-  `online::tests::resolver_delay_is_outside_the_connection_budget`
+  `online::tests::a_blackholed_candidate_does_not_starve_the_next`,
+  `online::tests::resolver_delay_is_outside_the_connection_budget` and
+  `online::tests::a_whole_probe_fits_one_wall_clock_budget`
 - **INV-GLOB-1** Glob matching is anchored and operates on Unicode scalar
   values without normalization: `?` and classes consume one scalar, `/` is
   excluded from `?`, `*`, and all classes (including negated classes), `*`
@@ -202,8 +218,12 @@ Each of these was a shipped defect. Treat the list as the spec.
   alignment, and archived pointer width are observable via
   `wire::format_descriptor`; callers bind those properties and their own schema
   version before persisting or exchanging bytes. Structural validation does not
-  establish application validity or schema identity. · why: #167 · enforced by:
-  `tests/wire_consumer.rs`
+  establish application validity or schema identity. A retained fixture pins the
+  schema and format and is read on every target whose format matches; a
+  feature-unification probe selects an alternate pointer width and proves the
+  descriptor and the emitted bytes move with it. · why: #167 · enforced by:
+  `tests/wire_consumer.rs`, `tests/wire_fixture.rs`, `tests/sim_wire.rs` and
+  `tests/wire_feature_unification.rs`
 - **INV-PATTERN-SAFE** A single regex search costs worst-case `O(m * n)`, but
   complete greedy match, split, and replacement iteration may cost `O(m * n^2)`;
   iterator laziness does not promise prefix-only search work. Checked patterns
@@ -323,6 +343,22 @@ Each of these was a shipped defect. Treat the list as the spec.
 
 - **INV-DOC-1** Bare `//!` intra-doc links break when `lib.rs` also doc-comments the
   `mod`; use reference definitions. · enforced by: rustdoc `-D warnings` in CI
+- **INV-DOC-2** A documentation claim about a capability is stated at the level
+  the evidence supports, names the test that observes it, and names its owning
+  issue when the property is not yet exercised. A claim resolved to a file and
+  a line, a green job, or a passing unit suite is not evidence of the
+  behavioural property; and an admitted dependency edge, a build check and an
+  external observation are three different things. · why: #155 and #170 found
+  prose describing a journal with no lock, a registry that accepted duplicates,
+  a 33-grammar matrix that has 28, a lint split that does not partition its
+  corpus, and a portability verdict that rested on a three-OS *build* · enforced
+  by: the `doc-citations` lane, which runs
+  python3 scripts/check-doc-citations.py (citation layer: a cited line must exist
+  and still read as a person last checked it). The claim layer is
+  docs/std-ast-deps-closure-matrix.md: every one of the twenty lgwks_std
+  modules, lgwks_ast and lgwks_deps carries a state from the fixed vocabulary
+  exercised / present / unexercised-gap / assurance-gap /
+  admitted-not-implemented, plus the test that exists
 
 ## Governance as code
 
@@ -367,10 +403,17 @@ Each of these was a shipped defect. Treat the list as the spec.
   an exit of zero is reported as an exit of zero, never as a completed task.
   Concurrent verb calls on one `sys::Process` share one bounded slot pool,
   claimed before the fork, so a burst of calls never forks past the ceiling.
+  On a non-Unix target the supervised process surface is a typed pre-fork
+  refusal (`io::ErrorKind::Unsupported`, `DispatchCertainty::Refused`) rather
+  than a second spawn path. The drop-time group kill repeats only while the
+  unreaped leader pins the group id, so a member forked at the instant of the
+  kill can still outlive the leader on macOS/BSD (Linux aborts such a fork);
+  no bounded fix preserves INV-BOT-12, because after the leader is reaped the
+  numeric id may be reused and the cleanup owner is observation-only by design.
   · why: #151 sys part, T05/T19/T20/T35 · enforced by:
   `tests/sys_process_binding.rs` (including
   `concurrent_calls_on_one_process_share_its_ceiling`), `tests/sim_process.rs`,
-  and `rt::supervise::tests`
+  `tests/sys_process_portable.rs` (non-Unix), and `rt::supervise::tests`
 - **INV-BOT-19** After a delivered group signal, an `EPERM` from a further
   `killpg` against the still-present, unreaped group is an observation that the
   group is present, not a refused termination: cleanup stays pending and is
@@ -380,6 +423,46 @@ Each of these was a shipped defect. Treat the list as the spec.
   enforced by:
   `rt::supervise::tests::an_unsignalable_present_group_stays_pending_rather_than_failed`
   and `rt::supervise::tests::an_unexpected_signal_error_is_a_failed_cleanup`
+- **INV-BOT-21** A structural inspection reads and parses the subject's bytes
+  and never executes them: no compile, import, build-script evaluation,
+  dependency install, shell invocation or dynamic-library load of the subject,
+  and the subject's instructions remain data. It parses through `lgwks_ast`
+  (never a second parser) and walks with budgets on **separate** axes — source
+  bytes, nodes, depth, work, retained findings and emitted output — refusing
+  before avoidable amplification. Its verdict is typed: a supported and
+  complete clean scope is `Clean`, and an unsupported grammar or rule set, an
+  unconfirmable declared version, a budget exhaustion or parse recovery, and an
+  infrastructure failure are distinct non-clean arms. Rule support is reported
+  per rule and is separate from grammar support; a `Clean` result claims only
+  that the configured rules did not match, never that the subject is safe. The
+  one operation is reachable through the same registry/admission path every
+  other domain uses — a [`Query`](crate::verb::Query) over supplied bytes
+  (`domain::inspect::Inspector`) and an [`Observe`](crate::verb::Observe)
+  source that reads the artifact under `bot.fs` (`domain::inspect::Subject`) —
+  and as a `Host`-run `Task`, and every door returns the operation's own report;
+  the artifact-read source is admitted, or refused, exactly like any other
+  capped domain.
+  · why: #150 (R8) · enforced by:
+  `tests/inspect_non_execution.rs` (independent filesystem, process-liveness and
+  TCP-listener observers over a hostile corpus),
+  `a_parser_fault_is_an_infrastructure_failure_not_a_clean_report`,
+  `an_eager_traversal_mutant_fails_the_node_budget_oracle`,
+  `a_subject_executing_mutant_fails_the_non_execution_oracle`,
+  `both_entry_points_produce_the_identical_inspection`,
+  `a_spec_naming_the_inspection_source_without_bot_fs_is_an_admission_need`,
+  `two_tenants_inspecting_the_same_artifact_stay_isolated`,
+  `host_bounded_admission_holds_at_every_tier`,
+  `retained_counters_grow_with_the_input`,
+  `a_match_longer_than_the_preview_budget_is_truncated_with_its_full_span_kept`,
+  `tests/inspect.rs::every_budget_has_its_own_refusal`,
+  `tests/inspect.rs::invalid_syntax_is_incomplete_and_never_a_clean_report`,
+  `tests/inspect.rs::a_declared_language_version_is_undecidable_not_clean`,
+  `tests/inspect.rs::the_report_round_trips_and_preserves_identity_spans_and_coverage`,
+  `sim_seeded_subjects_agree_across_every_entry_point`,
+  `sim_same_seed_same_trace_hash`,
+  `sim_seeded_multitenant_reports_stay_isolated`,
+  and `tests/sim_inspect.rs` (`sim_seeded_fragments_match_the_rule_model`,
+  `sim_same_seed_same_trace`, `sim_node_budget_tiers_refuse_deterministically`)
 - **INV-BOT-20** A task run on a `Host` takes at most one admission permit per
   host for its whole tree: a nested `host.run` from inside a body that already
   holds that host's permit is charged to the parent, so nesting at any depth
@@ -391,22 +474,6 @@ Each of these was a shipped defect. Treat the list as the spec.
   disposition, output or located error, and every report says no external
   effect is known. · why: #87 step 1 (T01–T04, T36) · enforced by:
   `tests/task_front_door.rs` and `tests/sim_task.rs`
-- **INV-BOT-21** A registry identifier declared twice in one role has one
-  meaning: refused. `DomainRegistry::validate` names the identifier, role and
-  both positions before any build, and the raw `source`/`action` lookups never
-  resolve an ambiguous identifier to its first declaration, so dispatch never
-  depends on declaration order. One identifier used once per role stays valid.
-  · why: #122 item 1 · enforced by: `tests/registry.rs`
-  (`an_ambiguous_identifier_is_not_resolved_by_declaration_order`,
-  `a_duplicate_source_identifier_is_refused_with_both_positions`,
-  `refusal_is_independent_of_declaration_order`)
-- **INV-BOT-22** An append whose reply was lost but whose record committed is
-  reconciled by readback and settled, never resent and never stalled on; an
-  append that may have committed and did not reports the occurrence as certain
-  and lands its record on the retry without re-entering the action.
-  · why: #118 item 1 · enforced by: `tests/ambiguous_commit.rs`
-  (`a_committed_outcome_with_a_lost_reply_settles_without_resending`,
-  `an_unknown_outcome_that_did_not_commit_reports_occurrence_and_records_on_retry`)
 - **INV-BOT-40** The committed record can be replayed without materializing it:
   `FileJournal::replay` streams frames from its own read-only descriptor,
   retaining at most one event, applies the same frame validation and event
@@ -455,6 +522,34 @@ Each of these was a shipped defect. Treat the list as the spec.
   (`concurrent_tenant_appends_scale_with_isolation`,
   `append_latency_tails_are_bounded`) and `tests/sim_journal_liveness.rs`
   (`tenant_tiers_replay_at_the_level_the_sim_can_drive`)
+- **INV-BOT-46** A registry identifier declared twice in one role has one
+  meaning: refused. `DomainRegistry::validate` names the identifier, role and
+  both positions before any build, and the raw `source`/`action` lookups never
+  resolve an ambiguous identifier to its first declaration, so dispatch never
+  depends on declaration order. One identifier used once per role stays valid.
+  · why: #122 item 1 · enforced by: `tests/registry.rs`
+  (`an_ambiguous_identifier_is_not_resolved_by_declaration_order`,
+  `a_duplicate_source_identifier_is_refused_with_both_positions`,
+  `refusal_is_independent_of_declaration_order`)
+- **INV-BOT-47** An append whose reply was lost but whose record committed is
+  reconciled by readback and settled, never resent and never stalled on; an
+  append that may have committed and did not reports the occurrence as certain
+  and lands its record on the retry without re-entering the action.
+  · why: #118 item 1 · enforced by: `tests/ambiguous_commit.rs`
+  (`a_committed_outcome_with_a_lost_reply_settles_without_resending`,
+  `an_unknown_outcome_that_did_not_commit_reports_occurrence_and_records_on_retry`)
+- **INV-BOT-70** The task front door's nine-axis evidence: a drawn scale of
+  concurrent `Host::run` never exceeds the admission ceiling and returns every
+  permit (100/1,000/10,000 tiers with recovery); two hosts with different
+  tenants over one shared task name and step path produce distinct step keys,
+  reports and budgets under concurrency; dropping or cancelling a suspended run
+  releases every permit and leaves nothing in flight; and task names, inputs
+  and host limits are accepted or refused exactly on their declared boundaries.
+  · why: #203 nine-axis review · enforced by:
+  `tests/sim_task_axes.rs` (`saturation_conserves_permits`,
+  `saturation_reaches_100_1000_and_10000_with_recovery`,
+  `two_tenants_stay_isolated`, `a_dropped_run_releases_everything`,
+  `names_inputs_and_limits`) and `examples/compare_orchestration.rs`
 
 ## Open questions for the Director
 
