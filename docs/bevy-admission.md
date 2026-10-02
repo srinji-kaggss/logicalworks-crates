@@ -59,7 +59,7 @@ An independent measurement of `bevy_ecs` + `bevy_app` with `default-features =
 false` on an M5 Pro: 64 lockfile packages, **7–9 s cold build**, 131 MB release
 `target/`. No renderer, no windowing, no audio, and no GPU driver in the graph.
 
-`bevy_ecs` requires rustc 1.95; the toolchain for this workspace is pinned to 1.98.0
+`bevy_ecs` requires rustc 1.95; the toolchain for this workspace is pinned to 1.99.0
 (`rust-toolchain.toml`), so there is no MSRV conflict.
 
 ## 3. What was deliberately excluded

@@ -70,7 +70,7 @@ so any location in the reported error must come from the orchestration.
 
 ## Results
 
-Measured 2026-09-30 on an Apple M5 Pro (15 cores), macOS 27.0: rustc 1.98.0,
+Measured 2026-09-30 on an Apple M5 Pro (15 cores), macOS 27.0: rustc 1.99.0,
 Go 1.27.1, Node 24.14.1 with Effect 3.22.2, Python 3.14.7 with Trio 0.34.0, on
 an idle host: the run started after three readings 20 s apart below a
 one-minute load of 4, and its load was 3.3 at the start and 3.1 at the end

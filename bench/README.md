@@ -37,7 +37,7 @@ difference rather than noise. The `churn-64x1` interval is the widest, which is
 what a scenario whose cost depends on how much work the scheduler actually
 dispatches should look like.
 
-**Machine and toolchain.** Apple M5 Pro, 15 cores, macOS 27.0, rustc 1.98.0,
+**Machine and toolchain.** Apple M5 Pro, 15 cores, macOS 27.0, rustc 1.99.0,
 `opt-level = 3`, `lto = true`, `codegen-units = 1`. One machine, one run: these
 are absolute numbers for this host, not a cross-platform claim.
 
