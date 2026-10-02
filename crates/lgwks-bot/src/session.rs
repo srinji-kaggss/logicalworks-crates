@@ -1614,6 +1614,10 @@ fn node_reads(
     node_id: &str,
     kind: &NodeKind,
 ) -> Result<BTreeSet<String>, BotError> {
+    lgwks_std::trace::warn!(
+        operation = "node_reads",
+        "operation refused its request; the typed error carries the facts"
+    );
     match *kind {
         NodeKind::Say { ref text } => declared_template_reads(spec, node_id, text, "say.text"),
         NodeKind::Refer { ref text, .. } => {
@@ -1639,6 +1643,10 @@ fn declared_template_reads(
     text: &str,
     field: &'static str,
 ) -> Result<BTreeSet<String>, BotError> {
+    lgwks_std::trace::warn!(
+        operation = "declared_template_reads",
+        "operation refused its request; the typed error carries the facts"
+    );
     // `compile` refuses with `MalformedTemplate` naming the placeholder
     // `"<runtime>"`, because it does not know its caller. The only thing this
     // adds is which node and field it was reached through, so the match is on
