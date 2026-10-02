@@ -820,7 +820,7 @@ impl Gh {
     ///
     /// `--paginate` makes the client follow GitHub's pages until it has them
     /// all, so the review list is bounded by the adapter's **review ceiling**
-    /// ([`MAX_REVISED_RECORDS`]) rather than by the client's patience. A pull
+    /// ([`MAX_REVIEWS_PER_PULL`]) rather than by the client's patience. A pull
     /// request carrying more reviews than that is refused with
     /// [`GhError::ReviewCeiling`], which is a different statement from a short
     /// list: a truncated list that decoded cleanly is a *complete* answer as far
@@ -831,7 +831,7 @@ impl Gh {
     ///
     /// As [`Gh::snapshot`], plus [`GhError::Response`] when the answer is not
     /// a review list and [`GhError::ReviewCeiling`] when the pull request holds
-    /// more than [`MAX_REVISED_RECORDS`] reviews.
+    /// more than [`MAX_REVIEWS_PER_PULL`] reviews.
     #[cfg(feature = "process")]
     pub async fn read_reviews(&self, pull: &PullRequest) -> Result<Vec<ReviewRecord>, GhError> {
         let path = format!(
