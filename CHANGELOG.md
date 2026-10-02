@@ -90,6 +90,20 @@ explicitly under that crate.
   The state is a report of what the process wrote, so it is read, never edited
   in place.
 
+### Documentation
+
+- The frontier comparisons now cite primary sources with pinned versions and an
+  access date (2026-10-02). `docs/framework-comparison.md` and
+  `docs/async-parity.md` name each external project's release or tag
+  (`spider-rs` v2.52.2, `discord.py` 2.7.1, `serenity` v0.12.5, Stagehand
+  `@browserbasehq/stagehand@3.7.3`, `@crawlee/core` 3.18.2, Scrapy 2.19.0,
+  tokio 1.53.1, tokio-util 0.7.19, async-std 1.13.2, smol 2.0.2, Bevy 0.19.1).
+  Claims a source contradicts are corrected (the `spider-rs` managed-mode and
+  declared-limits quotes, which were `main`'s wording rather than the `v2.52.2`
+  tag's; smol's missing cancellation token) and claims that cannot be sourced are
+  marked *unsourced* rather than deleted (`docs/framework-comparison.md`,
+  `docs/frontier.md`). No code, gate or ledger changes. (#155)
+
 ## [lgwks_std 0.10.0 / lgwks_ast 0.4.0 / lgwks_deps 0.4.0 / lgwks_bot 0.8.0 / lgwks_macros 0.1.2] - 2026-09-30
 
 The third cut of the day, for the #191-#194 review fixes that landed in #199.
