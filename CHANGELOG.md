@@ -64,6 +64,9 @@ explicitly under that crate.
 - Sparse-registry sources (`sparse+…`) are classified as the `registry` source
   class rather than an unknown scheme, so a sparse crates.io mirror compares as
   crates.io.
+- Drift diagnosis with several approvals for one crate reports the dimension on
+  the approval that admits the edge's source class, instead of the first
+  mismatch from an unrelated class (#158 acceptance).
 
 ### lgwks_bot Changed
 

@@ -68,6 +68,7 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
   `lgwks_deps::tests::a_class_only_git_approval_is_insufficient_for_exact_origin`,
   `lgwks_deps::tests::an_approved_path_origin_refuses_a_different_path`,
   `lgwks_deps::tests::an_unknown_scheme_is_not_an_admitted_origin`,
+  `lgwks_deps::tests::multiple_approvals_report_the_relevant_failed_dimension`,
   `metadata::tests::a_sparse_registry_source_is_classified_as_a_registry`
 
 ## lgwks_bot — durable execution

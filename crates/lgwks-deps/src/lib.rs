@@ -617,27 +617,37 @@ pub fn audit_direct(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
         if approvals.iter().any(|entry| edge_matches(entry, edge)) {
             continue;
         }
-        let consumer_approvals: Vec<&&contract::Entry> = approvals
+        let consumer_approvals: Vec<&contract::Entry> = approvals
             .iter()
+            .copied()
             .filter(|entry| allows_consumer(entry, &edge.consumer))
+            .collect();
+        // Only approvals that admit the edge's source class are candidates for
+        // the class, origin, requirement or kind drift. Reporting a source
+        // mismatch from an approval of a *different* class would name an
+        // irrelevant candidate and misdirect the repair.
+        let class_matching: Vec<&contract::Entry> = consumer_approvals
+            .iter()
+            .copied()
+            .filter(|entry| entry.source == edge.source.class())
             .collect();
         if consumer_approvals.is_empty() {
             refusals.push(Refusal::ConsumerNotAllowed {
                 consumer: edge.consumer.clone(),
                 krate: edge.package.clone(),
             });
-        } else if let Some(entry) = consumer_approvals
+        } else if class_matching.is_empty() {
+            if let Some(entry) = consumer_approvals.first() {
+                refusals.push(Refusal::SourceDrift {
+                    consumer: edge.consumer.clone(),
+                    krate: edge.package.clone(),
+                    approved: entry.source.clone(),
+                    declared: edge.source.class().to_owned(),
+                });
+            }
+        } else if let Some(entry) = class_matching
             .iter()
-            .find(|entry| entry.source != edge.source.class())
-        {
-            refusals.push(Refusal::SourceDrift {
-                consumer: edge.consumer.clone(),
-                krate: edge.package.clone(),
-                approved: entry.source.clone(),
-                declared: edge.source.class().to_owned(),
-            });
-        } else if let Some(entry) = consumer_approvals
-            .iter()
+            .copied()
             .find(|entry| !origin_matches(entry, edge))
         {
             refusals.push(Refusal::OriginDrift {
@@ -646,8 +656,9 @@ pub fn audit_direct(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
                 approved: approved_origin(entry, edge),
                 declared: edge.source.detail().to_owned(),
             });
-        } else if let Some(entry) = consumer_approvals
+        } else if let Some(entry) = class_matching
             .iter()
+            .copied()
             .find(|entry| entry.version != edge.requirement)
         {
             refusals.push(Refusal::RequirementDrift {
@@ -1188,6 +1199,60 @@ mod tests {
         assert!(
             matches!(refusals.first(), Some(Refusal::SourceDrift { .. })),
             "an unknown scheme is a class drift, never an ordinary admitted origin: {refusals:?}"
+        );
+        Ok(())
+    }
+
+    /// With several approvals for one crate, the reported drift is the one on
+    /// the approval that admits the edge's source class, not the first source
+    /// mismatch from an unrelated class.
+    #[test]
+    fn multiple_approvals_report_the_relevant_failed_dimension() -> TestResult {
+        let text = concat!(
+            "[policy]\nenforce = true\n\n",
+            "[[approved]]\n",
+            "crate = \"engine\"\ntier = \"boundary\"\nversion = \"1.0\"\nowner = \"app\"\n",
+            "capability = \"engine.git\"\nsource = \"git\"\n",
+            "origin = \"git+https://repo.example/engine\"\n",
+            "allowed_consumers = \"app\"\nallowed_kinds = \"normal\"\n",
+            "reason = \"The engine supplies a capability the standard library cannot express.\"\n",
+            "approved_by = \"reviewer\"\napproved_on = \"2026-09-30\"\nreview = \"tests\"\n\n",
+            "[[approved]]\n",
+            "crate = \"engine\"\ntier = \"boundary\"\nversion = \"1.0\"\nowner = \"app\"\n",
+            "capability = \"engine.registry\"\nsource = \"registry\"\n",
+            "origin = \"registry+https://approved.example/index\"\n",
+            "allowed_consumers = \"app\"\nallowed_kinds = \"normal\"\n",
+            "reason = \"The engine supplies a capability the standard library cannot express.\"\n",
+            "approved_by = \"reviewer\"\napproved_on = \"2026-09-30\"\nreview = \"tests\"\n",
+        );
+        let register = Contract::parse(text)?;
+
+        // The edge's class is registry and the registry approval is present, so
+        // the relevant drift is the kind, never the unrelated git source.
+        let mut dev = app_edge(metadata::DependencySource::Registry(
+            "registry+https://approved.example/index".into(),
+        ));
+        dev.kind = metadata::DependencyKind::Dev;
+        let refusals = audit_direct(&[dev], &register);
+        assert!(
+            matches!(refusals.first(), Some(Refusal::KindNotAllowed { .. })),
+            "the relevant kind drift must be reported, not the unrelated git source: {refusals:?}"
+        );
+
+        // A wrong requirement on the registry edge is likewise reported against
+        // the registry approval, not the git half.
+        let mut wrong_version = app_edge(metadata::DependencySource::Registry(
+            "registry+https://approved.example/index".into(),
+        ));
+        wrong_version.requirement = "2.0".into();
+        let refusals = audit_direct(&[wrong_version], &register);
+        assert!(
+            matches!(
+                refusals.first(),
+                Some(Refusal::RequirementDrift { approved, declared, .. })
+                    if approved == "1.0" && declared == "2.0"
+            ),
+            "the registry approval's requirement must be the one compared: {refusals:?}"
         );
         Ok(())
     }
