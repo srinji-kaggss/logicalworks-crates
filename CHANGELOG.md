@@ -10,6 +10,24 @@ explicitly under that crate.
 
 ### lgwks_bot Added
 
+- `inspect`, typed in-process structural code inspection (#150, R8; feature
+  `inspect`): `inspect(&InspectRequest)` parses the subject's bytes with
+  `lgwks_ast` and walks the tree against the versioned `RuleSet::STRUCTURAL_V1`
+  rules (`rust/no-unwrap`, `rust/no-todo`, `rust/no-panic`), returning an
+  `Inspection` whose typed `Verdict` distinguishes `Clean` (no match within an
+  explicitly complete supported scope), `Violations`, `Unsupported` (no compiled
+  grammar, unknown/mismatched rule set, or a grammar the rules cannot read),
+  `Undecidable` (a declared language version this build cannot confirm),
+  `Incomplete` (source/node/depth/work/findings/output budget exhaustion or parse
+  recovery) and `InfrastructureFailure`. The subject is never compiled, imported,
+  built, shelled or loaded; `Budgets` bounds bytes, nodes, depth, work, findings
+  and output as separate axes, and `Inspection::coverage` reports per-rule
+  support and evaluation. The report serializes through the shared JSON facade
+  with its input digest, exact byte spans and rule revision intact, and
+  `Inspection::assurance` states that a clean result is not proof of safety.
+  Host-only, like `process`/`fs`/`net`: it draws native tree-sitter grammars, so
+  it is not in the default feature set; `full` enables it.
+
 - `task::{Host, Task, Report}`, the front door (#87 step 1): build a `Host` once
   (tenant, stop token, admission ceiling, default deadline, trail capacity, all
   finite and readable through `Host::limits`), define a `Task` with `task(name,

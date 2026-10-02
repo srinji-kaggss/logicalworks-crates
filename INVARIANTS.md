@@ -380,6 +380,27 @@ Each of these was a shipped defect. Treat the list as the spec.
   enforced by:
   `rt::supervise::tests::an_unsignalable_present_group_stays_pending_rather_than_failed`
   and `rt::supervise::tests::an_unexpected_signal_error_is_a_failed_cleanup`
+- **INV-BOT-21** A structural inspection reads and parses the subject's bytes
+  and never executes them: no compile, import, build-script evaluation,
+  dependency install, shell invocation or dynamic-library load of the subject,
+  and the subject's instructions remain data. It parses through `lgwks_ast`
+  (never a second parser) and walks with budgets on **separate** axes — source
+  bytes, nodes, depth, work, retained findings and emitted output — refusing
+  before avoidable amplification. Its verdict is typed: a supported and
+  complete clean scope is `Clean`, and an unsupported grammar or rule set, an
+  unconfirmable declared version, a budget exhaustion or parse recovery, and an
+  infrastructure failure are distinct non-clean arms. Rule support is reported
+  per rule and is separate from grammar support; a `Clean` result claims only
+  that the configured rules did not match, never that the subject is safe.
+  · why: #150 (R8) · enforced by:
+  `tests/inspect_non_execution.rs` (independent filesystem, process-liveness and
+  TCP-listener observers over a hostile corpus),
+  `tests/inspect.rs::every_budget_has_its_own_refusal`,
+  `tests/inspect.rs::invalid_syntax_is_incomplete_and_never_a_clean_report`,
+  `tests/inspect.rs::a_declared_language_version_is_undecidable_not_clean`,
+  `tests/inspect.rs::the_report_round_trips_and_preserves_identity_spans_and_coverage`,
+  and `tests/sim_inspect.rs` (`sim_seeded_fragments_match_the_rule_model`,
+  `sim_same_seed_same_trace`, `sim_node_budget_tiers_refuse_deterministically`)
 - **INV-BOT-20** A task run on a `Host` takes at most one admission permit per
   host for its whole tree: a nested `host.run` from inside a body that already
   holds that host's permit is charged to the parent, so nesting at any depth

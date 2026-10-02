@@ -184,6 +184,16 @@ pub mod error;
 pub mod frontier;
 /// Grant sets: build-time admission and per-tick proof minting.
 pub mod gate;
+/// Typed in-process structural code inspection (R8, feature `inspect`).
+///
+/// Check risky code over its structure without executing it: parse the subject
+/// bytes with [`lgwks_ast`], walk the tree against a versioned structural rule
+/// set, and return a typed [`Verdict`](inspect::Verdict) that distinguishes a
+/// complete clean scope from unsupported, undecidable, incomplete and
+/// infrastructure-failure outcomes. The subject is never compiled, imported,
+/// built, shelled or loaded.
+#[cfg(feature = "inspect")]
+pub mod inspect;
 /// The interface model: recognizing the element a step names.
 pub mod interface;
 /// The durable journal an effect is appended to before it leaves the process.
@@ -290,6 +300,16 @@ pub use spec::{Admission, Bot, BotSpec, Need, NeedSet};
 pub use lgwks_macros::script;
 pub use verb::EffectLifetime;
 pub use verb::{Evaluate, Execute, Observe, Query};
+
+/// Typed in-process structural inspection (feature `inspect`).
+///
+/// [`Verdict`](inspect::Verdict) stays under `inspect::` because the session
+/// surface already exports a `Verdict` at the crate root; the two are unrelated
+/// and one name cannot mean two things.
+#[cfg(feature = "inspect")]
+pub use inspect::{
+    Budgets, Finding, InspectRequest, Inspection, RuleCoverage, RuleSet, UnsupportedReason, inspect,
+};
 
 /// Wait for all of a set of futures, returning their outputs in input order.
 ///
