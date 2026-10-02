@@ -27,6 +27,11 @@
 
 use core::fmt;
 
+/// The rolling DP rows the matcher retains: the previous token's row and the
+/// one being written. A third would buy nothing, since only these two are ever
+/// read.
+const ROLLING_ROWS: usize = 2;
+
 /// Selects the syntax accepted while compiling a glob.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -171,6 +176,17 @@ impl GlobPattern {
     pub fn is_match_with(&self, path: &str, scratch: &mut GlobScratch) -> bool {
         scratch.match_path(self, path)
     }
+
+    /// Returns the number of compiled tokens.
+    ///
+    /// Pattern storage is `O(M)` in the pattern length, and this is the count
+    /// that sizes it. It is reported separately from the `O(N)` matching
+    /// scratch so a caller sizing its own memory is not misled by a whole-call
+    /// figure that blends the two.
+    #[must_use]
+    pub const fn token_count(&self) -> usize {
+        self.tokens.len()
+    }
 }
 
 /// Reusable matching memory owned by the caller.
@@ -200,6 +216,50 @@ impl GlobScratch {
             next: Vec::new(),
             work: Work::new(),
         }
+    }
+
+    /// Returns the retained byte capacity of the scalar index.
+    ///
+    /// This is `O(N)` in the path's scalar count and is the largest single
+    /// buffer the scratch owns; `char` is four bytes on every target this
+    /// workspace supports.
+    #[must_use]
+    pub fn scalar_capacity(&self) -> usize {
+        self.scalars.capacity()
+    }
+
+    /// Returns the retained byte capacity of each rolling row.
+    ///
+    /// There are exactly two, and each is one byte per scalar plus the
+    /// terminating position.
+    #[must_use]
+    pub fn row_capacity(&self) -> usize {
+        self.previous.capacity()
+    }
+
+    /// Returns the number of rolling rows the scratch retains.
+    ///
+    /// Always two. It is reported rather than assumed so a caller accounting
+    /// for its own `O(N)` storage has the count from the type instead of from
+    /// the module's prose.
+    #[must_use]
+    pub const fn row_count(&self) -> usize {
+        ROLLING_ROWS
+    }
+
+    /// Returns the total retained capacity across all three buffers.
+    ///
+    /// The scratch is caller-owned and outlives the call, so a caller sizing
+    /// its own steady-state memory needs the scalar index, the two rolling
+    /// rows, and this sum reported separately from the pattern's own `O(M)`
+    /// storage ([`GlobPattern::token_count`]).
+    #[must_use]
+    pub fn storage_bytes(&self) -> usize {
+        self.scalars
+            .capacity()
+            .saturating_mul(core::mem::size_of::<char>())
+            .saturating_add(self.previous.capacity())
+            .saturating_add(self.next.capacity())
     }
 
     /// Runs the two-row automaton, counting each inspected state as work.

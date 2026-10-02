@@ -7,18 +7,18 @@
 use lgwks_std::retry::RetryPolicy;
 use std::time::Duration;
 
-/// Advances a deterministic xorshift-style stream.
-fn next_seed(state: &mut u64) -> u64 {
-    *state = state
-        .wrapping_mul(6_364_136_223_846_793_005)
-        .wrapping_add(1);
-    *state
-}
+#[path = "support/seeded_sweep.rs"]
+mod seeded_sweep;
 
-/// Folds one observed nanosecond count into the running trace.
+use seeded_sweep::{
+    SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, initial_trace,
+    next_seed,
+};
+
+/// Folds a nanosecond count into the trace, saturating a narrowing cast so a
+/// wide `Duration` cannot alias a small one.
 fn fold_nanos(trace: &mut u64, nanos: u128) {
-    let folded = u64::try_from(nanos).unwrap_or(u64::MAX);
-    *trace = trace.wrapping_mul(1_099_511_628_211).wrapping_add(folded);
+    fold(trace, u64::try_from(nanos).unwrap_or(u64::MAX));
 }
 
 /// Returns the exact capped backoff in nanoseconds by bounded repeated doubling.
@@ -61,7 +61,7 @@ fn reference_delay_nanos(base_nanos: u128, cap_nanos: u128, attempt: u32, entrop
 /// Runs the seeded sweep and returns its deterministic trace.
 fn run_seeded_sweep(seed: u64) -> u64 {
     let mut state = seed;
-    let mut trace = 14_695_981_039_346_656_037u64;
+    let mut trace = initial_trace();
 
     let bases = [
         Duration::ZERO,
@@ -129,28 +129,14 @@ fn run_seeded_sweep(seed: u64) -> u64 {
 
 #[test]
 fn the_same_seed_replays_to_the_same_trace() {
-    for seed in [
-        0x0164_0000_0000_0001_u64,
-        0x0164_0000_0000_0002,
-        0x0164_0000_FFFF_FFFF,
-        0xC0FF_EE00_1234_5678,
-    ] {
-        let first = run_seeded_sweep(seed);
-        let replayed = run_seeded_sweep(seed);
-        assert_eq!(
-            first, replayed,
-            "seed {seed}: the same seed must produce the same trace"
-        );
+    for seed in SWEEP_SEEDS {
+        assert_same_seed_replays(run_seeded_sweep, seed);
     }
 }
 
 #[test]
 fn different_seeds_produce_different_traces() {
-    assert_ne!(
-        run_seeded_sweep(0x0164_0000_0000_0001),
-        run_seeded_sweep(0x0164_0000_0000_0002),
-        "two seeds must not collapse to the same trace, or the sweep proves nothing"
-    );
+    assert_distinct_seeds_diverge(run_seeded_sweep, SWEEP_SEEDS[0], SWEEP_SEEDS[1]);
 }
 
 #[test]

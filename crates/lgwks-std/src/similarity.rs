@@ -1071,9 +1071,9 @@ impl CheckedSimilarity for Geometry {
 /// )?;
 /// // The input is over budget, so it is refused rather than scored 0.0.
 /// let verdict = policy.verdict("four", "four")?;
-/// assert!(!verdict.is_accepted);
-/// assert_eq!(verdict.score, None);
-/// assert_eq!(verdict.refusals()[0].index, 0);
+/// assert!(!verdict.is_accepted());
+/// assert_eq!(verdict.score(), None);
+/// assert_eq!(verdict.refusals()[0].index(), 0);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub struct CheckedEvidence<Value: ?Sized> {

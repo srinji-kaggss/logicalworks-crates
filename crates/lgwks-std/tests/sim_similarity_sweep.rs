@@ -9,23 +9,13 @@ use lgwks_std::similarity::{
     Jaccard, PathSimilarity, Similarity, is_exact_path_match,
 };
 
-/// Advances a deterministic xorshift-style stream.
-fn next_seed(state: &mut u64) -> u64 {
-    *state = state
-        .wrapping_mul(6_364_136_223_846_793_005)
-        .wrapping_add(1);
-    *state
-}
+#[path = "support/seeded_sweep.rs"]
+mod seeded_sweep;
 
-/// Folds one observed value into the running trace.
-fn fold(trace: &mut u64, value: u64) {
-    *trace = trace.wrapping_mul(1_099_511_628_211).wrapping_add(value);
-}
-
-/// Returns the bit pattern of a score as a foldable value.
-fn bits(score: f64) -> u64 {
-    score.to_bits()
-}
+use seeded_sweep::{
+    SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, fold_score,
+    fold_usize, initial_trace, next_seed,
+};
 
 /// Runs the seeded sweep and returns its deterministic trace.
 ///
@@ -33,7 +23,7 @@ fn bits(score: f64) -> u64 {
 /// reproduces the whole run.
 fn run_seeded_sweep(seed: u64) -> u64 {
     let mut state = seed;
-    let mut trace = 14_695_981_039_346_656_037u64;
+    let mut trace = initial_trace();
     let cosine = Cosine::new();
     let edit = EditDistance::new(6);
     let bounded = BoundedJaccard::<u32>::new(8);
@@ -66,9 +56,9 @@ fn run_seeded_sweep(seed: u64) -> u64 {
 
         match cosine.try_score(&left, &right) {
             Ok(raw) => {
-                fold(&mut trace, bits(raw));
+                fold_score(&mut trace, raw);
                 let normalized = cosine.normalized_score(&left, &right).unwrap_or(-1.0);
-                fold(&mut trace, bits(normalized));
+                fold_score(&mut trace, normalized);
                 let shared = Similarity::score(&cosine, &left, &right);
                 assert!(
                     (0.0..=1.0).contains(&shared),
@@ -117,7 +107,7 @@ fn run_seeded_sweep(seed: u64) -> u64 {
         let right_text: String = std::iter::repeat_n('b', word_length).collect();
         match edit.try_score(&left_text, &right_text) {
             Ok(score) => {
-                fold(&mut trace, bits(score));
+                fold_score(&mut trace, score);
                 assert!(
                     (0.0..=1.0).contains(&score),
                     "seed {seed}: measured edit score {score} left [0,1]"
@@ -138,12 +128,11 @@ fn run_seeded_sweep(seed: u64) -> u64 {
         // Unicode expansion: the charged unit is the normalized one, and the
         // refusal is consumed rather than discarded.
         let turkish = EditDistance::new(1);
-        let expanded = turkish.try_score("İ", "i").map(bits).unwrap_or(u64::MAX);
-        fold(&mut trace, expanded);
-        fold(
-            &mut trace,
-            u64::try_from(turkish.normalized_length("İ")).unwrap_or(u64::MAX),
-        );
+        match turkish.try_score("İ", "i") {
+            Ok(score) => fold_score(&mut trace, score),
+            Err(_) => fold(&mut trace, u64::MAX),
+        }
+        fold_usize(&mut trace, turkish.normalized_length("İ"));
 
         // Sets: budgeted and unbounded scorers agree within the budget.
         let set_length = usize::try_from(next_seed(&mut state).rem_euclid(12))
@@ -156,10 +145,10 @@ fn run_seeded_sweep(seed: u64) -> u64 {
             .map(|index| u32::try_from(index.saturating_add(1)).unwrap_or(0))
             .collect();
         let unbounded = Jaccard::<u32>::new();
-        fold(&mut trace, bits(unbounded.score(&left_set, &right_set)));
+        fold_score(&mut trace, unbounded.score(&left_set, &right_set));
         match CheckedSimilarity::try_score(&bounded, &left_set, &right_set) {
             Ok(bounded_score) => {
-                fold(&mut trace, bits(bounded_score));
+                fold_score(&mut trace, bounded_score);
                 assert_eq!(
                     bounded_score.to_bits(),
                     unbounded.score(&left_set, &right_set).to_bits(),
@@ -179,7 +168,7 @@ fn run_seeded_sweep(seed: u64) -> u64 {
         // Path heuristic: a scored collision is never an exact match.
         let left_path = format!("root/child/{word_length}");
         let right_path = format!("root/child/{}", word_length.saturating_add(1));
-        fold(&mut trace, bits(paths.score(&left_path, &right_path)));
+        fold_score(&mut trace, paths.score(&left_path, &right_path));
         assert!(
             !is_exact_path_match(&left_path, &right_path),
             "seed {seed}: a differing path is never an exact match"
@@ -190,39 +179,21 @@ fn run_seeded_sweep(seed: u64) -> u64 {
 
 #[test]
 fn the_same_seed_replays_to_the_same_trace() {
-    for seed in [
-        0x1600_5EED_0000_0001_u64,
-        0x1600_5EED_0000_0002,
-        0x1600_5EED_FFFF_FFFF,
-        0xDEAD_BEEF_CAFE_0001,
-    ] {
-        let first = run_seeded_sweep(seed);
-        let replayed = run_seeded_sweep(seed);
-        assert_eq!(
-            first, replayed,
-            "seed {seed}: the same seed must produce the same trace"
-        );
+    for seed in SWEEP_SEEDS {
+        assert_same_seed_replays(run_seeded_sweep, seed);
     }
 }
 
 #[test]
 fn different_seeds_produce_different_traces() {
-    let first = run_seeded_sweep(0x1600_5EED_0000_0001);
-    let second = run_seeded_sweep(0x1600_5EED_0000_0002);
-    assert_ne!(
-        first, second,
-        "two seeds must not collapse to the same trace, or the sweep proves nothing"
-    );
+    assert_distinct_seeds_diverge(run_seeded_sweep, SWEEP_SEEDS[0], SWEEP_SEEDS[1]);
 }
 
 #[test]
 fn a_failure_reports_the_seed_that_produced_it() {
     // The sweep's assertions carry the seed in their message, so a failing run
-    // names the reproducing seed. This checks the sweep is actually reached at
-    // every seed rather than short-circuiting on the first one.
-    let trace = run_seeded_sweep(0x1600_5EED_0000_0001);
-    assert_ne!(
-        trace, 0,
-        "seed 0x1600_5EED_0000_0001 produced an empty trace"
-    );
+    // names the reproducing seed. This checks the sweep is actually reached
+    // rather than short-circuiting on the first case.
+    let trace = run_seeded_sweep(SWEEP_SEEDS[0]);
+    assert_ne!(trace, initial_trace(), "the sweep produced an empty trace");
 }

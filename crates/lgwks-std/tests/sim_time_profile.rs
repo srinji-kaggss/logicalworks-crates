@@ -3,8 +3,13 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lgwks_std::time::calendar::{civil_from_days, days_from_civil, try_days_in_month};
+
+#[path = "support/seeded_sweep.rs"]
+mod seeded_sweep;
+
 use lgwks_std::time::format::{from_unix_parts, to_rfc3339, unix_parts};
 use lgwks_std::time::{Field, FormatError, ParseError, UnixTimeError, parse_rfc3339};
+use seeded_sweep::{assert_same_seed_replays, fold, initial_trace, next_seed};
 
 /// Calls deprecated lossy endpoints from this downstream integration crate.
 #[expect(
@@ -88,14 +93,6 @@ fn previous_date(year: i64, month: u32, day: u32) -> (i64, u32, u32) {
             try_days_in_month(prior_year, 12).unwrap_or(31),
         )
     }
-}
-
-/// Advances a deterministic xorshift-style test stream.
-fn next_seed(state: &mut u64) -> u64 {
-    *state = state
-        .wrapping_mul(6_364_136_223_846_793_005)
-        .wrapping_add(1);
-    *state
 }
 
 #[test]
@@ -520,7 +517,7 @@ fn t5_gregorian_and_leap_day_boundaries_match_the_wide_reference() {
 /// Runs seeded day and civil-date samples and returns their deterministic trace.
 fn run_seeded_calendar_samples(seed: u64) -> u64 {
     let mut state = seed;
-    let mut trace = 14_695_981_039_346_656_037u64;
+    let mut trace = initial_trace();
     for _ in 0..10_000 {
         let day_seed = next_seed(&mut state);
         let days = i64::from_le_bytes(day_seed.to_le_bytes());
@@ -535,9 +532,7 @@ fn run_seeded_calendar_samples(seed: u64) -> u64 {
             days,
             "seeded day sample must round-trip through the public inverse"
         );
-        trace = trace
-            .wrapping_mul(1_099_511_628_211)
-            .wrapping_add(u64::from_le_bytes(days.to_le_bytes()));
+        fold(&mut trace, u64::from_le_bytes(days.to_le_bytes()));
 
         let year = i64::try_from(next_seed(&mut state).rem_euclid(800_001))
             .unwrap_or(0)
@@ -562,11 +557,9 @@ fn run_seeded_calendar_samples(seed: u64) -> u64 {
             (year, month, day),
             "seeded valid civil date must round-trip through public calendar APIs"
         );
-        trace = trace
-            .wrapping_mul(1_099_511_628_211)
-            .wrapping_add(u64::try_from(year).unwrap_or(0))
-            .wrapping_add(u64::from(month))
-            .wrapping_add(u64::from(day));
+        fold(&mut trace, u64::try_from(year).unwrap_or(0));
+        fold(&mut trace, u64::from(month));
+        fold(&mut trace, u64::from(day));
     }
     trace
 }
@@ -574,12 +567,7 @@ fn run_seeded_calendar_samples(seed: u64) -> u64 {
 #[test]
 /// Replays 10,000 seeded day and civil-date pairs through the public API.
 fn seeded_calendar_model_replays_exactly() {
-    let first_trace = run_seeded_calendar_samples(0x1530_2026_0928);
-    let replayed_trace = run_seeded_calendar_samples(0x1530_2026_0928);
-    assert_eq!(
-        first_trace, replayed_trace,
-        "the same seed must produce the exact same calendar trace"
-    );
+    assert_same_seed_replays(run_seeded_calendar_samples, 0x1530_2026_0928);
 }
 
 #[test]
