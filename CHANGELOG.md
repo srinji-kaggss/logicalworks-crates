@@ -25,6 +25,19 @@ explicitly under that crate.
 - `Source::condition` resolves a wire condition identifier against the source's
   own output type, from the closed vocabulary `changed`, `always`,
   `threshold::above(<n>)`, `threshold::below(<n>)`.
+- `Supervisor::run_process` runs one child under the same in-flight ceiling,
+  process-group ownership and deadline machinery as `spawn_process`, and returns
+  its `ProcessRun`: the exit status or signal, bounded captured stdout and
+  stderr with truncation accounting, whether a deadline stopped it, and the
+  process-group cleanup receipt.
+- `rt::process::StdioPolicy::Capture(NonZeroUsize)` captures a standard stream
+  up to a non-zero ceiling, keeps draining past it, and reports the exact total.
+- `domain::sys::Process` runs real processes with the `process` feature and
+  reports exit code or signal, the captured streams and a finite default
+  capture ceiling and deadline; without the feature it keeps its refusal.
+  Concurrent verb calls on one `Process` share a bounded slot pool
+  (`DEFAULT_MAX_CONCURRENT`, set with `Process::max_concurrent`), claimed
+  before the fork, so a burst of calls never forks a burst of children.
 
 ### lgwks_bot Changed
 
@@ -32,6 +45,20 @@ explicitly under that crate.
   absent so a document written before the field existed still parses. A version
   this build does not implement is refused by `BotSpec::from_json` and by
   `Bot::from_spec`.
+
+### lgwks_bot Fixed
+
+- A process group whose leader is an unreaped zombie reports `EPERM` on a
+  further `killpg` (macOS/BSD). That is a still-present group, not a refused
+  termination, so process-group cleanup reports `CleanupPending` and settles via
+  the post-reap signal-zero probe instead of `CleanupFailed` (INV-BOT-19).
+- The drop-time group kill (a supervised run dropped mid-flight) was one
+  `killpg`. It now repeats while the unreaped leader still pins the group id,
+  so a member the first signal missed is reached. Known limit on macOS: a
+  child the leader is forking at the instant of the kill can still be created
+  after the leader dies, and the zombie leader then makes every further
+  `killpg` return `EPERM` without reaching it; Linux aborts such a fork. A
+  drop after the fork (T20) leaves no running member on either.
 
 ### lgwks_bot Breaking
 
@@ -47,6 +74,10 @@ explicitly under that crate.
   `ChainSpec::source`/`target`/`on`, and `ActionSpec::domain`/`target`. The types
   are `#[non_exhaustive]`, so a struct literal was already unavailable outside
   the crate; only field reads change. Serde round-trips are unchanged.
+- `domain::sys::ProcessState::stdout` is no longer a `pub` field: read it, and
+  the new `stderr`, through the `ProcessState::stdout()`/`stderr()` accessors.
+  The state is a report of what the process wrote, so it is read, never edited
+  in place.
 
 ## [lgwks_std 0.10.0 / lgwks_ast 0.4.0 / lgwks_deps 0.4.0 / lgwks_bot 0.8.0 / lgwks_macros 0.1.2] - 2026-09-30
 

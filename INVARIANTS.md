@@ -357,6 +357,29 @@ Each of these was a shipped defect. Treat the list as the spec.
 - **INV-GOV-2** A product requirement is superseded, never edited: a changed
   normative sentence with no Supersession log entry fails the gate. · enforced
   by: `python3 scripts/check-requirements.py` (`requirements` lane)
+- **INV-BOT-18** A supervised process reports only what it observed. A captured
+  stream retains at most its declared non-zero ceiling, keeps draining past it
+  so a chatty child cannot block, and reports the exact byte total with a
+  truncation flag; the retained buffer is sized once to the ceiling. A run
+  carries its exit status or signal, whether a deadline stopped it, and the
+  process-group cleanup receipt; a refusal before the fork (`Refused`,
+  `NotStarted`) is distinguishable from a failure after it (`AfterStart`); and
+  an exit of zero is reported as an exit of zero, never as a completed task.
+  Concurrent verb calls on one `sys::Process` share one bounded slot pool,
+  claimed before the fork, so a burst of calls never forks past the ceiling.
+  · why: #151 sys part, T05/T19/T20/T35 · enforced by:
+  `tests/sys_process_binding.rs` (including
+  `concurrent_calls_on_one_process_share_its_ceiling`), `tests/sim_process.rs`,
+  and `rt::supervise::tests`
+- **INV-BOT-19** After a delivered group signal, an `EPERM` from a further
+  `killpg` against the still-present, unreaped group is an observation that the
+  group is present, not a refused termination: cleanup stays pending and is
+  settled by the post-reap signal-zero probe, never reported as a failed kill.
+  · why: macOS/BSD report `EPERM` for a group whose leader is an unreaped
+  zombie; reading it as failed reported a deadline stop as a cleanup failure ·
+  enforced by:
+  `rt::supervise::tests::an_unsignalable_present_group_stays_pending_rather_than_failed`
+  and `rt::supervise::tests::an_unexpected_signal_error_is_a_failed_cleanup`
 
 ## Open questions for the Director
 

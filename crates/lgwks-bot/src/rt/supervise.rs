@@ -117,8 +117,12 @@ use lgwks_deps::tokio::task::Id;
 use lgwks_deps::tokio::process::{Child, Command};
 
 use super::cancel::CancellationToken;
+#[cfg(all(unix, feature = "process"))]
+use super::io::{AsyncRead, AsyncReadExt};
 #[cfg(feature = "process")]
 use super::process::ProcessSpec;
+#[cfg(all(unix, feature = "process"))]
+use super::process::{CapturedStream, ProcessRun, ProcessRunError};
 use super::task::{JoinSet, yield_now};
 
 /// Iterations one poll of [`repeat`] may complete before it hands the executor
@@ -669,7 +673,13 @@ pub struct Stats {
 }
 
 impl Stats {
-    /// Tasks started and not yet finished.
+    /// Tasks started and not yet reaped.
+    ///
+    /// This is accounting, not a live count: `completed` advances when a task
+    /// is joined (by [`Supervisor::reap`] or the reap every spawn performs), so
+    /// a task that has ended and released its permit counts here until then,
+    /// and the value can briefly exceed the in-flight bound. The bound itself
+    /// is enforced by the permits, which a task holds for its whole run.
     ///
     /// Saturated subtraction: `completed` cannot exceed `spawned` because both
     /// advance on the same path, but a counter pair that silently wrapped would
@@ -892,6 +902,28 @@ impl Supervisor {
     #[must_use]
     pub fn child_token(&self) -> CancellationToken {
         self.token.child_token()
+    }
+
+    /// The child token and the run bounds a spec declares, resolved once.
+    ///
+    /// Both process runners start from these four values, and a second copy is
+    /// a second place for the ceiling, the deadline or the token to drift.
+    #[cfg(all(unix, feature = "process"))]
+    fn prepare_process(
+        &self,
+        spec: &ProcessSpec,
+    ) -> (
+        CancellationToken,
+        Option<Duration>,
+        Option<NonZeroUsize>,
+        Option<NonZeroUsize>,
+    ) {
+        (
+            self.child_token(),
+            spec.deadline_duration(),
+            spec.stdout_capture(),
+            spec.stderr_capture(),
+        )
     }
 
     /// Whether this supervisor has been cancelled or is shutting down.
@@ -1155,94 +1187,127 @@ impl Supervisor {
             self.refused = self.refused.saturating_add(1);
             return Err(io::Error::other(SupervisorCancelled));
         }
-        let token = self.child_token();
-        let deadline = spec.deadline_duration();
-        let mut command = Command::new(spec.program());
-        spec.configure(&mut command);
-        // Two guarantees rather than one, because the group kill is a syscall
-        // the platform may not have: `kill_on_drop` reaches the direct child
-        // everywhere, and the group kill below reaches what that child spawned.
-        command.kill_on_drop(true);
-        #[cfg(unix)]
-        command.process_group(0);
-        let child = start(&mut command)?;
+        let (token, deadline, out_limit, err_limit) = self.prepare_process(spec);
+        let child = start(spec)?;
         // Construct the guard before the child is placed in the async task. If
         // the task is aborted before its first poll, this guard still owns the
         // cleanup fallback for a process that native spawning already started.
         let task = self.allocate_task_id();
-        let mut group = ProcessGroup::of(&child, task, permit, Arc::clone(&self.cleanup_owners));
+        let group = ProcessGroup::of(&child, task, permit, Arc::clone(&self.cleanup_owners));
         Ok(self.place_owned(task, async move {
-            let mut child = child;
-            let (observation, _observed_status) =
-                observe_child_without_reaping(&child, deadline, &token).await;
-
-            // The signal phase runs while `child` is still waitable. On Unix,
-            // `waitid(WNOWAIT)` observed its exit without releasing the leader
-            // pid; on cancellation/deadline the direct child is still owned and
-            // unreaped. Thus every signal sent by cleanup is to a group whose
-            // numeric id cannot yet have been reused.
-            let mut cleanup = group.cleanup().await;
-            if matches!(cleanup, CleanupReceipt::CleanupFailed)
-                && !matches!(observation, ProcessObservation::Exited)
-            {
-                // Do not wait on a child whose group signal could not be
-                // delivered. The owned child is dropped immediately after this
-                // return, and `kill_on_drop` remains the direct-child fallback.
-                drop(group);
-                return match observation {
-                    ProcessObservation::Cancelled => TaskEnd::CancelledWithCleanup { cleanup },
-                    ProcessObservation::Deadline | ProcessObservation::Unobservable => {
-                        TaskEnd::Failed {
-                            status: None,
-                            cleanup,
-                        }
-                    }
-                    ProcessObservation::Exited => TaskEnd::Failed {
-                        status: None,
-                        cleanup,
-                    },
-                };
-            }
-            let status = if matches!(cleanup, CleanupReceipt::CleanupFailed) {
-                // Keep the leader unreaped while the armed guard makes its
-                // final synchronous kill attempt. The receipt reports the
-                // syscall failure; dropping the child then relinquishes it to
-                // the platform's orphan reaper rather than signalling a stale
-                // numeric group id.
-                drop(group);
-                child.wait().await.ok()
-            } else {
-                let status = child.wait().await.ok();
-                group.mark_reaped();
-                if matches!(cleanup, CleanupReceipt::CleanupPending) {
-                    cleanup = group.confirm_absence().await;
-                }
-                status
-            };
-
-            // Group signals end before the reap. A Pending cleanup remains in
-            // this task through the bounded post-reap, signal-zero probe.
-            match observation {
-                ProcessObservation::Exited => match status {
-                    Some(status) if status.success() => TaskEnd::CompletedWithCleanup { cleanup },
-                    Some(status) => TaskEnd::Failed {
-                        status: Some(status),
-                        cleanup,
-                    },
-                    None => TaskEnd::Failed {
-                        status: None,
-                        cleanup,
-                    },
-                },
-                ProcessObservation::Cancelled => TaskEnd::CancelledWithCleanup { cleanup },
-                ProcessObservation::Deadline | ProcessObservation::Unobservable => {
-                    TaskEnd::Failed {
-                        status: None,
-                        cleanup,
-                    }
-                }
-            }
+            let end = drive_process(child, deadline, &token, group, out_limit, err_limit).await;
+            task_end(end)
         }))
+    }
+
+    /// Run `spec` to completion and return its captured report.
+    ///
+    /// This is the result-bearing counterpart of [`Supervisor::spawn_process`],
+    /// and it shares that method's ownership, deadline and cleanup machinery
+    /// through the same private driver: the child is placed in its own process
+    /// group, the deadline kills the **group** (INV-BOT-9), and the run reports
+    /// the same [`CleanupReceipt`]. Where `spawn_process` hands back a
+    /// [`TaskId`] and reports later, this awaits the child and returns what it
+    /// observed.
+    ///
+    /// - **Bounded.** A slot is claimed before the fork, so a supervisor at its
+    ///   ceiling waits for one rather than starting anyway. The permit is held
+    ///   for the whole run and released when it ends.
+    /// - **Captured.** A stream with [`StdioPolicy::Capture`](crate::rt::process::StdioPolicy::Capture)
+    ///   is retained up to its ceiling and drained past it, and
+    ///   [`ProcessRun`] reports the retained bytes, the exact total and whether
+    ///   the stream was truncated.
+    /// - **Truthful about a stop.** A deadline kill is reported through
+    ///   [`ProcessRun::deadline_fired`], not as a normal exit, and its cleanup
+    ///   receipt is the group's.
+    ///
+    /// # Errors
+    ///
+    /// [`ProcessRunError::Refused`] when the supervisor was cancelled before
+    /// the fork, and [`ProcessRunError::NotStarted`] when the platform refused
+    /// the program — both establish that nothing ran. A failure *after* the
+    /// child started is [`ProcessRunError::AfterStart`], which establishes the
+    /// opposite and is why the two are distinguishable.
+    #[cfg(all(unix, feature = "process"))]
+    pub async fn run_process(&mut self, spec: &ProcessSpec) -> Result<ProcessRun, ProcessRunError> {
+        let Some(permit) = self.claim().await else {
+            return Err(ProcessRunError::Refused);
+        };
+        // The same owned admission point `spawn_process` rechecks: a cancelled
+        // supervisor never forks, so the first instruction does not run.
+        if self.token.is_cancelled() {
+            self.refused = self.refused.saturating_add(1);
+            return Err(ProcessRunError::Refused);
+        }
+        let (token, deadline, out_limit, err_limit) = self.prepare_process(spec);
+        let child = match start(spec) {
+            Ok(child) => child,
+            Err(source) => return Err(ProcessRunError::NotStarted { source }),
+        };
+        let task = self.allocate_task_id();
+        let group = ProcessGroup::of(&child, task, permit, Arc::clone(&self.cleanup_owners));
+        self.spawned = self.spawned.saturating_add(1);
+        let end = drive_process(child, deadline, &token, group, out_limit, err_limit).await;
+        self.completed = self.completed.saturating_add(1);
+        let deadline_fired = matches!(end.observation, ProcessObservation::Deadline);
+        let settled = match end.observation {
+            ProcessObservation::Exited => {
+                if end.status.is_some_and(|status| status.success()) {
+                    self.succeeded = self.succeeded.saturating_add(1);
+                } else {
+                    self.failed = self.failed.saturating_add(1);
+                }
+                true
+            }
+            ProcessObservation::Deadline | ProcessObservation::Unobservable => {
+                self.failed = self.failed.saturating_add(1);
+                true
+            }
+            // Unreachable in practice: the child token is a child of a
+            // supervisor this call borrows exclusively, so nothing can cancel
+            // it while the run is awaited. Reported rather than asserted, and
+            // as permanently indeterminate rather than as a normal result.
+            ProcessObservation::Cancelled => {
+                self.cancelled = self.cancelled.saturating_add(1);
+                false
+            }
+        };
+        if !settled {
+            return Err(ProcessRunError::AfterStart {
+                source: io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "the supervisor was cancelled while the process ran",
+                ),
+            });
+        }
+        // A status is the command's *own* exit. A deadline kill reaps the group
+        // and the engine then reports the signal, but that is the supervisor's
+        // stop rather than the command's outcome, so it is not carried as a
+        // status — the same reading `spawn_process` reports.
+        let status = if matches!(end.observation, ProcessObservation::Exited) {
+            end.status
+        } else {
+            None
+        };
+        Ok(ProcessRun::new(
+            status,
+            deadline_fired,
+            end.stdout,
+            end.stderr,
+            end.cleanup,
+        ))
+    }
+
+    /// Process-group containment is unavailable on non-Unix targets.
+    #[cfg(all(not(unix), feature = "process"))]
+    pub async fn run_process(&mut self, spec: &ProcessSpec) -> Result<ProcessRun, ProcessRunError> {
+        let _ = spec;
+        Err(ProcessRunError::NotStarted {
+            source: io::Error::new(
+                io::ErrorKind::Unsupported,
+                "lgwks_bot: supervised process-group cleanup is Unix-only",
+            ),
+        })
     }
 
     /// Process-group containment is unavailable on non-Unix targets.
@@ -1571,22 +1636,30 @@ impl Drop for Supervisor {
     }
 }
 
-/// Start `command`, and name the one lint exception this module carries.
+/// Build the private engine command for `spec` and start the child.
 ///
-/// [`Command::spawn`] is banned workspace-wide by `clippy.toml`, with
-/// [`Supervisor::spawn_process`] as its named replacement. The ban exists so no
-/// *caller* starts a process nobody owns; here the child is owned by the task
-/// that `spawn_process` places, and there is no other constructor for a running
-/// child. The expectation is the crate's form for a reasoned, checked
-/// exception — if the entry is ever retargeted or lifted, this `expect` becomes
-/// unfulfilled and this line is revisited rather than silently continuing to be
-/// exempt.
+/// The one constructor both [`Supervisor::spawn_process`] and
+/// [`Supervisor::run_process`] call, so the group, the drop-time kill fallback
+/// and the configured streams cannot drift between them. [`Command::spawn`] is
+/// banned workspace-wide by `clippy.toml`, with `spawn_process` as its named
+/// replacement; here the child is owned by the supervisor's driver, and there
+/// is no other constructor for a running child. The expectation is the crate's
+/// form for a reasoned, checked exception — if the entry is ever retargeted or
+/// lifted, this `expect` becomes unfulfilled and this line is revisited rather
+/// than silently continuing to be exempt.
 #[cfg(all(unix, feature = "process"))]
 #[expect(
     clippy::disallowed_methods,
-    reason = "the engine's Command has no other way to start a child; this is the single call Supervisor::spawn_process wraps, and it is not reachable from outside this module"
+    reason = "the engine's Command has no other way to start a child; this is the single call the supervisor's drivers wrap, and it is not reachable from outside this module"
 )]
-fn start(command: &mut Command) -> io::Result<Child> {
+fn start(spec: &ProcessSpec) -> io::Result<Child> {
+    let mut command = Command::new(spec.program());
+    spec.configure(&mut command);
+    // Two guarantees rather than one, because the group kill is a syscall the
+    // platform may not have: `kill_on_drop` reaches the direct child
+    // everywhere, and the group kill reaches what that child spawned.
+    command.kill_on_drop(true);
+    command.process_group(0);
     command.spawn()
 }
 
@@ -1772,41 +1845,260 @@ enum ProcessObservation {
     Unobservable,
 }
 
-/// Poll the child's exit state without reaping it, keeping its pid allocated
-/// until the process-group termination phase is complete.
+/// Poll `pid`'s exit state without reaping it, keeping its pid allocated until
+/// the process-group termination phase is complete.
+///
+/// Takes the numeric id rather than the engine's child, so the caller can keep
+/// the child free to be waited on once the group has been signalled.
 #[cfg(all(unix, feature = "process"))]
-async fn observe_child_without_reaping(
-    child: &Child,
+async fn observe_pid_without_reaping(
+    pid: i32,
     deadline: Option<Duration>,
     token: &CancellationToken,
-) -> (ProcessObservation, Option<ExitStatus>) {
-    let Some(raw_pid) = child.id() else {
-        return (ProcessObservation::Unobservable, None);
-    };
-    let Ok(pid) = i32::try_from(raw_pid) else {
-        return (ProcessObservation::Unobservable, None);
-    };
+) -> ProcessObservation {
+    if pid <= 0 {
+        return ProcessObservation::Unobservable;
+    }
     let deadline = deadline.and_then(|duration| Instant::now().checked_add(duration));
     loop {
         if token.is_cancelled() {
-            return (ProcessObservation::Cancelled, None);
+            return ProcessObservation::Cancelled;
         }
         if deadline.is_some_and(|at| Instant::now() >= at) {
-            return (ProcessObservation::Deadline, None);
+            return ProcessObservation::Deadline;
         }
         match lgwks_std::process::child_has_exited_without_reaping(pid) {
-            Ok(true) => return (ProcessObservation::Exited, None),
+            Ok(true) => return ProcessObservation::Exited,
             Ok(false) => {}
-            Err(_) => return (ProcessObservation::Unobservable, None),
+            Err(_) => return ProcessObservation::Unobservable,
         }
         if token
             .run_until_cancelled(crate::rt::time::sleep(Duration::from_millis(5)))
             .await
             .is_none()
         {
-            return (ProcessObservation::Cancelled, None);
+            return ProcessObservation::Cancelled;
         }
     }
+}
+
+/// The terminal observation of one supervised child, before it is mapped to a
+/// public report.
+///
+/// One driver produces this shape for both [`Supervisor::spawn_process`] and
+/// [`Supervisor::run_process`], so the two cannot drift into cleaning up a
+/// group differently: the mapping to a `TaskEnd` or a `ProcessRun` happens at
+/// the edge.
+#[cfg(all(unix, feature = "process"))]
+struct ProcessEnd {
+    /// What the observation saw.
+    observation: ProcessObservation,
+    /// The status the engine reported, when there is one.
+    status: Option<ExitStatus>,
+    /// Process-group cleanup evidence.
+    cleanup: CleanupReceipt,
+    /// Captured stdout.
+    stdout: CapturedStream,
+    /// Captured stderr.
+    stderr: CapturedStream,
+}
+
+/// Map a driven child's terminal observation to the supervisor's internal
+/// task-end, so the public `TaskOutcome` is derived from one place.
+#[cfg(all(unix, feature = "process"))]
+fn task_end(end: ProcessEnd) -> TaskEnd {
+    // The signal phase ran while the leader was unreaped; group signals are
+    // over by the time this is constructed. A `Pending` cleanup stays in this
+    // task through the bounded post-reap, signal-zero probe.
+    match end.observation {
+        ProcessObservation::Exited => match end.status {
+            Some(status) if status.success() => TaskEnd::CompletedWithCleanup {
+                cleanup: end.cleanup,
+            },
+            Some(status) => TaskEnd::Failed {
+                status: Some(status),
+                cleanup: end.cleanup,
+            },
+            None => TaskEnd::Failed {
+                status: None,
+                cleanup: end.cleanup,
+            },
+        },
+        ProcessObservation::Cancelled => TaskEnd::CancelledWithCleanup {
+            cleanup: end.cleanup,
+        },
+        ProcessObservation::Deadline | ProcessObservation::Unobservable => TaskEnd::Failed {
+            status: None,
+            cleanup: end.cleanup,
+        },
+    }
+}
+
+/// Drive one started child to a terminal observation: drain its captured
+/// streams, wait for its exit (or the deadline, or cancellation), signal its
+/// process group, and reap it.
+///
+/// This is the single body behind [`Supervisor::spawn_process`] and
+/// [`Supervisor::run_process`]. The three phases run concurrently as
+/// [`join3`]: the two pipe reads must make progress while the child runs, or a
+/// child that writes more than a pipe buffer would block forever waiting for a
+/// reader that is waiting for it to exit.
+#[cfg(all(unix, feature = "process"))]
+async fn drive_process(
+    mut child: Child,
+    deadline: Option<Duration>,
+    token: &CancellationToken,
+    mut group: ProcessGroup<'static>,
+    out_limit: Option<NonZeroUsize>,
+    err_limit: Option<NonZeroUsize>,
+) -> ProcessEnd {
+    let pid = child.id().and_then(|raw| i32::try_from(raw).ok());
+    let capture_out = capture(child.stdout.take(), out_limit);
+    let capture_err = capture(child.stderr.take(), err_limit);
+    // Reading the pipes and waiting for the child are independent futures over
+    // disjoint state; only the group is borrowed, and that borrow ends when
+    // this future completes.
+    let wait = async {
+        let observation = match pid {
+            Some(pid) => observe_pid_without_reaping(pid, deadline, token).await,
+            None => ProcessObservation::Unobservable,
+        };
+        let cleanup = group.cleanup().await;
+        (observation, cleanup)
+    };
+    let (stdout, stderr, (observation, mut cleanup)) = join3(capture_out, capture_err, wait).await;
+
+    if matches!(cleanup, CleanupReceipt::CleanupFailed)
+        && !matches!(observation, ProcessObservation::Exited)
+    {
+        // Do not wait on a child whose group signal could not be delivered. The
+        // owned child is dropped immediately after this return, and
+        // `kill_on_drop` remains the direct-child fallback.
+        drop(group);
+        return ProcessEnd {
+            observation,
+            status: None,
+            cleanup,
+            stdout,
+            stderr,
+        };
+    }
+    let status = if matches!(cleanup, CleanupReceipt::CleanupFailed) {
+        // Keep the leader unreaped while the armed guard makes its final
+        // synchronous kill attempt. The receipt reports the syscall failure;
+        // dropping the child then relinquishes it to the platform's orphan
+        // reaper rather than signalling a stale numeric group id.
+        drop(group);
+        child.wait().await.ok()
+    } else {
+        let status = child.wait().await.ok();
+        group.mark_reaped();
+        if matches!(cleanup, CleanupReceipt::CleanupPending) {
+            cleanup = group.confirm_absence().await;
+        }
+        status
+    };
+    ProcessEnd {
+        observation,
+        status,
+        cleanup,
+        stdout,
+        stderr,
+    }
+}
+
+/// Read a captured pipe to EOF, retaining at most `limit` bytes and counting
+/// every byte.
+///
+/// The pipe is drained even after the ceiling is reached, so a child that
+/// writes far more than the ceiling cannot block on a full pipe. The retained
+/// buffer is sized once to the ceiling, so the retained capacity is bounded by
+/// the policy rather than by what the child wrote.
+#[cfg(all(unix, feature = "process"))]
+async fn capture<R>(reader: Option<R>, limit: Option<NonZeroUsize>) -> CapturedStream
+where
+    R: AsyncRead + Unpin,
+{
+    let (Some(mut reader), Some(limit)) = (reader, limit) else {
+        // No pipe (inherited or null) or no capture policy: nothing retained.
+        return CapturedStream::default();
+    };
+    let cap = limit.get();
+    let mut bytes: Vec<u8> = Vec::with_capacity(cap);
+    let mut total: u64 = 0;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        match reader.read(&mut buffer).await {
+            Ok(0) => break,
+            Ok(read) => {
+                total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+                if bytes.len() < cap {
+                    let room = cap.saturating_sub(bytes.len());
+                    let take = room.min(read);
+                    if let Some(head) = buffer.get(..take) {
+                        bytes.extend_from_slice(head);
+                    }
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    let truncated = total > u64::try_from(cap).unwrap_or(u64::MAX);
+    CapturedStream::from_parts(bytes, total, truncated)
+}
+
+/// Poll three futures to completion on the calling task, returning their
+/// outputs together.
+///
+/// The engine's `join!` is behind the `macros` feature, which the `process`
+/// feature does not require, so this is the small combinator that build needs.
+/// Nothing is spawned and nothing is `Send`-bound: a child's two pipes must be
+/// drained while it is observed, and the futures that do so borrow the caller's
+/// child and group, which a spawned task could not.
+#[cfg(all(unix, feature = "process"))]
+async fn join3<A, B, C>(first: A, second: B, third: C) -> (A::Output, B::Output, C::Output)
+where
+    A: Future,
+    B: Future,
+    C: Future,
+{
+    let mut first = std::pin::pin!(first);
+    let mut second = std::pin::pin!(second);
+    let mut third = std::pin::pin!(third);
+    let mut first_out: Option<A::Output> = None;
+    let mut second_out: Option<B::Output> = None;
+    let mut third_out: Option<C::Output> = None;
+    std::future::poll_fn(|context| {
+        if first_out.is_none()
+            && let std::task::Poll::Ready(value) = first.as_mut().poll(context)
+        {
+            first_out = Some(value);
+        }
+        if second_out.is_none()
+            && let std::task::Poll::Ready(value) = second.as_mut().poll(context)
+        {
+            second_out = Some(value);
+        }
+        if third_out.is_none()
+            && let std::task::Poll::Ready(value) = third.as_mut().poll(context)
+        {
+            third_out = Some(value);
+        }
+        if first_out.is_some() && second_out.is_some() && third_out.is_some() {
+            let first_value = first_out.take();
+            let second_value = second_out.take();
+            let third_value = third_out.take();
+            return match (first_value, second_value, third_value) {
+                (Some(first_value), Some(second_value), Some(third_value)) => {
+                    std::task::Poll::Ready((first_value, second_value, third_value))
+                }
+                _ => std::task::Poll::Pending,
+            };
+        }
+        std::task::Poll::Pending
+    })
+    .await
 }
 
 #[cfg(all(unix, feature = "process"))]
@@ -1866,6 +2158,22 @@ impl<'ops> ProcessGroup<'ops> {
                     self.disarm();
                     return CleanupReceipt::CleanupConfirmed;
                 }
+                // `EPERM` after a delivered SIGKILL is not a termination
+                // refusal: on macOS/BSD a process group whose leader is an
+                // unreaped zombie (which is exactly the state the first signal
+                // produced) reports `EPERM` for a further `killpg`, while the
+                // group — the zombie leader included — is still present. It is
+                // therefore the same fact `exists` reports as `Ok(true)`: the
+                // group is still there. Returning `Failed` here would claim the
+                // OS refused a kill it already delivered, and would report a
+                // deadline kill as a cleanup failure. The absence is settled by
+                // the post-reap signal-zero probe, so this stays pending.
+                Err(error)
+                    if error.kind() == io::ErrorKind::PermissionDenied
+                        || error.raw_os_error() == Some(1) =>
+                {
+                    return CleanupReceipt::CleanupPending;
+                }
                 Err(_) => return CleanupReceipt::CleanupFailed,
             }
         }
@@ -1902,11 +2210,30 @@ impl<'ops> ProcessGroup<'ops> {
     }
 
     /// Signal the whole group as a drop-time safety fallback.
+    ///
+    /// One signal is not enough. A group signal reaches the members that exist
+    /// when it is sent, so a child the leader is forking at that instant can
+    /// miss it, outlive its killed parent and run on reparented to init — a
+    /// dropped run's `sh -c 'echo; sleep'` left exactly that `sleep` behind.
+    /// The kill therefore repeats, yielding the thread between attempts so a
+    /// fork in progress completes and is reached, for as long as the group is
+    /// still present (`Ok`, or `EPERM` for a zombie leader, INV-BOT-19). It
+    /// stops at absence or any other error, and never runs after the leader is
+    /// reaped, so the id it signals is still pinned (INV-BOT-12).
     fn kill(&self) {
         if self.leader_reaped || self.group <= 0 {
             return;
         }
-        let _outcome = self.signaller.signal(self.group);
+        for _ in 0..PROCESS_CLEANUP_ATTEMPTS {
+            match self.signaller.signal(self.group) {
+                Ok(()) => {}
+                Err(error)
+                    if error.kind() == io::ErrorKind::PermissionDenied
+                        || error.raw_os_error() == Some(1) => {}
+                Err(_) => return,
+            }
+            std::thread::yield_now();
+        }
     }
 
     /// Mark the group as already gone, so [`Drop`] does not signal it.
@@ -2130,6 +2457,35 @@ mod tests {
         }
     }
 
+    /// A group whose leader is an unreaped zombie: macOS/BSD report `EPERM` for
+    /// a further `killpg` while the group is still present.
+    #[cfg(all(unix, feature = "process"))]
+    struct EpermGroupSignaller;
+
+    #[cfg(all(unix, feature = "process"))]
+    impl GroupSignaller for EpermGroupSignaller {
+        fn signal(&self, _group: i32) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "the group leader is a zombie",
+            ))
+        }
+    }
+
+    /// An error that is neither absence nor the zombie case: a genuine refusal.
+    #[cfg(all(unix, feature = "process"))]
+    struct UnexpectedGroupSignaller;
+
+    #[cfg(all(unix, feature = "process"))]
+    impl GroupSignaller for UnexpectedGroupSignaller {
+        fn signal(&self, _group: i32) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "injected unexpected failure",
+            ))
+        }
+    }
+
     #[cfg(all(unix, feature = "process"))]
     struct SequenceGroupObserver {
         calls: AtomicUsize,
@@ -2192,6 +2548,66 @@ mod tests {
             0,
             "cleanup and Drop must not signal after the owner has reaped the leader"
         );
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    #[test]
+    fn an_unsignalable_present_group_stays_pending_rather_than_failed() {
+        // macOS/BSD report EPERM for a further killpg against a group whose
+        // leader is an unreaped zombie. That is "the group is still there", not
+        // "the OS refused the kill", and reading it as a failure would report a
+        // deadline stop as a cleanup failure on those platforms.
+        let signaller = EpermGroupSignaller;
+        let observer = SequenceGroupObserver {
+            calls: AtomicUsize::new(0),
+            present_before_absent: usize::MAX,
+        };
+        let mut group = ProcessGroup {
+            group: 42,
+            task: TaskId(0),
+            permit: test_lease(),
+            owners: Arc::new(CleanupOwners::default()),
+            armed: true,
+            leader_reaped: false,
+            signaller: &signaller,
+            observer: &observer,
+        };
+        assert_eq!(
+            block_on(group.cleanup()),
+            CleanupReceipt::CleanupPending,
+            "an unsignalable but still-present group is pending, not a failed kill"
+        );
+        assert!(
+            group.armed,
+            "an unresolved group must stay armed for the drop-time fallback"
+        );
+        drop(group);
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    #[test]
+    fn an_unexpected_signal_error_is_a_failed_cleanup() {
+        let signaller = UnexpectedGroupSignaller;
+        let observer = SequenceGroupObserver {
+            calls: AtomicUsize::new(0),
+            present_before_absent: 0,
+        };
+        let mut group = ProcessGroup {
+            group: 42,
+            task: TaskId(0),
+            permit: test_lease(),
+            owners: Arc::new(CleanupOwners::default()),
+            armed: true,
+            leader_reaped: false,
+            signaller: &signaller,
+            observer: &observer,
+        };
+        assert_eq!(
+            block_on(group.cleanup()),
+            CleanupReceipt::CleanupFailed,
+            "an unexpected errno remains a refused termination"
+        );
+        drop(group);
     }
 
     #[cfg(all(unix, feature = "process"))]

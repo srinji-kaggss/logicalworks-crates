@@ -25,10 +25,11 @@
 //!   that preserves input order and never exceeds the limit.
 //! - [`supervise`](crate::rt::supervise) — `Supervisor`: the way concurrent
 //!   work, and a subprocess, is started. `Supervisor::default` is the ceiling
-//!   when the caller has no opinion, `Supervisor::spawn` and
-//!   `Supervisor::spawn_process` are the two starters, and nothing here returns
-//!   a handle to a running task or process, so nothing can be started and then
-//!   forgotten.
+//!   when the caller has no opinion; `Supervisor::spawn`,
+//!   `Supervisor::spawn_process` and `Supervisor::run_process` are the
+//!   starters — the first two report later, the last hands back what the child
+//!   wrote — and nothing here returns a handle to a running task or process, so
+//!   nothing can be started and then forgotten.
 //! - [`time`] — `sleep`, `timeout`, `interval`, `Instant` (feature `time`).
 //! - [`sync`] — `mpsc`, `oneshot`, `broadcast`, `watch`, `Mutex`, `RwLock`,
 //!   `Semaphore`, `Notify`, `Barrier` (feature `sync`).
