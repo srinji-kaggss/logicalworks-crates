@@ -35,6 +35,8 @@ invariants:
   - The body read window is one fixed chunk, never the declared body length.
   - Retained body capacity is clamped to the declared ceiling, even at a
     non-power-of-two ceiling.
+  - A measurement window contains no foreign allocation or free: every server
+    thread serving one exchange is joined before the next block is armed.
   - A body timeout or a torn transport is never EOF, a complete preview, or
     proof of no effect.
   - Two identities polling one endpoint keep their headers to themselves.
@@ -93,3 +95,8 @@ probes:
     action: "Within the allocation probe, an eager reader that reserves the
       declared length and drains unbounded reports a peak at least the body size,
       proving the same metric that bounds the real path would fail the mutant."
+  - id: measurement-window-is-deterministic
+    action: "Run `http_alloc::the_read_path_retains_the_ceiling_not_the_body` 30
+      times: each single-shot server thread is joined before the next block is
+      armed, so a detached server cannot free its reply inside a later window;
+      the eager peak stays at or above the 3 MB body on every run."
