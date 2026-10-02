@@ -668,14 +668,17 @@ impl Host {
         // and never leaves a step in the trail.
         let permit = match self.admit(started, &task_name).await {
             Ok(permit) => permit,
-            Err(error) => {
-                self.inner.refused.fetch_add(1, Ordering::Relaxed);
+            Err(failure) => {
+                let disposition = failure.disposition();
+                if disposition == Disposition::Refused {
+                    self.inner.refused.fetch_add(1, Ordering::Relaxed);
+                }
                 return self.report(
                     started,
                     task_name,
-                    disposition_of(&error),
+                    disposition,
                     None,
-                    Some(error),
+                    Some(failure.into_error()),
                     TrailSnapshot::Empty,
                 );
             }
@@ -822,7 +825,14 @@ impl Host {
         &self,
         started: Instant,
         task: &TaskName,
-    ) -> Result<Permit, FlowError> {
+    ) -> Result<Permit, AdmissionFailure> {
+        // Both refusals here are distinct facts and both are reported as
+        // `Refused`, never `Cancelled`: a run that never held a permit never ran
+        // a body, so no step was entered and there is nothing that could have
+        // been stopped mid-way. A `Cancelled` disposition means the run was
+        // admitted and then stopped, which is a different thing to tell a
+        // reader — and the reason this returns a [`Permit`] or a *timeout* is
+        // that only a run which entered its body can be cancelled inside it.
         let nested = HELD_PERMITS
             .try_with(|held| held.contains(&self.inner.identity))
             .unwrap_or(false);
@@ -830,9 +840,9 @@ impl Host {
             return Ok(Permit::Charged);
         }
         if self.inner.token.is_cancelled() {
-            return Err(FlowError::Cancelled {
+            return Err(AdmissionFailure::Refused(Refused {
                 at: Arc::from(task.as_str()),
-            });
+            }));
         }
         let deadline = self.inner.limits.default_deadline();
         let remaining = deadline.saturating_sub(started.elapsed());
@@ -846,16 +856,16 @@ impl Host {
             // does. Typed rather than panicked because the invariant that makes
             // this unreachable is a claim, not a proof, and a budget that is
             // closed is a fact the caller needs rather than a panic.
-            Ok(Some(Err(_closed))) => Err(FlowError::failed(
+            Ok(Some(Err(_closed))) => Err(AdmissionFailure::Failed(FlowError::failed(
                 "the host's admission budget is closed",
-            )),
-            Ok(None) => Err(FlowError::Cancelled {
+            ))),
+            Ok(None) => Err(AdmissionFailure::Refused(Refused {
                 at: Arc::from(task.as_str()),
-            }),
-            Err(_elapsed) => Err(FlowError::TimedOut {
+            })),
+            Err(_elapsed) => Err(AdmissionFailure::DeadlineExceeded(FlowError::TimedOut {
                 at: Arc::from(BODY_STEP),
                 after: deadline,
-            }),
+            })),
         }
     }
 
@@ -1029,6 +1039,49 @@ impl InFlight {
     /// How many runs hold a permit right now.
     fn get(&self) -> usize {
         self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// A run the host declined to admit, before any body ran.
+///
+/// Its own type rather than a `FlowError`, because the disposition it maps to
+/// is not the one a located failure maps to: a run that never held a permit
+/// never entered a step, so there is no step to be cancelled *at*. Reporting it
+/// as `Cancelled` would tell a reader its body had started and then stopped.
+struct Refused {
+    /// The task it was refused for, which is the only location it has.
+    at: Arc<str>,
+}
+
+/// Why a run never reached its body, and the disposition each reason reports.
+enum AdmissionFailure {
+    /// The host was stopped, or stopped while this run waited.
+    Refused(Refused),
+    /// The budget could not be acquired at all.
+    Failed(FlowError),
+    /// The run's deadline passed while it waited for a permit.
+    DeadlineExceeded(FlowError),
+}
+
+impl AdmissionFailure {
+    /// The disposition this admission failure reports.
+    const fn disposition(&self) -> Disposition {
+        match *self {
+            Self::Refused(_) => Disposition::Refused,
+            Self::DeadlineExceeded(_) => Disposition::DeadlineExceeded,
+            Self::Failed(_) => Disposition::Failed,
+        }
+    }
+
+    /// The located failure this admission failure reports.
+    fn into_error(self) -> FlowError {
+        match self {
+            Self::Refused(Refused { at }) => FlowError::Failed {
+                at,
+                reason: String::from("the host refused to admit this run"),
+            },
+            Self::Failed(error) | Self::DeadlineExceeded(error) => error,
+        }
     }
 }
 
