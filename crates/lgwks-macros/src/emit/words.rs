@@ -166,9 +166,19 @@ pub(super) fn bound(
             .chars()
             .filter(char::is_ascii_digit)
             .collect();
-        let value: u64 = digits
-            .parse()
-            .map_err(|_| Error::new(literal.span(), format!("`{clause}` takes a whole number")))?;
+        // An explicit match rather than `map_err(|_| ..)`: the parse error is
+        // `ParseIntError`, whose text is "invalid digit found in string", and the
+        // message the author needs names the clause instead. Stating the refusal
+        // in the arm keeps that decision on the line that makes it.
+        let value: u64 = match digits.parse() {
+            Ok(value) => value,
+            Err(_not_a_whole_number) => {
+                return Err(Error::new(
+                    literal.span(),
+                    format!("`{clause}` takes a whole number"),
+                ));
+            }
+        };
         if value == 0 || value > max {
             return Err(Error::new(
                 literal.span(),
@@ -225,8 +235,15 @@ pub(super) fn duration(tokens: &[TokenTree], line: &Line) -> Result<TokenStream>
                     "a zero duration is no deadline; give a positive one",
                 ));
             }
-            let nanos = u64::try_from(nanos)
-                .map_err(|_| Error::new(literal.span(), "this duration is too large"))?;
+            // As above: the conversion error is "out of range integral type
+            // conversion attempted", and the span plus the size is what the
+            // author needs.
+            let nanos = match u64::try_from(nanos) {
+                Ok(nanos) => nanos,
+                Err(_too_large) => {
+                    return Err(Error::new(literal.span(), "this duration is too large"));
+                }
+            };
             let literal = Literal::u64_unsuffixed(nanos);
             Ok(quote!(::core::time::Duration::from_nanos(#literal)))
         }

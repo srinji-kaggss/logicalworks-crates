@@ -542,7 +542,11 @@ pub fn validate_url(url: &str) -> Result<(), Error> {
         operation = "validate_url",
         "operation refused its request; the typed error carries the facts"
     );
-    UriAbsoluteStr::new(url).map_err(|_malformed| Error::InvalidUrl)?;
+    // Class-only, for the reason `resolve_location` states: ureq's message
+    // embeds the raw URI.
+    if UriAbsoluteStr::new(url).is_err() {
+        return Err(Error::InvalidUrl);
+    }
     let Some(scheme) = url.split_once(':').map(|(scheme, _)| scheme) else {
         return Err(Error::InvalidUrl);
     };
@@ -1030,21 +1034,38 @@ fn resolve_location(base: &str, location: &str) -> Result<String, Error> {
             Some(detail.to_owned()),
         )
     };
-    let base = UriAbsoluteStr::new(base).map_err(|_| refused("redirect base is not absolute"))?;
-    let reference =
-        UriReferenceStr::new(location).map_err(|_| refused("Location is not a URI reference"))?;
+    // Explicit matches rather than `map_err(|_| ..)` throughout: the parse
+    // errors here embed the URI that produced them, and the function's contract
+    // -- stated above -- is that a `Location` can carry a token the caller never
+    // saw and is not echoed into the error. Writing the refusal in the arm is
+    // what makes that visible at each site rather than at the doc comment.
+    let base = match UriAbsoluteStr::new(base) {
+        Ok(base) => base,
+        Err(_not_absolute) => return Err(refused("redirect base is not absolute")),
+    };
+    let reference = match UriReferenceStr::new(location) {
+        Ok(reference) => reference,
+        Err(_not_a_reference) => return Err(refused("Location is not a URI reference")),
+    };
     let resolved = reference.resolve_against(base);
-    resolved
-        .ensure_rfc3986_normalizable()
-        .map_err(|_| refused("Location does not resolve to one unambiguous target"))?;
-    let resolved = resolved
-        .try_to_dedicated_string()
-        .map_err(|_| failure(FailureStage::Redirect, FailureKind::Resource, None))?;
+    if resolved.ensure_rfc3986_normalizable().is_err() {
+        return Err(refused(
+            "Location does not resolve to one unambiguous target",
+        ));
+    }
+    let resolved = match resolved.try_to_dedicated_string() {
+        Ok(resolved) => resolved,
+        Err(_not_representable) => {
+            return Err(failure(FailureStage::Redirect, FailureKind::Resource, None));
+        }
+    };
     let target = resolved
         .as_str()
         .split_once('#')
         .map_or(resolved.as_str(), |(target, _fragment)| target);
-    validate_url(target).map_err(|_| refused("Location leaves absolute http(s)"))?;
+    if validate_url(target).is_err() {
+        return Err(refused("Location leaves absolute http(s)"));
+    }
     Ok(target.to_owned())
 }
 

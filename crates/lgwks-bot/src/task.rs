@@ -715,9 +715,19 @@ impl Host {
         // A nested run's identity joins the set its parent established, so a
         // child two levels down sees every ancestor's host and is charged the
         // same way. Sibling runs have their own scopes and their own sets.
-        let held = HELD_PERMITS
-            .try_with(Clone::clone)
-            .unwrap_or_else(|_unentered| Vec::new());
+        //
+        // Outside a scope there is no held set, and an empty one is the correct
+        // reading: this run holds nothing it inherited, so it is charged for
+        // everything it does itself. `Vec::new()` rather than a discard of the
+        // not-entered error, which carries no permit information at all.
+        let held = match HELD_PERMITS.try_with(Clone::clone) {
+            Ok(held) => held,
+            // Outside a scope there is no held set, and an empty one is the
+            // correct reading: this run holds nothing it inherited, so it is
+            // charged for everything it does itself. The error is not-entered,
+            // which carries no permit to lose.
+            Err(_not_entered) => Vec::new(),
+        };
         let charged = if held.contains(&self.inner.identity) {
             held
         } else {
