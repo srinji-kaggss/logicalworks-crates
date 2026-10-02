@@ -3316,7 +3316,11 @@ pub struct RecordedDecision {
 }
 
 impl RecordedDecision {
-    /// Returns the receipt.
+    /// The journal receipt this decision was written under.
+    ///
+    /// Borrowed, not cloned, so a caller cannot present a receipt that is not
+    /// the one the journal accepted. A receipt is the durable half of a decision:
+    /// it is what makes the decision survive a restart that loses this record.
     #[must_use]
     pub fn receipt(&self) -> &DecisionReceipt {
         &self.receipt
@@ -3367,7 +3371,12 @@ pub struct TranscriptEntry {
 }
 
 impl TranscriptEntry {
-    /// Return the path node id.
+    /// The node this transcript entry was recorded against.
+    ///
+    /// The *path* node rather than the current one: a session that loops back
+    /// through a branch records entries against the node that was current when
+    /// they happened, so a reader replaying the transcript follows the path the
+    /// conversation actually took rather than the one it ended on.
     #[must_use]
     pub fn path_node(&self) -> &str {
         &self.path_node

@@ -321,7 +321,12 @@ impl Options {
         &self.headers
     }
 
-    /// Set the redirect policy for this call.
+    /// How many redirects this request may follow.
+    ///
+    /// Takes `self` and returns it, so it chains with the rest of the builder.
+    /// A limit of `0` is not "unlimited": it returns whatever came back without
+    /// reading it, which is the only way to observe a redirect without following
+    /// it. The default is whatever [`Request::get`] and its siblings set.
     #[must_use]
     pub fn redirect_policy(mut self, redirect_policy: RedirectPolicy) -> Self {
         self.redirect_policy = redirect_policy;
@@ -1027,6 +1032,11 @@ fn origin_of(target: &str) -> Option<Origin> {
 /// is class-only, like [`validate_url`]: a `Location` can carry a token the
 /// caller never saw, so it is not echoed into the error.
 fn resolve_location(base: &str, location: &str) -> Result<String, Error> {
+    #[cfg(feature = "trace")]
+    crate::trace::warn!(
+        operation = "resolve_location",
+        "operation refused its request; the typed error carries the facts"
+    );
     let refused = |detail: &str| {
         failure(
             FailureStage::Redirect,
