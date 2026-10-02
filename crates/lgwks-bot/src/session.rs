@@ -668,6 +668,79 @@ fn any_true(items: &[Predicate], scope: &VarScope) -> Result<bool, BotError> {
     Ok(false)
 }
 
+/// Validates one `branch` node: its variable, its predicate and both edges.
+///
+/// A helper so every kind's arm in [`validate_node`] is one call. The order
+/// inside is the order a refusal should name things in: the variable before the
+/// predicate that reads it, and the predicate before either edge it chooses
+/// between.
+fn validate_branch_node(
+    spec: &FlowSpec,
+    node_id: &str,
+    var: &str,
+    when: &Predicate,
+    then: &str,
+    otherwise: &str,
+) -> Result<(), BotError> {
+    lgwks_std::trace::warn!(
+        operation = "validate_branch_node",
+        "operation refused its request; the typed error carries the facts"
+    );
+    validate_variable_reference(spec, node_id, var)?;
+    validate_predicate(spec, node_id, when)?;
+    check_edge_pair(&spec.nodes, node_id, then, otherwise)
+}
+
+/// Validates one `refer` node: its template, and that it reaches a terminal.
+///
+/// A helper for the same reason as the other kinds. A `refer` hands the
+/// conversation to someone else, so its target has to be a place the flow can
+/// actually end -- validated here rather than discovered when the session had
+/// already given the person away.
+fn validate_refer_node(
+    spec: &FlowSpec,
+    node_id: &str,
+    text: &str,
+    limits: ResourceLimits,
+) -> Result<(), BotError> {
+    validate_template(spec, node_id, text, "refer.text", limits)?;
+    for target in spec.edge_targets(node_id) {
+        check_target(&spec.nodes, node_id, &target)?;
+    }
+    Ok(())
+}
+
+/// Validates one `say` node: its template, and that it has exactly one way out.
+///
+/// A helper so every kind's arm in [`validate_node`] is one call. A `say` node
+/// that continues along two edges is ambiguous at run time -- which one the
+/// driver follows is not written down anywhere -- and a `say` node with no
+/// continuation and no terminal leaves the conversation with nowhere to go, so
+/// both are refused at load rather than at the moment a person is waiting.
+fn validate_say_node(
+    spec: &FlowSpec,
+    node_id: &str,
+    text: &str,
+    limits: ResourceLimits,
+) -> Result<(), BotError> {
+    lgwks_std::trace::warn!(
+        operation = "validate_say_node",
+        "operation refused its request; the typed error carries the facts"
+    );
+    validate_template(spec, node_id, text, "say.text", limits)?;
+    if spec.edge_targets(node_id).len() > 1 {
+        return Err(BotError::MalformedFlow {
+            cause: format!("say node {node_id:?} has multiple continuations"),
+        });
+    }
+    if spec.edge_targets(node_id).is_empty() && !spec.terminals.contains_key(node_id) {
+        return Err(BotError::MissingTransition {
+            node: node_id.to_owned(),
+        });
+    }
+    Ok(())
+}
+
 /// Validates one `ask` node: its variable, its options and its routes.
 ///
 /// A helper rather than the arm inline: as one block the arm carried the
@@ -1717,19 +1790,7 @@ fn validate_node(
         "operation refused its request; the typed error carries the facts"
     );
     match *kind {
-        NodeKind::Say { ref text } => {
-            validate_template(spec, node_id, text, "say.text", limits)?;
-            if spec.edge_targets(node_id).len() > 1 {
-                return Err(BotError::MalformedFlow {
-                    cause: format!("say node {node_id:?} has multiple continuations"),
-                });
-            }
-            if spec.edge_targets(node_id).is_empty() && !spec.terminals.contains_key(node_id) {
-                return Err(BotError::MissingTransition {
-                    node: node_id.to_owned(),
-                });
-            }
-        }
+        NodeKind::Say { ref text } => validate_say_node(spec, node_id, text, limits)?,
         NodeKind::Ask {
             ref var,
             ref options,
@@ -1740,17 +1801,9 @@ fn validate_node(
             ref when,
             ref then,
             ref otherwise,
-        } => {
-            // In this order, so a refusal names the variable before the
-            // predicate it is read by, and the predicate before either edge.
-            validate_variable_reference(spec, node_id, var)?;
-            validate_predicate(spec, node_id, when)?;
-            check_edge_pair(&spec.nodes, node_id, then, otherwise)?;
-        }
+        } => validate_branch_node(spec, node_id, var, when, then, otherwise)?,
         NodeKind::Handoff { .. } => {}
-        NodeKind::Refer { ref text, .. } => {
-            validate_template(spec, node_id, text, "refer.text", limits)?;
-        }
+        NodeKind::Refer { ref text, .. } => validate_refer_node(spec, node_id, text, limits)?,
         NodeKind::Route {
             ref dispatch,
             ref fallback,
@@ -3695,6 +3748,40 @@ impl Session {
     /// whose answer could not then be stored — which is the direction an audit
     /// record must err in, and the opposite of an accepted answer with no
     /// record of why.
+    /// Receipts the verdict, then records the person's answer.
+    ///
+    /// Every re-ask arm begins with this pair, and the order is the contract: the
+    /// receipt is the durable fact that a verdict was reached, and the transcript
+    /// line is what a reader sees later. Recording first would put an utterance
+    /// in the transcript for a verdict that was never durably reached.
+    fn receipt_and_record(
+        &mut self,
+        node_id: &str,
+        options: &[String],
+        verdict: &Verdict,
+        utterance: &str,
+    ) -> Result<(), BotError> {
+        self.write_receipt(node_id, options, verdict, None, None)?;
+        self.record(node_id, "user", utterance)
+    }
+
+    /// Submit one free-text answer. Unrecognized input is recorded, the same
+    /// ask remains current, and the prompt is recorded again.
+    ///
+    /// Every verdict — resolved, ambiguous, absent, or degraded — writes a
+    /// [`DecisionReceipt`], because a re-ask is a decision too and the one an
+    /// operator most needs to see afterwards.
+    ///
+    /// The receipt is written through the journal before the transition it
+    /// describes is applied, and a journal that refuses it aborts the answer
+    /// with [`BotError::ReceiptNotRecorded`] leaving the session exactly as it
+    /// was: not advanced, not terminated, the variable unwritten, the
+    /// transcript untouched, and no receipt held. Recording is part of
+    /// accepting an answer, not a report written beside it, so the one failure
+    /// this ordering leaves behind is a decision that was reached and recorded
+    /// whose answer could not then be stored — which is the direction an audit
+    /// record must err in, and the opposite of an accepted answer with no
+    /// record of why.
     pub fn answer(&mut self, utterance: &str) -> Result<(), BotError> {
         lgwks_std::trace::warn!(
             operation = "answer",
@@ -3773,8 +3860,7 @@ impl Session {
                     .iter()
                     .filter_map(|candidate| options.get(*candidate).cloned())
                     .collect();
-                self.write_receipt(&node_id, &options, &verdict, None, None)?;
-                self.record(&node_id, "user", utterance)?;
+                self.receipt_and_record(&node_id, &options, &verdict, utterance)?;
                 if narrowed.len() >= 2 {
                     self.record_prompt(&node_id, &narrowed)?;
                 } else {
@@ -3783,8 +3869,7 @@ impl Session {
                 Ok(())
             }
             Resolution::Absent { .. } => {
-                self.write_receipt(&node_id, &options, &verdict, None, None)?;
-                self.record(&node_id, "user", utterance)?;
+                self.receipt_and_record(&node_id, &options, &verdict, utterance)?;
                 self.record_prompt(&node_id, &options)?;
                 Ok(())
             }
@@ -3801,8 +3886,7 @@ impl Session {
                 // A re-ask is a decision, so it is receipted like every other
                 // verdict; the receipt names the withdrawal, and the roles
                 // below name it again for whoever reads the transcript.
-                self.write_receipt(&node_id, &options, &verdict, None, None)?;
-                self.record(&node_id, "user", utterance)?;
+                self.receipt_and_record(&node_id, &options, &verdict, utterance)?;
                 self.record_stale_alias(&node_id, &bound_question, &option)?;
                 self.record_prompt(&node_id, &options)?;
                 Ok(())
@@ -3812,8 +3896,7 @@ impl Session {
                 // role: a transcript that renders a degraded re-ask exactly as
                 // an unclear one is how an operator concludes the person was
                 // being difficult while the embedder was down.
-                self.write_receipt(&node_id, &options, &verdict, None, None)?;
-                self.record(&node_id, "user", utterance)?;
+                self.receipt_and_record(&node_id, &options, &verdict, utterance)?;
                 self.record_degraded(&node_id, reason)?;
                 self.record_prompt(&node_id, &options)?;
                 Ok(())
@@ -3887,6 +3970,19 @@ impl Session {
     }
 
     /// Execute deterministic nodes until an ask or terminal is reached.
+    /// Renders `text` and records it as the assistant's turn.
+    ///
+    /// `say` and `refer` both speak before either continues, and inline they
+    /// each rendered and recorded as two statements, so the drive loop carried
+    /// four of them across two arms and a reader could not see that the pair is
+    /// one step. It matters that the record follows the render: a render that
+    /// refuses must leave nothing said.
+    fn speak(&mut self, node_id: &str, text: &str) -> Result<(), BotError> {
+        let rendered = self.render(node_id, text)?;
+        self.record(node_id, "assistant", &rendered)
+    }
+
+    /// Advances the session until it needs an answer or reaches an outcome.
     fn drive(&mut self) -> Result<(), BotError> {
         lgwks_std::trace::warn!(
             operation = "drive",
@@ -3911,8 +4007,7 @@ impl Session {
             };
             match kind {
                 NodeKind::Say { text } => {
-                    let rendered = self.render(&node_id, &text)?;
-                    self.record(&node_id, "assistant", &rendered)?;
+                    self.speak(&node_id, &text)?;
                     let Some(target) = self.flow.edge_targets(&node_id).into_iter().next() else {
                         return Err(BotError::MissingTransition { node: node_id });
                     };
@@ -3945,8 +4040,7 @@ impl Session {
                     // referral itself — validation refuses anything else — so
                     // this text is never spoken for an outcome that
                     // contradicts it.
-                    let rendered = self.render(&node_id, &text)?;
-                    self.record(&node_id, "assistant", &rendered)?;
+                    self.speak(&node_id, &text)?;
                     self.finish(&node_id)?;
                 }
                 NodeKind::Route { dispatch, fallback } => {

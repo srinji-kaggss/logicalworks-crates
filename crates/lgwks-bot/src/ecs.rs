@@ -1174,15 +1174,7 @@ impl Effects {
             return self.settle_committed_outcome(key, evidence, required);
         }
         match self.append(&EffectEvent::OutcomeObserved { key, evidence }) {
-            Ok(acknowledgment) => {
-                self.confirm_outcome(key, evidence, required, acknowledgment)?;
-                self.accept_position(
-                    &EffectEvent::OutcomeObserved { key, evidence },
-                    self.outcome_position(key, evidence)?,
-                )?;
-                self.fold_outcome(key, evidence);
-                Ok(())
-            }
+            Ok(acknowledgment) => self.record_new_outcome(key, evidence, required, acknowledgment),
             Err(JournalError::OutOfOrder { expected, .. })
                 if expected == Some(EventKind::Verified) || expected.is_none() =>
             {

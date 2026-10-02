@@ -908,6 +908,44 @@ fn socket_source_on_the_shipped_runtime() -> TestResult {
         }
     }
 
+    /// Connects to `listener`, writes `7`, and reads the byte back.
+    ///
+    /// The whole round trip is one helper because the certainty of a failure is
+    /// a property of the round trip, not of one call. Three of the four steps
+    /// fail `NotDelivered` -- nothing had gone out -- and the write fails
+    /// `Unsettled`, because by then the connection existed and the byte may
+    /// already have reached the peer. Inline, that distinction sat in the middle
+    /// of the chain where it was easiest to read as one more of the same.
+    async fn round_trip(listener: &TcpListener) -> Result<u8, BotError> {
+        lgwks_std::trace::warn!(
+            operation = "round_trip",
+            "operation refused its request; the typed error carries the facts"
+        );
+        let peer = listener
+            .local_addr()
+            .map_err(|error| not_delivered(error))?;
+        let mut client = TcpStream::connect(peer)
+            .await
+            .map_err(|error| not_delivered(error))?;
+        if let Err(error) = client.write_all(b"7").await {
+            return Err(BotError::DomainError {
+                domain: DOMAIN.to_owned(),
+                certainty: DispatchCertainty::Unsettled,
+                cause: error.to_string(),
+            });
+        }
+        let (mut server, _origin) = listener
+            .accept()
+            .await
+            .map_err(|error| not_delivered(error))?;
+        let mut byte = [0u8; 1];
+        if let Err(error) = server.read_exact(&mut byte).await {
+            return Err(not_delivered(error));
+        }
+        Ok(byte[0])
+    }
+
+    /// A source that talks to itself over loopback.
     /// A source that talks to itself over loopback.
     struct SocketSource {
         /// The listening end, bound before the tick starts.
@@ -927,35 +965,8 @@ fn socket_source_on_the_shipped_runtime() -> TestResult {
                 "operation refused its request; the typed error carries the facts"
             );
             call.0.check(Observe::required_caps(self))?;
-            let domain = DOMAIN;
-            let peer = self
-                .listener
-                .local_addr()
-                .map_err(|error| not_delivered(error))?;
-            let mut client = TcpStream::connect(peer)
-                .await
-                .map_err(|error| not_delivered(error))?;
-            if let Err(error) = client.write_all(b"7").await {
-                // A write that failed on an established connection is the
-                // `Unsettled` arm, not `NotDelivered`: the connection existed,
-                // so bytes may already have reached the peer and a retry here
-                // is a possible duplicate.
-                return Err(BotError::DomainError {
-                    domain,
-                    certainty: DispatchCertainty::Unsettled,
-                    cause: error.to_string(),
-                });
-            }
-            let (mut server, _origin) = self
-                .listener
-                .accept()
-                .await
-                .map_err(|error| not_delivered(error))?;
-            let mut byte = [0u8; 1];
-            if let Err(error) = server.read_exact(&mut byte).await {
-                return Err(not_delivered(error));
-            }
-            Ok(match byte[0] {
+            let byte = round_trip(&self.listener).await?;
+            Ok(match byte {
                 b'7' => 7,
                 _ => 0,
             })
