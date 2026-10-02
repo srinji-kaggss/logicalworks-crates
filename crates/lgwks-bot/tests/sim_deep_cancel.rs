@@ -36,12 +36,13 @@ const TRACE_ENV: &str = "LGWKS_BOT_SIM_DEEP_CANCEL_TRACE";
 /// This test's own name, for the child's `--exact` filter.
 const TEST_NAME: &str = "seeded_deep_cancel_is_stack_bounded_under_a_process_watchdog";
 
-/// The seeds this family runs; each gets two child processes.
-const SEEDS: [u64; 5] = [1, 7, 42, 1_337, 65_535];
+/// The seeds this family runs; each gets two child processes. The first five
+/// cover every depth residue, the rest are arbitrary.
+const SEEDS: [u64; 8] = [0, 1, 2, 3, 4, 42, 1_337, 65_535];
 
 /// The stack the journey thread is given. Small on purpose, so a
 /// depth-proportional stack path is the thing that fails rather than the
-/// harness runnning on a default-sized stack.
+/// harness running on a default-sized stack.
 const SMALL_STACK: usize = 256 * 1024;
 
 /// How many times the parent looks at a child before declaring a hang.
@@ -198,7 +199,12 @@ fn trace_on_small_stack(seed: u64) -> TestResult {
 /// child cannot report a hang from the stack it was hung on.
 fn run_child(seed: u64, run: u32) -> Result<String, Box<dyn std::error::Error>> {
     let executable = std::env::current_exe()?;
-    let trace = std::env::temp_dir().join(format!("lgwks-bot-sim-deep-cancel-{seed}-{run}.trace"));
+    // The parent's pid keeps concurrent runs (another worktree, another
+    // checkout of the same test) from reading each other's trace.
+    let trace = std::env::temp_dir().join(format!(
+        "lgwks-bot-sim-deep-cancel-{}-{seed}-{run}.trace",
+        std::process::id()
+    ));
     discard(&trace)?;
     let mut child = std::process::Command::new(executable)
         .args([TEST_NAME, "--exact", "--nocapture"])
@@ -284,7 +290,16 @@ fn seeded_deep_cancel_is_stack_bounded_under_a_process_watchdog() -> TestResult 
             )
             .into());
         }
-        for marker in ["A:ready", "B:dropped", "C:leaf", "D:destroyed"] {
+        for marker in [
+            "A:pending",
+            "A:ready",
+            "A:leaf",
+            "B:pending",
+            "B:dropped",
+            "C:leaf",
+            "C:quiet",
+            "D:destroyed",
+        ] {
             if !first.contains(marker) {
                 return Err(format!("seed {seed}: trace `{first}` never reached {marker}").into());
             }
