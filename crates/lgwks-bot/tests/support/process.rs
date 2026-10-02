@@ -23,9 +23,7 @@ pub struct PidDir(PathBuf);
 impl PidDir {
     /// Create the directory for a test called `name`.
     pub fn new(name: &str) -> std::io::Result<Self> {
-        let tag = lgwks_std::random::bytes::<8>()
-            .map(u64::from_le_bytes)
-            .map_or(0, |tag| tag);
+        let tag = lgwks_std::random::bytes::<8>().map_or(0, u64::from_le_bytes);
         let seq = DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!("lgwks-bot-proc-{tag:016x}-{seq}-{name}"));
         std::fs::create_dir_all(&path)?;
@@ -49,6 +47,28 @@ impl Drop for PidDir {
 pub fn read_pid(path: &Path) -> Option<i32> {
     let text = std::fs::read_to_string(path).ok()?;
     text.trim().parse::<i32>().ok()
+}
+
+/// Drive `run` until its child has written its pid to `pid_file`, then drop
+/// `run` mid-flight and return that pid.
+///
+/// The drop happens on the event (the child is alive and has said so), not
+/// after a guessed delay, so a loaded host cannot make the drop land before
+/// the fork. `None` means `run` finished before the child wrote its pid,
+/// which a caller expecting a mid-flight drop reports as a failure.
+pub async fn drop_after_pid<F: std::future::Future>(run: F, pid_file: &Path) -> Option<i32> {
+    let mut run = std::pin::pin!(run);
+    std::future::poll_fn(|cx| {
+        if run.as_mut().poll(cx).is_ready() {
+            return std::task::Poll::Ready(None);
+        }
+        // The runner wakes itself on its own observation interval while the
+        // child lives, so this check reruns on each of those polls.
+        read_pid(pid_file).map_or(std::task::Poll::Pending, |pid| {
+            std::task::Poll::Ready(Some(pid))
+        })
+    })
+    .await
 }
 
 /// Whether the process group `pgid` is absent, through `kill_process_group`.

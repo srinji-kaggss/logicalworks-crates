@@ -43,7 +43,7 @@ use lgwks_bot::{Auth, BotError, Cap, DispatchCertainty, Execute, GrantSet, Obser
 #[path = "support/process.rs"]
 mod process_probe;
 
-use process_probe::{PidDir, read_pid, wait_group_gone};
+use process_probe::{PidDir, drop_after_pid, read_pid, wait_group_gone};
 
 /// What a test reports when a precondition did not hold.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -368,23 +368,22 @@ fn dropping_a_run_future_after_the_fork_leaves_no_orphan() -> TestResult {
     let pid_file = dir.join("shell.pid");
     let script = format!("echo $$ > {}; sleep 60", pid_file.display());
     let runtime = lgwks_bot::Runtime::new()?;
-    // A `timeout` drives the future and then drops it when the deadline
-    // elapses, which is a cancellation with a running child: the fork has
-    // happened, the child is asleep, and the future goes away mid-flight.
+    // The run future is dropped the moment its child reports its pid: the fork
+    // has happened, the child is asleep, and the future goes away mid-flight.
+    // The outer timeout only bounds a runner that never wakes again.
     let leader = runtime.block_on(async {
         let mut supervisor = Supervisor::new(1);
         let spec = shell(&script);
-        let outcome =
-            lgwks_bot::rt::time::timeout(Duration::from_millis(400), supervisor.run_process(&spec))
-                .await;
-        if outcome.is_ok() {
-            return Err(std::io::Error::other(
-                "the run was expected to be interrupted",
-            ));
-        }
-        read_pid(&pid_file)
-            .ok_or_else(|| std::io::Error::other("the run future never started its child"))
-    })?;
+        lgwks_bot::rt::time::timeout(
+            BUDGET,
+            drop_after_pid(supervisor.run_process(&spec), &pid_file),
+        )
+        .await
+        .ok()
+        .flatten()
+    });
+    let leader =
+        leader.ok_or("the run future never started its child, or ended before the drop")?;
     assert!(
         wait_group_gone(leader, BUDGET),
         "dropping the run future must kill the process group it owned"
@@ -541,6 +540,51 @@ fn the_default_constructor_runs_a_real_child() -> TestResult {
     assert!(
         !state.deadline_fired,
         "an ordinary child finishes before the default deadline"
+    );
+    Ok(())
+}
+
+/// Concurrent verb calls on one `Process` share its ceiling: a burst of calls
+/// waits for slots instead of forking a burst of children. Each child counts
+/// the live children (its own marker included) when it starts, so the highest
+/// count any child printed is a lower bound on the real concurrency and can
+/// only exceed the ceiling if the ceiling was not enforced.
+#[test]
+fn concurrent_calls_on_one_process_share_its_ceiling() -> TestResult {
+    const CALLS: usize = 64;
+    const CEILING: usize = 4;
+    let live = PidDir::new("ceiling-live")?;
+    let done = PidDir::new("ceiling-done")?;
+    let live_dir = live.join("");
+    let done_dir = done.join("");
+    let script = format!(
+        "touch {live}/$$; ls {live} | wc -l; sleep 0.2; mv {live}/$$ {done}/",
+        live = live_dir.display(),
+        done = done_dir.display(),
+    );
+    let process = process_for(&script)
+        .max_concurrent(NonZeroUsize::new(CEILING).unwrap_or(NonZeroUsize::MIN));
+    let auth = sys_auth()?;
+    let states = lgwks_bot::block_on(lgwks_std::task::join_all(
+        (0..CALLS).map(|_| process.execute_action((auth.clone(), &()))),
+    ));
+    let mut highest = 0_usize;
+    for state in states {
+        let state = state?;
+        assert_eq!(
+            state.exit_code,
+            Some(0),
+            "every call runs its child to a zero exit"
+        );
+        highest = highest.max(state.stdout().trim().parse::<usize>()?);
+    }
+    assert!(
+        highest <= CEILING,
+        "a child saw {highest} live children against a ceiling of {CEILING}"
+    );
+    assert!(
+        highest >= 2,
+        "the calls must overlap up to the ceiling, not run one at a time"
     );
     Ok(())
 }

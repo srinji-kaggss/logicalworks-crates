@@ -29,6 +29,8 @@ use crate::rt::process::{ProcessRun, ProcessRunError, ProcessSpec};
 #[cfg(feature = "process")]
 use crate::rt::supervise::Supervisor;
 #[cfg(feature = "process")]
+use crate::rt::sync::Semaphore;
+#[cfg(feature = "process")]
 use std::num::NonZeroUsize;
 #[cfg(feature = "process")]
 use std::time::Duration;
@@ -53,6 +55,17 @@ pub const DEFAULT_CAPTURE_LIMIT: NonZeroUsize = match NonZeroUsize::new(64 * 102
 #[cfg(feature = "process")]
 pub const DEFAULT_DEADLINE: Duration = Duration::from_secs(30);
 
+/// The default number of children one [`Process`] runs at once.
+///
+/// Finite by design: every verb call forks, and the bot polls and executes
+/// concurrently, so without a ceiling a burst of calls is a burst of children.
+/// Calls past the ceiling wait for a slot rather than forking.
+#[cfg(feature = "process")]
+pub const DEFAULT_MAX_CONCURRENT: NonZeroUsize = match NonZeroUsize::new(16) {
+    Some(limit) => limit,
+    None => NonZeroUsize::MIN,
+};
+
 /// Observe or execute a system process. Supports Observe, Execute, Query.
 ///
 /// A one-shot command is run to completion on each call. `Execute` is the verb
@@ -69,6 +82,9 @@ pub struct Process {
     /// Forced to `[bot.sys]` by the constructor: process control is the
     /// capability this domain exists to gate, and no constructor omits it.
     caps: Vec<Cap>,
+    /// One slot per child this domain may run at once, shared by every verb
+    /// call on this value, so concurrent calls cannot fork past the ceiling.
+    slots: Semaphore,
 }
 
 /// Observe or execute a system process. Supports Observe, Execute, Query.
@@ -154,22 +170,70 @@ impl Process {
         spec.capture_stdout(DEFAULT_CAPTURE_LIMIT);
         spec.capture_stderr(DEFAULT_CAPTURE_LIMIT);
         spec.deadline(DEFAULT_DEADLINE);
-        Self {
-            spec,
-            caps: vec![Cap::sys()],
-        }
+        Self::from_spec(spec)
     }
 
     /// Create a process domain from a validated [`ProcessSpec`].
     ///
     /// The spec's own stream policies and deadline govern; nothing is defaulted
     /// here, so a spec that captures nothing inherits the streams and one
-    /// without a deadline runs until the supervisor is cancelled.
+    /// without a deadline runs until the supervisor is cancelled. At most
+    /// [`DEFAULT_MAX_CONCURRENT`] children run at once; see
+    /// [`Process::max_concurrent`].
     #[must_use]
     pub fn from_spec(spec: ProcessSpec) -> Self {
         Self {
             spec,
             caps: vec![Cap::sys()],
+            slots: Semaphore::new(DEFAULT_MAX_CONCURRENT.get()),
+        }
+    }
+
+    /// Set how many children this domain runs at once.
+    ///
+    /// Every verb call on this value claims one slot before it forks and holds
+    /// it until the child is reaped, so a burst of concurrent calls waits for a
+    /// slot instead of starting a burst of children.
+    #[must_use]
+    pub fn max_concurrent(mut self, limit: NonZeroUsize) -> Self {
+        self.slots = Semaphore::new(limit.get());
+        self
+    }
+
+    /// Run the command once inside this domain's ceiling and map the outcome.
+    ///
+    /// The slot is claimed before the fork and released when the run ends, and
+    /// a dropped call releases it with the run, so the ceiling cannot leak.
+    /// The three error arms are the whole retry contract: a refusal or a failed
+    /// start established that nothing ran, so the certainty is
+    /// [`DispatchCertainty::Refused`]; a failure after the child started
+    /// established that it did run, so it is [`BotError::EffectIndeterminate`]
+    /// and never `Refused`.
+    async fn run_once(&self) -> Result<ProcessState, BotError> {
+        let Ok(_slot) = self.slots.acquire().await else {
+            return Err(BotError::DomainError {
+                domain: String::from("sys::process"),
+                certainty: DispatchCertainty::Refused,
+                cause: String::from("the process slots were closed before the process started"),
+            });
+        };
+        let mut supervisor = Supervisor::new(1);
+        match supervisor.run_process(&self.spec).await {
+            Ok(run) => Ok(ProcessState::from_run(&run)),
+            Err(ProcessRunError::Refused) => Err(BotError::DomainError {
+                domain: String::from("sys::process"),
+                certainty: DispatchCertainty::Refused,
+                cause: String::from("the supervisor was cancelled before the process started"),
+            }),
+            Err(ProcessRunError::NotStarted { source }) => Err(BotError::DomainError {
+                domain: String::from("sys::process"),
+                certainty: DispatchCertainty::Refused,
+                cause: format!("the process did not start: {source}"),
+            }),
+            Err(ProcessRunError::AfterStart { source }) => Err(BotError::EffectIndeterminate {
+                domain: String::from("sys::process"),
+                cause: format!("the process started but its outcome is unknown: {source}"),
+            }),
         }
     }
 }
@@ -210,35 +274,6 @@ impl ProcessState {
     }
 }
 
-/// Run one command on its own single-slot supervisor and map the outcome.
-///
-/// The three error arms are the whole retry contract: a refusal or a failed
-/// start established that nothing ran, so the certainty is
-/// [`DispatchCertainty::Refused`]; a failure after the child started established
-/// that it did run, so it is [`BotError::EffectIndeterminate`] and never
-/// `Refused`.
-#[cfg(feature = "process")]
-async fn run_once(spec: &ProcessSpec) -> Result<ProcessState, BotError> {
-    let mut supervisor = Supervisor::new(1);
-    match supervisor.run_process(spec).await {
-        Ok(run) => Ok(ProcessState::from_run(&run)),
-        Err(ProcessRunError::Refused) => Err(BotError::DomainError {
-            domain: String::from("sys::process"),
-            certainty: DispatchCertainty::Refused,
-            cause: String::from("the supervisor was cancelled before the process started"),
-        }),
-        Err(ProcessRunError::NotStarted { source }) => Err(BotError::DomainError {
-            domain: String::from("sys::process"),
-            certainty: DispatchCertainty::Refused,
-            cause: format!("the process did not start: {source}"),
-        }),
-        Err(ProcessRunError::AfterStart { source }) => Err(BotError::EffectIndeterminate {
-            domain: String::from("sys::process"),
-            cause: format!("the process started but its outcome is unknown: {source}"),
-        }),
-    }
-}
-
 #[cfg(feature = "process")]
 impl verb::Observe for Process {
     type Output = ProcessState;
@@ -252,7 +287,7 @@ impl verb::Observe for Process {
         // A one-shot process has no persistent state to read, so the observed
         // value is the result of running it: the ECS schedule fires the chain
         // when that state moves.
-        run_once(&self.spec).await
+        self.run_once().await
     }
 
     fn domain_id(&self) -> &str {
@@ -271,7 +306,7 @@ impl verb::Execute for Process {
 
     async fn execute_action(&self, call: (Auth, &())) -> Result<ProcessState, BotError> {
         call.0.check(self.required_caps())?;
-        run_once(&self.spec).await
+        self.run_once().await
     }
 
     fn domain_id(&self) -> &str {
@@ -293,7 +328,7 @@ impl verb::Query for Process {
         // The read-only probe form: it runs the same command and reports, and
         // by construction performs no write of its own beyond what the command
         // does. A command with an effect belongs in `Execute`.
-        run_once(&self.spec).await
+        self.run_once().await
     }
 
     fn domain_id(&self) -> &str {

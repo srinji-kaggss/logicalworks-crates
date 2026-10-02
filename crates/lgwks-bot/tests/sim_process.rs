@@ -44,7 +44,7 @@ use lgwks_bot::Runtime;
 use lgwks_bot::rt::process::ProcessSpec;
 use lgwks_bot::rt::supervise::{CleanupReceipt, Supervisor};
 
-use process_probe::{read_pid, wait_group_gone};
+use process_probe::{drop_after_pid, wait_group_gone};
 
 use sim::Band;
 
@@ -192,19 +192,16 @@ fn drop_case(sim: &mut sim::Sim, runtime: &Runtime) -> TestResult {
     let dir = sim.scratch("process-mix")?;
     let pid_file = dir.join("child.pid");
     let script = format!("echo $$ > {}; sleep 5", pid_file.display());
-    let millis = sim.rng().between(400, 700);
     let spec = plain(&script);
     let pid = runtime.block_on(async {
         let mut supervisor = Supervisor::new(1);
-        let outcome = lgwks_bot::rt::time::timeout(
-            Duration::from_millis(u64::from(millis)),
-            supervisor.run_process(&spec),
+        lgwks_bot::rt::time::timeout(
+            Duration::from_secs(5),
+            drop_after_pid(supervisor.run_process(&spec), &pid_file),
         )
-        .await;
-        if outcome.is_ok() {
-            return None;
-        }
-        read_pid(&pid_file)
+        .await
+        .ok()
+        .flatten()
     });
     let pid =
         pid.ok_or_else(|| std::io::Error::other("the dropped run never started its child"))?;
@@ -213,7 +210,6 @@ fn drop_case(sim: &mut sim::Sim, runtime: &Runtime) -> TestResult {
         "an early drop must leave no orphaned process group"
     );
     sim.record("drop");
-    sim.trace.record_u64("millis", u64::from(millis));
     Ok(())
 }
 
