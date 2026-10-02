@@ -45,9 +45,12 @@ impl FakeGh {
     /// coherent "GitHub has this pull request and no review" world rather than
     /// an empty one the script has to interpret.
     pub fn install(name: &str, head_sha: &str) -> std::io::Result<Self> {
-        let tag = std::process::id();
+        // Random rather than a process id: the OS reuses process ids, and two
+        // fixtures sharing a directory would read each other's argv log — which
+        // is the one thing these tests measure.
+        let tag = lgwks_std::random::bytes::<8>().map_or(0, u64::from_le_bytes);
         let seq = DIR_SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("lgwks-fake-gh-{tag}-{seq}-{name}"));
+        let dir = std::env::temp_dir().join(format!("lgwks-fake-gh-{tag:016x}-{seq}-{name}"));
         std::fs::create_dir_all(&dir)?;
         let log = dir.join("argv.log");
         std::fs::write(&log, b"")?;

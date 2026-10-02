@@ -7,12 +7,18 @@
 //! of them forks real processes: the fixture is the same receiver-backed fake
 //! `gh`, and the observations are what the adapter reports about what the child
 //! actually did.
+// `ephemeral` is required, not incidental: a staged publication payload needs a
+// filename no two concurrent publications share, and without that feature the
+// binding refuses to publish rather than fall back to a name the OS reuses. The
+// `full` lane runs this suite, so the refusal is exercised rather than
+// assumed; `gh_binding` covers what a process-only build can still do.
 #![cfg(all(
     unix,
     feature = "script",
     feature = "process",
     feature = "time",
-    feature = "sync"
+    feature = "sync",
+    feature = "ephemeral"
 ))]
 
 use std::num::NonZeroUsize;

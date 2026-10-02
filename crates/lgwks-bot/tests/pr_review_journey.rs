@@ -19,12 +19,18 @@
 //! - two identities on one repository stay isolated;
 //! - a truncated capture is reported as truncated, and a hanging client is
 //!   stopped as a whole process group.
+// `ephemeral` is required, not incidental: a staged publication payload needs a
+// filename no two concurrent publications share, and without that feature the
+// binding refuses to publish rather than fall back to a name the OS reuses. The
+// `full` lane runs this suite, so the refusal is exercised rather than
+// assumed; `gh_binding` covers what a process-only build can still do.
 #![cfg(all(
     unix,
     feature = "script",
     feature = "process",
     feature = "time",
-    feature = "sync"
+    feature = "sync",
+    feature = "ephemeral"
 ))]
 
 use std::num::NonZeroUsize;

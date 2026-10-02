@@ -964,6 +964,41 @@ fn outcome_of(run: &ProcessRun) -> GhOutcome {
     }
 }
 
+/// A name suffix no two staged payloads share, or the empty string when this
+/// build has no distinguishable source.
+///
+/// `lgwks_std::random` where the build has it, because a process id is reused
+/// by the OS and two processes staging a payload under the same name would
+/// race for one file. Without the `ephemeral` feature there is no entropy
+/// source this crate may assume, so the name is a per-process monotone counter
+/// and the `create_new` below is what turns a cross-process collision into a
+/// refusal rather than an overwrite. That is a stated limit, not an identity.
+#[cfg(feature = "process")]
+fn unique_tag() -> String {
+    #[cfg(feature = "ephemeral")]
+    {
+        let bytes = lgwks_std::random::bytes::<8>().unwrap_or([0; 8]);
+        bytes.iter().fold(String::new(), |mut text, byte| {
+            use std::fmt::Write as _;
+            // A `write!` into a `String` is infallible; the result is bound
+            // rather than discarded so nothing in this crate can ignore a
+            // formatting failure by accident.
+            let _written = write!(text, "{byte:02x}");
+            text
+        })
+    }
+    // Without the `ephemeral` feature this crate may not assume an entropy
+    // source (INV-DEP-6), so there is no tag to give. Rather than fall back to
+    // something the OS reuses — which is how two concurrent publications end
+    // up refusing each other's staged file — the publish path says it cannot
+    // run, and the review task reports that rather than publishing under a name
+    // it cannot guarantee. A `Refused` is the honest answer here.
+    #[cfg(not(feature = "ephemeral"))]
+    {
+        String::new()
+    }
+}
+
 /// A payload staged on disk for one `gh --input` call.
 ///
 /// The alternative is a second process path with a piped stdin, and the crate
@@ -1026,19 +1061,15 @@ impl Drop for StagedInput {
 #[cfg(feature = "process")]
 fn stage_input(input: &[u8]) -> Result<StagedInput, GhError> {
     use std::io::Write as _;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     let mut path = std::env::temp_dir();
-    // The process id and a monotone counter are enough here: the file is
-    // created with `create_new`, so a collision is refused rather than
-    // overwriting whatever is already there. This is not an identity anybody
-    // persists, so `lgwks_std::random`'s host-only entropy edge is not needed.
-    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    path.push(format!(
-        "lgwks-gh-payload-{}-{sequence}.json",
-        std::process::id()
-    ));
+    // `create_new` below is what makes a collision a refusal rather than an
+    // overwrite, so the name is the only thing that has to differ.
+    let tag = unique_tag();
+    if tag.is_empty() {
+        return Err(GhError::NoRunner);
+    }
+    path.push(format!("lgwks-gh-payload-{tag}.json"));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]

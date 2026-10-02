@@ -392,6 +392,33 @@ Each of these was a shipped defect. Treat the list as the spec.
   effect is known. · why: #87 step 1 (T01–T04, T36) · enforced by:
   `tests/task_front_door.rs` and `tests/sim_task.rs`
 
+- **INV-BOT-21** A GitHub publication is reported only from an independent
+  read-back, never from a client's exit code. `ReviewOutcome::Published` is
+  produced only when a review at the reviewed commit, with the intended body and
+  state, was observed on a separate call; the create's own success is transport
+  evidence and is never one. A publish step that failed for any reason other
+  than a `Refused` certainty — a non-zero exit, a dropped connection, a
+  deadline — leaves the effect unobserved and is reconciled by exactly one read,
+  because an exit code cannot distinguish "never arrived" from "applied and the
+  answer was lost". A reconciliation that cannot establish the outcome stays
+  `Unknown` and issues no second create. A head that changed between the pinned
+  read and the publication is `TargetMoved`, naming both commits, and publishes
+  nothing; the review subject is never silently re-pointed at the new head.
+  Verification compares subject, body and state and ignores the application
+  marker. A staged payload carries a name no two concurrent publications share,
+  taken from `lgwks_std::random` under `ephemeral`; a build without that feature
+  refuses to publish rather than reuse a name the OS recycles. · why: #151, #87
+  step 6 (PR-06, PR-07, PR-09) · enforced by:
+  `tests/pr_review_journey.rs` (`a_lost_response_is_reconciled_by_reading_back_and_never_reposted`,
+  `a_loss_that_cannot_be_reconciled_stays_unknown_and_still_does_not_repost`,
+  `a_moved_head_is_a_typed_refusal_and_publishes_nothing`,
+  `a_review_is_published_at_the_pinned_head_and_verified_by_a_separate_read`,
+  `a_non_zero_exit_is_not_a_published_review`,
+  `a_client_that_never_starts_is_a_definite_non_effect_and_is_not_reconciled`,
+  `two_identities_on_one_repository_stay_isolated`) and
+  `tests/sim_review_pr.rs` (`subject_r64`, `publication_r64`, `identity_r64`,
+  `same_seed_same_trace_hash`, `every_outcome_is_reachable_in_the_family`)
+
 ## Open questions for the Director
 
 - For INV-BOT-1..10: which crash/recovery test exercises each one? The ones without a

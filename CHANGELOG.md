@@ -10,6 +10,35 @@ explicitly under that crate.
 
 ### lgwks_bot Added
 
+- `domain::gh` is a real adapter (#151): the GitHub CLI runs as one supervised
+  child through `Supervisor::run_process`, with bounded capture, a deadline and
+  process-group cleanup, instead of the typed `binding required` refusal the
+  domain returned before. `Gh::snapshot`, `Gh::read_reviews` and `Gh::publish`
+  each admit a validated `ProcessSpec`; arguments are a vector, so no shell is
+  involved. `Repository`, `CommitId` and `ReviewPayload::new` refuse what
+  GitHub would reject rather than sending it. A publication payload is staged as
+  a private file (`create_new`, mode 0600) and removed on every exit path; the
+  name comes from `lgwks_std::random` under `ephemeral`, and a build without
+  that feature refuses to publish rather than reuse a name the OS recycles.
+  Without the `process` feature every call refuses with `GhError::NoRunner`
+  rather than reporting an empty answer a caller could mistake for "GitHub has
+  no reviews". `GhQuery` and `PrSnapshotSource` expose the same binding through
+  `Query` and `Observe`; both require `bot.sys` and `bot.net`.
+- `review`, the canonical PR-review task (#87 step 6, #151): `review_pr` pins a
+  subject, runs a caller-supplied analysis, checks freshness, publishes once at
+  the reviewed commit, and verifies through a separate read-back.
+  `ReviewOutcome` is five states a caller can act on without reading a message —
+  `Published { verified }`, `Unknown`, `TargetMoved { reviewed, current }`,
+  `Refused`. A lost response is reconciled by one read, never a second create;
+  only a `Refused` certainty proves nothing was written, because a non-zero
+  exit cannot distinguish "never arrived" from "applied and the answer was
+  lost". Verification compares subject, body and state and deliberately ignores
+  the application marker, which locates a candidate and is not proof. The body
+  manages no pid, no reap loop and no retry over publication.
+  `cargo run -p lgwks_bot --features process --example review_pr -- <repo> <pr>
+  <EVENT> <body>` runs the whole path; `LGWKS_REVIEW_PUBLISH=0` is a
+  draft-only profile.
+
 - `task::{Host, Task, Report}`, the front door (#87 step 1): build a `Host` once
   (tenant, stop token, admission ceiling, default deadline, trail capacity, all
   finite and readable through `Host::limits`), define a `Task` with `task(name,
