@@ -704,8 +704,7 @@ fn the_file_journal_recovers_exactly_what_the_memory_journal_recovers() -> TestR
 /// so the reopen must show an empty, clean journal and the retry must land
 /// exactly once: no duplicate, no lost receipt.
 fn stalled_probe_body() -> TestResult {
-    use std::future::poll_fn;
-    use std::task::Poll;
+    use std::task::{Context, Waker};
 
     let path = std::env::var_os(PROBE_JOURNAL)
         .ok_or("the stalled probe was started without a journal path")?;
@@ -717,12 +716,13 @@ fn stalled_probe_body() -> TestResult {
         key: key("1", DIGEST_A)?,
     };
     let tail = journal.tail();
-    let runtime = lgwks_bot::rt::runtime::Runtime::new()?;
     let mut append = Box::pin(journal.compare_and_append_async(tail, &event));
     // One poll: the owner is handed the request and parks on the closed device.
     // The append is now genuinely in flight, and no byte has reached the disk.
-    let first = runtime.block_on(poll_fn(|cx| Poll::Ready(append.as_mut().poll(cx))));
-    if first.is_ready() {
+    // A single poll needs no runtime, so this kill test runs under every feature
+    // set rather than only where `rt` is compiled in.
+    let mut cx = Context::from_waker(Waker::noop());
+    if append.as_mut().poll(&mut cx).is_ready() {
         return Err("the stalled append completed before the kill".into());
     }
     std::fs::write(&marker, b"in-flight")?;

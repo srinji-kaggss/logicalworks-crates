@@ -13,6 +13,7 @@
 //! driving the future would never reach the release, the unrelated task would
 //! never tick, and the watchdog would time out — which is why the assertion is
 //! on the tick count and not on a duration.
+#![cfg(feature = "rt")]
 
 use std::error::Error;
 use std::future::{Future, poll_fn};
