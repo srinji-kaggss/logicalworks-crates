@@ -14,31 +14,12 @@ use lgwks_deps::contract::Contract;
 use lgwks_deps::metadata::{self, DirectEdge};
 use lgwks_deps::{Refusal, audit_direct};
 
+#[path = "support/sim.rs"]
+mod sim;
+
+use sim::Rng;
+
 type TestResult = Result<(), Box<dyn Error>>;
-
-/// A tiny LCG so the seed fully determines the sequence with no wall clock, no
-/// OS entropy, and no dependency. `wrapping_*` keeps the arithmetic total.
-struct Rng(u64);
-
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self(seed ^ 0x9E37_79B9_7F4A_7C15)
-    }
-
-    fn next(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.0
-    }
-
-    fn pick<'a, T>(&mut self, values: &'a [T]) -> &'a T {
-        let len = u64::try_from(values.len()).unwrap_or(u64::MAX).max(1);
-        let index = usize::try_from(self.next().checked_rem(len).unwrap_or(0)).unwrap_or(0);
-        &values[index]
-    }
-}
 
 /// One `app` → `engine` edge for `source`/`path` through the public parser.
 fn edge(source: Option<&str>, path: Option<&str>) -> Result<DirectEdge, Box<dyn Error>> {
@@ -99,7 +80,7 @@ fn run(seed: u64) -> Result<(u64, usize, usize), Box<dyn Error>> {
     let mut drifted = 0_usize;
 
     for _ in 0..256 {
-        let family = rng.next().checked_rem(3).unwrap_or(0);
+        let family = rng.next_u64().checked_rem(3).unwrap_or(0);
         let (approved, observed, edges) = match family {
             0 => {
                 let approved = format!("{}{}", rng.pick(&repos), rng.pick(&revs));

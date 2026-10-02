@@ -1257,6 +1257,14 @@ fn map_contract_error(error: contract::ContractError) -> ErrorKind {
         contract::ContractError::DuplicatePolicySection { line } => {
             ErrorKind::DuplicatePolicySection { line }
         }
+        // The invariant schema has neither a `schema` policy key nor aliases, so
+        // these cannot arise from an invariant register; they are mapped rather
+        // than panicked so a future shared-parser change stays fail-closed.
+        error @ (contract::ContractError::UnsupportedSchema { line, .. }
+        | contract::ContractError::AliasCollision { line, .. }) => ErrorKind::Malformed {
+            line,
+            text: error.to_string(),
+        },
     }
 }
 

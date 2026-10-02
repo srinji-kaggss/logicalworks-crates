@@ -88,6 +88,29 @@ pub struct Entry {
     pub(crate) allowed_consumers: Vec<String>,
     /// Permitted edge kinds: `normal`, `build`, and/or `dev`.
     pub(crate) allowed_kinds: Vec<String>,
+    /// The complete set of upstream features this edge may enable, when the
+    /// entry constrains them. `None` grandfathered the dimension: the entry
+    /// predates feature policy and does not refuse a feature it never named.
+    pub(crate) features: Option<Vec<String>>,
+    /// Features the edge must enable, a subset of [`features`](Self::features)
+    /// when that is also authored. `None` requires nothing.
+    pub(crate) required_features: Option<Vec<String>>,
+    /// The exact authored `default-features` bit this edge must carry, when the
+    /// entry constrains it.
+    pub(crate) uses_default_features: Option<bool>,
+    /// The exact authored optionality this edge must carry, when constrained.
+    pub(crate) optional: Option<bool>,
+    /// The exact target `cfg(…)` this edge must be scoped to, when
+    /// constrained; `""` requires an unconditional declaration.
+    pub(crate) target: Option<String>,
+    /// Additional accepted spellings of this crate's Cargo package name.
+    ///
+    /// An explicit, collision-checked compatibility alias: the entry admits an
+    /// observed package whose name is `krate` or one of these. It exists because
+    /// Cargo folds `-`/`_` when it decides two packages collide, but that fold
+    /// is not package identity; an approval written in one spelling must say so
+    /// rather than have the fold silently exempt a different package.
+    pub(crate) aliases: Vec<String>,
     /// One sentence naming what the standard library cannot do.
     pub(crate) reason: String,
     /// The human who approved it.
@@ -100,6 +123,18 @@ pub struct Entry {
     pub(crate) line: usize,
 }
 
+impl Entry {
+    /// Whether this approval admits the observed Cargo package name `name`.
+    ///
+    /// Byte-exact against the Cargo-authored identity, plus any explicitly
+    /// authored [`aliases`](Self::aliases). There is no implicit `-`/`_` fold:
+    /// a fold would let two distinct packages share one authority.
+    #[must_use]
+    pub(crate) fn admits(&self, name: &str) -> bool {
+        self.krate == name || self.aliases.iter().any(|alias| alias == name)
+    }
+}
+
 /// The parsed register.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -110,6 +145,14 @@ pub struct Contract {
     pub enforce: bool,
     /// Canonical repository URL whose workspace members are local authority.
     pub repository: Option<String>,
+    /// Register schema version. Absent means version 1 (a class-only register);
+    /// the committed register authors version 2, which adds the exact-origin and
+    /// capability-policy keys and the explicit alias list.
+    pub(crate) schema: u32,
+    /// A stable fingerprint of the register text this `Contract` was parsed
+    /// from, so a CLI receipt can bind a run to the exact contract revision it
+    /// read. See [`Contract::digest`] for what this does and does not claim.
+    pub(crate) digest: String,
     /// Every approved dependency.
     pub(crate) entries: Vec<Entry>,
 }
@@ -242,6 +285,26 @@ pub enum ContractError {
         /// The repeated crate name.
         krate: String,
         /// One-based line where the duplicate opened.
+        line: usize,
+    },
+    /// A register schema version this build does not implement.
+    UnsupportedSchema {
+        /// One-based line of the `schema` assignment.
+        line: usize,
+        /// The version that was written.
+        value: String,
+    },
+    /// An alias a second identity also claims.
+    ///
+    /// An alias is a compatibility spelling, so exactly one Cargo package may
+    /// own it; two packages sharing one alias would share one authority, which
+    /// is the defect the explicit alias exists to avoid.
+    AliasCollision {
+        /// The contested spelling.
+        alias: String,
+        /// The package that already owns it.
+        owner: String,
+        /// The one-based line where the entry claiming it again opened.
         line: usize,
     },
 }
@@ -397,6 +460,33 @@ fn fmt_duplicate(formatter: &mut fmt::Formatter<'_>, line: usize, krate: &str) -
     write!(formatter, "line {line}: {krate:?} is already approved")
 }
 
+/// Renders `ContractError::UnsupportedSchema`, naming the versions this build
+/// can read so the repair is "migrate or downgrade", not "guess".
+fn fmt_unsupported_schema(
+    formatter: &mut fmt::Formatter<'_>,
+    line: usize,
+    value: &str,
+) -> fmt::Result {
+    write!(
+        formatter,
+        "line {line}: register schema {value:?} is not supported; this build reads schema 1 and 2"
+    )
+}
+
+/// Renders `ContractError::AliasCollision`, naming both the contested spelling
+/// and the package that already owns it.
+fn fmt_alias_collision(
+    formatter: &mut fmt::Formatter<'_>,
+    alias: &str,
+    owner: &str,
+    line: usize,
+) -> fmt::Result {
+    write!(
+        formatter,
+        "line {line}: alias {alias:?} is already claimed by {owner:?}; a compatibility alias names exactly one Cargo package"
+    )
+}
+
 impl fmt::Display for ContractError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         // `ContractError` is not `Copy`, so the borrowed payloads are bound by
@@ -453,6 +543,14 @@ impl fmt::Display for ContractError {
             } => fmt_invalid_field(formatter, krate, field, line, value, expected),
             Self::ThinReason { ref krate } => fmt_thin_reason(formatter, krate),
             Self::DuplicateEntry { line, ref krate } => fmt_duplicate(formatter, line, krate),
+            Self::UnsupportedSchema { line, ref value } => {
+                fmt_unsupported_schema(formatter, line, value)
+            }
+            Self::AliasCollision {
+                ref alias,
+                ref owner,
+                line,
+            } => fmt_alias_collision(formatter, alias, owner, line),
         }
     }
 }
@@ -481,10 +579,11 @@ const REQUIRED: [&str; 12] = [
 ];
 
 /// Every key an `[[approved]]` block may carry: the required set plus the
-/// optional exact-origin identity. Keeping it separate from `REQUIRED` is what
-/// lets an existing class-only block keep parsing while a block that writes
-/// `origin` has it validated and compared.
-const ENTRY_KEYS: [&str; 13] = [
+/// optional exact-origin identity and the optional admitted-capability policy.
+/// Keeping it separate from `REQUIRED` is what lets an existing class-only,
+/// policy-free block keep parsing while a block that writes `origin`,
+/// `features` or `target` has it validated and compared.
+const ENTRY_KEYS: [&str; 19] = [
     "crate",
     "tier",
     "version",
@@ -492,6 +591,12 @@ const ENTRY_KEYS: [&str; 13] = [
     "capability",
     "source",
     "origin",
+    "features",
+    "required_features",
+    "uses_default_features",
+    "optional",
+    "target",
+    "aliases",
     "allowed_consumers",
     "allowed_kinds",
     "reason",
@@ -595,6 +700,8 @@ struct Reader<'a> {
     enforce: bool,
     /// Optional repository authority.
     repository: Option<String>,
+    /// Register schema version, defaulting to 1 when `[policy] schema` is absent.
+    schema: u32,
     /// Raw entries in source order.
     entries: Vec<RawEntry>,
 }
@@ -644,7 +751,15 @@ fn handle_section_header(
 }
 
 /// Every key the `[policy]` block defines.
-const POLICY_KEYS: [&str; 2] = ["enforce", "repository"];
+const POLICY_KEYS: [&str; 3] = ["enforce", "repository", "schema"];
+
+/// The register schema versions this build reads.
+///
+/// `1` is a register that authorises a source class and nothing finer; it is
+/// still read so an older committed register does not fail to parse. `2` adds
+/// the exact-origin and admitted-capability-policy keys and the explicit alias
+/// list. An unknown future version is refused rather than read as either.
+const SUPPORTED_SCHEMAS: [u32; 2] = [1, 2];
 
 /// Decodes `[policy] enforce` under a closed grammar: exactly `true` or exactly
 /// `false`, and nothing else.
@@ -663,6 +778,23 @@ fn decode_enforce(value: &str, line_no: usize) -> Result<bool, ContractError> {
         _ => Err(ContractError::BadPolicyValue {
             line: line_no,
             key: "enforce".to_owned(),
+            value: value.to_owned(),
+        }),
+    }
+}
+
+/// Decodes `[policy] schema` as an unsigned integer this build implements.
+///
+/// The token is read bare (an integer, not a string). A version this build does
+/// not implement is [`ContractError::UnsupportedSchema`] rather than a default,
+/// so a register written for a later schema cannot be read under the older
+/// rules and silently lose the keys that schema added.
+fn decode_schema(value: &str, line_no: usize) -> Result<u32, ContractError> {
+    let parsed = value.parse::<u32>().ok();
+    match parsed {
+        Some(version) if SUPPORTED_SCHEMAS.contains(&version) => Ok(version),
+        _ => Err(ContractError::UnsupportedSchema {
+            line: line_no,
             value: value.to_owned(),
         }),
     }
@@ -755,6 +887,7 @@ fn apply_policy_pair(
     seen_keys: &mut Vec<String>,
     enforce: &mut bool,
     repository: &mut Option<String>,
+    schema: &mut u32,
 ) -> Result<(), ContractError> {
     if !POLICY_KEYS.contains(&key) {
         return Err(ContractError::UnknownKey {
@@ -773,6 +906,12 @@ fn apply_policy_pair(
             let decoded = decode_enforce(value, line_no)?;
             seen_keys.push(key.to_owned());
             *enforce = decoded;
+            Ok(())
+        }
+        "schema" => {
+            let decoded = decode_schema(value, line_no)?;
+            seen_keys.push(key.to_owned());
+            *schema = decoded;
             Ok(())
         }
         _ => {
@@ -845,6 +984,7 @@ fn process_pair(
             &mut reader.policy_keys,
             &mut reader.enforce,
             &mut reader.repository,
+            &mut reader.schema,
         ),
         Section::Entry => {
             // `Section::Entry` is only ever entered by `handle_section_header`
@@ -911,6 +1051,8 @@ pub(crate) struct RawRegister {
     pub(crate) enforce: bool,
     /// Optional repository authority carried by the dependency register.
     pub(crate) repository: Option<String>,
+    /// Register schema version; 1 when absent.
+    pub(crate) schema: u32,
     /// Repeated blocks in source order.
     pub(crate) entries: Vec<RawEntry>,
 }
@@ -934,6 +1076,7 @@ pub(crate) fn parse_register(
         policy_keys: Vec::new(),
         enforce: true,
         repository: None,
+        schema: 1,
         entries: Vec::new(),
     };
 
@@ -944,6 +1087,7 @@ pub(crate) fn parse_register(
     Ok(RawRegister {
         enforce: reader.enforce,
         repository: reader.repository,
+        schema: reader.schema,
         entries: reader.entries,
     })
 }
@@ -959,9 +1103,12 @@ fn check_duplicate_entry(
     entry: &Entry,
     line: usize,
 ) -> Result<(), ContractError> {
+    // Identity is byte-exact. Folding `-`/`_` here would let `foo-bar` and
+    // `foo_bar` collide into one entry, which is the conflation the exact match
+    // in `admits` exists to prevent.
     let duplicate = entries.iter().any(|existing| {
-        normalise(&existing.krate) == normalise(&entry.krate)
-            && normalise(&existing.owner) == normalise(&entry.owner)
+        existing.krate == entry.krate
+            && existing.owner == entry.owner
             && existing.capability == entry.capability
     });
     if duplicate {
@@ -972,6 +1119,39 @@ fn check_duplicate_entry(
     } else {
         Ok(())
     }
+}
+
+/// Refuses an alias that two distinct Cargo packages would share.
+///
+/// Every entry's exact `krate` is registered first as its own owner, so an
+/// alias that equals another package's real name is caught as a collision, and
+/// two entries claiming the same alias are caught too. The alias must also be a
+/// valid identifier and must not be the entry's own crate name.
+fn check_aliases(entries: &[Entry]) -> Result<(), ContractError> {
+    let mut owners: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
+    for entry in entries {
+        owners
+            .entry(entry.krate.as_str())
+            .or_insert(entry.krate.as_str());
+    }
+    for entry in entries {
+        for alias in &entry.aliases {
+            match owners.get(alias.as_str()) {
+                Some(owner) if *owner != entry.krate => {
+                    return Err(ContractError::AliasCollision {
+                        alias: alias.clone(),
+                        owner: (*owner).to_owned(),
+                        line: entry.line,
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    owners.insert(alias.as_str(), entry.krate.as_str());
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 impl Contract {
@@ -991,25 +1171,49 @@ impl Contract {
             check_duplicate_entry(&entries, &entry, draft.line)?;
             entries.push(entry);
         }
+        check_aliases(&entries)?;
         Ok(Self {
             enforce: raw.enforce,
             repository: raw.repository,
+            schema: raw.schema,
+            digest: fingerprint(text),
             entries,
         })
     }
 
-    /// Finds the approval for a resolved package, tolerating `-`/`_` spelling
-    /// drift between a manifest and a lock file.
+    /// The register schema version this contract was written under.
+    #[must_use]
+    pub const fn schema(&self) -> u32 {
+        self.schema
+    }
+
+    /// A stable fingerprint of the register text this contract was parsed from.
     ///
-    /// Returns the first match only. A package that legitimately backs several
-    /// capabilities has several entries, so callers that need all of them must
-    /// use `approvals_for`; this one exists for the single-owner question.
+    /// It binds a receipt to the exact contract revision a run read: two
+    /// different registers fingerprint differently, so a receipt naming a
+    /// digest that does not match the committed register is visibly stale.
+    ///
+    /// This is an identity fingerprint, not an adversarial integrity claim.
+    /// `lgwks_std::hash` (BLAKE3) is the estate's cryptographic primitive and is
+    /// deliberately not used here: it sits behind a `lgwks_std` feature that
+    /// enabling would add a `blake3` edge to the gate's own dependency graph,
+    /// which INV-DEP-EDGE-OWNED refuses. A register is human-authored and
+    /// reviewable, and this digest detects accidental drift, not a forger who
+    /// can already rewrite the validator.
+    #[must_use]
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    /// Finds the approval for a resolved Cargo package name.
+    ///
+    /// Matching is byte-exact against the Cargo-authored package name, plus any
+    /// explicitly authored [`Entry::admits`] alias. Returns the first match
+    /// only; a package that backs several capabilities has several entries, so
+    /// callers that need all of them use `approvals_for`.
     #[must_use]
     pub fn approval_for(&self, krate: &str) -> Option<&Entry> {
-        let wanted = normalise(krate);
-        self.entries
-            .iter()
-            .find(|entry| normalise(&entry.krate) == wanted)
+        self.entries.iter().find(|entry| entry.admits(krate))
     }
 
     /// Returns every semantic approval for an upstream package. A package may
@@ -1018,11 +1222,26 @@ impl Contract {
     /// Order follows the register, so for a given register the sequence is
     /// deterministic and diffable.
     pub fn approvals_for<'a>(&'a self, krate: &'a str) -> impl Iterator<Item = &'a Entry> {
-        let wanted = normalise(krate);
-        self.entries
-            .iter()
-            .filter(move |entry| normalise(&entry.krate) == wanted)
+        self.entries.iter().filter(move |entry| entry.admits(krate))
     }
+}
+
+/// A 128-bit FNV-1a fingerprint of `text`, as `fnv1a128:<32 hex>`.
+///
+/// Chosen over a std `Hasher` because `DefaultHasher`'s algorithm is explicitly
+/// unspecified and may change between releases, which would make a stored
+/// receipt digest meaningless across toolchains. FNV-1a is a fixed,
+/// well-defined function of the bytes and costs one multiply per byte over a
+/// register of a few kilobytes.
+fn fingerprint(text: &str) -> String {
+    const OFFSET: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+    const PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
+    let mut hash = OFFSET;
+    for byte in text.as_bytes() {
+        hash ^= u128::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    format!("fnv1a128:{hash:032x}")
 }
 
 /// Requires a field to be present and non-blank.
@@ -1148,6 +1367,65 @@ fn validate_closed_value(
     }
 }
 
+/// Reads an optional Boolean field under the closed `true`/`false` grammar.
+///
+/// A value outside the grammar is a typed field refusal, never a default: an
+/// unknown spelling must not silently stand a policy down.
+fn optional_bool(
+    draft: &RawEntry,
+    key: &'static str,
+    krate: &str,
+) -> Result<Option<bool>, ContractError> {
+    match draft.get(key) {
+        None => Ok(None),
+        Some("true") => Ok(Some(true)),
+        Some("false") => Ok(Some(false)),
+        Some(value) => Err(ContractError::InvalidField {
+            krate: krate.to_owned(),
+            field: key,
+            line: draft.field_line(key).unwrap_or(draft.line),
+            value: value.to_owned(),
+            expected: "expected true or false",
+        }),
+    }
+}
+
+/// Reads an optional comma-separated list of Cargo feature names.
+///
+/// Presence is meaningful: an absent key leaves the dimension unconstrained
+/// (grandfathered), while a present key admits exactly the features it lists.
+fn optional_feature_list(
+    draft: &RawEntry,
+    key: &'static str,
+    krate: &str,
+) -> Result<Option<Vec<String>>, ContractError> {
+    let Some(raw) = draft.get(key) else {
+        return Ok(None);
+    };
+    let items = split_csv(raw);
+    validate_closed_value(
+        draft,
+        krate,
+        key,
+        &items.join(","),
+        !items.is_empty() && items.iter().all(|item| is_feature_name(item)),
+        "expected a nonempty comma-separated list of Cargo feature names",
+    )?;
+    Ok(Some(items))
+}
+
+/// Checks a Cargo feature spelling: a non-empty run of name characters.
+///
+/// Feature names may be plain (`std`), versioned-dependency features
+/// (`serde/derive`), or explicit dependency activations (`dep:syn`), so the
+/// admit set is alphanumerics plus the separators Cargo uses.
+fn is_feature_name(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '+'))
+}
+
 /// Turns a fully-read draft into an `Entry`, validating every field rule.
 ///
 /// The checks run in a fixed order (required fields, then tier, then date,
@@ -1174,6 +1452,12 @@ fn build(draft: &RawEntry) -> Result<Entry, ContractError> {
     let capability = draft.require("capability", &krate)?.to_owned();
     let source = draft.require("source", &krate)?.to_owned();
     let origin = draft.get("origin").map(str::to_owned);
+    let features = optional_feature_list(draft, "features", &krate)?;
+    let required_features = optional_feature_list(draft, "required_features", &krate)?;
+    let uses_default_features = optional_bool(draft, "uses_default_features", &krate)?;
+    let optional = optional_bool(draft, "optional", &krate)?;
+    let target = draft.get("target").map(str::to_owned);
+    let aliases = draft.get("aliases").map(split_csv).unwrap_or_default();
     let allowed_consumers = split_csv(draft.require("allowed_consumers", &krate)?);
     let allowed_kinds = split_csv(draft.require("allowed_kinds", &krate)?);
     validate_closed_value(
@@ -1229,6 +1513,39 @@ fn build(draft: &RawEntry) -> Result<Entry, ContractError> {
                 .all(|kind| matches!(kind.as_str(), "normal" | "build" | "dev")),
         "expected a nonempty list containing only normal, build or dev",
     )?;
+    if let Some(target) = target.as_deref() {
+        // An empty target is meaningful: it requires an unconditional
+        // declaration. Any non-empty value is the `cfg(…)` or triple Cargo
+        // reported, compared byte-for-byte at admission.
+        validate_closed_value(
+            draft,
+            &krate,
+            "target",
+            target,
+            !target.chars().any(char::is_control),
+            "expected a target cfg expression, possibly empty for unconditional",
+        )?;
+    }
+    validate_closed_value(
+        draft,
+        &krate,
+        "aliases",
+        &aliases.join(","),
+        aliases
+            .iter()
+            .all(|alias| is_identifier(alias) && alias != &krate),
+        "expected comma-separated package identifiers, none equal to crate",
+    )?;
+    if let (Some(allowed), Some(required)) = (features.as_ref(), required_features.as_ref()) {
+        validate_closed_value(
+            draft,
+            &krate,
+            "required_features",
+            &required.join(","),
+            required.iter().all(|needed| allowed.contains(needed)),
+            "expected a subset of the allowed features",
+        )?;
+    }
     let approved_by = draft.require("approved_by", &krate)?.to_owned();
     let review = draft.require("review", &krate)?.to_owned();
 
@@ -1240,6 +1557,12 @@ fn build(draft: &RawEntry) -> Result<Entry, ContractError> {
         capability,
         source,
         origin,
+        features,
+        required_features,
+        uses_default_features,
+        optional,
+        target,
+        aliases,
         allowed_consumers,
         allowed_kinds,
         reason,
@@ -1280,7 +1603,7 @@ fn is_a_sentence(reason: &str, krate: &str) -> bool {
     if trimmed.split_whitespace().count() < 4 {
         return false;
     }
-    normalise(trimmed.trim_end_matches('.')) != normalise(krate)
+    fold_for_prose(trimmed.trim_end_matches('.')) != fold_for_prose(krate)
 }
 
 /// Validates a canonical Gregorian `YYYY-MM-DD` date without allocation.
@@ -1324,11 +1647,15 @@ fn decimal_pair(bytes: &[u8]) -> Option<u32> {
     })
 }
 
-/// Cargo treats `-` and `_` as interchangeable in package names; so does this.
+/// Folds a string for the *prose* check in [`is_a_sentence`] and nothing else.
 ///
-/// Trims, lowercases, and maps `-` to `_`. Used for crate names and owners, not
-/// for capability strings, which are compared verbatim.
-fn normalise(name: &str) -> String {
+/// Trims, lowercases, and maps `-` to `_`. This is deliberately **not** used
+/// for package identity: Cargo's `-`/`_` fold decides whether two published
+/// names collide, but it is not the identity a register approves. Approval
+/// matching is byte-exact (see [`Entry::admits`]); the only place the fold
+/// survives is deciding whether a `reason` merely restates the crate name,
+/// where a near-miss in prose is not an authority question.
+fn fold_for_prose(name: &str) -> String {
     name.trim().to_ascii_lowercase().replace('-', "_")
 }
 
@@ -1518,9 +1845,22 @@ mod tests {
         let mut lines = lines.collect::<Vec<_>>();
         lines.reverse();
         let reordered = format!("{header}\n{}\n", lines.join("\n"));
+        let from_original = Contract::parse(&original)?;
+        let from_reordered = Contract::parse(&reordered)?;
+        // The text fingerprint is a property of the bytes, so it differs by
+        // construction; the admitted meaning — policy and every entry — must
+        // not.
         assert_eq!(
-            Contract::parse(&original)?,
-            Contract::parse(&reordered)?,
+            (
+                from_original.enforce,
+                from_original.schema,
+                &from_original.entries
+            ),
+            (
+                from_reordered.enforce,
+                from_reordered.schema,
+                &from_reordered.entries
+            ),
             "reordering unique fields must not change the admitted contract"
         );
         Ok(())
@@ -2017,10 +2357,88 @@ mod tests {
         Ok(())
     }
 
+    /// Lookup is byte-exact: an approval for one spelling does not admit a
+    /// package whose name is a `-`/`_` fold of it, and a caller that wants the
+    /// fold must author an explicit alias.
     #[test]
-    fn lookup_tolerates_hyphen_underscore_drift() -> TestResult {
-        let contract = Contract::parse(&entry(""))?;
-        assert!(contract.approval_for("serde").is_some());
+    fn lookup_is_exact_and_only_an_explicit_alias_is_tolerated() -> TestResult {
+        let exact = Contract::parse(&entry(""))?;
+        assert!(exact.approval_for("serde").is_some());
+        assert!(
+            exact.approval_for("ser-de").is_none(),
+            "a fold-alike spelling must not borrow the approval"
+        );
+        assert!(
+            exact.approval_for("SERDE").is_none(),
+            "identity is case-sensitive, not folded"
+        );
+
+        let aliased = Contract::parse(&entry("aliases = \"ser-de\"\n"))?;
+        assert!(
+            aliased.approval_for("ser-de").is_some(),
+            "an authored alias admits the observed spelling"
+        );
+        assert!(
+            aliased.approval_for("serde").is_some(),
+            "the canonical name stays admitted alongside its alias"
+        );
+        Ok(())
+    }
+
+    /// Two distinct spellings are two distinct approvals, not one — and a
+    /// compatibility alias a second package also needs is a collision.
+    #[test]
+    fn aliases_collide_rather_than_share_authority() -> TestResult {
+        let distinct = Contract::parse(&format!(
+            "{}\n{}",
+            entry(""),
+            entry("").replace("crate = \"serde\"", "crate = \"ser-de\"")
+        ))?;
+        assert_eq!(distinct.entry_count(), 2);
+        assert!(distinct.approval_for("serde").is_some());
+        assert!(distinct.approval_for("ser-de").is_some());
+
+        let contested = Contract::parse(&format!(
+            "{}\n{}",
+            entry("aliases = \"other\"\n"),
+            entry("").replace("crate = \"serde\"", "crate = \"other\"")
+        ));
+        assert!(
+            matches!(contested, Err(ContractError::AliasCollision { ref alias, .. }) if alias == "other"),
+            "an alias equal to another package's name is a collision"
+        );
+
+        let shared = Contract::parse(&format!(
+            "{}\n{}",
+            entry("aliases = \"shared\"\n"),
+            entry("")
+                .replace("crate = \"serde\"", "crate = \"alias_second\"")
+                .replace(
+                    "review = \"docs/ADMISSION.md\"",
+                    "review = \"docs/ADMISSION.md\"\naliases = \"shared\""
+                )
+        ));
+        assert!(
+            matches!(shared, Err(ContractError::AliasCollision { ref alias, .. }) if alias == "shared"),
+            "two packages may not share one alias"
+        );
+        Ok(())
+    }
+
+    /// An unsupported register schema is refused rather than read under the
+    /// older rules, and both supported versions load.
+    #[test]
+    fn an_unsupported_schema_is_refused() -> TestResult {
+        assert!(matches!(
+            Contract::parse("[policy]\nschema = 3\n"),
+            Err(ContractError::UnsupportedSchema { line: 2, ref value }) if value == "3"
+        ));
+        assert!(matches!(
+            Contract::parse("[policy]\nschema = \"2\"\n"),
+            Err(ContractError::UnsupportedSchema { line: 2, .. })
+        ));
+        assert_eq!(Contract::parse("[policy]\nenforce = true\n")?.schema(), 1);
+        assert_eq!(Contract::parse("[policy]\nschema = 2\n")?.schema(), 2);
         Ok(())
     }
 }
