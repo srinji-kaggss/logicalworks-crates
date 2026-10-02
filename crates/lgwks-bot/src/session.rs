@@ -668,6 +668,102 @@ fn any_true(items: &[Predicate], scope: &VarScope) -> Result<bool, BotError> {
     Ok(false)
 }
 
+/// Validates one `ask` node: its variable, its options and its routes.
+///
+/// A helper rather than the arm inline: as one block the arm carried the
+/// variable lookup, the option decode, the byte check and the two route passes,
+/// so `validate_node` read as a list of kinds when what it needed to say was
+/// which parts of an `ask` node are checked and in what order -- decode with
+/// the runtime's own decoder first, then the session's own ceiling, then the
+/// routes, so a refusal names the earliest thing wrong rather than an arbitrary
+/// one.
+fn validate_ask_node(
+    spec: &FlowSpec,
+    node_id: &str,
+    var: &str,
+    options: &[String],
+    routes: &BTreeMap<String, NodeId>,
+    limits: ResourceLimits,
+    writers: &mut BTreeSet<String>,
+) -> Result<(), BotError> {
+    lgwks_std::trace::warn!(
+        operation = "validate_ask_node",
+        "operation refused its request; the typed error carries the facts"
+    );
+    let declared = declared_variable(spec, var)?;
+    writers.insert(var.to_owned());
+    if options.is_empty() || has_duplicate_strings(options) {
+        return Err(BotError::MalformedFlow {
+            cause: format!("ask node {node_id:?} has invalid options"),
+        });
+    }
+    // Distinct strings are not distinct answers. Two options the answer
+    // policy cannot tell apart are one option the person cannot choose
+    // between, and the resolver can only ever report the tie — so the
+    // authoring mistake is refused here, where it names an option,
+    // rather than at run time, where it names none.
+    if let Some((first, second)) = colliding_options(options, answer_domain_of(spec, var)) {
+        return Err(BotError::MalformedFlow {
+            cause: format!(
+                "ask node {node_id:?} offers {first:?} and {second:?} as the same \
+                             {} answer",
+                answer_domain_of(spec, var)
+            ),
+        });
+    }
+    for option in options {
+        let Some(target) = routes.get(option) else {
+            return Err(BotError::MissingAskRoute {
+                node: node_id.to_owned(),
+                option: option.clone(),
+            });
+        };
+        check_target(&spec.nodes, node_id, target)?;
+        // Every candidate is decoded with the same decoder the runtime
+        // assigns with, so "the flow asks a question the variable
+        // cannot hold an answer to" is a load-time refusal rather than
+        // a conversation the person cannot complete.
+        let value = match declared.decode_answer(option) {
+            Ok(value) => value,
+            Err(rejection) => {
+                return Err(BotError::AskOptionNotAssignable {
+                    node: node_id.to_owned(),
+                    variable: var.to_owned(),
+                    option: option.clone(),
+                    expected: declared.label(),
+                    cause: rejection.to_string(),
+                });
+            }
+        };
+        // Then that the value fits the session that will store it.
+        // "The candidate cannot be held" and "the candidate cannot be
+        // held *here*" are different statements, and both are knowable
+        // while the document is loading: the second one is a session
+        // whose value ceiling is below the option it asked for, and
+        // deferring it to the person's answer would charge them a step
+        // for an operator's configuration.
+        let value_bytes = limits.get(ResourceAxis::Value);
+        if value.rendered_bytes() > value_bytes {
+            return Err(BotError::AskOptionTooLarge {
+                node: node_id.to_owned(),
+                variable: var.to_owned(),
+                option: option.clone(),
+                bytes: value.rendered_bytes(),
+                limit: value_bytes,
+            });
+        }
+    }
+    for (option, target) in routes {
+        if !options.iter().any(|candidate| candidate == option) {
+            return Err(BotError::MalformedFlow {
+                cause: format!("ask node {node_id:?} routes undeclared option {option:?}"),
+            });
+        }
+        check_target(&spec.nodes, node_id, target)?;
+    }
+    Ok(())
+}
+
 /// A declared flow node and its closed operation kind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(crate = "lgwks_std::json::serde", rename_all = "snake_case")]
@@ -1623,79 +1719,7 @@ fn validate_node(
             ref var,
             ref options,
             ref routes,
-        } => {
-            let declared = declared_variable(spec, var)?;
-            writers.insert(var.clone());
-            if options.is_empty() || has_duplicate_strings(options) {
-                return Err(BotError::MalformedFlow {
-                    cause: format!("ask node {node_id:?} has invalid options"),
-                });
-            }
-            // Distinct strings are not distinct answers. Two options the answer
-            // policy cannot tell apart are one option the person cannot choose
-            // between, and the resolver can only ever report the tie — so the
-            // authoring mistake is refused here, where it names an option,
-            // rather than at run time, where it names none.
-            if let Some((first, second)) = colliding_options(options, answer_domain_of(spec, var)) {
-                return Err(BotError::MalformedFlow {
-                    cause: format!(
-                        "ask node {node_id:?} offers {first:?} and {second:?} as the same \
-                         {} answer",
-                        answer_domain_of(spec, var)
-                    ),
-                });
-            }
-            for option in options {
-                let Some(target) = routes.get(option) else {
-                    return Err(BotError::MissingAskRoute {
-                        node: node_id.to_owned(),
-                        option: option.clone(),
-                    });
-                };
-                check_target(&spec.nodes, node_id, target)?;
-                // Every candidate is decoded with the same decoder the runtime
-                // assigns with, so "the flow asks a question the variable
-                // cannot hold an answer to" is a load-time refusal rather than
-                // a conversation the person cannot complete.
-                let value = match declared.decode_answer(option) {
-                    Ok(value) => value,
-                    Err(rejection) => {
-                        return Err(BotError::AskOptionNotAssignable {
-                            node: node_id.to_owned(),
-                            variable: var.clone(),
-                            option: option.clone(),
-                            expected: declared.label(),
-                            cause: rejection.to_string(),
-                        });
-                    }
-                };
-                // Then that the value fits the session that will store it.
-                // "The candidate cannot be held" and "the candidate cannot be
-                // held *here*" are different statements, and both are knowable
-                // while the document is loading: the second one is a session
-                // whose value ceiling is below the option it asked for, and
-                // deferring it to the person's answer would charge them a step
-                // for an operator's configuration.
-                let value_bytes = limits.get(ResourceAxis::Value);
-                if value.rendered_bytes() > value_bytes {
-                    return Err(BotError::AskOptionTooLarge {
-                        node: node_id.to_owned(),
-                        variable: var.clone(),
-                        option: option.clone(),
-                        bytes: value.rendered_bytes(),
-                        limit: value_bytes,
-                    });
-                }
-            }
-            for (option, target) in routes {
-                if !options.iter().any(|candidate| candidate == option) {
-                    return Err(BotError::MalformedFlow {
-                        cause: format!("ask node {node_id:?} routes undeclared option {option:?}"),
-                    });
-                }
-                check_target(&spec.nodes, node_id, target)?;
-            }
-        }
+        } => validate_ask_node(spec, node_id, var, options, routes, limits, writers)?,
         NodeKind::Branch {
             ref var,
             ref when,
