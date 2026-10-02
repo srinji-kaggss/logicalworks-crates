@@ -304,15 +304,22 @@ to clear a refusal. That is a suppressed gate, not a fix.
 
 ## 10. Dependencies
 
-Estate first, in this order:
+Estate first, in this order. The **reuse ladder** (std → `lgwks_std` →
+`lgwks_bot` → `lgwks_ast` → `lgwks_deps`) is an ownership order, and it is not
+the dependency graph. The graph, read from the manifests, is:
 
 ```
-std / core / alloc
-  → lgwks_std     (sync primitives, JSON via lgwks_std::json, hash)
-    → lgwks_bot   (async runtime, runners, actors; owns the single tokio edge)
-      → lgwks_ast (parsing, multi-language, typed diagnostics)
-        → lgwks_deps (third-party storefront, admission gate)
+lgwks_std      (depends on nothing in this workspace)
+lgwks_ast      (depends on nothing in this workspace)
+lgwks_macros   (proc-macro support crate; no workspace deps)
+lgwks_bot      → lgwks_std, and optionally lgwks_macros (feature `script`)
+lgwks_deps     → lgwks_std, unconditionally and twice (features `json`, `random`)
 ```
+
+So `lgwks_ast` sits at the end of the ladder while sitting at the *top* of the
+dependency graph, `lgwks_deps` depends only on `lgwks_std` and not on
+`lgwks_bot`, and `lgwks_macros` is absent from the ladder entirely. Reach for a
+capability in ladder order; do not read the ladder as a build order.
 
 - JSON is `lgwks_std::json` with `#[serde(crate = "lgwks_std::json::serde")]`.
   Do not declare `serde` directly.

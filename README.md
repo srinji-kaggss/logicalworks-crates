@@ -1,11 +1,22 @@
 # logicalworks-crates
 
-Four independently versioned Rust crates: a zero-dependency core, a runtime for
-long-running automation, a multi-language AST front end, and an audited
-dependency storefront. Each is usable on its own. Take one and ignore the rest.
+Five independently versioned Rust crates: a zero-external-dependency core, a
+runtime for long-running automation, a multi-language AST front end, a proc-macro
+support crate, and an audited dependency storefront. Each is usable on its own.
+Take one and ignore the rest.
 
-They share a workspace and a release process, not a dependency graph. Only
-`lgwks_bot` depends on `lgwks_std`, and nothing depends on `lgwks_ast`.
+**Two qualifications on "zero-dependency core", because at the crate level it is
+not true.** Only `--no-default-features --features core` pulls nothing at all;
+the *default* feature set includes `trace`, which is `tracing` +
+`tracing-subscriber`. `lgwks_std`'s README carries this caveat and the quickstart
+below assumes the default set.
+
+**The dependency graph, stated exactly.** `lgwks_std` and `lgwks_ast` depend on
+nothing in this workspace. `lgwks_bot` depends on `lgwks_std`, and optionally on
+`lgwks_macros` (behind its `script` feature). `lgwks_deps` depends on
+`lgwks_std` — twice, under two separate entries, both unconditional (one for
+`json`, one for `random`). So it is not true that only `lgwks_bot` depends on
+`lgwks_std`, and it is true that nothing depends on `lgwks_ast`.
 
 **Contents**
 
@@ -283,7 +294,7 @@ the rest of this table is design history and contributor policy.
 | [`docs/framework-comparison.md`](docs/framework-comparison.md) | Why the field looks the same, the four axes it actually differs on, and the axis nobody occupies. |
 | [`docs/production-readiness.md`](docs/production-readiness.md) | Nine-axis production readiness of `lgwks_bot`, the case that it replaces non-AI automation and RPA, and the rows that currently fail their own gate. |
 | [`docs/releasing.md`](docs/releasing.md) | The release process. |
-| [`CHANGELOG.md`](CHANGELOG.md) | Per-release changes across all four crates. |
+| [`CHANGELOG.md`](CHANGELOG.md) | Per-release changes across all five crates. |
 | [`SECURITY.md`](SECURITY.md) | Attack surface, reporting process, and advisories assessed. |
 
 Each crate also carries its own README: [`lgwks_std`](crates/lgwks-std/README.md),
