@@ -8,7 +8,7 @@ cargo add lgwks_deps --no-default-features      # the storefront library
 ```
 
 The binary is the gate. The library is the storefront. Current version:
-`0.1.13`, MSRV Rust 1.98.0, edition 2024.
+`0.4.0`, MSRV Rust 1.98.0, edition 2024.
 
 Do not run `cargo install lgwks_deps --no-default-features` expecting the `scan`
 subcommand. The CLI's source detectors live behind the `scan` feature, which is

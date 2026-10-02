@@ -146,10 +146,11 @@ weeks" is a design intent and not a measurement.
   by any single `#[allow]` anywhere, including one smuggled in by a macro this
   workspace does not own; `forbid` cannot be lowered from source and a
   conflicting allow is a hard `E0453`.
-- The anti-pattern corpus's 75 entries: the 25 that a lint can catch are
-  configured, the four names in the corpus that silently do nothing are
-  corrected, and the other 50 are stated as needing Miri, perf counters or
-  human review. The ceiling is published rather than claimed.
+- The anti-pattern corpus's 75 entries against 75 configured lints (69 `clippy`,
+  5 `rustc`, 1 `rustdoc`); the four names in the corpus that silently do nothing
+  are corrected. The rest need Miri, perf counters, allocation profiling or
+  human review, and the corpus and the lint table are not a partition — see
+  `CODEBOOK.md` §2.3. The ceiling is published rather than claimed.
 - Every `#[allow]` and `#[expect]` must carry `reason = "..."`.
 - `clippy --workspace --all-targets --locked -- -D warnings` is a required gate
   lane and is green, across a feature matrix and a `--no-default-features` pass.
@@ -168,11 +169,17 @@ that would break them." That second half is an argument.
 
 **⚠️ — the declared input space is covered. The messy one is not.**
 
-Covered and gated: a feature matrix across `lgwks_std`, `lgwks_bot`, `lgwks_ast`
-and `lgwks_deps` (default, each feature alone, all features, none); 33
-`lgwks_ast` grammars in CI; a `wasm32-wasip1` boundary lane; three host
-operating systems; RON flow parsing; and the `--no-default-features` build of
-every crate.
+Covered and gated: per-feature compile lanes for `lgwks_std` (7 of its 12
+non-`default`/`full` features — `hash`, `pattern`, `json`, `wire`, `http`,
+`online`, `fs-raw`) and three `lgwks_deps` single-feature checks (`tokio`,
+`gpui`, `ml-candle`+`ml-tokenizers`); 4 `lgwks_bot` legs (no-default, `full`,
+`net`+`process`+`fs`+`signal`, and `wasm32-wasip1` with `rt`) and one combined
+28-grammar `lgwks_ast` invocation; plus RON flow parsing. It does **not** cover
+every crate or every feature: `lgwks_deps` and `lgwks_macros` have no bare
+`--no-default-features` lane, and `lgwks_std`'s remaining 5 features (`core`,
+`trace`, `random`, `ron`, `process`) have no per-feature lane of their own. The
+28-grammar figure is `DECLARED_GRAMMARS` in `crates/lgwks-ast/src/lib.rs`, not
+a wider matrix.
 
 **This is the axis the whole product turns on, and it is where the gap is
 largest.** The reason automation is hard is not the happy path. It is that
@@ -221,8 +228,12 @@ Generalized axis is the bulk of the remaining work on this crate.
   journal does not own the effects, the verbs do not own the runtime.
 
 *Not covered:* no downstream compatibility evidence. A workspace caller search
-proves nothing about external consumers, and the published tags trail `main`
-(see the version-boundary note in the crate README).
+proves nothing about external consumers, and the published tags trail `main`:
+the newest tag of each crate sits 35 commits behind `origin/main` (`lgwks_std-v0.9.0`,
+`lgwks_bot-v0.7.0`, `lgwks_deps-v0.3.0`, `lgwks_macros-v0.1.1`) or 53 behind it
+(`lgwks_ast-v0.3.0`), while the manifests already read 0.10.0 / 0.8.0 / 0.4.0 /
+0.4.0 / 0.1.2. See the version-boundary note in the crate README; a source tag
+is also not a registry upload.
 
 ### 4.6 Ephemeral — survives process loss
 
@@ -282,19 +293,43 @@ is indexed, so an append's cost does not grow with the journal's length
 (measured flat from an empty journal to 32,000 prior attempts, against the
 linear walk it replaces, which measured 98× slower at 8,000). Replay holds
 every committed entry in memory and reopens in time linear in the file;
-rotation and compaction are not provided and the journal grows without bound
-until a controller rotates it.
+rotation and compaction are still not provided.
+
+**What ships instead of unbounded growth is a hard ceiling, and a hard refusal
+is not a long-running-service availability proof.** Both `open` and `append`
+refuse with `JournalError::CapacityExceeded`, naming the limit, rather than
+truncating, compacting or partially replaying: the file is bounded by
+`MAX_JOURNAL_BYTES` and `MAX_JOURNAL_EVENTS`. The refusal writes nothing and
+preserves the committed history, so it is safe — and it is still **stopping**.
+A controller that runs for weeks on one store reaches the ceiling and needs a
+rotation or continuation strategy that does not exist yet (#122/#143). And the
+ceiling bounds the *file*, not the records needed to settle work already handed
+off to the outside world, so it is not a settlement-capacity proof either.
+Read this row as "the file adapter refuses to grow without bound", not as "this
+service can run indefinitely on a single store".
 
 ### 4.7 Portable — same semantics on all declared targets
 
-**✅ — measured on three operating systems in CI.**
+**⚠️ — three operating systems are built in CI; one of them runs the tests that
+carry the containment claim.**
 
-Thirteen hosted CI jobs green across `ubuntu-latest`, `macos-14` and
-`windows-latest`, including the feature matrices and the no-default builds. A
+Twenty hosted job definitions. Their `runs-on` distribution is **14
+`ubuntu-latest`, 2 `macos-14`, 1 `windows-latest`, 1 `matrix.os`**, and that
+single `matrix.os` job is `appcui-native` — so "three operating systems" is
+true of that one storefront feature and not of the estate. The `lgwks_std` /
+`lgwks_bot` / `lgwks_ast` test and clippy lanes are `ubuntu-latest` only. A
 `wasm32-wasip1` boundary lane checks that the default feature set compiles for
-WASI. `os.uname` and other host-only calls are behind `platform` dispatch.
+WASI — a build check, not an executed containment test. `os.uname` and other
+host-only calls are behind `platform` dispatch.
 
-*Not covered:* ARM Linux, musl, 32-bit, and any target outside the three hosted
+**The feature × OS × backend × assurance matrix, and what it does not say.** The
+bot's supervised process backend returns `Unsupported` on non-Unix, so a
+green `windows-latest` job is a *build* receipt for the Windows target and
+never a *containment* receipt: no Windows run in CI can have killed a process
+group. A build check and an executed containment test are different facts, and
+only the second one is a portability claim about the runtime.
+
+*Not covered:* ARM Linux, musl, 32-bit, and any target outside the hosted
 runners. The performance numbers in §4.9 are from one machine and are explicitly
 not a cross-platform claim.
 
