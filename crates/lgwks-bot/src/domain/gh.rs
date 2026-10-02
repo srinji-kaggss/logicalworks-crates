@@ -237,6 +237,24 @@ impl ReviewRecord {
         self.user.as_ref()
     }
 
+    /// Build a record from the fields a read-back verification reads.
+    ///
+    /// Public because a consumer that keeps its own receipt of what it
+    /// published needs to reconstruct the same record its own adapter will
+    /// return, and a private field would force it to compare against a
+    /// different shape. It builds only what [`ReviewRecord::matches`] reads, so
+    /// it cannot be used to assert a match that was never observed.
+    #[must_use]
+    pub fn new(id: u64, commit_id: &str, state: &str, body: &str) -> Self {
+        Self {
+            id,
+            commit_id: Some(String::from(commit_id)),
+            state: String::from(state),
+            body: Some(String::from(body)),
+            user: None,
+        }
+    }
+
     /// Whether this record is the review `intended` describes.
     ///
     /// The subject, the body and the state are all compared, because a
