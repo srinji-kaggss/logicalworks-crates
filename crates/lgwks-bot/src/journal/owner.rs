@@ -520,7 +520,6 @@ fn serve<S, A>(
     slot: Arc<Mutex<Slot>>,
     signal: Arc<Condvar>,
 ) {
-    let _entered = std::fs::write("/private/tmp/lgwks-serve.txt", b"in");
     while let Some(envelope) = next(&mut inbox, &slot, &signal) {
         // The whole critical section runs here: the fence, the write, the sync and
         // the fold into shared state, in one ordered step no other request can
@@ -585,10 +584,6 @@ fn next<S, A>(
             held.closed
         };
         let got = inbox.try_recv();
-        let _ignored = std::fs::write(
-            "/private/tmp/lgwks-next.txt",
-            format!("closed={closed} got={}\n", got.is_ok()).as_bytes(),
-        );
         if let Ok(job) = got {
             return Some(job);
         }

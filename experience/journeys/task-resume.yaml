@@ -9,15 +9,14 @@ prior_knowledge:
     "at-least-once" is free. Both are wrong without a store, and this journey is
     where they learn which claim they are actually holding.
 start:
-  installation: lgwks-bot built with `script`; optionally a store directory the
-    process can write.
+  installation: "lgwks-bot built with `script`; optionally a store directory the process can write."
   state: a task whose steps are durable work, and a process that may be killed
     between two of them.
 success:
-  visible_outcome: after a kill -9, the same run id resumes: finished steps are
+  visible_outcome: "after a kill -9, the same run id resumes: finished steps are
     returned from the record without running, the interrupted step runs exactly
     once, the final output equals the uninterrupted one, and a report that
-    stopped says where it stopped and carries the ticket that resumes it.
+    stopped says where it stopped and carries the ticket that resumes it."
 states:
   - name: unrecorded
     expectation: no store installed, the report says so and offers no ticket; a
@@ -35,6 +34,15 @@ states:
     expectation: over-cap records, an unreadable store and another tenant's run
       id are each a typed refusal naming the bound or the owner, never a silent
       re-run and never a cross-tenant read.
+  - name: parked
+    expectation: "the record device has stopped answering. A step awaiting its
+      record is a wait the runtime may await, not a thread parked inside an fsync.
+      Unrelated work keeps taking turns, and an operator with a separate handle can
+      release the device."
+  - name: abandoned
+    expectation: "a step whose record was still being written is dropped. The store
+      is still a store afterwards — it reopens, is never duplicated, and the resume
+      reaches the same value whether the record landed or not."
 invariants:
   - A step runs if and only if the store has no committed record for its key.
   - A record is committed (written and synced) before its value is returned.
@@ -43,6 +51,11 @@ invariants:
   - A step that ran but whose record did not land re-runs on resume, so a durable
     run is at-least-once for an *unrecorded* step and exactly-once for a recorded
     one. External effects still need the effect journal.
+  - "A durable record reaches the disk on a thread of the store's own, so no
+    executor thread ever waits inside a flush. Ordering between appends is the
+    owner's, and is the same order the file sees."
+  - "The store's frames and the effect journal's frames are one grammar, so what a
+    torn tail is cannot be answered two ways."
 trust_boundaries:
   - "The store directory is the host's authority: a step key that is not in it has
     not run, and a record that is in it is the truth about that step."
@@ -55,8 +68,8 @@ recovery_contracts:
     the trail as steps entered without a record lookup.
   - A torn tail loses only its own incomplete record.
 agent_contracts:
-  - `remember` reports the disposition it observed: replayed, recorded, or the
-    step's own failure located at the step.
+  - "`remember` reports the disposition it observed: replayed, recorded, or the
+    step's own failure located at the step."
   - The host claims durability only when a store is installed, and a report with
     no store says so in the same field a reader checks.
 probes:
@@ -78,3 +91,26 @@ probes:
   - id: caps-refuse-without-truncating
     action: Lower the per-record, per-run and total-byte ceilings; assert each is a
       typed refusal naming the bound, and that the earlier records still read.
+  - id: parked-record-device-lets-the-runtime-turn
+    action: "Open the store with its storage gate closed, drive a step and an
+      unrelated self-waking task on one driver, and have an independent OS thread
+      release the device once the unrelated task has taken at least 64 turns; assert
+      the turn count, and that the released record reads back from a fresh handle."
+  - id: abandoned-record-leaves-the-store-consistent
+    action: "Park the device, poll a step once so the owner holds the request, drop
+      the step, keep the unrelated task turning until the watchdog releases; assert
+      the turn count, that the store reopens, that the record is not duplicated, and
+      that the resume reaches the same value."
+  - id: scale-tiers-100-1000-10000
+    action: "Run each tier of 100, 1000 and 10000 runs against one store with two
+      tenants alternating, then reopen the store and assert every run holds exactly
+      one record attributed to its own tenant; report p50/p95/p99 and peak RSS."
+  - id: frontier-cost-against-the-journal
+    action: "Measure a plain step, a remember through the store, and one
+      FileJournal append at the same payload size in one harness, and report p50,
+      p95 and p99 for each."
+  - id: contention-loses-nothing
+    action: "Sweep seeded concurrent appends, repeated submissions, replayed steps
+      and interleaved tenants against the real store; assert no record is lost,
+      doubled, or attributed to another tenant, and that a same seed replays to the
+      same trace hash."

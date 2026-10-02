@@ -10,6 +10,56 @@ explicitly under that crate.
 
 ### lgwks_bot Added
 
+- The run store's durable write reaches the disk off the executor (#87 step 5).
+  `remember` awaited `RunStore::commit` directly, so a step's `write_all` plus
+  `sync_all` ran on the thread polling it and parked the whole runtime for the
+  length of an `fsync` — the blocking-write defect #122 removed from
+  `FileJournal`, inherited here because this store was written later. The
+  run store now shares `journal::file`'s storage-owner thread, generalised to run
+  the caller's whole critical section (the in-memory checks, the length fence,
+  the write, the `sync_all` and the fold into the store's index) as one ordered
+  step no other append can overtake. `RunRecords` gains `append_async`, which
+  `remember` awaits, so a step waits for its record instead of sitting through
+  the flush; the default implementation calls the synchronous door, which is
+  correct and is exactly the blocking shape the method exists to remove.
+  `RunStore::open_with_stalled_device` and `RunStore::storage_gate` are public
+  for the same reason `FileJournal::open_with_stalled_storage` is: an operator
+  has to be able to ask what a run does while its record store has stopped
+  answering, and a probe that only exists inside the crate's test binary cannot
+  answer it. A caller that walks away from an outstanding record still latches
+  the handle's poison, because the bytes may be on the disk under no
+  acknowledgment; only a reopen, which replays the truth, clears it.
+  `journal::frame` and `journal::owner` are the two extracted mechanisms, and
+  `journal::file`'s behaviour and tests are unchanged by the extraction.
+  INV-BOT-50.
+- One frame grammar for both file-backed stores (#87 step 5).
+  `RunStore` re-implemented `journal::file`'s frame codec — the length prefix,
+  the 32-byte head, the torn-tail scan and the refusal of a frame no writer
+  produces — which is a second definition of "what a torn tail is" that only one
+  store's tests would see. `journal::frame` now holds that grammar once, and
+  `frame_record` performs a record's whole archive/bound/chain/lay-out step,
+  parameterised by each store's record type, archiver and head-chaining function.
+  `FileJournal` and `RunStore` call it; neither writes a frame by hand. No
+  behaviour change to either store: `journal::file`'s existing tests pass
+  unchanged. INV-BOT-51.
+- Measurements for the durable step (#87 step 5).
+  `examples/resume_cost.rs` compares three mechanisms at one payload size: a
+  plain step (p50=1us), a `remember` through the store (p50=6173us, p95=14729us,
+  p99=21461us) and one `FileJournal` append (p50=6543us, p95=15457us,
+  p99=25183us) — so a durable step is not paying twice for one mechanism.
+  `tests/task_resume.rs::concurrent_runs_across_tiers` runs 100, 1000 and 10000
+  runs over one store with two tenants alternating and re-reads every record
+  from a reopened store: 100 → p50=5953us p95=11510us p99=17148us in 687ms;
+  1000 → p50=6368us p95=14997us p99=24184us in 7.64s; 10000 → p50=6624us
+  p95=18063us p99=31314us in 86.30s, with no record lost, none duplicated and
+  none attributed to the wrong tenant. Both measurements are opt-in through an
+  environment variable and report that they did not run rather than a bound
+  nobody checked. `tests/resume_liveness.rs` measures the liveness claim
+  directly: with the device parked and an independent OS thread releasing it,
+  an unrelated ready task turned 46,835,531 times while one flush was parked,
+  where a blocking implementation reaches one poll and then sits inside the
+  fsync. INV-BOT-52, INV-BOT-53.
+
 - Host-held resumable runs (#87 step 5). `HostBuilder::run_store(dir)` installs a
   durable, file-backed per-step record store — `task::RunStore`, chain-framed and
   `fsync`-ed per record, opened and replayed at installation so a refusal happens
@@ -31,7 +81,7 @@ explicitly under that crate.
   for a recorded step, at-least-once for an unrecorded one — and an external
   effect still needs the effect journal. Migration: none; every added item is
   additive, and a host that installs no store behaves exactly as before.
-  INV-BOT-21.
+  INV-BOT-54.
 - `task::{Host, Task, Report}`, the front door (#87 step 1): build a `Host` once
   (tenant, stop token, admission ceiling, default deadline, trail capacity, all
   finite and readable through `Host::limits`), define a `Task` with `task(name,

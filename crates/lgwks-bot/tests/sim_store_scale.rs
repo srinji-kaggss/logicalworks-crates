@@ -29,14 +29,18 @@ mod sim;
 #[path = "sim/bands.rs"]
 mod band_family;
 
+#[path = "support/resume.rs"]
+mod shared;
+
 use std::error::Error;
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
 
 use lgwks_bot::effect::RunId;
 use lgwks_bot::script::{FlowError, Scope, remember};
 use lgwks_bot::task::{Host, RunStore, Task, task};
+
+use shared::Scratch;
 
 use sim::Band;
 use sim::Rng;
@@ -51,43 +55,6 @@ type BodyFuture = Pin<Box<dyn Future<Output = Result<u32, FlowError>>>>;
 
 /// The task type every scenario here builds.
 type AppendTask = Task<fn(Scope, u32) -> BodyFuture>;
-
-/// A scratch directory for one scenario, removed when it ends.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    /// A directory named by the scenario's own tag, the seed it is on and the
-    /// process's own identity.
-    ///
-    /// All three, because this file's families run in parallel and two of them
-    /// reach the same seed numbers: a directory named by tag and seed alone is two
-    /// scenarios' scratch space, and one of them deletes the other's store while it
-    /// is still appending. The pid is the last third because the same seed is also
-    /// swept twice in `same_seed_replays`, within one process.
-    fn new(tag: &str, unique: u32) -> Result<Self, Box<dyn Error>> {
-        let path = std::env::temp_dir().join(format!(
-            "lgwks-sim-store-{tag}-{unique}-{}",
-            std::process::id()
-        ));
-        if path.exists() {
-            std::fs::remove_dir_all(&path)?;
-        }
-        std::fs::create_dir_all(&path)?;
-        Ok(Self(path))
-    }
-
-    /// The store file this scenario contends over.
-    fn store(&self) -> PathBuf {
-        self.0.join("contended.runstore")
-    }
-}
-
-impl Drop for Scratch {
-    /// Remove the directory. A leaked temp directory is a nuisance, not a failure.
-    fn drop(&mut self) {
-        drop(std::fs::remove_dir_all(&self.0));
-    }
-}
 
 /// The task whose whole body is one `remember` over a caller-chosen value.
 fn append_task() -> Result<AppendTask, FlowError> {
@@ -123,7 +90,7 @@ fn concurrent_appends_lose_nothing(band: Band) -> TestResult {
     for _ in band.seeds() {
         let appends = tenant_runs(&mut rng);
         let tag = rng.below(u32::MAX);
-        let scratch = Scratch::new("contend", tag)?;
+        let scratch = Scratch::new("sim-contend")?;
         let store = RunStore::open(scratch.store())?;
         let host = host("sim", store)?;
         let work = append_task()?;
@@ -165,7 +132,7 @@ fn duplicate_submissions_are_idempotent(band: Band) -> TestResult {
     for _ in band.seeds() {
         let repeats = tenant_runs(&mut rng);
         let tag = rng.below(u32::MAX);
-        let scratch = Scratch::new("dupe", tag)?;
+        let scratch = Scratch::new("sim-dupe")?;
         let store = RunStore::open(scratch.store())?;
         let host = host("sim", store)?;
         let work = append_task()?;
@@ -221,7 +188,7 @@ fn an_interrupted_step_records_exactly_once(band: Band) -> TestResult {
     for _ in band.seeds() {
         let attempts = tenant_runs(&mut rng);
         let tag = rng.below(u32::MAX);
-        let scratch = Scratch::new("once", tag)?;
+        let scratch = Scratch::new("sim-once")?;
         let path = scratch.store();
         let store = RunStore::open(&path)?;
         let work = append_task()?;
@@ -280,7 +247,7 @@ fn tenants_interleaved_stay_isolated(band: Band) -> TestResult {
         let tenants = rng.between(2, 8);
         let appends = tenant_runs(&mut rng);
         let tag = rng.below(u32::MAX);
-        let scratch = Scratch::new("tenant", tag)?;
+        let scratch = Scratch::new("sim-tenant")?;
         let store = RunStore::open(scratch.store())?;
         let work = append_task()?;
 
@@ -341,8 +308,7 @@ fn tenants_interleaved_stay_isolated(band: Band) -> TestResult {
 fn same_seed_replays(band: Band) -> TestResult {
     let body = |sim_run: &mut sim::Sim| -> TestResult {
         let appends = tenant_runs(sim_run.rng());
-        let tag = u32::try_from(sim_run.seed & u64::from(u32::MAX)).unwrap_or_default();
-        let scratch = Scratch::new("replay", tag)?;
+        let scratch = Scratch::new("sim-replay")?;
         let store = RunStore::open(scratch.store())?;
         let host = host("sim", store)?;
         let work = append_task()?;

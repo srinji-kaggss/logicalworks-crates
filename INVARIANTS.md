@@ -391,7 +391,57 @@ Each of these was a shipped defect. Treat the list as the spec.
   disposition, output or located error, and every report says no external
   effect is known. · why: #87 step 1 (T01–T04, T36) · enforced by:
   `tests/task_front_door.rs` and `tests/sim_task.rs`
-- **INV-BOT-21** A durable claim is backed by a store that outlives the process, and
+- **INV-BOT-50** A durable record reaches the disk on a thread of the store's own,
+  so no executor thread ever waits inside a flush. The whole ordered step — the
+  in-memory checks, the length fence, the write, the `sync_all` and the fold into
+  the store's index — runs on one `journal::owner` thread, which is what makes the
+  fence and the write it guards un-overtakable. `RunRecords::append_async` is what
+  a step awaits, so a parked device is a wait rather than a stalled runtime; a
+  caller that walks away from an outstanding record latches the handle's poison,
+  because the bytes may be on the disk under no acknowledgment and only a reopen
+  settles that. · why: #87 step 5, the blocking-write defect #122 removed from
+  `FileJournal` and the run store inherited · enforced by:
+  `tests/resume_liveness.rs` (`a_parked_record_device_lets_the_runtime_turn`,
+  `an_abandoned_record_leaves_the_store_consistent`,
+  `a_parked_store_still_serves_its_own_records_only`,
+  `the_parked_device_probe_measures_turns`), whose watchdog is an independent OS
+  thread and whose assertion is on the unrelated task's poll count — measured at
+  46,835,531 turns against a parked flush, where a blocking implementation reaches
+  one
+- **INV-BOT-51** The effect journal's frames and the run store's frames are one
+  grammar, in `journal::frame`: the length prefix, the 32-byte stored head, the
+  torn-tail scan, the refusal of a frame no writer produces, and the whole
+  archive/bound/chain/lay-out step, parameterised by each store's record type,
+  archiver and head-chaining function. "What a torn tail is" therefore has one
+  answer in this crate rather than one per store, and a frame one store writes is
+  framed exactly as a frame the other writes. `journal::file`'s behaviour is
+  unchanged by the extraction. · why: #87 step 5 (duplicated estate capability)
+  · enforced by: `journal::frame::tests` (six properties, including the three
+  prefix endings and the frame round trip), `journal::file::tests` unchanged and
+  green, and the `sim_journal` binaries
+- **INV-BOT-52** A durable step's cost is a stated number, not an adjective. The
+  run store's per-step cost is measured against the two things it could be: a
+  plain un-recorded step, and the effect journal's append at the same payload
+  size. Measured here: plain p50=1us, `remember` p50=6173us / p95=14729us /
+  p99=21461us, `FileJournal` p50=6543us / p95=15457us / p99=25183us — so a
+  durable step is not paying twice for one mechanism. A measurement that did not
+  run says it did not run, never a bound nobody checked. · why: #87 step 5
+  (frontier) · enforced by: `crates/lgwks-bot/examples/resume_cost.rs`, three
+  mechanisms at one payload size in one harness
+- **INV-BOT-53** The store holds every record at every concurrency tier it claims,
+  with two tenants interleaved, and the counts are read back from a reopened
+  store rather than from the handle that wrote them. Measured here: 100 runs →
+  p50=5953us p95=11510us p99=17148us in 687ms; 1000 → p50=6368us p95=14997us
+  p99=24184us in 7.64s; 10000 → p50=6624us p95=18063us p99=31314us in 86.30s,
+  with no record lost, none duplicated and none attributed to the wrong tenant.
+  Under contention the ordered step stays ordered: many appends through one owner
+  thread lose nothing, a repeated submission commits one frame, and a replayed
+  step is never re-recorded. · why: #87 step 5 (hyperscale) · enforced by:
+  `tests/task_resume.rs::concurrent_runs_across_tiers` and
+  `tests/sim_store_scale.rs` (`concurrent_appends_lose_nothing`,
+  `an_interrupted_step_records_exactly_once`,
+  `tenants_interleaved_stay_isolated`, `same_seed_replays`)
+- **INV-BOT-54** A durable claim is backed by a store that outlives the process, and
   every part of it says which. A host with `run_store` installed mints a `RunId`,
   records each `remember` step's value with an `fsync` *before* returning it, and
   reports the run's identity and step count in `EffectKnowledge::StepRecords`; a

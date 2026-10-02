@@ -683,7 +683,7 @@ struct Installation {
     /// `None` is the honest local mode: no record survives the process, so no
     /// report claims a run id and no ticket exists. A host with a store in hand
     /// that behaved as though it had none would be claiming durability it does
-    /// not have, which is the one thing INV-BOT-21 forbids.
+    /// not have, which is the one thing INV-BOT-54 forbids.
     store: Option<store::RunStore>,
     /// The runtime [`Host::block_on`] drives on, built once on first use.
     reactor: Mutex<Option<Reactor>>,
