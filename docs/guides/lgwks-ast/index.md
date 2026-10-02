@@ -1,7 +1,7 @@
 # lgwks_ast consumer guide
 
 One AST type across several languages, with grammar selection by cargo feature
-and bounded traversal. Current version: `0.2.2`, MSRV Rust 1.98.0, edition 2024.
+and bounded traversal. Current version: `0.4.0`, MSRV Rust 1.98.0, edition 2024.
 
 ```sh
 cargo add lgwks_ast

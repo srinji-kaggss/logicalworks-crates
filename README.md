@@ -1,11 +1,22 @@
 # logicalworks-crates
 
-Four independently versioned Rust crates: a zero-dependency core, a runtime for
-long-running automation, a multi-language AST front end, and an audited
-dependency storefront. Each is usable on its own. Take one and ignore the rest.
+Five independently versioned Rust crates: a zero-external-dependency core, a
+runtime for long-running automation, a multi-language AST front end, a proc-macro
+support crate, and an audited dependency storefront. Each is usable on its own.
+Take one and ignore the rest.
 
-They share a workspace and a release process, not a dependency graph. Only
-`lgwks_bot` depends on `lgwks_std`, and nothing depends on `lgwks_ast`.
+**Two qualifications on "zero-dependency core", because at the crate level it is
+not true.** Only `--no-default-features --features core` pulls nothing at all;
+the *default* feature set includes `trace`, which is `tracing` +
+`tracing-subscriber`. `lgwks_std`'s README carries this caveat and the quickstart
+below assumes the default set.
+
+**The dependency graph, stated exactly.** `lgwks_std` and `lgwks_ast` depend on
+nothing in this workspace. `lgwks_bot` depends on `lgwks_std`, and optionally on
+`lgwks_macros` (behind its `script` feature). `lgwks_deps` depends on
+`lgwks_std` — twice, under two separate entries, both unconditional (one for
+`json`, one for `random`). So it is not true that only `lgwks_bot` depends on
+`lgwks_std`, and it is true that nothing depends on `lgwks_ast`.
 
 **Contents**
 
@@ -220,6 +231,8 @@ loop stops without waiting on a body that will never observe the cancellation.
 |---|---|---|
 | Hex, base64, timestamps, UUIDs, hashing, glob, LEB128 | `lgwks_std` core | default, zero deps |
 | Retry budgets (attempts, backoff, deadlines) | `lgwks_std::retry` | default, zero deps |
+| Edit-distance / Jaccard / cosine scoring, weighted composition | `lgwks_std::similarity` | default, zero deps |
+| Directory walking with depth, order and symlink policy | `lgwks_std::fs` | default, zero deps |
 | Regex, JSON, RON, binary wire, HTTP client, reachability | `lgwks_std` | `pattern`, `json`, `ron`, `wire`, `http`, `online` |
 | `block_on`, bounded `join_all`, `spawn_blocking` (sync) | `lgwks_std::task` | default, zero deps |
 | Capability-gated automation (Observe/Evaluate/Execute/Query) | `lgwks_bot` | default (sync) |
@@ -282,8 +295,9 @@ the rest of this table is design history and contributor policy.
 | [`docs/frontier.md`](docs/frontier.md) | The state of the art across the nine areas this bot competes in, with measured anchors and the design decision each forces. |
 | [`docs/framework-comparison.md`](docs/framework-comparison.md) | Why the field looks the same, the four axes it actually differs on, and the axis nobody occupies. |
 | [`docs/production-readiness.md`](docs/production-readiness.md) | Nine-axis production readiness of `lgwks_bot`, the case that it replaces non-AI automation and RPA, and the rows that currently fail their own gate. |
+| [`docs/std-ast-deps-closure-matrix.md`](docs/std-ast-deps-closure-matrix.md) | All twenty `lgwks_std` modules, `lgwks_ast` and `lgwks_deps`: each with its feature, its evidence state, the test that exists on the named revision, and its owning issue. |
 | [`docs/releasing.md`](docs/releasing.md) | The release process. |
-| [`CHANGELOG.md`](CHANGELOG.md) | Per-release changes across all four crates. |
+| [`CHANGELOG.md`](CHANGELOG.md) | Per-release changes across all five crates. |
 | [`SECURITY.md`](SECURITY.md) | Attack surface, reporting process, and advisories assessed. |
 
 Each crate also carries its own README: [`lgwks_std`](crates/lgwks-std/README.md),
