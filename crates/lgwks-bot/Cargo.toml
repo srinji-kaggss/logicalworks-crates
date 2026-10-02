@@ -130,6 +130,11 @@ path = "examples/compare_orchestration.rs"
 required-features = ["script", "rt", "time", "sync", "macros"]
 
 [[example]]
+name = "review_pr_bench"
+path = "examples/review_pr_bench.rs"
+required-features = ["script", "process"]
+
+[[example]]
 name = "review_pr"
 path = "examples/review_pr.rs"
 required-features = ["script", "process"]
