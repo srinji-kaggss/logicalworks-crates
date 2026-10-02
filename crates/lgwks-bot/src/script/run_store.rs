@@ -318,8 +318,13 @@ where
         return decode(&stored);
     }
 
-    let value = body().await?;
-    let bytes = encode(&value)?;
+    // The body's own failure is located at *this* step rather than at the run's
+    // boundary, so a ticket names the step a caller must look at rather than the
+    // task that happened to contain it.
+    let value = body()
+        .await
+        .map_err(|error| error.located_at(scope.shared_path()))?;
+    let bytes = encode(&value).map_err(|error| error.located_at(scope.shared_path()))?;
     records.record(tenant, run, key, scope.path(), bytes)?;
     Ok(value)
 }

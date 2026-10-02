@@ -265,7 +265,7 @@ impl Scope {
     }
 
     /// This scope's path, shared rather than copied, for error locations.
-    pub(super) fn shared_path(&self) -> &Arc<str> {
+    pub(crate) fn shared_path(&self) -> &Arc<str> {
         &self.inner.path
     }
 

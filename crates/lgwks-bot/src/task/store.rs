@@ -151,6 +151,20 @@ pub enum StoreError {
         /// The tenant that asked to resume it.
         asked: String,
     },
+    /// The run id names no run this store holds, so it cannot be attributed to
+    /// any tenant here.
+    ///
+    /// Distinct from [`ForeignTenant`][Self::ForeignTenant] because the two say
+    /// opposite things: one says the run exists and belongs elsewhere, the other
+    /// says this store has never seen it. A resume in either case is refused —
+    /// recording a run this host cannot attribute would put one tenant's work
+    /// under another's name.
+    UnknownRun {
+        /// The run id that was asked for.
+        run: String,
+        /// The store that could not attribute it.
+        tenant: String,
+    },
 }
 
 impl StoreError {
@@ -205,6 +219,14 @@ impl fmt::Display for StoreError {
                 formatter,
                 "run belongs to tenant {owner:?}, not {asked:?}; refusing to read its records"
             ),
+            Self::UnknownRun {
+                ref run,
+                ref tenant,
+            } => write!(
+                formatter,
+                "no records for run {run} in tenant {tenant:?}'s store; refusing to resume a \
+                 run this store cannot attribute to it"
+            ),
         }
     }
 }
@@ -218,7 +240,8 @@ impl std::error::Error for StoreError {
             Self::Limit { .. }
             | Self::NotAStore
             | Self::Corrupt { .. }
-            | Self::ForeignTenant { .. } => None,
+            | Self::ForeignTenant { .. }
+            | Self::UnknownRun { .. } => None,
         }
     }
 }
@@ -404,6 +427,16 @@ impl RunStore {
         self.index().committed
     }
 
+    /// Whether this store has a record under `run`.
+    ///
+    /// The check `Host::resume` makes before it admits a run: a run id this
+    /// store never wrote is one it cannot attribute to a tenant, and resuming it
+    /// would be recording another host's run under this host's tenant.
+    #[must_use]
+    pub fn knows_run(&self, run: RunId) -> bool {
+        self.index().runs.contains_key(&run)
+    }
+
     /// Who minted `run`, when the store knows.
     ///
     /// The answer a caller checks before deciding a run id belongs to someone
@@ -566,6 +599,7 @@ impl RunStore {
         file.sync_all().map_err(StoreError::storage)?;
 
         index.committed = next;
+        index.tail = stored.head_from(&previous);
         index.runs.entry(stored.run).or_insert_with(|| RunIndex {
             tenant: stored.tenant.clone(),
             steps: HashMap::new(),
