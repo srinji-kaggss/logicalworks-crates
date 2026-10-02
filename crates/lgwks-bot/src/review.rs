@@ -1,43 +1,42 @@
-// File: crates/lgwks-bot/src/review.rs (rust)
-//! The canonical PR-review task: pin a subject, read a snapshot, produce a
-//! review for it, publish it at the reviewed commit, and verify the
-//! publication independently.
-//!
-//! # The whole safety argument, in one place
-//!
-//! Every defect this module exists to prevent is a case of **the review's
-//! subject drifting away from the code that was read**, or **an effect being
-//! repeated because its outcome was not observed**. Each is answered by one
-//! mechanism rather than by care at the call site:
-//!
-//! | Failure | Mechanism | Type |
-//! |---|---|---|
-//! | the head moved between snapshot and publication | [`ReviewOutcome::TargetMoved`] naming reviewed and current | refusal, publishes nothing |
-//! | a lost response after an accepted write | one read-back, never a second create | [`ReviewOutcome::Published`] with `verified: true` |
-//! | a lost response that cannot be reconciled | the outcome stays open | [`ReviewOutcome::Unknown`] |
-//! | a marker matching but the payload differing | [`ReviewRecord::matches`] compares subject, body and state | refusal |
-//! | an unbounded or chatty `gh` | the adapter's capture ceiling and deadline | [`domain::gh::GhOutcome`] |
-//!
-//! # What this module deliberately does not contain
-//!
-//! No process id, no reap loop, no retry ladder over publication, no queue and
-//! no private state machine. Every effect is one call on the adapter, which is
-//! the crate's only sanctioned runner; every wait is
-//! [`within`](crate::script::within); and the run is bounded by the host. That
-//! is what makes the task body ordinary business code rather than a second
-//! orchestrator.
-//!
-//! # Ephemeral by construction
-//!
-//! This is the **local** mode: the run holds no durable record between
-//! attempts, so a lost response is reconciled by reading back within the same
-//! run and never by consulting a journal the mode does not have. The
-//! [`ReviewOutcome::Unknown`] arm is what makes that limitation visible instead
-//! of papering over it: with no durable store to re-read, a write whose outcome
-//! cannot be observed from GitHub is reported as unknown and the caller
-//! decides. A durable mode that persists the same
-//! [`ReviewIntent`](ReviewIntent) and replays it after a restart belongs to the
-//! effect layer, not here.
+// The canonical PR-review task: pin a subject, read a snapshot, produce a
+// review for it, publish it at the reviewed commit, and verify the
+// publication independently.
+//
+// # The whole safety argument, in one place
+//
+// Every defect this module exists to prevent is a case of **the review's
+// subject drifting away from the code that was read**, or **an effect being
+// repeated because its outcome was not observed**. Each is answered by one
+// mechanism rather than by care at the call site:
+//
+// | Failure | Mechanism | Type |
+// |---|---|---|
+// | the head moved between snapshot and publication | [`ReviewOutcome::TargetMoved`] naming reviewed and current | refusal, publishes nothing |
+// | a lost response after an accepted write | one read-back, never a second create | [`ReviewOutcome::Published`] with `verified: true` |
+// | a lost response that cannot be reconciled | the outcome stays open | [`ReviewOutcome::Unknown`] |
+// | a marker matching but the payload differing | [`ReviewRecord::matches`](crate::domain::gh::ReviewRecord::matches) compares subject, body and state | refusal |
+// | an unbounded or chatty `gh` | the adapter's capture ceiling and deadline | [`domain::gh::GhOutcome`] |
+//
+// # What this module deliberately does not contain
+//
+// No process id, no reap loop, no retry ladder over publication, no queue and
+// no private state machine. Every effect is one call on the adapter, which is
+// the crate's only sanctioned runner; every wait is
+// [`within`](crate::script::within); and the run is bounded by the host. That
+// is what makes the task body ordinary business code rather than a second
+// orchestrator.
+//
+// # Ephemeral by construction
+//
+// This is the **local** mode: the run holds no durable record between
+// attempts, so a lost response is reconciled by reading back within the same
+// run and never by consulting a journal the mode does not have. The
+// [`ReviewOutcome::Unknown`] arm is what makes that limitation visible instead
+// of papering over it: with no durable store to re-read, a write whose outcome
+// cannot be observed from GitHub is reported as unknown and the caller
+// decides. A durable mode that persists the same
+// `ReviewIntent`(ReviewIntent) and replays it after a restart belongs to the
+// effect layer, not here.
 
 use std::time::Duration;
 
@@ -71,7 +70,7 @@ pub struct ReviewRequest {
     /// reconciliation.
     ///
     /// Deliberately not a uniqueness proof: two runs of the same request carry
-    /// the same marker, and it is [`ReviewRecord::matches`] that decides.
+    /// the same marker, and it is [`ReviewRecord::matches`](crate::domain::gh::ReviewRecord::matches) that decides.
     ///
     /// Read through [`ReviewRequest::marker`], and private so the payload
     /// cannot be edited after the request it belongs to was declared.
@@ -303,7 +302,7 @@ pub async fn review_pr(
     let body = body?;
 
     // The marker travels in the body so a read-back can *locate* this review.
-    // It is a locator: [`ReviewRecord::matches`] decides.
+    // It is a locator: [`ReviewRecord::matches`](crate::domain::gh::ReviewRecord::matches) decides.
     let payload = ReviewPayload::new(&reviewed, &request.event, body, &request.marker)
         .map_err(|source| FlowError::failed(source.to_string()))?;
 

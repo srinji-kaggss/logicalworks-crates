@@ -1,11 +1,9 @@
-// File: crates/lgwks-bot/src/domain/gh.rs (rust)
 //! `gh` owns the GitHub domain through the `gh` command-line client.
 //!
 //! Every call is one supervised child process: the GitHub CLI is the only
-//! handle this crate has on GitHub, so it is admitted as a
-//! [`ProcessSpec`](crate::rt::process::ProcessSpec) and run through
-//! [`Supervisor::run_process`](crate::rt::supervise::Supervisor::run_process),
-//! which owns the process group, the bounded capture and the deadline. Nothing
+//! handle this crate has on GitHub, so it is admitted as a `ProcessSpec` and
+//! run through the supervisor, which owns the process group, the bounded
+//! capture and the deadline. Nothing
 //! here spawns a process, manages a pid, or parses a shell string: arguments
 //! are passed as a vector, so a repository name, a body or a commit id is never
 //! re-parsed by a shell.
@@ -740,11 +738,10 @@ impl Gh {
     ///
     /// # Errors
     ///
-    /// [`GhError::Process`] when the client could not be run at all,
-    /// [`GhError::Transport`] naming the exit code or the deadline when it ran
-    /// and failed, and [`GhError::Response`] when it answered with something
-    /// that is not a pull request.
-    /// Without the `process` feature there is no runner, and saying so is the
+    /// [`GhError::Transport`] or [`GhError::Deadline`] naming the exit code or
+    /// the stop when it ran and failed, [`GhError::Response`] when it answered
+    /// with something that is not a pull request, and [`GhError::NoRunner`]
+    /// without the `process` feature. Saying so is the
     /// honest answer: a binding that cannot reach GitHub must not report an
     /// empty answer, which a caller could mistake for "GitHub has no reviews".
     ///
@@ -762,7 +759,7 @@ impl Gh {
     ///
     /// # Errors
     ///
-    /// [`GhError::Process`] when the client could not be run at all,
+    /// a client failure when it could not be run at all,
     /// [`GhError::Transport`] naming the exit code when it ran and failed,
     /// [`GhError::Deadline`] when the supervisor stopped it before it
     /// answered, and [`GhError::Response`] or [`GhError::MalformedResponse`]
