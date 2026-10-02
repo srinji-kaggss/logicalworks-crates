@@ -58,9 +58,9 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::task::Waker;
 
+use super::frame::{HEAD_BYTES, LENGTH_BYTES, Piece, Prefix};
+use super::owner::{StorageGate, StorageOwner};
 use super::{
     ChainBreak, DurabilityPromise, DurableAck, EffectEvent, EffectEvidence, EffectJournal,
     EventKind, JournalEntry, JournalError, JournalLimitKind, JournalPosition, MAX_JOURNAL_BYTES,
@@ -76,11 +76,12 @@ use lgwks_std::wire::{WireError, from_bytes};
 /// partial prefix is a torn tail.
 const MAX_FRAME_BYTES: usize = 64 * 1024;
 
-/// The byte width of a stored chain head.
-const HEAD_BYTES: usize = 32;
-
-/// The byte width of a frame's length prefix.
-const LENGTH_BYTES: usize = 4;
+/// One whole piece of a frame's bytes: the payload or the head.
+///
+/// The crate-wide grammar names the pieces it reads; this is the same shape under
+/// the name this module's own error vocabulary uses, so `Interrupted` here and
+/// there cannot be two different classifications of the same bytes.
+type FramePiece = Piece;
 
 /// Why the journal refused its own committed bytes.
 ///
@@ -180,33 +181,16 @@ enum ScanStop {
     },
 }
 
-/// How one frame piece's read ended.
-enum FramePiece {
-    /// The buffer filled.
-    Filled,
-    /// The source ended before the buffer did: `read_exact`'s own evidence
-    /// of an early end, which is the only thing a tail may be repaired on.
-    Interrupted,
-}
-
 /// Read a fixed-size piece of a frame, classifying the ending.
 ///
-/// Only a true early end — [`std::io::ErrorKind::UnexpectedEof`] — reads as
-/// [`FramePiece::Interrupted`]. Every other error is the store refusing, and
-/// travels unchanged: a fault is not evidence that the bytes after it were
-/// never written, and treating it as one would authorize repair over bytes
-/// that may be acknowledged.
+/// The crate-wide grammar in [`super::frame`] makes the classification, so this
+/// journal and the run store cannot disagree about which early end is repairable;
+/// this wrapper only maps the device's refusal onto this module's error vocabulary.
 fn read_exact_classified(
     reader: &mut impl Read,
     buf: &mut [u8],
 ) -> Result<FramePiece, JournalError> {
-    match reader.read_exact(buf) {
-        Ok(()) => Ok(FramePiece::Filled),
-        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
-            Ok(FramePiece::Interrupted)
-        }
-        Err(error) => Err(JournalError::Storage(error)),
-    }
+    super::frame::read_piece(reader, buf).map_err(JournalError::Storage)
 }
 
 /// Decide what an end of file inside a declared frame means.
@@ -299,12 +283,10 @@ fn scan(
     let mut index = 0u64;
     loop {
         let mut prefix = [0u8; LENGTH_BYTES];
-        match read_exact_or_eof(reader, &mut prefix)? {
-            None => return Ok((entries, ScanStop::Complete(offset))),
-            Some(read_len) if read_len < LENGTH_BYTES => {
-                return Ok((entries, ScanStop::Torn(offset)));
-            }
-            Some(_) => {
+        match super::frame::read_prefix(reader, &mut prefix).map_err(JournalError::Storage)? {
+            Prefix::Eof => return Ok((entries, ScanStop::Complete(offset))),
+            Prefix::Torn => return Ok((entries, ScanStop::Torn(offset))),
+            Prefix::Full => {
                 let requested = u64::try_from(entries.len())
                     .unwrap_or(u64::MAX)
                     .saturating_add(1);
@@ -317,8 +299,8 @@ fn scan(
                 }
             }
         }
-        let payload_len = usize::try_from(u32::from_be_bytes(prefix)).unwrap_or(usize::MAX);
-        if payload_len == 0 || payload_len > MAX_FRAME_BYTES {
+        let payload_len = super::frame::declared_length(&prefix);
+        if !super::frame::is_possible_length(payload_len, MAX_FRAME_BYTES) {
             // A complete prefix that names an impossible frame is not a torn
             // append: a write leaves only a prefix of its bytes, so the
             // length a writer did complete is the length it intended, and
@@ -375,410 +357,9 @@ fn scan(
         }
         entries.push(JournalEntry::new(recorded, event));
         position = recorded;
-        let frame_len = LENGTH_BYTES
-            .saturating_add(payload_len)
-            .saturating_add(HEAD_BYTES);
-        let frame_len = u64::try_from(frame_len).unwrap_or(u64::MAX);
-        offset = offset.saturating_add(frame_len);
+        offset = offset.saturating_add(super::frame::framed_len(payload_len));
         index = index.saturating_add(1);
     }
-}
-
-/// Read `buf.len()` bytes, or fewer at end of file, reporting how many.
-///
-/// `None` means nothing at all was read: a clean end of file.
-fn read_exact_or_eof(
-    reader: &mut impl Read,
-    buf: &mut [u8],
-) -> Result<Option<usize>, JournalError> {
-    let mut filled = 0usize;
-    while filled < buf.len() {
-        let read = reader
-            .read(&mut buf[filled..])
-            .map_err(JournalError::Storage)?;
-        if read == 0 {
-            break;
-        }
-        filled = filled.saturating_add(read);
-    }
-    if filled == 0 {
-        Ok(None)
-    } else {
-        Ok(Some(filled))
-    }
-}
-
-/// Take the lock, treating a poisoned one as recoverable.
-///
-/// Nothing in this module can panic while the lock is held — every arm is a
-/// `Result` that propagates — so a poison would be a bug in an unrelated
-/// thread, and refusing every later append because of it would turn one
-/// failure into a bricked journal.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// One durable append, as the storage owner receives it.
-struct Append {
-    /// The acknowledged prefix length this handle believes the file has.
-    expected_len: u64,
-    /// The frames to write, in chain order.
-    frames: Vec<u8>,
-}
-
-/// The state the handle and its storage owner share.
-///
-/// A single slot, not a queue. Every append API takes `&mut self`, so the type
-/// system already admits one outstanding request per journal: a second is not
-/// representable. That is the whole bound, and it is the tightest one
-/// available — an owner that could be handed two requests would need a queue,
-/// and a queue would need a length to bound it.
-#[derive(Default)]
-struct Slot {
-    /// The append waiting to be performed, if one is.
-    request: Option<Append>,
-    /// The outcome of the append the owner is performing or has performed.
-    outcome: Option<std::io::Result<()>>,
-    /// Whether the caller that submitted is still there to receive it.
-    waiting: bool,
-    /// The task to wake when it is, for a caller awaiting rather than blocking.
-    waker: Option<Waker>,
-    /// Whether bytes may be on the disk that no acknowledgment names.
-    poisoned: bool,
-    /// Whether the handle is gone and the owner should finish and exit.
-    closed: bool,
-    /// Whether the owner has dropped the file and released the writer lock.
-    released: bool,
-    /// Whether a flush should wait for an explicit release before syncing.
-    stalled: bool,
-    /// Whether the next commit should report a device refusal instead of
-    /// writing. Private, and never reachable from outside the crate: a write
-    /// that fails after the fence has passed is the one failure the poison
-    /// exists for, and it cannot be produced from the filesystem on demand.
-    fail_next: bool,
-}
-
-/// The one thread that owns a journal's file.
-///
-/// # ASSUMPTION: the owner is the only writer
-///
-/// Every append on this journal goes through the owner's slot, and the only
-/// other handle anyone holds is a read-only view that can be asked a length
-/// and nothing else. This is a durability boundary, not a style preference: it
-/// is why the length check and the write it guards can be one ordered step.
-/// `grep -n "ASSUMPTION: the owner is the only writer"` finds every place that
-/// claim is relied on.
-///
-/// # ASSUMPTION: the advisory lock is held by the file, not the thread
-///
-/// The lock is taken in `open` and the `File` then moves to the owner thread,
-/// so the lock must follow the descriptor rather than the thread that took it.
-/// This holds on the platforms the estate builds for; a platform where an
-/// advisory lock were owned per-thread would need the lock taken on the owner
-/// instead, which is a one-line move of `try_lock` into `serve`.
-///
-/// # ASSUMPTION: an append is at-least-once, never exactly-once
-///
-/// The owner performs what it was asked and reports what happened. It cannot
-/// know whether a caller that stopped listening will retry, and it does not
-/// pretend to: a caller that leaves latches the poison, and the next reader
-/// reconciles by reading the file back rather than by assuming. Exactly-once
-/// is a property of a caller's idempotency key, never of this thread.
-///
-/// # Why the file is not on the handle
-///
-/// `write_all` and `sync_all` are the storage device's cost, and the durable
-/// path reaches them from the thread that awaits the dispatch. On a
-/// current-thread executor there is no other thread to run anything, so the
-/// device's latency became the process's latency: a heartbeat, a timer and
-/// every unrelated bot in the same runtime stalled for the length of an
-/// `fsync`. Moving the file here makes the device's cost the owner's, and the
-/// caller's cost a wait it may await rather than sit through.
-///
-/// # What the owner preserves
-///
-/// Ordering is the owner's: it is one thread taking one request at a time, so
-/// the order appends were admitted in is the order they reach the disk. The
-/// staleness fence moved here with the write, so the length check and the
-/// write it guards are one ordered step and no append can be admitted between
-/// them. And an append whose caller has gone is not quietly forgotten: the
-/// owner notices the waiter is gone, latches the poison, and the handle refuses
-/// every later append rather than continuing from a view that may be behind
-/// the file.
-struct StorageOwner {
-    /// The slot both sides read, and the poison the owner latches.
-    shared: Arc<Mutex<Slot>>,
-    /// Woken on every state change, so a blocking caller and the owner's own
-    /// wait both re-read rather than spin.
-    signal: Arc<Condvar>,
-}
-
-/// A handle onto one journal's storage device, cloneable and independent of
-/// the journal.
-///
-/// It exists because a caller awaiting an append cannot reach the journal to
-/// release it: the future holds the handle's borrow for exactly as long as the
-/// append is outstanding, which is the window in which the device most needs
-/// to be unstuck. An operator un-sticking a real device is in the same
-/// position — their handle is busy on the append that is waiting.
-#[derive(Clone)]
-pub struct StorageGate {
-    /// The owner's slot, shared with the thread that performs the appends.
-    shared: Arc<Mutex<Slot>>,
-    /// Woken so the owner re-reads the gate.
-    signal: Arc<Condvar>,
-}
-
-impl StorageGate {
-    /// Let a flush that is waiting for a release proceed, and every flush
-    /// after it. The stall is not re-armed.
-    pub fn release(&self) {
-        let mut slot = lock(&self.shared);
-        slot.stalled = false;
-        self.signal.notify_all();
-    }
-}
-
-impl StorageOwner {
-    /// Hand `file` to a new owner thread and return the handle side, plus a
-    /// read-only view of the same file for the handle's own fence.
-    ///
-    /// Two handles, one writer. The owner holds the only handle that can write
-    /// and the lock; the view can only be asked how long the file is, which is
-    /// what the fence needs before it decides anything. The fence cannot go to
-    /// the owner for that answer, because a fence that had to wait for the
-    /// device would charge the caller the device's cost before it had decided
-    /// to append at all.
-    fn spawn(file: File, path: &Path, stalled: bool) -> Result<(Self, FileView), JournalError> {
-        let shared = Arc::new(Mutex::new(Slot {
-            stalled,
-            ..Slot::default()
-        }));
-        let signal = Arc::new(Condvar::new());
-        let owner = Self {
-            shared: Arc::clone(&shared),
-            signal: Arc::clone(&signal),
-        };
-        // A dedicated thread, not a pooled blocking job: this one outlives
-        // every job it runs and holds the file for the handle's whole life, so
-        // it is a thread with a lifetime rather than work handed to a pool.
-        // The handle is owned by `StorageOwner::drop`, which closes the slot
-        // and waits for the owner to report it has let the file go.
-        let view = FileView::read_only(path)?;
-        let _task = lgwks_std::task::spawn_blocking(move || serve(file, shared, signal));
-        Ok((owner, view))
-    }
-
-    /// Whether an append may be admitted at all.
-    fn poisoned(&self) -> bool {
-        lock(&self.shared).poisoned
-    }
-
-    /// Perform `frames` and wait for the owner to finish.
-    fn submit(&self, expected_len: u64, frames: Vec<u8>) -> Result<(), std::io::Error> {
-        let mut slot = lock(&self.shared);
-        slot.request = Some(Append {
-            expected_len,
-            frames,
-        });
-        slot.outcome = None;
-        slot.waiting = true;
-        self.signal.notify_all();
-        loop {
-            if let Some(outcome) = slot.outcome.take() {
-                slot.waiting = false;
-                return outcome;
-            }
-            slot = self
-                .signal
-                .wait(slot)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-        }
-    }
-
-    /// Make the next commit report a device refusal instead of writing.
-    ///
-    /// Private, and deliberately so: the failure this models is a write that
-    /// fails after the fence has passed, which no filesystem will produce on
-    /// demand, and the poison latch behind it has to be tested somehow.
-    #[cfg(test)]
-    fn fail_next_commit(&self) {
-        lock(&self.shared).fail_next = true;
-    }
-
-    /// The same door, for a caller that awaits rather than blocks.
-    ///
-    /// The difference is only in how the answer is delivered: a blocking caller
-    /// waits on the signal, a task registers a waker and is woken by the owner
-    /// when it answers. The append itself is the same ordered step either way,
-    /// so a caller choosing to await does not get a weaker write than one that
-    /// chose to sit through it.
-    fn submit_async<'a>(&'a self, expected_len: u64, frames: Vec<u8>) -> Awaiting<'a> {
-        Awaiting {
-            owner: self,
-            pending: Some(Append {
-                expected_len,
-                frames,
-            }),
-            submitted: false,
-        }
-    }
-}
-
-/// A submitted append waiting for the storage owner's answer.
-///
-/// Dropping this is not a cancellation of the append, and the type says so:
-/// [`Drop`] tells the owner its waiter is gone, which is the same position a
-/// failed write leaves the handle in, and the owner latches the poison on it.
-/// A caller that walks away from a durable write it started must not then keep
-/// appending from a view that may be behind the file.
-struct Awaiting<'a> {
-    /// The owner that was asked, and will answer.
-    owner: &'a StorageOwner,
-    /// The append, until it has been handed over.
-    pending: Option<Append>,
-    /// Whether it has been handed over.
-    submitted: bool,
-}
-
-impl Drop for Awaiting<'_> {
-    fn drop(&mut self) {
-        if !self.submitted {
-            return;
-        }
-        let mut slot = lock(&self.owner.shared);
-        slot.waiting = false;
-    }
-}
-
-impl std::future::Future for Awaiting<'_> {
-    type Output = Result<(), std::io::Error>;
-
-    fn poll(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        let this = self.get_mut();
-        let mut slot = lock(&this.owner.shared);
-        if !this.submitted {
-            let request = this.pending.take().unwrap_or_else(|| Append {
-                expected_len: 0,
-                frames: Vec::new(),
-            });
-            this.submitted = true;
-            slot.request = Some(request);
-            slot.outcome = None;
-            slot.waiting = true;
-            this.owner.signal.notify_all();
-        }
-        if let Some(outcome) = slot.outcome.take() {
-            slot.waiting = false;
-            return std::task::Poll::Ready(outcome);
-        }
-        slot.waker = Some(cx.waker().clone());
-        std::task::Poll::Pending
-    }
-}
-
-impl Drop for StorageOwner {
-    fn drop(&mut self) {
-        let mut slot = lock(&self.shared);
-        slot.closed = true;
-        self.signal.notify_all();
-        // Wait for the owner to report the file released, so the advisory lock
-        // this journal held is gone before a caller reopens the same path. The
-        // wait is bounded by the device: it ends when the owner's own in-flight
-        // append ends, which is the same append whose bytes are on the disk
-        // under the acknowledgment the caller may never see.
-        while !slot.released {
-            slot = self
-                .signal
-                .wait(slot)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-        }
-    }
-}
-
-/// The owner's loop: take a request, perform it, publish the outcome, repeat.
-///
-/// The file is dropped before `released` is set, so a waiter that observes the
-/// release knows the advisory lock is already gone rather than about to be.
-fn serve(mut file: File, shared: Arc<Mutex<Slot>>, signal: Arc<Condvar>) {
-    loop {
-        let request = {
-            let mut slot = lock(&shared);
-            loop {
-                if slot.closed {
-                    break None;
-                }
-                if let Some(request) = slot.request.take() {
-                    break Some(request);
-                }
-                slot = signal
-                    .wait(slot)
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-            }
-        };
-        let Some(request) = request else { break };
-
-        // A stalled flush models a device that has not answered yet. It is the
-        // only reason this thread ever waits on anything but its own request.
-        {
-            let mut slot = lock(&shared);
-            while slot.stalled && !slot.closed {
-                slot = signal
-                    .wait(slot)
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-            }
-        }
-
-        let outcome = {
-            let mut slot = lock(&shared);
-            if std::mem::take(&mut slot.fail_next) {
-                Err(std::io::Error::other("the injected device refusal"))
-            } else {
-                drop(slot);
-                commit(&mut file, request.expected_len, &request.frames)
-            }
-        };
-
-        let mut slot = lock(&shared);
-        // A caller that went away while the bytes were moving leaves the handle
-        // unable to say whether they landed. That is the same position a failed
-        // write leaves it in, so it is refused the same way.
-        if outcome.is_err() || !slot.waiting {
-            slot.poisoned = true;
-        }
-        slot.outcome = Some(outcome);
-        if let Some(waker) = slot.waker.take() {
-            waker.wake();
-        }
-        signal.notify_all();
-    }
-    drop(file);
-    let mut slot = lock(&shared);
-    slot.released = true;
-    signal.notify_all();
-}
-
-/// The ordered step that is the append: check the fence, write, sync.
-///
-/// # Errors
-///
-/// Whatever the device reports. A length that is not the one the caller
-/// expected means the file moved, and is refused before any byte is written.
-fn commit(file: &mut File, expected_len: u64, frames: &[u8]) -> std::io::Result<()> {
-    let on_disk = file.metadata()?.len();
-    if on_disk != expected_len {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "the journal file moved under this controller; reopen before appending",
-        ));
-    }
-    file.write_all(frames)?;
-    file.sync_all()
 }
 
 /// An effect journal whose acknowledged appends are on the disk.
@@ -796,7 +377,7 @@ pub struct FileJournal {
     /// The thread that holds the file, and the one door an append reaches the
     /// disk through. It also carries the poison, so the handle never has to
     /// guess whether a write it did not see succeed.
-    storage: StorageOwner,
+    storage: StorageOwner<(), ()>,
     /// A read-only window onto the same file, so the fence can check the
     /// acknowledged length without a round trip to the storage owner.
     view: FileView,
@@ -976,7 +557,8 @@ impl FileJournal {
             }
         }
 
-        let (storage, view) = StorageOwner::spawn(file, &path, stalled)?;
+        let storage = StorageOwner::spawn(file, (), stalled).map_err(JournalError::Storage)?;
+        let view = FileView::read_only(&path)?;
         Ok(Self {
             path,
             storage,
@@ -1095,27 +677,28 @@ impl FileJournal {
             .sequence()
             .checked_add(1)
             .ok_or(JournalError::Exhausted)?;
-        let head = chain(from, event)?;
-        let position = JournalPosition { sequence, head };
-        let payload = event.to_bytes().map_err(JournalError::Encoding)?;
-        let payload_len = u32::try_from(payload.len())
-            .ok()
-            .filter(|len| usize::try_from(*len).is_ok_and(|len| len <= MAX_FRAME_BYTES));
-        let Some(payload_len) = payload_len else {
-            return Err(JournalError::Storage(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "the event exceeds this journal's frame bound",
-            )));
-        };
-        let mut framed = Vec::with_capacity(
-            LENGTH_BYTES
-                .saturating_add(payload.len())
-                .saturating_add(HEAD_BYTES),
-        );
-        framed.extend_from_slice(&payload_len.to_be_bytes());
-        framed.extend_from_slice(&payload);
-        framed.extend_from_slice(head.as_bytes());
-        Ok((position, framed))
+        // Archive, bound, chain and lay out — the shared step, which the run store
+        // takes too. Only the event's own archiving and its position-chaining head
+        // are this journal's, and both arrive as the closures they are.
+        let (framed, head) = super::frame::frame_record(
+            event,
+            &from.head,
+            MAX_FRAME_BYTES,
+            |event| {
+                event
+                    .to_bytes()
+                    .map(|bytes| bytes.as_ref().to_vec())
+                    .map_err(JournalError::Encoding)
+            },
+            |_event, previous, archived| super::chain_over_bytes(previous, archived),
+            |_len| {
+                JournalError::Storage(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "the event exceeds this journal's frame bound",
+                ))
+            },
+        )?;
+        Ok((JournalPosition { sequence, head }, framed))
     }
 
     /// Refuse an append that would take the file past [`MAX_JOURNAL_BYTES`].
@@ -1155,9 +738,40 @@ impl FileJournal {
     ///
     /// [`JournalError::OutcomeUnknown`] from either the write or the sync.
     fn write_and_sync(&mut self, frames: &[u8]) -> Result<(), JournalError> {
+        self.write_and_sync_blocking(frames)
+    }
+
+    /// [`Self::write_and_sync`] for the door a task awaits rather than sits through.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::write_and_sync`].
+    fn write_and_sync_async<'a>(
+        &'a mut self,
+        frames: Vec<u8>,
+    ) -> crate::BoxFuture<'a, Result<(), JournalError>> {
+        let expected = self.disk_len;
+        Box::pin(async move {
+            self.storage
+                .submit_async(move |file, _state| commit(file, expected, &frames))
+                .await
+                .map_err(write_refusal)
+        })
+    }
+
+    /// The synchronous door: perform the append on the owner thread and block for
+    /// its answer.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::OutcomeUnknown`] from the write or the sync, and
+    /// [`JournalError::Storage`] when the owner refuses a request outright.
+    fn write_and_sync_blocking(&self, frames: &[u8]) -> Result<(), JournalError> {
+        let staged = frames.to_vec();
+        let expected = self.disk_len;
         self.storage
-            .submit(self.disk_len, frames.to_vec())
-            .map_err(|cause| JournalError::OutcomeUnknown { cause })
+            .submit(move |file, _state| commit(file, expected, &staged))
+            .map_err(write_refusal)
     }
 
     /// Fold a committed frame into this handle's view of the journal.
@@ -1248,10 +862,7 @@ impl FileJournal {
     /// the device is the one awaiting an append on it, and that caller holds
     /// the journal's borrow for the whole wait.
     fn storage_gate(&self) -> StorageGate {
-        StorageGate {
-            shared: Arc::clone(&self.storage.shared),
-            signal: Arc::clone(&self.storage.signal),
-        }
+        self.storage.gate()
     }
 
     /// Let the outstanding flush proceed, and every flush after it.
@@ -1350,6 +961,44 @@ impl FileJournal {
     }
 }
 
+/// The ordered step that is the append: check the fence, write, sync.
+///
+/// It runs on the storage owner's thread, which is what makes the length check and
+/// the write it guards one step no other append can overtake.
+///
+/// # Errors
+///
+/// Whatever the device reports. A length that is not the one the caller expected
+/// means the file moved, and is refused before any byte is written.
+fn commit(file: &mut File, expected_len: u64, frames: &[u8]) -> std::io::Result<()> {
+    let on_disk = file.metadata()?.len();
+    if on_disk != expected_len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the journal file moved under this controller; reopen before appending",
+        ));
+    }
+    file.write_all(frames)?;
+    file.sync_all()
+}
+
+/// Map one owner refusal onto this module's error vocabulary.
+///
+/// The distinction that matters is whether the bytes may be on the disk under no
+/// acknowledgment: a failed write or an undelivered answer is
+/// [`JournalError::OutcomeUnknown`], because only a reopen settles it, while a
+/// poisoned handle or a queue that was merely full wrote nothing and is a plain
+/// [`JournalError::Storage`] the caller may reason about and retry.
+fn write_refusal(cause: super::owner::SubmitError) -> JournalError {
+    if cause.is_outcome_unknown() {
+        JournalError::OutcomeUnknown {
+            cause: cause.into_io(),
+        }
+    } else {
+        JournalError::Storage(cause.into_io())
+    }
+}
+
 impl EffectJournal for FileJournal {
     fn durability(&self) -> DurabilityPromise {
         DurabilityPromise::ProcessCrash
@@ -1440,10 +1089,7 @@ impl EffectJournal for FileJournal {
     ) -> crate::BoxFuture<'a, Result<DurableAck, JournalError>> {
         Box::pin(async move {
             let (position, frame) = self.prepare_append(expected_tail, event)?;
-            self.storage
-                .submit_async(self.disk_len, frame.clone())
-                .await
-                .map_err(|cause| JournalError::OutcomeUnknown { cause })?;
+            self.write_and_sync_async(frame.clone()).await?;
             self.accept(event, position, frame.len());
             Ok(DurableAck::new(position, self.durability()))
         })
@@ -1966,18 +1612,18 @@ mod tests {
 
     /// The raw bytes of one frame, built the way the writer builds them, so
     /// the scan-level fault tests can serve exact prefixes without a file.
+    ///
+    /// Through the shared grammar rather than by hand, because a hand-rolled frame
+    /// in the test would be a second definition of the thing the tests are supposed
+    /// to be checking — a fixture that drifted from the writer would prove nothing.
     fn frame_bytes(
         position: JournalPosition,
         event: &EffectEvent,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let payload = event.to_bytes()?;
         let head = chain(position, event)?;
-        let mut frame = Vec::new();
-        let len = u32::try_from(payload.len())?;
-        frame.extend_from_slice(&len.to_be_bytes());
-        frame.extend_from_slice(&payload);
-        frame.extend_from_slice(head.as_bytes());
-        Ok(frame)
+        let length = u32::try_from(payload.len())?;
+        Ok(crate::journal::frame::encode(length, &payload, &head))
     }
 
     /// A reader that serves bytes up to an absolute offset and fails every
@@ -2160,10 +1806,8 @@ mod tests {
         }
         let bytes = std::fs::read(path)?;
         let first = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        let first_len = LENGTH_BYTES
-            .saturating_add(usize::try_from(first)?)
-            .saturating_add(HEAD_BYTES);
-        let next = u64::try_from(first_len)?;
+        let first_len = crate::journal::frame::framed_len(usize::try_from(first)?);
+        let next = first_len;
         let mut second_prefix = [0u8; LENGTH_BYTES];
         for (slot, offset) in second_prefix.iter_mut().zip(0u64..) {
             let index = next.saturating_add(offset);
@@ -2172,10 +1816,11 @@ mod tests {
                 .ok_or("fixture file is shorter than its own first frame")?;
         }
         let second = u32::from_be_bytes(second_prefix);
-        let second_len = LENGTH_BYTES
-            .saturating_add(usize::try_from(second)?)
-            .saturating_add(HEAD_BYTES);
-        Ok((bytes, first_len.saturating_add(second_len)))
+        let second_len = crate::journal::frame::framed_len(usize::try_from(second)?);
+        Ok((
+            bytes,
+            usize::try_from(first_len.saturating_add(second_len))?,
+        ))
     }
 
     #[test]

@@ -130,6 +130,129 @@ pub trait RunRecords: Send + Sync {
         path: &str,
         bytes: Vec<u8>,
     ) -> Result<Appended, FlowError>;
+
+    /// [`RunRecords::append`], waited for rather than sat through.
+    ///
+    /// The door [`remember`] takes, and the reason it is a separate method rather
+    /// than an `async fn` on the trait: a durable write is `write_all` plus
+    /// `sync_all`, and running that on the thread awaiting it parks every other
+    /// task on that executor for the length of an `fsync`. A store that implements
+    /// this hands the write to a thread of its own and this future waits for the
+    /// answer, so the device's latency is the device's and the runtime keeps
+    /// turning (INV-BOT-50).
+    ///
+    /// The default implementation calls [`RunRecords::append`] on the awaiting
+    /// thread, which is correct and is exactly the defect this method exists to
+    /// remove — so a store that has no owner thread is a store that blocks, not one
+    /// that loses the record.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`RunRecords::append`] reports.
+    fn append_async<'a>(
+        &'a self,
+        record: StagedRecord<'a>,
+    ) -> crate::BoxFuture<'a, Result<Appended, FlowError>> {
+        Box::pin(async move {
+            let (tenant, run, key, path) =
+                (record.tenant(), record.run(), record.key(), record.path());
+            self.append(tenant, run, key, path, record.into_bytes())
+        })
+    }
+
+    /// Build the record this store is being asked to commit.
+    ///
+    /// One constructor for the five fields both doors take, because the awaited door
+    /// and the blocking door are otherwise two places that assemble the same thing
+    /// and could disagree about what a record is.
+    fn stage<'a>(
+        &self,
+        tenant: &'a str,
+        run: RunId,
+        key: StepKey,
+        path: &'a str,
+        bytes: Vec<u8>,
+    ) -> StagedRecord<'a> {
+        StagedRecord::of(tenant, run, key, path, bytes)
+    }
+}
+
+/// One record a store is being asked to commit, borrowed rather than assembled at
+/// each call site.
+///
+/// The trait's two doors take the same five facts, and a store's implementation
+/// wants them as one value; a struct the caller fills once through
+/// [`StagedRecord::of`] is what keeps those two doors from being two copies of the
+/// same parameter list.
+///
+/// Fields private and reached through accessors, because the invariants a store
+/// checks — the tenant that owns the run, the key the record is filed under — are
+/// the store's to make, not a caller's to have bypassed by writing the field
+/// directly.
+#[derive(Debug, Clone)]
+pub struct StagedRecord<'a> {
+    /// The tenant the run belongs to.
+    tenant: &'a str,
+    /// The run the record is for.
+    run: RunId,
+    /// The step key it is filed under.
+    key: StepKey,
+    /// The step's path, for attribution.
+    path: &'a str,
+    /// The archived value.
+    bytes: Vec<u8>,
+}
+
+impl<'a> StagedRecord<'a> {
+    /// The five facts a record is, assembled once.
+    fn of(tenant: &'a str, run: RunId, key: StepKey, path: &'a str, bytes: Vec<u8>) -> Self {
+        Self {
+            tenant,
+            run,
+            key,
+            path,
+            bytes,
+        }
+    }
+
+    /// The tenant the run belongs to.
+    #[must_use]
+    pub const fn tenant(&self) -> &'a str {
+        self.tenant
+    }
+
+    /// The run the record is for.
+    #[must_use]
+    pub const fn run(&self) -> RunId {
+        self.run
+    }
+
+    /// The step key the record is filed under.
+    #[must_use]
+    pub const fn key(&self) -> StepKey {
+        self.key
+    }
+
+    /// The step's path, for attribution.
+    #[must_use]
+    pub const fn path(&self) -> &'a str {
+        self.path
+    }
+
+    /// The archived value, by reference.
+    ///
+    /// A borrow rather than a `take`, so reading a staged record cannot empty it
+    /// behind a store that is about to write it.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The archived value, by value, for the one store that moves it onto its own
+    /// storage thread.
+    fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
 }
 
 /// A committed record, as the script module receives it: the step's path and its
@@ -198,25 +321,32 @@ impl Records {
     /// # Errors
     ///
     /// [`FlowError`] on a refusal or on a conflict.
-    pub(crate) fn record(
-        &self,
-        tenant: &str,
+    pub(crate) fn record<'a>(
+        &'a self,
+        tenant: &'a str,
         run: RunId,
         key: StepKey,
-        path: &str,
+        path: &'a str,
         bytes: Vec<u8>,
-    ) -> Result<(), FlowError> {
-        match self.0.append(tenant, run, key, path, bytes) {
-            Ok(Appended::Recorded) | Ok(Appended::AlreadyRecorded) => Ok(()),
-            Ok(Appended::Conflicting) => Err(FlowError::Failed {
-                at: std::sync::Arc::from(path),
-                reason: format!(
-                    "a different value is already recorded for step {path:?} under this run; \
-                     refusing to overwrite a committed record"
-                ),
-            }),
-            Err(error) => Err(error.located_at(&std::sync::Arc::from(path))),
-        }
+    ) -> crate::BoxFuture<'a, Result<(), FlowError>> {
+        let conflict = std::sync::Arc::from(path);
+        Box::pin(async move {
+            match self
+                .0
+                .append_async(self.0.stage(tenant, run, key, path, bytes))
+                .await
+            {
+                Ok(Appended::Recorded) | Ok(Appended::AlreadyRecorded) => Ok(()),
+                Ok(Appended::Conflicting) => Err(FlowError::Failed {
+                    at: conflict,
+                    reason: format!(
+                        "a different value is already recorded for step {path:?} under this run; \
+                         refusing to overwrite a committed record"
+                    ),
+                }),
+                Err(error) => Err(error.located_at(&conflict)),
+            }
+        })
     }
 }
 
@@ -264,7 +394,7 @@ pub(crate) fn installed() -> Option<Records> {
 /// use lgwks_bot::script::{FlowError, Scope, remember};
 ///
 /// # async fn run(scope: &Scope) -> Result<(), FlowError> {
-/// let fetched = remember(scope, "fetch", async { Ok::<_, FlowError>(41u32) }).await?;
+/// let fetched = remember(scope, "fetch", || async { Ok::<_, FlowError>(41u32) }).await?;
 /// assert_eq!(fetched, 41);
 /// # Ok(())
 /// # }
@@ -325,7 +455,9 @@ where
         .await
         .map_err(|error| error.located_at(scope.shared_path()))?;
     let bytes = encode(&value).map_err(|error| error.located_at(scope.shared_path()))?;
-    records.record(tenant, run, key, scope.path(), bytes)?;
+    records
+        .record(tenant, run, key, scope.path(), bytes)
+        .await?;
     Ok(value)
 }
 

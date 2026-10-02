@@ -8,20 +8,16 @@
 //!
 //! # Why this is not `journal::FileJournal`
 //!
-//! The frame shape is deliberately the estate's — a `u32` big-endian payload
-//! length, the archived bytes, then a 32-byte head — and the torn-tail
-//! discipline is `journal::file`'s: an interrupted final append is a prefix cut
-//! short, so it is dropped, while a frame that does not follow from the ones
-//! before it is refused rather than trimmed. What cannot be reused is the
-//! *record*: `journal::file` frames [`EffectEvent`](crate::journal::EffectEvent)
-//! and its head chains effect positions, so a step record smuggled through it
-//! would claim to be an effect event and chain against a sequence that has
-//! nothing to do with steps. Polluting the effect ladder with a pseudo-effect
-//! would make `EventKind::next` answer a question it should not be asked, and
-//! forking the file module into a generic frame codec would duplicate the torn
-//! scan this module would then have to keep in step with it. So this module
-//! states its own record and reuses the discipline; the encoding is
-//! `lgwks_std::wire` in both.
+//! The *frame grammar* is the estate's and is shared verbatim: [`journal::frame`]
+//! holds the length prefix, the 32-byte head, the torn-tail scan and the refusal
+//! of a frame no writer produces, and both this store and `journal::file` call
+//! those same functions. What cannot be reused is the *record*: `journal::file`
+//! frames [`EffectEvent`](crate::journal::EffectEvent) and its head chains effect
+//! positions, so a step record smuggled through it would claim to be an effect
+//! event and chain against a sequence that has nothing to do with steps. So this
+//! module states its own record and reuses the frame grammar; the encoding is
+//! `lgwks_std::wire` in both. It shares `journal::file`'s storage-owner thread
+//! too, so a durable step's `sync_all` costs the device, not the executor.
 //!
 //! # What a record is
 //!
@@ -49,7 +45,9 @@ use lgwks_std::hash::{Digest, Hasher};
 use lgwks_std::wire::{WireError, from_bytes, to_bytes};
 
 use crate::effect::RunId;
-use crate::script::run_store::{Appended, RunRecords, StoredValue};
+use crate::journal::frame::{self, HEAD_BYTES, LENGTH_BYTES, Piece, Prefix};
+use crate::journal::owner::{self, StorageGate, StorageOwner, SubmitError};
+use crate::script::run_store::{Appended, RunRecords, StagedRecord, StoredValue};
 use crate::script::{FlowError, StepKey};
 
 /// The most bytes one archived step record may occupy.
@@ -72,12 +70,6 @@ pub const MAX_STORE_BYTES: u64 = 64 * 1024 * 1024;
 /// value nobody wrote. The trailing `\x01` is this format's version, so a future
 /// change is a refusal rather than a misreading.
 const STORE_MAGIC: &[u8; 16] = b"lgwks-runstore\x00\x01";
-
-/// The byte width of a frame's length prefix.
-const LENGTH_BYTES: usize = 4;
-
-/// The byte width of a frame's stored head.
-const HEAD_BYTES: usize = 32;
 
 /// The chain digest a store starts from: 32 zero bytes, hashed through the same
 /// framing as any record so the first head is a real chain step and not a
@@ -273,12 +265,15 @@ pub struct RunStore {
 
 /// The state one store owns, shared by every clone of its handle.
 struct StoreInner {
-    /// The file, under the lock that makes one writer.
-    file: Mutex<File>,
+    /// The thread that holds the file, and the one door an append reaches the
+    /// disk through. Its writes are `write_all` plus `sync_all`, so they belong
+    /// off the executor — INV-BOT-50.
+    owner: StorageOwner<Arc<Mutex<Index>>, Appended>,
     /// Where the file is, for diagnostics.
     path: PathBuf,
-    /// The index every clone reads: per run, per step key, the record.
-    index: Mutex<Index>,
+    /// The index every clone reads, and the one the owner folds into: per run, per
+    /// step key, the record.
+    index: Arc<Mutex<Index>>,
 }
 
 /// The index, and the committed length it accounts for.
@@ -354,7 +349,35 @@ impl RunStore {
     /// not a run store; [`StoreError::Corrupt`] when a committed frame does not
     /// follow from the ones before it.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
-        let path: PathBuf = path.into();
+        Self::open_impl(path.into(), false)
+    }
+
+    /// Open a store whose device does not answer a flush until its gate is
+    /// released.
+    ///
+    /// A fault injector, and public for the reason
+    /// [`FileJournal::open_with_stalled_storage`](crate::journal::FileJournal::open_with_stalled_storage)
+    /// is: "what does this run do while its record store has stopped answering" is
+    /// a question an operator has to be able to ask on a real process, and a probe
+    /// that only exists inside the crate's own test binary cannot answer it. The
+    /// bytes written are real and the frames are the ones the store always writes;
+    /// only the device's answer is held back, which is exactly what a stalled
+    /// device does. Nothing is acknowledged until the release.
+    ///
+    /// # Errors
+    ///
+    /// As [`RunStore::open`].
+    pub fn open_with_stalled_device(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
+        Self::open_impl(path.into(), true)
+    }
+
+    /// One constructor for both: a stalled device is a property of the storage
+    /// owner, not a second way to open a store.
+    ///
+    /// # Errors
+    ///
+    /// As [`RunStore::open`].
+    fn open_impl(path: PathBuf, stalled: bool) -> Result<Self, StoreError> {
         let existed = path.exists();
         let mut file = OpenOptions::new()
             .read(true)
@@ -381,13 +404,40 @@ impl RunStore {
             index.committed >= header,
             "the header is part of the committed length"
         );
+        // The index is shared, not copied: the owner folds each committed record
+        // into it inside the same ordered step as the write, and a lookup reads it
+        // from an executor thread. That is not a lock across an `await` — a lookup
+        // takes it for a hash-map probe and gives it straight back, and the write
+        // it can wait for is the *file's*, which is what the owner thread exists to
+        // absorb. Parking on a mutex a few hundred nanoseconds wide is not
+        // parking on an `fsync`; it is the second thing the fix is about.
+        let index = Arc::new(Mutex::new(index));
+        let owner =
+            StorageOwner::spawn(file, Arc::clone(&index), stalled).map_err(StoreError::storage)?;
         Ok(Self {
-            inner: Arc::new(StoreInner {
-                file: Mutex::new(file),
-                path,
-                index: Mutex::new(index),
-            }),
+            inner: Arc::new(StoreInner { owner, path, index }),
         })
+    }
+
+    /// A handle that can release this store's parked device, independently of
+    /// the store.
+    ///
+    /// Returned rather than only as [`Self::release_device`] because the caller
+    /// that most needs to un-stick the device is the one awaiting a record on it,
+    /// and that caller holds the store's borrow for the whole wait.
+    #[must_use]
+    pub fn storage_gate(&self) -> StorageGate {
+        self.inner.owner.gate()
+    }
+
+    /// Let the outstanding flush proceed, and every flush after it.
+    ///
+    /// After this the handle is an ordinary store: the stall is over and is not
+    /// re-armed. A caller awaiting a record on this store cannot reach this
+    /// method — the borrow the append holds is the same one — and needs the gate
+    /// [`Self::storage_gate`] hands back instead.
+    pub fn release_device(&self) {
+        self.storage_gate().release();
     }
 
     /// Open a store under `dir`, named by the tenant that owns it.
@@ -447,25 +497,33 @@ impl RunStore {
         index.runs.get(&run).map(|held| held.tenant.clone())
     }
 
-    /// The index's lock, recovering a poison.
-    fn index(&self) -> MutexGuard<'_, Index> {
-        self.inner
-            .index
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    /// Turn a borrowed record into one that can cross onto the storage owner's
+    /// thread.
+    ///
+    /// The stored record owns its tenant and path, so the hop is the only part that
+    /// has to be `'static`, and it takes the record by value rather than borrowing
+    /// the caller's strings for the length of a flush.
+    fn owned(&self, record: StagedRecord<'_>) -> Staged {
+        Staged {
+            record: Stored {
+                run: record.run(),
+                key: record.key().as_bytes().to_vec(),
+                tenant: record.tenant().to_owned(),
+                path: record.path().to_owned(),
+                value: record.bytes().to_vec(),
+            },
+            key: record.key(),
+        }
     }
 
-    /// The file's lock, recovering a poison.
+    /// The index's lock, recovering a poison.
     ///
-    /// Recovering is right here for the reason it is right in `journal::file`: no
-    /// arm in the append path panics while the lock is held — every one returns
-    /// its `Result` first — so a poison is a bug in an unrelated thread, and
+    /// Recovering is right here for the reason it is right in `journal::owner`: no
+    /// arm in the append path panics while the lock is held — every one returns its
+    /// `Result` first — so a poison is a bug in an unrelated thread, and
     /// propagating it would brick a store that is still perfectly readable.
-    fn file(&self) -> MutexGuard<'_, File> {
-        self.inner
-            .file
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn index(&self) -> MutexGuard<'_, Index> {
+        owner::lock(&self.inner.index)
     }
 }
 
@@ -507,15 +565,53 @@ impl RunRecords for RunStore {
         path: &str,
         bytes: Vec<u8>,
     ) -> Result<Appended, FlowError> {
-        let stored = Stored {
-            run,
-            key: key.as_bytes().to_vec(),
-            tenant: tenant.to_owned(),
-            path: path.to_owned(),
-            value: bytes,
-        };
-        self.commit(&stored, key).map_err(FlowError::from)
+        let staged = self.owned(RunRecords::stage(self, tenant, run, key, path, bytes));
+        self.commit(staged.record, staged.key)
+            .map_err(FlowError::from)
     }
+
+    /// The awaited door, which is the one a durable step takes.
+    ///
+    /// The `sync_all` behind it is the device's cost, and this is what keeps that
+    /// cost off the executor: the step's future waits for the owner's answer
+    /// instead of sitting through the flush (INV-BOT-50).
+    fn append_async<'a>(
+        &'a self,
+        record: StagedRecord<'a>,
+    ) -> crate::BoxFuture<'a, Result<Appended, FlowError>> {
+        let staged = self.owned(record);
+        Box::pin(async move {
+            self.commit_async(staged.record, staged.key)
+                .await
+                .map_err(FlowError::from)
+        })
+    }
+}
+
+/// Map one owner refusal onto this store's vocabulary.
+///
+/// One conversion rather than a match per call site, because every `?` on an owner
+/// refusal wraps the same fact — the device, or the handle, said no — and a literal
+/// per call site would be four chances to name a different variant for one event.
+/// The refusal's own message distinguishes a full queue from a poison from an
+/// undelivered answer, so nothing is lost by carrying it as the device's error.
+impl From<SubmitError> for StoreError {
+    fn from(cause: SubmitError) -> Self {
+        Self::Storage {
+            cause: cause.into_io(),
+        }
+    }
+}
+
+/// One staged append: the record to write and the step key it is for.
+///
+/// Its own type so the two append doors build the record once between them, and
+/// the key travels with it rather than being threaded beside it at each call site.
+struct Staged {
+    /// The record as it will be archived.
+    record: Stored,
+    /// The step key the already-recorded and conflict checks are on.
+    key: StepKey,
 }
 
 /// The in-file chain head of one run, held with the index.
@@ -529,92 +625,153 @@ impl RunStore {
     /// frames, and a caller that read one run's records could then not verify
     /// them without reading every other tenant's records too. One file, one
     /// chain, and the tenant check above is what keeps the reads separated.
-    fn commit(&self, stored: &Stored, key: StepKey) -> Result<Appended, StoreError> {
-        let mut file = self.file();
-        let mut index = self.index();
-
-        let owned = index.runs.get(&stored.run);
-        if let Some(owned) = owned {
-            if owned.tenant != stored.tenant {
-                return Err(StoreError::ForeignTenant {
-                    owner: owned.tenant.clone(),
-                    asked: stored.tenant.clone(),
-                });
-            }
-            if let Some(step) = owned.steps.get(&key.to_hex()) {
-                // Already recorded. An identical record is the same fact seen
-                // twice — a step whose value was returned and whose caller
-                // recorded it again — and a different one is a conflict. Neither
-                // writes a byte.
-                return Ok(if step.bytes == stored.value {
-                    Appended::AlreadyRecorded
-                } else {
-                    Appended::Conflicting
-                });
-            }
-            if u64::try_from(owned.steps.len()).unwrap_or(u64::MAX) >= MAX_RECORDS_PER_RUN {
-                return Err(StoreError::Limit {
-                    kind: StoreLimitKind::Records,
-                    requested: u64::try_from(owned.steps.len())
-                        .unwrap_or(u64::MAX)
-                        .saturating_add(1),
-                    limit: MAX_RECORDS_PER_RUN,
-                });
-            }
-        }
-
-        let previous = tail_head(&index);
-        let frame = frame(stored, &previous)?;
-
-        let next = index
-            .committed
-            .checked_add(u64::try_from(frame.len()).unwrap_or(u64::MAX))
-            .ok_or(StoreError::Limit {
-                kind: StoreLimitKind::StoreBytes,
-                requested: u64::MAX,
-                limit: MAX_STORE_BYTES,
-            })?;
-        if next > MAX_STORE_BYTES {
-            return Err(StoreError::Limit {
-                kind: StoreLimitKind::StoreBytes,
-                requested: next,
-                limit: MAX_STORE_BYTES,
-            });
-        }
-
-        // The fence, checked before a byte is written: the length this handle
-        // indexed must be the length on the disk, so a file another writer moved
-        // under it is refused here rather than forked. `journal::file` makes the
-        // same check for the same reason, and this is the operation it cannot do
-        // for us because this store has no owner thread.
-        let on_disk = file.metadata().map_err(StoreError::storage)?.len();
-        if on_disk != index.committed {
-            return Err(StoreError::Corrupt {
-                at: u64::try_from(index.runs.get(&stored.run).map_or(0, |run| run.steps.len()))
-                    .unwrap_or(u64::MAX),
-            });
-        }
-
-        file.write_all(&frame).map_err(StoreError::storage)?;
-        file.sync_all().map_err(StoreError::storage)?;
-
-        index.committed = next;
-        index.tail = stored.head_from(&previous);
-        index.runs.entry(stored.run).or_insert_with(|| RunIndex {
-            tenant: stored.tenant.clone(),
-            steps: HashMap::new(),
-        });
-        if let Some(run) = index.runs.get_mut(&stored.run) {
-            run.steps.insert(
-                hex_of(&stored.key),
-                Held {
-                    path: stored.path.clone(),
-                    bytes: stored.value.clone(),
-                },
-            );
-        }
-        Ok(Appended::Recorded)
+    ///
+    /// The whole of this runs on the storage owner's thread — the in-memory checks,
+    /// the fence, the write, the `sync_all` and the fold into the index — so two
+    /// appends to this store are two ordered steps rather than two racing ones,
+    /// and none of them parks the executor the `sync_all` does. INV-BOT-50.
+    fn commit(&self, stored: Stored, key: StepKey) -> Result<Appended, StoreError> {
+        self.inner
+            .owner
+            .submit(move |file, index| append_on_owner(file, index, &stored, key))
+            .map_err(StoreError::from)
     }
+
+    /// The same append, awaited rather than sat through.
+    ///
+    /// The one a durable step takes, because a step's body is a future and the
+    /// `sync_all` its record costs is the device's, not the executor's.
+    fn commit_async<'a>(
+        &'a self,
+        stored: Stored,
+        key: StepKey,
+    ) -> crate::BoxFuture<'a, Result<Appended, StoreError>> {
+        Box::pin(async move {
+            self.inner
+                .owner
+                .submit_async(move |file, index| append_on_owner(file, index, &stored, key))
+                .await
+                .map_err(StoreError::from)
+        })
+    }
+}
+
+/// The ordered append, over the file and the index it folds into.
+///
+/// A free function taking the shared state rather than a method on `&self`, because
+/// it runs on the storage owner's thread with a closure that must own everything it
+/// touches: the `Arc` the store's state lives in and the record itself.
+///
+/// # Errors
+///
+/// Every [`StoreError`] an append can produce, carried as the device's own error so
+/// the owner's one reply channel serves both stores.
+fn append_on_owner(
+    file: &mut File,
+    shared: &Arc<Mutex<Index>>,
+    stored: &Stored,
+    key: StepKey,
+) -> std::io::Result<Appended> {
+    // Taken for the whole decision, the write and the fold, so a second append on
+    // this store cannot observe a half-committed index. The wait is bounded by the
+    // device rather than by the map, and it happens on the owner's thread, never on
+    // the executor's.
+    let mut index = owner::lock(shared);
+    decide_and_write(file, &mut index, stored, key)
+        .map_err(|error| std::io::Error::other(error.to_string()))
+}
+
+/// The decision and the write, in one ordered step over the file and the index.
+///
+/// Every check that can refuse in memory runs before a byte moves, and the length
+/// fence runs inside the owner's ordered step where no other append can overtake it
+/// — which is why the file's `metadata` is read here rather than through the
+/// read-only view: the authoritative answer is the one taken at the moment of the
+/// write.
+///
+/// # Errors
+///
+/// Every [`StoreError`] an append can produce. Nothing is written by any of them,
+/// and a refusal leaves the index and the file byte-identical.
+fn decide_and_write(
+    file: &mut File,
+    index: &mut Index,
+    stored: &Stored,
+    key: StepKey,
+) -> Result<Appended, StoreError> {
+    let owned = index.runs.get(&stored.run);
+    if let Some(owned) = owned {
+        if owned.tenant != stored.tenant {
+            return Err(StoreError::ForeignTenant {
+                owner: owned.tenant.clone(),
+                asked: stored.tenant.clone(),
+            });
+        }
+        if let Some(step) = owned.steps.get(&key.to_hex()) {
+            // Already recorded. An identical record is the same fact seen
+            // twice — a step whose value was returned and whose caller
+            // recorded it again — and a different one is a conflict. Neither
+            // writes a byte.
+            return Ok(if step.bytes == stored.value {
+                Appended::AlreadyRecorded
+            } else {
+                Appended::Conflicting
+            });
+        }
+        if u64::try_from(owned.steps.len()).unwrap_or(u64::MAX) >= MAX_RECORDS_PER_RUN {
+            return Err(StoreError::Limit {
+                kind: StoreLimitKind::Records,
+                requested: u64::try_from(owned.steps.len())
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(1),
+                limit: MAX_RECORDS_PER_RUN,
+            });
+        }
+    }
+
+    let previous = tail_head(index);
+    let (framed, head) = frame(stored, &previous)?;
+
+    let staged = u64::try_from(framed.len()).unwrap_or(u64::MAX);
+    let next = index
+        .committed
+        .checked_add(staged)
+        .ok_or_else(|| store_full(u64::MAX))?;
+    if next > MAX_STORE_BYTES {
+        return Err(store_full(next));
+    }
+
+    // The fence, checked before a byte is written: the length this handle
+    // indexed must be the length on the disk, so a file another writer moved
+    // under it is refused here rather than forked. It runs on the owner thread,
+    // so the check and the write it guards cannot be split by another append.
+    let on_disk = file.metadata().map_err(StoreError::storage)?.len();
+    if on_disk != index.committed {
+        return Err(StoreError::Corrupt {
+            at: u64::try_from(index.runs.get(&stored.run).map_or(0, |run| run.steps.len()))
+                .unwrap_or(u64::MAX),
+        });
+    }
+
+    file.write_all(&framed).map_err(StoreError::storage)?;
+    file.sync_all().map_err(StoreError::storage)?;
+
+    index.committed = next;
+    index.tail = head;
+    index.runs.entry(stored.run).or_insert_with(|| RunIndex {
+        tenant: stored.tenant.clone(),
+        steps: HashMap::new(),
+    });
+    if let Some(run) = index.runs.get_mut(&stored.run) {
+        run.steps.insert(
+            hex_of(&stored.key),
+            Held {
+                path: stored.path.clone(),
+                bytes: stored.value.clone(),
+            },
+        );
+    }
+    Ok(Appended::Recorded)
 }
 
 /// The chain head the next frame in this file follows.
@@ -662,7 +819,7 @@ impl Stored {
     /// confused with the digest of the bytes it holds: the run, the key, the
     /// tenant and the path are each length-framed, and the value is framed last
     /// so no two different records hash the same byte string.
-    fn head_from(&self, previous: &Digest) -> Digest {
+    fn head_from(&self, previous: &Digest, _archived: &[u8]) -> Digest {
         let mut hasher = Hasher::new();
         hasher.write_framed(previous.as_bytes());
         hasher.write_framed(&self.run_key_bytes());
@@ -689,62 +846,49 @@ impl Stored {
 /// torn tail (dropped, because a write leaves a prefix and a prefix has no head)
 /// from a frame that does not follow (refused, because those bytes were
 /// acknowledged).
-fn frame(stored: &Stored, previous: &Digest) -> Result<Vec<u8>, StoreError> {
-    let payload = to_bytes::<WireError>(stored).map_err(|cause| StoreError::Encoding { cause })?;
-    let Ok(length) = u32::try_from(payload.len()) else {
-        return Err(StoreError::Limit {
-            kind: StoreLimitKind::RecordBytes,
-            requested: u64::try_from(payload.len()).unwrap_or(u64::MAX),
-            limit: u64::try_from(MAX_RECORD_BYTES).unwrap_or(u64::MAX),
-        });
-    };
-    if payload.len() > MAX_RECORD_BYTES {
-        return Err(StoreError::Limit {
-            kind: StoreLimitKind::RecordBytes,
-            requested: u64::try_from(payload.len()).unwrap_or(u64::MAX),
-            limit: u64::try_from(MAX_RECORD_BYTES).unwrap_or(u64::MAX),
-        });
-    }
-    let head = stored.head_from(previous);
-    let mut frame = Vec::with_capacity(
-        LENGTH_BYTES
-            .saturating_add(payload.len())
-            .saturating_add(HEAD_BYTES),
-    );
-    frame.extend_from_slice(&length.to_be_bytes());
-    frame.extend_from_slice(&payload);
-    frame.extend_from_slice(head.as_bytes());
-    Ok(frame)
+fn frame(stored: &Stored, previous: &Digest) -> Result<(Vec<u8>, Digest), StoreError> {
+    // Archive, bound, chain and lay out — the same step the effect journal takes.
+    // Only the record's own archiving and its step-chaining head are this store's.
+    frame::frame_record(
+        stored,
+        previous,
+        MAX_RECORD_BYTES,
+        |stored| {
+            to_bytes::<WireError>(stored)
+                .map(|bytes| bytes.as_ref().to_vec())
+                .map_err(|cause| StoreError::Encoding { cause })
+        },
+        Stored::head_from,
+        record_too_large,
+    )
 }
 
-/// How a length prefix read ended.
-enum Prefix {
-    /// Nothing at all: a clean end of records.
-    Eof,
-    /// Some of the prefix arrived: an interrupted append.
-    Torn,
-    /// The whole prefix arrived.
-    Full,
+/// The refusal for a store that has no room left, named by what it would have
+/// needed.
+///
+/// One constructor because both call sites discovered the same fact by different
+/// routes — an addition that overflowed and an addition that came out past the
+/// ceiling — and a literal per site would be two chances to name a different bound
+/// for the same ceiling.
+fn store_full(requested: u64) -> StoreError {
+    StoreError::Limit {
+        kind: StoreLimitKind::StoreBytes,
+        requested,
+        limit: MAX_STORE_BYTES,
+    }
 }
 
-/// Read the four-byte length prefix, classifying the three ways it can end.
-fn read_prefix(reader: &mut impl Read, buf: &mut [u8]) -> Result<Prefix, StoreError> {
-    let mut filled = 0usize;
-    while filled < buf.len() {
-        match reader.read(&mut buf[filled..]) {
-            Ok(0) => {
-                return Ok(if filled == 0 {
-                    Prefix::Eof
-                } else {
-                    Prefix::Torn
-                });
-            }
-            Ok(read) => filled = filled.saturating_add(read),
-            Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(cause) => return Err(StoreError::storage(cause)),
-        }
+/// The refusal for a record whose archived bytes are past this store's ceiling.
+///
+/// One constructor, because the message and the two numbers are the same fact
+/// whichever call site discovers it, and a literal per site would be two chances to
+/// name a different bound for the same ceiling.
+fn record_too_large(len: usize) -> StoreError {
+    StoreError::Limit {
+        kind: StoreLimitKind::RecordBytes,
+        requested: u64::try_from(len).unwrap_or(u64::MAX),
+        limit: u64::try_from(MAX_RECORD_BYTES).unwrap_or(u64::MAX),
     }
-    Ok(Prefix::Full)
 }
 
 /// Read `buf` in full, reporting whether all of it arrived.
@@ -784,39 +928,38 @@ fn replay(file: &mut File) -> Result<Index, StoreError> {
     let mut at = 0u64;
     loop {
         let mut prefix = [0u8; LENGTH_BYTES];
-        let declared = match read_prefix(file, &mut prefix)? {
+        let declared = match frame::read_prefix(file, &mut prefix).map_err(StoreError::storage)? {
             Prefix::Eof => break,
             // A partial length prefix is an append that never finished: it was
             // never anyone's answer, so the scan stops here and the caller trims
             // to `committed`.
             Prefix::Torn => break,
-            Prefix::Full => usize::try_from(u32::from_be_bytes(prefix)).unwrap_or(usize::MAX),
+            Prefix::Full => frame::declared_length(&prefix),
         };
-        if declared == 0 || declared > MAX_RECORD_BYTES {
+        if !frame::is_possible_length(declared, MAX_RECORD_BYTES) {
             // A complete prefix naming a frame this store never writes cannot be
             // an interrupted append: a write leaves a prefix of a length it did
             // finish computing, and that length was always legal. Refuse.
             return Err(StoreError::Corrupt { at });
         }
         let mut payload = vec![0u8; declared];
-        if !read_full(file, &mut payload)? {
+        if let Piece::Interrupted =
+            frame::read_piece(file, &mut payload).map_err(StoreError::storage)?
+        {
             break;
         }
         let mut head = [0u8; HEAD_BYTES];
-        if !read_full(file, &mut head)? {
+        if let Piece::Interrupted =
+            frame::read_piece(file, &mut head).map_err(StoreError::storage)?
+        {
             break;
         }
         let stored: Stored =
             from_bytes::<Stored, WireError>(&payload).map_err(|_| StoreError::Corrupt { at })?;
-        if stored.head_from(&previous) != Digest::from_bytes(head) {
+        if stored.head_from(&previous, &payload) != Digest::from_bytes(head) {
             return Err(StoreError::Corrupt { at });
         }
-        let frame_len = u64::try_from(
-            LENGTH_BYTES
-                .saturating_add(declared)
-                .saturating_add(HEAD_BYTES),
-        )
-        .unwrap_or(u64::MAX);
+        let frame_len = frame::framed_len(declared);
         // A frame that runs past the end of the file is an interrupted append.
         // Readable as a whole above, so this only catches a header that lied
         // about a frame already acknowledged, which is rot rather than a crash.
@@ -828,8 +971,8 @@ fn replay(file: &mut File) -> Result<Index, StoreError> {
             break;
         }
         index.committed = index.committed.saturating_add(frame_len);
-        index.tail = stored.head_from(&previous);
-        previous = stored.head_from(&previous);
+        index.tail = stored.head_from(&previous, &payload);
+        previous = stored.head_from(&previous, &payload);
         at = at.saturating_add(1);
         if at > MAX_RECORDS_PER_RUN {
             return Err(StoreError::Limit {

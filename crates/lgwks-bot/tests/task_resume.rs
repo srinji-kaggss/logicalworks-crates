@@ -749,14 +749,24 @@ fn the_store_is_opened_at_installation_not_at_the_first_step() -> TestResult {
 /// How many runs the resident-set measurement performs.
 const RSS_RUNS: usize = 10_000;
 
-/// The environment variable that runs the ten-thousand-run measurement.
+/// The environment variable that gates the ten-thousand-run measurement.
 ///
-/// Ten thousand `sync_all`-ed appends is several minutes, which is the right cost
-/// for a measurement and the wrong cost for every ordinary test run. The test is
-/// therefore opt-in and says so in its result: an ordinary run skips it and prints
-/// why, rather than quietly reporting a bound it never checked. CI's `scale` lane
-/// sets the variable, so the measurement is run where a number is expected.
+/// Ten thousand `sync_all`-ed appends is several minutes: the right cost for a
+/// measurement, the wrong cost for every ordinary test run. The test is therefore
+/// `#[ignore]`d and reports itself as **skipped**, never as a bound nobody
+/// checked. The scale lane runs it explicitly:
+///
+/// ```text
+/// LGWKS_RESUME_RSS_RUNS=1 cargo test -p lgwks_bot --features script,ephemeral \
+///     --test task_resume peak_rss -- --ignored
+/// ```
 const RSS_ENV: &str = "LGWKS_RESUME_RSS_RUNS";
+
+/// Gate the measurement on its environment variable, so an explicit `--ignored`
+/// run without it says why instead of spending minutes measuring nothing.
+fn rss_measurement_requested() -> bool {
+    std::env::var_os(RSS_ENV).is_some()
+}
 
 /// Peak resident set size of this process, or `None` where nothing reports it.
 ///
@@ -783,13 +793,12 @@ fn peak_rss_bytes() -> Option<u64> {
 /// a machine's allocator; a design that retained every run's body would exceed it
 /// long before ten thousand.
 #[test]
+#[ignore = "the ten-thousand-run resident-set measurement; run it with \
+            LGWKS_RESUME_RSS_RUNS=1 and --ignored"]
 fn peak_rss_is_bounded_over_ten_thousand_runs() -> TestResult {
-    if std::env::var_os(RSS_ENV).is_none() {
-        // Not a silent pass: the test *names* the fact it did not measure, so a
-        // reader of the result sees a skipped measurement rather than a bound
-        // nobody checked.
+    if !rss_measurement_requested() {
         return Err(format!(
-            "{RSS_ENV} is not set, so the ten-thousand-run resident-set measurement did not run"
+            "{RSS_ENV} is not set, so the measurement did not run; set it to measure"
         )
         .into());
     }

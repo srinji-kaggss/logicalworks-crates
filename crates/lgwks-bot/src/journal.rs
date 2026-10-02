@@ -69,10 +69,34 @@ pub use wire_form::{
 
 mod file;
 
+/// The frame grammar the file journal and the run store share.
+///
+/// Private to the crate because a caller cannot frame a record for either store:
+/// what a head is over, and what a frame even holds, is each store's own. The
+/// grammar — length prefix, torn-tail rule, impossible-length refusal — is one
+/// definition both call, so the two stores cannot disagree about what a torn tail
+/// is.
+pub(crate) mod frame;
+
+/// The one thread that owns a file-backed store's device.
+///
+/// Extracted from `file` because the run store inherited the same blocking-write
+/// defect and needed the same mechanism, and a second owner thread beside the
+/// first would be two poison latches with two behaviours.
+pub(crate) mod owner;
+
 /// The file-backed journal, re-exported from the private `file` module beside
 /// the in-memory one: the trait's second shipped adapter, and the one whose
 /// promises a process kill can check.
 pub use file::{Corruption, CorruptionKind, FileJournal};
+
+/// The handle that releases a stalled store's parked flush.
+///
+/// Public because "what does this bot do while its disk has stopped answering" is
+/// a question an operator has to be able to ask on a real process: the caller
+/// awaiting the append holds the journal's borrow for the whole wait, so it cannot
+/// reach the journal to release its own device.
+pub use owner::StorageGate;
 
 /// The domain separator hashed into the genesis position.
 ///
@@ -1209,6 +1233,20 @@ fn chain(previous: JournalPosition, event: &EffectEvent) -> Result<Digest, Journ
     hasher.update(previous.head().as_bytes());
     hasher.update(&event.to_bytes().map_err(JournalError::Encoding)?);
     Ok(hasher.finalize())
+}
+
+/// [`chain`] over bytes the caller has already archived.
+///
+/// The two-step split exists because the shared frame step archives an event once
+/// and then needs its head: calling [`chain`] there would encode the same value
+/// twice and hand the head a second chance to disagree with the bytes that were
+/// actually framed. Infallible, because the bytes are already in hand and nothing
+/// can fail.
+pub(crate) fn chain_over_bytes(previous: &Digest, payload: &[u8]) -> Digest {
+    let mut hasher = Hasher::new();
+    hasher.update(previous.as_bytes());
+    hasher.update(payload);
+    hasher.finalize()
 }
 
 /// What the ladder allows next for `key`, given the entries committed so far.
