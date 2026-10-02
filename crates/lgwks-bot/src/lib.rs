@@ -247,6 +247,17 @@ pub mod session;
 /// `Auth::check` where it was, and reaches `syn` only on the host through the
 /// `lgwks_deps` storefront.
 pub mod spec;
+/// The task front door: a [`Host`](task::Host) runs a
+/// [`Task`](task::Task) and returns a [`Report`](task::Report) (feature
+/// `script`).
+///
+/// The smallest complete path from "here is a typed body" to "here is a
+/// disposition, an output and evidence": no trait to implement per workflow, no
+/// observer to poll, no handle to reap, and no `Send`, `Box` or `'static` bound
+/// in the author's code. It sits on `script`, so a task body composes with
+/// `each`, `within` and `retry` and inherits their bounds.
+#[cfg(feature = "script")]
+pub mod task;
 /// The four verbs: Observe, Evaluate, Execute, Query. No fifth verb exists.
 pub mod verb;
 

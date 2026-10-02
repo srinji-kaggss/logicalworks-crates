@@ -65,7 +65,8 @@ mod each;
 mod error;
 mod map;
 mod policy;
-mod scope;
+pub(crate) mod scope;
+pub(crate) mod trail;
 
 use std::time::Duration;
 
@@ -74,6 +75,14 @@ pub use each::each;
 pub use error::{FlowError, OptionExt, ResultExt};
 pub use map::{Architecture, FlowShape, StepKind, StepShape};
 pub use scope::{Scope, StepKey, Tenant};
+
+/// How many step paths a scope's trail retains unless a host says otherwise.
+///
+/// A reported bound rather than an implicit one: a run that entered thousands
+/// of `each` items and retained them all would make the report the largest
+/// object in the process, which is the opposite of what a report is for. See
+/// [`crate::task::Report::steps`].
+pub const DEFAULT_TRAIL_STEPS: usize = 64;
 
 /// The longest tenant name a [`Tenant`] accepts, in bytes.
 ///

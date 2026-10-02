@@ -80,6 +80,14 @@
 pub mod runtime;
 pub mod task;
 
+/// Declare task-local storage, re-exported from the engine so a caller of
+/// [`crate::task`] never names `tokio` to reach it.
+///
+/// It is a `macro_rules!` macro, so it cannot be listed inside `sync`: the
+/// engine's `task_local!` needs only the `rt` feature this module already
+/// requires, and a `pub use` of a macro is what keeps that true.
+pub use lgwks_deps::tokio::task_local;
+
 /// This crate's own cancellation primitive. Private, because its only public
 /// name is `rt::sync::CancellationToken` (one type, one path), matching how
 /// the ECS substrate is reached through `spec` rather than named directly.
