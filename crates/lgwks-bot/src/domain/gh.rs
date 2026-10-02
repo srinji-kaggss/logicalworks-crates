@@ -550,7 +550,7 @@ impl GhOutcome {
 /// client's identity, and a caller who needs that must pin a path. The
 /// [`BotSpec`](crate::BotSpec) for a deployment declares that trust in the
 /// adapter set rather than discovering it by running something.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Gh {
     /// `owner/repo` every call targets.
     repository: Repository,
@@ -562,6 +562,9 @@ pub struct Gh {
     /// The maximum runtime of one call.
     #[cfg(feature = "process")]
     deadline: Option<Duration>,
+    /// Environment deltas applied to every child, in order.
+    #[cfg(feature = "process")]
+    env: Vec<(String, String)>,
     /// Forced by the constructor; see [`Gh::required_caps`].
     caps: Vec<Cap>,
 }
@@ -581,6 +584,8 @@ impl Gh {
             capture: DEFAULT_CAPTURE_LIMIT,
             #[cfg(feature = "process")]
             deadline: Some(DEFAULT_DEADLINE),
+            #[cfg(feature = "process")]
+            env: Vec::new(),
             caps: vec![Cap::sys(), Cap::net()],
         }
     }
@@ -614,6 +619,22 @@ impl Gh {
     #[must_use]
     pub fn deadline(mut self, deadline: Option<Duration>) -> Self {
         self.deadline = deadline;
+        self
+    }
+
+    /// Set `key` to `value` in the environment of every call this binding makes.
+    ///
+    /// The environment policy belongs to the binding rather than to the process
+    /// that happens to be running it: a caller that pins a client needs a
+    /// pinned `PATH`, and a caller whose credentials are scoped to this one
+    /// repository needs `GH_REPO` set here rather than in a shell. It is a
+    /// per-child delta, so it is bounded by the number of variables the caller
+    /// declared rather than by the ambient environment.
+    #[cfg(feature = "process")]
+    #[must_use]
+    pub fn env(mut self, key: impl Into<String>, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        self.env
+            .push((key.into(), value.as_ref().to_string_lossy().into_owned()));
         self
     }
 
@@ -667,6 +688,9 @@ impl Gh {
         spec.capture_stderr(self.capture);
         if let Some(deadline) = self.deadline {
             spec.deadline(deadline);
+        }
+        for delta in self.env.iter() {
+            spec.env(&delta.0, &delta.1);
         }
         spec
     }

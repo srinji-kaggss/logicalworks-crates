@@ -333,11 +333,15 @@ pub async fn review_pr(
     let created_id = match published {
         Ok(id) => Some(id),
         Err(error) => {
-            // A refusal *before* the fork established that nothing ran, so a
-            // retry is a retry. An error *after* the fork may mean the review
-            // landed: those two are different facts and the task must not
-            // collapse them. The reconciliation read below is what separates
-            // them, by observing GitHub rather than by trusting an exit code.
+            // The only failure that certainly wrote nothing is a refusal
+            // *before the fork*. Every other publish failure — a non-zero exit,
+            // a dropped connection, a deadline — may have reached GitHub and
+            // had its response discarded, because the exit code alone cannot
+            // distinguish "the request never arrived" from "the request was
+            // applied and the answer was lost". Those two are different facts
+            // and the task must not collapse them, so the only sound next move
+            // is the reconciliation read below — which observes GitHub rather
+            // than trusting an exit code. It is a read, never a second create.
             if !may_have_landed(&error) {
                 return Err(error);
             }
@@ -405,14 +409,32 @@ pub async fn review_pr(
 #[cfg(feature = "process")]
 fn may_have_landed(error: &FlowError) -> bool {
     match *error {
-        // `within` itself did not time out and the scope was not stopped: the
-        // adapter reported the failure, so what it reported is what is known.
-        FlowError::Bot { ref source, .. } => {
-            matches!(**source, crate::error::BotError::EffectIndeterminate { .. })
-        }
+        // A bot error carries the adapter's own certainty, and only one value
+        // proves nothing was written: `Refused`, which is a refusal before the
+        // fork. Every other certainty — `NotDelivered` from a failed transport,
+        // `Unsettled` from a child that started and did not settle — leaves the
+        // effect unobserved, because an exit code cannot distinguish "the
+        // request never arrived" from "the request was applied and the answer
+        // was lost".
+        //
+        // `NotDelivered` is the subtle one, and reading it as "nothing
+        // happened" is the exact defect this classifier exists to prevent: a
+        // client that applied a write and then lost its connection exits
+        // non-zero, and skipping the reconciliation read on that basis loses
+        // the one case the whole lost-response path is for.
+        FlowError::Bot { ref source, .. } => !matches!(
+            **source,
+            crate::error::BotError::DomainError {
+                certainty: crate::error::DispatchCertainty::Refused,
+                ..
+            }
+        ),
         // A stop or a deadline during the publish step: the child may have been
         // written and the response dropped, so this is unknown, not "not done".
         FlowError::TimedOut { .. } | FlowError::Cancelled { .. } => true,
+        // A validation failure before the write — an unusable commit id, an
+        // event GitHub does not accept, a malformed event — established that
+        // nothing was sent, so a retry is a retry rather than a duplicate.
         _ => false,
     }
 }
