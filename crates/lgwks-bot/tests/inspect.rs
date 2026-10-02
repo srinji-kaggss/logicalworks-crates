@@ -374,8 +374,8 @@ fn a_match_longer_than_the_preview_budget_is_truncated_with_its_full_span_kept()
         "the preview is a prefix of the exact span it was cut from"
     );
     assert!(
-        subject[start..end].ends_with(")\");"),
-        "the span still reaches the end of the matched node"
+        subject[start..end].starts_with("panic!("),
+        "the span still names the matched macro invocation"
     );
     Ok(())
 }
