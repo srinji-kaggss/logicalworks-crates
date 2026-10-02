@@ -56,13 +56,13 @@
 //! ```
 //! use lgwks_bot::inspect::{inspect, InspectRequest, Verdict};
 //!
-//! let request = InspectRequest::new("src/lib.rs", "fn f() { let x = g().unwrap(); }");
+//! let request = InspectRequest::new("src/lib.rs", "fn f() { panic!(\"boom\"); }");
 //! let inspection = inspect(&request);
 //! assert!(matches!(inspection.verdict(), Verdict::Violations { .. }));
 //! assert_eq!(
 //!     inspection.findings().first().map(|found| found.rule_id()),
-//!     Some("rust/no-unwrap"),
-//!     "a `.unwrap()` is the shipped unwrap rule's whole subject"
+//!     Some("rust/no-panic"),
+//!     "a `panic!` invocation is the shipped panic rule's whole subject"
 //! );
 //! ```
 
