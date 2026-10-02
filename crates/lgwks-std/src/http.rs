@@ -1180,22 +1180,68 @@ fn exchange(url: &str, method: Method<'_>, options: &Options) -> Result<Response
         if limit == 0 {
             return response_of(response, options, chain);
         }
-        let Some(location) = redirect_location(&response)? else {
-            return response_of(response, options, chain);
-        };
-        if hops >= limit {
-            return Err(failure(
-                FailureStage::Redirect,
-                FailureKind::RedirectLimit,
-                None,
-            ));
+        match next_hop(&target, &response, limit, hops, method)? {
+            Hop::Final => return response_of(response, options, chain),
+            Hop::Follow {
+                next,
+                method: next_method,
+                hops: climbed,
+            } => {
+                method = next_method;
+                hops = climbed;
+                chain.push(sanitized_target(&next));
+                target = next;
+            }
         }
-        let next = resolve_location(&target, location)?;
-        method = next_method(response.status(), method)?;
-        hops = hops.saturating_add(1);
-        chain.push(sanitized_target(&next));
-        target = next;
     }
+}
+
+/// What one response means for the redirect walk.
+enum Hop<'body> {
+    /// The walk stops and the response just seen is the answer.
+    Final,
+    /// The walk continues to `next` with `method`.
+    Follow {
+        /// The absolute URL this hop targets.
+        next: String,
+        /// The method this hop carries, which a 303 rewrites to `GET`.
+        method: Method<'body>,
+        /// How many redirects the walk has now taken, for the limit check.
+        hops: u32,
+    },
+}
+
+/// Decides whether a response ends the redirect walk or continues it.
+///
+/// A helper rather than the loop's second half inline: as one block the walk
+/// carried four propagation operators across the location parse, the limit
+/// check, the location resolve and the method rewrite, so a reader following
+/// the redirect rules had to hold the whole tail of the loop in view to see
+/// which of them could refuse.
+fn next_hop<'body>(
+    current: &str,
+    response: &ureq::http::Response<ureq::Body>,
+    limit: u32,
+    hops: u32,
+    method: Method<'body>,
+) -> Result<Hop<'body>, Error> {
+    let Some(location) = redirect_location(response)? else {
+        return Ok(Hop::Final);
+    };
+    if hops >= limit {
+        return Err(failure(
+            FailureStage::Redirect,
+            FailureKind::RedirectLimit,
+            None,
+        ));
+    }
+    let next = resolve_location(current, location)?;
+    let method = next_method(response.status(), method)?;
+    Ok(Hop::Follow {
+        next,
+        method,
+        hops: hops.saturating_add(1),
+    })
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

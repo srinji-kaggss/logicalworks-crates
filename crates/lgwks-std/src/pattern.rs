@@ -583,13 +583,7 @@ fn expand_replacement(
     let mut cursor = 0;
     let mut literal_start = 0;
     while cursor < bytes.len() {
-        match next_expansion(
-            captures,
-            replacement,
-            &mut output,
-            cursor,
-            &mut literal_start,
-        )? {
+        match next_expansion(captures, replacement, output, cursor, &mut literal_start)? {
             ExpansionStep::Skipped => {
                 cursor = cursor.saturating_add(1);
             }
@@ -610,7 +604,10 @@ enum ExpansionStep {
     /// A byte that is not part of a reference; the caller advances past it.
     Skipped,
     /// A `$$` escape or a reference that consumed to the end.
-    Consumed { next: usize },
+    Consumed {
+        /// The offset the walk resumes at, just past what was expanded.
+        next: usize,
+    },
     /// The reference ran past the end, so the loop stops here.
     Done,
 }
@@ -625,7 +622,7 @@ fn next_expansion(
     captures: &regex::Captures<'_>,
     replacement: &str,
     output: &mut BoundedString,
-    cursor: usize,
+    mut cursor: usize,
     literal_start: &mut usize,
 ) -> Result<ExpansionStep, PatternRunError> {
     let bytes = replacement.as_bytes();
