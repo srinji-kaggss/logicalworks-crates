@@ -133,3 +133,8 @@ required-features = ["script", "rt", "time", "sync", "macros"]
 name = "script_tenants"
 path = "examples/script_tenants.rs"
 required-features = ["script"]
+
+[[example]]
+name = "measure_overhead"
+path = "examples/measure_overhead.rs"
+required-features = ["script", "rt", "time", "sync", "process"]
