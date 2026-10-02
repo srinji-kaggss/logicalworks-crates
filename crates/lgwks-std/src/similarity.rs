@@ -3,10 +3,61 @@
 //! This module keeps deterministic lexical, structural, and geometric scores
 //! behind [`Similarity`]. Each concrete scorer owns only its policy; callers
 //! can replace one scorer without changing the code that combines or consumes
-//! scores. The algorithms use `core` and `alloc` only, and all returned scores
-//! are clamped to the contract's closed interval `[0.0, 1.0]`.
+//! scores. The algorithms use `core` and `alloc` only, and every score the
+//! [`Similarity`] seam returns is clamped to the contract's closed interval
+//! `[0.0, 1.0]`.
+//!
+//! # Two domains, and the difference between a measurement and a refusal
+//!
+//! Raw cosine similarity has a mathematical domain of `[-1, 1]`, and
+//! [`Cosine::try_score`] keeps it. The shared [`Similarity`] contract has the
+//! domain `[0, 1]`, and the mapping between the two is the explicit, named,
+//! versioned [`Cosine::normalized_score`] (`(raw + 1) / 2`). An opposite pair
+//! is therefore `0.0` through the shared contract and `-1.0` through the raw
+//! one, which is a stated mapping rather than a silent shift.
+//!
+//! A weight total below `1.0` is a deliberate evidence deficit, so an identical
+//! pair scored at weight `0.5` reads `0.5` rather than the trait's identity
+//! `1.0`. The maximum is not renormalized to hide the deficit, and the deficit
+//! is never presented as an identity score.
+//!
+//! A refusal is not a measurement. Every checked scorer reports one through a
+//! typed error, and [`Weighted::try_is_accepted`] carries component identity,
+//! the refusal, and applicability through to the acceptance decision, so an
+//! unavailable component cannot satisfy a threshold — including a threshold of
+//! zero. All-zero effective evidence is [`EvidenceError::InsufficientEvidence`]
+//! rather than a score of zero.
+//!
+//! The infallible [`Similarity`] methods remain for source compatibility and
+//! are documented as lossy: they map a refusal to `0.0`. They are not the
+//! authority-facing path; the checked composition is.
 //!
 //! [`Similarity`]: crate::similarity::Similarity
+//!
+//! # Example
+//!
+//! ```rust
+//! use lgwks_std::similarity::{Cosine, CosineError, Similarity};
+//!
+//! let cosine = Cosine::new();
+//! assert_eq!(cosine.try_score(&[1.0_f32], &[-1.0_f32])?, -1.0);
+//! assert_eq!(Similarity::score(&cosine, &[1.0_f32], &[-1.0_f32]), 0.0);
+//! assert!(matches!(
+//!     cosine.try_score(&[1.0_f32, 0.0], &[1.0_f32, 0.0, 0.0]),
+//!     Err(CosineError::DimensionMismatch { .. })
+//! ));
+//! # Ok::<(), CosineError>(())
+//! ```
+//!
+//! The named normalized mapping is available on its own:
+//!
+//! ```rust
+//! use lgwks_std::similarity::Cosine;
+//!
+//! let cosine = Cosine::new();
+//! // Opposite reads 0.0 through the shared contract.
+//! assert_eq!(cosine.normalized_score(&[1.0_f32], &[-1.0_f32]).unwrap_or(-1.0), 0.0);
+//! ```
 
 extern crate alloc;
 
@@ -18,6 +69,11 @@ use core::fmt;
 use core::marker::PhantomData;
 
 /// A score-producing seam for one kind of comparable value.
+///
+/// Every implementation returns `1.0` for identical values, `0.0` for values
+/// with no similarity, and a finite result in `[0.0, 1.0]`. Implementations
+/// that can refuse document the infallible mapping in their own `impl` block;
+/// [`Weighted::try_is_accepted`] is the path that preserves the refusal.
 pub trait Similarity {
     /// The value type accepted by this scorer.
     type Value: ?Sized;
@@ -40,6 +96,16 @@ pub enum EditDistanceError {
         /// The first observed length known to exceed `maximum`.
         observed: usize,
     },
+}
+
+impl From<EditDistanceError> for EvidenceError {
+    fn from(value: EditDistanceError) -> Self {
+        match value {
+            EditDistanceError::InputTooLong { maximum, observed } => {
+                Self::InputTooLong { maximum, observed }
+            }
+        }
+    }
 }
 
 impl fmt::Display for EditDistanceError {
@@ -82,11 +148,234 @@ impl EditDistance {
         self.maximum_length
     }
 
+    /// Returns the normalized scalar count an input occupies under this
+    /// scorer's text normalization.
+    ///
+    /// Normalization trims, collapses internal whitespace, and applies Unicode
+    /// lower-case expansion, so this is the unit [`Self::maximum_length`]
+    /// charges rather than the raw scalar count. Lower-casing can expand a
+    /// scalar — `İ` becomes two — so the two units differ and only this one is
+    /// the budget.
+    #[must_use]
+    pub fn normalized_length(&self, input: &str) -> usize {
+        normalize_text(input, usize::MAX).map_or(0, |normalized| normalized.len())
+    }
+
     /// Calculates the normalized score or reports an over-limit input.
+    ///
+    /// The budget is charged against the normalized scalar count, so a scalar
+    /// whose lower-case form expands can be refused even when its raw scalar
+    /// count is inside the limit. The refusal names the normalized length that
+    /// crossed the bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EditDistanceError::InputTooLong`] when either input's
+    /// normalized length exceeds [`Self::maximum_length`]. Both the raw pass
+    /// and the normalized pass are checked, and the raw pass runs first, so a
+    /// hostile input is refused before the row is allocated.
     pub fn try_score(&self, left: &str, right: &str) -> Result<f64, EditDistanceError> {
         let left = normalize_text(left, self.maximum_length)?;
         let right = normalize_text(right, self.maximum_length)?;
         Ok(sequence_similarity(&left, &right))
+    }
+}
+
+/// Why a checked comparison could not produce a measurement.
+///
+/// Every variant is a refusal, never a score. A refusal reaching a composition
+/// is retained with its component identity and can never satisfy an acceptance
+/// threshold, so "we could not measure this" and "these did not match" stay
+/// distinguishable through every layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EvidenceError {
+    /// The two vectors had different lengths.
+    DimensionMismatch {
+        /// Length of the left-hand vector.
+        left: usize,
+        /// Length of the right-hand vector.
+        right: usize,
+    },
+    /// A vector had zero magnitude, so its angle is undefined.
+    ZeroMagnitude,
+    /// A vector or coordinate carried a value that is not finite.
+    NonFinite,
+    /// At least one input exceeded the scorer's declared normalized budget.
+    InputTooLong {
+        /// The largest permitted normalized length.
+        maximum: usize,
+        /// The first normalized length known to exceed `maximum`.
+        observed: usize,
+    },
+    /// A collection exceeded the scorer's declared element budget.
+    CollectionTooLong {
+        /// The largest permitted element count.
+        maximum: usize,
+        /// The first observed count known to exceed `maximum`.
+        observed: usize,
+    },
+    /// The composition had no effective evidence at all.
+    ///
+    /// A weight total of zero is not a measurement of zero similarity; it is
+    /// the absence of anything to weigh, and it refuses regardless of the
+    /// configured threshold.
+    InsufficientEvidence {
+        /// The sum of the configured component weights.
+        total_weight: u64,
+    },
+    /// The weighted composition itself could not be constructed or evaluated.
+    Composition(WeightedError),
+}
+
+impl fmt::Display for EvidenceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::DimensionMismatch { left, right } => write!(
+                formatter,
+                "cosine vectors differ in length: {left} and {right}"
+            ),
+            Self::ZeroMagnitude => formatter.write_str("cosine vector has zero magnitude"),
+            Self::NonFinite => formatter.write_str("cosine vector is not finite"),
+            Self::InputTooLong { maximum, observed } => write!(
+                formatter,
+                "similarity input length {observed} exceeds maximum {maximum}"
+            ),
+            Self::CollectionTooLong { maximum, observed } => write!(
+                formatter,
+                "similarity collection length {observed} exceeds maximum {maximum}"
+            ),
+            Self::InsufficientEvidence { total_weight } => write!(
+                formatter,
+                "weighted similarity has no effective evidence (total weight {total_weight})"
+            ),
+            Self::Composition(inner) => {
+                write!(formatter, "weighted similarity composition: {inner}")
+            }
+        }
+    }
+}
+
+impl core::error::Error for EvidenceError {}
+
+impl From<WeightedError> for EvidenceError {
+    fn from(value: WeightedError) -> Self {
+        Self::Composition(value)
+    }
+}
+
+impl From<CosineError> for EvidenceError {
+    fn from(value: CosineError) -> Self {
+        match value {
+            CosineError::DimensionMismatch { left, right } => {
+                Self::DimensionMismatch { left, right }
+            }
+            CosineError::ZeroMagnitude => Self::ZeroMagnitude,
+            CosineError::NonFinite => Self::NonFinite,
+        }
+    }
+}
+
+/// One component's outcome inside a checked composition.
+///
+/// The fields are private because an outcome is a report about a measurement,
+/// not a value the caller may rewrite: a caller that could set `score` to
+/// `Some(1.0)` on a refused component would defeat the whole contract.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct ComponentOutcome {
+    /// Position of this component in the composition's weight list.
+    index: usize,
+    /// The component's configured weight.
+    weight: f64,
+    /// The measured score, or [`None`] when the component refused.
+    score: Option<f64>,
+    /// Why this component refused, or [`None`] when it measured.
+    reason: Option<EvidenceError>,
+}
+
+impl ComponentOutcome {
+    /// Position of this component in the composition's weight list.
+    #[must_use]
+    pub const fn index(&self) -> usize {
+        self.index
+    }
+
+    /// The component's configured weight.
+    #[must_use]
+    pub const fn weight(&self) -> f64 {
+        self.weight
+    }
+
+    /// The measured score, or [`None`] when the component refused.
+    ///
+    /// [`None`] is the refusal signal, distinct from a measured `0.0`.
+    #[must_use]
+    pub const fn score(&self) -> Option<f64> {
+        self.score
+    }
+
+    /// Why this component refused, or [`None`] when it measured.
+    #[must_use]
+    pub const fn reason(&self) -> Option<&EvidenceError> {
+        self.reason.as_ref()
+    }
+
+    /// Whether this component produced a usable measurement.
+    ///
+    /// A refused component is never applicable, so it cannot contribute to an
+    /// acceptance decision at any threshold.
+    #[must_use]
+    pub const fn is_applicable(&self) -> bool {
+        self.score.is_some() && self.reason.is_none()
+    }
+}
+
+/// One component's evidence: either a measurement or a refusal.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum Evidence {
+    /// A finite measured score.
+    Measured {
+        /// The measured score.
+        value: f64,
+    },
+    /// The component could not be measured.
+    Refused {
+        /// Why it could not be measured.
+        reason: EvidenceError,
+    },
+}
+
+impl Evidence {
+    /// Wraps a measured score as applicable evidence.
+    #[must_use]
+    pub const fn measured(value: f64) -> Self {
+        Self::Measured { value }
+    }
+
+    /// Wraps a refusal as inapplicable evidence.
+    #[must_use]
+    pub const fn refused(reason: EvidenceError) -> Self {
+        Self::Refused { reason }
+    }
+
+    /// Whether this evidence can be composed.
+    ///
+    /// A refusal is not applicable: unavailable evidence never acquires the
+    /// authority of a measurement.
+    #[must_use]
+    pub const fn is_applicable(&self) -> bool {
+        matches!(self, Self::Measured { .. })
+    }
+
+    /// The measured score, or [`None`] for a refusal.
+    #[must_use]
+    pub const fn value(&self) -> Option<f64> {
+        match *self {
+            Self::Measured { value } => Some(value),
+            Self::Refused { .. } => None,
+        }
     }
 }
 
@@ -98,11 +387,18 @@ impl Similarity for EditDistance {
     }
 }
 
-/// A set-based Jaccard similarity scorer.
+/// A set-based Jaccard similarity scorer with no length ceiling.
 ///
 /// `T` is intentionally constrained only by equality. The implementation
 /// treats duplicate entries as one set member and uses bounded pairwise scans,
 /// so it needs no hashing policy or third-party dependency.
+///
+/// The pairwise scans are `O(n²)` in the element count and this scorer declares
+/// no ceiling, so it is reachable from the default `core` build with no bound at
+/// all on caller-supplied input. That is stated here rather than left to be
+/// discovered: prefer [`BoundedJaccard`] whenever the input comes from outside
+/// the process, and use this type for small in-process sets whose size you
+/// control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Jaccard<T = String> {
@@ -111,7 +407,10 @@ pub struct Jaccard<T = String> {
 }
 
 impl<T> Jaccard<T> {
-    /// Creates a Jaccard scorer for collections of `T`.
+    /// Creates an unbounded Jaccard scorer for collections of `T`.
+    ///
+    /// For untrusted input use [`BoundedJaccard::new`], which refuses before
+    /// the quadratic scan rather than after it.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -126,32 +425,116 @@ impl<T> Default for Jaccard<T> {
     }
 }
 
+/// A Jaccard scorer that refuses an over-budget element count.
+///
+/// The budget is charged against the *input* length, before dedup and before
+/// the pairwise scans, so a hostile input is refused without paying the `O(n²)`
+/// cost it was trying to cause. The refusal names the limit and the observed
+/// count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BoundedJaccard<T = String> {
+    /// The largest element count accepted per side.
+    maximum_length: usize,
+    /// Keeps the collection element type in the scorer's type identity.
+    marker: PhantomData<fn() -> T>,
+}
+
+impl<T> BoundedJaccard<T> {
+    /// Creates a scorer that accepts at most `maximum_length` elements per side.
+    #[must_use]
+    pub const fn new(maximum_length: usize) -> Self {
+        Self {
+            maximum_length,
+            marker: PhantomData,
+        }
+    }
+
+    /// Returns the maximum element count accepted per side.
+    #[must_use]
+    pub const fn maximum_length(&self) -> usize {
+        self.maximum_length
+    }
+}
+
+impl<T> Default for BoundedJaccard<T> {
+    fn default() -> Self {
+        Self::new(256)
+    }
+}
+
+/// Scores two sets, or refuses an over-budget element count.
+///
+/// The empty/empty, empty/non-empty, and full-overlap cases are handled before
+/// the scans, so the budget is charged against what the caller supplied rather
+/// than against dedup work.
+fn bounded_jaccard_score<T: PartialEq>(
+    maximum_length: usize,
+    left: &[T],
+    right: &[T],
+) -> Result<f64, EvidenceError> {
+    let observed = left.len().max(right.len());
+    if observed > maximum_length {
+        return Err(EvidenceError::CollectionTooLong {
+            maximum: maximum_length,
+            observed,
+        });
+    }
+    Ok(jaccard_unit(left, right))
+}
+
+impl<T: PartialEq> CheckedSimilarity for BoundedJaccard<T> {
+    type Value = [T];
+
+    fn try_score(&self, left: &Self::Value, right: &Self::Value) -> Result<f64, EvidenceError> {
+        bounded_jaccard_score(self.maximum_length, left, right)
+    }
+}
+
+impl<T: PartialEq> Similarity for BoundedJaccard<T> {
+    type Value = [T];
+
+    fn score(&self, left: &Self::Value, right: &Self::Value) -> f64 {
+        bounded_jaccard_score(self.maximum_length, left, right).unwrap_or(0.0)
+    }
+}
+
 impl<T: PartialEq> Similarity for Jaccard<T> {
     type Value = [T];
 
     fn score(&self, left: &Self::Value, right: &Self::Value) -> f64 {
-        if left.is_empty() && right.is_empty() {
-            return 1.0;
-        }
-        if left.is_empty() || right.is_empty() {
-            return 0.0;
-        }
-
-        let left_unique = unique_count(left);
-        let right_unique = unique_count(right);
-        let intersection = left
-            .iter()
-            .enumerate()
-            .filter(|item| {
-                let index = item.0;
-                let value = item.1;
-                !left[..index].iter().any(|previous| previous == value)
-                    && right.iter().any(|candidate| candidate == value)
-            })
-            .fold(0.0, |count, _| count + 1.0);
-        let union = left_unique + right_unique - intersection;
-        unit_score(intersection / union)
+        jaccard_unit(left, right)
     }
+}
+
+/// Scores two collections as sets, with no input ceiling.
+///
+/// `PartialEq` is the only law used, so `T` must have equivalence-like
+/// equality: a type whose equality is not reflexive — `f64` with `NaN`, say —
+/// does not satisfy set-identity laws and is outside the supported domain.
+/// Callers scoring floats should map them to an ordered key first.
+fn jaccard_unit<T: PartialEq>(left: &[T], right: &[T]) -> f64 {
+    if left.is_empty() && right.is_empty() {
+        return 1.0;
+    }
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+
+    let left_unique = unique_count(left);
+    let right_unique = unique_count(right);
+    let intersection = left
+        .iter()
+        .enumerate()
+        .filter(|item| {
+            let index = item.0;
+            let value = item.1;
+            !left[..index].iter().any(|previous| previous == value)
+                && right.iter().any(|candidate| candidate == value)
+        })
+        .fold(0.0, |count, _| count + 1.0);
+    let union = left_unique + right_unique - intersection;
+    unit_score(intersection / union)
 }
 
 /// Structural path similarity that ignores volatile identifiers and hashes.
@@ -179,6 +562,19 @@ impl Similarity for PathSimilarity {
         let right = normalized_path(right);
         sequence_similarity(&left, &right)
     }
+}
+
+/// Whether two paths are exactly equal, with no normalization applied.
+///
+/// [`PathSimilarity`] deliberately drops numeric, hash-suffixed and
+/// class-prefixed segments, so two genuinely different paths can score `1.0`.
+/// That makes the score a structural heuristic, not an identity claim, and this
+/// is the exact comparison a caller reaches for when it needs one. Never
+/// substitute a heuristic score for this, and never use this as a canonical
+/// key: a path that differs only in a dropped segment is a different path.
+#[must_use]
+pub fn is_exact_path_match(left: &str, right: &str) -> bool {
+    left == right
 }
 
 /// A normalized four-coordinate bounding box.
@@ -422,18 +818,39 @@ impl Cosine {
         }
         Ok((dot / magnitudes).clamp(-1.0, 1.0))
     }
+
+    /// Maps raw cosine similarity into the shared `[0.0, 1.0]` contract with
+    /// `(raw + 1) / 2`.
+    ///
+    /// This is the one named mapping between the two domains. It is affine and
+    /// monotone, so ordering is preserved: an opposite pair reads `0.0`, an
+    /// orthogonal pair `0.5`, and an identical direction `1.0`. No threshold is
+    /// shifted by it — a caller comparing against a raw-cosine threshold must
+    /// call [`Self::try_score`], not this.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same [`EvidenceError`] refusal variants as the vector
+    /// scorers, for the same reasons.
+    pub fn normalized_score(&self, left: &[f32], right: &[f32]) -> Result<f64, EvidenceError> {
+        let raw = self.try_score(left, right)?;
+        Ok(unit_score((raw + 1.0) / 2.0))
+    }
 }
 
 impl Similarity for Cosine {
     type Value = [f32];
 
+    /// Returns the normalized `(raw + 1) / 2` score, so an opposite pair reads
+    /// `0.0` rather than escaping the trait's documented `[0.0, 1.0]` interval
+    /// as `-1.0`. Use [`Cosine::try_score`] for the raw mathematical domain.
     fn score(&self, left: &Self::Value, right: &Self::Value) -> f64 {
-        self.try_score(left, right).unwrap_or(0.0)
+        self.normalized_score(left, right).unwrap_or(0.0)
     }
 }
 
 /// Why a weighted scorer could not be constructed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum WeightedError {
     /// No component scorer was supplied.
@@ -447,6 +864,13 @@ pub enum WeightedError {
     WeightSumExceedsOne,
     /// The acceptance threshold was outside the finite unit interval.
     InvalidThreshold,
+    /// A checked composition's scorer and weight lists had different lengths.
+    WeightCountMismatch {
+        /// Number of configured scorers.
+        scorers: usize,
+        /// Number of configured weights.
+        weights: usize,
+    },
 }
 
 impl fmt::Display for WeightedError {
@@ -465,6 +889,10 @@ impl fmt::Display for WeightedError {
             Self::InvalidThreshold => {
                 formatter.write_str("weighted similarity threshold must be in [0.0, 1.0]")
             }
+            Self::WeightCountMismatch { scorers, weights } => write!(
+                formatter,
+                "weighted similarity has {scorers} scorers and {weights} weights"
+            ),
         }
     }
 }
@@ -521,9 +949,24 @@ impl<Value: ?Sized> Weighted<Value> {
     }
 
     /// Scores the pair and reports whether it reaches the configured threshold.
+    ///
+    /// This is the infallible adapter: a refused component reaches it as `0.0`,
+    /// so an unavailable component satisfies a threshold of `0.0`. Prefer
+    /// [`Self::try_is_accepted`], which retains the refusal.
     #[must_use]
     pub fn is_accepted(&self, left: &Value, right: &Value) -> bool {
         self.score(left, right) >= self.threshold
+    }
+
+    /// Returns the sum of the configured component weights.
+    ///
+    /// A total below `1.0` is a deliberate evidence deficit: the composition's
+    /// maximum is that total, not `1.0`, and it is never renormalized away.
+    #[must_use]
+    pub fn total_weight(&self) -> f64 {
+        self.components
+            .iter()
+            .fold(0.0, |sum, component| sum + component.0)
     }
 }
 
@@ -562,6 +1005,276 @@ impl<Value: ?Sized> Similarity for Weighted<Value> {
             sum + (component.0 * unit_score(component.1.score(left, right)))
         });
         unit_score(total)
+    }
+}
+
+/// A scorer that reports a refusal instead of folding it into a number.
+///
+/// [`Similarity`] is the numeric seam every scorer can satisfy; this is the
+/// checked seam a scorer that can refuse also satisfies, so a composition can
+/// carry the refusal rather than losing it at a trait-object boundary.
+pub trait CheckedSimilarity {
+    /// The value type accepted by this scorer.
+    type Value: ?Sized;
+
+    /// Scores the pair, or reports why it could not be measured.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvidenceError`] naming the reason the measurement is
+    /// unavailable. Every refusal is a variant of that enum; none of them is a
+    /// score.
+    fn try_score(&self, left: &Self::Value, right: &Self::Value) -> Result<f64, EvidenceError>;
+}
+
+impl CheckedSimilarity for EditDistance {
+    type Value = str;
+
+    fn try_score(&self, left: &Self::Value, right: &Self::Value) -> Result<f64, EvidenceError> {
+        EditDistance::try_score(self, left, right).map_err(EvidenceError::from)
+    }
+}
+
+impl CheckedSimilarity for Cosine {
+    type Value = [f32];
+
+    /// Returns the raw `[-1, 1]` cosine, not the normalized mapping, so a
+    /// caller reading a weighted composition sees the domain it declared. Use
+    /// [`Cosine::normalized_score`] for the unit interval.
+    fn try_score(&self, left: &Self::Value, right: &Self::Value) -> Result<f64, EvidenceError> {
+        Cosine::try_score(self, left, right).map_err(EvidenceError::from)
+    }
+}
+
+impl CheckedSimilarity for Geometry {
+    type Value = [f64; 4];
+
+    fn try_score(&self, left: &Self::Value, right: &Self::Value) -> Result<f64, EvidenceError> {
+        Ok(Similarity::score(self, left, right))
+    }
+}
+
+/// A weighted composition that preserves each component's refusal.
+///
+/// This is the authority-facing path. [`Weighted`] stays available for callers
+/// that want a bare number and accept that a refusal reads as `0.0`;
+/// [`CheckedEvidence`] keeps "could not measure" distinct from "measured
+/// zero" all the way to the acceptance decision.
+///
+/// ```
+/// use lgwks_std::similarity::{CheckedEvidence, CheckedSimilarity, EditDistance};
+///
+/// let policy = CheckedEvidence::new(
+///     vec![Box::new(EditDistance::new(3))],
+///     vec![1.0],
+///     0.0,
+/// )?;
+/// // The input is over budget, so it is refused rather than scored 0.0.
+/// let verdict = policy.verdict("four", "four")?;
+/// assert!(!verdict.is_accepted);
+/// assert_eq!(verdict.score, None);
+/// assert_eq!(verdict.refusals()[0].index, 0);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub struct CheckedEvidence<Value: ?Sized> {
+    /// The component scorers, in configuration order.
+    scorers: Vec<Box<dyn CheckedSimilarity<Value = Value>>>,
+    /// Each component's bounded non-negative weight, parallel to `scorers`.
+    weights: Vec<f64>,
+    /// The score at or above which a measured verdict accepts.
+    threshold: f64,
+}
+
+impl<Value: ?Sized> CheckedEvidence<Value> {
+    /// Creates a checked composition from parallel scorer and weight lists.
+    ///
+    /// The two lists must be the same length. Weights are validated exactly as
+    /// [`Weighted::new`] validates them: finite, non-negative, totalling at
+    /// most `1.0`. A total of `0.0` is accepted here and refused at evaluation
+    /// time as [`EvidenceError::InsufficientEvidence`], so the policy can be
+    /// constructed and inspected while still never producing a verdict from
+    /// nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WeightedError::Empty`] for no components,
+    /// [`WeightedError::InvalidWeight`] for a negative or non-finite weight,
+    /// [`WeightedError::WeightSumExceedsOne`] for a total above `1.0`, and
+    /// [`WeightedError::InvalidThreshold`] for a threshold outside `[0, 1]`.
+    pub fn new(
+        scorers: Vec<Box<dyn CheckedSimilarity<Value = Value>>>,
+        weights: Vec<f64>,
+        threshold: f64,
+    ) -> Result<Self, WeightedError> {
+        if scorers.is_empty() {
+            return Err(WeightedError::Empty);
+        }
+        if scorers.len() != weights.len() {
+            return Err(WeightedError::WeightCountMismatch {
+                scorers: scorers.len(),
+                weights: weights.len(),
+            });
+        }
+        if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+            return Err(WeightedError::InvalidThreshold);
+        }
+        let mut total = 0.0;
+        for (index, weight) in weights.iter().enumerate() {
+            if !weight.is_finite() || *weight < 0.0 {
+                return Err(WeightedError::InvalidWeight { index });
+            }
+            total += weight;
+        }
+        if total > 1.0 {
+            return Err(WeightedError::WeightSumExceedsOne);
+        }
+        Ok(Self {
+            scorers,
+            weights,
+            threshold,
+        })
+    }
+
+    /// Returns the acceptance threshold.
+    #[must_use]
+    pub const fn threshold(&self) -> f64 {
+        self.threshold
+    }
+
+    /// Returns the sum of the configured component weights.
+    #[must_use]
+    pub fn total_weight(&self) -> f64 {
+        self.weights.iter().fold(0.0, |sum, weight| sum + weight)
+    }
+
+    /// Evaluates every component and returns the verdict.
+    ///
+    /// When any component refuses, the verdict's `score` is [`None`] and
+    /// `is_accepted` is `false` at every threshold, including `0.0`: a refusal
+    /// is not a measurement of zero. Each refusal is attributed to its
+    /// component index and retains its typed reason.
+    ///
+    /// The surviving weights are not renormalized. A missing component leaves an
+    /// evidence deficit rather than inflating its neighbours to cover the gap,
+    /// so geometry alone can never acquire a missing identity field's authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvidenceError::InsufficientEvidence`] when the weight total is
+    /// zero: there is nothing to weigh, which is not a measurement of zero
+    /// similarity.
+    pub fn verdict(&self, left: &Value, right: &Value) -> Result<EvidenceVerdict, EvidenceError> {
+        let total_weight = self.total_weight();
+        if total_weight <= 0.0 {
+            return Err(EvidenceError::InsufficientEvidence {
+                total_weight: total_weight.to_bits(),
+            });
+        }
+
+        let mut outcomes = Vec::with_capacity(self.scorers.len());
+        let mut measured_total = 0.0;
+        let mut refusals = 0_usize;
+        for (index, scorer) in self.scorers.iter().enumerate() {
+            let weight = self.weights[index];
+            match scorer.try_score(left, right) {
+                Ok(score) => {
+                    measured_total += weight * score;
+                    outcomes.push(ComponentOutcome {
+                        index,
+                        weight,
+                        score: Some(score),
+                        reason: None,
+                    });
+                }
+                Err(reason) => {
+                    refusals = refusals.saturating_add(1);
+                    outcomes.push(ComponentOutcome {
+                        index,
+                        weight,
+                        score: None,
+                        reason: Some(reason),
+                    });
+                }
+            }
+        }
+
+        if refusals > 0 {
+            return Ok(EvidenceVerdict {
+                score: None,
+                is_accepted: false,
+                outcomes,
+            });
+        }
+        let score = unit_score(measured_total);
+        Ok(EvidenceVerdict {
+            score: Some(score),
+            is_accepted: score >= self.threshold,
+            outcomes,
+        })
+    }
+}
+
+impl<Value: ?Sized> core::fmt::Debug for CheckedEvidence<Value> {
+    /// Reports the composition policy rather than the scorer identities.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CheckedEvidence")
+            .field("components", &self.scorers.len())
+            .field("weights", &self.weights)
+            .field("threshold", &self.threshold)
+            .finish()
+    }
+}
+
+/// A checked composition's verdict: what was measured, what refused, and
+/// whether the pair is accepted.
+///
+/// The score is [`None`] whenever any component refused, so a refusal is never
+/// read as a number, and the composition is then not accepted at any
+/// threshold, including `0.0`.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct EvidenceVerdict {
+    /// The composed score, or [`None`] when any component refused.
+    score: Option<f64>,
+    /// Whether the composition reaches the configured threshold.
+    ///
+    /// Always `false` when the score is [`None`].
+    is_accepted: bool,
+    /// Each component's index, weight, score, and refusal reason.
+    outcomes: Vec<ComponentOutcome>,
+}
+
+impl EvidenceVerdict {
+    /// Returns the composed score, or [`None`] when any component refused.
+    ///
+    /// [`None`] is the refusal signal: it is distinct from a measured `0.0`,
+    /// and it never satisfies a threshold.
+    #[must_use]
+    pub const fn score(&self) -> Option<f64> {
+        self.score
+    }
+
+    /// Whether the composition reaches the configured threshold.
+    ///
+    /// Always `false` when [`Self::score`] is [`None`].
+    #[must_use]
+    pub const fn is_accepted(&self) -> bool {
+        self.is_accepted
+    }
+
+    /// Returns each component's outcome, in composition order.
+    #[must_use]
+    pub fn outcomes(&self) -> &[ComponentOutcome] {
+        &self.outcomes
+    }
+
+    /// Returns only the components that refused, in composition order.
+    #[must_use]
+    pub fn refusals(&self) -> Vec<&ComponentOutcome> {
+        self.outcomes
+            .iter()
+            .filter(|outcome| outcome.reason.is_some())
+            .collect()
     }
 }
 
