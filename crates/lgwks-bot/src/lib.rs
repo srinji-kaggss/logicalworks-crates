@@ -212,6 +212,10 @@ mod registry;
 /// composes those with the budget, the authority, the intent and any remote
 /// deduplication contract.
 pub mod retry;
+/// The canonical PR-review task: pin a subject, publish at that commit, and
+/// verify the publication independently.
+#[cfg(all(feature = "script", feature = "process"))]
+pub mod review;
 /// Async runtime surface (feature `rt`): owned `Runtime`, bounded fan-out,
 /// timers, channels, and opt-in drivers.
 #[cfg(feature = "rt")]

@@ -727,12 +727,16 @@ impl Gh {
     /// when it answered with something that is not a pull request.
     #[cfg(feature = "process")]
     pub async fn snapshot(&self, pull: &PullRequest) -> Result<PrSnapshot, GhError> {
-        let path = format!("repos/{}/pulls/{}", pull.repository.as_str(), pull.number);
+        let path = format!(
+            "repos/{}/pulls/{}",
+            pull.repository().as_str(),
+            pull.number()
+        );
         let args = self.args_for(&["--method", "GET", &path]);
         let outcome = self.call(&args).await?;
         outcome.require_success("reading the pull request head")?;
         let snapshot = outcome.parse_json::<PrSnapshot>()?;
-        if snapshot.head_sha.len() != SHA_HEX_LEN || snapshot.base_sha.len() != SHA_HEX_LEN {
+        if snapshot.head_sha().len() != SHA_HEX_LEN || snapshot.base_sha().len() != SHA_HEX_LEN {
             return Err(GhError::Response {
                 path,
                 reason: String::from("the pull request has no 40-character head and base"),
@@ -779,8 +783,8 @@ impl Gh {
     pub async fn read_reviews(&self, pull: &PullRequest) -> Result<Vec<ReviewRecord>, GhError> {
         let path = format!(
             "repos/{}/pulls/{}/reviews",
-            pull.repository.as_str(),
-            pull.number
+            pull.repository().as_str(),
+            pull.number()
         );
         let args = self.args_for(&["--method", "GET", &path, "--paginate"]);
         let outcome = self.call(&args).await?;
@@ -840,8 +844,8 @@ impl Gh {
         })?;
         let path = format!(
             "repos/{}/pulls/{}/reviews",
-            pull.repository.as_str(),
-            pull.number
+            pull.repository().as_str(),
+            pull.number()
         );
         // The staged file is this call's to remove. It is bound here, so it is
         // removed on every path out of this function, including the one where
@@ -1207,6 +1211,45 @@ impl std::error::Error for GhError {
             | Self::MalformedResponse { .. }
             | Self::PayloadNotSent { .. }
             | Self::Staging { .. } => None,
+        }
+    }
+}
+
+impl From<GhError> for crate::script::FlowError {
+    /// A GitHub adapter failure inside a flow is a located failure carrying the
+    /// adapter's own typed vocabulary as its cause.
+    ///
+    /// The certainty is preserved rather than flattened: an `EffectIndeterminate`
+    /// stays one, so a flow's retry decision still knows that the publication
+    /// may have happened. This is the same mapping the verb path makes.
+    fn from(source: GhError) -> Self {
+        let certainty = match source {
+            // The child started and did not settle: it may have reached
+            // GitHub, so the effect is unsettled rather than undelivered. A
+            // flow's retry policy reads that distinction, and a retry of an
+            // unsettled publication is the duplicate this crate refuses to make.
+            #[cfg(feature = "process")]
+            GhError::Process(crate::rt::process::ProcessRunError::AfterStart { .. }) => {
+                crate::error::DispatchCertainty::Unsettled
+            }
+            _ => crate::error::DispatchCertainty::NotDelivered,
+        };
+        let cause = match certainty {
+            crate::error::DispatchCertainty::Unsettled => {
+                crate::error::BotError::EffectIndeterminate {
+                    domain: String::from("gh"),
+                    cause: source.to_string(),
+                }
+            }
+            _ => crate::error::BotError::DomainError {
+                domain: String::from("gh"),
+                certainty,
+                cause: source.to_string(),
+            },
+        };
+        crate::script::FlowError::Bot {
+            at: std::sync::Arc::from(""),
+            source: Box::new(cause),
         }
     }
 }
