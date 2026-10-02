@@ -18,6 +18,16 @@
 //! they bound the fan-out, retry only retryable failures, apply the deadline
 //! per attempt, stop on the first failure and honour cancellation. They build
 //! their idempotency key as `tenant/item` by hand.
+//!
+//! # One disclosed difference in the located error
+//!
+//! The `host` way stops the fan-out by cancelling its own host from inside the
+//! failing body. That cancellation is an event the body's `within` observes, so
+//! the run reports `Cancelled` at `<task>/<step>`, while a way that stops at the
+//! enclosing fan-out reports the underlying located failure. Bounds, attempts,
+//! stop-on-first-failure and liveness match the `script` way; only the error
+//! text differs, and it differs because the host way cancels where the flow
+//! way stops. This is an idiom in the example, not a `Host::run` contract.
 
 use std::collections::HashSet;
 use std::io::Write;
