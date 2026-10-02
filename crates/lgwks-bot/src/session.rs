@@ -4041,53 +4041,76 @@ impl Session {
                     target: node_id,
                 });
             };
-            match kind {
-                NodeKind::Say { text } => {
-                    self.speak(&node_id, &text)?;
-                    let Some(target) = self.flow.edge_targets(&node_id).into_iter().next() else {
-                        return Err(BotError::MissingTransition { node: node_id });
-                    };
-                    self.current = Some(target);
-                }
-                NodeKind::Ask { options, .. } => {
-                    self.record_prompt(&node_id, &options)?;
-                    return Ok(());
-                }
-                NodeKind::Branch {
-                    when,
-                    then,
-                    otherwise,
-                    ..
-                } => {
-                    self.current = Some(if when.evaluate(&self.scope)? {
-                        then
-                    } else {
-                        otherwise
-                    });
-                }
-                // The two terminal kinds that emit nothing before they end.
-                // Both read the outcome from the document rather than
-                // constructing it from the node, so a declared outcome is
-                // executed here and not only checked at load.
-                NodeKind::Handoff { .. } | NodeKind::End => self.finish(&node_id)?,
-                NodeKind::Refer { text, .. } => {
-                    // The text is emitted before the outcome is set, and the
-                    // only declared outcome a `refer` node can carry is the
-                    // referral itself — validation refuses anything else — so
-                    // this text is never spoken for an outcome that
-                    // contradicts it.
-                    self.speak(&node_id, &text)?;
-                    self.finish(&node_id)?;
-                }
-                NodeKind::Route { dispatch, fallback } => {
-                    self.current = Some(if self.last_utterance.is_some() {
-                        dispatch
-                    } else {
-                        fallback
-                    });
-                }
+            if self.step(&node_id, kind)? {
+                return Ok(());
             }
         }
+    }
+
+    /// Advances one node. Answers whether the session must stop and wait.
+    ///
+    /// A helper rather than the `match` inside the drive loop: as one block the
+    /// loop carried the charge, the lookup and every arm's write as one
+    /// statement, and the thing that actually varies -- what a node kind does --
+    /// was indistinguishable from the thing that does not -- what every node
+    /// does first.
+    ///
+    /// `Ok(true)` means the session is waiting for an answer, which is the only
+    /// kind that stops the loop short of an outcome.
+    fn step(&mut self, node_id: &str, kind: NodeKind) -> Result<bool, BotError> {
+        lgwks_std::trace::warn!(
+            operation = "step",
+            "operation refused its request; the typed error carries the facts"
+        );
+        match kind {
+            NodeKind::Say { text } => {
+                self.speak(node_id, &text)?;
+                let Some(target) = self.flow.edge_targets(node_id).into_iter().next() else {
+                    return Err(BotError::MissingTransition {
+                        node: node_id.to_owned(),
+                    });
+                };
+                self.current = Some(target);
+            }
+            NodeKind::Ask { options, .. } => {
+                self.record_prompt(node_id, &options)?;
+                return Ok(true);
+            }
+            NodeKind::Branch {
+                when,
+                then,
+                otherwise,
+                ..
+            } => {
+                self.current = Some(if when.evaluate(&self.scope)? {
+                    then
+                } else {
+                    otherwise
+                });
+            }
+            // The two terminal kinds that emit nothing before they end.
+            // Both read the outcome from the document rather than
+            // constructing it from the node, so a declared outcome is
+            // executed here and not only checked at load.
+            NodeKind::Handoff { .. } | NodeKind::End => self.finish(node_id)?,
+            NodeKind::Refer { text, .. } => {
+                // The text is emitted before the outcome is set, and the
+                // only declared outcome a `refer` node can carry is the
+                // referral itself — validation refuses anything else — so
+                // this text is never spoken for an outcome that
+                // contradicts it.
+                self.speak(node_id, &text)?;
+                self.finish(node_id)?;
+            }
+            NodeKind::Route { dispatch, fallback } => {
+                self.current = Some(if self.last_utterance.is_some() {
+                    dispatch
+                } else {
+                    fallback
+                });
+            }
+        }
+        Ok(false)
     }
 
     /// End the session with the outcome the document gives one terminal node.
