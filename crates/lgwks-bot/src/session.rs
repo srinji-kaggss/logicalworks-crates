@@ -1639,16 +1639,21 @@ fn declared_template_reads(
     text: &str,
     field: &'static str,
 ) -> Result<BTreeSet<String>, BotError> {
-    let compiled = CompiledTemplate::compile(text).map_err(|_placeholder| {
-        // `compile` already refuses with `MalformedTemplate`, naming the
-        // placeholder `"<runtime>"` because it does not know its caller. The
-        // only thing this adds is which node and field it was reached through,
-        // so the cause carries no detail that is not already in the variant.
-        BotError::MalformedTemplate {
-            node: node_id.to_owned(),
-            field,
+    // `compile` refuses with `MalformedTemplate` naming the placeholder
+    // `"<runtime>"`, because it does not know its caller. The only thing this
+    // adds is which node and field it was reached through, so the match is on
+    // the variant rather than a map that would discard it: there is no detail in
+    // the cause to keep, and a map would read as though there were.
+    let compiled = match CompiledTemplate::compile(text) {
+        Ok(compiled) => compiled,
+        Err(BotError::MalformedTemplate { .. }) => {
+            return Err(BotError::MalformedTemplate {
+                node: node_id.to_owned(),
+                field,
+            });
         }
-    })?;
+        Err(other) => return Err(other),
+    };
     let mut names = BTreeSet::new();
     for part in compiled.parts() {
         if let TemplatePart::Variable(name) = *part
@@ -1947,14 +1952,17 @@ fn validate_template(
         operation = "validate_template",
         "operation refused its request; the typed error carries the facts"
     );
-    let compiled = CompiledTemplate::compile(template).map_err(|_placeholder| {
-        // As above: the cause is the same variant with a placeholder node, and
-        // the caller knows the real one.
-        BotError::MalformedTemplate {
-            node: node_id.to_owned(),
-            field,
+    // As above: matching the variant keeps the substitution explicit.
+    let compiled = match CompiledTemplate::compile(template) {
+        Ok(compiled) => compiled,
+        Err(BotError::MalformedTemplate { .. }) => {
+            return Err(BotError::MalformedTemplate {
+                node: node_id.to_owned(),
+                field,
+            });
         }
-    })?;
+        Err(other) => return Err(other),
+    };
     let mut literals = 0usize;
     for part in compiled.parts() {
         match *part {

@@ -5170,10 +5170,16 @@ impl EcsBot {
                 cause: DispatchError::Journal(cause),
             })?;
         let tail = effects.journal().tail();
-        let recovered_events =
-            u64::try_from(committed.len()).map_err(|_| BotError::EffectRefused {
-                cause: DispatchError::Journal(JournalError::Exhausted),
-            })?;
+        // A committed count that cannot be a sequence number means the journal
+        // holds more events than the sequence can name, which is exhaustion.
+        let recovered_events = match u64::try_from(committed.len()) {
+            Ok(count) => count,
+            Err(_too_many_events) => {
+                return Err(BotError::EffectRefused {
+                    cause: DispatchError::Journal(JournalError::Exhausted),
+                });
+            }
+        };
         if recovered_events != tail.sequence() {
             return Err(BotError::EffectRefused {
                 cause: DispatchError::Journal(JournalError::SnapshotStale {

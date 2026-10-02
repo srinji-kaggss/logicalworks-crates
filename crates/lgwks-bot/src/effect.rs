@@ -202,7 +202,13 @@ impl Id128 {
         // `u128`. The arm exists because `from_str_radix` has an error channel
         // and this crate has no `unwrap` to spend on a proof it cannot state to
         // the compiler.
-        let raw = u128::from_str_radix(text, 16).map_err(|_| IdError::WrongLength { len: 32 })?;
+        // The length is checked above, so the only way this fails is a
+        // non-hexadecimal character. `ParseIntError` would say "invalid digit
+        // found in string", which names neither the field nor the width.
+        let raw = match u128::from_str_radix(text, 16) {
+            Ok(raw) => raw,
+            Err(_not_hex) => return Err(IdError::WrongLength { len: 32 }),
+        };
         match NonZeroU128::new(raw) {
             Some(value) => Ok(Self(value)),
             None => Err(IdError::Zero),

@@ -403,12 +403,18 @@ fn read_frame(
     if let FramePiece::Interrupted = read_exact_classified(reader, &mut head)? {
         return Ok(FrameRead::Done(ScanStop::Torn(offset)));
     }
-    let event: EffectEvent = from_bytes::<EffectEvent, WireError>(&payload).map_err(|_| {
-        JournalError::Corrupt(Box::new(Corruption::new(
-            index,
-            CorruptionKind::Undecodable,
-        )))
-    })?;
+    // The frame's bytes are corrupt, and `index` is where in the journal that
+    // frame was. `WireError`'s own text describes the codec rather than the
+    // journal, so it would point a reader at the reader.
+    let event: EffectEvent = match from_bytes::<EffectEvent, WireError>(&payload) {
+        Ok(event) => event,
+        Err(_undecodable) => {
+            return Err(JournalError::Corrupt(Box::new(Corruption::new(
+                index,
+                CorruptionKind::Undecodable,
+            ))));
+        }
+    };
     let head_digest = chain(position, &event)?;
     let recomputed = JournalPosition {
         sequence: position.sequence().saturating_add(1),

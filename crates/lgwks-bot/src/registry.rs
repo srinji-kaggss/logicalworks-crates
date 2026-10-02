@@ -249,10 +249,13 @@ fn parenthesized<'a>(identifier: &'a str, prefix: &str) -> Option<&'a str> {
 
 /// Parse a threshold argument as `T`, reporting the whole identifier on failure.
 fn parse_bound<T: std::str::FromStr>(argument: &str, identifier: &str) -> Result<T, BotError> {
+    // `ParseError`'s text is "invalid digit found in string" or "cannot parse
+    // integer from empty string". Neither names the argument the caller has to
+    // fix, which is what `identifier` is for.
     argument
         .trim()
         .parse::<T>()
-        .map_err(|_| BotError::UnknownCondition {
+        .map_err(|_not_this_type| BotError::UnknownCondition {
             condition: identifier.to_owned(),
         })
 }
