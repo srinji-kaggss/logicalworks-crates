@@ -1236,6 +1236,29 @@ impl Effects {
     }
 }
 
+impl Effects {
+    /// Records a freshly appended outcome and folds it into the in-memory view.
+    ///
+    /// A helper rather than three statements in the arm: confirming the outcome,
+    /// accepting its position and folding it are one transition, and a reader of
+    /// `ensure_outcome` had to know that all three happen before the outcome
+    /// counts. The other two arms settle the same outcome by a different route,
+    /// so the three are now one named step with one exit.
+    fn record_new_outcome(
+        &mut self,
+        key: EffectKey,
+        evidence: EffectEvidence,
+        required: DurabilityPromise,
+        acknowledgment: DurableAck,
+    ) -> Result<(), JournalError> {
+        self.confirm_outcome(key, evidence, required, acknowledgment)?;
+        let position = self.outcome_position(key, evidence)?;
+        self.accept_position(&EffectEvent::OutcomeObserved { key, evidence }, position)?;
+        self.fold_outcome(key, evidence);
+        Ok(())
+    }
+}
+
 impl fmt::Debug for Effects {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Effects")

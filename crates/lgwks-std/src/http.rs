@@ -1335,50 +1335,65 @@ mod tests {
         let handle = thread::spawn(move || -> std::io::Result<()> {
             for (status, body) in replies {
                 let (mut stream, _) = listener.accept()?;
-                let mut request = vec![0u8; 4096];
-                let mut head = Vec::new();
-                loop {
-                    let n = stream.read(&mut request)?;
-                    head.extend_from_slice(&request[..n]);
-                    if head.windows(4).any(|w| w == b"\r\n\r\n") {
-                        break;
-                    }
-                }
-                let header_end = head
-                    .windows(4)
-                    .position(|w| w == b"\r\n\r\n")
-                    // `position` reports the delimiter's first byte, so the
-                    // header end is four past it; in a 4096-byte buffer that
-                    // cannot approach `usize::MAX`.
-                    .map(|position| position.saturating_add(4))
-                    .unwrap_or(head.len());
-                let text = String::from_utf8_lossy(&head[..header_end]);
-                let content_length = text
-                    .lines()
-                    .filter_map(|line| line.split_once(':'))
-                    .find(|entry| entry.0.eq_ignore_ascii_case("content-length"))
-                    .and_then(|(_, value)| value.trim().parse::<usize>().ok())
-                    .unwrap_or(0);
-                // `header_end` is either the delimiter's end or the whole
-                // buffer, so it never exceeds `head.len()`.
-                let mut received = head.len().saturating_sub(header_end);
-                while received < content_length {
-                    let n = stream.read(&mut request)?;
-                    head.extend_from_slice(&request[..n]);
-                    received = received.saturating_add(n);
-                }
-                let full = String::from_utf8_lossy(&head);
-                let echoed = full.contains(ECHO);
-                let payload = if echoed { ECHO.to_owned() } else { body };
-                let reply = format!(
-                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
-                    payload.len()
-                );
-                stream.write_all(reply.as_bytes())?;
+                serve_one(&mut stream, status, body)?;
             }
             Ok(())
         });
         Ok((port, handle))
+    }
+
+    /// Reads one request off `stream` and writes the canned reply.
+    ///
+    /// A helper rather than the accept loop's body: as one block the loop carried
+    /// five fallible operations across the header read, the body read and the
+    /// reply write, and the header/body split is the part a reader of this fixture
+    /// actually needs to understand. It is now named, and the reply decision -- an
+    /// `ECHO` marker in the request wins over the canned body -- is one `if`.
+    #[cfg(test)]
+    fn serve_one(
+        stream: &mut std::net::TcpStream,
+        status: &'static str,
+        body: String,
+    ) -> std::io::Result<()> {
+        let mut request = vec![0u8; 4096];
+        let mut head = Vec::new();
+        loop {
+            let n = stream.read(&mut request)?;
+            head.extend_from_slice(&request[..n]);
+            if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let header_end = head
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            // `position` reports the delimiter's first byte, so the header end is
+            // four past it; in a 4096-byte buffer that cannot approach `usize::MAX`.
+            .map(|position| position.saturating_add(4))
+            .unwrap_or(head.len());
+        let text = String::from_utf8_lossy(&head[..header_end]);
+        let content_length = text
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|entry| entry.0.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        // `header_end` is either the delimiter's end or the whole buffer, so it
+        // never exceeds `head.len()`.
+        let mut received = head.len().saturating_sub(header_end);
+        while received < content_length {
+            let n = stream.read(&mut request)?;
+            head.extend_from_slice(&request[..n]);
+            received = received.saturating_add(n);
+        }
+        let full = String::from_utf8_lossy(&head);
+        let echoed = full.contains(ECHO);
+        let payload = if echoed { ECHO.to_owned() } else { body };
+        let reply = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+            payload.len()
+        );
+        stream.write_all(reply.as_bytes())
     }
 
     /// Joins the canned server, surfacing its refusal or a panic inside it.

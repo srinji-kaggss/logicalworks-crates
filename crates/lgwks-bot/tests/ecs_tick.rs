@@ -889,6 +889,25 @@ fn socket_source_on_the_shipped_runtime() -> TestResult {
     use lgwks_bot::rt::io::{AsyncReadExt, AsyncWriteExt};
     use lgwks_bot::rt::net::{TcpListener, TcpStream};
 
+    /// The domain name this source's refusals carry.
+    const DOMAIN: &str = "test::socket_source";
+
+    /// A failure on a socket operation that certainly delivered nothing.
+    ///
+    /// One mapping rather than three copies: `poll` reads the listener's address,
+    /// connects a client and accepts a connection, and each of those refused the
+    /// same way -- `NotDelivered`, because no byte had gone out when any of them
+    /// failed. Naming it is what lets the one arm that is genuinely different --
+    /// the write, which fails `Unsettled` because the connection existed -- read
+    /// as the exception it is.
+    fn not_delivered(error: std::io::Error) -> BotError {
+        BotError::DomainError {
+            domain: DOMAIN.to_owned(),
+            certainty: DispatchCertainty::NotDelivered,
+            cause: error.to_string(),
+        }
+    }
+
     /// A source that talks to itself over loopback.
     struct SocketSource {
         /// The listening end, bound before the tick starts.
@@ -908,23 +927,14 @@ fn socket_source_on_the_shipped_runtime() -> TestResult {
                 "operation refused its request; the typed error carries the facts"
             );
             call.0.check(Observe::required_caps(self))?;
-            let domain = "test::socket_source".to_owned();
+            let domain = DOMAIN;
             let peer = self
                 .listener
                 .local_addr()
-                .map_err(|error| BotError::DomainError {
-                    domain: domain.clone(),
-                    certainty: DispatchCertainty::NotDelivered,
-                    cause: error.to_string(),
-                })?;
-            let mut client =
-                TcpStream::connect(peer)
-                    .await
-                    .map_err(|error| BotError::DomainError {
-                        domain: domain.clone(),
-                        certainty: DispatchCertainty::NotDelivered,
-                        cause: error.to_string(),
-                    })?;
+                .map_err(|error| not_delivered(error))?;
+            let mut client = TcpStream::connect(peer)
+                .await
+                .map_err(|error| not_delivered(error))?;
             if let Err(error) = client.write_all(b"7").await {
                 // A write that failed on an established connection is the
                 // `Unsettled` arm, not `NotDelivered`: the connection existed,
@@ -936,22 +946,14 @@ fn socket_source_on_the_shipped_runtime() -> TestResult {
                     cause: error.to_string(),
                 });
             }
-            let (mut server, _origin) =
-                self.listener
-                    .accept()
-                    .await
-                    .map_err(|error| BotError::DomainError {
-                        domain: "test::socket_source".to_owned(),
-                        certainty: DispatchCertainty::NotDelivered,
-                        cause: error.to_string(),
-                    })?;
+            let (mut server, _origin) = self
+                .listener
+                .accept()
+                .await
+                .map_err(|error| not_delivered(error))?;
             let mut byte = [0u8; 1];
             if let Err(error) = server.read_exact(&mut byte).await {
-                return Err(BotError::DomainError {
-                    domain: "test::socket_source".to_owned(),
-                    certainty: DispatchCertainty::NotDelivered,
-                    cause: error.to_string(),
-                });
+                return Err(not_delivered(error));
             }
             Ok(match byte[0] {
                 b'7' => 7,
