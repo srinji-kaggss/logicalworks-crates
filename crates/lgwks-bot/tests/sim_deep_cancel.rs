@@ -199,12 +199,15 @@ fn trace_on_small_stack(seed: u64) -> TestResult {
 /// child cannot report a hang from the stack it was hung on.
 fn run_child(seed: u64, run: u32) -> Result<String, Box<dyn std::error::Error>> {
     let executable = std::env::current_exe()?;
-    // The parent's pid keeps concurrent runs (another worktree, another
-    // checkout of the same test) from reading each other's trace.
-    let trace = std::env::temp_dir().join(format!(
-        "lgwks-bot-sim-deep-cancel-{}-{seed}-{run}.trace",
-        std::process::id()
-    ));
+    // The build's own scratch directory plus the start instant keep concurrent
+    // runs (another worktree, another checkout of the same test) from reading
+    // each other's trace; a pid would not, because the OS reuses it.
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos())
+        .unwrap_or_default();
+    let trace = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("sim-deep-cancel-{started}-{seed}-{run}.trace"));
     discard(&trace)?;
     let mut child = std::process::Command::new(executable)
         .args([TEST_NAME, "--exact", "--nocapture"])
