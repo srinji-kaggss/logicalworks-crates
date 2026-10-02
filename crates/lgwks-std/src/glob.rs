@@ -27,6 +27,11 @@
 
 use core::fmt;
 
+/// The rolling DP rows the matcher retains: the previous token's row and the
+/// one being written. A third would buy nothing, since only these two are ever
+/// read.
+const ROLLING_ROWS: usize = 2;
+
 /// Selects the syntax accepted while compiling a glob.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -112,10 +117,34 @@ enum Token {
 /// Pattern storage is O(M), including the token list and compiled class
 /// intervals. A caller that matches many paths should retain this value and a
 /// [`GlobScratch`] to amortize compilation and matching allocations.
+///
+/// # Sharing one pattern across threads
+///
+/// A `GlobPattern` is `Send + Sync` and holds no caller data, so one compiled
+/// pattern serves any number of concurrent callers. The mutable half is
+/// [`GlobScratch`], which [`is_match_with`](Self::is_match_with) takes by
+/// `&mut`: the pattern is what is shared, and the scratch is what a caller owns.
+/// Two callers sharing a scratch share one caller's path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GlobPattern {
     /// The compiled sequence of matching transitions.
     tokens: Vec<Token>,
+}
+
+/// The compile-time assertion that one pattern is shareable across threads.
+///
+/// A compile error, not a runtime note, if a future edit gives [`GlobPattern`]
+/// interior mutability or a non-`Send` field: the whole sharing contract above
+/// is that claim. It is asserted once here, and the same assertion is written
+/// independently against the published type by
+/// `tests/sim_shared_policy_tiers.rs`, which is what makes this one a check
+/// rather than a note. The test module below carries the matching runtime
+/// probe.
+#[cfg(test)]
+const fn assert_shared_across_threads() {
+    const fn assert<T: Send + Sync>() {}
+    assert::<GlobPattern>();
+    assert::<GlobScratch>();
 }
 
 impl GlobPattern {
@@ -171,6 +200,17 @@ impl GlobPattern {
     pub fn is_match_with(&self, path: &str, scratch: &mut GlobScratch) -> bool {
         scratch.match_path(self, path)
     }
+
+    /// Returns the number of compiled tokens.
+    ///
+    /// Pattern storage is `O(M)` in the pattern length, and this is the count
+    /// that sizes it. It is reported separately from the `O(N)` matching
+    /// scratch so a caller sizing its own memory is not misled by a whole-call
+    /// figure that blends the two.
+    #[must_use]
+    pub const fn token_count(&self) -> usize {
+        self.tokens.len()
+    }
 }
 
 /// Reusable matching memory owned by the caller.
@@ -200,6 +240,50 @@ impl GlobScratch {
             next: Vec::new(),
             work: Work::new(),
         }
+    }
+
+    /// Returns the retained byte capacity of the scalar index.
+    ///
+    /// This is `O(N)` in the path's scalar count and is the largest single
+    /// buffer the scratch owns; `char` is four bytes on every target this
+    /// workspace supports.
+    #[must_use]
+    pub fn scalar_capacity(&self) -> usize {
+        self.scalars.capacity()
+    }
+
+    /// Returns the retained byte capacity of each rolling row.
+    ///
+    /// There are exactly two, and each is one byte per scalar plus the
+    /// terminating position.
+    #[must_use]
+    pub fn row_capacity(&self) -> usize {
+        self.previous.capacity()
+    }
+
+    /// Returns the number of rolling rows the scratch retains.
+    ///
+    /// Always two. It is reported rather than assumed so a caller accounting
+    /// for its own `O(N)` storage has the count from the type instead of from
+    /// the module's prose.
+    #[must_use]
+    pub const fn row_count(&self) -> usize {
+        ROLLING_ROWS
+    }
+
+    /// Returns the total retained capacity across all three buffers.
+    ///
+    /// The scratch is caller-owned and outlives the call, so a caller sizing
+    /// its own steady-state memory needs the scalar index, the two rolling
+    /// rows, and this sum reported separately from the pattern's own `O(M)`
+    /// storage ([`GlobPattern::token_count`]).
+    #[must_use]
+    pub fn storage_bytes(&self) -> usize {
+        self.scalars
+            .capacity()
+            .saturating_mul(core::mem::size_of::<char>())
+            .saturating_add(self.previous.capacity())
+            .saturating_add(self.next.capacity())
     }
 
     /// Runs the two-row automaton, counting each inspected state as work.
@@ -908,6 +992,44 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn a_compiled_pattern_is_shareable_across_threads_by_construction() {
+        // The claim on `GlobPattern` is not a comment: the assertion is
+        // checked at compile time, and this is what keeps it from being
+        // deleted as an uncalled constant. It also proves the pattern is
+        // shareable across real OS threads, not only that the bounds hold.
+        assert_shared_across_threads();
+        let compiled = GlobPattern::compile_with_dialect(SHARED_PATTERN, GlobDialect::Legacy);
+        let Ok(pattern) = compiled else {
+            return;
+        };
+        let shared = std::sync::Arc::new(pattern);
+        let observed: Vec<bool> = (0..8)
+            .map(|index| {
+                let shared = std::sync::Arc::clone(&shared);
+                match std::thread::Builder::new()
+                    .name(format!("glob-share-{index}"))
+                    .stack_size(64 * 1024)
+                    .spawn(move || {
+                        let mut scratch = GlobScratch::new();
+                        let path = format!("a/{}b7z", "x/".repeat(index));
+                        shared.is_match_with(&path, &mut scratch)
+                    }) {
+                    Ok(joined) => joined.join().unwrap_or(false),
+                    Err(_) => false,
+                }
+            })
+            .collect();
+        assert!(
+            observed.iter().all(|matched| *matched),
+            "every caller must match the shared pattern identically: {observed:?}"
+        );
+    }
+
+    /// The pattern the shareability test above matches with, kept next to it so
+    /// the two cannot drift apart.
+    const SHARED_PATTERN: &str = "*a**/b[0-9]?";
 
     #[test]
     fn scratch_capacity_is_reused_without_per_token_row_allocations() -> Result<(), PatternError> {

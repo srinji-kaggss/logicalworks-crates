@@ -38,6 +38,16 @@ use std::time::Duration;
 ///
 /// All fields are plain data so policies can cross crate boundaries (JSON,
 /// manifests, config files) without dragging an executor along.
+///
+/// # Sharing one policy across threads
+///
+/// A `RetryPolicy` is `Send + Sync` and holds no interior mutability, no clock
+/// and no counter, so one policy serves any number of concurrent callers and
+/// every one of them gets the same delay for the same `(attempt, entropy)`.
+/// The public fields are settable, so "share it" means share it before
+/// configuring it, or freeze the value in a binding the callers borrow; a
+/// caller that mutates a policy another thread is reading has made a data race
+/// in its own program, which is what the field mutability buys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RetryPolicy {
@@ -300,6 +310,63 @@ mod tests {
         assert!(
             !RetryPolicy::new(1, Duration::ZERO, Duration::ZERO).should_retry(0, Duration::ZERO),
             "a zero deadline refuses at equality"
+        );
+    }
+
+    #[test]
+    fn delay_work_is_bounded_independently_of_the_attempt_value() {
+        let policy = RetryPolicy::new(u32::MAX, Duration::from_nanos(1), Duration::MAX);
+        // The shift-and-compare form performs a fixed number of machine
+        // operations whatever `attempt` is. An implementation that looped
+        // `attempt` times, or that walked the doubling sequence, would take
+        // measurably longer at `u32::MAX` than at `0`.
+        //
+        // The oracle is a ratio, not an absolute: it holds on a loaded host as
+        // long as the constant factor is nowhere near `2^32`.
+        let repeats = 100_000_u64;
+        let mut timings = [(0_u32, std::time::Duration::ZERO); 4];
+        for (index, attempt) in [0_u32, 31, 1_000, u32::MAX].into_iter().enumerate() {
+            let start = std::time::Instant::now();
+            let mut observed = Duration::ZERO;
+            for step in 0..repeats {
+                // A changing base keeps the optimizer from hoisting the call
+                // out of the loop; the value is consumed below.
+                observed = policy.delay(attempt, step);
+            }
+            assert_eq!(
+                observed,
+                policy.delay(attempt, repeats.saturating_sub(1)),
+                "the timed loop must finish on the last computed value"
+            );
+            timings[index] = (attempt, start.elapsed());
+        }
+        let baseline = timings[0].1.as_nanos();
+        for (attempt, elapsed) in timings {
+            assert!(
+                elapsed.as_nanos() <= baseline.saturating_mul(4).saturating_add(1_000_000),
+                "attempt {attempt} took {elapsed:?} against {baseline}ns at attempt 0; \
+                 the work must not scale with the numeric attempt value"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ordinary_sequence_is_unchanged_for_an_existing_consumer() {
+        // A caller that migrates nothing must see the same sequence it saw
+        // before, from the same constructor, across the ordinary attempt range.
+        let policy = RetryPolicy::new(6, Duration::from_millis(100), Duration::from_secs(60));
+        let observed: Vec<Duration> = (0..6).map(|attempt| policy.delay(attempt, 0)).collect();
+        let expected = [
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+            Duration::from_millis(400),
+            Duration::from_millis(800),
+            Duration::from_millis(1_600),
+            Duration::from_millis(3_200),
+        ];
+        assert_eq!(
+            observed, expected,
+            "the ordinary doubling sequence must be unchanged"
         );
     }
 }

@@ -102,6 +102,31 @@ Each of these was a shipped defect. Treat the list as the spec.
 
 ## lgwks_std
 
+- **INV-STD-SIM-2** A score and a refusal are different things. Raw cosine keeps
+  its `[-1, 1]` domain and the shared `Similarity` contract reads it through the
+  explicit, named `(raw + 1) / 2` mapping, so every implementation behind the
+  trait satisfies its `[0.0, 1.0]` and identity laws. A weight total below `1.0`
+  is a declared evidence deficit and is never renormalized or presented as
+  identity. Any refused component withdraws the whole composed verdict at every
+  threshold including `0.0`, is attributed to its component index, and its
+  weight is not redistributed onto a surviving neighbour; all-zero effective
+  evidence is an explicit `InsufficientEvidence`. The infallible `Similarity`
+  and `Weighted::is_accepted` methods remain lossy for source compatibility and
+  are not the authority-facing path. An edit or set budget is charged against
+  the *normalized* unit — the lower-case-expanded scalar count — and a set
+  budget is charged before dedup and before the quadratic scan. The lossy path
+  heuristic is not reachable as an exact-match proof. · why: #160 S1/S2/S4 ·
+  enforced by: `tests/similarity_evidence_contract.rs`
+  (`cosine_trait_impl_stays_inside_the_documented_unit_interval`,
+  `a_refused_component_is_not_accepted_at_threshold_zero`,
+  `all_zero_weight_refuses_regardless_of_threshold`,
+  `typed_refusals_carry_component_identity_through_composition`,
+  `bounded_jaccard_refuses_before_the_quadratic_scan`,
+  `budget_refusal_precedes_amplification_and_is_measurable`,
+  `the_edit_budget_charges_the_normalized_unit_not_the_raw_scalar_count`,
+  `the_heuristic_path_score_is_never_an_exact_match_proof`), `similarity.rs`
+  (`every_evidence_error_variant_is_exercised_by_a_test`), and
+  `tests/sim_similarity_sweep.rs` (`the_same_seed_replays_to_the_same_trace`)
 - **INV-STD-SIM-1** The documented `Geometry::score` accepts both `[f64; 4]`
   and `BoundingBox`. · why: #160 S3 · enforced by:
   `tests/similarity_public_api.rs`
@@ -164,6 +189,21 @@ Each of these was a shipped defect. Treat the list as the spec.
   `http::tests::eof_probe_timeout_preserves_stage_and_class`,
   `http::tests::legal_header_bytes_and_repeated_values_are_preserved`, and
   `http::tests::redirect_loop_refuses_at_the_configured_limit`
+- **INV-STD-HTTP-2** The HTTP body ceiling is a measured bound, not an
+  assertion. The body reader is handed one window of `min(remaining,
+  READ_CHUNK_BYTES)` per call, never the declared body length; retained `Vec`
+  capacity clamps to the declared ceiling at non-power-of-two sizes; retained
+  header value bytes and the live heap held while a `Response` is alive are
+  countable separately; the peak heap of a call is dominated by the engine's
+  fixed buffering rather than by the body, so a preview of a body thousands of
+  times the ceiling peaks within a fixed slack of a call whose body is at the
+  ceiling; and an eager reader that reserves the declared length and drains the
+  transport is measurably outside that bound. · why: #163 A5 · enforced by:
+  `http::tests::the_read_window_is_a_fixed_chunk_and_capacity_is_clamped_to_the_ceiling`,
+  `tests/sim_http.rs` (`seeded_ceiling_families_match_the_declared_outcome`,
+  `a_seeded_torn_transport_is_never_a_complete_body`,
+  `two_tenants_on_one_endpoint_stay_isolated`), and `tests/http_alloc.rs`
+  (`the_read_path_retains_the_ceiling_not_the_body`).
 - **INV-STD-ONLINE-1** Resolved reachability candidates share one monotonic
   connection budget and at most 64 addresses are attempted; each is offered an
   equal share of what remains, so a blackholed candidate cannot starve the
@@ -172,8 +212,9 @@ Each of these was a shipped defect. Treat the list as the spec.
   the literal `is_online` endpoints share the same budget. The Boolean result
   remains a TCP heuristic, not application health. · why: #163 N4 · enforced
   by: `online::tests::address_candidates_share_one_remaining_budget`,
-  `online::tests::a_blackholed_candidate_does_not_starve_the_next` and
-  `online::tests::resolver_delay_is_outside_the_connection_budget`
+  `online::tests::a_blackholed_candidate_does_not_starve_the_next`,
+  `online::tests::resolver_delay_is_outside_the_connection_budget` and
+  `online::tests::a_whole_probe_fits_one_wall_clock_budget`
 - **INV-GLOB-1** Glob matching is anchored and operates on Unicode scalar
   values without normalization: `?` and classes consume one scalar, `/` is
   excluded from `?`, `*`, and all classes (including negated classes), `*`
@@ -184,9 +225,29 @@ Each of these was a shipped defect. Treat the list as the spec.
   component-invalid `**` as typed errors. Compilation is O(M); each token
   transition is O(N) over the finite Unicode scalar alphabet; reusable
   scratch retains one scalar index and two rolling rows in O(N), with no row
-  allocation per token. · enforced by: `glob::tests` work-growth, scratch
-  capacity, Unicode, strict-error and exact double-star cases, plus
-  `tests/glob_public.rs`
+  allocation per token. A compiled `GlobPattern` carries no caller data and
+  holds no interior mutability, so one pattern serves any number of concurrent
+  callers; the mutable half is the caller-owned `GlobScratch`, which
+  `is_match_with` takes by `&mut`. · enforced by: `glob::tests` work-growth,
+  scratch capacity, Unicode, strict-error and exact double-star cases, plus
+  `tests/glob_public.rs` and `tests/sim_shared_policy_tiers.rs`
+  (`one_shared_matcher_evidence_policy_and_retry_policy_serve_every_tier`,
+  `the_shared_values_are_reachable_through_an_arc_clone`)
+- **INV-STD-SHARED-POLICY** One compiled matcher, one evidence policy and one
+  retry policy serve 100, 1 000 and 10 000 concurrent callers with answers
+  bit-identical to the single-threaded reference, zero divergence at every tier,
+  and memory that does not scale with the caller count. Each caller owns its
+  scratch; the shared values carry no caller data. A host that cannot reach a
+  tier reports the requested tier and the level reached. A checked composition
+  is `Send + Sync` because it is immutable and its components are, so the
+  sharing claim is on the types rather than inferred from a run that did not
+  crash; two tenants' policies over one input never cross. · why: the reviewer
+  note on #154 item 7 and the hyperscale axis · enforced by:
+  `tests/sim_shared_policy_tiers.rs`
+  (`one_shared_matcher_evidence_policy_and_retry_policy_serve_every_tier`,
+  `the_shared_values_are_reachable_through_an_arc_clone`),
+  `glob::tests::a_compiled_pattern_is_shareable_across_threads_by_construction`,
+  and `tests/sim_tenant_isolation.rs`
 - **INV-CODEC-1** JSON and RON text/slice decoders preserve input borrowing
   where their decoders support it; escaped text that needs allocation is not
   reported as borrowed. RON writer failures distinguish serialization from I/O
@@ -202,8 +263,12 @@ Each of these was a shipped defect. Treat the list as the spec.
   alignment, and archived pointer width are observable via
   `wire::format_descriptor`; callers bind those properties and their own schema
   version before persisting or exchanging bytes. Structural validation does not
-  establish application validity or schema identity. · why: #167 · enforced by:
-  `tests/wire_consumer.rs`
+  establish application validity or schema identity. A retained fixture pins the
+  schema and format and is read on every target whose format matches; a
+  feature-unification probe selects an alternate pointer width and proves the
+  descriptor and the emitted bytes move with it. · why: #167 · enforced by:
+  `tests/wire_consumer.rs`, `tests/wire_fixture.rs`, `tests/sim_wire.rs` and
+  `tests/wire_feature_unification.rs`
 - **INV-PATTERN-SAFE** A single regex search costs worst-case `O(m * n)`, but
   complete greedy match, split, and replacement iteration may cost `O(m * n^2)`;
   iterator laziness does not promise prefix-only search work. Checked patterns
@@ -323,6 +388,22 @@ Each of these was a shipped defect. Treat the list as the spec.
 
 - **INV-DOC-1** Bare `//!` intra-doc links break when `lib.rs` also doc-comments the
   `mod`; use reference definitions. · enforced by: rustdoc `-D warnings` in CI
+- **INV-DOC-2** A documentation claim about a capability is stated at the level
+  the evidence supports, names the test that observes it, and names its owning
+  issue when the property is not yet exercised. A claim resolved to a file and
+  a line, a green job, or a passing unit suite is not evidence of the
+  behavioural property; and an admitted dependency edge, a build check and an
+  external observation are three different things. · why: #155 and #170 found
+  prose describing a journal with no lock, a registry that accepted duplicates,
+  a 33-grammar matrix that has 28, a lint split that does not partition its
+  corpus, and a portability verdict that rested on a three-OS *build* · enforced
+  by: the `doc-citations` lane, which runs
+  python3 scripts/check-doc-citations.py (citation layer: a cited line must exist
+  and still read as a person last checked it). The claim layer is
+  docs/std-ast-deps-closure-matrix.md: every one of the twenty lgwks_std
+  modules, lgwks_ast and lgwks_deps carries a state from the fixed vocabulary
+  exercised / present / unexercised-gap / assurance-gap /
+  admitted-not-implemented, plus the test that exists
 
 ## Governance as code
 
@@ -367,10 +448,17 @@ Each of these was a shipped defect. Treat the list as the spec.
   an exit of zero is reported as an exit of zero, never as a completed task.
   Concurrent verb calls on one `sys::Process` share one bounded slot pool,
   claimed before the fork, so a burst of calls never forks past the ceiling.
+  On a non-Unix target the supervised process surface is a typed pre-fork
+  refusal (`io::ErrorKind::Unsupported`, `DispatchCertainty::Refused`) rather
+  than a second spawn path. The drop-time group kill repeats only while the
+  unreaped leader pins the group id, so a member forked at the instant of the
+  kill can still outlive the leader on macOS/BSD (Linux aborts such a fork);
+  no bounded fix preserves INV-BOT-12, because after the leader is reaped the
+  numeric id may be reused and the cleanup owner is observation-only by design.
   · why: #151 sys part, T05/T19/T20/T35 · enforced by:
   `tests/sys_process_binding.rs` (including
   `concurrent_calls_on_one_process_share_its_ceiling`), `tests/sim_process.rs`,
-  and `rt::supervise::tests`
+  `tests/sys_process_portable.rs` (non-Unix), and `rt::supervise::tests`
 - **INV-BOT-19** After a delivered group signal, an `EPERM` from a further
   `killpg` against the still-present, unreaped group is an observation that the
   group is present, not a refused termination: cleanup stays pending and is
@@ -380,6 +468,46 @@ Each of these was a shipped defect. Treat the list as the spec.
   enforced by:
   `rt::supervise::tests::an_unsignalable_present_group_stays_pending_rather_than_failed`
   and `rt::supervise::tests::an_unexpected_signal_error_is_a_failed_cleanup`
+- **INV-BOT-21** A structural inspection reads and parses the subject's bytes
+  and never executes them: no compile, import, build-script evaluation,
+  dependency install, shell invocation or dynamic-library load of the subject,
+  and the subject's instructions remain data. It parses through `lgwks_ast`
+  (never a second parser) and walks with budgets on **separate** axes — source
+  bytes, nodes, depth, work, retained findings and emitted output — refusing
+  before avoidable amplification. Its verdict is typed: a supported and
+  complete clean scope is `Clean`, and an unsupported grammar or rule set, an
+  unconfirmable declared version, a budget exhaustion or parse recovery, and an
+  infrastructure failure are distinct non-clean arms. Rule support is reported
+  per rule and is separate from grammar support; a `Clean` result claims only
+  that the configured rules did not match, never that the subject is safe. The
+  one operation is reachable through the same registry/admission path every
+  other domain uses — a [`Query`](crate::verb::Query) over supplied bytes
+  (`domain::inspect::Inspector`) and an [`Observe`](crate::verb::Observe)
+  source that reads the artifact under `bot.fs` (`domain::inspect::Subject`) —
+  and as a `Host`-run `Task`, and every door returns the operation's own report;
+  the artifact-read source is admitted, or refused, exactly like any other
+  capped domain.
+  · why: #150 (R8) · enforced by:
+  `tests/inspect_non_execution.rs` (independent filesystem, process-liveness and
+  TCP-listener observers over a hostile corpus),
+  `a_parser_fault_is_an_infrastructure_failure_not_a_clean_report`,
+  `an_eager_traversal_mutant_fails_the_node_budget_oracle`,
+  `a_subject_executing_mutant_fails_the_non_execution_oracle`,
+  `both_entry_points_produce_the_identical_inspection`,
+  `a_spec_naming_the_inspection_source_without_bot_fs_is_an_admission_need`,
+  `two_tenants_inspecting_the_same_artifact_stay_isolated`,
+  `host_bounded_admission_holds_at_every_tier`,
+  `retained_counters_grow_with_the_input`,
+  `a_match_longer_than_the_preview_budget_is_truncated_with_its_full_span_kept`,
+  `tests/inspect.rs::every_budget_has_its_own_refusal`,
+  `tests/inspect.rs::invalid_syntax_is_incomplete_and_never_a_clean_report`,
+  `tests/inspect.rs::a_declared_language_version_is_undecidable_not_clean`,
+  `tests/inspect.rs::the_report_round_trips_and_preserves_identity_spans_and_coverage`,
+  `sim_seeded_subjects_agree_across_every_entry_point`,
+  `sim_same_seed_same_trace_hash`,
+  `sim_seeded_multitenant_reports_stay_isolated`,
+  and `tests/sim_inspect.rs` (`sim_seeded_fragments_match_the_rule_model`,
+  `sim_same_seed_same_trace`, `sim_node_budget_tiers_refuse_deterministically`)
 - **INV-BOT-20** A task run on a `Host` takes at most one admission permit per
   host for its whole tree: a nested `host.run` from inside a body that already
   holds that host's permit is charged to the parent, so nesting at any depth
@@ -391,6 +519,18 @@ Each of these was a shipped defect. Treat the list as the spec.
   disposition, output or located error, and every report says no external
   effect is known. · why: #87 step 1 (T01–T04, T36) · enforced by:
   `tests/task_front_door.rs` and `tests/sim_task.rs`
+- **INV-BOT-70** The task front door's nine-axis evidence: a drawn scale of
+  concurrent `Host::run` never exceeds the admission ceiling and returns every
+  permit (100/1,000/10,000 tiers with recovery); two hosts with different
+  tenants over one shared task name and step path produce distinct step keys,
+  reports and budgets under concurrency; dropping or cancelling a suspended run
+  releases every permit and leaves nothing in flight; and task names, inputs
+  and host limits are accepted or refused exactly on their declared boundaries.
+  · why: #203 nine-axis review · enforced by:
+  `tests/sim_task_axes.rs` (`saturation_conserves_permits`,
+  `saturation_reaches_100_1000_and_10000_with_recovery`,
+  `two_tenants_stay_isolated`, `a_dropped_run_releases_everything`,
+  `names_inputs_and_limits`) and `examples/compare_orchestration.rs`
 
 - **INV-BOT-80** A GitHub publication is reported only from an independent
   read-back, never from a client's exit code. `ReviewOutcome::Published` is
@@ -407,8 +547,15 @@ Each of these was a shipped defect. Treat the list as the spec.
   Verification compares subject, body and state and ignores the application
   marker. A staged payload carries a name no two concurrent publications share,
   taken from `lgwks_std::random` under `ephemeral`; a build without that feature
-  refuses to publish rather than reuse a name the OS recycles. · why: #151, #87
-  step 6 (PR-06, PR-07, PR-09) · enforced by:
+  refuses to publish rather than reuse a name the OS recycles. A review read is
+  bounded by the declared `domain::gh::MAX_REVIEWS_PER_PULL` rather than by
+  `--paginate`'s patience: a list longer than the ceiling is refused whole with
+  `GhError::ReviewCeiling`, because a prefix that decoded cleanly is
+  indistinguishable from the whole history and would report "no matching
+  review" for a review on a page nobody read. A build without the `process`
+  feature refuses every call with `GhError::NoRunner` and returns no snapshot,
+  review list or review id at all. · why: #151, #87 step 6 (PR-06, PR-07,
+  PR-09) · enforced by:
   `tests/pr_review_journey.rs` (`a_lost_response_is_reconciled_by_reading_back_and_never_reposted`,
   `a_loss_that_cannot_be_reconciled_stays_unknown_and_still_does_not_repost`,
   `a_moved_head_is_a_typed_refusal_and_publishes_nothing`,
@@ -417,7 +564,17 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_client_that_never_starts_is_a_definite_non_effect_and_is_not_reconciled`,
   `two_identities_on_one_repository_stay_isolated`) and
   `tests/sim_review_pr.rs` (`subject_r64`, `publication_r64`, `identity_r64`,
-  `same_seed_same_trace_hash`, `every_outcome_is_reachable_in_the_family`)
+  `same_seed_same_trace_hash`, `every_outcome_is_reachable_in_the_family`),
+  `tests/sim_review_path.rs` (`verified_and_not_observed_r32`,
+  `gh_exit_failures_r32`, `deadline_stop_r32`,
+  `head_moved_between_snapshot_and_publish_r32`,
+  `malformed_and_oversized_answers_r32`,
+  `a_publication_the_ceiling_cannot_verify_stays_unknown`,
+  `same_seed_same_trace_hash_r32`, `saturation_r32`,
+  `two_tenants_on_one_pull_request_r32`) and
+  `tests/gh_binding.rs` (`a_review_list_past_the_ceiling_is_refused_not_truncated`,
+  `a_review_list_exactly_at_the_ceiling_is_read`,
+  `a_malformed_review_list_is_refused_rather_than_decoded_into_a_partial_answer`)
 
 ## Open questions for the Director
 
