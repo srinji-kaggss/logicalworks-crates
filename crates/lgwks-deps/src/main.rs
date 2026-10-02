@@ -467,9 +467,11 @@ fn audit_invariant_root(
 
 /// Prints every refusal and returns the verdict's exit code.
 ///
-/// Exit 0 when `[policy] enforce = false`: the register has stood enforcement
-/// down deliberately, so the refusals are reported as adoption guidance and the
-/// build still passes. Exit 2 otherwise.
+/// Always exit 2 when there is at least one refusal. Adoption mode no longer
+/// returns success from this path: an `enforce = false` register on a tree that
+/// carries refusals is itself refused, so arriving here with a non-empty list
+/// means the gate found something, and the note explains which posture it was
+/// read under.
 fn report_refusals(
     root: &Path,
     register: &Contract,
@@ -494,12 +496,12 @@ fn report_refusals(
     if !register.enforce {
         writeln!(
             err,
-            "\nNOTE  [policy] enforce = false, so builds still pass. This is adoption-only."
+            "\nNOTE  [policy] enforce = false does not make these pass. Adoption mode \
+             is a reviewable posture over a *clean* tree; a stand-down over a violating \
+             tree is refused above, so fix the named edges or set enforce = true."
         )?;
-        Ok(ExitCode::SUCCESS)
-    } else {
-        Ok(ExitCode::from(2))
     }
+    Ok(ExitCode::from(2))
 }
 
 /// Prints the admitted-edge summary and returns success.
@@ -613,10 +615,20 @@ impl<'a> InvariantReport<'a> {
     }
 
     /// Computes the combined check exit code for this invariant report.
+    ///
+    /// Both halves are now pure functions of the refusal count. `enforce =
+    /// false` no longer reaches this verdict: `audit_direct` refuses a
+    /// stand-down outright when the tree carries violations, so an
+    /// adoption-mode register on a violating tree arrives here with a
+    /// non-empty list and exits 2 exactly as `enforce = true` would. Keeping
+    /// the boolean out of the comparison is what makes the two directions
+    /// symmetric — no token remains whose flip changes the verdict.
     fn check_exit_code(self, register: &Contract, refusals: &[Refusal]) -> ExitCode {
-        let dependencies_pass = refusals.is_empty() || !register.enforce;
-        let invariants_pass = self.audit.refusals().is_empty() || !self.register.enforce;
-        if dependencies_pass && invariants_pass {
+        // The two policies are read for nothing: the adoption stand-down is
+        // already a refusal in `refusals`. Named so the signature stays
+        // explicit about which registers it was handed.
+        let _policies = (register.enforce, self.register.enforce);
+        if refusals.is_empty() && self.audit.refusals().is_empty() {
             ExitCode::SUCCESS
         } else {
             ExitCode::from(2)
@@ -816,7 +828,7 @@ fn write_register_detail(err: &mut impl io::Write, register: &str, detail: &str)
 /// One function rather than a branch at each call site: the human and machine
 /// renderings differ in bytes and must not differ in *verdict*, and the only way
 /// to guarantee that is for a single place to compute it. Both modes exit 0 for
-/// an admitted tree, 0 for refusals under `enforce = false`, and 2 otherwise.
+/// an admitted tree and 2 for any refusal, including a stand-down of refusals.
 fn report_check(
     root: Option<&Path>,
     register: Option<&Contract>,
@@ -838,11 +850,12 @@ fn report_check(
         if error.is_some() {
             return Ok(ExitCode::from(2));
         }
-        // `enforce = false` is adoption-only: refusals are reported and the
-        // build still passes, exactly as in the human path. The two modes must
-        // not disagree about what an exit code means.
-        let enforced = register.is_none_or(|contract| contract.enforce);
-        return Ok(if refusals.is_empty() || !enforced {
+        // The verdict is the refusal count alone. `enforce = false` is no
+        // longer consulted: an adoption-mode register on a violating tree is
+        // itself refused by `audit_direct`, so it arrives here with a non-empty
+        // `refusals` and exits 2 — identical to the human path, which is the
+        // property `--json` must never lose.
+        return Ok(if refusals.is_empty() {
             ExitCode::SUCCESS
         } else {
             ExitCode::from(2)

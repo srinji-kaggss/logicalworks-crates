@@ -96,9 +96,14 @@ pub struct Entry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Contract {
-    /// When false, refusals are reported as warnings instead of failing the
-    /// build. Adoption-only: flipping it is a reviewable diff in the register
-    /// itself, never an environment variable a process can set for itself.
+    /// When false, the register declares itself to be in adoption mode.
+    ///
+    /// This is a reviewable posture, not an off switch: flipping it is a diff in
+    /// the register itself, never an environment variable a process can set for
+    /// itself. It does **not** make refusals non-fatal. `audit_direct` refuses a
+    /// stand-down outright when the tree carries violations, so the recorded
+    /// value reports which posture the register was read under while the verdict
+    /// stays a function of the refusals (#204).
     pub enforce: bool,
     /// Canonical repository URL whose workspace members are local authority.
     pub repository: Option<String>,

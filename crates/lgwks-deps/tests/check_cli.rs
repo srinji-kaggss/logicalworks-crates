@@ -155,6 +155,38 @@ fn copy_fixture_files(source: &Path, target: &Path, files: &[&str]) -> TestResul
     Ok(())
 }
 
+/// Rewrites one authored consumer field in a copy of the real register so the
+/// tree genuinely carries edge violations.
+///
+/// The register is copied rather than edited in place: the negative control has
+/// to inject *real* violations that `audit_direct` finds on its own, and it must
+/// not leave this repository's own register in a violating state if the test
+/// fails midway. Returns the copied register's path.
+fn register_with_violations(
+    scratch: &Scratch,
+    tag: &str,
+    enforce: &str,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let root = workspace_root()?;
+    let register = scratch.path().join(format!("APPROVED-{tag}.toml"));
+    let authored = std::fs::read_to_string(root.join("contract/APPROVED.toml"))?;
+    // Point one entry's consumers at a package that does not exist, which
+    // breaks that edge's approval and produces real `ConsumerNotAllowed`
+    // refusals plus the `UnusedApproval` they leave behind.
+    let violated = authored
+        .replace(
+            "allowed_consumers = \"lgwks_std\"",
+            "allowed_consumers = \"lgwks_bogus_consumer\"",
+        )
+        .replace("enforce = true", &format!("enforce = {enforce}"));
+    assert_ne!(
+        violated, authored,
+        "the fixture must actually differ from the shipped register, or the control proves nothing"
+    );
+    std::fs::write(&register, violated)?;
+    Ok(register)
+}
+
 #[test]
 fn debug_reports_default_sdk_bootstrap_in_json() -> TestResult {
     let root = workspace_root()?;
@@ -613,4 +645,104 @@ impl Drop for Scratch {
             // Nothing to report here; `Drop` has no failure channel.
         }
     }
+}
+
+/// One audited tree under one enforcement posture.
+struct Posture {
+    /// The `enforce` token the copied register carried.
+    enforce: &'static str,
+    /// What the binary did with it.
+    outcome: Outcome,
+}
+
+/// Issue #204: `[policy] enforce = false` is a posture, not an off switch.
+///
+/// The baseline defect was that the gate's entire verdict reduced to that one
+/// boolean: a reviewable one-token diff turned 26 real refusals into exit 0.
+/// This test drives the shipped binary against *this* repository with real
+/// injected violations and asserts the exit code in **both** directions, because
+/// either half alone is satisfied by the defect — under the old code
+/// `enforce = true` exited 2 and only the `enforce = false` half could fail.
+///
+/// The negative control demonstrates wrong behaviour rather than a compile
+/// failure: the refusals are produced by `audit_direct` finding the injected
+/// violation on its own, and the stand-down is refused by name.
+#[test]
+fn adoption_mode_cannot_stand_down_a_tree_that_carries_violations() -> TestResult {
+    let root = workspace_root()?;
+    let scratch = Scratch::new("adoption-mode")?;
+
+    // Both runs audit the same real tree through the same real binary; only the
+    // `enforce` token in a copied register differs between them.
+    let mut runs = Vec::new();
+    for (tag, enforce) in [("enforced", "true"), ("adoption", "false")] {
+        let register = register_with_violations(&scratch, tag, enforce)?;
+        let outcome = check_from(&root, &["check", ".", "--contract", argument(&register)?])?;
+        runs.push(Posture { enforce, outcome });
+    }
+
+    for run in &runs {
+        assert_eq!(
+            run.outcome.code,
+            Some(2),
+            "enforce = {} with real injected violations must exit 2, not 0 (stderr {:?})",
+            run.enforce,
+            run.outcome.stderr
+        );
+    }
+
+    // The refusal that distinguishes the two runs has to be named, so a rename
+    // cannot satisfy the test, and it must name the count it stood down.
+    let adoption = runs
+        .iter()
+        .find(|run| run.enforce == "false")
+        .ok_or("the adoption-mode run was not collected")?;
+    assert!(
+        adoption.outcome.stderr.contains("adoption mode"),
+        "an adoption-mode stand-down must be refused in its own words, distinct from \
+         the edge refusals it counted (stderr {:?})",
+        adoption.outcome.stderr
+    );
+
+    // The control only means something if the violations are real. Assert the
+    // edge refusals themselves were found, so a register that failed to mutate
+    // cannot quietly produce the same exit code for the wrong reason.
+    assert!(
+        adoption
+            .outcome
+            .stderr
+            .contains("dependency-edge violations"),
+        "the run must actually have found edge violations (stderr {:?})",
+        adoption.outcome.stderr
+    );
+    Ok(())
+}
+
+/// The other half of #204, and the direction that keeps adoption mode
+/// meaningful: on a tree with no refusals, `enforce = false` is still a
+/// legitimate posture and must exit 0.
+///
+/// Without this, the fix above would be satisfied by refusing every register
+/// that says `enforce = false`, which would delete adoption mode rather than
+/// removing its power to launder a violating tree.
+#[test]
+fn adoption_mode_over_a_clean_tree_still_passes() -> TestResult {
+    let root = workspace_root()?;
+    let scratch = Scratch::new("adoption-clean")?;
+    // The real register, copied and only re-posted under the adoption token.
+    let register = scratch.path().join("APPROVED-adoption.toml");
+    let authored = std::fs::read_to_string(root.join("contract/APPROVED.toml"))?;
+    std::fs::write(
+        &register,
+        authored.replace("enforce = true", "enforce = false"),
+    )?;
+    let outcome = check_from(&root, &["check", ".", "--contract", argument(&register)?])?;
+    assert_eq!(
+        outcome.code,
+        Some(0),
+        "adoption mode over an admitting tree is a supported posture (stdout {:?}, stderr {:?})",
+        outcome.stdout,
+        outcome.stderr
+    );
+    Ok(())
 }
