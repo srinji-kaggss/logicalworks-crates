@@ -76,6 +76,14 @@ pub struct Entry {
     pub(crate) capability: String,
     /// Admitted Cargo source class: `registry`, `git`, or `path`.
     pub(crate) source: String,
+    /// Admitted origin identity for the source class: a complete Cargo
+    /// registry source, a Git repository plus its admitted revision/reference
+    /// policy, or an external path authority.
+    ///
+    /// `None` is a legacy class-only approval. It grants no exact-origin
+    /// assurance beyond the one deterministic registry this estate uses, and a
+    /// git or path edge requires an authored origin before it can be admitted.
+    pub(crate) origin: Option<String>,
     /// Workspace crates permitted to declare this edge directly.
     pub(crate) allowed_consumers: Vec<String>,
     /// Permitted edge kinds: `normal`, `build`, and/or `dev`.
@@ -464,6 +472,26 @@ const REQUIRED: [&str; 12] = [
     "owner",
     "capability",
     "source",
+    "allowed_consumers",
+    "allowed_kinds",
+    "reason",
+    "approved_by",
+    "approved_on",
+    "review",
+];
+
+/// Every key an `[[approved]]` block may carry: the required set plus the
+/// optional exact-origin identity. Keeping it separate from `REQUIRED` is what
+/// lets an existing class-only block keep parsing while a block that writes
+/// `origin` has it validated and compared.
+const ENTRY_KEYS: [&str; 13] = [
+    "crate",
+    "tier",
+    "version",
+    "owner",
+    "capability",
+    "source",
+    "origin",
     "allowed_consumers",
     "allowed_kinds",
     "reason",
@@ -956,7 +984,7 @@ impl Contract {
     /// Parses a register. Fail-closed: an unrecognised line is an error, not a
     /// line to skip.
     pub fn parse(text: &str) -> Result<Self, ContractError> {
-        let raw = parse_register(text, "[[approved]]", &REQUIRED)?;
+        let raw = parse_register(text, "[[approved]]", &ENTRY_KEYS)?;
         let mut entries: Vec<Entry> = Vec::new();
         for draft in &raw.entries {
             let entry = build(draft)?;
@@ -1079,6 +1107,25 @@ fn is_identifier(value: &str) -> bool {
         && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
 }
 
+/// Whether an authored `origin` names a supported origin identity.
+///
+/// Three shapes are admitted: a Cargo registry source (`registry+`), a Cargo
+/// sparse-registry source (`sparse+`), and a Cargo Git source (`git+`). A
+/// scheme-free, non-empty string is an external path authority. Everything
+/// else — in particular an unknown scheme such as `svn+…` — is refused at load
+/// rather than stored as an origin that would later compare as an ordinary
+/// admitted string.
+fn is_supported_origin(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() {
+        return false;
+    }
+    if value.starts_with("registry+") || value.starts_with("sparse+") || value.starts_with("git+") {
+        return true;
+    }
+    !value.contains("://") && !value.contains('+')
+}
+
 /// Refuses a decoded field that is outside its schema vocabulary.
 fn validate_closed_value(
     draft: &RawEntry,
@@ -1126,6 +1173,7 @@ fn build(draft: &RawEntry) -> Result<Entry, ContractError> {
     let owner = draft.require("owner", &krate)?.to_owned();
     let capability = draft.require("capability", &krate)?.to_owned();
     let source = draft.require("source", &krate)?.to_owned();
+    let origin = draft.get("origin").map(str::to_owned);
     let allowed_consumers = split_csv(draft.require("allowed_consumers", &krate)?);
     let allowed_kinds = split_csv(draft.require("allowed_kinds", &krate)?);
     validate_closed_value(
@@ -1152,6 +1200,16 @@ fn build(draft: &RawEntry) -> Result<Entry, ContractError> {
         matches!(source.as_str(), "registry" | "git" | "path"),
         "expected one of registry, git or path",
     )?;
+    if let Some(origin) = origin.as_deref() {
+        validate_closed_value(
+            draft,
+            &krate,
+            "origin",
+            origin,
+            is_supported_origin(origin),
+            "expected a registry+ / sparse+ / git+ Cargo source, or a scheme-free path authority",
+        )?;
+    }
     validate_closed_value(
         draft,
         &krate,
@@ -1181,6 +1239,7 @@ fn build(draft: &RawEntry) -> Result<Entry, ContractError> {
         owner,
         capability,
         source,
+        origin,
         allowed_consumers,
         allowed_kinds,
         reason,

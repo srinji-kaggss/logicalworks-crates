@@ -257,6 +257,19 @@ pub enum Refusal {
         /// Authored source class.
         declared: String,
     },
+    /// The package's source class is approved, but the admitted origin differs:
+    /// another registry, another Git repository or revision policy, or another
+    /// external path. A class approval is not an origin approval.
+    OriginDrift {
+        /// Package declaring the edge.
+        consumer: String,
+        /// External package name.
+        krate: String,
+        /// Approved origin identity.
+        approved: String,
+        /// Authored origin identity.
+        declared: String,
+    },
     /// The package is registered, but not for this dependency kind.
     KindNotAllowed {
         /// Package declaring the edge.
@@ -324,6 +337,15 @@ impl fmt::Display for Refusal {
                 formatter,
                 "{consumer} declares {krate} from {declared}, contract approves {approved}"
             ),
+            Self::OriginDrift {
+                ref consumer,
+                ref krate,
+                ref approved,
+                ref declared,
+            } => write!(
+                formatter,
+                "{consumer} declares {krate} from {declared}, contract approves origin {approved}"
+            ),
             Self::KindNotAllowed {
                 ref consumer,
                 ref krate,
@@ -354,6 +376,7 @@ impl Refusal {
             | Self::ConsumerNotAllowed { ref krate, .. }
             | Self::RequirementDrift { ref krate, .. }
             | Self::SourceDrift { ref krate, .. }
+            | Self::OriginDrift { ref krate, .. }
             | Self::KindNotAllowed { ref krate, .. }
             | Self::UnusedApproval { ref krate, .. } => krate,
         }
@@ -461,16 +484,98 @@ fn allows_consumer(entry: &contract::Entry, consumer: &str) -> bool {
         .any(|allowed| normalise(allowed) == normalise(consumer))
 }
 
+/// The one registry a legacy class-only approval admits.
+///
+/// The two Cargo spellings — the Git index and the sparse index — name this one
+/// registry, so both compare equal to it and to each other. Any other registry
+/// source is a different authority and needs its own authored `origin`.
+const CRATES_IO_INDEX: &str = "registry+https://github.com/rust-lang/crates.io-index";
+/// The sparse transport spelling of the crates.io registry.
+const CRATES_IO_SPARSE: &str = "sparse+https://index.crates.io/";
+
+/// Whether `detail` names the crates.io registry through either Cargo spelling.
+fn is_crates_io(detail: &str) -> bool {
+    detail == CRATES_IO_INDEX
+        || detail == CRATES_IO_SPARSE
+        || detail == "sparse+https://index.crates.io"
+}
+
+/// The repository portion of a Cargo Git source, before any revision policy.
+fn git_repository(detail: &str) -> &str {
+    match detail.find(['?', '#']) {
+        Some(index) => &detail[..index],
+        None => detail,
+    }
+}
+
+/// The revision/reference policy of a Cargo Git source: the `?rev=…`/`?branch=…`
+/// query and the `#…` resolved-revision fragment, or empty when none is pinned.
+fn git_policy(detail: &str) -> &str {
+    match detail.find(['?', '#']) {
+        Some(index) => &detail[index..],
+        None => "",
+    }
+}
+
+/// Whether an authored origin admits an observed Cargo source exactly.
+///
+/// Registry identity is the whole source string, except that the two spellings
+/// of crates.io name one registry. Git identity is the repository plus its
+/// admitted revision/reference policy, so pinning a different revision inside
+/// the approved repository is still a drift. Path identity is the whole
+/// authority string.
+fn same_origin(approved: &str, observed: &str) -> bool {
+    if approved == observed {
+        return true;
+    }
+    if approved.starts_with("registry+") || approved.starts_with("sparse+") {
+        return is_crates_io(approved) && is_crates_io(observed);
+    }
+    if approved.starts_with("git+") && observed.starts_with("git+") {
+        return git_repository(approved) == git_repository(observed)
+            && git_policy(approved) == git_policy(observed);
+    }
+    false
+}
+
+/// Whether `entry`'s approval admits `edge`'s origin.
+///
+/// An authored `origin` is compared by [`same_origin`]. A legacy entry with no
+/// `origin` is exact only for the one deterministic registry this estate uses;
+/// a git or path edge needs an authored origin before it can be admitted, so a
+/// class-only entry is insufficient for exact-origin assurance rather than
+/// implicit approval of every origin in its class.
+fn origin_matches(entry: &contract::Entry, edge: &DirectEdge) -> bool {
+    match entry.origin.as_deref() {
+        Some(approved) => same_origin(approved, edge.source.detail()),
+        None => entry.source == "registry" && is_crates_io(edge.source.detail()),
+    }
+}
+
+/// The approved origin to name in an [`Refusal::OriginDrift`].
+fn approved_origin(entry: &contract::Entry, edge: &DirectEdge) -> String {
+    match entry.origin.as_deref() {
+        Some(approved) => approved.to_owned(),
+        None if entry.source == "registry" => CRATES_IO_INDEX.to_owned(),
+        None => format!(
+            "{} (class-only: an exact origin is required)",
+            edge.source.class()
+        ),
+    }
+}
+
 /// Whether an approval admits this exact edge.
 ///
-/// All four axes must hold: the consumer is allowed, the requirement string is
-/// identical, the source class is identical, and the dependency kind is listed.
-/// A partial match is not a weak admission: it is a refusal with a named axis,
-/// which is why `audit_direct` re-tests each axis to report *which* one drifted.
+/// All five axes must hold: the consumer is allowed, the requirement string is
+/// identical, the source class is identical, the origin is admitted, and the
+/// dependency kind is listed. A partial match is not a weak admission: it is a
+/// refusal with a named axis, which is why `audit_direct` re-tests each axis to
+/// report *which* one drifted.
 fn edge_matches(entry: &contract::Entry, edge: &DirectEdge) -> bool {
     allows_consumer(entry, &edge.consumer)
         && entry.version == edge.requirement
         && entry.source == edge.source.class()
+        && origin_matches(entry, edge)
         && entry
             .allowed_kinds
             .iter()
@@ -530,6 +635,16 @@ pub fn audit_direct(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
                 krate: edge.package.clone(),
                 approved: entry.source.clone(),
                 declared: edge.source.class().to_owned(),
+            });
+        } else if let Some(entry) = consumer_approvals
+            .iter()
+            .find(|entry| !origin_matches(entry, edge))
+        {
+            refusals.push(Refusal::OriginDrift {
+                consumer: edge.consumer.clone(),
+                krate: edge.package.clone(),
+                approved: approved_origin(entry, edge),
+                declared: edge.source.detail().to_owned(),
             });
         } else if let Some(entry) = consumer_approvals
             .iter()
@@ -707,6 +822,48 @@ mod tests {
         }
     }
 
+    /// One approval for `engine`, owned by `app`, with the given source class
+    /// and optional exact origin.
+    ///
+    /// `origin` is `None` for a legacy class-only entry, which is the shape the
+    /// origin tests must show is insufficient rather than permissive.
+    fn register_with(
+        source: &str,
+        origin: Option<&str>,
+    ) -> Result<Contract, contract::ContractError> {
+        let origin_line = origin
+            .map(|value| format!("origin = \"{value}\"\n"))
+            .unwrap_or_default();
+        Contract::parse(&format!(
+            concat!(
+                "[policy]\nenforce = true\n\n",
+                "[[approved]]\n",
+                "crate = \"engine\"\n",
+                "tier = \"boundary\"\n",
+                "version = \"1.0\"\n",
+                "owner = \"app\"\n",
+                "capability = \"engine.core\"\n",
+                "source = \"{source}\"\n",
+                "{origin}",
+                "allowed_consumers = \"app\"\n",
+                "allowed_kinds = \"normal\"\n",
+                "reason = \"The engine supplies a capability the standard library cannot express.\"\n",
+                "approved_by = \"reviewer\"\n",
+                "approved_on = \"2026-09-30\"\n",
+                "review = \"tests/origin_binding.rs\"\n",
+            ),
+            source = source,
+            origin = origin_line,
+        ))
+    }
+
+    /// The `app` → `engine` edge with a chosen source.
+    fn app_edge(source: metadata::DependencySource) -> DirectEdge {
+        let mut edge = edge("app", "engine", "1.0");
+        edge.source = source;
+        edge
+    }
+
     #[test]
     fn direct_edge_requires_an_allowed_consumer() -> TestResult {
         let register = Contract::parse(REGISTER)?;
@@ -864,6 +1021,174 @@ mod tests {
             audit_direct(&[], &register).as_slice(),
             [Refusal::UnusedApproval { .. }]
         ));
+        Ok(())
+    }
+
+    /// An authored Git origin admits its own repository and refuses another,
+    /// with both identities in the refusal.
+    #[test]
+    fn an_approved_git_origin_admits_only_that_repository() -> TestResult {
+        let register = register_with("git", Some("git+https://approved.example/engine?rev=abc"))?;
+        let approved = app_edge(metadata::DependencySource::Git(
+            "git+https://approved.example/engine?rev=abc".into(),
+        ));
+        assert!(
+            audit_direct(&[approved], &register).is_empty(),
+            "the approved Git origin must pass"
+        );
+
+        let substituted = app_edge(metadata::DependencySource::Git(
+            "git+https://different.example/engine?rev=abc".into(),
+        ));
+        let refusals = audit_direct(&[substituted], &register);
+        assert!(
+            matches!(
+                refusals.first(),
+                Some(Refusal::OriginDrift { approved, declared, .. })
+                    if approved.contains("approved.example") && declared.contains("different.example")
+            ),
+            "a substituted Git repository must be an OriginDrift naming both origins: {refusals:?}"
+        );
+        Ok(())
+    }
+
+    /// A Git revision/reference policy change inside the approved repository is
+    /// a drift: the repository is admitted, the pin is not.
+    #[test]
+    fn a_git_revision_policy_change_is_an_origin_drift() -> TestResult {
+        let register = register_with("git", Some("git+https://repo.example/engine?rev=abc"))?;
+        for substituted in [
+            "git+https://repo.example/engine?rev=def",
+            "git+https://repo.example/engine?branch=main",
+            "git+https://repo.example/engine",
+        ] {
+            let edge = app_edge(metadata::DependencySource::Git(substituted.into()));
+            let refusals = audit_direct(&[edge], &register);
+            assert!(
+                matches!(refusals.first(), Some(Refusal::OriginDrift { declared, .. }) if declared == substituted),
+                "a changed revision policy ({substituted}) must be an OriginDrift: {refusals:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A different registry is refused even though the source class matches.
+    #[test]
+    fn an_approved_registry_origin_refuses_a_different_registry() -> TestResult {
+        let register = register_with("registry", Some("registry+https://approved.example/index"))?;
+        let approved = app_edge(metadata::DependencySource::Registry(
+            "registry+https://approved.example/index".into(),
+        ));
+        assert!(audit_direct(&[approved], &register).is_empty());
+
+        let substituted = app_edge(metadata::DependencySource::Registry(
+            "registry+https://different.example/index".into(),
+        ));
+        let refusals = audit_direct(&[substituted], &register);
+        assert!(
+            matches!(
+                refusals.first(),
+                Some(Refusal::OriginDrift { declared, .. }) if declared.contains("different.example")
+            ),
+            "a different registry must be an OriginDrift: {refusals:?}"
+        );
+        Ok(())
+    }
+
+    /// A legacy class-only registry entry is exact for crates.io and nothing
+    /// else: it is not implicit approval of every registry.
+    #[test]
+    fn a_class_only_registry_approval_admits_crates_io_only() -> TestResult {
+        let register = register_with("registry", None)?;
+        let crates_io = app_edge(metadata::DependencySource::Registry(CRATES_IO_INDEX.into()));
+        assert!(
+            audit_direct(&[crates_io], &register).is_empty(),
+            "the one deterministic registry stays admitted by a class-only entry"
+        );
+        let sparse = app_edge(metadata::DependencySource::Registry(
+            CRATES_IO_SPARSE.into(),
+        ));
+        assert!(
+            audit_direct(&[sparse], &register).is_empty(),
+            "the sparse spelling names the same crates.io registry"
+        );
+
+        let other = app_edge(metadata::DependencySource::Registry(
+            "registry+https://different.example/index".into(),
+        ));
+        let refusals = audit_direct(&[other], &register);
+        assert!(
+            matches!(
+                refusals.first(),
+                Some(Refusal::OriginDrift { approved, .. }) if approved == CRATES_IO_INDEX
+            ),
+            "a class-only registry entry must admit crates.io only: {refusals:?}"
+        );
+        Ok(())
+    }
+
+    /// A class-only Git entry cannot grant exact-origin assurance: every Git
+    /// origin is refused until an origin is authored.
+    #[test]
+    fn a_class_only_git_approval_is_insufficient_for_exact_origin() -> TestResult {
+        let register = register_with("git", None)?;
+        let edge = app_edge(metadata::DependencySource::Git(
+            "git+https://any.example/engine?rev=abc".into(),
+        ));
+        let refusals = audit_direct(&[edge], &register);
+        assert!(
+            matches!(
+                refusals.first(),
+                Some(Refusal::OriginDrift { approved, .. }) if approved.contains("class-only")
+            ),
+            "a class-only Git entry must be insufficient, not permissive: {refusals:?}"
+        );
+        Ok(())
+    }
+
+    /// An authored external path authority admits only that path.
+    #[test]
+    fn an_approved_path_origin_refuses_a_different_path() -> TestResult {
+        let register = register_with("path", Some("../vendor/engine"))?;
+        let approved = app_edge(metadata::DependencySource::Path("../vendor/engine".into()));
+        assert!(audit_direct(&[approved], &register).is_empty());
+
+        let substituted = app_edge(metadata::DependencySource::Path("../vendor/evil".into()));
+        let refusals = audit_direct(&[substituted], &register);
+        assert!(
+            matches!(
+                refusals.first(),
+                Some(Refusal::OriginDrift { approved, declared, .. })
+                    if approved == "../vendor/engine" && declared == "../vendor/evil"
+            ),
+            "a different external path must be an OriginDrift: {refusals:?}"
+        );
+        Ok(())
+    }
+
+    /// An unknown scheme is not an ordinary admitted origin: it cannot be
+    /// authored, and an edge carrying it does not match a registry approval.
+    #[test]
+    fn an_unknown_scheme_is_not_an_admitted_origin() -> TestResult {
+        assert!(
+            matches!(
+                register_with("registry", Some("svn+https://example.invalid/x")),
+                Err(contract::ContractError::InvalidField {
+                    field: "origin",
+                    ..
+                })
+            ),
+            "an unknown origin scheme must be refused at register load"
+        );
+        let register = register_with("registry", None)?;
+        let edge = app_edge(metadata::DependencySource::Other(
+            "svn+https://example.invalid/x".into(),
+        ));
+        let refusals = audit_direct(&[edge], &register);
+        assert!(
+            matches!(refusals.first(), Some(Refusal::SourceDrift { .. })),
+            "an unknown scheme is a class drift, never an ordinary admitted origin: {refusals:?}"
+        );
         Ok(())
     }
 

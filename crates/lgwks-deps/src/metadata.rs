@@ -414,13 +414,18 @@ struct CargoDependency {
 ///
 /// A `source` key takes precedence over `path`, matching Cargo's own reading:
 /// a registry package reached through a path override reports both, and the
-/// registry spelling is what the register approves. `registry+` and `git+` are
-/// the two schemes the gate names; any other scheme is carried verbatim as
+/// registry spelling is what the register approves. `registry+`, `sparse+` and
+/// `git+` are the schemes the gate names — the two registry spellings differ
+/// only in transport and name one registry — while any other scheme is carried
+/// verbatim as
 /// [`DependencySource::Other`] so an unknown origin is reported rather than
 /// dropped. An edge with neither key cannot be placed at all and is refused.
 fn source(dependency: &CargoDependency) -> Result<DependencySource, MetadataError> {
     match (dependency.source.as_deref(), dependency.path.as_deref()) {
         (Some(value), _) if value.starts_with("registry+") => {
+            Ok(DependencySource::Registry(value.to_owned()))
+        }
+        (Some(value), _) if value.starts_with("sparse+") => {
             Ok(DependencySource::Registry(value.to_owned()))
         }
         (Some(value), _) if value.starts_with("git+") => {
@@ -1658,6 +1663,36 @@ mod tests {
         assert!(serde.optional);
         assert!(!serde.workspace);
         assert_eq!(proptest.kind, DependencyKind::Dev);
+        Ok(())
+    }
+
+    /// A sparse-registry source names the same registry class as the Git
+    /// index, so an admission comparing registry identity is not defeated by
+    /// Cargo's transport spelling.
+    #[test]
+    fn a_sparse_registry_source_is_classified_as_a_registry() -> TestResult {
+        let input = r#"{
+          "packages": [{
+            "id": "app",
+            "name": "app",
+            "repository": null,
+            "manifest_path": "/repo/Cargo.toml",
+            "dependencies": [
+              {"name":"serde","source":"sparse+https://index.crates.io/","req":"^1","kind":null,"optional":false,"path":null}
+            ]
+          }],
+          "workspace_members": ["app"]
+        }"#;
+        let edges = parse(input)?;
+        let edge = edges
+            .first()
+            .ok_or("the sparse registry edge must be extracted")?;
+        assert_eq!(
+            edge.source.class(),
+            "registry",
+            "a sparse+ source is a registry, not an unknown scheme"
+        );
+        assert_eq!(edge.source.detail(), "sparse+https://index.crates.io/");
         Ok(())
     }
 

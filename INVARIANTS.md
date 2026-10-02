@@ -53,6 +53,23 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
   position; valid unique fields have order-independent meaning, and parsed
   approvals cannot be mutated outside the crate. · why: #157 ·
   enforced by: `contract::tests::invariant_register_uses_the_shared_duplicate_key_refusal`
+- **INV-DEP-12** A source class is not an approved origin: an admission compares
+  the Cargo origin (a complete registry source, a Git repository plus its
+  admitted revision/reference policy, or an external path authority), so a
+  substitution inside an approved class is `OriginDrift`, never a pass. A legacy
+  class-only entry is exact for crates.io — both its Git and sparse spellings —
+  and insufficient for a Git or path edge; an unknown scheme is neither
+  authorable nor an ordinary admitted origin. · why: #158 A1 · enforced by:
+  `tests/origin_binding.rs` and
+  `lgwks_deps::tests::an_approved_git_origin_admits_only_that_repository`,
+  `lgwks_deps::tests::a_git_revision_policy_change_is_an_origin_drift`,
+  `lgwks_deps::tests::an_approved_registry_origin_refuses_a_different_registry`,
+  `lgwks_deps::tests::a_class_only_registry_approval_admits_crates_io_only`,
+  `lgwks_deps::tests::a_class_only_git_approval_is_insufficient_for_exact_origin`,
+  `lgwks_deps::tests::an_approved_path_origin_refuses_a_different_path`,
+  `lgwks_deps::tests::an_unknown_scheme_is_not_an_admitted_origin`,
+  `metadata::tests::a_sparse_registry_source_is_classified_as_a_registry`
+
 ## lgwks_bot — durable execution
 
 Each of these was a shipped defect. Treat the list as the spec.

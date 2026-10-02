@@ -50,6 +50,21 @@ explicitly under that crate.
   (`DEFAULT_MAX_CONCURRENT`, set with `Process::max_concurrent`), claimed
   before the fork, so a burst of calls never forks a burst of children.
 
+### lgwks_deps Added
+
+- `[[approved]]` entries accept an optional `origin`: the exact admitted origin
+  for the entry's source class — a complete registry source, a Git repository
+  plus its admitted revision/reference policy, or an external path authority.
+  Admission now compares origin as well as class, so replacing an approved Git
+  repository, registry, path, or Git revision produces a typed
+  `Refusal::OriginDrift` carrying the approved and observed identities. A legacy
+  class-only entry is exact for crates.io (both its Git and sparse spellings)
+  and insufficient for a Git or path edge; an unknown origin scheme is refused
+  at load and never admitted (INV-DEP-12, #158 A1).
+- Sparse-registry sources (`sparse+…`) are classified as the `registry` source
+  class rather than an unknown scheme, so a sparse crates.io mirror compares as
+  crates.io.
+
 ### lgwks_bot Changed
 
 - `BotSpec` carries a `version`, defaulted to `BotSpec::CURRENT_VERSION` when
