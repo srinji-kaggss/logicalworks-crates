@@ -201,6 +201,7 @@ async fn spawn_gated(supervisor: &mut Supervisor, gate: &Gate, count: u64) {
             .spawn(move |_token| async move { body.arrive_and_wait().await })
             .await;
     }
+    gate.await_arrivals(count).await;
 }
 
 /// A fresh supervisor is empty, at its declared ceiling, and admits.
