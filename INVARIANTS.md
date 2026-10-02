@@ -443,6 +443,14 @@ Each of these was a shipped defect. Treat the list as the spec.
   then parked. · why: #122 item 2 / #156 · enforced by
   `tests/durable_crash_observation.rs`
   (`a_real_kill_mid_append_leaves_no_duplicate_and_no_lost_receipt`)
+- **INV-BOT-28** Concurrent tenant appends over separate files stay isolated,
+  and one acknowledged append's latency tails stay bounded on the shipped path
+  where the write and `sync_all` run on the storage owner. 100 tenant journals
+  append concurrently and each holds only its own events; 1,024 appends yield a
+  measured p50/p95/p99. · why: #122 item 2 / #156 · enforced by
+  `tests/journal_scale.rs`
+  (`concurrent_tenant_appends_at_100_stay_isolated`,
+  `append_latency_tails_are_bounded`)
 
 ## Open questions for the Director
 

@@ -21,19 +21,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
-use lgwks_bot::effect::{
-    ActionDigest, ActionId, AttemptId, EffectKey, EnvironmentEpoch, EnvironmentId, FlowRevision,
-    RunId,
-};
 use lgwks_bot::journal::{
     DurabilityPromise, EffectEvent, EffectJournal, FileJournal, JournalPosition, StorageGate,
 };
 
-const RUN: &str = "0102030405060708090a0b0c0d0e0f10";
-const ACTION: &str = "1112131415161718191a1b1c1d1e1f20";
-const ENV: &str = "2122232425262728292a2b2c2d2e2f30";
-const FLOW_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-const DIGEST_HEX: &str = "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeffe0e1e2e3e4e5e6e7e8e9eaebecedeeef";
+#[path = "support/journal.rs"]
+mod shared;
+
+use shared::{TempGuard, key, scratch};
 
 /// How many turns the unrelated task must get before the watchdog releases the
 /// parked device. A blocking durable wait reaches at most one.
@@ -41,41 +36,8 @@ const PROGRESS_TURNS: u64 = 64;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
-static SCRATCH: AtomicU64 = AtomicU64::new(0);
-
-/// A scratch path unique to one run: nanos plus a counter, never a process id.
-fn scratch(name: &str) -> std::path::PathBuf {
-    let unique = SCRATCH.fetch_add(1, Ordering::Relaxed);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_nanos())
-        .unwrap_or_default();
-    std::env::temp_dir().join(format!("lgwks-liveness-{name}-{nanos}-{unique}"))
-}
-
-/// Removes a test's scratch file when the test ends, however it ends.
-struct TempGuard(std::path::PathBuf);
-
-impl Drop for TempGuard {
-    fn drop(&mut self) {
-        drop(std::fs::remove_file(&self.0));
-    }
-}
-
 /// Consume an expression for its side effect without binding it.
 fn ignore<T>(_: T) {}
-
-fn key(attempt: u64) -> Result<EffectKey, Box<dyn Error>> {
-    Ok(EffectKey::new(
-        RunId::from_hex(RUN)?,
-        ActionId::from_hex(ACTION)?,
-        AttemptId::from_decimal(&attempt.to_string())?,
-        FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-        ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
-        EnvironmentId::from_hex(ENV)?,
-        EnvironmentEpoch::from_decimal("1")?,
-    ))
-}
 
 /// A parked journal with the two instruments both liveness tests need.
 ///
