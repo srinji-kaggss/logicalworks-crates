@@ -81,6 +81,14 @@ pub struct Deadline<'a> {
     clock: &'a Clock,
     /// The budget, measured on that clock.
     budget: Duration,
+    /// Where the governing clock stood when this deadline was created.
+    ///
+    /// Subtracted from every later reading, so `elapsed` means *time since this
+    /// deadline* on either source. Without it a deadline built on a long-lived
+    /// wall clock would inherit that clock's whole age and report itself spent
+    /// the moment it was created — and a deadline is precisely "a budget from
+    /// now", so the anchor is what makes one.
+    started_on: Duration,
     /// Real time this deadline has been alive, for the watchdog.
     ///
     /// The engine's `Instant`, named explicitly: this module re-exports the
@@ -97,6 +105,7 @@ impl<'a> Deadline<'a> {
         Self {
             clock,
             budget,
+            started_on: clock.now(),
             started: std::time::Instant::now(),
         }
     }
@@ -123,10 +132,10 @@ impl<'a> Deadline<'a> {
         self.budget
     }
 
-    /// Elapsed time on the governing clock.
+    /// Elapsed time on the governing clock, since this deadline was created.
     #[must_use]
     pub fn elapsed(&self) -> Duration {
-        self.clock.now()
+        self.clock.now().saturating_sub(self.started_on)
     }
 
     /// How much of the budget is left, saturating at zero.

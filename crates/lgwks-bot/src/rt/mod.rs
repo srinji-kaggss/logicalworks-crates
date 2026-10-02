@@ -81,7 +81,13 @@
 //! across worker threads is not deterministic; only the *result* order of
 //! [`join_all_bounded`](crate::rt::task::join_all_bounded) is.
 
-#[cfg(feature = "time")]
+// Gated on `rt` rather than `time` because the clock is `std`-only and is
+// reached by two surfaces with different gates: `time` re-exports it beside
+// `Deadline`, and `supervise` (gate `sync`, which does not imply `time`) reads
+// it to measure its budgets. Gating it on the narrower of the two would make
+// `sync`-without-`time` a build that cannot name the clock its own deadlines
+// are measured on.
+#[cfg(feature = "rt")]
 pub mod clock;
 pub mod runtime;
 pub mod task;

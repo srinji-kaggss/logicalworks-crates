@@ -103,7 +103,7 @@ use std::process::ExitStatus;
 use std::sync::Arc;
 #[cfg(all(unix, feature = "process"))]
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 // Only the supervised process reports an `io::Error`; a build without the
 // `process` feature has no such fallible call, so the import is gated with it.
@@ -117,6 +117,7 @@ use lgwks_deps::tokio::task::Id;
 use lgwks_deps::tokio::process::{Child, Command};
 
 use super::cancel::CancellationToken;
+use super::clock::{Clock, TimeSource};
 #[cfg(all(unix, feature = "process"))]
 use super::io::{AsyncRead, AsyncReadExt};
 #[cfg(feature = "process")]
@@ -743,6 +744,14 @@ pub struct Supervisor {
     refused: u64,
     /// Terminal outcomes refused by the retention cap. Saturating.
     reports_dropped: u64,
+    /// The clock that governs this supervisor's deadlines.
+    ///
+    /// Read by the budget loop and the process-deadline loop, and reported by
+    /// [`Supervisor::snapshot`], so a reader can ask *which* clock a deadline was
+    /// measured on. A wall clock by default, because production must not have to
+    /// drive anything; a virtual one makes every budget in this supervisor exact
+    /// and instant.
+    clock: Clock,
 }
 
 /// What a supervised body reported when it returned.
@@ -876,6 +885,22 @@ impl Supervisor {
     /// that produces an unbounded supervisor.
     #[must_use]
     pub fn new(max_in_flight: usize) -> Self {
+        Self::with_clock(max_in_flight, Clock::wall())
+    }
+
+    /// Create a supervisor whose deadlines are governed by `clock`.
+    ///
+    /// The same supervisor as [`Supervisor::new`] with one difference: the clock
+    /// its budget checks and its process deadlines read. A wall clock is the
+    /// default, so nothing in production has to drive anything; a
+    /// caller-advanceable one makes every budget in this supervisor exact, so a
+    /// test can exhaust a five-minute budget in one call with no real wait and
+    /// observe the *same* refusal a real overrun produces.
+    ///
+    /// Clones share the clock rather than copying it, so one advance from a test
+    /// reaches every task the supervisor started.
+    #[must_use]
+    pub fn with_clock(max_in_flight: usize, clock: Clock) -> Self {
         let bound = max_in_flight.clamp(1, Semaphore::MAX_PERMITS);
         Self {
             token: CancellationToken::new(),
@@ -897,7 +922,14 @@ impl Supervisor {
             panicked: 0,
             refused: 0,
             reports_dropped: 0,
+            clock,
         }
+    }
+
+    /// The clock that governs this supervisor's deadlines.
+    #[must_use]
+    pub fn clock(&self) -> &Clock {
+        &self.clock
     }
 
     /// A token that is cancelled when this supervisor is cancelled or dropped.
@@ -1158,8 +1190,9 @@ impl Supervisor {
             return;
         };
         let token = self.child_token();
+        let clock = self.clock.clone();
         self.place(permit, async move {
-            match repeat(&token, budget, body).await {
+            match repeat_on(&clock, &token, budget, body).await {
                 Outcome::Exhausted { .. } => TaskEnd::Completed,
                 Outcome::Cancelled { .. } => TaskEnd::Cancelled,
             }
@@ -1253,6 +1286,7 @@ impl Supervisor {
             return Err(io::Error::other(SupervisorCancelled));
         }
         let (token, deadline, out_limit, err_limit) = self.prepare_process(spec);
+        let clock = self.clock.clone();
         let child = start(spec)?;
         // Construct the guard before the child is placed in the async task. If
         // the task is aborted before its first poll, this guard still owns the
@@ -1260,7 +1294,8 @@ impl Supervisor {
         let task = self.allocate_task_id();
         let group = ProcessGroup::of(&child, task, permit, Arc::clone(&self.cleanup_owners));
         Ok(self.place_owned(task, async move {
-            let end = drive_process(child, deadline, &token, group, out_limit, err_limit).await;
+            let end =
+                drive_process(&clock, child, deadline, &token, group, out_limit, err_limit).await;
             task_end(end)
         }))
     }
@@ -1305,6 +1340,7 @@ impl Supervisor {
             return Err(ProcessRunError::Refused);
         }
         let (token, deadline, out_limit, err_limit) = self.prepare_process(spec);
+        let clock = self.clock.clone();
         let child = match start(spec) {
             Ok(child) => child,
             Err(source) => return Err(ProcessRunError::NotStarted { source }),
@@ -1312,7 +1348,7 @@ impl Supervisor {
         let task = self.allocate_task_id();
         let group = ProcessGroup::of(&child, task, permit, Arc::clone(&self.cleanup_owners));
         self.spawned = self.spawned.saturating_add(1);
-        let end = drive_process(child, deadline, &token, group, out_limit, err_limit).await;
+        let end = drive_process(&clock, child, deadline, &token, group, out_limit, err_limit).await;
         self.completed = self.completed.saturating_add(1);
         let deadline_fired = matches!(end.observation, ProcessObservation::Deadline);
         let settled = match end.observation {
@@ -1419,16 +1455,22 @@ impl Supervisor {
         // yielding a fixed number of times and only then joining: a body that
         // returns early is settled immediately, so the grace is a ceiling on
         // the wait and not a charge for it.
-        let deadline = Instant::now().checked_add(COOPERATIVE_DRAIN_GRACE);
+        // The grace is bounded on the **wall** clock, deliberately, and not on
+        // the supervisor's governing clock. This loop waits for real work to
+        // reach a join boundary; a caller-advanceable clock would let one
+        // advance end the grace before any body ran, and the abort would then
+        // report every cooperative task as `Aborted` — a false terminal state
+        // produced by the test's own clock. The wall watchdog is the one bound
+        // that cannot be moved by whoever is driving time.
+        let watchdog = self.clock.wall_watchdog();
+        let deadline = watchdog.elapsed().saturating_add(COOPERATIVE_DRAIN_GRACE);
         loop {
             while let Some(joined) = self.set.try_join_next_with_id() {
                 self.absorb(joined, Retention::Draining);
             }
-            // `None` means the clock could not express the deadline, which is
-            // reachable only past the representable range. There is nothing to
-            // wait for in that case, so the abort below is the whole response.
-            let Some(deadline) = deadline else { break };
-            if self.set.is_empty() || Instant::now() >= deadline {
+            // The set emptying is the real exit condition; the grace is the
+            // ceiling on how long the loop may keep trying.
+            if self.set.is_empty() || watchdog.elapsed() >= deadline {
                 break;
             }
             yield_now().await;
@@ -2161,6 +2203,7 @@ enum ProcessObservation {
 /// the child free to be waited on once the group has been signalled.
 #[cfg(all(unix, feature = "process"))]
 async fn observe_pid_without_reaping(
+    clock: &Clock,
     pid: i32,
     deadline: Option<Duration>,
     token: &CancellationToken,
@@ -2168,12 +2211,16 @@ async fn observe_pid_without_reaping(
     if pid <= 0 {
         return ProcessObservation::Unobservable;
     }
-    let deadline = deadline.and_then(|duration| Instant::now().checked_add(duration));
+    // The deadline is anchored on the governing clock's own timeline, so a
+    // caller-advanceable clock exhausts it in one arithmetic step and a wall
+    // clock exhausts it when real time says so — the same refusal either way.
+    let started_at = clock.now();
+    let deadline = deadline.map(|duration| started_at.saturating_add(duration));
     loop {
         if token.is_cancelled() {
             return ProcessObservation::Cancelled;
         }
-        if deadline.is_some_and(|at| Instant::now() >= at) {
+        if deadline.is_some_and(|at| clock.now() >= at) {
             return ProcessObservation::Deadline;
         }
         match lgwks_std::process::child_has_exited_without_reaping(pid) {
@@ -2254,6 +2301,7 @@ fn task_end(end: ProcessEnd) -> TaskEnd {
 /// reader that is waiting for it to exit.
 #[cfg(all(unix, feature = "process"))]
 async fn drive_process(
+    clock: &Clock,
     mut child: Child,
     deadline: Option<Duration>,
     token: &CancellationToken,
@@ -2269,7 +2317,7 @@ async fn drive_process(
     // this future completes.
     let wait = async {
         let observation = match pid {
-            Some(pid) => observe_pid_without_reaping(pid, deadline, token).await,
+            Some(pid) => observe_pid_without_reaping(clock, pid, deadline, token).await,
             None => ProcessObservation::Unobservable,
         };
         let cleanup = group.cleanup().await;
@@ -2634,21 +2682,47 @@ fn truncate_panic_message(text: &str) -> String {
 /// crate can enforce: a *body* that never returns from `poll` is noncooperative
 /// user code, and no amount of yielding here can preempt it. See
 /// [`Supervisor::shutdown`].
-pub async fn repeat<F, Fut>(token: &CancellationToken, budget: Budget, mut body: F) -> Outcome
+pub async fn repeat<F, Fut>(token: &CancellationToken, budget: Budget, body: F) -> Outcome
 where
     F: FnMut(u64) -> Fut,
     Fut: Future<Output = ()>,
 {
-    // Both bounds are computed once, outside the loop, and neither uses an
-    // arithmetic operator: `checked_add` returns `None` instead of wrapping, and
-    // a budget of `Duration::MAX` is a deadline that never arrives rather than
-    // one that arrives immediately.
+    repeat_on(&Clock::wall(), token, budget, body).await
+}
+
+/// [`repeat`] with the budget measured on a declared [`Clock`].
+///
+/// The same loop, and the same [`Outcome`], with one difference that matters:
+/// `Budget::For` is compared against the clock's own timeline rather than
+/// against a local [`Instant`]. A wall clock is the default through [`repeat`],
+/// so a caller that never asks for a clock observes the behaviour it always
+/// did — real elapsed time — and a caller that supplies a caller-advanceable
+/// one gets a budget that is exact and costs no real wait to exhaust.
+///
+/// The iteration bound is unaffected: a count of iterations is a fact about the
+/// body, not about time, and no clock governs it.
+pub async fn repeat_on<F, Fut>(
+    clock: &Clock,
+    token: &CancellationToken,
+    budget: Budget,
+    mut body: F,
+) -> Outcome
+where
+    F: FnMut(u64) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    // The iteration bound and the time bound are read once, outside the loop, and
+    // neither uses an arithmetic operator: a saturating add cannot wrap, and a
+    // budget of `Duration::MAX` is a deadline that never arrives rather than one
+    // that arrives immediately.
     let iteration_limit = match budget {
         Budget::Iterations(limit) => Some(limit.get()),
         Budget::For(_) | Budget::Ongoing => None,
     };
+    // The instant the budget is measured from, on the governing clock.
+    let started_at = clock.now();
     let deadline = match budget {
-        Budget::For(limit) => Instant::now().checked_add(limit),
+        Budget::For(limit) => Some(started_at.saturating_add(limit)),
         Budget::Iterations(_) | Budget::Ongoing => None,
     };
 
@@ -2666,13 +2740,61 @@ where
         // conditionals, so the two ways a budget can run out read as one
         // decision and the loop has a single exit for each reason.
         let spent = iteration_limit.is_some_and(|limit| iterations >= limit)
-            || deadline.is_some_and(|deadline| Instant::now() >= deadline);
+            || deadline.is_some_and(|deadline| clock.now() >= deadline);
         if spent {
             return Outcome::Exhausted { iterations };
         }
-        match token.run_until_cancelled(body(iterations)).await {
-            Some(()) => iterations = iterations.saturating_add(1),
-            None => return Outcome::Cancelled { iterations },
+        // The body is raced against the stop *and*, on a caller-advanceable
+        // clock, against the bound.
+        //
+        // Without the second arm a suspended body would be checked against its
+        // budget only after it returned — that is, never — and a body that waits
+        // indefinitely would wait for a cancel the budget was supposed to have
+        // delivered. A budget consulted only between iterations bounds nothing
+        // that is suspended, which is most of what this loop exists to bound.
+        //
+        // The bound is polled on a short real interval rather than by a timer,
+        // because a caller-advanceable clock's bound is not a real time at all:
+        // no engine timer can be armed for it. The interval bounds how *late*
+        // an advance is noticed, never whether it is — the loop re-reads the
+        // clock, so an advance that lands at any point is observed.
+        //
+        // A wall clock takes the other arm, governed by its own timer and
+        // unchanged from what this loop always did. Racing both for a wall clock
+        // would double every wakeup for no difference in the reported outcome.
+        if let Some(deadline) = deadline {
+            if clock.source() != TimeSource::Wall {
+                match wait_for_bound(clock, token, deadline, body(iterations)).await {
+                    Bounded::Spent => return Outcome::Exhausted { iterations },
+                    Bounded::Stopped => return Outcome::Cancelled { iterations },
+                    Bounded::Finished => iterations = iterations.saturating_add(1),
+                }
+            } else {
+                // The timer arm. Anchored on real elapsed time from now, which
+                // is the wall clock's own reading and therefore the same value
+                // the deadline above carries.
+                let remaining = deadline.saturating_sub(clock.now());
+                let spent = lgwks_deps::tokio::select! {
+                    biased;
+                    () = crate::rt::time::sleep(remaining) => true,
+                    observed = token.run_until_cancelled(body(iterations)) => {
+                        match observed {
+                            Some(()) => false,
+                            None => return Outcome::Cancelled { iterations },
+                        }
+                    }
+                };
+                if spent {
+                    return Outcome::Exhausted { iterations };
+                }
+                iterations = iterations.saturating_add(1);
+                continue;
+            }
+        } else {
+            match token.run_until_cancelled(body(iterations)).await {
+                Some(()) => iterations = iterations.saturating_add(1),
+                None => return Outcome::Cancelled { iterations },
+            }
         }
         // Hand the executor back periodically so a ready body cannot hold it
         // for the whole run. `yield_now` resolves on its second poll, so this
@@ -2684,6 +2806,59 @@ where
         if until_yield == 0 {
             until_yield = YIELD_INTERVAL;
             yield_now().await;
+        }
+    }
+}
+
+/// How one bounded wait on a caller-advanceable clock settled.
+enum Bounded {
+    /// The body returned.
+    Finished,
+    /// The logical clock reached `deadline`.
+    Spent,
+    /// The token was cancelled first.
+    Stopped,
+}
+
+/// Run one body iteration under a logical deadline no engine timer can reach.
+///
+/// The polling interval is real time, and that is the point of the split between
+/// the two clocks in this module: the *bound* is logical and exact, and the
+/// *observation* of it is real and slightly late. A caller-advanceable clock
+/// cannot be armed on any timer, so something has to wake up to notice — and
+/// what wakes up reads the clock, so the bound itself is never approximated.
+///
+/// A one-millisecond poll is the observation granularity and not a budget: a
+/// body that runs for an hour under a virtual clock is polled 3.6 million times,
+/// which is the honest cost of asking a real executor to watch a counter nobody
+/// real time is moving. A wall clock never reaches this function.
+async fn wait_for_bound<Fut>(
+    clock: &Clock,
+    token: &CancellationToken,
+    deadline: Duration,
+    body: Fut,
+) -> Bounded
+where
+    Fut: Future<Output = ()>,
+{
+    /// How often the logical clock is re-read while a body is suspended.
+    const LOGICAL_POLL: Duration = Duration::from_millis(1);
+    let mut body = std::pin::pin!(body);
+    loop {
+        if clock.now() >= deadline {
+            return Bounded::Spent;
+        }
+        lgwks_deps::tokio::select! {
+            biased;
+            () = crate::rt::time::sleep(LOGICAL_POLL) => {}
+            _finished = &mut body => return Bounded::Finished,
+        }
+        // The stop is checked on every pass rather than only when the bound is
+        // met, so a cancelled loop under a virtual clock stops in a
+        // millisecond rather than when its budget happens to be reached — which
+        // under a clock nobody is advancing is never.
+        if token.is_cancelled() {
+            return Bounded::Stopped;
         }
     }
 }

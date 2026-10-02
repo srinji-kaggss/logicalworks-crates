@@ -147,6 +147,27 @@ struct Inner {
     elapsed: AtomicU64,
     /// Whether this clock can be advanced by a caller.
     source: TimeSource,
+    /// Where a wall clock was placed on its timeline, read through
+    /// [`Inner::origin`].
+    ///
+    /// `None` for a virtual clock, whose timeline is the counter above and
+    /// nothing else. The `Option` rather than a bare `Instant` because
+    /// `Instant::now()` at construction would be a real read a virtual-clock
+    /// caller never asked for, and a clock that touches the wall clock when it
+    /// is supposed not to is precisely the coupling this module forbids.
+    placed: Option<Instant>,
+}
+
+impl Inner {
+    /// A wall clock's real monotonic origin.
+    ///
+    /// Unwrapping is correct because `placed` is set for a wall clock and absent
+    /// for a virtual one, and [`Clock::now`] only asks on the wall branch — the
+    /// two facts cannot disagree. Written as one place so a second reader of
+    /// `placed` cannot skip the reasoning.
+    fn origin(&self) -> Instant {
+        self.placed.unwrap_or_else(Instant::now)
+    }
 }
 
 /// Why a clock operation was refused.
@@ -197,6 +218,34 @@ impl Clock {
             inner: Arc::new(Inner {
                 elapsed: AtomicU64::new(0),
                 source: TimeSource::Wall,
+                placed: Some(Instant::now()),
+            }),
+        }
+    }
+
+    /// A wall clock re-established at `elapsed`, for a restart.
+    ///
+    /// The same fact as [`Clock::wall`] with a known starting point: the origin
+    /// is the recorded elapsed time the previous process reached, and real time
+    /// advances from there. This is the form a durable record replays, and it is
+    /// why a restart restores a **duration** and never a stored `Instant` — an
+    /// `Instant` is process-local and means nothing here.
+    ///
+    /// ```
+    /// # use std::time::Duration;
+    /// # use lgwks_bot::rt::clock::Clock;
+    /// // A run that had spent four of its ten seconds restarts here.
+    /// let clock = Clock::wall_at(Duration::from_secs(4));
+    /// assert!(clock.now() >= Duration::from_secs(4));
+    /// assert_eq!(clock.snapshot().remaining_from(Duration::from_secs(10)), clock.now() - Duration::from_secs(4));
+    /// ```
+    #[must_use]
+    pub fn wall_at(elapsed: Duration) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                elapsed: AtomicU64::new(duration_to_nanos(elapsed)),
+                source: TimeSource::Wall,
+                placed: Some(Instant::now()),
             }),
         }
     }
@@ -222,6 +271,7 @@ impl Clock {
             inner: Arc::new(Inner {
                 elapsed: AtomicU64::new(duration_to_nanos(elapsed)),
                 source: TimeSource::Virtual,
+                placed: None,
             }),
         }
     }
@@ -234,15 +284,32 @@ impl Clock {
 
     /// Elapsed time since this clock's origin.
     ///
-    /// For a [`TimeSource::Wall`] clock this is the counter advanced by the
-    /// construction instant and never since, so it reports the origin's
-    /// magnitude, **not** the time since this call. A wall clock's elapsed time
-    /// is [`WallClock::elapsed`], which samples a real monotonic reading. This
-    /// split is deliberate: the logical counter and the wall reading are
-    /// different facts and reading one as the other is the bug the module
-    /// exists to prevent.
+    /// A [`TimeSource::Virtual`] clock reports the counter a caller drives, so a
+    /// test owns every deadline exactly and a three-day outage costs three
+    /// arithmetic operations.
+    ///
+    /// A [`TimeSource::Wall`] clock reports **real** elapsed time, sampled from
+    /// `std::time::Instant` on every call. That is what makes a wall clock safe
+    /// to govern real deadlines with: the counter it also carries records where
+    /// the clock *was placed* on a restart, and reading one as the other is the
+    /// bug this module exists to prevent. See [`Clock::placed_at`] for the
+    /// counter that does mean the origin's magnitude.
     #[must_use]
     pub fn now(&self) -> Duration {
+        match self.inner.source {
+            TimeSource::Wall => self.inner.origin().elapsed(),
+            TimeSource::Virtual => Duration::from_nanos(self.inner.elapsed.load(Ordering::Relaxed)),
+        }
+    }
+
+    /// Where this clock was placed on its timeline, for either source.
+    ///
+    /// The origin a clock was restored to. For a wall clock it is the recorded
+    /// elapsed time the restart re-established, so `now` starts from it and
+    /// advances with real time; for a virtual clock it is the current counter,
+    /// which is what [`Clock::snapshot`] persists.
+    #[must_use]
+    pub fn placed_at(&self) -> Duration {
         Duration::from_nanos(self.inner.elapsed.load(Ordering::Relaxed))
     }
 
@@ -268,7 +335,7 @@ impl Clock {
         if self.inner.source == TimeSource::Wall {
             return Err(ClockError::NotVirtual);
         }
-        let now = self.now();
+        let now = self.placed_at();
         if now >= Self::elapsed_ceiling() {
             return Err(ClockError::OutOfRange {
                 requested: by,
@@ -328,6 +395,13 @@ impl Clock {
         }
     }
 
+    /// The independent wall-clock watchdog, sampling the real monotonic origin.
+    fn watchdog(&self) -> WallClock {
+        WallClock {
+            started: self.inner.origin(),
+        }
+    }
+
     /// A wall-clock watchdog that keeps running while logical time is frozen.
     ///
     /// The point of this method is that pausing logical time cannot pause a
@@ -347,9 +421,7 @@ impl Clock {
     /// ```
     #[must_use]
     pub fn wall_watchdog(&self) -> WallClock {
-        WallClock {
-            started: Instant::now(),
-        }
+        self.watchdog()
     }
 }
 

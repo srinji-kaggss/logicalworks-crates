@@ -70,10 +70,17 @@ pub(crate) mod trail;
 
 use std::time::Duration;
 
-pub use control::{at_most, attempts, retry, within};
+// The clock is re-exported here rather than reached through `rt::clock` because
+// this is the module that *consumes* it: a flow author writing `within` needs
+// the type, and the two paths to it is one more name to keep straight. The
+// underlying module stays the single definition.
+use crate::rt::clock as rt_clock;
+
+pub use control::{at_most, attempts, retry, within, within_on};
 pub use each::each;
 pub use error::{FlowError, OptionExt, ResultExt};
 pub use map::{Architecture, FlowShape, StepKind, StepShape};
+pub use rt_clock::Clock;
 pub use scope::{Scope, StepKey, Tenant};
 
 /// How many step paths a scope's trail retains unless a host says otherwise.

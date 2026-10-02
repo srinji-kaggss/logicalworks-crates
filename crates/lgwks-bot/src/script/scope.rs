@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use lgwks_std::hash::{Digest, Hasher};
 
+use crate::rt::clock::Clock;
 use crate::rt::sync::CancellationToken;
+use crate::rt::time::Deadline;
 
 use super::policy::Policy;
 use super::trail::Trail;
@@ -129,13 +131,40 @@ struct ScopeInner {
     policy: Arc<Policy>,
     /// The bounded record of which steps this root's steps entered.
     trail: Arc<Trail>,
+    /// The clock every deadline under this root is measured on.
+    ///
+    /// Inherited by every descended scope and shared by clone rather than
+    /// copied, so one advance from a test reaches every step of the flow and a
+    /// step cannot quietly measure its deadline against a different timeline
+    /// from the one its parent was admitted under.
+    clock: Clock,
 }
 
 impl Scope {
     /// A root scope for `tenant` with a fresh cancellation token.
+    ///
+    /// Its deadlines are measured on a wall clock, which is what every scope a
+    /// caller did not name a clock for must do. Use [`Scope::with_clock`] to
+    /// govern them from somewhere a test can move.
     #[must_use]
     pub fn root(tenant: Tenant) -> Self {
         Self::with_token(tenant, CancellationToken::new())
+    }
+
+    /// A root scope for `tenant` whose deadlines are measured on `clock`.
+    ///
+    /// The declared-clock form. Every step descended from this scope measures
+    /// its [`within`](crate::script::within) budget on `clock`, so advancing it
+    /// past a budget produces the same [`FlowError::TimedOut`](crate::script::FlowError::TimedOut)
+    /// a real overrun produces — with no real wait, which is the whole point of
+    /// having one declared clock rather than three implicit ones.
+    ///
+    /// Clones and descendants share the clock, so an advance reaches every step
+    /// of the flow at once and two flows built on two clocks cannot see each
+    /// other's time.
+    #[must_use]
+    pub fn with_clock(tenant: Tenant, clock: Clock) -> Self {
+        Self::with_token_and_clock(tenant, CancellationToken::new(), clock)
     }
 
     /// A root scope for `tenant` that stops when `token` is cancelled.
@@ -149,6 +178,13 @@ impl Scope {
     }
 
     /// A root scope for `tenant` that stops when `token` is cancelled and
+    /// measures its deadlines on `clock`.
+    #[must_use]
+    pub fn with_token_and_clock(tenant: Tenant, token: CancellationToken, clock: Clock) -> Self {
+        Self::with_token_trail_and_clock(tenant, token, Trail::new(DEFAULT_TRAIL_STEPS), clock)
+    }
+
+    /// A root scope for `tenant` that stops when `token` is cancelled and
     /// records the steps it enters into `trail`.
     ///
     /// The form [`Host`](crate::task::Host) uses: one trail per task run, so a
@@ -159,10 +195,11 @@ impl Scope {
     /// Crate-private because the trail's type is: the host is the supported way
     /// to obtain a scoped trail (DX-10), and a caller who reaches past it
     /// would be writing the second ledger this exists to remove.
-    pub(crate) fn with_token_and_trail(
+    pub(crate) fn with_token_trail_and_clock(
         tenant: Tenant,
         token: CancellationToken,
         trail: Arc<Trail>,
+        clock: Clock,
     ) -> Self {
         Self {
             inner: Arc::new(ScopeInner {
@@ -172,8 +209,18 @@ impl Scope {
                 token,
                 policy: Arc::new(Policy::for_this_machine()),
                 trail,
+                clock,
             }),
         }
+    }
+
+    /// [`Self::with_token_trail_and_clock`] on a wall clock.
+    pub(crate) fn with_token_and_trail(
+        tenant: Tenant,
+        token: CancellationToken,
+        trail: Arc<Trail>,
+    ) -> Self {
+        Self::with_token_trail_and_clock(tenant, token, trail, Clock::wall())
     }
 
     /// Enter the named step beneath this scope.
@@ -235,6 +282,7 @@ impl Scope {
                 },
                 policy: Arc::clone(&self.inner.policy),
                 trail: Arc::clone(&self.inner.trail),
+                clock: self.inner.clock.clone(),
             }),
         })
     }
@@ -284,6 +332,29 @@ impl Scope {
     #[must_use]
     pub fn token(&self) -> &CancellationToken {
         &self.inner.token
+    }
+
+    /// The clock every deadline under this scope is measured on.
+    ///
+    /// Inherited by each step descended from here, so a reader can ask which
+    /// clock governs a `within` budget instead of assuming. A caller that needs
+    /// to move time holds the [`Clock`] it built the scope with — this borrow
+    /// cannot advance it.
+    #[must_use]
+    pub fn clock(&self) -> &Clock {
+        &self.inner.clock
+    }
+
+    /// The budget remaining on `budget`, measured on this scope's clock.
+    ///
+    /// The shape a caller writes a precondition against. A deadline that cannot
+    /// be asked how much of it is left is a deadline nobody can reason about, and
+    /// with a caller-advanceable clock it is also the only way to know whether a
+    /// body has a real chance of finishing before its step times out.
+    #[must_use]
+    pub fn remaining_of(&self, budget: std::time::Duration) -> std::time::Duration {
+        let deadline = Deadline::after(&self.inner.clock, budget);
+        deadline.remaining()
     }
 
     /// Stop this scope and every step beneath it; inside an `each` body or a
