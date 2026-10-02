@@ -37,9 +37,7 @@
 use crate::cap::{Auth, Cap};
 use crate::effect::InputIdentity;
 use crate::error::{BotError, DispatchCertainty};
-use crate::inspect::{
-    Budgets, InspectRequest, Inspection, RuleSet, Scope as InspectScope,
-};
+use crate::inspect::{Budgets, InspectRequest, Inspection, RuleSet, Scope as InspectScope};
 use crate::verb;
 
 /// The domain identifier both verbs report.
@@ -319,10 +317,11 @@ impl InputIdentity for Inspection {
 
 /// The body signature of [`inspection_task`].
 #[cfg(feature = "script")]
-pub type InspectionBody = fn(
-    crate::script::Scope,
-    InspectionJob,
-) -> crate::BoxFuture<'static, Result<Inspection, crate::script::FlowError>>;
+pub type InspectionBody =
+    fn(
+        crate::script::Scope,
+        InspectionJob,
+    ) -> crate::BoxFuture<'static, Result<Inspection, crate::script::FlowError>>;
 
 /// A [`Task`](crate::task::Task) that inspects its input and returns the
 /// [`Inspection`].

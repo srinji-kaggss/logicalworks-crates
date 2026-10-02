@@ -776,11 +776,7 @@ fn inspect_eager(request: &InspectRequest<'_>) -> Inspection {
 
 /// Run one inspection, parsing through `parse` and enforcing budgets when
 /// `enforce` is set.
-fn inspect_mode(
-    request: &InspectRequest<'_>,
-    parse: ParseFn,
-    enforce: bool,
-) -> Inspection {
+fn inspect_mode(request: &InspectRequest<'_>, parse: ParseFn, enforce: bool) -> Inspection {
     let digest = hash::blake3(request.subject.as_bytes()).to_hex();
     let coverage = coverage_for(&request.rules, request.language, false);
     let base = |verdict: Verdict,
@@ -1058,12 +1054,7 @@ type Frame<'t> = (lgwks_ast::AstNode<'t>, usize, usize);
 /// The walk is iterative with one frame per active ancestor, so its resident
 /// state follows depth rather than sibling fan-out, and every budget is charged
 /// as the work happens rather than after it.
-fn walk(
-    parsed: &lgwks_ast::Parsed,
-    source: &str,
-    budgets: &Budgets,
-    enforce: bool,
-) -> WalkOutcome {
+fn walk(parsed: &lgwks_ast::Parsed, source: &str, budgets: &Budgets, enforce: bool) -> WalkOutcome {
     let root = parsed.root();
     let mut outcome = WalkOutcome {
         nodes: 0,
@@ -1231,9 +1222,7 @@ mod tests {
                 "the failure must carry the parser's own detail: {cause:?}"
             ),
             other => {
-                return Err(
-                    format!("expected an infrastructure failure, got {other:?}").into()
-                );
+                return Err(format!("expected an infrastructure failure, got {other:?}").into());
             }
         }
         assert!(
@@ -1307,13 +1296,10 @@ mod tests {
     #[test]
     fn a_subject_executing_mutant_fails_the_non_execution_oracle()
     -> Result<(), Box<dyn std::error::Error>> {
-        let marker = std::env::temp_dir().join(format!(
-            "lgwks-inspect-mutant-{}",
-            std::process::id()
-        ));
+        let marker =
+            std::env::temp_dir().join(format!("lgwks-inspect-mutant-{}", std::process::id()));
         let shown = marker.display();
-        let source =
-            format!("fn main() {{ std::fs::remove_file(\"{shown}\").unwrap(); }}\n");
+        let source = format!("fn main() {{ std::fs::remove_file(\"{shown}\").unwrap(); }}\n");
         let request = InspectRequest::new("src/main.rs", &source);
 
         // The shipped operation never runs the subject: the marker it "would"
@@ -1345,7 +1331,10 @@ mod tests {
     /// The `run_subject` closure stands in for whatever "execute" means; the
     /// point is that the operation performs it, so the filesystem oracle has
     /// something to observe. Never compiled outside tests.
-    fn inspect_executing<F: FnOnce(&str)>(request: &InspectRequest<'_>, run_subject: F) -> Inspection {
+    fn inspect_executing<F: FnOnce(&str)>(
+        request: &InspectRequest<'_>,
+        run_subject: F,
+    ) -> Inspection {
         run_subject(request.subject);
         inspect(request)
     }

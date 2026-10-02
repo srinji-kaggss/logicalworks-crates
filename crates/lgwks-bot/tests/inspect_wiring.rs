@@ -126,8 +126,7 @@ fn two_tenants_inspecting_the_same_artifact_stay_isolated() -> TestResult<()> {
                 .map_err(|_| "beta thread panicked".to_owned()),
         )
     });
-    let alpha_report = alpha_run
-        .map_err(|cause| -> Box<dyn Error> { cause.into() })??;
+    let alpha_report = alpha_run.map_err(|cause| -> Box<dyn Error> { cause.into() })??;
     let beta_report = beta_run.map_err(|cause| -> Box<dyn Error> { cause.into() })??;
 
     assert_eq!(

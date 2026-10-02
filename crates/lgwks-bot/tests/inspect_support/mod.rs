@@ -109,7 +109,11 @@ pub fn scope() -> TestResult<EffectScope> {
 /// what the action saw" sequence is not copied between targets.
 pub fn tick_once(bot: &mut Bot) -> TestResult<Inspection> {
     clear_captured();
-    assert_eq!(bot.tick()?, 1, "the one inspection chain fires exactly once");
+    assert_eq!(
+        bot.tick()?,
+        1,
+        "the one inspection chain fires exactly once"
+    );
     take_captured()
 }
 

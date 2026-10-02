@@ -11,9 +11,7 @@
 mod inspect_support;
 
 use inspect_support::sim::{Rng, Trace};
-use inspect_support::{
-    INSPECT_DOMAINS, TestResult, artifact_for, observe_once, scope,
-};
+use inspect_support::{INSPECT_DOMAINS, TestResult, artifact_for, observe_once, scope};
 use lgwks_bot::domain::inspect::{InspectionJob, Inspector, inspection_task};
 use lgwks_bot::inspect::{Budgets, IncompleteReason, InspectRequest, Inspection, Verdict, inspect};
 use lgwks_bot::spec::Bot;
@@ -181,7 +179,11 @@ fn sim_seeded_admission_needs_are_deterministic() -> TestResult<()> {
             Need::MissingCapability { capability, .. } => {
                 assert_eq!(capability, Cap::fs(), "seed {seed}: the need is `bot.fs`");
             }
-            other => return Err(format!("seed {seed}: expected MissingCapability, got {other:?}").into()),
+            other => {
+                return Err(
+                    format!("seed {seed}: expected MissingCapability, got {other:?}").into(),
+                );
+            }
         }
     }
     Ok(())
@@ -315,7 +317,10 @@ fn sim_seeded_host_admission_peak_is_bounded() -> TestResult<()> {
             peak <= ceiling,
             "seed {seed}: peak in-flight {peak} exceeded the ceiling {ceiling}"
         );
-        assert!(peak >= 1, "seed {seed}: at least one run must have been in flight");
+        assert!(
+            peak >= 1,
+            "seed {seed}: at least one run must have been in flight"
+        );
         assert_eq!(
             host.admission().admitted(),
             u64::try_from(jobs).unwrap_or(0),
