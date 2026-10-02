@@ -330,8 +330,14 @@ fn serve_once(stream: &mut TcpStream, reply: &[u8]) {
 }
 
 /// Accept one connection and answer it.
+///
+/// The caller joins this thread before the next measurement, so its read and
+/// write must end even if the client stops reading first: a blocked join would
+/// be a hung probe rather than a measured number. The timeouts bound that.
 fn serve(listener: TcpListener, reply: Vec<u8>) {
     if let Ok((mut stream, _)) = listener.accept() {
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
         serve_once(&mut stream, &reply);
     }
 }
@@ -423,11 +429,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
         let reply = reply_for(16, "");
-        std::thread::spawn(move || serve(listener, reply));
+        let server = std::thread::spawn(move || serve(listener, reply));
         let _ = http::get_with(
             &format!("http://127.0.0.1:{port}/"),
             &Options::default(),
         );
+        let _ = server.join();
     }
 
     // Exact fit at the non-power-of-two ceiling.
@@ -435,12 +442,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
         let reply = reply_for(CEILING, "X-Probe: allocation\r\n");
-        std::thread::spawn(move || serve(listener, reply));
+        let server = std::thread::spawn(move || serve(listener, reply));
         let url = format!("http://127.0.0.1:{port}/");
         let options = Options::default()
             .max_body_bytes(CEILING)
             .body_policy(BodyPolicy::Whole);
         let measured = measure(&url, &options)?;
+        let _ = server.join();
         println!("exact-body-len {}", measured.body_len);
         println!("exact-retained {}", measured.retained);
         println!("exact-peak {}", measured.peak);
@@ -453,12 +461,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
         let reply = reply_for(CUT_BODY, "");
-        std::thread::spawn(move || serve(listener, reply));
+        let server = std::thread::spawn(move || serve(listener, reply));
         let url = format!("http://127.0.0.1:{port}/");
         let options = Options::default()
             .max_body_bytes(CEILING)
             .body_policy(BodyPolicy::Preview);
         let measured = measure(&url, &options)?;
+        let _ = server.join();
         println!("cut-body-len {}", measured.body_len);
         println!("cut-retained {}", measured.retained);
         println!("cut-peak {}", measured.peak);
