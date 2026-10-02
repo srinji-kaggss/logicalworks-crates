@@ -100,6 +100,16 @@ explicitly under that crate.
   `killpg` return `EPERM` without reaching it; Linux aborts such a fork. A
   drop after the fork (T20) leaves no running member on either.
 
+- The journal-scale invariants were renumbered `INV-BOT-23..28` to
+  `INV-BOT-40..45`, because the old numbers were taken by another branch's
+  register. Only the identifiers moved; every enforced-by reference still
+  resolves. `INV-BOT-45` now states the tiered 100/1,000/10,000 sweep and its
+  requested/reached/ceiling receipt (#122 item 1).
+- `FileJournal::storage_gate`'s documentation now says what the handle is: a
+  fault-injection and liveness instrument whose held gate parks every append on
+  that journal by design, opened only through `open_with_stalled_storage`, never
+  by `open` (#122 item 2).
+
 ### lgwks_bot Breaking
 
 - `Source::new` now requires `O::Output: Clone + PartialEq + InputIdentity`

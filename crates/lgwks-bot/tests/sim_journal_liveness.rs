@@ -1,11 +1,12 @@
 //! Simulation family: bounded replay and cross-tenant journal isolation.
 //!
-//! Two properties of the durable journal that a seeded sweep can pin exactly:
+//! Three properties of the durable journal that a seeded sweep can pin exactly:
 //!
 //! | Family | Property it pins |
 //! |---|---|
 //! | `streaming_replay` | the bounded, frame-at-a-time replay yields exactly the acknowledged history, and the materialized view agrees |
 //! | `tenant_isolation` | two journals writing the **same effect key** keep only their own events, and one file cannot be shared |
+//! | `tenant_tiers` | the real scale test's 100/1,000/10,000 tiers, at the level a deterministic run can drive, lose and duplicate nothing and stay isolated |
 //!
 //! Both drive the real [`FileJournal`] — its real storage-owner thread, frame
 //! codec and chain verification. Nothing here reimplements a journal: a second
@@ -156,6 +157,126 @@ fn tenant_isolation_same_key(band: Band) -> TestResult {
             .record_count("tenant-attempts", usize::try_from(attempts)?);
         Ok(())
     })
+}
+
+/// The tiers the real scale test drives, in the order it drives them.
+const TIERS: [usize; 3] = [100, 1_000, 10_000];
+
+/// The most concurrent journals the deterministic simulation will hold.
+///
+/// A constant rather than a host reading: the trace hash is a replay receipt,
+/// so a ceiling that depended on the machine would make one seed hash
+/// differently on two hosts. Above this the run would spend its budget on
+/// threads instead of on the property under test.
+const SIM_CEILING: usize = 128;
+
+/// Events one simulated tenant writes.
+const SIM_EVENTS_PER_TENANT: usize = 2;
+
+/// The attempt-number stride between simulated tenants, so no two tenants ever
+/// write the same effect key.
+const SIM_ATTEMPT_STRIDE: u64 = 1_000;
+
+/// How many seeds the deterministic tier sweep replays, each run twice.
+///
+/// One seed rather than a band, because each tier fsyncs per journal and a
+/// band of the *real* tiers is minutes of disk rather than more coverage; the
+/// bread-and-butter seed breadth lives in the `tenant_isolation` family above.
+/// The seed is still replayed twice and the two trace hashes must match, so the
+/// receipt is the same one a band asserts.
+const SEED_SAMPLES: u64 = 1;
+
+/// The attempt number simulated tenant `tenant` writes for `step`.
+fn sim_attempt(tenant: usize, step: usize) -> Result<u64, std::num::TryFromIntError> {
+    let stride = u64::try_from(tenant)?.saturating_mul(SIM_ATTEMPT_STRIDE);
+    Ok(stride.saturating_add(u64::try_from(step)?))
+}
+
+/// The exact events simulated tenant `tenant` must hold after its appends.
+fn sim_events(tenant: usize) -> Result<Vec<EffectEvent>, Box<dyn Error>> {
+    let mut events = Vec::with_capacity(SIM_EVENTS_PER_TENANT);
+    for step in 1..=SIM_EVENTS_PER_TENANT {
+        events.push(EffectEvent::IntentAdmitted {
+            key: attempt_key(sim_attempt(tenant, step)?)?,
+        });
+    }
+    Ok(events)
+}
+
+/// Run the real tiers at the level the simulation can drive, and return the
+/// trace hash.
+///
+/// Each tier opens `min(requested, SIM_CEILING)` journals, writes every
+/// tenant's ladder in tenant order — the same sequence for every seed, so the
+/// run is a replay and not a race — then reopens every file and requires its
+/// exact own events. That is isolation, zero lost and zero duplicated at once,
+/// at the level a deterministic single-threaded driver can reach. The requested,
+/// reached and ceiling levels are recorded together, the same receipt the real
+/// scale test writes (INV-BOT-16).
+fn run_tenant_tiers(seed: u64) -> Result<u64, Box<dyn Error>> {
+    let mut sim = sim::Sim::new(seed);
+    for requested in TIERS {
+        let level = requested.min(SIM_CEILING);
+        let dir = sim.scratch(&format!("tiers-{requested}"))?;
+        let mut paths = Vec::with_capacity(level);
+        let mut journals = Vec::with_capacity(level);
+        for tenant in 0..level {
+            let path = sim.journal_path(&dir, u32::try_from(tenant)?);
+            journals.push(FileJournal::open(&path)?);
+            paths.push(path);
+        }
+
+        for (tenant, journal) in journals.iter_mut().enumerate() {
+            drop(journal.compare_and_append_all(&sim_events(tenant)?)?);
+        }
+        for (tenant, journal) in journals.iter().enumerate() {
+            assert_eq!(
+                journal.events().count(),
+                SIM_EVENTS_PER_TENANT,
+                "tenant {tenant} of the {requested} tier held another tenant's events"
+            );
+        }
+        drop(journals);
+
+        for (tenant, path) in paths.iter().enumerate() {
+            let reopened = FileJournal::open(path)?;
+            let held: Vec<EffectEvent> = reopened.events().copied().collect();
+            assert_eq!(
+                held,
+                sim_events(tenant)?,
+                "tenant {tenant} of the {requested} tier did not reopen to exactly its own events"
+            );
+        }
+
+        sim.record("tenant-tier-isolated");
+        sim.trace
+            .record_u64("tier-requested", u64::try_from(requested)?);
+        sim.trace.record_u64("tier-reached", u64::try_from(level)?);
+        sim.trace
+            .record_u64("tier-ceiling", u64::try_from(SIM_CEILING)?);
+        sim.trace
+            .record_count("tier-events", level.saturating_mul(SIM_EVENTS_PER_TENANT));
+    }
+    Ok(sim.hash())
+}
+
+/// The named receipt: the tier sweep replays exactly, seed by seed.
+///
+/// A named test rather than a sixteen-band sweep, because the cost of the sweep
+/// is the fsync per journal and sixteen bands of the real scale tiers is minutes
+/// of disk, not more coverage. Every seed is run twice and the two trace hashes
+/// must match, which is the same replay receipt a band asserts.
+#[test]
+fn tenant_tiers_replay_at_the_level_the_sim_can_drive() -> TestResult {
+    for seed in 0..SEED_SAMPLES {
+        let first = run_tenant_tiers(seed)?;
+        let second = run_tenant_tiers(seed)?;
+        assert_eq!(
+            first, second,
+            "seed {seed} produced two different trace hashes, so the tier sweep is not deterministic"
+        );
+    }
+    Ok(())
 }
 
 use band_family::band_family;

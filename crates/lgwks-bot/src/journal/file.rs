@@ -1400,11 +1400,20 @@ impl FileJournal {
 
     /// A handle that can release the stall, independently of this journal.
     ///
+    /// This is a fault-injection and liveness instrument, not a production
+    /// door: while the gate is held closed — the state a journal opened with
+    /// [`Self::open_with_stalled_storage`] starts in — **every append on this
+    /// journal parks on the device by design**. Nothing is acknowledged until
+    /// [`StorageGate::release`] runs, which is exactly what a stalled device
+    /// does, and it is what lets a caller ask "what does this bot do while its
+    /// disk has stopped answering" against a real process rather than a mock.
+    ///
     /// Returned alongside the journal rather than only as
     /// [`Self::release_storage`] because the caller that most needs to un-stick
     /// the device is the one awaiting an append on it, and that caller holds
     /// the journal's borrow for the whole wait. It is the instrument a
-    /// slow-store liveness test releases from an independent thread.
+    /// slow-store liveness test releases from an independent thread; an
+    /// ordinary journal is opened with [`Self::open`] and is never gated.
     #[must_use]
     pub fn storage_gate(&self) -> StorageGate {
         StorageGate {

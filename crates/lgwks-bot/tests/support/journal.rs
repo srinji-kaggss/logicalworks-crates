@@ -60,6 +60,26 @@ impl Drop for TempGuard {
     }
 }
 
+/// Append one measurement line to the file named by `LGWKS_SCALE_OUT`.
+///
+/// The measurement targets write their tails and tier lines here rather than to
+/// stdout, because the workspace forbids printing and because a report needs the
+/// number the run produced, not an assertion that happened to pass. The file is
+/// opened in append mode so two measurement targets that share it cannot erase
+/// each other's lines, and an unset variable is a silent no-op so the tests pass
+/// unchanged on a host that does not want a report.
+pub fn record_measurement(line: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("LGWKS_SCALE_OUT") else {
+        return Ok(());
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(file, "{line}")
+}
+
 /// A fixture key for attempt `attempt`, under the shared identity.
 pub fn key(attempt: u64) -> Result<EffectKey, Box<dyn Error>> {
     Ok(EffectKey::new(
