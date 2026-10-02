@@ -1,27 +1,15 @@
 //! Exercises the wire facade from an external-crate consumer context.
 #![cfg(feature = "wire")]
 
-use std::{collections::BTreeMap, mem::size_of};
+#[path = "support/wire_record.rs"]
+mod wire_record;
+
+use std::mem::{align_of, size_of};
 
 use lgwks_std::wire::{
     self, Archive, Deserialize, Endianness, Serialize, WireError, access, from_bytes, to_bytes,
 };
-
-#[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Eq)]
-#[rkyv(crate = lgwks_std::wire::rkyv, derive(Debug))]
-struct ConsumerRecord {
-    name: String,
-    indices: Vec<usize>,
-    signed_index: isize,
-    fields: BTreeMap<String, u32>,
-    child: Option<Box<ConsumerChild>>,
-}
-
-#[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Eq)]
-#[rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
-struct ConsumerChild {
-    value: u64,
-}
+use wire_record::{ArchivedConsumerRecord, ConsumerChild, ConsumerRecord, sample};
 
 #[derive(Archive, Deserialize, Serialize)]
 #[rkyv(crate = lgwks_std::wire::rkyv, derive(Debug))]
@@ -29,7 +17,7 @@ struct StructurallySimilarButDifferentSchema {
     name: String,
     indices: Vec<usize>,
     signed_index: isize,
-    fields: BTreeMap<String, u32>,
+    fields: std::collections::BTreeMap<String, u32>,
     child: Option<Box<ConsumerChild>>,
 }
 
@@ -98,6 +86,11 @@ fn reports_effective_rkyv_primitive_format() -> Result<(), WireError> {
     assert_eq!(
         format.pointer_width_bits, expected_pointer_width_bits,
         "reported pointer width matches the effective archived alias"
+    );
+    assert_eq!(
+        format.archived_u32_alignment,
+        u8::try_from(align_of::<lgwks_std::wire::rkyv::primitive::ArchivedU32>()).unwrap_or(0),
+        "reported alignment matches the effective archived primitive"
     );
     Ok(())
 }
@@ -182,18 +175,4 @@ fn equal_zero_values_can_have_different_archive_bytes() -> Result<(), WireError>
         "archive bytes preserve distinct signed-zero representations"
     );
     Ok(())
-}
-
-fn sample() -> ConsumerRecord {
-    let mut fields = BTreeMap::new();
-    fields.insert(String::from("height"), 200);
-    fields.insert(String::from("width"), 100);
-
-    ConsumerRecord {
-        name: String::from("consumer fixture"),
-        indices: vec![3, 5, 8],
-        signed_index: -13,
-        fields,
-        child: Some(Box::new(ConsumerChild { value: 42 })),
-    }
 }

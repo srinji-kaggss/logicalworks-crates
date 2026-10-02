@@ -21,6 +21,13 @@ Two conventions. **Solved** means no longer a research problem — build against
 and do not spend budget re-deriving it. **Open** means the field does not know, so
 a decision here is a bet and should be recorded as one.
 
+Provenance, re-checked 2026-10-02. The Anchors below are **research**: arXiv
+papers, patents, leaderboards, RFCs and standards, cited by title, and assessed
+as research rather than measured on this crate. The few shipping projects named
+were re-pinned against their own releases at that date (OpenAdapt launcher
+`v1.16.0`, Flow `1.34.0`). A claim the named project does not support at that
+version is marked *unsourced* rather than removed.
+
 ---
 
 ## 1. Element grounding — the sketch is half right, and the half that is wrong is load-bearing
@@ -220,10 +227,17 @@ preconditions and postconditions against the system of record.
 - Inducing Task Models from Computer-Use Traces (arXiv 2608.20319) — 0.974
   agreement recovering interleaved concurrent tasks, 74.9% of execution steps
   reconstructed, +30.0% held-out task accuracy over the strongest baseline.
-- **OpenAdapt** (production OSS, v1.16.0) — the shipping form of the same thesis:
-  *"one demonstration is evidence, not a specification"*. `induce` requires at
-  least two recordings and emits a parameterised program **or exits nonzero with no
-  bundle**, halting rather than act on unverifiable identity or write.
+- **OpenAdapt** (production OSS, launcher `v1.16.0` / Flow `1.34.0`) — a shipping
+  form of the same thesis, in its own words: a person or a watched agent "authors
+  a demonstration" that compiles into a program, and a `--break-it` run halts when
+  an independent read of the record store disagrees with the screen even though
+  every on-screen check passes (`README.md`). *Unsourced at this version:* the
+  quoted sentence *"one demonstration is evidence, not a specification"* and an
+  `induce` command requiring at least two recordings — neither appears in the
+  `v1.16.0` README, whose CLI compiles one recording (`openadapt flow compile rec
+  --out bundle`) and whose compiler/runtime now live in `openadapt-flow`. The
+  refusal principle the point makes survives; the specific command and quote do
+  not, and are kept here as the historical claim they were.
 - AgentLTL (arXiv 2607.02599) — FO-LTL procedural rules over traces yielding a
   deterministic **judge-free** compliance score, usable as an online pre-execution
   gate; +38 / +17.5 pp on held-out patterns including unseen tool names.

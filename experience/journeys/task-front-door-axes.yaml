@@ -1,0 +1,84 @@
+id: task-front-door-axes
+actor: agent-or-human-dev
+job: Run a typed task on a Host under load, across tenants and on drop, and be
+  certain afterwards that the admission budget came back whole, that two tenants
+  never shared a step, and that a stopped run left nothing behind.
+prior_knowledge:
+  - Knows the body they want to run; has not read the task module.
+  - Assumes "the run returned" means its permit was released, and that two
+    hosts on the same task name must collide. Both are wrong, and this journey
+    is where they learn it.
+start:
+  installation: lgwks-bot built with the `script` feature; no observer or tick
+    loop to wire.
+  state: a Host built once for a tenant, one Task declared, and a caller that
+    may run it 10,000 times at once, for two tenants, or drop it mid-flight.
+success:
+  visible_outcome: every run reports its own disposition and typed output; the
+    host's admission counters return to their starting values; two hosts with
+    different tenants on one shared task name produce distinct step keys and
+    reports; a dropped or cancelled run returns every permit.
+states:
+  - name: saturated
+    expectation: a drawn scale up to 10,000 concurrent runs never exceeds the
+      admission ceiling, all complete, and every permit returns.
+  - name: isolated
+    expectation: two hosts with two tenants over one shared task name and step
+      path keep distinct keys, distinct reports and separate budgets.
+  - name: dropped
+    expectation: dropping or cancelling a suspended run releases its permit and
+      leaves nothing in flight.
+  - name: refused-boundary
+    expectation: a name, deadline or ceiling outside its declared bound is a
+      typed refusal, never a silent truncation or a panic.
+invariants:
+  - A permit is held for a run's whole life and released on every exit path,
+    including a future the caller drops while it is suspended.
+  - A step key is scoped by its tenant, so a shared path keys apart rather than
+    colliding.
+  - A ceiling the caller cannot see is a ceiling they cannot reason about, so
+    every host limit is finite and readable.
+trust_boundaries:
+  - "The admission semaphore is the host's, not the caller's: a task body that
+    holds a Host clone cannot raise the ceiling it is bounded by."
+  - A dropped future is untrusted: its body's drop must be the evidence that
+    nothing borrowed outlived it.
+recovery_contracts:
+  - A run refused at the admission gate is `Refused`, never `Cancelled` or
+    `Failed`, because no body ran.
+  - A host whose budget was saturated admits work again once the permits
+    return; saturation is not a terminal state.
+agent_contracts:
+  - Host::run reports `Succeeded`, `Failed`, `Cancelled`, `DeadlineExceeded` or
+    `Refused` and never infers the disposition from the output's shape.
+  - Two sibling top-level runs each take their own permit; a nested run is
+    charged to its parent's permit.
+profiles:
+  - first-time-dev: one task declaration and one `host.run(..).await` returns a
+    typed value with no observer, tick loop or handle to reap.
+  - expert-in-a-hurry: runs 10,000 concurrent calls and reads the ceiling, the
+    high-water mark and the permit count from the host.
+  - anxious-user: reads `Host::limits` before running, so no ceiling is a
+    surprise at refusal time.
+  - misuser: passes a 129-byte name, a zero deadline and a ceiling past the
+    bound; each is a typed refusal and nothing runs.
+  - ai-agent: derives a workload from a seed, replays it twice and compares the
+    trace hash, so a nondeterministic run fails even when every assertion passes.
+probes:
+  - id: saturation-conserves-permits
+    action: Drive a drawn scale of concurrent Host::run at a drawn ceiling;
+      assert the peak never exceeds it, all runs succeed, and every permit
+      returns.
+  - id: saturation-tiers-with-recovery
+    action: Run 100, 1,000 and 10,000 concurrent runs at a ceiling of 64; assert
+      conservation after each tier and that the host still admits work after.
+  - id: two-tenants-stay-isolated
+    action: Run one shared task on two hosts with different tenants
+      concurrently; assert the paths match, the keys differ, the reports carry
+      their own tenants, and each budget is whole.
+  - id: a-dropped-run-releases-everything
+    action: Park a run in its body, drop it or cancel the host, then assert the
+      permit returned, nothing is in flight, and a fresh host still runs.
+  - id: names-inputs-and-limits
+    action: Sweep seeded names, inputs and host limits; assert acceptance iff the
+      value is inside its declared bound.

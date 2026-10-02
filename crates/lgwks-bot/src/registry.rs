@@ -27,11 +27,32 @@
 //!
 //! # Uniqueness
 //!
-//! Identifiers are expected to be unique within a list. A duplicate is not
-//! refused: lookup is in declaration order and the first entry wins. The check
-//! that would make this a compile error is a `const` assertion, and it is not
-//! written because `clippy::panic` is forbidden workspace-wide, which leaves no
-//! way to fail a `const` evaluation from this module.
+//! Identifiers are expected to be unique within a role, and the boundary
+//! between "refused" and "first wins" is exactly this:
+//!
+//! - **Construction is validated.** [`DomainRegistry::validate`] refuses a
+//!   registry that declares one identifier twice in the same role, naming both
+//!   positions, and every build path — [`DomainRegistry::build_source`],
+//!   [`DomainRegistry::build_action`] and the `domains!` macro — goes through
+//!   it, so no registry with a duplicate can be constructed. Letting the first
+//!   declaration win would make dispatch depend on declaration order.
+//! - **The lookup accessors are not.** [`DomainRegistry::source`] and
+//!   [`DomainRegistry::action`] return `Option`, resolving in declaration order.
+//!   They exist to answer *which* constructor an identifier names, and because
+//!   a validated registry cannot hold a duplicate within a role, first-match
+//!   lookup is a property of a value that validation already guarantees rather
+//!   than a weaker rule silently applied. They are the accessors, not an
+//!   alternative construction path.
+//!
+//! The two roles are checked independently: one identifier appearing once as a
+//! source and once as an action is one domain with two roles, not a duplicate.
+//!
+//! Exercised by `tests/registry.rs`:
+//! `a_duplicate_source_identifier_is_refused_with_both_positions`,
+//! `a_duplicate_action_identifier_is_refused_the_same_way` and
+//! `validate_names_the_first_duplicate_pair_and_passes_clean_lists`; the
+//! downstream consequence by `tests/spec_materialize.rs`'s
+//! `a_duplicate_registry_is_refused_naming_the_identifier`.
 
 use std::any::Any;
 

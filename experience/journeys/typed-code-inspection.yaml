@@ -1,0 +1,102 @@
+id: typed-code-inspection
+actor: agent-or-human-dev
+job: Ask the bot to check risky code in process, over its structure, and get a
+  typed verdict — without the code ever being compiled, imported or run to find
+  out what it does.
+prior_knowledge:
+  - Knows the code they are unsure about; has not read the inspect module.
+  - Assumes a linter must run or compile the subject, and that "no findings"
+    means "safe". Both are wrong, and this is where they learn it.
+start:
+  installation: lgwks-bot built with the `inspect` feature.
+  state: a subject's bytes in hand, an artifact identity, and a rule set the
+    caller is willing to name.
+success:
+  visible_outcome: the caller receives one typed report that says either the
+    configured rules found nothing within a complete supported scope, or exactly
+    which rules matched where, or that the subject could not be decided — and
+    the subject was read only.
+states:
+  - name: clean
+    expectation: no configured rule matched, the scope was complete, and the
+      report says plainly it is not proof of safety.
+  - name: violations
+    expectation: each finding names a stable rule id and an exact byte span,
+      with a bounded preview.
+  - name: unsupported
+    expectation: an unknown grammar, unknown/mismatched rule set, or a grammar
+      the rules cannot read is a refusal, never a clean verdict.
+  - name: undecidable
+    expectation: a property this build cannot decide (a declared language
+      version) is reported as undecidable rather than guessed.
+  - name: incomplete
+    expectation: a budget exhaustion or parse recovery states the reason and the
+      limit, and never collapses to clean.
+  - name: infrastructure-failure
+    expectation: a parser fault is its own arm, never converted to a verdict.
+invariants:
+  - The subject is data at every step; its instructions cannot change the rule
+    set, the budgets or the host's authority.
+  - Grammar support is not rule support, and the report says which is which.
+  - A clean result is only ever about the configured rules, never about safety.
+  - Source bytes, parser nodes, traversal depth, work, findings and output are
+    separate budgets, each refused before avoidable amplification.
+trust_boundaries:
+  - The parser is third-party Rust; its faults are infrastructure failures, not
+    inspection verdicts.
+  - A hostile grammar can spend time inside the parser; this operation does not
+    claim in-process preemption of foreign stuck code.
+recovery_contracts:
+  - Every refusal names the reason and the bound that produced it, so a caller
+    can repair the budget or the rule set rather than re-run blind.
+  - A report binds to its subject by content digest, so a stale report cannot be
+    read as a statement about different bytes.
+agent_contracts:
+  - An agent calls `inspect` and reads the typed verdict, coverage and findings;
+    it builds no scanner, queue, retry controller or permission bypass of its
+    own.
+  - The report serializes through the shared JSON facade with its digest, spans,
+    rule revision and coverage intact.
+  - The operation is reachable on the existing verbs: a `Query` over supplied
+    bytes, and an `Observe` source that reads the artifact under `bot.fs`, both
+    through the registry and admission path every other domain uses, plus a
+    `Host`-run `Task`. Every door returns the one report; a host bounds how many
+    inspections run at once.
+probes:
+  - id: hostile-corpus-never-executes
+    action: Inspect a corpus of infinite loop, panic, abort, immediate exit,
+      filesystem delete, network connect, build script and instruction
+      injection; assert a filesystem marker survives, a TCP listener observes no
+      connection, and the process is still alive.
+  - id: distinct-typed-results
+    action: Inspect valid clean, violating, invalid-syntax, unsupported-language,
+      undecidable-version and budget-exhausted subjects; assert each lands on its
+      own verdict arm and never on clean.
+  - id: budgets-are-separate-axes
+    action: Apply a tiny source, node, depth, work, findings and output budget in
+      turn; assert each produces its own refusal and that node/depth walks stop
+      at the bound's overflow witness.
+  - id: seeded-model-agreement
+    action: Generate 128 seeded subjects and assert the reported violations equal
+      an independent model of the shipped rules, the same seed reproduces the
+      same trace, and statement order does not change the finding set.
+  - id: round-trip-preserves-identity
+    action: Serialize a report and decode it; assert the digest, spans, rule
+      revision and coverage survive.
+  - id: every-door-one-report
+    action: Run the same seeded subject through the free function, the Query
+      verb, the Observe source behind a bot and the Host task; assert all four
+      return the identical report, and that a spec naming the source without
+      `bot.fs` is an admission need rather than a poll.
+  - id: bounded-host-admission
+    action: Drive 100, 1,000 and 10,000 inspections through one host with a
+      small admission ceiling on a fixed worker pool; assert every run succeeds
+      and the peak in-flight count never exceeds the ceiling.
+  - id: two-tenants-one-artifact-name
+    action: Run two tenants inspecting the same artifact name over different
+      bytes; assert each report carries its own subject digest and the two do
+      not collide.
+  - id: linear-retained-counters
+    action: Inspect subjects of increasing size and assert the retained findings,
+      output bytes and visited nodes grow with the input rather than jumping,
+      using the operation's own Resources counters.
