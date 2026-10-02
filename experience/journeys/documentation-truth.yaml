@@ -1,0 +1,84 @@
+id: documentation-truth
+actor: agent-or-human-dev
+job: Read a sentence in this repository's documentation, act on it, and be certain
+  the sentence describes the code that ships at the revision the claim names — and
+  find out immediately when a claim has outlived the evidence under it.
+prior_knowledge:
+  - Can read Rust and markdown; has not read the gate scripts.
+  - Assumes a resolved file link, a pinned citation or a green CI job means the
+    sentence is true. All three are weaker than the claim they appear to
+    support, and this journey is where that is learned.
+start:
+  installation: a clone of the repository at a named revision.
+  state: an index of claims across the root governance docs, the crate READMEs,
+    the `docs/` tree, `llms.txt` and the release notes — some of them true, some
+    of them describing code that no longer exists, and no field on the page
+    saying which.
+success:
+  visible_outcome: every capability claim names its implementation path, the
+    test that exercises it, the revision it was checked at and the state it is
+    in; a reader can tell a proposed design from a shipped module, and a
+    hard refusal from a missing capability, without opening the source.
+states:
+  - name: shipped-and-exercised
+    expectation: the sentence names a path and a test that runs, and the claim is
+      limited to what that test actually observes.
+  - name: shipped-and-unexercised
+    expectation: the mechanism exists and the sentence says no behavioural
+      evidence was collected for it.
+  - name: proposed
+    expectation: the page says proposed and not shipped, so no consumer reads it
+      as an available API spelling.
+  - name: admitted-not-implemented
+    expectation: an approved dependency edge is never presented as a delivered
+      capability.
+  - name: refused
+    expectation: a bounded refusal with its named limits reads as a deliberate
+      boundary, not as an absent feature.
+invariants:
+  - A resolved citation proves the line exists and still reads as a person last
+    checked it; only the named test proves behaviour.
+  - A compile failure caused by missing dependencies is not a passing
+    API-negative test, and a green job summary is not an unrun case.
+  - A requirement is superseded through the log, never edited in place.
+  - A version pin in prose is a maintenance liability: the manifest and the tag
+    are the truth, and prose that restates them is restated wrongly.
+trust_boundaries:
+  - A claim written by a person and checked by a checker is not a claim checked
+    by a person; the checker decides resolvability, a reader decides meaning.
+  - Historical evidence is immutable. New receipts are added, and old
+    experiments are never relabelled as current.
+recovery_contracts:
+  - Every drifted sentence names the test that proves the corrected form, so the
+    repair is falsifiable rather than editorial.
+  - Where the code does not yet support the honest sentence, the state is
+    `planned` and names its owning issue; it is never rounded up to `present`.
+  - A re-anchored citation is reviewed by reading the moved line, not by
+    regenerating the lock and trusting the green check.
+agent_contracts:
+  - An agent may not convert a missing capability into a green checkbox; a
+    documented limitation stays visible as a limitation.
+  - An agent may not weaken a gate to make a claim checkable.
+  - An agent writing a doc example either compiles it or labels it non-executable.
+probes:
+  - id: drift-claims-match-the-test
+    action: For every corrected sentence, run the named test and assert the tree
+      is green; then re-introduce the old sentence and assert the citation or
+      doc check still passes, proving the doc change is a semantic repair and not
+      a mechanical one.
+  - id: proposed-is-labelled-proposed
+    action: Assert every design-proposal page carries an explicit proposed /
+      not-shipped marker, and that the pages claiming shipped modules do not.
+  - id: version-pins-match-the-manifest
+    action: Parse the workspace manifest and assert every version string printed
+      in prose equals the manifest, so a release cannot drift a pin silently.
+  - id: every-std-module-is-in-the-closure-matrix
+    action: Enumerate the `lgwks_std` module inventory from the crate root and
+      assert the closure matrix names each one, so a new module cannot be added
+      without a row.
+  - id: exact-revision-linkage-is-machine-readable
+    action: Assert every claim row carries a revision, a test name and a state
+      from the fixed vocabulary, and that no row uses a state outside it.
+  - id: same-seed-same-matrix
+    action: Re-read the matrix from two seeds and assert identical row count,
+      identical module set and an identical digest over the rendered rows.

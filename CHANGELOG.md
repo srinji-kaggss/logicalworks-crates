@@ -8,6 +8,45 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### Documentation
+
+- **#155/#170 — documentation claims reconciled to the code at this revision.**
+  No public API changed; this entry records sentences that described code the
+  tree does not contain, or overstated what it does.
+  - `journal/file.rs` and `registry.rs` module docs described pre-repair
+    behaviour: a journal with no writer exclusion, and a registry where a
+    duplicate identifier silently first-wins. Both now describe what ships
+    (`FileJournal::open` takes an exclusive advisory lock before scanning and
+    refuses a second opener; `validate` and both `build_*` paths refuse
+    duplicate identifiers). The journal doc now states the lock's three real
+    limits — advisory, lifetime/host-scoped, filesystem-dependent — so it is
+    not read as a distributed lease.
+  - `docs/production-readiness.md`: 33 grammars → 28; "13 jobs across three
+    operating systems" → 20 job definitions with 14 ubuntu / 2 macos / 1
+    windows / 1 `matrix.os` (AppCUI), plus the distinction between a *build*
+    receipt and an *executed containment* receipt; the lint-ceiling arithmetic
+    (25 + 4 + 50 = 79 over a 75-entry corpus) → 69 clippy + 5 rustc + 1
+    rustdoc; "the journal grows without bound" → the real
+    `MAX_JOURNAL_BYTES` / `MAX_JOURNAL_EVENTS` refusal and why a hard refusal is
+    not a long-running-service availability proof.
+  - `docs/async-parity.md`: removed a recommendation (`join_all_bounded` /
+    `Supervisor::spawn` for non-`Send` futures) that does not compile — both
+    require `Send + 'static` — and added §5a separating tracked lifetime,
+    cancellation request, actual termination, queue/byte bounds and retained
+    authoritative state.
+  - `README.md`, `llms.txt`, all four crate READMEs, `CODEBOOK.md`,
+    `AGENTS.md`, `GOVERNANCE.md`, `docs/orchestration-acceptance.spec.md` and
+    three stale guide version pins: crate count four → five, the
+    zero-dependency claim stated at the level it is true at, the real
+    dependency graph, the ban list restated as a ban on *new* edges, and T22
+    marked as having candidate tests while remaining unaccepted.
+  - Added `docs/std-ast-deps-closure-matrix.md`: all twenty `lgwks_std`
+    modules, `lgwks_ast` and `lgwks_deps`, each with a state from a fixed
+    vocabulary and the test that exists on the named revision. Recorded as
+    `INV-DOC-2`. Four rows are marked `assurance-gap` (constant-time hashing,
+    fallible thread admission, entropy failure meaning, feature-isolated
+    ergonomics) — unproven, not disproven, and deliberately not green.
+
 ### lgwks_bot Added
 
 - `inspect`, typed in-process structural code inspection (#150, R8; feature

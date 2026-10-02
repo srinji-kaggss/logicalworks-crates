@@ -80,14 +80,20 @@ whole reason the crash fixtures keep their exit site in a helper.
 
 ### 2.3 The coverage ceiling
 
-**25 of 75 catalogued anti-patterns name an enforceable lint.** The other 50
-need Miri, hardware performance counters, allocation profiling, or human review.
-They are not lint-expressible and no configuration will catch them.
+**The corpus has 75 entries and the workspace configures 75 lints, but the two
+numbers are not a partition.** Of the 75 anti-patterns, 69 are configured as
+`clippy` lints, 5 as `rustc` lints (moved out of the `clippy::` namespace
+because they are not clippy's), and 1 as a `rustdoc` lint. The remaining
+entries of the corpus need Miri, hardware performance counters, allocation
+profiling, or human review; they are not lint-expressible and no configuration
+will catch them.
 
-Claiming "all anti-patterns are enforced" is false. State the ceiling wherever
-coverage is claimed. The non-expressible remainder clusters as UB and aliasing
-(Miri), false sharing and cache layout (counters), allocation and
-monomorphization (profilers), and API and domain-modelling shape (review).
+Claiming "all anti-patterns are enforced" is false, and so is the older
+"25 of 75 name an enforceable lint" figure this replaces — 25 + 4 + 50 = 79 does
+not partition 75, and 25 was never a count of anything in the tree. State the
+ceiling wherever coverage is claimed. The non-expressible remainder clusters as
+UB and aliasing (Miri), false sharing and cache layout (counters), allocation
+and monomorphization (profilers), and API and domain-modelling shape (review).
 
 ### 2.4 API bans are half the gate
 
@@ -298,15 +304,22 @@ to clear a refusal. That is a suppressed gate, not a fix.
 
 ## 10. Dependencies
 
-Estate first, in this order:
+Estate first, in this order. The **reuse ladder** (std → `lgwks_std` →
+`lgwks_bot` → `lgwks_ast` → `lgwks_deps`) is an ownership order, and it is not
+the dependency graph. The graph, read from the manifests, is:
 
 ```
-std / core / alloc
-  → lgwks_std     (sync primitives, JSON via lgwks_std::json, hash)
-    → lgwks_bot   (async runtime, runners, actors; owns the single tokio edge)
-      → lgwks_ast (parsing, multi-language, typed diagnostics)
-        → lgwks_deps (third-party storefront, admission gate)
+lgwks_std      (depends on nothing in this workspace)
+lgwks_ast      (depends on nothing in this workspace)
+lgwks_macros   (proc-macro support crate; no workspace deps)
+lgwks_bot      → lgwks_std, and optionally lgwks_macros (feature `script`)
+lgwks_deps     → lgwks_std, unconditionally and twice (features `json`, `random`)
 ```
+
+So `lgwks_ast` sits at the end of the ladder while sitting at the *top* of the
+dependency graph, `lgwks_deps` depends only on `lgwks_std` and not on
+`lgwks_bot`, and `lgwks_macros` is absent from the ladder entirely. Reach for a
+capability in ladder order; do not read the ladder as a build order.
 
 - JSON is `lgwks_std::json` with `#[serde(crate = "lgwks_std::json::serde")]`.
   Do not declare `serde` directly.
