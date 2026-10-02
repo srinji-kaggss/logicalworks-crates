@@ -6,6 +6,23 @@ how much. It is a measurement instrument, not a consumer of the crate: it is its
 own Cargo workspace root so that the estate's dependency contract never sees it,
 and it is not published.
 
+## Two rigs, two claims
+
+| directory | measures | build |
+|---|---|---|
+| `bench/` (this one) | the **synchronous** ECS schedule against a hand-rolled loop | `lgwks_bot` with `rt` withdrawn — no tokio edge compiled at all |
+| `bench/async/` | `lgwks_bot::rt` against **pinned raw Tokio**, matched semantics | `lgwks_bot` with `rt`, plus a raw `tokio` edge the estate never authors |
+
+They are separate roots rather than two binaries here because Cargo features are
+per-package and not per-binary: a second binary in this workspace would have
+forced the async surface into the build below and made its "no tokio edge"
+headline false. Both roots are invisible to `lgwks-deps check`, which discovers
+packages through Cargo's own `workspace_members`.
+
+`bench/async/` carries its own fairness gate — it compares terminal counts field
+by field and aborts on any mismatch — and its own results, in
+[`async/README.md`](async/README.md).
+
 ## Running it
 
 ```sh

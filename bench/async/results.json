@@ -1,0 +1,11 @@
+{
+"tool":"lgwks-bench-async",
+"rounds":11,
+"fairness":"paired; aborted on any work-count mismatch",
+"floor_seconds":0.000009959,
+"scenarios":[
+{"scenario":"quiet-async-bot","tasks":256,"bound":8,"facade_p50":0.002130042,"facade_p99":0.0027626702,"baseline_p50":0.000405541,"baseline_p99":0.0012536869000000003,"ratio":5.252346865051869,"ci_lo":3.325562861127715,"ci_hi":5.6159074071274135,"distinguishes":true,"completed":256,"cancelled":0,"aborted":0,"work_units":256},
+{"scenario":"high-fanout","tasks":2048,"bound":32,"facade_p50":0.005460625,"facade_p99":0.0075942161000000005,"baseline_p50":0.0024725,"baseline_p99":0.0034393173,"ratio":2.2085439838220426,"ci_lo":1.9812366219745403,"ci_hi":2.2591021882651003,"distinguishes":true,"completed":2048,"cancelled":0,"aborted":0,"work_units":2048},
+{"scenario":"at-capacity","tasks":512,"bound":4,"facade_p50":0.003224791,"facade_p99":0.0038243083,"baseline_p50":0.001304209,"baseline_p99":0.0029583708000000004,"ratio":2.4726029340389464,"ci_lo":1.965025310630465,"ci_hi":2.939425352838387,"distinguishes":true,"completed":512,"cancelled":0,"aborted":0,"work_units":512},
+{"scenario":"single-permit","tasks":512,"bound":1,"facade_p50":0.006516834,"facade_p99":0.010573904100000002,"baseline_p50":0.004743042,"baseline_p99":0.0070474289,"ratio":1.3739777130373292,"ci_lo":1.2801545706954776,"ci_hi":1.625758834522547,"distinguishes":true,"completed":512,"cancelled":0,"aborted":0,"work_units":512}]
+}

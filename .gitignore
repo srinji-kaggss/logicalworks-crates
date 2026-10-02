@@ -8,8 +8,11 @@ Cargo.lock.orig
 graphify-out/
 
 # The benchmark rig is its own Cargo workspace, so a default `cargo run` there
-# creates a target directory the root `/target` rule does not cover.
+# creates a target directory the root `/target` rule does not cover. `bench/async`
+# is a second such root (its own workspace, for the raw-tokio comparison), so it
+# needs its own line rather than a rewrite of the one above.
 bench/target/
+bench/async/target/
 
 # Member crates can be built on their own (`cargo test -p lgwks_bot`), which
 # puts a target directory beside the crate rather than at the workspace root, so
