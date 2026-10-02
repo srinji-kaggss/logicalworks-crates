@@ -640,6 +640,128 @@ impl<'a> InvariantReport<'a> {
     }
 }
 
+/// Writes the two lines a clean `check` reports.
+///
+/// A helper for the same reason as the refusal detail: the success arm was a
+/// five-field header plus the scope line in one statement, and the five `{}`
+/// placeholders are the summary's whole content, so a reader counting what a
+/// clean verdict asserts had to count placeholders rather than read them.
+fn write_check_success(
+    root: &Path,
+    register: &Contract,
+    audit: &InvariantAudit,
+    out: &mut impl io::Write,
+) -> io::Result<()> {
+    writeln!(
+        out,
+        "OK  {} — {} semantic approvals; {} invariants resolve ({} resolved, {} attested by a recorded run)",
+        root.display(),
+        register.entry_count(),
+        audit.registered(),
+        audit.resolved(),
+        audit.attested()
+    )?;
+    writeln!(out, "SCOPE  {INVARIANT_SCOPE}")
+}
+
+/// Writes both refusal registers and the closing contract note.
+///
+/// A helper rather than the arm's own statements: the header, the two registers
+/// and the two closing lines were six fallible writes in one block, so a reader
+/// checking what a refusal report contains had to follow six error paths to see
+/// that the report is all-or-nothing.
+fn write_refusal_detail(
+    root: &Path,
+    refusals: &[Refusal],
+    audit: &InvariantAudit,
+    err: &mut impl io::Write,
+) -> io::Result<()> {
+    writeln!(
+        err,
+        "REFUSED  {} — {} dependency-edge violations, {} invariant violations\n",
+        root.display(),
+        refusals.len(),
+        audit.refusals().len()
+    )?;
+    write_dependency_refusals(refusals, err)?;
+    write_invariant_refusals(audit, err)?;
+    writeln!(err, "SCOPE  {INVARIANT_SCOPE}")?;
+    writeln!(
+        err,
+        "\nBoth registers are reviewed contracts; repair each named refusal before delivery."
+    )
+}
+
+/// Emits the machine-readable form of a failed invariant audit.
+///
+/// `register` is `None` when the dependency audit failed too, and the error it
+/// carried is then already in `dependency_error` on the caller; this carries the
+/// invariant side either way, so a consumer reading the JSON sees the invariant
+/// failure is the reason the exit code is 2 rather than guessing from the code.
+fn print_invariant_error_json(
+    root: &Path,
+    register: Option<&Contract>,
+    refusals: &[Refusal],
+    dependency_error: Option<&str>,
+    invariant_error: &str,
+    stdout: &mut impl io::Write,
+) -> io::Result<()> {
+    print_check_json(
+        Some(root),
+        register,
+        refusals,
+        dependency_error,
+        Some(InvariantJson {
+            register: None,
+            audit: None,
+            error: Some(invariant_error),
+        }),
+        stdout,
+    )
+}
+
+/// Reports a dependency register that audited but the invariant register did not.
+///
+/// A helper because the three fallible writes this replaces are one report: the
+/// header, the refusals, and the register error that stopped the other audit.
+/// Keeping them together is what makes the report all-or-nothing -- a reader
+/// who sees the header knows the refusals follow, and one who sees only the
+/// header knows the write failed rather than that the register was clean.
+fn write_dependency_register_error(
+    root: &Path,
+    refusals: &[Refusal],
+    invariant_error: &str,
+    stderr: &mut impl io::Write,
+) -> io::Result<()> {
+    writeln!(
+        stderr,
+        "REFUSED  {} — {} dependency-edge violations, invariant register error\n",
+        root.display(),
+        refusals.len()
+    )?;
+    write_dependency_refusals(refusals, stderr)?;
+    write_register_detail(stderr, "invariant", invariant_error)
+}
+
+/// Reports that neither register could be audited.
+///
+/// The two register details are one report for the same reason: an operator
+/// reading this has to see both failures to know which two things to repair.
+fn write_both_registers_error(
+    root: &Path,
+    dependency_error: &str,
+    invariant_error: &str,
+    stderr: &mut impl io::Write,
+) -> io::Result<()> {
+    writeln!(
+        stderr,
+        "REFUSED  {} — both registers could not be audited",
+        root.display()
+    )?;
+    write_register_detail(stderr, "dependency", dependency_error)?;
+    write_register_detail(stderr, "invariant", invariant_error)
+}
+
 /// Reports one check verdict after both registers have been audited.
 fn report_check_with_invariants(
     root: &Path,
@@ -663,32 +785,10 @@ fn report_check_with_invariants(
                 return Ok(invariant.check_exit_code(&register, &refusals));
             }
             if refusals.is_empty() && invariant.audit.refusals().is_empty() {
-                writeln!(
-                    out,
-                    "OK  {} — {} semantic approvals; {} invariants resolve ({} resolved, {} attested by a recorded run)",
-                    root.display(),
-                    register.entry_count(),
-                    invariant.audit.registered(),
-                    invariant.audit.resolved(),
-                    invariant.audit.attested()
-                )?;
-                writeln!(out, "SCOPE  {INVARIANT_SCOPE}")?;
+                write_check_success(root, &register, invariant.audit, out)?;
                 return Ok(ExitCode::SUCCESS);
             }
-            writeln!(
-                err,
-                "REFUSED  {} — {} dependency-edge violations, {} invariant violations\n",
-                root.display(),
-                refusals.len(),
-                invariant.audit.refusals().len()
-            )?;
-            write_dependency_refusals(&refusals, err)?;
-            write_invariant_refusals(invariant.audit, err)?;
-            writeln!(err, "SCOPE  {INVARIANT_SCOPE}")?;
-            writeln!(
-                err,
-                "\nBoth registers are reviewed contracts; repair each named refusal before delivery."
-            )?;
+            write_refusal_detail(root, &refusals, invariant.audit, err)?;
             Ok(invariant.check_exit_code(&register, &refusals))
         }
         Err(dependency_error) => report_check_with_dependency_error(
@@ -743,59 +843,42 @@ fn report_check_with_invariant_error(
     stdout: &mut impl io::Write,
     stderr: &mut impl io::Write,
 ) -> io::Result<ExitCode> {
+    // Every path out of here is exit 2: an invariant register that could not be
+    // audited is not a clean audit, and neither is a dependency register that
+    // could not be read alongside one. Stating it once here is what makes the
+    // arms below one fallible statement each.
+    let _exit = ExitCode::from(2);
     match dependency {
         Ok((register, refusals)) => {
             if machine_output {
-                print_check_json(
-                    Some(root),
+                print_invariant_error_json(
+                    root,
                     Some(&register),
                     &refusals,
                     None,
-                    Some(InvariantJson {
-                        register: None,
-                        audit: None,
-                        error: Some(invariant_error),
-                    }),
+                    invariant_error,
                     stdout,
-                )?;
-                return Ok(ExitCode::from(2));
+                )
+            } else {
+                write_dependency_register_error(root, &refusals, invariant_error, stderr)
             }
-            writeln!(
-                stderr,
-                "REFUSED  {} — {} dependency-edge violations, invariant register error\n",
-                root.display(),
-                refusals.len()
-            )?;
-            write_dependency_refusals(&refusals, stderr)?;
-            write_register_detail(stderr, "invariant", invariant_error)?;
-            Ok(ExitCode::from(2))
         }
         Err(dependency_error) => {
             if machine_output {
-                print_check_json(
-                    Some(root),
+                print_invariant_error_json(
+                    root,
                     None,
                     &[],
                     Some(&dependency_error),
-                    Some(InvariantJson {
-                        register: None,
-                        audit: None,
-                        error: Some(invariant_error),
-                    }),
+                    invariant_error,
                     stdout,
-                )?;
-                return Ok(ExitCode::from(2));
+                )
+            } else {
+                write_both_registers_error(root, &dependency_error, invariant_error, stderr)
             }
-            writeln!(
-                stderr,
-                "REFUSED  {} — both registers could not be audited",
-                root.display()
-            )?;
-            write_register_detail(stderr, "dependency", &dependency_error)?;
-            write_register_detail(stderr, "invariant", invariant_error)?;
-            Ok(ExitCode::from(2))
         }
-    }
+    }?;
+    Ok(_exit)
 }
 
 /// Writes dependency-register refusals with an explicit zero line.
@@ -1768,6 +1851,38 @@ fn handle_vendor(
 /// Exit 0 when the tree covers the lock file and 2 when any locked package is
 /// missing from it, since an uncovered package means the offline build would
 /// reach the network.
+/// Writes the vendored packages a lock file names and the tree does not hold.
+///
+/// A helper because the header, the missing list and the closing instruction are
+/// one report: an operator reading only the header knows which tree to sync, and
+/// the list under it is the evidence for that claim. Splitting them would let a
+/// write fail between the claim and its evidence.
+fn write_missing_vendor_packages(
+    root: &Path,
+    tree: &Path,
+    report: &lgwks_deps::vendor::Report,
+    err: &mut impl io::Write,
+) -> io::Result<()> {
+    writeln!(
+        err,
+        "REFUSED  {} — {} of {} locked packages missing from {}\n",
+        root.display(),
+        report.missing.len(),
+        // Both operands are counts of entries in one lock file, so the
+        // sum is bounded by its package count and cannot overflow.
+        report.covered.saturating_add(report.missing.len()),
+        tree.display()
+    )?;
+    for missing in &report.missing {
+        writeln!(err, "  {} {}", missing.name, missing.version)?;
+    }
+    writeln!(
+        err,
+        "\nRe-run the vendor sync for this repo, then re-check."
+    )
+}
+
+/// Reports whether every locked package is present in the vendor tree.
 fn run_vendor_check(
     start: &Path,
     out: &mut impl io::Write,
@@ -1792,23 +1907,7 @@ fn run_vendor_check(
             Ok(ExitCode::SUCCESS)
         }
         Ok(report) => {
-            writeln!(
-                err,
-                "REFUSED  {} — {} of {} locked packages missing from {}\n",
-                root.display(),
-                report.missing.len(),
-                // Both operands are counts of entries in one lock file, so the
-                // sum is bounded by its package count and cannot overflow.
-                report.covered.saturating_add(report.missing.len()),
-                tree.display()
-            )?;
-            for missing in &report.missing {
-                writeln!(err, "  {} {}", missing.name, missing.version)?;
-            }
-            writeln!(
-                err,
-                "\nRe-run the vendor sync for this repo, then re-check."
-            )?;
+            write_missing_vendor_packages(&root, &tree, &report, err)?;
             Ok(ExitCode::from(2))
         }
         Err(error) => refuse(&error.to_string(), err),

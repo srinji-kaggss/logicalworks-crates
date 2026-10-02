@@ -281,30 +281,13 @@ impl fmt::Display for MetadataError {
                 ref process,
                 ref captures,
                 ref obligation,
-            } => {
-                if let Some(cause) = cause.as_deref() {
-                    write!(f, "{cause}; ")?;
-                }
-                write!(f, "cleanup unconfirmed")?;
-                let report = &obligation.report;
-                if let Some(ref error) = *process {
-                    let step = report.step.map_or("stop", CleanupStep::verb);
-                    match report.pid {
-                        Some(pid) => write!(f, "; could not {step} cargo (pid {pid}): {error}")?,
-                        None => write!(f, "; could not {step} cargo: {error}")?,
-                    }
-                }
-                let mut paths = report.capture_paths.iter();
-                for error in captures.iter() {
-                    match paths.next() {
-                        Some(path) => {
-                            write!(f, "; could not remove {}: {error}", path.display())?;
-                        }
-                        None => write!(f, "; could not remove a capture file: {error}")?,
-                    }
-                }
-                Ok(())
-            }
+            } => write_cleanup_unconfirmed(
+                f,
+                cause.as_deref(),
+                process.as_ref(),
+                captures,
+                obligation,
+            ),
             #[cfg(not(target_family = "wasm"))]
             Self::Entropy(ref error) => write!(
                 f,
@@ -312,6 +295,47 @@ impl fmt::Display for MetadataError {
             ),
         }
     }
+}
+
+/// Renders what could not be cleaned up after a refused capture.
+///
+/// A helper rather than the arm inline: as one block the arm carried six
+/// propagation operators across the cause prefix, the process failure, the pid
+/// arms and the capture paths, so an operator reading why cleanup was
+/// unconfirmed had to hold six partial sentences at once -- and a writer that
+/// failed part-way had already emitted the truncated prefix. Rendering into a
+/// buffer and writing once means the sentence is either whole or absent.
+fn write_cleanup_unconfirmed(
+    formatter: &mut fmt::Formatter<'_>,
+    cause: Option<&MetadataError>,
+    process: Option<&std::io::Error>,
+    captures: &[std::io::Error],
+    obligation: &CleanupObligation,
+) -> fmt::Result {
+    let mut rendered = String::new();
+    if let Some(cause) = cause {
+        let prefix = format!("{cause}; ");
+        rendered.push_str(&prefix);
+    }
+    rendered.push_str("cleanup unconfirmed");
+    let report = &obligation.report;
+    if let Some(error) = process {
+        let step = report.step.map_or("stop", CleanupStep::verb);
+        let sentence = match report.pid {
+            Some(pid) => format!("; could not {step} cargo (pid {pid}): {error}"),
+            None => format!("; could not {step} cargo: {error}"),
+        };
+        rendered.push_str(&sentence);
+    }
+    let mut paths = report.capture_paths.iter();
+    for error in captures {
+        let sentence = match paths.next() {
+            Some(path) => format!("; could not remove {}: {error}", path.display()),
+            None => format!("; could not remove a capture file: {error}"),
+        };
+        rendered.push_str(&sentence);
+    }
+    formatter.write_str(&rendered)
 }
 
 impl std::error::Error for MetadataError {
