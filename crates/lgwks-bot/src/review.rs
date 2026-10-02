@@ -57,30 +57,24 @@ pub struct ReviewRequest {
     /// The pull request to review.
     pull: PullRequest,
     /// The review body to publish.
-    #[expect(
-        dead_code,
-        reason = "the request's body is supplied by the caller's script, which \
-        composes the body it wants to publish; the field is the record of what was asked for and \
-        is read by `body()`"
-    )]
+    ///
+    /// Read through [`ReviewRequest::body`]. The field rather than nothing so a
+    /// request is the whole of what was asked for: a caller that builds one
+    /// does not have to keep the body beside it and hope the two agree.
     body: String,
     /// The review event: `COMMENT`, `APPROVE` or `REQUEST_CHANGES`.
-    #[expect(
-        dead_code,
-        reason = "read through `event()`; the field exists so a request carries \
-        its own policy rather than having the caller keep it beside it"
-    )]
+    ///
+    /// Read through [`ReviewRequest::event`]. The review policy belongs to the
+    /// request, not to a value the caller remembers separately.
     event: String,
     /// An application marker used only to *locate* a candidate review during
     /// reconciliation.
     ///
     /// Deliberately not a uniqueness proof: two runs of the same request carry
     /// the same marker, and it is [`ReviewRecord::matches`] that decides.
-    #[expect(
-        dead_code,
-        reason = "read through `marker()`; kept private so a caller cannot edit \
-        the payload after the request was declared"
-    )]
+    ///
+    /// Read through [`ReviewRequest::marker`], and private so the payload
+    /// cannot be edited after the request it belongs to was declared.
     marker: String,
     /// How long each network step may take before the step is abandoned.
     ///
