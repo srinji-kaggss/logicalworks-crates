@@ -10,6 +10,17 @@ explicitly under that crate.
 
 ### lgwks_bot Added
 
+- `task::{Host, Task, Report}`, the front door (#87 step 1): build a `Host` once
+  (tenant, stop token, admission ceiling, default deadline, trail capacity, all
+  finite and readable through `Host::limits`), define a `Task` with `task(name,
+  body)`, and `host.run(&task, input).await` returns a `Report` carrying the
+  disposition (`Succeeded`, `Failed`, `Cancelled`, `DeadlineExceeded`,
+  `Refused`), the typed output, the located error, a bounded step trail with a
+  dropped-step count, and `EffectKnowledge::None`. Bodies are polled on the
+  calling task, so they need not be `Send` and inputs may borrow; nested runs
+  on one host are charged to the parent's permit (INV-BOT-20).
+  `Host::block_on` is the synchronous entry and refuses to run inside an
+  existing runtime.
 - `Bot::from_spec` materializes a validated `BotSpec` against a `DomainRegistry`
   into a runnable `Bot`, through the same `assemble`/`build` path a native bot
   uses — no second interpreter and no second execution path — so a JSON-built bot

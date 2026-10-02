@@ -8,7 +8,8 @@ use lgwks_std::hash::{Digest, Hasher};
 use crate::rt::sync::CancellationToken;
 
 use super::policy::Policy;
-use super::{FlowError, MAX_DEPTH, MAX_TENANT_BYTES};
+use super::trail::Trail;
+use super::{DEFAULT_TRAIL_STEPS, FlowError, MAX_DEPTH, MAX_TENANT_BYTES};
 
 // ── Tenant ──────────────────────────────────────────────────────────────────
 
@@ -126,6 +127,8 @@ struct ScopeInner {
     token: CancellationToken,
     /// The fan-out and retry decisions every step under the root shares.
     policy: Arc<Policy>,
+    /// The bounded record of which steps this root's steps entered.
+    trail: Arc<Trail>,
 }
 
 impl Scope {
@@ -142,6 +145,25 @@ impl Scope {
     /// shutdown reaches every step of the flow.
     #[must_use]
     pub fn with_token(tenant: Tenant, token: CancellationToken) -> Self {
+        Self::with_token_and_trail(tenant, token, Trail::new(DEFAULT_TRAIL_STEPS))
+    }
+
+    /// A root scope for `tenant` that stops when `token` is cancelled and
+    /// records the steps it enters into `trail`.
+    ///
+    /// The form [`Host`](crate::task::Host) uses: one trail per task run, so a
+    /// [`Report`](crate::task::Report) can answer which steps ran without the
+    /// flow carrying a second ledger. A scope built any other way gets its own
+    /// ring, which is exactly right for a flow no report is claimed about.
+    ///
+    /// Crate-private because the trail's type is: the host is the supported way
+    /// to obtain a scoped trail (DX-10), and a caller who reaches past it
+    /// would be writing the second ledger this exists to remove.
+    pub(crate) fn with_token_and_trail(
+        tenant: Tenant,
+        token: CancellationToken,
+        trail: Arc<Trail>,
+    ) -> Self {
         Self {
             inner: Arc::new(ScopeInner {
                 tenant,
@@ -149,6 +171,7 @@ impl Scope {
                 depth: 0,
                 token,
                 policy: Arc::new(Policy::for_this_machine()),
+                trail,
             }),
         }
     }
@@ -196,16 +219,22 @@ impl Scope {
                 limit: MAX_DEPTH,
             });
         }
+        // Recorded where the step is entered, not where it finishes: a run that
+        // dies halfway through a fan-out has still entered those items, and a
+        // trail that only listed completed steps would under-report exactly the
+        // run a reader most wants to see.
+        self.inner.trail.record(&path);
         Ok(Self {
             inner: Arc::new(ScopeInner {
                 tenant: self.inner.tenant.clone(),
-                path,
+                path: Arc::clone(&path),
                 depth: self.inner.depth.saturating_add(1),
                 token: match stop {
                     Stop::Own => self.inner.token.child_token(),
                     Stop::Shared => self.inner.token.clone(),
                 },
                 policy: Arc::clone(&self.inner.policy),
+                trail: Arc::clone(&self.inner.trail),
             }),
         })
     }

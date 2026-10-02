@@ -6,7 +6,7 @@
 //! must cross an await point.
 
 pub use lgwks_deps::tokio::sync::{Barrier, Mutex, Notify, OnceCell, RwLock, Semaphore};
-pub use lgwks_deps::tokio::sync::{broadcast, mpsc, oneshot, watch};
+pub use lgwks_deps::tokio::sync::{OwnedSemaphorePermit, broadcast, mpsc, oneshot, watch};
 
 // This crate's own, not the engine's. `tokio_util::sync::CancellationToken` is
 // the crate this could have come from, but that would add a third-party edge to

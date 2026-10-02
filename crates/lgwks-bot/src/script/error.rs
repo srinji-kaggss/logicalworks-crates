@@ -87,6 +87,11 @@ pub enum FlowError {
         /// What is wrong with it.
         reason: &'static str,
     },
+    /// A task's logical name did not validate.
+    InvalidName {
+        /// What is wrong with it.
+        reason: &'static str,
+    },
     /// A bound computed at run time is outside what the block accepts.
     InvalidBound {
         /// Which bound.
@@ -132,6 +137,7 @@ impl FlowError {
             | Self::Failed { .. }
             | Self::TooDeep { .. }
             | Self::InvalidTenant { .. }
+            | Self::InvalidName { .. }
             | Self::InvalidBound { .. } => false,
         }
     }
@@ -154,7 +160,7 @@ impl FlowError {
             | Self::Transient { ref at, .. }
             | Self::Bot { ref at, .. }
             | Self::TooDeep { ref at, .. } => at,
-            Self::InvalidTenant { .. } | Self::InvalidBound { .. } => "",
+            Self::InvalidTenant { .. } | Self::InvalidName { .. } | Self::InvalidBound { .. } => "",
         }
     }
 
@@ -183,7 +189,7 @@ impl FlowError {
                     *at = Arc::clone(path);
                 }
             }
-            Self::InvalidTenant { .. } | Self::InvalidBound { .. } => {}
+            Self::InvalidTenant { .. } | Self::InvalidName { .. } | Self::InvalidBound { .. } => {}
         }
         self
     }
@@ -223,6 +229,7 @@ impl fmt::Display for FlowError {
                 write!(formatter, "{at}: steps nested deeper than {limit}")
             }
             Self::InvalidTenant { reason } => write!(formatter, "invalid tenant: {reason}"),
+            Self::InvalidName { reason } => write!(formatter, "invalid task name: {reason}"),
             Self::InvalidBound { what, value, max } => {
                 write!(formatter, "{what}: {value} is outside 1..={max}")
             }
@@ -241,6 +248,7 @@ impl std::error::Error for FlowError {
             | Self::Transient { .. }
             | Self::TooDeep { .. }
             | Self::InvalidTenant { .. }
+            | Self::InvalidName { .. }
             | Self::InvalidBound { .. } => None,
         }
     }
