@@ -150,9 +150,8 @@ type HostIdentity = u64;
 /// defect in the value rather than panicking, and a panic here would turn a
 /// broken invariant into an abort with no account of which run was affected.
 fn own_fault() -> &'static FlowError {
-    OWN_FAULT.get_or_init(|| {
-        FlowError::failed("a report with neither an output nor a located failure")
-    })
+    OWN_FAULT
+        .get_or_init(|| FlowError::failed("a report with neither an output nor a located failure"))
 }
 
 /// The storage behind [`own_fault`].
@@ -613,9 +612,7 @@ impl Host {
     /// This host's live admission counters.
     #[must_use]
     pub fn admission(&self) -> Admission<'_> {
-        Admission {
-            inner: &self.inner,
-        }
+        Admission { inner: &self.inner }
     }
 
     /// The token that stops every run under this host.
@@ -769,11 +766,7 @@ impl Host {
     /// [`HostError::InsideRuntime`] when a runtime is already driving this
     /// thread; [`HostError::Runtime`] when the OS refuses the runtime's driver
     /// resources.
-    pub fn block_on<I, O, F, Fut>(
-        &self,
-        task: &Task<F>,
-        input: I,
-    ) -> Result<Report<O>, HostError>
+    pub fn block_on<I, O, F, Fut>(&self, task: &Task<F>, input: I) -> Result<Report<O>, HostError>
     where
         F: Fn(Scope, I) -> Fut,
         Fut: Future<Output = Result<O, FlowError>>,
@@ -821,11 +814,7 @@ impl Host {
     /// acquires nothing and is charged to the permit its ancestor holds. That is
     /// the whole of the no-deadlock argument: a parent awaiting a child never
     /// holds the last permit while waiting, because it never waits for one.
-    async fn admit(
-        &self,
-        started: Instant,
-        task: &TaskName,
-    ) -> Result<Permit, AdmissionFailure> {
+    async fn admit(&self, started: Instant, task: &TaskName) -> Result<Permit, AdmissionFailure> {
         // Both refusals here are distinct facts and both are reported as
         // `Refused`, never `Cancelled`: a run that never held a permit never ran
         // a body, so no step was entered and there is nothing that could have
@@ -952,11 +941,11 @@ impl HighWater {
         // previous value is bound and never read, which is how a returned value
         // is discarded without `let _ =` — the shape `let_underscore_must_use`
         // exists to refuse — or `drop` on a `Copy` value, which does nothing.
-        let _previous = self.0.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |peak| (live > peak).then_some(live),
-        );
+        let _previous = self
+            .0
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |peak| {
+                (live > peak).then_some(live)
+            });
     }
 
     /// The most tasks that were ever in flight at once.
@@ -1029,11 +1018,11 @@ impl InFlight {
         // it, and the counter is left alone for a reader to see. Nothing closes
         // an atomic, so the previous value is bound and never read rather than
         // discarded with `let _ =`, the shape `let_underscore_must_use` refuses.
-        let _previous = self.0.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |live| live.checked_sub(1),
-        );
+        let _previous = self
+            .0
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
+                live.checked_sub(1)
+            });
     }
 
     /// How many runs hold a permit right now.
@@ -1384,11 +1373,9 @@ impl fmt::Display for HostError {
     /// What was refused and why, naming the alternative.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            Self::Bound {
-                what,
-                value,
-                max,
-            } => write!(formatter, "{what}: {value} is outside 1..={max}"),
+            Self::Bound { what, value, max } => {
+                write!(formatter, "{what}: {value} is outside 1..={max}")
+            }
             Self::InsideRuntime => formatter.write_str(
                 "the synchronous entry cannot park a thread an async runtime is driving; \
                  await `Host::run` on that runtime, or call it outside it",

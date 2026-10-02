@@ -30,12 +30,12 @@ use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
-use lgwks_bot::script::{each, within, FlowError, Scope, Tenant};
+use lgwks_bot::script::{FlowError, Scope, Tenant, each, within};
 use lgwks_bot::task::{Disposition, EffectKnowledge, Host, HostError, Report, Task, task};
 
 /// A test's result: an error fails it with the error's text.
@@ -49,9 +49,7 @@ fn host(tenant: &str) -> Result<Host, Box<dyn Error>> {
 /// A host for `tenant` admitting at most `tasks` runs at once.
 fn bounded_host(tenant: &str, tasks: usize) -> Result<Host, Box<dyn Error>> {
     let limit = NonZeroUsize::new(tasks).ok_or("the ceiling must be at least one")?;
-    Ok(Host::builder(tenant)?
-        .max_concurrent_tasks(limit)
-        .build()?)
+    Ok(Host::builder(tenant)?.max_concurrent_tasks(limit).build()?)
 }
 
 /// Drive one future to completion on a fresh current-thread runtime.
@@ -150,11 +148,7 @@ fn a_failing_body_reports_failed_and_no_output() -> TestResult {
 /// run time.
 #[test]
 fn a_malformed_name_is_refused() -> TestResult {
-    let build = |name: &str| {
-        task(name, |_scope: Scope, ()| async {
-            Ok::<(), FlowError>(())
-        })
-    };
+    let build = |name: &str| task(name, |_scope: Scope, ()| async { Ok::<(), FlowError>(()) });
     for refused in ["", "has space", "has/slash", "has\nnewline"] {
         let error = build(refused)
             .err()
@@ -386,22 +380,19 @@ fn nested_runs_complete_at_a_ceiling_of_one() -> TestResult {
     let host = bounded_host("acme", 1)?;
     let entered = Rc::new(Cell::new(0_usize));
 
-    let leaf: Shared<_> = Rc::new(task(
-        "leaf",
-        |scope: Scope, items: Vec<u32>| async move {
-            each::<_, u32, _, _>(
-                &scope,
-                "item",
-                NonZeroUsize::new(1),
-                items,
-                |step, item| async move {
-                    step.checkpoint()?;
-                    Ok(item * 2)
-                },
-            )
-            .await
-        },
-    )?);
+    let leaf: Shared<_> = Rc::new(task("leaf", |scope: Scope, items: Vec<u32>| async move {
+        each::<_, u32, _, _>(
+            &scope,
+            "item",
+            NonZeroUsize::new(1),
+            items,
+            |step, item| async move {
+                step.checkpoint()?;
+                Ok(item * 2)
+            },
+        )
+        .await
+    })?);
 
     // The level below the leaf turns its vector into a scalar, so every wrapper
     // above works in one type and the chain's value is a single number.
@@ -430,7 +421,11 @@ fn nested_runs_complete_at_a_ceiling_of_one() -> TestResult {
             let log = Rc::clone(&log);
             async move {
                 log.set(log.get().saturating_add(1));
-                Ok(host.run(&inner, value).await.into_output().unwrap_or_default())
+                Ok(host
+                    .run(&inner, value)
+                    .await
+                    .into_output()
+                    .unwrap_or_default())
             }
         })?
     });
@@ -444,7 +439,11 @@ fn nested_runs_complete_at_a_ceiling_of_one() -> TestResult {
             let log = Rc::clone(&log);
             async move {
                 log.set(log.get().saturating_add(1));
-                Ok(host.run(&middle, value).await.into_output().unwrap_or_default())
+                Ok(host
+                    .run(&middle, value)
+                    .await
+                    .into_output()
+                    .unwrap_or_default())
             }
         })?
     });
@@ -503,11 +502,7 @@ fn a_nested_report_locates_every_level() -> TestResult {
         "the inner task runs: {:?}",
         report.error()
     );
-    let steps: Vec<String> = report
-        .steps()
-        .iter()
-        .map(|path| path.to_string())
-        .collect();
+    let steps: Vec<String> = report.steps().iter().map(|path| path.to_string()).collect();
     assert_eq!(
         steps,
         vec!["inner".to_owned(), "inner/deeper".to_owned()],
@@ -749,13 +744,16 @@ fn two_tenants_never_share_a_step_key() -> TestResult {
     let observed: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
 
     let capture = |log: Rc<RefCell<Vec<String>>>| -> Result<Shared<_>, Box<dyn Error>> {
-        Ok(Rc::new(task("same-name", move |scope: Scope, value: u32| {
-            let log = Rc::clone(&log);
-            async move {
-                log.borrow_mut().push(scope.key().to_hex());
-                Ok(value)
-            }
-        })?))
+        Ok(Rc::new(task(
+            "same-name",
+            move |scope: Scope, value: u32| {
+                let log = Rc::clone(&log);
+                async move {
+                    log.borrow_mut().push(scope.key().to_hex());
+                    Ok(value)
+                }
+            },
+        )?))
     };
     let one = capture(Rc::clone(&observed))?;
     let two = capture(Rc::clone(&observed))?;
@@ -976,8 +974,7 @@ fn ceilings_are_finite_readable_and_bounded() -> TestResult {
         matches!(zero.build(), Err(HostError::Bound { .. })),
         "a zero deadline would expire every run before its body starts"
     );
-    let over = Host::builder("acme")?
-        .default_deadline(lgwks_bot::task::MAX_TASK_DEADLINE * 2);
+    let over = Host::builder("acme")?.default_deadline(lgwks_bot::task::MAX_TASK_DEADLINE * 2);
     assert!(
         matches!(over.build(), Err(HostError::Bound { .. })),
         "a deadline over the ceiling is refused"
@@ -1040,7 +1037,10 @@ fn a_task_body_runs_under_its_own_named_step() -> TestResult {
 /// stronger statement anyway: the type is carried, not erased.
 #[test]
 fn a_task_name_is_a_label_not_an_identity() -> TestResult {
-    let numbers = task("review-pr", |_scope: Scope, value: u32| async move { Ok(value) })?;
+    let numbers = task(
+        "review-pr",
+        |_scope: Scope, value: u32| async move { Ok(value) },
+    )?;
     let lines = task("review-pr", |_scope: Scope, value: String| async move {
         Ok(value.len())
     })?;
@@ -1058,9 +1058,7 @@ fn a_task_name_is_a_label_not_an_identity() -> TestResult {
         "the first body answers its own input type"
     );
     assert_eq!(
-        drive(host.run(&lines, "abc".to_owned()))
-            .output()
-            .copied(),
+        drive(host.run(&lines, "abc".to_owned())).output().copied(),
         Some(3),
         "the second body answers its own input type, under the same name"
     );

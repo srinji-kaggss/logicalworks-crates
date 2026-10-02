@@ -37,7 +37,7 @@ use std::error::Error;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
 
-use lgwks_bot::script::{each, FlowError, Scope};
+use lgwks_bot::script::{FlowError, Scope, each};
 use lgwks_bot::task::{Disposition, Host, Report, Task, task};
 
 use sim::Band;
@@ -259,10 +259,9 @@ fn build(host: &Host, plan: &Plan, observed: Rc<Observed>) -> Result<Tree, Box<d
                     let log = Rc::clone(&item_log);
                     async move {
                         item_scope.checkpoint()?;
-                        log.keys.borrow_mut().push((
-                            item_scope.key().to_hex(),
-                            item_scope.path().to_owned(),
-                        ));
+                        log.keys
+                            .borrow_mut()
+                            .push((item_scope.key().to_hex(), item_scope.path().to_owned()));
                         log.tenants
                             .borrow_mut()
                             .push(item_scope.tenant().as_str().to_owned());
@@ -304,19 +303,37 @@ fn build(host: &Host, plan: &Plan, observed: Rc<Observed>) -> Result<Tree, Box<d
     let level_2 = Rc::new({
         let (ctx, inner) = (base.clone(), Rc::clone(&level_1));
         task("level-2", move |_scope: Scope, step: Step| {
-            descend(ctx.clone(), 2, Rc::clone(&inner), Rc::clone(&leaf_for_2), step)
+            descend(
+                ctx.clone(),
+                2,
+                Rc::clone(&inner),
+                Rc::clone(&leaf_for_2),
+                step,
+            )
         })?
     });
     let level_3 = Rc::new({
         let (ctx, inner) = (base.clone(), Rc::clone(&level_2));
         task("level-3", move |_scope: Scope, step: Step| {
-            descend(ctx.clone(), 3, Rc::clone(&inner), Rc::clone(&leaf_for_3), step)
+            descend(
+                ctx.clone(),
+                3,
+                Rc::clone(&inner),
+                Rc::clone(&leaf_for_3),
+                step,
+            )
         })?
     });
     let level_4 = Rc::new({
         let (ctx, inner) = (base, Rc::clone(&level_3));
         task("level-4", move |_scope: Scope, step: Step| {
-            descend(ctx.clone(), 4, Rc::clone(&inner), Rc::clone(&leaf_for_4), step)
+            descend(
+                ctx.clone(),
+                4,
+                Rc::clone(&inner),
+                Rc::clone(&leaf_for_4),
+                step,
+            )
         })?
     });
     levels.extend([
@@ -373,25 +390,20 @@ where
             ctx.observed.applied.borrow_mut().push(Event::Cancel);
             ctx.host.cancel();
         }
-        match fault {
-            Some(fault) => {
-                ctx.observed.applied.borrow_mut().push(Event::Fault(fault));
-                match fault {
-                    Fault::Overrun => {
-                        // A body that never returns, which the host's deadline
-                        // ends. Nothing below this level is ever entered.
-                        std::future::pending::<()>().await;
-                        return Ok(0);
-                    }
-                    Fault::Permanent => {
-                        return Err(FlowError::failed(
-                            "the seeded fault refused this level",
-                        ));
-                    }
-                    Fault::None => {}
+        if let Some(fault) = fault {
+            ctx.observed.applied.borrow_mut().push(Event::Fault(fault));
+            match fault {
+                Fault::Overrun => {
+                    // A body that never returns, which the host's deadline
+                    // ends. Nothing below this level is ever entered.
+                    std::future::pending::<()>().await;
+                    return Ok(0);
                 }
+                Fault::Permanent => {
+                    return Err(FlowError::failed("the seeded fault refused this level"));
+                }
+                Fault::None => {}
             }
-            None => {}
         }
         // A level propagates its child's failure rather than swallowing it. That is
         // what makes the expected disposition derivable: a fault three levels
@@ -511,8 +523,8 @@ fn disposition_matches_the_fault(band: Band) -> TestResult {
         };
         let reached = |level: u32| level <= plan.depth;
         let fault_level = plan.failing.filter(|&level| reached(level));
-        let cancels_at = (plan.cancels && reached(plan.cancelling_level))
-            .then_some(plan.cancelling_level);
+        let cancels_at =
+            (plan.cancels && reached(plan.cancelling_level)).then_some(plan.cancelling_level);
         let applied = observed.applied.borrow();
         let fault_applied = applied.contains(&Event::Fault(plan.fault));
         let cancel_applied = applied.contains(&Event::Cancel);
@@ -539,15 +551,15 @@ fn disposition_matches_the_fault(band: Band) -> TestResult {
         // it are never entered and their events never happen. An unreachable
         // cancel is never applied either way.
         if cancels_at.is_some() && !fault_applied {
-            assert_eq!(
-                cancel_applied, true,
+            assert!(
+                cancel_applied,
                 "a reachable cancel with nothing above it stopping the run must \
                  be applied: cancel at {cancels_at:?}, applied {applied:?}"
             );
         }
         if cancels_at.is_none() {
-            assert_eq!(
-                cancel_applied, false,
+            assert!(
+                !cancel_applied,
                 "a cancel at a level the run never entered must not be applied: \
                  cancel at {cancels_at:?}, applied {applied:?}"
             );
@@ -607,9 +619,7 @@ fn keys_never_collide_across_tenants(band: Band) -> TestResult {
                 }
                 let overlap = keys
                     .iter()
-                    .filter(|entry| {
-                        others.iter().any(|theirs| theirs.0 == entry.0)
-                    })
+                    .filter(|entry| others.iter().any(|theirs| theirs.0 == entry.0))
                     .count();
                 assert_eq!(
                     overlap, 0,
@@ -668,8 +678,15 @@ fn ceiling_binds_the_peak(band: Band) -> TestResult {
         // host's contract, not a defect in the tree, so this family builds the
         // runs with the cancellation off: its subject is the ceiling, and a
         // stopped host has no ceiling left to measure.
+        // An overrun is off-subject for the same reason, and costlier: each one
+        // waits out the whole deadline in real time, and up to eight runs in a
+        // row made this family five seconds a band. A permanent fault still
+        // ends a run early, so a failing run's permit is still counted back.
         let mut measured = plan.clone();
         measured.cancels = false;
+        if matches!(measured.fault, Fault::Overrun) {
+            measured.fault = Fault::Permanent;
+        }
         let tree = build(&host, &measured, Rc::clone(&observed))?;
         let reports: Vec<Report<u32>> = (0..runs)
             .map(|index| (tree.run)(&host, u32::try_from(index).unwrap_or_default()))
@@ -691,11 +708,7 @@ fn ceiling_binds_the_peak(band: Band) -> TestResult {
             ceiling,
             "every permit came back after {runs} runs"
         );
-        assert_eq!(
-            host.admission().in_flight(),
-            0,
-            "nothing is left in flight"
-        );
+        assert_eq!(host.admission().in_flight(), 0, "nothing is left in flight");
         sim.record(&format!(
             "runs={runs} depth={} fan={} peak={} admitted={}",
             plan.depth,

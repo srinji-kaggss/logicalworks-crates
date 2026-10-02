@@ -50,8 +50,8 @@ crates/lgwks-bot/src/language.rs:603	pub fn learn(&mut self, question: &str, utt
 crates/lgwks-bot/src/language.rs:616	pub fn forget(&mut self, question: &str, utterance: &str) -> Option<Alias> {
 crates/lgwks-bot/src/language.rs:641	pub fn aliases(&self) -> Vec<Alias> {
 crates/lgwks-bot/src/rt/mod.rs:76	//! This is not a scheduler with realtime guarantees. Future completion order
-crates/lgwks-bot/src/rt/mod.rs:86	#[cfg(feature = "sync")]
-crates/lgwks-bot/src/rt/mod.rs:97	pub mod signal;
+crates/lgwks-bot/src/rt/mod.rs:94	#[cfg(feature = "sync")]
+crates/lgwks-bot/src/rt/mod.rs:105	pub mod signal;
 crates/lgwks-bot/src/rt/process.rs:45	Capture(NonZeroUsize),
 crates/lgwks-bot/src/rt/process.rs:352	pub struct ProcessRun {
 crates/lgwks-bot/src/rt/process.rs:453	pub enum ProcessRunError {

@@ -380,6 +380,17 @@ Each of these was a shipped defect. Treat the list as the spec.
   enforced by:
   `rt::supervise::tests::an_unsignalable_present_group_stays_pending_rather_than_failed`
   and `rt::supervise::tests::an_unexpected_signal_error_is_a_failed_cleanup`
+- **INV-BOT-20** A task run on a `Host` takes at most one admission permit per
+  host for its whole tree: a nested `host.run` from inside a body that already
+  holds that host's permit is charged to the parent, so nesting at any depth
+  completes at an admission ceiling of one, while sibling top-level runs each
+  take their own permit and stay bounded. Waiting for a permit is cancellable by
+  the host's stop and charged to the run's deadline; a run the host refuses
+  before admission is `Refused`, never `Cancelled` or `Failed`. The step trail
+  is a bounded ring whose overflow is counted and never changes the
+  disposition, output or located error, and every report says no external
+  effect is known. · why: #87 step 1 (T01–T04, T36) · enforced by:
+  `tests/task_front_door.rs` and `tests/sim_task.rs`
 
 ## Open questions for the Director
 
