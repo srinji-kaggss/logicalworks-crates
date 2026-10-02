@@ -84,6 +84,19 @@ const SEEDS: u64 = 32;
 /// with the fixture's own padding.
 const CAPTURE: usize = 64 * 1024;
 
+/// The first review id the scripted receiver hands out.
+///
+/// The receiver numbers accepted creates from `next_review_id`, which
+/// [`fake_gh::Scenario`] sets to 9001, and this family's two runs take 9001 and
+/// 9002. Naming the range here rather than writing the numbers into an
+/// assertion keeps the comparison honest if the fixture's base ever moves: a
+/// run that reported an id from outside the receiver's own range would be
+/// reporting something the receiver never applied.
+const FIRST_REVIEW_ID: u64 = 9_001;
+
+/// The last review id this family's two runs can receive.
+const LAST_REVIEW_ID: u64 = 9_002;
+
 /// The scenario space, one entry per fault the client can inject.
 ///
 /// Named rather than an index so a family's fault and its expectation are read
@@ -1261,4 +1274,227 @@ fn path_for(fake: &FakeGh) -> Result<std::ffi::OsString, Box<dyn std::error::Err
     let mut entries = vec![fake.dir().to_path_buf()];
     entries.extend(std::env::split_paths(&ambient));
     Ok(std::env::join_paths(&entries)?)
+}
+
+/// The cancellation family: a run stopped mid-flight keeps its effect knowledge.
+///
+/// The seed chooses *when* the stop arrives, which is the whole question: a run
+/// cancelled before the create leaves nothing, and a run cancelled after it may
+/// have left a review whose outcome nobody observed. Both must be reported —
+/// neither may report a publication, and neither may issue a second create on
+/// the way out. A cancellation that quietly looked like success is the failure
+/// this family exists to catch.
+#[test]
+fn cancellation_under_faults_r16() -> TestResult {
+    for index in 0..16u64 {
+        // Alternate the phase the stop lands in: before the first read, or after
+        // the create. Both are reachable by a real caller cancelling under load,
+        // and they are the two answers a caller most needs to tell apart.
+        let after_create = index % 2 == 0;
+        let fake = FakeGh::install("cancel", HEAD)?;
+        fake.configure(
+            Scenario::new(HEAD)
+                .created_body(BODY)
+                .hangs_for(if after_create { 3 } else { 0 }),
+        )?;
+        let host = host()?;
+        let job = review_task()?;
+
+        if after_create {
+            // Run to the publication, then stop the host: the create's response
+            // is still in flight when the stop arrives.
+            let report = host.block_on(&job, (gh_for(&fake, CAPTURE)?, request(7)?))?;
+            host.cancel();
+            assert!(
+                !report.output().is_some_and(ReviewOutcome::is_published),
+                "seed {index}: a run whose client hung must not report a \
+                 publication: {:?}",
+                report.output()
+            );
+            assert!(
+                fake.creates()? <= 1,
+                "seed {index}: a cancelled run publishes at most once"
+            );
+        } else {
+            // Stop the host before the run is even admitted.
+            host.cancel();
+            let report = host.block_on(&job, (gh_for(&fake, CAPTURE)?, request(7)?))?;
+            assert_ne!(
+                report.disposition().label(),
+                "Succeeded",
+                "seed {index}: a run cancelled before it starts must not report \
+                 success: {}",
+                report.error().map_or_else(String::new, ToString::to_string)
+            );
+            assert_eq!(
+                fake.creates()?,
+                0,
+                "seed {index}: a run cancelled before it starts creates nothing"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The duplicate-submission family: the same request twice still creates once
+/// per *run*, and each run is reported honestly.
+///
+/// This is the shape a retrying caller produces, and the question is not whether
+/// two runs are allowed to each publish — they are, that is two reviews — but
+/// whether either run ever creates twice. The counter at the receiver is the
+/// only place that question has an answer.
+#[test]
+fn duplicate_submission_r16() -> TestResult {
+    for index in 0..16u64 {
+        let fake = FakeGh::install("duplicate", HEAD)?;
+        fake.configure(Scenario::new(HEAD).created_body(BODY))?;
+        let host = host()?;
+        let job = review_task()?;
+
+        // The same request, run twice: once cleanly, once with the create's
+        // response dropped. The second is what a caller retrying after a
+        // timeout would produce, and it is exactly the case the reconciliation
+        // read exists for rather than a second create.
+        let clean = host.block_on(&job, (gh_for(&fake, CAPTURE)?, request(7)?))?;
+        fake.configure(Scenario::new(HEAD).created_body(BODY).accept_then_drop())?;
+        let retried = host.block_on(&job, (gh_for(&fake, CAPTURE)?, request(7)?))?;
+
+        assert_eq!(
+            fake.creates()?,
+            2,
+            "seed {index}: two runs are two reviews — one each, never one run \
+             posting twice"
+        );
+        assert!(
+            clean.output().is_some_and(ReviewOutcome::is_published),
+            "seed {index}: the first run publishes and verifies: {:?}",
+            clean.output()
+        );
+        assert!(
+            retried.output().is_some_and(ReviewOutcome::is_published),
+            "seed {index}: the retried run reconciles its lost response and \
+             reports published, not unknown: {:?}",
+            retried.output()
+        );
+        // Both runs published, and the receiver holds two distinct records with two
+        // distinct ids — that part is checked against the receiver below, not
+        // inferred from the outcomes. What the *outcomes* must do is stay
+        // truthful: neither may report a review the receiver never applied, and
+        // reconciling a lost response onto an earlier identical review is
+        // correct, not a defect — the two runs asked for the same body at the
+        // same commit, so the records are interchangeable by every field the
+        // verification reads.
+        let first_id = clean.output().and_then(ReviewOutcome::review_id);
+        let second_id = retried.output().and_then(ReviewOutcome::review_id);
+        let applied = fake.received()?;
+        assert_eq!(
+            applied.len(),
+            2,
+            "seed {index}: the receiver really did apply two reviews, so a run \
+             reporting one id for both would be reporting one review twice"
+        );
+        assert!(
+            first_id.is_some() && second_id.is_some(),
+            "seed {index}: both runs must name a review: {first_id:?} {second_id:?}"
+        );
+        // Both ids must lie in the range the receiver actually handed out
+        // (`next_review_id` and up), so a run that invented one — or reported
+        // the id from some other world — would fall outside it.
+        let first = first_id.unwrap_or_default();
+        let second = second_id.unwrap_or_default();
+        assert!(
+            (FIRST_REVIEW_ID..=LAST_REVIEW_ID).contains(&first)
+                && (FIRST_REVIEW_ID..=LAST_REVIEW_ID).contains(&second),
+            "seed {index}: both ids must come from the receiver's own range \
+             {FIRST_REVIEW_ID}..={LAST_REVIEW_ID}: {first} and {second}"
+        );
+    }
+    Ok(())
+}
+
+/// The repository-isolation family: two repositories on one host stay apart.
+///
+/// The tenant family covers two identities on one pull request; this is the
+/// other direction, and it is the one a shared host makes possible: a host that
+/// leaked its `PATH` or its binding between runs would send one repository's
+/// review to another's pull request, and the run would still report success.
+#[test]
+fn two_repositories_on_one_host_r16() -> TestResult {
+    for index in 0..16u64 {
+        let first_fake = FakeGh::install("repo-a", HEAD)?;
+        let second_fake = FakeGh::install("repo-b", MOVED)?;
+        first_fake.configure(Scenario::new(HEAD).created_body(BODY))?;
+        second_fake.configure(Scenario::new(MOVED).created_body(BODY))?;
+        let host = host()?;
+
+        // One host, two bindings, two repositories. The second names the second
+        // repository, so a run that resolved the wrong binding would read the
+        // wrong head — and since the two heads differ, it would either publish
+        // against the wrong commit or refuse.
+        let job = task(
+            "review-pr",
+            |scope: Scope, (gh, repo, request): (Gh, String, ReviewRequest)| async move {
+                lgwks_bot::review::review_pr(scope, gh, request, move |snapshot, _scope| {
+                    Ok(format!("{repo}: {BODY} at {}", snapshot.head_sha()))
+                })
+                .await
+            },
+        )?;
+
+        let run =
+            |repo: &str, fake: &FakeGh| -> Result<ReviewOutcome, Box<dyn std::error::Error>> {
+                let gh = Gh::new(Repository::new(repo)?)
+                    .program(fake.program())
+                    .capture_limit(NonZeroUsize::new(CAPTURE).ok_or("a non-zero limit")?)
+                    .deadline(Some(Duration::from_secs(20)))
+                    .env("PATH", path_for(fake)?);
+                let pull = PullRequest::new(Repository::new(repo)?, 7);
+                let request = ReviewRequest::new(pull, "COMMENT", BODY).with_marker(repo);
+                let report = host.block_on(&job, (gh, String::from(repo), request))?;
+                report
+                    .output()
+                    .cloned()
+                    .ok_or_else(|| format!("{repo} produced no outcome").into())
+            };
+
+        let first = run("acme/widgets", &first_fake)?;
+        let second = run("other/gadgets", &second_fake)?;
+
+        assert!(
+            first.is_published(),
+            "seed {index}: the first repository publishes: {first:?}"
+        );
+        assert!(
+            second.is_published(),
+            "seed {index}: the second repository publishes: {second:?}"
+        );
+        // The two heads differ, so a crossed binding would show up as one run
+        // publishing at the other's commit.
+        assert_eq!(
+            first.commit_id().map(CommitId::as_str),
+            Some(HEAD),
+            "seed {index}: the first run published at its own head"
+        );
+        assert_eq!(
+            second.commit_id().map(CommitId::as_str),
+            Some(MOVED),
+            "seed {index}: the second run published at its own head, not the \
+             first's"
+        );
+        // Each receiver saw only its own create.
+        assert_eq!(first_fake.creates()?, 1, "seed {index}: receiver A's count");
+        assert_eq!(
+            second_fake.creates()?,
+            1,
+            "seed {index}: receiver B's count"
+        );
+        assert!(
+            first_fake
+                .received()?
+                .iter()
+                .all(|payload| !payload.contains("other/gadgets")),
+            "seed {index}: no payload crossed into the other repository"
+        );
+    }
+    Ok(())
 }

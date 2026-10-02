@@ -571,7 +571,8 @@ Each of these was a shipped defect. Treat the list as the spec.
   `malformed_and_oversized_answers_r32`,
   `a_publication_the_ceiling_cannot_verify_stays_unknown`,
   `same_seed_same_trace_hash_r32`, `saturation_r32`,
-  `two_tenants_on_one_pull_request_r32`) and
+  `two_tenants_on_one_pull_request_r32`, `cancellation_under_faults_r16`,
+  `duplicate_submission_r16`, `two_repositories_on_one_host_r16`) and
   `tests/gh_binding.rs` (`a_review_list_past_the_ceiling_is_refused_not_truncated`,
   `a_review_list_exactly_at_the_ceiling_is_read`,
   `a_malformed_review_list_is_refused_rather_than_decoded_into_a_partial_answer`)
