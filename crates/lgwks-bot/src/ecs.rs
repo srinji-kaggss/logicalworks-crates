@@ -3716,11 +3716,11 @@ impl EcsBot {
     ///
     /// This is `from_spec`, and it is deliberately the *same* bot the builder
     /// chain produces: the spec's sources and actions are built through the
-    /// registry, erased into [`EcsChain`]s, and handed to [`EcsBot::assemble`]
-    /// exactly as [`ObserveBuilder::build`](crate::spec::ObserveBuilder::build)
-    /// hands over a natively declared chain. There is no second interpreter and
-    /// no second execution path, so a materialized bot and a native one built
-    /// from the same domains produce the same operation trace (T25).
+    /// registry, erased into chains, and handed to the same `assemble` step
+    /// that [`ObserveBuilder::build`](crate::spec::ObserveBuilder::build)
+    /// reaches with a natively declared chain. There is no second interpreter
+    /// and no second execution path, so a materialized bot and a native one
+    /// built from the same domains produce the same operation trace (T25).
     ///
     /// # Authority
     ///
