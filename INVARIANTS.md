@@ -392,7 +392,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   effect is known. · why: #87 step 1 (T01–T04, T36) · enforced by:
   `tests/task_front_door.rs` and `tests/sim_task.rs`
 
-- **INV-BOT-21** A GitHub publication is reported only from an independent
+- **INV-BOT-80** A GitHub publication is reported only from an independent
   read-back, never from a client's exit code. `ReviewOutcome::Published` is
   produced only when a review at the reviewed commit, with the intended body and
   state, was observed on a separate call; the create's own success is transport

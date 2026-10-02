@@ -62,8 +62,8 @@ impl FakeGh {
                 "{{\"head_sha\":\"{head_sha}\",\"base_sha\":\"{}\",\"create\":\"accept\",\
                  \"reviews\":[],\"next_review_id\":9001,\"created_body\":\"\",\
                  \"created_state\":\"COMMENT\",\"fail_reads\":0,\"hang_seconds\":0,\
-                 \"flood_bytes\":0}}\n",
-                "b".repeat(40)
+                 \"flood_bytes\":0,\"filler_reviews\":0,\"reviews_shape\":\"\"}}\n",
+                "b".repeat(40),
             ),
         )?;
 
@@ -328,6 +328,17 @@ if [ "$is_reviews" -eq 1 ]; then
       printf 'read refused by scenario\n' >&2
       exit 1
     fi
+    # A malformed answer, for the decode-refusal probes. `garbage` is not JSON;
+    # `truncated` is a JSON document that lost its closing bracket, which is the
+    # shape a stream cut mid-write takes when everything before the cut was
+    # valid. Both must be refused rather than decoded into a partial list.
+    shape=$(field reviews_shape)
+    case "$shape" in
+      garbage)
+        printf 'gh: this is not what you asked for\n'
+        exit 0
+        ;;
+    esac
     # The list is built from what the receiver actually applied, so a scenario
     # that posted one review reads back exactly that review. `sh` is not asked
     # to parse JSON: each applied payload is copied verbatim, and only its id,
@@ -347,7 +358,26 @@ if [ "$is_reviews" -eq 1 ]; then
       printf '{"id":%s,"commit_id":"%s","state":"%s","body":"%s"}' \
         "$id" "$commit" "$event" "$body"
     done
-  printf ']\n'
+    # Filler reviews, for the review-ceiling probe. They are real records on
+    # another commit: what matters is that the adapter would have had to read
+    # them to call the list complete, so returning only the prefix would be a
+    # lie about the pull request's review history.
+    filler=$(field filler_reviews)
+    i=0
+    while [ -n "${filler:-}" ] && [ "$i" -lt "$filler" ] 2>/dev/null; do
+      if [ "$first" -eq 0 ]; then printf ','; fi
+      first=0
+      printf '{"id":%s,"commit_id":"%s","state":"COMMENT","body":"history"}' \
+        "$((7000 + i))" "ccccccccccccccccccccccccccccccccccccccc"
+      i=$((i + 1))
+    done
+  if [ "$shape" = "truncated" ]; then
+    # The document opened and the records are valid; what is missing is the
+    # close. A decoder that fills that in would invent the end of the list.
+    printf '\n'
+  else
+    printf ']\n'
+  fi
 else
   # The pull-request read. `head_after_first` models a head that moves between
   # two reads: the first read reports `head_sha`, and every read after it
@@ -392,6 +422,19 @@ pub struct Scenario {
     /// How many padding lines a call writes to stdout before its answer, for
     /// the bounded-capture probe.
     pub flood_bytes: u32,
+    /// How many filler reviews the receiver reports on a review read, over and
+    /// above whatever it actually applied.
+    ///
+    /// This is how the review-ceiling probe builds a pull request whose review
+    /// history is longer than the adapter will decode. A real one arrives from
+    /// `--paginate` following page after page; the fake emits the same *shape*
+    /// in one document, because what is under test is the adapter's refusal to
+    /// treat a clean decode as proof of completeness.
+    pub filler_reviews: u32,
+    /// What the review read emits instead of a JSON list: `""` for a real list,
+    /// `garbage` for something that is not JSON, or `truncated` for a JSON
+    /// document whose closing bracket was lost.
+    pub reviews_shape: &'static str,
 }
 
 impl Scenario {
@@ -407,6 +450,8 @@ impl Scenario {
             fail_reads: 0,
             hang_seconds: 0,
             flood_bytes: 0,
+            filler_reviews: 0,
+            reviews_shape: "",
         }
     }
 
@@ -477,6 +522,29 @@ impl Scenario {
         self
     }
 
+    /// The receiver reports `count` extra reviews beyond the ones it applied.
+    ///
+    /// Used to push a pull request's review history past the adapter's declared
+    /// ceiling. The point of the probe is the *refusal*, so the filler needs no
+    /// particular body: it only has to be a review the adapter would have had to
+    /// read to call the list complete.
+    #[must_use]
+    pub fn with_filler_reviews(mut self, count: u32) -> Self {
+        self.filler_reviews = count;
+        self
+    }
+
+    /// The review read answers with something other than a JSON list.
+    ///
+    /// `garbage` is not JSON at all; `truncated` is a JSON document whose
+    /// closing bracket was lost, which is the shape a truncated stream takes
+    /// when the client managed to emit valid-looking JSON first.
+    #[must_use]
+    pub fn answers_reviews_with(mut self, shape: &'static str) -> Self {
+        self.reviews_shape = shape;
+        self
+    }
+
     /// The behaviour file this scenario is, as the fake reads it.
     ///
     /// Written here rather than assembled by each test so the keys the fake
@@ -495,7 +563,8 @@ impl Scenario {
             "{{{after}\"head_sha\":\"{head}\",\"base_sha\":\"{base}\",\
              \"create\":\"{create}\",\"next_review_id\":9001,\
              \"created_body\":\"{body}\",\"created_state\":\"{state}\",\
-             \"fail_reads\":{fail_reads},\"hang_seconds\":{hang},\"flood_bytes\":{flood}}}\n",
+             \"fail_reads\":{fail_reads},\"hang_seconds\":{hang},\"flood_bytes\":{flood},\
+             \"filler_reviews\":{filler},\"reviews_shape\":\"{shape}\"}}\n",
             head = self.head,
             create = self.create,
             body = self.created_body,
@@ -503,6 +572,8 @@ impl Scenario {
             fail_reads = self.fail_reads,
             hang = self.hang_seconds,
             flood = self.flood_bytes,
+            filler = self.filler_reviews,
+            shape = self.reviews_shape,
         )
     }
 }

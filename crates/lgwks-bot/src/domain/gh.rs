@@ -20,7 +20,11 @@
 //! - **Bounded output.** Each call retains at most its declared capture
 //!   ceiling of stdout and counts every byte the child wrote, so a chatty or
 //!   hostile `gh` is truncated with a report rather than retained without
-//!   bound.
+//!   bound. Byte bounds and *count* bounds are different, and the second is
+//!   [`MAX_REVIEWS_PER_PULL`]: a read-back that decoded cleanly but stopped at
+//!   the end of what a paginating client happened to print looks exactly like a
+//!   complete answer, so a list past the ceiling is refused rather than
+//!   returned short.
 //!
 //! Without the `process` feature there is no supervised runner to bind to, so
 //! every call refuses with [`GhError::NoRunner`]: a GitHub binding that cannot
@@ -556,6 +560,22 @@ impl GhOutcome {
     }
 }
 
+/// The most reviews one read-back will accept.
+///
+/// This is the ceiling that bounds `--paginate`. GitHub's reviews endpoint is
+/// paginated and `gh api --paginate` follows every page, so without a stated
+/// ceiling the adapter's answer grows with a pull request's history rather than
+/// with its own declaration — an unbounded read dressed as a bounded one,
+/// because the capture ceiling bounds the *bytes*, not the number of records a
+/// verification then walks.
+///
+/// The number is high enough that no realistic pull request reaches it and low
+/// enough that the decode is cheap: a pull request past this many reviews has
+/// already had its head reviewed and superseded many times over, and the honest
+/// answer for a caller that cannot hold them all is a refusal rather than a
+/// prefix of the list presented as the list.
+pub const MAX_REVIEWS_PER_PULL: usize = 1_000;
+
 // ── The adapter ─────────────────────────────────────────────────────────────
 
 /// The `gh` command-line client, as a GitHub binding.
@@ -734,25 +754,20 @@ impl Gh {
         args
     }
 
-    /// Read the pinned head and base of `pull`.
+    /// Read the pinned head and base of `pull`, without the `process` feature.
+    ///
+    /// There is no supervised runner in this build, so the call is not made and
+    /// the answer is not invented. A binding that cannot reach GitHub must not
+    /// report a pull request with an empty head, which a caller would read as a
+    /// real answer and go on to review nothing.
     ///
     /// # Errors
     ///
-    /// [`GhError::Transport`] or [`GhError::Deadline`] naming the exit code or
-    /// the stop when it ran and failed, [`GhError::Response`] when it answered
-    /// with something that is not a pull request, and [`GhError::NoRunner`]
-    /// without the `process` feature. Saying so is the
-    /// honest answer: a binding that cannot reach GitHub must not report an
-    /// empty answer, which a caller could mistake for "GitHub has no reviews".
-    ///
-    /// # Errors
-    ///
-    /// [`GhError::NoRunner`], always.
+    /// [`GhError::NoRunner`], always. Rebuild with the `process` feature to bind
+    /// this adapter to a supervised runner.
     #[cfg(not(feature = "process"))]
-    pub async fn snapshot(&self, pull: &PullRequest) -> Result<PrSnapshot, GhError> {
-        let path = format!("repos/{}/pulls/{}", pull.repository(), pull.number());
-        let args = self.args_for(&["--method", "GET", &path]);
-        self.call(&args).await.map(|_| PrSnapshot::default())
+    pub async fn snapshot(&self, _pull: &PullRequest) -> Result<PrSnapshot, GhError> {
+        Err(GhError::NoRunner)
     }
 
     /// Read the pinned head and base of `pull`.
@@ -784,40 +799,39 @@ impl Gh {
         Ok(snapshot)
     }
 
-    /// Read every review currently on `pull`.
+    /// Read every review currently on `pull`, without the `process` feature.
     ///
-    /// The independent observation a publication is verified against: it is a
-    /// separate process from the one that wrote, and it reads GitHub's own
-    /// record rather than the exit code of the write.
-    ///
-    /// # Errors
-    ///
-    /// As [`Gh::snapshot`], plus [`GhError::Response`] when the answer is not
-    /// a review list.
-    ///
-    /// Without the `process` feature there is no runner, so no review is read
-    /// and none is reported as absent.
+    /// There is no supervised runner in this build, so the call is not made and
+    /// no review is read. An empty `Vec` here would be the worst possible answer
+    /// for this particular call: it is exactly what a caller would read as "the
+    /// pull request has no reviews", which is a fact about GitHub this build has
+    /// no way to know. The refusal is the honest one.
     ///
     /// # Errors
     ///
-    /// [`GhError::NoRunner`], always.
+    /// [`GhError::NoRunner`], always. Rebuild with the `process` feature to bind
+    /// this adapter to a supervised runner.
     #[cfg(not(feature = "process"))]
-    pub async fn read_reviews(&self, pull: &PullRequest) -> Result<Vec<ReviewRecord>, GhError> {
-        let path = format!(
-            "repos/{}/pulls/{}/reviews",
-            pull.repository(),
-            pull.number()
-        );
-        let args = self.args_for(&["--method", "GET", &path]);
-        self.call(&args).await.map(|_| Vec::new())
+    pub async fn read_reviews(&self, _pull: &PullRequest) -> Result<Vec<ReviewRecord>, GhError> {
+        Err(GhError::NoRunner)
     }
 
     /// Read every review currently on `pull`, through a real supervised call.
     ///
+    /// `--paginate` makes the client follow GitHub's pages until it has them
+    /// all, so the review list is bounded by the adapter's **review ceiling**
+    /// ([`MAX_REVISED_RECORDS`]) rather than by the client's patience. A pull
+    /// request carrying more reviews than that is refused with
+    /// [`GhError::ReviewCeiling`], which is a different statement from a short
+    /// list: a truncated list that decoded cleanly is a *complete* answer as far
+    /// as any consumer can tell, and a verification built on it would report
+    /// "no matching review" for a review that is on a page nobody read.
+    ///
     /// # Errors
     ///
     /// As [`Gh::snapshot`], plus [`GhError::Response`] when the answer is not
-    /// a review list.
+    /// a review list and [`GhError::ReviewCeiling`] when the pull request holds
+    /// more than [`MAX_REVISED_RECORDS`] reviews.
     #[cfg(feature = "process")]
     pub async fn read_reviews(&self, pull: &PullRequest) -> Result<Vec<ReviewRecord>, GhError> {
         let path = format!(
@@ -828,28 +842,39 @@ impl Gh {
         let args = self.args_for(&["--method", "GET", &path, "--paginate"]);
         let outcome = self.call(&args).await?;
         outcome.require_success("reading the pull request's reviews")?;
-        outcome.parse_json::<Vec<ReviewRecord>>()
+        let reviews = outcome.parse_json::<Vec<ReviewRecord>>()?;
+        // Counted after the decode rather than while reading the pages, because
+        // the decode is already bounded by the capture ceiling: this check is
+        // about *completeness*, not about memory. A list over the ceiling is
+        // refused outright, never truncated and returned.
+        if reviews.len() > MAX_REVIEWS_PER_PULL {
+            return Err(GhError::ReviewCeiling {
+                path,
+                reviews: reviews.len(),
+                ceiling: MAX_REVIEWS_PER_PULL,
+            });
+        }
+        Ok(reviews)
     }
 
-    /// Without the `process` feature there is no runner, so nothing is
-    /// published and nothing is reported as published.
+    /// Publish one review on `pull`, without the `process` feature.
+    ///
+    /// Nothing runs and nothing is reported as published. A review id of `0` here
+    /// would be indistinguishable from a real answer in the places that consume
+    /// it, and inventing one would be the module's exact defect: reporting an
+    /// effect that was never attempted.
     ///
     /// # Errors
     ///
-    /// [`GhError::NoRunner`], always.
+    /// [`GhError::NoRunner`], always. Rebuild with the `process` feature to bind
+    /// this adapter to a supervised runner.
     #[cfg(not(feature = "process"))]
     pub async fn publish(
         &self,
-        pull: &PullRequest,
+        _pull: &PullRequest,
         _payload: &ReviewPayload,
     ) -> Result<u64, GhError> {
-        let path = format!(
-            "repos/{}/pulls/{}/reviews",
-            pull.repository(),
-            pull.number()
-        );
-        let args = self.args_for(&["--method", "POST", &path]);
-        self.call(&args).await.map(|_| 0)
+        Err(GhError::NoRunner)
     }
 
     /// Create one review on `pull` with `payload`.
@@ -1157,6 +1182,22 @@ pub enum GhError {
         /// Bytes the child wrote.
         total: u64,
     },
+    /// The pull request holds more reviews than the adapter will decode.
+    ///
+    /// Reported rather than truncated. A prefix of the review list presented as
+    /// the list is indistinguishable from a complete answer, and a verification
+    /// over it would report "no matching review" for a review that exists on a
+    /// page nobody read — the one failure mode a bounded capture cannot catch,
+    /// because the truncation would have happened inside a client that decoded
+    /// cleanly.
+    ReviewCeiling {
+        /// The endpoint the answer came from.
+        path: String,
+        /// How many reviews the client reported.
+        reviews: usize,
+        /// The ceiling that refused them.
+        ceiling: usize,
+    },
     /// The answer was not valid JSON of the expected type.
     MalformedResponse {
         /// Which stream it came from.
@@ -1184,11 +1225,21 @@ impl GhError {
     /// The adapter does not decide that — a caller that is about to *publish*
     /// must reconcile rather than repeat — but a read-only probe can ask, and
     /// this is the honest answer for each kind of failure.
+    ///
+    /// [`GhError::ReviewCeiling`] is retryable and would stay wrong on a second
+    /// attempt: the pull request still holds the reviews it held. What makes a
+    /// read different next time is the subject changing, not the read being
+    /// repeated, so a caller that loops on this answer loops forever. It is
+    /// reported here precisely so a caller can choose a ceiling rather than be
+    /// handed a truncated list to mistake for the whole history.
     #[must_use]
     pub const fn is_read_only_retryable(&self) -> bool {
         matches!(
             *self,
-            Self::Deadline { .. } | Self::MalformedResponse { .. } | Self::Transport { .. }
+            Self::Deadline { .. }
+                | Self::MalformedResponse { .. }
+                | Self::Transport { .. }
+                | Self::ReviewCeiling { .. }
         )
     }
 }
@@ -1242,6 +1293,16 @@ impl std::fmt::Display for GhError {
                 "the response was truncated at the capture ceiling: {retained} of {total} bytes \
                  retained, so it was not decoded"
             ),
+            Self::ReviewCeiling {
+                ref path,
+                reviews,
+                ceiling,
+            } => write!(
+                formatter,
+                "{path}: the pull request holds {reviews} reviews, past the ceiling of \
+                 {ceiling}; the list was not returned, because a prefix of it is not \
+                 the review history"
+            ),
             Self::MalformedResponse {
                 ref path,
                 ref source,
@@ -1278,6 +1339,7 @@ impl std::error::Error for GhError {
             | Self::Deadline { .. }
             | Self::Response { .. }
             | Self::TruncatedResponse { .. }
+            | Self::ReviewCeiling { .. }
             | Self::MalformedResponse { .. }
             | Self::PayloadNotSent { .. }
             | Self::Staging { .. } => None,

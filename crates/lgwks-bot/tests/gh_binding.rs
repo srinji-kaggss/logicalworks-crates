@@ -233,6 +233,135 @@ fn a_build_without_a_runner_refuses_rather_than_reporting_an_empty_answer() {
     );
 }
 
+// ── The review ceiling ──────────────────────────────────────────────────────
+
+#[test]
+fn a_review_list_past_the_ceiling_is_refused_not_truncated() -> TestResult {
+    let fake = FakeGh::install("ceiling", HEAD)?;
+    // One more review than the adapter will decode. A client that paginates
+    // happily produces exactly this, and the question is not whether the bytes
+    // fit — they do — but whether a *clean decode* of a partial history is
+    // reported as the history.
+    let over = u32::try_from(lgwks_bot::domain::gh::MAX_REVIEWS_PER_PULL)
+        .map_err(|_| "the ceiling must fit the fixture's counter")?
+        .saturating_add(1);
+    fake.configure(Scenario::new(HEAD).with_filler_reviews(over))?;
+    let gh = Gh::new(Repository::new("acme/widgets")?)
+        .program(fake.program())
+        .capture_limit(limit(4 * 1024 * 1024)?)
+        .deadline(Some(Duration::from_secs(20)))
+        .env("PATH", path_for(&fake)?);
+
+    let refused = lgwks_bot::Runtime::new()?
+        .block_on(async {
+            gh.read_reviews(&lgwks_bot::domain::gh::PullRequest::new(
+                Repository::new("acme/widgets")?,
+                7,
+            ))
+            .await
+        })
+        .err()
+        .ok_or("a list past the ceiling must be refused, not returned short")?;
+
+    match refused {
+        GhError::ReviewCeiling {
+            ref path,
+            reviews,
+            ceiling,
+        } => {
+            assert!(
+                path.contains("/reviews"),
+                "the refusal names the endpoint it came from: {path}"
+            );
+            assert_eq!(
+                reviews,
+                usize::try_from(over).unwrap_or(usize::MAX),
+                "the refusal reports what the client actually returned, so a caller \
+                 can tell a long history from a short one"
+            );
+            assert_eq!(
+                ceiling,
+                lgwks_bot::domain::gh::MAX_REVIEWS_PER_PULL,
+                "and the ceiling that refused it, which is a declared bound"
+            );
+        }
+        other => {
+            return Err(format!(
+                "a list past the ceiling must be ReviewCeiling, not {other:?} ({other})"
+            )
+            .into());
+        }
+    }
+    assert!(
+        refused.to_string().contains("not returned"),
+        "the message says the list was withheld rather than shortened: {refused}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_review_list_exactly_at_the_ceiling_is_read() -> TestResult {
+    let fake = FakeGh::install("ceiling-edge", HEAD)?;
+    // The boundary: exactly the ceiling is the largest list the adapter accepts,
+    // and refusing it would make the bound a fiction rather than a declaration.
+    let at = u32::try_from(lgwks_bot::domain::gh::MAX_REVIEWS_PER_PULL)
+        .map_err(|_| "the ceiling must fit the fixture's counter")?;
+    fake.configure(Scenario::new(HEAD).with_filler_reviews(at))?;
+    let gh = Gh::new(Repository::new("acme/widgets")?)
+        .program(fake.program())
+        .capture_limit(limit(4 * 1024 * 1024)?)
+        .deadline(Some(Duration::from_secs(20)))
+        .env("PATH", path_for(&fake)?);
+
+    let reviews = lgwks_bot::Runtime::new()?.block_on(async {
+        gh.read_reviews(&lgwks_bot::domain::gh::PullRequest::new(
+            Repository::new("acme/widgets")?,
+            7,
+        ))
+        .await
+    })?;
+    assert_eq!(
+        reviews.len(),
+        lgwks_bot::domain::gh::MAX_REVIEWS_PER_PULL,
+        "the ceiling is inclusive: exactly the declared number is accepted"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_malformed_review_list_is_refused_rather_than_decoded_into_a_partial_answer() -> TestResult {
+    for shape in ["garbage", "truncated"] {
+        let fake = FakeGh::install(shape, HEAD)?;
+        fake.configure(Scenario::new(HEAD).answers_reviews_with(shape))?;
+        let gh = Gh::new(Repository::new("acme/widgets")?)
+            .program(fake.program())
+            .capture_limit(limit(64 * 1024)?)
+            .deadline(Some(Duration::from_secs(10)))
+            .env("PATH", path_for(&fake)?);
+
+        let refused = lgwks_bot::Runtime::new()?
+            .block_on(async {
+                gh.read_reviews(&lgwks_bot::domain::gh::PullRequest::new(
+                    Repository::new("acme/widgets")?,
+                    7,
+                ))
+                .await
+            })
+            .err()
+            .ok_or("a review list that is not a review list must be refused")?;
+        assert!(
+            matches!(refused, GhError::MalformedResponse { .. }),
+            "{shape:?} must be a decode failure, not a partial list: {refused:?}"
+        );
+        assert!(
+            refused.is_read_only_retryable(),
+            "and it is read-only retryable, because a malformed answer says nothing \
+             about whether the reviews exist: {refused}"
+        );
+    }
+    Ok(())
+}
+
 // ── The argument vector ─────────────────────────────────────────────────────
 
 #[test]
