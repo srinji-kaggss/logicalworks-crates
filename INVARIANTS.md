@@ -172,8 +172,9 @@ Each of these was a shipped defect. Treat the list as the spec.
   the literal `is_online` endpoints share the same budget. The Boolean result
   remains a TCP heuristic, not application health. · why: #163 N4 · enforced
   by: `online::tests::address_candidates_share_one_remaining_budget`,
-  `online::tests::a_blackholed_candidate_does_not_starve_the_next` and
-  `online::tests::resolver_delay_is_outside_the_connection_budget`
+  `online::tests::a_blackholed_candidate_does_not_starve_the_next`,
+  `online::tests::resolver_delay_is_outside_the_connection_budget` and
+  `online::tests::a_whole_probe_fits_one_wall_clock_budget`
 - **INV-GLOB-1** Glob matching is anchored and operates on Unicode scalar
   values without normalization: `?` and classes consume one scalar, `/` is
   excluded from `?`, `*`, and all classes (including negated classes), `*`
@@ -202,8 +203,12 @@ Each of these was a shipped defect. Treat the list as the spec.
   alignment, and archived pointer width are observable via
   `wire::format_descriptor`; callers bind those properties and their own schema
   version before persisting or exchanging bytes. Structural validation does not
-  establish application validity or schema identity. · why: #167 · enforced by:
-  `tests/wire_consumer.rs`
+  establish application validity or schema identity. A retained fixture pins the
+  schema and format and is read on every target whose format matches; a
+  feature-unification probe selects an alternate pointer width and proves the
+  descriptor and the emitted bytes move with it. · why: #167 · enforced by:
+  `tests/wire_consumer.rs`, `tests/wire_fixture.rs`, `tests/sim_wire.rs` and
+  `tests/wire_feature_unification.rs`
 - **INV-PATTERN-SAFE** A single regex search costs worst-case `O(m * n)`, but
   complete greedy match, split, and replacement iteration may cost `O(m * n^2)`;
   iterator laziness does not promise prefix-only search work. Checked patterns

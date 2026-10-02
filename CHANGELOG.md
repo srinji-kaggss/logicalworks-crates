@@ -8,6 +8,23 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### lgwks_std Added
+
+- `tests/fixtures/wire/consumer_record_v1.hex` is a retained archive that pins
+  an application schema and the effective rkyv format (pointer width 32,
+  little-endian, `u32` alignment 4). `tests/wire_fixture.rs` reads it on every
+  target whose format matches and reproduces it byte for byte, so a format or
+  schema drift is caught on every OS rather than inferred from the host.
+  `tests/wire_feature_unification.rs` builds a separate consumer crate that
+  selects `rkyv/pointer_width_16`, `rkyv/big_endian` and `rkyv/unaligned` and
+  proves `wire::format_descriptor()` and the emitted bytes move with the
+  unified features, and `tests/sim_wire.rs`
+  checks 64 seeded nested values for byte-repeatability, round-trip and refusal
+  of truncated or misaligned archives. (#167)
+- `online::tests::a_whole_probe_fits_one_wall_clock_budget` observes, from
+  outside the injected dial, that one probe's resolved candidates share a single
+  wall-clock budget rather than restarting per address. (#163)
+
 ### lgwks_bot Added
 
 - `task::{Host, Task, Report}`, the front door (#87 step 1): build a `Host` once
