@@ -462,6 +462,9 @@ fn run_walk(
 /// omission in the engine passes through here, so no new omission site can
 /// silently pick a mode: it states one by calling this.
 fn omit(ctx: &mut WalkContext<'_>, omission: WalkOmission) -> io::Result<()> {
+    // The zero-dependency build has no logging stack, and the crate
+    // doc says so; the emission is the same refusal either way.
+    #[cfg(feature = "trace")]
     crate::trace::warn!(
         operation = "omit",
         "operation refused its request; the typed error carries the facts"
@@ -732,6 +735,9 @@ fn process_entry(
 /// path-based read is not bound to this pathname; the
 /// surrounding before/after checks are best-effort only.
 fn check_directory_path(dir: &Path, canonical_root: &Path) -> io::Result<PathBuf> {
+    // The zero-dependency build has no logging stack, and the crate
+    // doc says so; the emission is the same refusal either way.
+    #[cfg(feature = "trace")]
     crate::trace::warn!(
         operation = "check_directory_path",
         "operation refused its request; the typed error carries the facts"
@@ -773,6 +779,9 @@ fn walk_recursive(
     current_depth: usize,
     ctx: &mut WalkContext<'_>,
 ) -> io::Result<()> {
+    // The zero-dependency build has no logging stack, and the crate
+    // doc says so; the emission is the same refusal either way.
+    #[cfg(feature = "trace")]
     crate::trace::warn!(
         operation = "walk_recursive",
         "operation refused its request; the typed error carries the facts"

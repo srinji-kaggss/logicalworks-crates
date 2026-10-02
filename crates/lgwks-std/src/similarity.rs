@@ -385,6 +385,9 @@ impl Cosine {
 
     /// Calculates the cosine similarity, or reports why it is undefined.
     pub fn try_score(&self, left: &[f32], right: &[f32]) -> Result<f64, CosineError> {
+        // The zero-dependency build has no logging stack, and the crate
+        // doc says so; the emission is the same refusal either way.
+        #[cfg(feature = "trace")]
         crate::trace::warn!(
             operation = "try_score",
             "operation refused its request; the typed error carries the facts"
@@ -493,6 +496,9 @@ impl<Value: ?Sized> Weighted<Value> {
         components: Vec<(f64, Box<dyn Similarity<Value = Value>>)>,
         threshold: f64,
     ) -> Result<Self, WeightedError> {
+        // The zero-dependency build has no logging stack, and the crate
+        // doc says so; the emission is the same refusal either way.
+        #[cfg(feature = "trace")]
         crate::trace::warn!(
             operation = "new",
             "operation refused its request; the typed error carries the facts"
@@ -584,6 +590,9 @@ fn unit_score(candidate: f64) -> f64 {
 
 /// Normalizes text without allocating until the raw bound has been checked.
 fn normalize_text(input: &str, maximum: usize) -> Result<Vec<char>, EditDistanceError> {
+    // The zero-dependency build has no logging stack, and the crate
+    // doc says so; the emission is the same refusal either way.
+    #[cfg(feature = "trace")]
     crate::trace::warn!(
         operation = "normalize_text",
         "operation refused its request; the typed error carries the facts"

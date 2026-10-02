@@ -255,6 +255,9 @@ fn write_optional_fraction(out: &mut String, nanos: u32) {
 /// Instants outside that range, or outside the signed Unix-seconds domain, are
 /// refused instead of emitting extended-year text or a saturated timestamp.
 pub fn to_rfc3339(at: SystemTime) -> Result<String, FormatError> {
+    // The zero-dependency build has no logging stack, and the crate
+    // doc says so; the emission is the same refusal either way.
+    #[cfg(feature = "trace")]
     crate::trace::warn!(
         operation = "to_rfc3339",
         "operation refused its request; the typed error carries the facts"

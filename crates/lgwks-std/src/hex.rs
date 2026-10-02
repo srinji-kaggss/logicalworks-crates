@@ -154,6 +154,9 @@ pub fn decode(input: impl AsRef<[u8]>) -> Result<Vec<u8>, DecodeError> {
 /// # Ok::<(), lgwks_std::hex::DecodeError>(())
 /// ```
 pub fn decode_into(input: impl AsRef<[u8]>, output: &mut [u8]) -> Result<(), DecodeError> {
+    // The zero-dependency build has no logging stack, and the crate
+    // doc says so; the emission is the same refusal either way.
+    #[cfg(feature = "trace")]
     crate::trace::warn!(
         operation = "decode_into",
         "operation refused its request; the typed error carries the facts"

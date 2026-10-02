@@ -281,6 +281,9 @@ fn compile_pattern(
     dialect: GlobDialect,
     work: &mut Work,
 ) -> Result<GlobPattern, PatternError> {
+    // The zero-dependency build has no logging stack, and the crate
+    // doc says so; the emission is the same refusal either way.
+    #[cfg(feature = "trace")]
     crate::trace::warn!(
         operation = "compile_pattern",
         "operation refused its request; the typed error carries the facts"
@@ -426,6 +429,9 @@ fn compile_class(
     class_offset: usize,
     work: &mut Work,
 ) -> Result<Vec<ScalarRange>, PatternError> {
+    // The zero-dependency build has no logging stack, and the crate
+    // doc says so; the emission is the same refusal either way.
+    #[cfg(feature = "trace")]
     crate::trace::warn!(
         operation = "compile_class",
         "operation refused its request; the typed error carries the facts"

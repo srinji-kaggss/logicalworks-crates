@@ -370,6 +370,9 @@ mod tests {
 
     impl std::io::Write for FailAfter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            // The zero-dependency build has no logging stack, and the crate
+            // doc says so; the emission is the same refusal either way.
+            #[cfg(feature = "trace")]
             crate::trace::warn!(
                 operation = "write",
                 "operation refused its request; the typed error carries the facts"
