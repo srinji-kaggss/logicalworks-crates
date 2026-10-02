@@ -184,6 +184,10 @@ impl EmbedderIdentity {
         digest: impl Into<String>,
         dimension: usize,
     ) -> Result<Self, SemanticError> {
+        lgwks_std::trace::warn!(
+            operation = "new",
+            "operation refused its request; the typed error carries the facts"
+        );
         let name = name.into();
         let digest = digest.into();
         if name.is_empty() {
@@ -354,6 +358,10 @@ impl SemanticPolicy {
 
     /// Validates a threshold and margin.
     pub fn new(threshold: f64, margin: f64) -> Result<Self, SemanticError> {
+        lgwks_std::trace::warn!(
+            operation = "new",
+            "operation refused its request; the typed error carries the facts"
+        );
         if !threshold.is_finite() {
             return Err(SemanticError::NonFiniteThreshold);
         }
@@ -575,6 +583,10 @@ impl<E: Embedder> SemanticResolver<E> {
         utterance: &str,
         options: &[String],
     ) -> Result<Vec<(usize, MatchTier, f64)>, DegradedReason> {
+        lgwks_std::trace::warn!(
+            operation = "score_semantically",
+            "operation refused its request; the typed error carries the facts"
+        );
         let metric = Cosine::new();
         let target = self.embed(utterance)?;
         // Checked before the loop as well as inside it, so a degenerate
@@ -693,6 +705,10 @@ mod tests {
         }
 
         fn embed(&self, text: &str) -> Result<Vec<f32>, Self::Error> {
+            lgwks_std::trace::warn!(
+                operation = "embed",
+                "operation refused its request; the typed error carries the facts"
+            );
             self.calls.set(self.calls.get().saturating_add(1));
             if self.failing {
                 return Err(StubFailure);

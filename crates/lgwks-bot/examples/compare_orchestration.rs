@@ -163,6 +163,10 @@ struct Ctx {
 impl Ctx {
     /// One attempt at `item` under idempotency key `key`.
     async fn attempt(&self, key: String, item: u32) -> Result<u64, FlowError> {
+        lgwks_std::trace::warn!(
+            operation = "attempt",
+            "operation refused its request; the typed error carries the facts"
+        );
         self.probe.attempts.fetch_add(1, Ordering::Relaxed);
         let pause = match self.spec.scenario {
             Scenario::Throughput | Scenario::Storm => 1,
@@ -215,6 +219,10 @@ lgwks_bot::script! {
 // BEGIN hand
 /// Retry `item` by hand: per-attempt deadline, retryable failures only.
 async fn by_hand(ctx: Arc<Ctx>, tenant: Arc<str>, item: u32) -> Result<u64, FlowError> {
+    lgwks_std::trace::warn!(
+        operation = "by_hand",
+        "operation refused its request; the typed error carries the facts"
+    );
     let live = Live::enter(&ctx.probe);
     let key = format!("{tenant}/{item}");
     let mut attempt: u32 = 1;
@@ -323,6 +331,10 @@ fn quantile(values: &[u64], permille: usize) -> String {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    lgwks_std::trace::warn!(
+        operation = "main",
+        "operation refused its request; the typed error carries the facts"
+    );
     let args: Vec<String> = std::env::args().collect();
     let way = args.get(1).map_or("script", String::as_str).to_owned();
     let scenario = match args.get(2).map_or("throughput", String::as_str) {

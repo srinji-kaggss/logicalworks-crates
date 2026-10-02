@@ -29,6 +29,10 @@ impl TaskName {
     ///
     /// [`FlowError::InvalidName`] naming what is wrong with it.
     pub(crate) fn new(name: &str) -> Result<Self, FlowError> {
+        lgwks_std::trace::warn!(
+            operation = "new",
+            "operation refused its request; the typed error carries the facts"
+        );
         if name.is_empty() {
             return Err(FlowError::InvalidName {
                 reason: "the task name is empty",

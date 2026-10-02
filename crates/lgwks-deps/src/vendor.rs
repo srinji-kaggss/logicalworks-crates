@@ -172,6 +172,10 @@ pub fn tree_for(repo: &Path) -> Result<PathBuf, VendorError> {
 /// `"package": "<hex>"` pair needs no general parser. Anything else is a
 /// broken tree, refused rather than guessed at.
 fn package_hash(checksum_file: &Path) -> Result<String, String> {
+    lgwks_std::trace::warn!(
+        operation = "package_hash",
+        "operation refused its request; the typed error carries the facts"
+    );
     let text =
         std::fs::read_to_string(checksum_file).map_err(|cause| format!("unreadable: {cause}"))?;
     let key = "\"package\"";

@@ -235,6 +235,10 @@ fn resolve_ambiguous_tail(
     position: JournalPosition,
     index: u64,
 ) -> Result<ScanStop, JournalError> {
+    lgwks_std::trace::warn!(
+        operation = "resolve_ambiguous_tail",
+        "operation refused its request; the typed error carries the facts"
+    );
     let length_u64 = u64::from(u32::try_from(LENGTH_BYTES).unwrap_or(u32::MAX));
     let head_u64 = u64::from(u32::try_from(HEAD_BYTES).unwrap_or(u32::MAX));
     let file_len = file.metadata().map_err(JournalError::Storage)?.len();
@@ -293,6 +297,10 @@ fn scan(
     previous: JournalPosition,
     max_events: usize,
 ) -> Result<(Vec<JournalEntry>, ScanStop), JournalError> {
+    lgwks_std::trace::warn!(
+        operation = "scan",
+        "operation refused its request; the typed error carries the facts"
+    );
     let mut entries = Vec::new();
     let mut position = previous;
     let mut offset = 0u64;
@@ -770,6 +778,10 @@ fn serve(mut file: File, shared: Arc<Mutex<Slot>>, signal: Arc<Condvar>) {
 /// Whatever the device reports. A length that is not the one the caller
 /// expected means the file moved, and is refused before any byte is written.
 fn commit(file: &mut File, expected_len: u64, frames: &[u8]) -> std::io::Result<()> {
+    lgwks_std::trace::warn!(
+        operation = "commit",
+        "operation refused its request; the typed error carries the facts"
+    );
     let on_disk = file.metadata()?.len();
     if on_disk != expected_len {
         return Err(std::io::Error::new(
@@ -895,6 +907,10 @@ impl FileJournal {
     ///
     /// Whatever the file, the lock or the scan reports.
     fn open_impl(path: &Path, stalled: bool) -> Result<Self, JournalError> {
+        lgwks_std::trace::warn!(
+            operation = "open_impl",
+            "operation refused its request; the typed error carries the facts"
+        );
         let path = path.to_path_buf();
         let mut file = OpenOptions::new()
             .read(true)
@@ -999,6 +1015,10 @@ impl FileJournal {
     /// bound. The history is not compacted to make room, so nothing
     /// acknowledged is evicted to admit more work.
     fn bound_events(&self, additional: u64) -> Result<(), JournalError> {
+        lgwks_std::trace::warn!(
+            operation = "bound_events",
+            "operation refused its request; the typed error carries the facts"
+        );
         let requested = u64::try_from(self.committed.len())
             .unwrap_or(u64::MAX)
             .saturating_add(additional);
@@ -1058,6 +1078,10 @@ impl FileJournal {
     ///
     /// [`JournalError::Storage`] when this handle is stale and must be reopened.
     fn fence(&self) -> Result<(), JournalError> {
+        lgwks_std::trace::warn!(
+            operation = "fence",
+            "operation refused its request; the typed error carries the facts"
+        );
         if self.storage.poisoned() {
             return Err(JournalError::Storage(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -1091,6 +1115,10 @@ impl FileJournal {
         event: &EffectEvent,
         from: JournalPosition,
     ) -> Result<(JournalPosition, Vec<u8>), JournalError> {
+        lgwks_std::trace::warn!(
+            operation = "frame",
+            "operation refused its request; the typed error carries the facts"
+        );
         let sequence = from
             .sequence()
             .checked_add(1)
@@ -1128,6 +1156,10 @@ impl FileJournal {
     /// [`JournalError::CapacityExceeded`] when the staged write is over the
     /// bound.
     fn bound_bytes(&self, staged: usize) -> Result<(), JournalError> {
+        lgwks_std::trace::warn!(
+            operation = "bound_bytes",
+            "operation refused its request; the typed error carries the facts"
+        );
         let requested = self
             .disk_len
             .saturating_add(u64::try_from(staged).unwrap_or(u64::MAX));
@@ -1165,6 +1197,10 @@ impl FileJournal {
     /// The acknowledgment is minted from the position the frame was chained at,
     /// so the two cannot disagree.
     fn accept(&mut self, event: &EffectEvent, position: JournalPosition, frame_len: usize) {
+        lgwks_std::trace::warn!(
+            operation = "accept",
+            "operation refused its request; the typed error carries the facts"
+        );
         self.committed.push(JournalEntry::new(position, *event));
         self.ladder.insert(event.key(), event.kind());
         if let EffectEvent::OutcomeObserved { key, evidence } = *event {
@@ -1173,6 +1209,52 @@ impl FileJournal {
         self.disk_len = self
             .disk_len
             .saturating_add(u64::try_from(frame_len).unwrap_or(u64::MAX));
+    }
+
+    /// Records one committed frame and mints its acknowledgment.
+    ///
+    /// The tail [`FileJournal::compare_and_append_all`] repeats per frame. Both
+    /// paths must commit and acknowledge in the same order and off the same
+    /// durability promise, so the sequence is written once rather than twice:
+    /// a batch that acknowledged on its own would be one edit away from
+    /// promising more than the single append does.
+    fn commit_one(
+        &mut self,
+        event: &EffectEvent,
+        position: JournalPosition,
+        frame_len: usize,
+    ) -> DurableAck {
+        self.accept(event, position, frame_len);
+        DurableAck::new(position, self.durability())
+    }
+
+    /// Refuses `event` unless its rung is the one this key admits next.
+    ///
+    /// The ladder decision both append doors make, differing only in what they
+    /// consult: the single append reads committed state, while the batch gives
+    /// its own staged kinds precedence because they are the newest fact about
+    /// the key. Written once so the two cannot disagree about what a rung is
+    /// allowed to follow.
+    fn check_ladder(
+        &self,
+        event: &EffectEvent,
+        staged: Option<EventKind>,
+    ) -> Result<(), JournalError> {
+        lgwks_std::trace::warn!(
+            operation = "check_ladder",
+            "operation refused its request; the typed error carries the facts"
+        );
+        let key = event.key();
+        let attempted = event.kind();
+        let expected = next_allowed_of(staged.or_else(|| self.ladder.get(&key).copied()));
+        if expected != Some(attempted) {
+            return Err(JournalError::OutOfOrder {
+                key: Box::new(key),
+                expected,
+                attempted,
+            });
+        }
+        Ok(())
     }
 
     /// Everything one append checks and frames before the disk is touched.
@@ -1196,6 +1278,10 @@ impl FileJournal {
         expected_tail: JournalPosition,
         event: &EffectEvent,
     ) -> Result<(JournalPosition, Vec<u8>), JournalError> {
+        lgwks_std::trace::warn!(
+            operation = "prepare_append",
+            "operation refused its request; the typed error carries the facts"
+        );
         let actual = self.tail();
         if expected_tail != actual {
             return Err(JournalError::TailMismatch {
@@ -1203,15 +1289,7 @@ impl FileJournal {
                 actual,
             });
         }
-        let attempted = event.kind();
-        let expected = next_allowed_of(self.ladder.get(&event.key()).copied());
-        if expected != Some(attempted) {
-            return Err(JournalError::OutOfOrder {
-                key: Box::new(event.key()),
-                expected,
-                attempted,
-            });
-        }
+        self.check_ladder(event, None)?;
         self.fence()?;
         self.bound_events(1)?;
         let (position, frame) = self.frame(event, actual)?;
@@ -1297,6 +1375,10 @@ impl FileJournal {
         &mut self,
         events: &[EffectEvent],
     ) -> Result<Vec<DurableAck>, JournalError> {
+        lgwks_std::trace::warn!(
+            operation = "compare_and_append_all",
+            "operation refused its request; the typed error carries the facts"
+        );
         // The fence runs once for the batch, ahead of everything including the
         // empty case: a stale handle answers for itself, not with an empty
         // success.
@@ -1316,18 +1398,8 @@ impl FileJournal {
         let mut frames = Vec::new();
         let mut pending: Vec<(JournalPosition, usize)> = Vec::with_capacity(events.len());
         for event in events {
-            let key = event.key();
-            let attempted = event.kind();
-            let expected =
-                next_allowed_of(staged.get(&key).or_else(|| self.ladder.get(&key)).copied());
-            if expected != Some(attempted) {
-                return Err(JournalError::OutOfOrder {
-                    key: Box::new(key),
-                    expected,
-                    attempted,
-                });
-            }
-            staged.insert(key, attempted);
+            self.check_ladder(event, staged.get(&event.key()).copied())?;
+            staged.insert(event.key(), event.kind());
             let (next, framed) = self.frame(event, position)?;
             position = next;
             self.bound_bytes(frames.len().saturating_add(framed.len()))?;
@@ -1343,8 +1415,7 @@ impl FileJournal {
         let mut acks = Vec::with_capacity(pending.len());
         for (event, entry) in events.iter().zip(&pending) {
             let (position, frame_len) = *entry;
-            self.accept(event, position, frame_len);
-            acks.push(DurableAck::new(position, self.durability()));
+            acks.push(self.commit_one(event, position, frame_len));
         }
         Ok(acks)
     }
@@ -1420,9 +1491,7 @@ impl EffectJournal for FileJournal {
         // returns, the bytes are through the file system, and a kill of this
         // process cannot take the fact back out of the file.
         self.write_and_sync(&frame)?;
-
-        self.accept(event, position, frame.len());
-        Ok(DurableAck::new(position, self.durability()))
+        Ok(self.commit_one(event, position, frame.len()))
     }
 
     /// The same append, waited for rather than sat through.
@@ -1470,6 +1539,10 @@ impl EffectJournal for FileJournal {
         position: JournalPosition,
         required: DurabilityPromise,
     ) -> Result<DurableAck, JournalError> {
+        lgwks_std::trace::warn!(
+            operation = "confirm_outcome",
+            "operation refused its request; the typed error carries the facts"
+        );
         if !self.durability().meets(required) {
             return Err(JournalError::ReceiptUnavailable { required });
         }
@@ -1565,16 +1638,35 @@ mod tests {
         std::env::temp_dir().join(format!("lgwks-journal-file-{name}-{nanos}-{unique}"))
     }
 
-    fn key() -> Result<crate::effect::EffectKey, Box<dyn std::error::Error>> {
+    /// The shared run, action, environment and epoch every key in this module
+    /// uses, on the named attempt.
+    ///
+    /// One builder rather than a copy per fixture: the seven components are the
+    /// same in each, so three copies is three places the key shape has to be
+    /// changed at once when it moves.
+    fn key_with_attempt(
+        attempt: &str,
+    ) -> Result<crate::effect::EffectKey, Box<dyn std::error::Error>> {
+        let key_run = RunId::from_hex(RUN)?;
+        let key_action = ActionId::from_hex(ACTION)?;
+        let key_attempt = AttemptId::from_decimal(attempt)?;
+        let key_flow_revision = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
+        let key_digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
+        let key_environment = EnvironmentId::from_hex(ENV)?;
+        let key_epoch = EnvironmentEpoch::from_decimal("1")?;
         Ok(crate::effect::EffectKey::new(
-            RunId::from_hex(RUN)?,
-            ActionId::from_hex(ACTION)?,
-            AttemptId::from_decimal("1")?,
-            FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-            ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
-            EnvironmentId::from_hex(ENV)?,
-            EnvironmentEpoch::from_decimal("1")?,
+            key_run,
+            key_action,
+            key_attempt,
+            key_flow_revision,
+            key_digest,
+            key_environment,
+            key_epoch,
         ))
+    }
+
+    fn key() -> Result<crate::effect::EffectKey, Box<dyn std::error::Error>> {
+        key_with_attempt("1")
     }
 
     #[test]
@@ -1686,28 +1778,12 @@ mod tests {
     /// A key for attempt `n`, so a frame count can be built without
     /// tripping the ladder's one-climb-per-key rule.
     fn attempt_key(n: u64) -> Result<crate::effect::EffectKey, Box<dyn std::error::Error>> {
-        Ok(crate::effect::EffectKey::new(
-            RunId::from_hex(RUN)?,
-            ActionId::from_hex(ACTION)?,
-            AttemptId::from_decimal(&n.to_string())?,
-            FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-            ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
-            EnvironmentId::from_hex(ENV)?,
-            EnvironmentEpoch::from_decimal("1")?,
-        ))
+        key_with_attempt(&n.to_string())
     }
 
     /// A second key, so a batch can fail on its own rung.
     fn key2() -> Result<crate::effect::EffectKey, Box<dyn std::error::Error>> {
-        Ok(crate::effect::EffectKey::new(
-            RunId::from_hex(RUN)?,
-            ActionId::from_hex(ACTION)?,
-            AttemptId::from_decimal("7")?,
-            FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-            ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
-            EnvironmentId::from_hex(ENV)?,
-            EnvironmentEpoch::from_decimal("1")?,
-        ))
+        key_with_attempt("7")
     }
 
     #[test]
@@ -1943,6 +2019,10 @@ mod tests {
 
     #[test]
     fn the_ladder_refuses_a_second_prepared_dispatch_from_a_replayed_view() -> TestResult {
+        lgwks_std::trace::warn!(
+            operation = "the_ladder_refuses_a_second_prepared_dispatch_from_a_replayed_view",
+            "operation refused its request; the typed error carries the facts"
+        );
         let path = scratch("ladder");
         let _guard = TempGuard(path.clone());
         let key = key()?;
@@ -1989,6 +2069,10 @@ mod tests {
 
     impl Read for FaultyAfter {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            lgwks_std::trace::warn!(
+                operation = "read",
+                "operation refused its request; the typed error carries the facts"
+            );
             if self.inner.position() >= self.serve {
                 return Err(std::io::Error::other("injected storage fault"));
             }

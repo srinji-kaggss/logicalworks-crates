@@ -774,6 +774,10 @@ impl Host {
         F: Fn(Scope, I) -> Fut,
         Fut: Future<Output = Result<O, FlowError>>,
     {
+        lgwks_std::trace::warn!(
+            operation = "block_on",
+            "operation refused its request; the typed error carries the facts"
+        );
         // Checked before the reactor is taken, so the refusal cannot leave a
         // freshly built runtime behind for a caller that never used it.
         if lgwks_deps::tokio::runtime::Handle::try_current().is_ok() {
@@ -818,6 +822,10 @@ impl Host {
     /// the whole of the no-deadlock argument: a parent awaiting a child never
     /// holds the last permit while waiting, because it never waits for one.
     async fn admit(&self, started: Instant, task: &TaskName) -> Result<Permit, AdmissionFailure> {
+        lgwks_std::trace::warn!(
+            operation = "admit",
+            "operation refused its request; the typed error carries the facts"
+        );
         // Both refusals here are distinct facts and both are reported as
         // `Refused`, never `Cancelled`: a run that never held a permit never ran
         // a body, so no step was entered and there is nothing that could have
@@ -1170,6 +1178,10 @@ impl HostBuilder {
     /// [`HostError::Bound`] for a ceiling outside the declared bound, including a
     /// zero deadline, which would expire every run before its body starts.
     pub fn build(self) -> Result<Host, HostError> {
+        lgwks_std::trace::warn!(
+            operation = "build",
+            "operation refused its request; the typed error carries the facts"
+        );
         let tasks = u64::try_from(self.max_concurrent.get()).unwrap_or(u64::MAX);
         let tasks_ceiling = u64::try_from(MAX_ADMITTED_TASKS).unwrap_or(u64::MAX);
         if tasks > tasks_ceiling {

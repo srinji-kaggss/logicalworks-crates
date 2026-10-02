@@ -239,6 +239,10 @@ impl ResourceLimits {
     /// Returns [`BotError::ResourceLimitAboveCeiling`] naming the first axis
     /// that exceeds its ceiling.
     pub fn within_ceiling(self) -> Result<Self, BotError> {
+        lgwks_std::trace::warn!(
+            operation = "within_ceiling",
+            "operation refused its request; the typed error carries the facts"
+        );
         let ceiling = Self::shipped();
         for axis in [
             ResourceAxis::Utterance,
@@ -412,6 +416,10 @@ impl VarType {
     ///
     /// Returns the [`AnswerRejection`] naming why the answer cannot be stored.
     pub fn decode_answer(&self, answer: &str) -> Result<Value, AnswerRejection> {
+        lgwks_std::trace::warn!(
+            operation = "decode_answer",
+            "operation refused its request; the typed error carries the facts"
+        );
         let trimmed = answer.trim();
         match *self {
             // A free-form string accepts anything, including the untrimmed
@@ -590,12 +598,8 @@ impl Predicate {
     pub fn evaluate(&self, scope: &VarScope) -> Result<bool, BotError> {
         match *self {
             Self::Const(value) => Ok(value),
-            Self::Eq(ref left, ref right) => {
-                Ok(resolve_expr(left, scope)? == resolve_expr(right, scope)?)
-            }
-            Self::Ne(ref left, ref right) => {
-                Ok(resolve_expr(left, scope)? != resolve_expr(right, scope)?)
-            }
+            Self::Eq(ref left, ref right) => same_value(left, right, scope, true),
+            Self::Ne(ref left, ref right) => same_value(left, right, scope, false),
             Self::Lt(ref left, ref right) => {
                 compare_expr(left, right, scope, |ordering| ordering.is_lt())
             }
@@ -608,25 +612,171 @@ impl Predicate {
             Self::Ge(ref left, ref right) => {
                 compare_expr(left, right, scope, |ordering| ordering.is_ge())
             }
-            Self::And(ref items) => {
-                for item in items {
-                    if !item.evaluate(scope)? {
-                        return Ok(false);
-                    }
-                }
-                Ok(true)
-            }
-            Self::Or(ref items) => {
-                for item in items {
-                    if item.evaluate(scope)? {
-                        return Ok(true);
-                    }
-                }
-                Ok(false)
-            }
+            Self::And(ref items) => all_true(items, scope),
+            Self::Or(ref items) => any_true(items, scope),
             Self::Not(ref inner) => Ok(!inner.evaluate(scope)?),
         }
     }
+}
+
+/// Whether the two sides resolve to the same value, or to different ones.
+///
+/// `equal` is `true` for `Eq` and `false` for `Ne`, so one resolution path
+/// serves both: each side resolves exactly once, which matters because
+/// resolution is fallible and a side that resolved twice could fail twice.
+///
+/// This deliberately does not go through `compare_expr`. That one refuses a
+/// pair of different `Value` variants with `PredicateTypeMismatch`, where `==`
+/// here answers `false`; routing `Eq` through it would turn a comparison that
+/// has always answered into one that fails.
+fn same_value(
+    left: &ValueExpr,
+    right: &ValueExpr,
+    scope: &VarScope,
+    equal: bool,
+) -> Result<bool, BotError> {
+    let left_value = resolve_expr(left, scope)?;
+    let right_value = resolve_expr(right, scope)?;
+    Ok((left_value == right_value) == equal)
+}
+
+/// Every item must hold; evaluation stops at the first that does not.
+///
+/// `Ok(true)` on an empty list, the identity for `and`. The two short-circuit
+/// loops are helpers rather than arms because each was a loop with a
+/// propagation operator inside it, so the `match` above held three of them
+/// across two arms and a reader could not see the short-circuit rule without
+/// reading both loops in full.
+fn all_true(items: &[Predicate], scope: &VarScope) -> Result<bool, BotError> {
+    for item in items {
+        if !item.evaluate(scope)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Some item must hold; evaluation stops at the first that does.
+///
+/// `Ok(false)` on an empty list, the identity for `or`.
+fn any_true(items: &[Predicate], scope: &VarScope) -> Result<bool, BotError> {
+    for item in items {
+        if item.evaluate(scope)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Validates one `ask` node: its variable, its options and its routes.
+///
+/// A helper rather than the arm inline: as one block the arm carried the
+/// variable lookup, the option decode, the byte check and the two route passes,
+/// so `validate_node` read as a list of kinds when what it needed to say was
+/// which parts of an `ask` node are checked and in what order -- decode with
+/// the runtime's own decoder first, then the session's own ceiling, then the
+/// routes, so a refusal names the earliest thing wrong rather than an arbitrary
+/// one.
+fn validate_ask_node(
+    spec: &FlowSpec,
+    node_id: &str,
+    var: &str,
+    options: &[String],
+    routes: &BTreeMap<String, NodeId>,
+    limits: ResourceLimits,
+    writers: &mut BTreeSet<String>,
+) -> Result<(), BotError> {
+    lgwks_std::trace::warn!(
+        operation = "validate_ask_node",
+        "operation refused its request; the typed error carries the facts"
+    );
+    let declared = declared_variable(spec, var)?;
+    writers.insert(var.to_owned());
+    if options.is_empty() || has_duplicate_strings(options) {
+        return Err(BotError::MalformedFlow {
+            cause: format!("ask node {node_id:?} has invalid options"),
+        });
+    }
+    // Distinct strings are not distinct answers. Two options the answer
+    // policy cannot tell apart are one option the person cannot choose
+    // between, and the resolver can only ever report the tie — so the
+    // authoring mistake is refused here, where it names an option,
+    // rather than at run time, where it names none.
+    if let Some((first, second)) = colliding_options(options, answer_domain_of(spec, var)) {
+        return Err(BotError::MalformedFlow {
+            cause: format!(
+                "ask node {node_id:?} offers {first:?} and {second:?} as the same \
+                             {} answer",
+                answer_domain_of(spec, var)
+            ),
+        });
+    }
+    for option in options {
+        let Some(target) = routes.get(option) else {
+            return Err(BotError::MissingAskRoute {
+                node: node_id.to_owned(),
+                option: option.clone(),
+            });
+        };
+        check_target(&spec.nodes, node_id, target)?;
+        // Every candidate is decoded with the same decoder the runtime
+        // assigns with, so "the flow asks a question the variable
+        // cannot hold an answer to" is a load-time refusal rather than
+        // a conversation the person cannot complete.
+        let value = match declared.decode_answer(option) {
+            Ok(value) => value,
+            Err(rejection) => {
+                return Err(BotError::AskOptionNotAssignable {
+                    node: node_id.to_owned(),
+                    variable: var.to_owned(),
+                    option: option.clone(),
+                    expected: declared.label(),
+                    cause: rejection.to_string(),
+                });
+            }
+        };
+        // Then that the value fits the session that will store it.
+        // "The candidate cannot be held" and "the candidate cannot be
+        // held *here*" are different statements, and both are knowable
+        // while the document is loading: the second one is a session
+        // whose value ceiling is below the option it asked for, and
+        // deferring it to the person's answer would charge them a step
+        // for an operator's configuration.
+        let value_bytes = limits.get(ResourceAxis::Value);
+        if value.rendered_bytes() > value_bytes {
+            return Err(BotError::AskOptionTooLarge {
+                node: node_id.to_owned(),
+                variable: var.to_owned(),
+                option: option.clone(),
+                bytes: value.rendered_bytes(),
+                limit: value_bytes,
+            });
+        }
+    }
+    for (option, target) in routes {
+        if !options.iter().any(|candidate| candidate == option) {
+            return Err(BotError::MalformedFlow {
+                cause: format!("ask node {node_id:?} routes undeclared option {option:?}"),
+            });
+        }
+        check_target(&spec.nodes, node_id, target)?;
+    }
+    Ok(())
+}
+
+/// Checks both edges of a branch, in the order the branch names them.
+///
+/// A helper for the pair rather than two calls: the branch's whole contract is
+/// that both targets resolve, and a reader checking one edge had no reason to
+/// look for the other three lines below it.
+fn check_edge_pair(
+    nodes: &BTreeMap<NodeId, NodeKind>,
+    node_id: &str,
+    first: &str,
+    second: &str,
+) -> Result<(), BotError> {
+    check_target(nodes, node_id, first)?;
+    check_target(nodes, node_id, second)
 }
 
 /// A declared flow node and its closed operation kind.
@@ -1239,6 +1389,10 @@ fn validate_flow(spec: &FlowSpec) -> Result<(), BotError> {
 /// validation, so "the document is valid" and "the document can be run here"
 /// cannot disagree about a candidate list or a template.
 fn validate_flow_within(spec: &FlowSpec, limits: ResourceLimits) -> Result<(), BotError> {
+    lgwks_std::trace::warn!(
+        operation = "validate_flow_within",
+        "operation refused its request; the typed error carries the facts"
+    );
     // First, and before any structural work: a document that asks for a
     // ceiling above the operator's gets a diagnostic naming the axis it asked
     // about, not a run under a bound it did not choose.
@@ -1316,6 +1470,10 @@ fn validate_flow_within(spec: &FlowSpec, limits: ResourceLimits) -> Result<(), B
 /// the join. Both choices fail toward silence rather than rejecting a flow the
 /// runner would have executed.
 fn reject_uninitialized_reads(spec: &FlowSpec) -> Result<(), BotError> {
+    lgwks_std::trace::warn!(
+        operation = "reject_uninitialized_reads",
+        "operation refused its request; the typed error carries the facts"
+    );
     let universe: BTreeSet<String> = spec.vars.keys().cloned().collect();
     let mut available: BTreeMap<NodeId, BTreeSet<String>> = spec
         .nodes
@@ -1426,6 +1584,10 @@ fn declared_template_reads(
 
 /// Collect the variable references of a predicate expression.
 fn collect_predicate_variables(predicate: &Predicate, into: &mut BTreeSet<String>) {
+    lgwks_std::trace::warn!(
+        operation = "collect_predicate_variables",
+        "operation refused its request; the typed error carries the facts"
+    );
     match *predicate {
         Predicate::Const(_) => {}
         Predicate::Eq(ref left, ref right)
@@ -1448,6 +1610,10 @@ fn collect_predicate_variables(predicate: &Predicate, into: &mut BTreeSet<String
 
 /// Collect the variable references of one predicate operand.
 fn collect_expr_variables(expression: &ValueExpr, into: &mut BTreeSet<String>) {
+    lgwks_std::trace::warn!(
+        operation = "collect_expr_variables",
+        "operation refused its request; the typed error carries the facts"
+    );
     if let ValueExpr::Var(ref name) = *expression {
         into.insert(name.clone());
     }
@@ -1455,6 +1621,10 @@ fn collect_expr_variables(expression: &ValueExpr, into: &mut BTreeSet<String>) {
 
 /// Validate variable declaration names and choice contents.
 fn validate_declarations(vars: &BTreeMap<String, VarType>) -> Result<(), BotError> {
+    lgwks_std::trace::warn!(
+        operation = "validate_declarations",
+        "operation refused its request; the typed error carries the facts"
+    );
     for (name, kind) in vars {
         if !valid_identifier(name) {
             return Err(BotError::MalformedFlow {
@@ -1488,6 +1658,10 @@ fn validate_declarations(vars: &BTreeMap<String, VarType>) -> Result<(), BotErro
 /// declaration that repeats the node's own outcome is accepted; it is then
 /// read by [`FlowSpec::effective_terminal`] rather than ignored.
 fn validate_terminals(spec: &FlowSpec) -> Result<(), BotError> {
+    lgwks_std::trace::warn!(
+        operation = "validate_terminals",
+        "operation refused its request; the typed error carries the facts"
+    );
     for (node_id, declared) in &spec.terminals {
         let Some(kind) = spec.nodes.get(node_id) else {
             return Err(BotError::InvalidTransitionTarget {
@@ -1538,6 +1712,10 @@ fn validate_node(
     limits: ResourceLimits,
     writers: &mut BTreeSet<String>,
 ) -> Result<(), BotError> {
+    lgwks_std::trace::warn!(
+        operation = "validate_node",
+        "operation refused its request; the typed error carries the facts"
+    );
     match *kind {
         NodeKind::Say { ref text } => {
             validate_template(spec, node_id, text, "say.text", limits)?;
@@ -1556,89 +1734,18 @@ fn validate_node(
             ref var,
             ref options,
             ref routes,
-        } => {
-            let declared = declared_variable(spec, var)?;
-            writers.insert(var.clone());
-            if options.is_empty() || has_duplicate_strings(options) {
-                return Err(BotError::MalformedFlow {
-                    cause: format!("ask node {node_id:?} has invalid options"),
-                });
-            }
-            // Distinct strings are not distinct answers. Two options the answer
-            // policy cannot tell apart are one option the person cannot choose
-            // between, and the resolver can only ever report the tie — so the
-            // authoring mistake is refused here, where it names an option,
-            // rather than at run time, where it names none.
-            if let Some((first, second)) = colliding_options(options, answer_domain_of(spec, var)) {
-                return Err(BotError::MalformedFlow {
-                    cause: format!(
-                        "ask node {node_id:?} offers {first:?} and {second:?} as the same \
-                         {} answer",
-                        answer_domain_of(spec, var)
-                    ),
-                });
-            }
-            for option in options {
-                let Some(target) = routes.get(option) else {
-                    return Err(BotError::MissingAskRoute {
-                        node: node_id.to_owned(),
-                        option: option.clone(),
-                    });
-                };
-                check_target(&spec.nodes, node_id, target)?;
-                // Every candidate is decoded with the same decoder the runtime
-                // assigns with, so "the flow asks a question the variable
-                // cannot hold an answer to" is a load-time refusal rather than
-                // a conversation the person cannot complete.
-                let value = match declared.decode_answer(option) {
-                    Ok(value) => value,
-                    Err(rejection) => {
-                        return Err(BotError::AskOptionNotAssignable {
-                            node: node_id.to_owned(),
-                            variable: var.clone(),
-                            option: option.clone(),
-                            expected: declared.label(),
-                            cause: rejection.to_string(),
-                        });
-                    }
-                };
-                // Then that the value fits the session that will store it.
-                // "The candidate cannot be held" and "the candidate cannot be
-                // held *here*" are different statements, and both are knowable
-                // while the document is loading: the second one is a session
-                // whose value ceiling is below the option it asked for, and
-                // deferring it to the person's answer would charge them a step
-                // for an operator's configuration.
-                let value_bytes = limits.get(ResourceAxis::Value);
-                if value.rendered_bytes() > value_bytes {
-                    return Err(BotError::AskOptionTooLarge {
-                        node: node_id.to_owned(),
-                        variable: var.clone(),
-                        option: option.clone(),
-                        bytes: value.rendered_bytes(),
-                        limit: value_bytes,
-                    });
-                }
-            }
-            for (option, target) in routes {
-                if !options.iter().any(|candidate| candidate == option) {
-                    return Err(BotError::MalformedFlow {
-                        cause: format!("ask node {node_id:?} routes undeclared option {option:?}"),
-                    });
-                }
-                check_target(&spec.nodes, node_id, target)?;
-            }
-        }
+        } => validate_ask_node(spec, node_id, var, options, routes, limits, writers)?,
         NodeKind::Branch {
             ref var,
             ref when,
             ref then,
             ref otherwise,
         } => {
+            // In this order, so a refusal names the variable before the
+            // predicate it is read by, and the predicate before either edge.
             validate_variable_reference(spec, node_id, var)?;
             validate_predicate(spec, node_id, when)?;
-            check_target(&spec.nodes, node_id, then)?;
-            check_target(&spec.nodes, node_id, otherwise)?;
+            check_edge_pair(&spec.nodes, node_id, then, otherwise)?;
         }
         NodeKind::Handoff { .. } => {}
         NodeKind::Refer { ref text, .. } => {
@@ -1718,6 +1825,10 @@ fn validate_predicate(
     node_id: &str,
     predicate: &Predicate,
 ) -> Result<(), BotError> {
+    lgwks_std::trace::warn!(
+        operation = "validate_predicate",
+        "operation refused its request; the typed error carries the facts"
+    );
     match *predicate {
         Predicate::Const(_) => Ok(()),
         Predicate::Eq(ref left, ref right)
@@ -1746,6 +1857,10 @@ fn validate_predicate(
 
 /// Validate one predicate expression.
 fn validate_expr(spec: &FlowSpec, _node_id: &str, expression: &ValueExpr) -> Result<(), BotError> {
+    lgwks_std::trace::warn!(
+        operation = "validate_expr",
+        "operation refused its request; the typed error carries the facts"
+    );
     if let ValueExpr::Var(ref name) = *expression
         && !spec.vars.contains_key(name)
     {
@@ -1770,6 +1885,10 @@ fn validate_template(
     field: &'static str,
     limits: ResourceLimits,
 ) -> Result<(), BotError> {
+    lgwks_std::trace::warn!(
+        operation = "validate_template",
+        "operation refused its request; the typed error carries the facts"
+    );
     let compiled =
         CompiledTemplate::compile(template).map_err(|_error| BotError::MalformedTemplate {
             node: node_id.to_owned(),
@@ -1825,6 +1944,10 @@ fn check_target(
 
 /// Reject a graph node that cannot be reached from the entry.
 fn reject_unreachable(spec: &FlowSpec) -> Result<(), BotError> {
+    lgwks_std::trace::warn!(
+        operation = "reject_unreachable",
+        "operation refused its request; the typed error carries the facts"
+    );
     let mut seen = BTreeSet::new();
     let mut pending = VecDeque::from([spec.entry.clone()]);
     while let Some(node_id) = pending.pop_front() {
@@ -1852,6 +1975,10 @@ fn reject_unreachable(spec: &FlowSpec) -> Result<(), BotError> {
 
 /// Collect every statically possible destination from one node.
 fn successor_targets(spec: &FlowSpec, node_id: &str, kind: &NodeKind) -> Vec<NodeId> {
+    lgwks_std::trace::warn!(
+        operation = "successor_targets",
+        "operation refused its request; the typed error carries the facts"
+    );
     let mut targets = spec.edge_targets(node_id);
     match *kind {
         NodeKind::Ask { ref routes, .. } => targets.extend(routes.values().cloned()),
@@ -1899,6 +2026,10 @@ fn parse_json<T>(text: &str) -> Result<T, String>
 where
     T: serde::de::DeserializeOwned,
 {
+    lgwks_std::trace::warn!(
+        operation = "parse_json",
+        "operation refused its request; the typed error carries the facts"
+    );
     crate::json::from_str(text).map_err(|error| error.to_string())
 }
 
@@ -1915,6 +2046,10 @@ where
 /// Every notation is measured the same way, so a document cannot be too large
 /// in one and acceptable in another.
 fn check_flow_size(source: &str) -> Result<(), BotError> {
+    lgwks_std::trace::warn!(
+        operation = "check_flow_size",
+        "operation refused its request; the typed error carries the facts"
+    );
     if source.len() > MAX_FLOW_BYTES {
         return Err(BotError::FlowTooLarge {
             bytes: source.len(),
@@ -1938,6 +2073,10 @@ fn malformed_flow(error: impl std::fmt::Display) -> BotError {
 /// Reject unknown tagged node kinds before serde turns them into a generic
 /// malformed-document diagnostic.
 fn reject_unknown_node_kinds(declared: &BTreeMap<String, String>) -> Result<(), BotError> {
+    lgwks_std::trace::warn!(
+        operation = "reject_unknown_node_kinds",
+        "operation refused its request; the typed error carries the facts"
+    );
     for (node_id, kind) in declared {
         if !matches!(
             kind.as_str(),
@@ -2103,6 +2242,10 @@ impl VarScope {
 
     /// Assign a typed value after checking its declaration.
     pub fn set(&mut self, name: &str, value: Value) -> Result<(), BotError> {
+        lgwks_std::trace::warn!(
+            operation = "set",
+            "operation refused its request; the typed error carries the facts"
+        );
         let Some(declared) = self.declarations.get(name) else {
             return Err(BotError::UndeclaredVariable {
                 name: name.to_owned(),
@@ -2147,6 +2290,10 @@ impl VarScope {
         answer: &str,
         value_bytes: usize,
     ) -> Result<(), BotError> {
+        lgwks_std::trace::warn!(
+            operation = "set_from_answer_within",
+            "operation refused its request; the typed error carries the facts"
+        );
         let Some(declared) = self.declarations.get(name) else {
             return Err(BotError::UndeclaredVariable {
                 name: name.to_owned(),
@@ -2276,6 +2423,10 @@ impl<'a> CompiledTemplate<'a> {
     /// Returns [`BotError::MalformedTemplate`] for an unterminated marker or a
     /// name that is not an identifier.
     pub fn compile(template: &'a str) -> Result<Self, BotError> {
+        lgwks_std::trace::warn!(
+            operation = "compile",
+            "operation refused its request; the typed error carries the facts"
+        );
         let mut parts = Vec::new();
         let mut cursor = 0;
         while let Some(relative_start) = template[cursor..].find("${") {
@@ -2326,6 +2477,10 @@ impl<'a> CompiledTemplate<'a> {
     /// if the sum overflows, which no real expansion can and which is reported
     /// rather than wrapped.
     pub fn expanded_bytes(&self, scope: &VarScope) -> Result<usize, BotError> {
+        lgwks_std::trace::warn!(
+            operation = "expanded_bytes",
+            "operation refused its request; the typed error carries the facts"
+        );
         let mut total = 0usize;
         for part in &self.parts {
             let bytes = match *part {
@@ -2365,6 +2520,10 @@ impl<'a> CompiledTemplate<'a> {
     /// sizing and rendering. A scope is not mutated during a render, so this is
     /// reachable only through a caller that interleaves the two.
     pub fn render(&self, scope: &VarScope) -> Result<String, BotError> {
+        lgwks_std::trace::warn!(
+            operation = "render",
+            "operation refused its request; the typed error carries the facts"
+        );
         let mut output = String::new();
         for part in &self.parts {
             match *part {
@@ -2510,6 +2669,10 @@ impl Interpolate for TemplateInterpolator {
         node: &str,
         limit: usize,
     ) -> Result<String, BotError> {
+        lgwks_std::trace::warn!(
+            operation = "interpolate",
+            "operation refused its request; the typed error carries the facts"
+        );
         let compiled = CompiledTemplate::compile(template).map_err(|error| match error {
             // The compile-time diagnostics name the runtime as their node,
             // because the compiler is not handed the node it is compiling for.
@@ -3448,6 +3611,10 @@ impl Session {
     /// Return transcript records in insertion order.
     #[must_use]
     pub fn transcript(&self) -> &[TranscriptEntry] {
+        lgwks_std::trace::warn!(
+            operation = "transcript",
+            "operation refused its request; the typed error carries the facts"
+        );
         &self.transcript
     }
 
@@ -3466,6 +3633,10 @@ impl Session {
     /// Return the digest of the flow document this session is running.
     #[must_use]
     pub fn flow_revision(&self) -> &str {
+        lgwks_std::trace::warn!(
+            operation = "flow_revision",
+            "operation refused its request; the typed error carries the facts"
+        );
         &self.flow_revision
     }
 
@@ -3478,6 +3649,10 @@ impl Session {
     /// Return the number of charged steps.
     #[must_use]
     pub fn steps(&self) -> usize {
+        lgwks_std::trace::warn!(
+            operation = "steps",
+            "operation refused its request; the typed error carries the facts"
+        );
         self.steps
     }
 
@@ -3521,6 +3696,10 @@ impl Session {
     /// record must err in, and the opposite of an accepted answer with no
     /// record of why.
     pub fn answer(&mut self, utterance: &str) -> Result<(), BotError> {
+        lgwks_std::trace::warn!(
+            operation = "answer",
+            "operation refused its request; the typed error carries the facts"
+        );
         if self.terminal.is_some() {
             return Err(BotError::SessionTerminated);
         }
@@ -3686,6 +3865,10 @@ impl Session {
 
     /// Charge one bounded step or return [`BotError::SessionBudgetExceeded`].
     fn charge_step(&mut self) -> Result<(), BotError> {
+        lgwks_std::trace::warn!(
+            operation = "charge_step",
+            "operation refused its request; the typed error carries the facts"
+        );
         let attempted = self
             .steps
             .checked_add(1)
@@ -3705,6 +3888,10 @@ impl Session {
 
     /// Execute deterministic nodes until an ask or terminal is reached.
     fn drive(&mut self) -> Result<(), BotError> {
+        lgwks_std::trace::warn!(
+            operation = "drive",
+            "operation refused its request; the typed error carries the facts"
+        );
         loop {
             let Some(node_id) = self.current.clone() else {
                 return Ok(());
@@ -3782,6 +3969,10 @@ impl Session {
     /// consulted the terminal map for `End` alone, and a refusal declared on a
     /// `handoff` node was accepted by validation and ignored here.
     fn finish(&mut self, node_id: &str) -> Result<(), BotError> {
+        lgwks_std::trace::warn!(
+            operation = "finish",
+            "operation refused its request; the typed error carries the facts"
+        );
         let Some(outcome) = self.flow.effective_terminal(node_id) else {
             return Err(BotError::MalformedFlow {
                 cause: format!("node {node_id:?} reached with no terminal outcome"),
@@ -3814,6 +4005,10 @@ impl Session {
     /// to clean up: the journal has not been told, the transcript has not grown,
     /// and the counter has not moved.
     fn charge_retention(&mut self, bytes: usize) -> Result<(), BotError> {
+        lgwks_std::trace::warn!(
+            operation = "charge_retention",
+            "operation refused its request; the typed error carries the facts"
+        );
         let limit = self.limits.get(ResourceAxis::Session);
         let total = self
             .retained
@@ -3846,6 +4041,10 @@ impl Session {
     /// Returns [`BotError::RecordTooLarge`] or
     /// [`BotError::SessionRetentionExceeded`]. Neither has written anything.
     fn record(&mut self, node_id: &str, role: &str, text: &str) -> Result<(), BotError> {
+        lgwks_std::trace::warn!(
+            operation = "record",
+            "operation refused its request; the typed error carries the facts"
+        );
         let record_bytes = self.limits.get(ResourceAxis::Record);
         if text.len() > record_bytes {
             return Err(BotError::RecordTooLarge {
@@ -3881,6 +4080,10 @@ impl Session {
     ///
     /// Returns [`BotError::RecordTooLarge`] for a prompt over the ceiling.
     fn record_prompt(&mut self, node_id: &str, options: &[String]) -> Result<(), BotError> {
+        lgwks_std::trace::warn!(
+            operation = "record_prompt",
+            "operation refused its request; the typed error carries the facts"
+        );
         let bytes = prompt_bytes(options).unwrap_or(usize::MAX);
         let record_bytes = self.limits.get(ResourceAxis::Record);
         if bytes > record_bytes {
@@ -4003,6 +4206,10 @@ fn compare_expr<F>(
 where
     F: FnOnce(std::cmp::Ordering) -> bool,
 {
+    lgwks_std::trace::warn!(
+        operation = "compare_expr",
+        "operation refused its request; the typed error carries the facts"
+    );
     let left = resolve_expr(left, scope)?;
     let right = resolve_expr(right, scope)?;
     let ordering = match (left, right) {

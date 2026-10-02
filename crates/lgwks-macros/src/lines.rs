@@ -100,6 +100,10 @@ fn ends_in_block_colon(tokens: &[TokenTree]) -> bool {
 /// A header with nothing indented beneath it, a line indented under something
 /// that is not a header, and a dedent that lands between two block levels.
 pub(crate) fn tree(lines: Vec<Line>) -> Result<Vec<Node>> {
+    lgwks_std::trace::warn!(
+        operation = "tree",
+        "operation refused its request; the typed error carries the facts"
+    );
     let mut queue = lines.into_iter().peekable();
     let Some(first_column) = queue.peek().map(|line| line.column) else {
         return Ok(Vec::new());
@@ -120,6 +124,10 @@ fn block(
     queue: &mut std::iter::Peekable<std::vec::IntoIter<Line>>,
     column: usize,
 ) -> Result<Vec<Node>> {
+    lgwks_std::trace::warn!(
+        operation = "block",
+        "operation refused its request; the typed error carries the facts"
+    );
     let mut nodes = Vec::new();
     while let Some(next) = queue.peek() {
         if next.column < column {

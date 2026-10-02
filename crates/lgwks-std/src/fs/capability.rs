@@ -278,6 +278,13 @@ impl OpenFlags {
     /// [`io::ErrorKind::InvalidInput`] when the combination cannot be honoured
     /// on every supported platform.
     pub fn validate(&self) -> io::Result<()> {
+        // The zero-dependency build has no logging stack, and the crate
+        // doc says so; the emission is the same refusal either way.
+        #[cfg(feature = "trace")]
+        crate::trace::warn!(
+            operation = "validate",
+            "operation refused its request; the typed error carries the facts"
+        );
         if self.truncate && !self.write {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -706,6 +713,13 @@ mod unsupported {
 /// by an entry whose name is `..`.
 #[cfg(unix)]
 fn single_component(name: &str) -> io::Result<std::ffi::CString> {
+    // The zero-dependency build has no logging stack, and the crate
+    // doc says so; the emission is the same refusal either way.
+    #[cfg(feature = "trace")]
+    crate::trace::warn!(
+        operation = "single_component",
+        "operation refused its request; the typed error carries the facts"
+    );
     if name.is_empty() || name == "." || name == ".." || name.contains('/') {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,

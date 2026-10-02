@@ -119,6 +119,10 @@ const CANCEL_AFTER: Duration = Duration::from_millis(1);
 /// cannot report on itself: it is parked on the driver it was supposed to be
 /// driving, so nothing inside it will ever run again.
 fn guarded(test_name: &'static str, body: fn() -> TestResult) -> TestResult {
+    lgwks_std::trace::warn!(
+        operation = "guarded",
+        "operation refused its request; the typed error carries the facts"
+    );
     if std::env::var_os(GUARD_ENV).is_some() {
         let outcome = body();
         if outcome.is_ok() {
@@ -333,6 +337,10 @@ impl Observe for ChannelSource {
     }
 
     async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+        lgwks_std::trace::warn!(
+            operation = "poll",
+            "operation refused its request; the typed error carries the facts"
+        );
         call.0.check(Observe::required_caps(self))?;
         let mut held = self.receiver.lock().await;
         let Some(receiver) = held.as_mut() else {
@@ -463,6 +471,10 @@ fn is_positive(seen: &u32) -> bool {
 /// because a refusal that left the tick half-started would be a worse answer
 /// than the error.
 fn refusal_current_thread() -> TestResult {
+    lgwks_std::trace::warn!(
+        operation = "refusal_current_thread",
+        "operation refused its request; the typed error carries the facts"
+    );
     let log = Rc::new(RefCell::new(Vec::new()));
     let mut bot = Bot::builder("refusal-current-thread")
         .observe(TimerSource {
@@ -519,6 +531,10 @@ fn refusal_current_thread() -> TestResult {
 /// adapter refuses on both because which thread it was handed is not knowable
 /// from it.
 fn refusal_one_worker() -> TestResult {
+    lgwks_std::trace::warn!(
+        operation = "refusal_one_worker",
+        "operation refused its request; the typed error carries the facts"
+    );
     let Some(workers) = NonZeroUsize::new(1) else {
         return Err("one is non-zero".into());
     };
@@ -584,6 +600,10 @@ fn refusal_one_worker() -> TestResult {
 /// show up here as a flipped log. Both chains are selected on the same tick, so
 /// the log is the tick's whole effect program.
 fn timer_effects_in_order() -> TestResult {
+    lgwks_std::trace::warn!(
+        operation = "timer_effects_in_order",
+        "operation refused its request; the typed error carries the facts"
+    );
     let log = Rc::new(RefCell::new(Vec::new()));
     let mut bot = Bot::builder("timer-order")
         .observe(TimerSource {
@@ -638,6 +658,10 @@ fn timer_effects_in_order() -> TestResult {
 /// elapsed on the same thread the tick is awaiting on. A parked thread fails
 /// both halves at once.
 fn sibling_channel_completion() -> TestResult {
+    lgwks_std::trace::warn!(
+        operation = "sibling_channel_completion",
+        "operation refused its request; the typed error carries the facts"
+    );
     let (sender, receiver) = mpsc::channel::<u32>(CHANNEL_CAPACITY);
     let beats = Arc::new(AtomicUsize::new(0));
     let sibling_beats = Arc::clone(&beats);
@@ -714,6 +738,10 @@ fn sibling_channel_completion() -> TestResult {
 /// observable — the message is still there to be received, because a dropped
 /// `recv` does not consume it.
 fn a_cancelled_tick_leaves_the_bot_usable() -> TestResult {
+    lgwks_std::trace::warn!(
+        operation = "a_cancelled_tick_leaves_the_bot_usable",
+        "operation refused its request; the typed error carries the facts"
+    );
     let (sender, receiver) = mpsc::channel::<u32>(CHANNEL_CAPACITY);
     let log = Rc::new(RefCell::new(Vec::new()));
     let action_log = Rc::clone(&log);
@@ -875,6 +903,10 @@ fn socket_source_on_the_shipped_runtime() -> TestResult {
         }
 
         async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+            lgwks_std::trace::warn!(
+                operation = "poll",
+                "operation refused its request; the typed error carries the facts"
+            );
             call.0.check(Observe::required_caps(self))?;
             let domain = "test::socket_source".to_owned();
             let peer = self
@@ -1088,6 +1120,10 @@ impl Observe for PollProbe {
     }
 
     async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+        lgwks_std::trace::warn!(
+            operation = "poll",
+            "operation refused its request; the typed error carries the facts"
+        );
         call.0.check(Observe::required_caps(self))?;
         self.polls.set(self.polls.get().saturating_add(1));
         if self.refuse_next.replace(false) {
@@ -1153,6 +1189,10 @@ impl Execute for Doubtful {
     }
 
     async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
+        lgwks_std::trace::warn!(
+            operation = "execute_action",
+            "operation refused its request; the typed error carries the facts"
+        );
         call.0.check(Execute::required_caps(self))?;
         self.seen.borrow_mut().push(*call.1);
         if self.uncertain.get() {
@@ -1248,6 +1288,10 @@ fn test_effects() -> Result<EffectScope, Box<dyn std::error::Error>> {
 /// told the wrong thing about work that is still held.
 #[test]
 fn a_settlement_names_the_binding_it_settles_and_no_other() -> TestResult {
+    lgwks_std::trace::warn!(
+        operation = "a_settlement_names_the_binding_it_settles_and_no_other",
+        "operation refused its request; the typed error carries the facts"
+    );
     let value = Rc::new(Cell::new(1));
     let uncertain = Rc::new(Cell::new(true));
     let seen = Rc::new(RefCell::new(Vec::new()));
@@ -1474,6 +1518,10 @@ impl Execute for Refuses {
     }
 
     async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
+        lgwks_std::trace::warn!(
+            operation = "execute_action",
+            "operation refused its request; the typed error carries the facts"
+        );
         call.0.check(Execute::required_caps(self))?;
         self.attempts.set(self.attempts.get().saturating_add(1));
         if self.refusing.get() {
@@ -1679,6 +1727,10 @@ fn an_abandoned_entry_is_never_a_quiet_tick() -> TestResult {
 /// and its successors with it — or the chain stays reported as unresolved.
 #[test]
 fn an_abandoned_entry_blocks_its_successors() -> TestResult {
+    lgwks_std::trace::warn!(
+        operation = "an_abandoned_entry_blocks_its_successors",
+        "operation refused its request; the typed error carries the facts"
+    );
     let attempts = Rc::new(Cell::new(0));
     let refusing = Rc::new(Cell::new(true));
     let log = Rc::new(RefCell::new(Vec::new()));
@@ -1816,6 +1868,10 @@ impl Execute for Grudging {
     }
 
     async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
+        lgwks_std::trace::warn!(
+            operation = "execute_action",
+            "operation refused its request; the typed error carries the facts"
+        );
         call.0.check(Execute::required_caps(self))?;
         self.seen.borrow_mut().push(*call.1);
         let left = self.refusals.get();

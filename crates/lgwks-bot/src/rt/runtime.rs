@@ -86,6 +86,10 @@ impl Builder {
     /// refusing a thread, and it is returned rather than panicked so a caller
     /// can degrade instead of aborting. WASM builds a current-thread runtime.
     pub fn build(self) -> io::Result<Runtime> {
+        lgwks_std::trace::warn!(
+            operation = "build",
+            "operation refused its request; the typed error carries the facts"
+        );
         #[cfg(target_family = "wasm")]
         if self.worker_threads.is_some() {
             return Err(io::Error::new(

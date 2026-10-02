@@ -87,6 +87,16 @@ lgwks-deps debug [PATH]         # doctor the default lgwks_std debugger surface
 Approval is a committed diff with a human's name on it, and the register format
 is documented in `contract/APPROVED.toml`.
 
+`[policy] enforce = false` is an adoption posture, **not an off switch**. It is
+a supported posture over a tree the gate admits: `check` still reports every
+refusal it finds, and a tree with no refusals still exits 0. What it no longer
+does is make a violating tree pass. A register that reads `enforce = false`
+while the tree actually carries dependency-edge violations is itself refused, by
+a named `AdoptionModeRefusals` refusal that states how many violations the
+posture stood down, and `check` exits 2 — identically to `enforce = true`. The
+verdict is therefore a function of the refusals alone; flipping that one token
+cannot change a build. See issue #204.
+
 `vendor check` is the physical counterpart of the register. The register states
 which edges are owned, the tree in `vendor/` states which bytes the offline
 build resolves, and the subcommand binds the two by hash. The tree sits at the

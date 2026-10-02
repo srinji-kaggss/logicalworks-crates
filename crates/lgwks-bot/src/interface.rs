@@ -331,6 +331,10 @@ impl Ladder {
     /// Deduplicated because two `Anchor::Text` rungs in a row are one rung and
     /// a repeated fall-through is a bug the walk should not have to notice.
     pub fn new(anchors: impl IntoIterator<Item = Anchor>) -> Result<Self, LadderError> {
+        lgwks_std::trace::warn!(
+            operation = "new",
+            "operation refused its request; the typed error carries the facts"
+        );
         let mut sorted: Vec<Anchor> = anchors.into_iter().collect();
         if sorted.is_empty() {
             return Err(LadderError::Empty);
@@ -531,6 +535,10 @@ impl RecognitionVector {
         threshold: f64,
         margin: f64,
     ) -> Result<Self, RecognitionError> {
+        lgwks_std::trace::warn!(
+            operation = "new",
+            "operation refused its request; the typed error carries the facts"
+        );
         if !margin.is_finite() || !(0.0..=1.0).contains(&margin) {
             return Err(RecognitionError::InvalidMargin { margin });
         }

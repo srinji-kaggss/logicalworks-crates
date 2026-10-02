@@ -90,6 +90,10 @@ impl Execute for Fail {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    lgwks_std::trace::warn!(
+        operation = "main",
+        "operation refused its request; the typed error carries the facts"
+    );
     let value = Arc::new(AtomicU32::new(0));
     let counted = Arc::new(AtomicU32::new(0));
     let mut bot = Bot::builder("two-actions")

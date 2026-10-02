@@ -76,14 +76,21 @@ fn scratch(name: &str) -> std::path::PathBuf {
 }
 
 fn key(attempt: &str) -> Result<EffectKey, Box<dyn std::error::Error>> {
+    let key_run = RunId::from_hex(RUN)?;
+    let key_action = ActionId::from_hex(ACTION)?;
+    let key_attempt = AttemptId::from_decimal(attempt)?;
+    let key_flow_revision = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
+    let key_digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
+    let key_environment = EnvironmentId::from_hex(ENV)?;
+    let key_epoch = EnvironmentEpoch::from_decimal("1")?;
     Ok(EffectKey::new(
-        RunId::from_hex(RUN)?,
-        ActionId::from_hex(ACTION)?,
-        AttemptId::from_decimal(attempt)?,
-        FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-        ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
-        EnvironmentId::from_hex(ENV)?,
-        EnvironmentEpoch::from_decimal("1")?,
+        key_run,
+        key_action,
+        key_attempt,
+        key_flow_revision,
+        key_digest,
+        key_environment,
+        key_epoch,
     ))
 }
 

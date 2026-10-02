@@ -6,6 +6,10 @@ use std::io::Write;
 use lgwks_std::glob::{GlobDialect, GlobPattern, GlobScratch, PatternErrorKind};
 
 fn main() -> Result<(), Box<dyn Error>> {
+    lgwks_std::trace::warn!(
+        operation = "main",
+        "operation refused its request; the typed error carries the facts"
+    );
     let pattern = GlobPattern::compile("src/**/[a-z]?.rs")?;
     let mut scratch = GlobScratch::new();
     let root_match = pattern.is_match_with("src/a1.rs", &mut scratch);

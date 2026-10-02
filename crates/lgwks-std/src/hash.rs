@@ -71,6 +71,13 @@ impl Digest {
     /// the fixed-size hex decoder fills the digest bytes without a temporary
     /// heap allocation.
     pub fn from_hex(text: &str) -> Result<Self, DigestParseError> {
+        // The zero-dependency build has no logging stack, and the crate
+        // doc says so; the emission is the same refusal either way.
+        #[cfg(feature = "trace")]
+        crate::trace::warn!(
+            operation = "from_hex",
+            "operation refused its request; the typed error carries the facts"
+        );
         if text.len() != 64 {
             return Err(DigestParseError::WrongLength { len: text.len() });
         }

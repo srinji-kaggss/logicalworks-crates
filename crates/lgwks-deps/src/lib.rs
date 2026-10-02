@@ -25,6 +25,15 @@
 //! register itself: a reviewable diff carrying a human's name, never an
 //! environment variable a build can set for itself.
 //!
+//! Adoption mode is a posture, not an off switch. It is supported over a tree
+//! this gate admits, and a clean tree still passes under it. It cannot stand a
+//! violating tree down: `enforce = false` over refusals adds a named
+//! [`Refusal::AdoptionModeRefusals`] reporting how many violations the posture
+//! stood down, so `check` exits non-zero identically under `enforce = true` and
+//! `enforce = false`. The verdict is a function of the refusals alone, which is
+//! what makes the reviewable one-token diff that adoption mode depends on
+//! incapable of changing a build's result (#204).
+//!
 //! ## No name-based exemption
 //!
 //! There is no package whose name alone escapes the audit. An edge is exempt
@@ -275,6 +284,19 @@ pub enum Refusal {
         /// Capability the approval claims to supply.
         capability: String,
     },
+    /// `[policy] enforce = false` was used to turn a tree that *actually
+    /// carries refusals* into a passing build.
+    ///
+    /// Adoption mode is a reviewable posture, not an off switch: it may report
+    /// refusals as guidance, but it cannot make them non-fatal. This refusal is
+    /// added on top of the edge refusals it counted, so the verdict is the same
+    /// under `enforce = true` and `enforce = false` and the boolean cannot be
+    /// inverted without the build changing. The count is carried so the report
+    /// says how many violations the posture tried to stand down.
+    AdoptionModeRefusals {
+        /// Number of dependency-edge refusals the posture stood down.
+        refusals: usize,
+    },
 }
 
 impl fmt::Display for Refusal {
@@ -340,12 +362,24 @@ impl fmt::Display for Refusal {
                 formatter,
                 "unused approval for {krate} capability {capability} owned by {owner}"
             ),
+            Self::AdoptionModeRefusals { refusals } => write!(
+                formatter,
+                "[policy] enforce = false stood down {refusals} dependency-edge \
+                 violations; adoption mode reports refusals, it does not make them \
+                 pass — register the edges or re-enable enforcement"
+            ),
         }
     }
 }
 
 impl Refusal {
     /// The crate this refusal is about.
+    ///
+    /// An adoption-mode refusal is not about any one crate: it is about the
+    /// register's own `[policy]` block standing down a count of edge
+    /// violations, so it carries no crate name and answers `"<policy>"`. A
+    /// caller that wants to distinguish the two shapes matches on the variant
+    /// rather than on this label.
     #[must_use]
     pub fn krate(&self) -> &str {
         match *self {
@@ -356,7 +390,20 @@ impl Refusal {
             | Self::SourceDrift { ref krate, .. }
             | Self::KindNotAllowed { ref krate, .. }
             | Self::UnusedApproval { ref krate, .. } => krate,
+            Self::AdoptionModeRefusals { .. } => "<policy>",
         }
+    }
+
+    /// Whether this refusal names the register's enforcement policy rather
+    /// than a dependency edge.
+    ///
+    /// Kept beside [`Refusal::krate`] because the two must not drift: every
+    /// variant that returns the `"<policy>"` label has to answer `true` here,
+    /// or a consumer filtering by scope would find a crate-shaped refusal
+    /// carrying a policy-shaped name.
+    #[must_use]
+    pub const fn is_policy(&self) -> bool {
+        matches!(*self, Self::AdoptionModeRefusals { .. })
     }
 }
 
@@ -562,6 +609,19 @@ pub fn audit_direct(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
                 capability: entry.capability.clone(),
             });
         }
+    }
+    // Adoption mode is a posture, not an off switch. When the register says
+    // `enforce = false` *and* the tree actually carries edge violations, one
+    // refusal names the stand-down so the build fails for the same reason it
+    // would under `enforce = true`. Without this the whole verdict reduced to
+    // that one boolean: a reviewable one-token diff was enough to make a tree
+    // the gate had just declared in violation report success. An empty audit
+    // stays empty — adoption mode on a clean tree is a legitimate posture and
+    // must not be refused.
+    if !register.enforce && !refusals.is_empty() {
+        refusals.push(Refusal::AdoptionModeRefusals {
+            refusals: refusals.len(),
+        });
     }
     refusals.sort_by_key(ToString::to_string);
     refusals

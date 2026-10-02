@@ -542,6 +542,10 @@ impl ShutdownReport {
     /// returned report still owns every pending cleanup lease and can be polled
     /// with `reap_pending_cleanups`.
     pub fn into_outcomes(self) -> Result<Vec<TaskOutcome>, Self> {
+        lgwks_std::trace::warn!(
+            operation = "into_outcomes",
+            "operation refused its request; the typed error carries the facts"
+        );
         #[cfg(all(unix, feature = "process"))]
         if self.pending_cleanup_count() > 0 {
             return Err(self);
@@ -1053,6 +1057,10 @@ impl Supervisor {
         F: FnOnce(CancellationToken) -> Fut,
         Fut: Future<Output = ()> + Send + 'static,
     {
+        lgwks_std::trace::warn!(
+            operation = "try_spawn",
+            "operation refused its request; the typed error carries the facts"
+        );
         let Some(permit) = self.claim_now() else {
             // `claim_now` counted the refusal; which world refused is the one
             // fact the counter cannot carry, so it is read here for the type.
@@ -1168,6 +1176,10 @@ impl Supervisor {
     /// permit is released when this function returns.
     #[cfg(all(unix, feature = "process"))]
     pub async fn spawn_process(&mut self, spec: &ProcessSpec) -> io::Result<TaskId> {
+        lgwks_std::trace::warn!(
+            operation = "spawn_process",
+            "operation refused its request; the typed error carries the facts"
+        );
         let Some(permit) = self.claim().await else {
             // The fence inside `claim` answered for capacity and for
             // cancellation alike; name which world refused, so a cancelled
@@ -1230,6 +1242,10 @@ impl Supervisor {
     /// opposite and is why the two are distinguishable.
     #[cfg(all(unix, feature = "process"))]
     pub async fn run_process(&mut self, spec: &ProcessSpec) -> Result<ProcessRun, ProcessRunError> {
+        lgwks_std::trace::warn!(
+            operation = "run_process",
+            "operation refused its request; the typed error carries the facts"
+        );
         let Some(permit) = self.claim().await else {
             return Err(ProcessRunError::Refused);
         };

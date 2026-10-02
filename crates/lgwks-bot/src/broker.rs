@@ -245,6 +245,10 @@ impl Broker {
     ///
     /// [`BrokerError::AlreadyRegistered`] when this broker already owns `id`.
     pub fn register(&mut self, id: EnvironmentId) -> Result<EnvironmentEpoch, BrokerError> {
+        lgwks_std::trace::warn!(
+            operation = "register",
+            "operation refused its request; the typed error carries the facts"
+        );
         if self.environments.contains_key(&id) {
             return Err(BrokerError::AlreadyRegistered { id });
         }
@@ -269,6 +273,10 @@ impl Broker {
     /// [`BrokerError::UnknownEnvironment`], [`BrokerError::Closed`] or
     /// [`BrokerError::Exhausted`].
     pub fn replace(&mut self, id: EnvironmentId) -> Result<EnvironmentEpoch, BrokerError> {
+        lgwks_std::trace::warn!(
+            operation = "replace",
+            "operation refused its request; the typed error carries the facts"
+        );
         let environment = self
             .environments
             .get_mut(&id)
@@ -327,6 +335,10 @@ impl Broker {
         id: EnvironmentId,
         presented: EnvironmentEpoch,
     ) -> Result<EnvironmentEpoch, BrokerError> {
+        lgwks_std::trace::warn!(
+            operation = "check_generation",
+            "operation refused its request; the typed error carries the facts"
+        );
         let environment = self
             .environments
             .get(&id)
@@ -517,14 +529,21 @@ mod tests {
     /// A key for the shared run and action, on the named environment and
     /// generation.
     fn key_on(env: &str, epoch: &str) -> Result<EffectKey, Box<dyn std::error::Error>> {
+        let key_run = RunId::from_hex(RUN)?;
+        let key_action = ActionId::from_hex(ACTION)?;
+        let key_attempt = AttemptId::from_decimal("1")?;
+        let key_flow_revision = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
+        let key_digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
+        let key_environment = EnvironmentId::from_hex(env)?;
+        let key_epoch = EnvironmentEpoch::from_decimal(epoch)?;
         Ok(EffectKey::new(
-            RunId::from_hex(RUN)?,
-            ActionId::from_hex(ACTION)?,
-            AttemptId::from_decimal("1")?,
-            FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-            ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
-            EnvironmentId::from_hex(env)?,
-            EnvironmentEpoch::from_decimal(epoch)?,
+            key_run,
+            key_action,
+            key_attempt,
+            key_flow_revision,
+            key_digest,
+            key_environment,
+            key_epoch,
         ))
     }
 

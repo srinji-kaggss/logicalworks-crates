@@ -592,6 +592,10 @@ impl PolitenessPolicy {
         increase_after: u32,
         decrease_percent: u32,
     ) -> Result<Self, PolitenessError> {
+        lgwks_std::trace::warn!(
+            operation = "new",
+            "operation refused its request; the typed error carries the facts"
+        );
         if min_window == 0 {
             return Err(PolitenessError::ZeroWindow);
         }
@@ -1331,6 +1335,10 @@ impl Frontier {
     /// point: the ledger exists so that misuse is loud rather than a slot that
     /// silently stays occupied for the rest of the run.
     fn verify(&self, permit: &InFlightPermit) -> Result<(), CompletionError> {
+        lgwks_std::trace::warn!(
+            operation = "verify",
+            "operation refused its request; the typed error carries the facts"
+        );
         if !Arc::ptr_eq(&permit.issuer, &self.issuer) {
             return Err(CompletionError::ForeignPermit);
         }

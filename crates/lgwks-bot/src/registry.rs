@@ -462,6 +462,10 @@ impl DomainRegistry {
     /// construction — the alternative, letting the first declaration win,
     /// would make dispatch depend on declaration order.
     pub fn validate(&self) -> Result<(), BotError> {
+        lgwks_std::trace::warn!(
+            operation = "validate",
+            "operation refused its request; the typed error carries the facts"
+        );
         if let Some((first, second)) = first_duplicate(self.sources) {
             return Err(BotError::DuplicateDomain {
                 domain: self.sources[first].0.to_owned(),

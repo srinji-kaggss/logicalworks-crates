@@ -103,6 +103,10 @@ pub(super) fn expect_words<'line>(
     words: &[&str],
     form: &str,
 ) -> Result<&'line [TokenTree]> {
+    lgwks_std::trace::warn!(
+        operation = "expect_words",
+        "operation refused its request; the typed error carries the facts"
+    );
     let matches = words.iter().enumerate().all(|(index, word)| {
         line.tokens
             .get(index)
@@ -122,6 +126,10 @@ pub(super) fn expect_words<'line>(
 /// host and wrong on the next. `1` (one at a time) is a statement about the
 /// work, not the machine, so it stands.
 pub(super) fn refuse_typed_concurrency(tokens: &[TokenTree]) -> Result<()> {
+    lgwks_std::trace::warn!(
+        operation = "refuse_typed_concurrency",
+        "operation refused its request; the typed error carries the facts"
+    );
     if let [TokenTree::Literal(ref literal)] = *tokens
         && literal
             .to_string()
@@ -148,6 +156,10 @@ pub(super) fn bound(
     clause: &str,
     max: u64,
 ) -> Result<TokenStream> {
+    lgwks_std::trace::warn!(
+        operation = "bound",
+        "operation refused its request; the typed error carries the facts"
+    );
     if let [TokenTree::Literal(ref literal)] = *tokens {
         let digits: String = literal
             .to_string()
@@ -188,6 +200,10 @@ pub(super) const UNITS: [(&str, u128); 4] = [
 
 /// A duration: `250ms`, `2s`, `1.5s`, `5m`, `1h`, or `(expr)` of type `Duration`.
 pub(super) fn duration(tokens: &[TokenTree], line: &Line) -> Result<TokenStream> {
+    lgwks_std::trace::warn!(
+        operation = "duration",
+        "operation refused its request; the typed error carries the facts"
+    );
     match *tokens {
         [TokenTree::Literal(ref literal)] => {
             let written = literal.to_string().replace('_', "");
@@ -236,11 +252,32 @@ pub(super) fn scaled(number: &str, scale: u128) -> Option<u128> {
     let mut total = whole.checked_mul(scale)?;
     let mut place = scale;
     for digit in fraction.chars() {
-        place = place.checked_div(10)?;
-        let value = u128::from(digit.to_digit(10)?);
-        total = total.checked_add(value.checked_mul(place)?)?;
+        let step = fraction_step(total, place, digit)?;
+        total = step.total;
+        place = step.place;
     }
     Some(total)
+}
+
+/// One decimal digit's contribution to a scaled number.
+struct FractionStep {
+    /// The running total with this digit folded in.
+    total: u128,
+    /// The place value the next digit would carry.
+    place: u128,
+}
+
+/// Folds one fraction digit into `total` at `place`.
+///
+/// A helper rather than the loop body inline: as one block the loop carried
+/// three propagation operators across the place division, the digit decode and
+/// the product, so "why does an over-long fraction refuse" meant reading all
+/// three to find the overflow check.
+fn fraction_step(total: u128, place: u128, digit: char) -> Option<FractionStep> {
+    let place = place.checked_div(10)?;
+    let value = u128::from(digit.to_digit(10)?);
+    let total = total.checked_add(value.checked_mul(place)?)?;
+    Some(FractionStep { total, place })
 }
 
 /// A `StepShape::new(..)` constant for the architecture map.

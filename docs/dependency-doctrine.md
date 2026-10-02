@@ -322,6 +322,14 @@ unregistered (`UnregisteredEdge`). Both directions are enforced.
   cannot drift between a developer's machine and CI.
 - The gate is fail-closed: a missing register, unparseable metadata, or
   unreadable lock is a refusal, never a pass.
+- `enforce = false` is an adoption posture, not an off switch. It remains a
+  supported posture over a tree the gate admits, and a clean tree still exits 0
+  under it. What it cannot do is stand down violations: a register reading
+  `enforce = false` while the tree carries dependency-edge violations is itself
+  refused as `AdoptionModeRefusals`, naming the count it stood down, and `check`
+  exits 2 — the same code it exits under `enforce = true`. The verdict is a
+  function of the refusals alone, so the reviewable one-token diff that adoption
+  mode depends on cannot change a build's result. (Issue #204.)
 - `deps_are_approved_leaves` in `crates/lgwks-deps/src/lib.rs` pins the exact
   allowed dependency names for `lgwks_std` and for the gate itself, so a new
   edge cannot be added by editing a manifest alone.

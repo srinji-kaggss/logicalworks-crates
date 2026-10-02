@@ -453,6 +453,20 @@ approved_on = "2026-09-20"
 review = "crates/lgwks-std/src/trace.rs"
 
 [[approved]]
+crate = "tracing"
+tier = "boundary"
+version = "^0.1"
+owner = "lgwks_ast"
+capability = "observability.structured-logging"
+source = "registry"
+allowed_consumers = "lgwks_ast"
+allowed_kinds = "normal"
+reason = "The standalone AST crate refuses parses without a recorded signal, and the print ban forbids the alternative in library code. It stands outside the lgwks_std facade deliberately, so it reaches tracing directly rather than through an estate edge that INV-DEP-1 forbids."
+approved_by = "maintainer"
+approved_on = "2026-10-02"
+review = "crates/lgwks-ast/src/lib.rs"
+
+[[approved]]
 crate = "tracing-subscriber"
 tier = "boundary"
 version = "^0.3"

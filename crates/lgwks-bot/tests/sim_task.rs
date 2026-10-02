@@ -380,6 +380,10 @@ where
     G: Fn(Scope, Step) -> FutG,
     FutG: std::future::Future<Output = Result<u32, FlowError>>,
 {
+    lgwks_std::trace::warn!(
+        operation = "descend",
+        "operation refused its request; the typed error carries the facts"
+    );
     let fault = ctx.fault_at(level);
     let cancels = ctx.cancels_at(level);
     ctx.note_tenant();

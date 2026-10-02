@@ -20,6 +20,13 @@ use std::io;
 /// themselves before falling back here.
 #[cfg(all(unix, feature = "process"))]
 pub fn kill_process_group(pgid: i32) -> io::Result<()> {
+    // The zero-dependency build has no logging stack, and the crate
+    // doc says so; the emission is the same refusal either way.
+    #[cfg(feature = "trace")]
+    crate::trace::warn!(
+        operation = "kill_process_group",
+        "operation refused its request; the typed error carries the facts"
+    );
     // Reject before touching rustix: 0 names the CALLER's group (SIGKILL
     // would hit us) and negatives panic inside Pid::from_raw in debug.
     if pgid <= 0 {
@@ -53,6 +60,13 @@ pub fn kill_process_group(pgid: i32) -> io::Result<()> {
 /// waitable.
 #[cfg(all(unix, feature = "process"))]
 pub fn child_has_exited_without_reaping(pid: i32) -> io::Result<bool> {
+    // The zero-dependency build has no logging stack, and the crate
+    // doc says so; the emission is the same refusal either way.
+    #[cfg(feature = "trace")]
+    crate::trace::warn!(
+        operation = "child_has_exited_without_reaping",
+        "operation refused its request; the typed error carries the facts"
+    );
     if pid <= 0 {
         return Err(invalid_pid());
     }

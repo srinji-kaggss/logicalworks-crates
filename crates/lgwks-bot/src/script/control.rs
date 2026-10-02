@@ -120,6 +120,10 @@ where
     F: FnMut(Scope, u32) -> Fut,
     Fut: Future<Output = Result<T, FlowError>>,
 {
+    lgwks_std::trace::warn!(
+        operation = "retry",
+        "operation refused its request; the typed error carries the facts"
+    );
     let here = scope.enter_sharing(step)?;
     here.policy().first_attempt();
     let mut attempt: u32 = 1;

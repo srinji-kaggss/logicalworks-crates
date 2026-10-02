@@ -96,9 +96,14 @@ pub struct Entry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Contract {
-    /// When false, refusals are reported as warnings instead of failing the
-    /// build. Adoption-only: flipping it is a reviewable diff in the register
-    /// itself, never an environment variable a process can set for itself.
+    /// When false, the register declares itself to be in adoption mode.
+    ///
+    /// This is a reviewable posture, not an off switch: flipping it is a diff in
+    /// the register itself, never an environment variable a process can set for
+    /// itself. It does **not** make refusals non-fatal. `audit_direct` refuses a
+    /// stand-down outright when the tree carries violations, so the recorded
+    /// value reports which posture the register was read under while the verdict
+    /// stays a function of the refusals (#204).
     pub enforce: bool,
     /// Canonical repository URL whose workspace members are local authority.
     pub repository: Option<String>,
@@ -585,6 +590,10 @@ fn handle_section_header(
     policy_declared: &mut bool,
     drafts: &mut Vec<RawEntry>,
 ) -> Result<bool, ContractError> {
+    lgwks_std::trace::warn!(
+        operation = "handle_section_header",
+        "operation refused its request; the typed error carries the facts"
+    );
     if line == "[policy]" {
         // A second `[policy]` is refused rather than merged. The two blocks are
         // read by the same reader, so a later one silently overwrites whatever
@@ -650,6 +659,10 @@ fn decode_enforce(value: &str, line_no: usize) -> Result<bool, ContractError> {
 /// stricter than TOML, which admits a raw tab, and it fails closed. Literal and
 /// multiline strings are outside this register subset and refused.
 fn decode_string(value: &str, key: &str, line: usize) -> Result<String, ContractError> {
+    lgwks_std::trace::warn!(
+        operation = "decode_string",
+        "operation refused its request; the typed error carries the facts"
+    );
     let invalid = |reason| ContractError::InvalidString {
         line,
         key: key.to_owned(),
@@ -728,6 +741,10 @@ fn apply_policy_pair(
     enforce: &mut bool,
     repository: &mut Option<String>,
 ) -> Result<(), ContractError> {
+    lgwks_std::trace::warn!(
+        operation = "apply_policy_pair",
+        "operation refused its request; the typed error carries the facts"
+    );
     if !POLICY_KEYS.contains(&key) {
         return Err(ContractError::UnknownKey {
             line: line_no,
@@ -767,6 +784,10 @@ fn apply_entry_pair(
     draft: &mut RawEntry,
     allowed_keys: &[&'static str],
 ) -> Result<(), ContractError> {
+    lgwks_std::trace::warn!(
+        operation = "apply_entry_pair",
+        "operation refused its request; the typed error carries the facts"
+    );
     let known = allowed_keys
         .iter()
         .find(|candidate| **candidate == key)

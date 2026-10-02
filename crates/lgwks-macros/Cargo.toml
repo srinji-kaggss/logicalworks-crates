@@ -20,6 +20,8 @@ proc-macro = true
 # owns those edges (`contract/APPROVED.toml`: syn, proc-macro2, quote). No other
 # feature of `lgwks_deps` is selected, so this pulls no runtime.
 lgwks_deps = { workspace = true, default-features = false, features = ["macro"] }
+# The diagnostics `unlogged-err-return` requires come from the estate facade.
+lgwks_std = { workspace = true }
 
 [lints]
 workspace = true

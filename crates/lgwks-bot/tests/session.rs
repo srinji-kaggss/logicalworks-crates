@@ -970,6 +970,10 @@ impl Journal for TestJournal {
         &mut self,
         receipt: &DecisionReceipt,
     ) -> Result<ReceiptAcceptance, JournalError> {
+        lgwks_std::trace::warn!(
+            operation = "record_decision",
+            "operation refused its request; the typed error carries the facts"
+        );
         if self.refusals.get() > 0 {
             self.refusals.set(self.refusals.get().saturating_sub(1));
             self.refused.borrow_mut().push(receipt.clone());

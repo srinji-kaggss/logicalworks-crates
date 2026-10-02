@@ -107,6 +107,11 @@ full = [
 ast-grep-core = "0.45"
 ast-grep-language = { version = "0.45", default-features = false }
 thiserror = { version = "2", default-features = false }
+# The `unlogged-err-return` rule requires a recorded signal on every refusal,
+# and `print_stderr` is `forbid` in library code. `lgwks_ast` stands outside the
+# `lgwks_std` facade (INV-DEP-1), so it reaches `tracing` directly. Registered in
+# `contract/APPROVED.toml`; `attributes` stays off so no proc-macro stack enters.
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 
 [[example]]
 name = "parse"

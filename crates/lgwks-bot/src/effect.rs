@@ -184,6 +184,10 @@ impl Id128 {
     ///
     /// [`IdError::WrongLength`], [`IdError::NotHex`] or [`IdError::Zero`].
     pub fn from_hex(text: &str) -> Result<Self, IdError> {
+        lgwks_std::trace::warn!(
+            operation = "from_hex",
+            "operation refused its request; the typed error carries the facts"
+        );
         if text.len() != 32 {
             return Err(IdError::WrongLength { len: text.len() });
         }
@@ -1088,14 +1092,21 @@ mod tests {
     }
 
     fn key(attempt: u64, epoch: u64) -> Result<EffectKey, EffectKeyError> {
+        let key_run = RunId::from_hex(RUN)?;
+        let key_action = ActionId::from_hex(ACTION)?;
+        let key_attempt = AttemptId::new(nonzero(attempt)?);
+        let key_flow_revision = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
+        let key_digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
+        let key_environment = EnvironmentId::from_hex(ENV)?;
+        let key_epoch = EnvironmentEpoch::new(nonzero(epoch)?);
         Ok(EffectKey::new(
-            RunId::from_hex(RUN)?,
-            ActionId::from_hex(ACTION)?,
-            AttemptId::new(nonzero(attempt)?),
-            FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-            ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
-            EnvironmentId::from_hex(ENV)?,
-            EnvironmentEpoch::new(nonzero(epoch)?),
+            key_run,
+            key_action,
+            key_attempt,
+            key_flow_revision,
+            key_digest,
+            key_environment,
+            key_epoch,
         ))
     }
 

@@ -43,7 +43,7 @@
 #             CI ignores the field: every CI job is its own machine.
 
 [toolchain]
-rust = "1.98.0"
+rust = "1.99.0"
 
 # ── shared: one command, both surfaces ──────────────────────────────────────
 

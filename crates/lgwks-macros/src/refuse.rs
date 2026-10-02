@@ -34,6 +34,10 @@ const MACHINE_PATHS: [&str; 9] = [
 /// The first banned construct, spanned at the offending token, with the
 /// replacement in the message.
 pub(crate) fn check(tokens: &[TokenTree]) -> Result<()> {
+    lgwks_std::trace::warn!(
+        operation = "check",
+        "operation refused its request; the typed error carries the facts"
+    );
     for (index, token) in tokens.iter().enumerate() {
         let back = |distance: usize| index.checked_sub(distance).and_then(|at| tokens.get(at));
         let next = index.checked_add(1).and_then(|at| tokens.get(at));

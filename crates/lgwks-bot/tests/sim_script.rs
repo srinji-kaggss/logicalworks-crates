@@ -308,6 +308,10 @@ fn fan_bounded(band: Band) -> TestResult {
 /// The first failure stops the fan-out, is located at its item, and leaves no
 /// body running.
 fn fan_fail_fast(band: Band) -> TestResult {
+    lgwks_std::trace::warn!(
+        operation = "fan_fail_fast",
+        "operation refused its request; the typed error carries the facts"
+    );
     sim::assert_replays(band, |sim| {
         let (list, failing) = items_with_one(sim, 120, |item| item.fails = true)?;
         let limit = seeded_limit(sim, 16)?;
@@ -339,6 +343,10 @@ fn fan_fail_fast(band: Band) -> TestResult {
 /// Every attempt sees one key; transient failures retry to the budget,
 /// permanent ones never.
 fn retry_one_key(band: Band) -> TestResult {
+    lgwks_std::trace::warn!(
+        operation = "retry_one_key",
+        "operation refused its request; the typed error carries the facts"
+    );
     sim::assert_replays(band, |sim| {
         let budget = sim.rng().between(1, 8);
         let failures = sim.rng().between(0, 10);
@@ -445,6 +453,10 @@ fn tenants_isolated(band: Band) -> TestResult {
 
 /// A stop mid-fan-out ends the flow as cancelled with nothing left running.
 fn stop_reaches_every_body(band: Band) -> TestResult {
+    lgwks_std::trace::warn!(
+        operation = "stop_reaches_every_body",
+        "operation refused its request; the typed error carries the facts"
+    );
     sim::assert_replays(band, |sim| {
         let (list, stopping) = items_with_one(sim, 120, |item| item.stops = true)?;
         let limit = seeded_limit(sim, 16)?;
@@ -469,6 +481,10 @@ fn stop_reaches_every_body(band: Band) -> TestResult {
 /// A correlated failure across a fan-out spends at most the run's retry
 /// budget: `10 + first attempts / 5` retries, then `Throttled`.
 fn retry_budget_holds(band: Band) -> TestResult {
+    lgwks_std::trace::warn!(
+        operation = "retry_budget_holds",
+        "operation refused its request; the typed error carries the facts"
+    );
     sim::assert_replays(band, |sim| {
         let list = items(sim, 400);
         let limit = seeded_limit(sim, 64)?;

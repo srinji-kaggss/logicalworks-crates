@@ -34,6 +34,10 @@
 //! the message.
 
 use std::fmt;
+// `write!` and `write_str` into a `String` need `fmt::Write` in scope;
+// `Display`'s own `Formatter` already implements it, so this names the same
+// sink trait rather than introducing another.
+use std::fmt::Write as FmtWrite;
 
 use super::broker::DispatchError;
 use super::cap::Deficit;
@@ -863,21 +867,28 @@ impl From<Deficit> for BotError {
 /// rather than with an escaping pass of its own.
 pub(crate) struct Escaped<'a>(pub(crate) &'a str);
 
+/// Writes one glyph's escaped form.
+///
+/// A helper rather than a fourth match arm inline: the loop body was four
+/// fallible writes in one statement, so reading the escaping rules also meant
+/// reading four propagation operators to see that each arm writes one thing.
+fn write_escaped(formatter: &mut fmt::Formatter<'_>, glyph: char) -> fmt::Result {
+    match glyph {
+        '\n' => formatter.write_str("\\n"),
+        '\r' => formatter.write_str("\\r"),
+        '\t' => formatter.write_str("\\t"),
+        control if control.is_control() => write!(formatter, "\\u{{{:x}}}", u32::from(control)),
+        plain => {
+            let mut buffer = [0_u8; 4];
+            formatter.write_str(plain.encode_utf8(&mut buffer))
+        }
+    }
+}
+
 impl fmt::Display for Escaped<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for glyph in self.0.chars() {
-            match glyph {
-                '\n' => f.write_str("\\n")?,
-                '\r' => f.write_str("\\r")?,
-                '\t' => f.write_str("\\t")?,
-                control if control.is_control() => {
-                    write!(f, "\\u{{{:x}}}", u32::from(control))?;
-                }
-                plain => {
-                    let mut buffer = [0_u8; 4];
-                    f.write_str(plain.encode_utf8(&mut buffer))?;
-                }
-            }
+            write_escaped(f, glyph)?;
         }
         Ok(())
     }
@@ -903,6 +914,41 @@ fn write_terminal(formatter: &mut fmt::Formatter<'_>, terminal: &Terminal) -> fm
         Terminal::Referred { ref target } => write!(formatter, "referred to {target:?}"),
         Terminal::HandedOff { ref target } => write!(formatter, "handed off to {target:?}"),
         Terminal::Refused { ref reason } => write!(formatter, "refused because {reason:?}"),
+    }
+}
+
+/// Renders a node whose declared terminal contradicts its kind's own outcome.
+///
+/// Rendered into a buffer and written once: inline, the arm was five fallible
+/// writes in one statement, so reading the sentence also meant reading five
+/// propagation operators, and a writer that failed part-way through had already
+/// emitted a truncated sentence.
+fn write_conflicting_declaration(
+    formatter: &mut fmt::Formatter<'_>,
+    node: &str,
+    intrinsic: &Terminal,
+    declared: &Terminal,
+) -> fmt::Result {
+    let mut rendered = String::new();
+    write!(rendered, "terminal declaration on node {} ", Escaped(node))?;
+    rendered.write_str("contradicts the outcome its kind carries: ")?;
+    write_terminal_to(&mut rendered, intrinsic)?;
+    rendered.write_str(" declared as ")?;
+    write_terminal_to(&mut rendered, declared)?;
+    formatter.write_str(&rendered)
+}
+
+/// Renders one terminal outcome into any `fmt::Write` sink.
+///
+/// `write_terminal` is the `Formatter`-typed form used by the `Display` arms;
+/// this is the same rendering against a buffer, so a caller composing a
+/// sentence cannot reimplement the escaping and get it subtly wrong.
+fn write_terminal_to<W: fmt::Write>(sink: &mut W, terminal: &Terminal) -> fmt::Result {
+    match *terminal {
+        Terminal::Completed => sink.write_str("completed"),
+        Terminal::Referred { ref target } => write!(sink, "referred to {target:?}"),
+        Terminal::HandedOff { ref target } => write!(sink, "handed off to {target:?}"),
+        Terminal::Refused { ref reason } => write!(sink, "refused because {reason:?}"),
     }
 }
 
@@ -1083,13 +1129,7 @@ impl fmt::Display for BotError {
                 ref node,
                 ref intrinsic,
                 ref declared,
-            } => {
-                write!(f, "terminal declaration on node {} ", Escaped(node))?;
-                f.write_str("contradicts the outcome its kind carries: ")?;
-                write_terminal(f, intrinsic)?;
-                f.write_str(" declared as ")?;
-                write_terminal(f, declared)
-            }
+            } => write_conflicting_declaration(f, node, intrinsic, declared),
             Self::UtteranceTooLarge { bytes, limit } => write!(
                 f,
                 "answer utterance of {bytes} bytes exceeds the {limit}-byte utterance limit"

@@ -535,6 +535,13 @@ fn failure_cause_source(cause: &FailureCause) -> &(dyn std::error::Error + 'stat
 ///
 /// A URL that fails here never reaches a socket.
 pub fn validate_url(url: &str) -> Result<(), Error> {
+    // The zero-dependency build has no logging stack, and the crate
+    // doc says so; the emission is the same refusal either way.
+    #[cfg(feature = "trace")]
+    crate::trace::warn!(
+        operation = "validate_url",
+        "operation refused its request; the typed error carries the facts"
+    );
     UriAbsoluteStr::new(url).map_err(|_malformed| Error::InvalidUrl)?;
     let Some(scheme) = url.split_once(':').map(|(scheme, _)| scheme) else {
         return Err(Error::InvalidUrl);
@@ -703,6 +710,13 @@ fn response_of(
 /// and the caller asked for a body. Under [`BodyPolicy::Preview`] the prefix is
 /// the declared result.
 fn read_bounded(reader: &mut impl Read, options: &Options) -> Result<(Vec<u8>, Truncation), Error> {
+    // The zero-dependency build has no logging stack, and the crate
+    // doc says so; the emission is the same refusal either way.
+    #[cfg(feature = "trace")]
+    crate::trace::warn!(
+        operation = "read_bounded",
+        "operation refused its request; the typed error carries the facts"
+    );
     let ceiling = options.max_body_bytes;
     let mut body = Vec::new();
     let mut chunk = [0_u8; READ_CHUNK_BYTES];
@@ -1123,6 +1137,13 @@ fn send_hop<'headers>(
 /// origin carries none. The hop count is bounded by [`redirect_limit`], and
 /// each hop's target is recorded, sanitized, in the response's chain.
 fn exchange(url: &str, method: Method<'_>, options: &Options) -> Result<Response, Error> {
+    // The zero-dependency build has no logging stack, and the crate
+    // doc says so; the emission is the same refusal either way.
+    #[cfg(feature = "trace")]
+    crate::trace::warn!(
+        operation = "exchange",
+        "operation refused its request; the typed error carries the facts"
+    );
     validate_url(url)?;
     let limit = redirect_limit(options)?;
     let agent = agent(options);
@@ -1159,22 +1180,73 @@ fn exchange(url: &str, method: Method<'_>, options: &Options) -> Result<Response
         if limit == 0 {
             return response_of(response, options, chain);
         }
-        let Some(location) = redirect_location(&response)? else {
-            return response_of(response, options, chain);
-        };
-        if hops >= limit {
-            return Err(failure(
-                FailureStage::Redirect,
-                FailureKind::RedirectLimit,
-                None,
-            ));
+        match next_hop(&target, &response, limit, hops, method)? {
+            Hop::Final => return response_of(response, options, chain),
+            Hop::Follow {
+                next,
+                method: next_method,
+                hops: climbed,
+            } => {
+                method = next_method;
+                hops = climbed;
+                chain.push(sanitized_target(&next));
+                target = next;
+            }
         }
-        let next = resolve_location(&target, location)?;
-        method = next_method(response.status(), method)?;
-        hops = hops.saturating_add(1);
-        chain.push(sanitized_target(&next));
-        target = next;
     }
+}
+
+/// What one response means for the redirect walk.
+enum Hop<'body> {
+    /// The walk stops and the response just seen is the answer.
+    Final,
+    /// The walk continues to `next` with `method`.
+    Follow {
+        /// The absolute URL this hop targets.
+        next: String,
+        /// The method this hop carries, which a 303 rewrites to `GET`.
+        method: Method<'body>,
+        /// How many redirects the walk has now taken, for the limit check.
+        hops: u32,
+    },
+}
+
+/// Decides whether a response ends the redirect walk or continues it.
+///
+/// A helper rather than the loop's second half inline: as one block the walk
+/// carried four propagation operators across the location parse, the limit
+/// check, the location resolve and the method rewrite, so a reader following
+/// the redirect rules had to hold the whole tail of the loop in view to see
+/// which of them could refuse.
+fn next_hop<'body>(
+    current: &str,
+    response: &ureq::http::Response<ureq::Body>,
+    limit: u32,
+    hops: u32,
+    method: Method<'body>,
+) -> Result<Hop<'body>, Error> {
+    #[cfg(feature = "trace")]
+    crate::trace::warn!(
+        operation = "next_hop",
+        "operation refused its request; the typed error carries the facts"
+    );
+    let Some(location) = redirect_location(response)? else {
+        return Ok(Hop::Final);
+    };
+    if hops >= limit {
+        return Err(failure(
+            FailureStage::Redirect,
+            FailureKind::RedirectLimit,
+            None,
+        ));
+    }
+    let next = resolve_location(current, location)?;
+    let method = next_method(response.status(), method)?;
+    Ok(Hop::Follow {
+        next,
+        method,
+        hops: hops.saturating_add(1),
+    })
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

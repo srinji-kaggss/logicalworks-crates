@@ -654,6 +654,10 @@ impl Effects {
         key: EffectKey,
         lifetime: EffectLifetime,
     ) -> Result<Authority, DispatchError> {
+        lgwks_std::trace::warn!(
+            operation = "prepare",
+            "operation refused its request; the typed error carries the facts"
+        );
         // The durability admission is on the actual handoff path, not a
         // helper a test can call: an external effect must not leave on a
         // record that cannot outlive the process (issue #100).
@@ -772,6 +776,10 @@ impl Effects {
         event: &EffectEvent,
         position: JournalPosition,
     ) -> Result<(), JournalError> {
+        lgwks_std::trace::warn!(
+            operation = "accept_position",
+            "operation refused its request; the typed error carries the facts"
+        );
         self.event_position(event, position)?;
         let actual = self.scope.journal().tail();
         if actual != position {
@@ -909,6 +917,10 @@ impl Effects {
         key: EffectKey,
         evidence: EffectEvidence,
     ) -> Result<JournalPosition, JournalError> {
+        lgwks_std::trace::warn!(
+            operation = "outcome_position",
+            "operation refused its request; the typed error carries the facts"
+        );
         let event = EffectEvent::OutcomeObserved { key, evidence };
         let Some((position, recorded)) = self.scope.journal().outcome_at(key)? else {
             return Err(JournalError::OutOfOrder {
@@ -938,6 +950,10 @@ impl Effects {
         expected: &EffectEvent,
         position: JournalPosition,
     ) -> Result<(), JournalError> {
+        lgwks_std::trace::warn!(
+            operation = "event_position",
+            "operation refused its request; the typed error carries the facts"
+        );
         let Some(entry) = self.scope.journal().committed_entry(position)? else {
             return Err(JournalError::OutOfOrder {
                 key: Box::new(expected.key()),
@@ -989,6 +1005,10 @@ impl Effects {
         required: DurabilityPromise,
         acknowledgment: DurableAck,
     ) -> Result<(), JournalError> {
+        lgwks_std::trace::warn!(
+            operation = "confirm_outcome",
+            "operation refused its request; the typed error carries the facts"
+        );
         let position = self.outcome_position(key, evidence)?;
         if acknowledgment.position() != position {
             return Err(JournalError::ReceiptMismatch {
@@ -1042,6 +1062,10 @@ impl Effects {
         key: EffectKey,
         evidence: EffectEvidence,
     ) -> Result<(), JournalError> {
+        lgwks_std::trace::warn!(
+            operation = "confirm_recorded_outcome",
+            "operation refused its request; the typed error carries the facts"
+        );
         let required = self.scope.journal().durability();
         if required == DurabilityPromise::Ephemeral {
             return Ok(());
@@ -1088,6 +1112,10 @@ impl Effects {
         evidence: EffectEvidence,
         required: DurabilityPromise,
     ) -> Result<(), JournalError> {
+        lgwks_std::trace::warn!(
+            operation = "settle_committed_outcome",
+            "operation refused its request; the typed error carries the facts"
+        );
         let offered = self.scope.journal().durability();
         if !offered.meets(required) {
             return Err(JournalError::ReceiptUnavailable { required });
@@ -1121,6 +1149,10 @@ impl Effects {
         key: EffectKey,
         evidence: EffectEvidence,
     ) -> Result<(), JournalError> {
+        lgwks_std::trace::warn!(
+            operation = "ensure_outcome",
+            "operation refused its request; the typed error carries the facts"
+        );
         let required = self
             .requirements
             .iter()
@@ -2447,6 +2479,10 @@ impl Ledger {
         id: WorkId,
         lifetime: EffectLifetime,
     ) -> Result<(EffectKey, Authority), BotError> {
+        lgwks_std::trace::warn!(
+            operation = "begin_attempt",
+            "operation refused its request; the typed error carries the facts"
+        );
         let no_such_work = || BotError::NoSuchWork { work: id };
         let action = self.action_of(id).ok_or_else(no_such_work)?;
         // Refused before anything is written, and refused for the reason
@@ -3839,6 +3875,10 @@ impl EcsBot {
         grants: &GrantSet,
         effects: EffectScope,
     ) -> Result<Self, Admission> {
+        lgwks_std::trace::warn!(
+            operation = "from_spec",
+            "operation refused its request; the typed error carries the facts"
+        );
         // A registry that declares one identifier twice cannot be dispatched
         // against: lookup would depend on declaration order. Refused before any
         // chain is walked, because the repair is the registry's, not the
@@ -4018,6 +4058,10 @@ impl EcsBot {
     /// The first domain failure of the tick, in the order described above, or
     /// [`BotError::PendingTransition`] when nothing failed and work is still held.
     pub async fn tick_async(&mut self) -> Result<usize, BotError> {
+        lgwks_std::trace::warn!(
+            operation = "tick_async",
+            "operation refused its request; the typed error carries the facts"
+        );
         self.begin_tick();
 
         // The staging buffers are moved out, refilled and put back, so the
@@ -4121,6 +4165,10 @@ impl EcsBot {
     /// [`BotError::TickInsideRuntime`] as above, or the first domain failure of
     /// the tick.
     pub fn tick(&mut self) -> Result<usize, BotError> {
+        lgwks_std::trace::warn!(
+            operation = "tick",
+            "operation refused its request; the typed error carries the facts"
+        );
         #[cfg(feature = "rt")]
         if lgwks_deps::tokio::runtime::Handle::try_current().is_ok() {
             return Err(BotError::TickInsideRuntime);
@@ -5018,6 +5066,10 @@ impl<S: Observe> EcsObserveBuilder<S> {
         S: 'static,
         S::Output: PartialEq + InputIdentity + 'static,
     {
+        lgwks_std::trace::warn!(
+            operation = "build",
+            "operation refused its request; the typed error carries the facts"
+        );
         let Self {
             name,
             mut prior,
@@ -5077,6 +5129,10 @@ impl EcsBot {
         policy: RetryPolicy,
         effects: Option<EffectScope>,
     ) -> Result<Self, BotError> {
+        lgwks_std::trace::warn!(
+            operation = "assemble",
+            "operation refused its request; the typed error carries the facts"
+        );
         if name.is_empty() {
             return Err(BotError::IncompleteSpec { field: "name" });
         }
@@ -5498,6 +5554,10 @@ mod tests {
         }
 
         async fn poll(&self, call: (Auth, ())) -> Result<u16, BotError> {
+            lgwks_std::trace::warn!(
+                operation = "poll",
+                "operation refused its request; the typed error carries the facts"
+            );
             call.0.check(&self.caps)?;
             let left = self.remaining.get();
             self.remaining.set(left.saturating_sub(1));
@@ -5549,6 +5609,10 @@ mod tests {
         }
 
         async fn poll(&self, call: (Auth, ())) -> Result<u16, BotError> {
+            lgwks_std::trace::warn!(
+                operation = "poll",
+                "operation refused its request; the typed error carries the facts"
+            );
             call.0.check(&self.caps)?;
             self.polls.set(self.polls.get().saturating_add(1));
             if self.fail.get() {
@@ -6020,6 +6084,10 @@ mod tests {
         }
 
         fn outcome_appends(&self) -> Rc<Cell<usize>> {
+            lgwks_std::trace::warn!(
+                operation = "outcome_appends",
+                "operation refused its request; the typed error carries the facts"
+            );
             Rc::clone(&self.outcome_appends)
         }
 
@@ -6056,6 +6124,10 @@ mod tests {
             expected_tail: JournalPosition,
             event: &EffectEvent,
         ) -> Result<DurableAck, JournalError> {
+            lgwks_std::trace::warn!(
+                operation = "compare_and_append",
+                "operation refused its request; the typed error carries the facts"
+            );
             let refuse = match *event {
                 EffectEvent::IntentAdmitted { .. } => self.refuse_intent.get(),
                 EffectEvent::DispatchPrepared { .. } => self.refuse_prepare.get(),
@@ -6289,6 +6361,10 @@ mod tests {
             expected_tail: JournalPosition,
             event: &EffectEvent,
         ) -> Result<DurableAck, JournalError> {
+            lgwks_std::trace::warn!(
+                operation = "compare_and_append",
+                "operation refused its request; the typed error carries the facts"
+            );
             if matches!(event, EffectEvent::OutcomeObserved { .. }) && self.unknown_once.take() {
                 return Err(JournalError::OutcomeUnknown {
                     cause: io::Error::other("injected unknown outcome, nothing written"),
@@ -6313,6 +6389,10 @@ mod tests {
             position: JournalPosition,
             required: DurabilityPromise,
         ) -> Result<DurableAck, JournalError> {
+            lgwks_std::trace::warn!(
+                operation = "confirm_outcome",
+                "operation refused its request; the typed error carries the facts"
+            );
             let held = EffectJournal::committed(&*self.inner.borrow())?.iter().any(
                 |event| matches!(*event, EffectEvent::OutcomeObserved { key: held, evidence: held_evidence }
                         if held == key && held_evidence == evidence),
