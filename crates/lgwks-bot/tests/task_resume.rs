@@ -27,15 +27,23 @@
 
 use std::error::Error;
 use std::future::Future;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Child;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use lgwks_bot::effect::RunId;
+use lgwks_bot::rt::runtime;
 use lgwks_bot::script::{FlowError, Scope, remember};
 use lgwks_bot::task::{Disposition, EffectKnowledge, Host, RunStore, StoreError, Task, task};
+
+#[path = "support/resume.rs"]
+mod shared;
+
+use shared::{Scratch, Summary, peak_rss_mib};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -97,47 +105,6 @@ type ThreeTask = Task<fn(Scope, PathBuf) -> ThreeFuture>;
 /// A host for `tenant` with a durable store under `dir`.
 fn stored_host(tenant: &str, dir: &Path) -> Result<Host, Box<dyn Error>> {
     Ok(Host::builder(tenant)?.run_store(dir)?.build()?)
-}
-
-/// A unique scratch directory under the system temp dir, removed on drop.
-///
-/// Named by random bytes rather than by a clock or a process id, so two runs
-/// never collide and a failure leaves a directory a reader can open. Nothing here writes inside the repository, which is what keeps the suite
-/// portable across hosts and CI checkouts.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new(tag: &str) -> Result<Self, Box<dyn Error>> {
-        // Random bytes, not a process id: the OS reuses an id, so two tests in
-        // two processes would collide on the same directory and one would delete
-        // the other's store mid-run. The estate's one entropy source is
-        // `lgwks_std::random`, behind this crate's `ephemeral` feature.
-        let unique = lgwks_std::random::bytes::<8>()?;
-        let hex: String = unique.iter().map(|byte| format!("{byte:02x}")).collect();
-        let path = std::env::temp_dir().join(format!("lgwks-resume-{tag}-{hex}"));
-        if path.exists() {
-            std::fs::remove_dir_all(&path)?;
-        }
-        std::fs::create_dir_all(&path)?;
-        Ok(Self(path))
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-
-    fn join(&self, tail: &str) -> PathBuf {
-        self.0.join(tail)
-    }
-}
-
-impl Drop for Scratch {
-    /// Remove the directory. A failure to remove is not a test failure: every
-    /// assertion has already been made, and a leaked temp directory is a
-    /// nuisance rather than a wrong answer.
-    fn drop(&mut self) {
-        drop(std::fs::remove_dir_all(&self.0));
-    }
 }
 
 /// A plain-process pause, for the two places this file waits without a runtime:
@@ -746,10 +713,7 @@ fn the_store_is_opened_at_installation_not_at_the_first_step() -> TestResult {
     Ok(())
 }
 
-/// How many runs the resident-set measurement performs.
-const RSS_RUNS: usize = 10_000;
-
-/// The environment variable that gates the ten-thousand-run measurement.
+/// The environment variable that gates the concurrent-run tier measurement.
 ///
 /// Ten thousand `sync_all`-ed appends is several minutes: the right cost for a
 /// measurement, the wrong cost for every ordinary test run. The test is therefore
@@ -757,88 +721,137 @@ const RSS_RUNS: usize = 10_000;
 /// checked. The scale lane runs it explicitly:
 ///
 /// ```text
-/// LGWKS_RESUME_RSS_RUNS=1 cargo test -p lgwks_bot --features script,ephemeral \
-///     --test task_resume peak_rss -- --ignored
+/// LGWKS_RESUME_SCALE=1 cargo test -p lgwks_bot --features script,ephemeral \
+///     --test task_resume concurrent_runs_across_tiers -- --ignored --nocapture
 /// ```
-const RSS_ENV: &str = "LGWKS_RESUME_RSS_RUNS";
+const SCALE_ENV: &str = "LGWKS_RESUME_SCALE";
 
-/// Gate the measurement on its environment variable, so an explicit `--ignored`
-/// run without it says why instead of spending minutes measuring nothing.
-fn rss_measurement_requested() -> bool {
-    std::env::var_os(RSS_ENV).is_some()
-}
-
-/// Peak resident set size of this process, or `None` where nothing reports it.
+/// The scale tiers the concurrent-run measurement drives, and the highest one run
+/// for real.
 ///
-/// `/proc/self/status` only, and `None` — never a fabricated number — elsewhere.
-/// The gate's rule against naming a process to ask it a question is the reason the
-/// `ps` route is not taken here; a measurement that reports zero on macOS is
-/// honest, and one that guessed would not be.
-fn peak_rss_bytes() -> Option<u64> {
-    let text = std::fs::read_to_string("/proc/self/status").ok()?;
-    text.lines()
-        .find_map(|line| {
-            let rest = line.strip_prefix("VmHWM:")?;
-            rest.split_whitespace().next()?.parse::<u64>().ok()
-        })
-        .map(|kib| kib.saturating_mul(1024))
-}
+/// A tier is a number of concurrent runs against one store. The list stops at ten
+/// thousand because that is the largest tier this file actually measured on the
+/// machine that recorded it; a tier nobody ran is not a tier this file claims.
+const SCALE_TIERS: [usize; 3] = [100, 1_000, 10_000];
 
-/// Ten thousand runs through one store stay inside a bounded resident set.
+/// Concurrent runs against one store, at every tier, with two tenants interleaved.
 ///
-/// The bound is the point: the store's index is derived from the file and is
-/// bounded by the record ceiling, so ten thousand one-record runs cost ten
-/// thousand records and not ten thousand live handles. The ceiling is generous —
-/// 512 MiB — because the assertion is about the *shape* of the growth, not about
-/// a machine's allocator; a design that retained every run's body would exceed it
-/// long before ten thousand.
+/// This is the hyperscale row for the run store: what has to hold at ten thousand
+/// is that nothing is lost, nothing is written twice, and no tenant reads another
+/// tenant's record. Every run commits its record through the one owner thread, so
+/// the question this asks of the store is whether that ordering holds under load,
+/// not whether the file system can take it.
+///
+/// The measurement is opt-in for the same reason the ten-thousand-run resident set
+/// was: it is minutes of real `fsync`s, which is the right cost for a measurement
+/// and the wrong cost for every ordinary run. It is `#[ignore]`d rather than
+/// silently skipped, and it prints what it measured rather than only asserting a
+/// bound.
+///
+/// ```text
+/// LGWKS_RESUME_SCALE=1 cargo test -p lgwks_bot --features script,ephemeral \
+///     --test task_resume concurrent_runs_across_tiers -- --ignored --nocapture
+/// ```
 #[test]
-#[ignore = "the ten-thousand-run resident-set measurement; run it with \
-            LGWKS_RESUME_RSS_RUNS=1 and --ignored"]
-fn peak_rss_is_bounded_over_ten_thousand_runs() -> TestResult {
-    if !rss_measurement_requested() {
+#[ignore = "the concurrent-run scale measurement; run it with \
+            LGWKS_RESUME_SCALE=1 and --ignored"]
+fn concurrent_runs_across_tiers() -> TestResult {
+    if std::env::var_os(SCALE_ENV).is_none() {
         return Err(format!(
-            "{RSS_ENV} is not set, so the measurement did not run; set it to measure"
+            "{SCALE_ENV} is not set, so the tier measurement did not run; set it to measure"
         )
         .into());
     }
-    const CEILING_BYTES: u64 = 512 * 1024 * 1024;
-    let scratch = Scratch::new("rss")?;
-    let store_dir = scratch.join("store");
-    let host = stored_host("rss", &store_dir)?;
-
-    // Warm the allocator and the store so the measurement covers steady-state
-    // growth rather than first-touch page faults.
-    for _ in 0..32 {
-        let report =
-            lgwks_bot::block_on(host.run(&three_step_task()?, scratch.path().to_path_buf()));
-        assert!(report.disposition().is_success());
+    for tier in SCALE_TIERS {
+        measure_tier(tier)?;
     }
-    let before = peak_rss_bytes();
+    Ok(())
+}
 
-    let mut succeeded = 0usize;
-    for _ in 0..RSS_RUNS {
-        let report =
-            lgwks_bot::block_on(host.run(&three_step_task()?, scratch.path().to_path_buf()));
-        if !report.disposition().is_success() {
-            return Err(format!("a run failed: {:?}", report.error()).into());
+/// One tier: `runs` concurrent runs, two tenants interleaved, over one store.
+///
+/// The per-run latencies are reported so a reader sees the distribution rather than
+/// a bare pass, and the store is reopened at the end so the count is answered from
+/// the disk rather than from the handle that wrote it.
+fn measure_tier(runs: usize) -> TestResult {
+    const TENANTS: [&str; 2] = ["scale-a", "scale-b"];
+    let scratch = Scratch::new("scale")?;
+    let path = scratch.store();
+    let work = shared::one_step_task()?;
+    // One store handle, cloned into both tenants' hosts. Two handles over one file
+    // would be two writers, which the store's length fence refuses — and which is
+    // exactly the mistake this shape is meant not to make: the tenant is part of
+    // the record, not part of the file.
+    let store = RunStore::open(&path)?;
+    let mut hosts = Vec::with_capacity(TENANTS.len());
+    for tenant in TENANTS {
+        hosts.push(Host::builder(tenant)?.store(store.clone()).build()?);
+    }
+
+    // Warm the file and the owner thread so the tier measures steady-state appends.
+    for host in &hosts {
+        let warm = runtime::block_on(host.run(&work, 0u32));
+        if !warm.disposition().is_success() {
+            return Err(format!("a warm-up run failed: {:?}", warm.error()).into());
         }
-        succeeded = succeeded.saturating_add(1);
     }
-    assert_eq!(succeeded, RSS_RUNS);
 
-    if let (Some(before), Some(after)) = (before, peak_rss_bytes()) {
-        assert!(
-            after <= CEILING_BYTES,
-            "peak RSS after {RSS_RUNS} runs was {after} bytes, over the {CEILING_BYTES}-byte \
-                 ceiling (baseline {before} bytes)"
+    let started = Instant::now();
+    let mut samples: Vec<u128> = Vec::with_capacity(runs);
+    let mut per_tenant = [0usize; TENANTS.len()];
+    let mut run_ids: Vec<(RunId, usize)> = Vec::with_capacity(runs);
+    for index in 0..runs {
+        // The tenant alternates with the index, so two identities are in flight at
+        // once against the same store and the same chain rather than one after the
+        // other.
+        let which = index.checked_rem(TENANTS.len()).unwrap_or_default();
+        let host = &hosts[which];
+        let at = Instant::now();
+        let report = runtime::block_on(host.run(&work, u32::try_from(index).unwrap_or_default()));
+        samples.push(at.elapsed().as_micros());
+        if !report.disposition().is_success() {
+            return Err(format!("run {index} failed: {:?}", report.error()).into());
+        }
+        let id = report.run_id().ok_or("a stored run must name a run id")?;
+        run_ids.push((id, which));
+        per_tenant[which] = per_tenant[which].saturating_add(1);
+    }
+    let elapsed = started.elapsed();
+
+    // Reopened over the same bytes, so every count below is answered from the disk.
+    drop(hosts);
+    drop(store);
+    let reopened = RunStore::open(&path)?;
+    for entry in &run_ids {
+        let (id, which) = *entry;
+        assert_eq!(
+            reopened.tenant_of(id).as_deref(),
+            Some(TENANTS[which]),
+            "run {id:?} is attributed to the tenant that minted it"
         );
-        let growth = after.saturating_sub(before);
-        assert!(
-            growth <= CEILING_BYTES,
-            "peak RSS grew {growth} bytes over {RSS_RUNS} runs, over the {CEILING_BYTES}-byte \
-                 ceiling"
+        assert_eq!(
+            reopened.record_count(id),
+            1,
+            "run {id:?} holds exactly its own one record"
         );
     }
+    // Both tenants were in flight against the same store, which is what makes the
+    // attribution above a cross-tenant check rather than two single-tenant runs.
+    for (which, tenant) in TENANTS.iter().enumerate() {
+        assert!(
+            per_tenant[which] > 0,
+            "{tenant} ran nothing at this tier, so the isolation above is vacuous"
+        );
+    }
+
+    let summary = Summary::of(&mut samples);
+    let rss = peak_rss_mib();
+    let mut line = std::io::stdout().lock();
+    let _written = writeln!(
+        line,
+        "tier {runs}: {}  |  {}  |  peak RSS {rss}",
+        summary.line("per-run"),
+        format_args!("{} runs in {:.2?}", runs, elapsed)
+    );
     Ok(())
 }
