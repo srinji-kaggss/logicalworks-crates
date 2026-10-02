@@ -60,7 +60,7 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
   class-only entry is exact for crates.io — both its Git and sparse spellings —
   and insufficient for a Git or path edge; an unknown scheme is neither
   authorable nor an ordinary admitted origin. · why: #158 A1 · enforced by:
-  `tests/origin_binding.rs` and
+  `tests/origin_binding.rs`, `tests/sim_origin.rs`, and
   `lgwks_deps::tests::an_approved_git_origin_admits_only_that_repository`,
   `lgwks_deps::tests::a_git_revision_policy_change_is_an_origin_drift`,
   `lgwks_deps::tests::an_approved_registry_origin_refuses_a_different_registry`,
