@@ -117,6 +117,32 @@ pub enum BotError {
         /// so an untrusted field name cannot forge a log line.
         cause: String,
     },
+    /// The serialized spec declares a version this binary does not implement.
+    ///
+    /// A document is a versioned contract, not a schema to guess at: a spec
+    /// written for a later materializer may name fields with meanings this one
+    /// does not have, so it is refused before any of it is interpreted rather
+    /// than partially understood. The found and supported versions are carried
+    /// as numbers so a caller can decide the repair without parsing the
+    /// rendering.
+    UnsupportedSpecVersion {
+        /// The version the document declared.
+        found: u32,
+        /// The version this build implements.
+        supported: u32,
+    },
+    /// A spec named a condition identifier outside the supported vocabulary.
+    ///
+    /// Conditions are the one part of a chain that carries parameters (a
+    /// threshold), and the vocabulary is therefore closed and versioned with the
+    /// type it evaluates rather than open to arbitrary wire text. An identifier
+    /// this build does not know is refused before the chain is built, never
+    /// treated as an always-true condition — a silently inert gate is how an
+    /// effect a person expected to be guarded fires anyway.
+    UnknownCondition {
+        /// The condition identifier the spec spelled.
+        condition: String,
+    },
     /// The synchronous adapter, [`Bot::tick`](crate::Bot::tick), was called on a
     /// thread an async runtime is already driving.
     ///
@@ -914,6 +940,16 @@ impl fmt::Display for BotError {
             Self::MalformedSpec { ref cause } => {
                 write!(f, "malformed bot spec: {}", Escaped(cause))
             }
+            Self::UnsupportedSpecVersion { found, supported } => write!(
+                f,
+                "bot spec declares version {found}, but this build materializes version \
+                 {supported} only"
+            ),
+            Self::UnknownCondition { ref condition } => write!(
+                f,
+                "unknown condition {}: not in the supported wire vocabulary",
+                Escaped(condition)
+            ),
             Self::TickInsideRuntime => f.write_str(
                 "tick: the synchronous adapter cannot park a thread an async runtime is driving; \
                  await `tick_async` on that runtime, or call the tick outside it",

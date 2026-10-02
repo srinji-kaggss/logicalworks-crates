@@ -410,24 +410,26 @@ Each step must leave `cargo test --workspace --all-targets` green.
    behind a default-off `ecs` feature) was rejected as a candidate architecture
    that nothing would exercise; see §12.
 
-   **What is not done, stated plainly: the `from_spec` gap is still open, and it
-   is now scheduled work rather than an open question.** The builder takes
-   *verbs*, not a [`BotSpec`]. Materializing a `World` from wire data needs a
-   `domain_id -> constructor` registry (`"gh::pr_status"` has to become a
-   concrete `Observe`) and no such registry exists anywhere in this workspace.
-   `experience/invariants/sdk.yaml`'s *"a validated BotSpec cannot be
-   materialized into a runnable Bot through this SDK alone"* is therefore still
-   true, on both substrates.
+   **Landed: the registry and `Bot::from_spec`.** The
+   `domain_id -> constructor` registry (`DomainRegistry`, the `domains!` list)
+   names the concrete `Source`/`Action` a document's strings resolve to, and
+   `Bot::from_spec(spec, registry, grants, effects)` materializes a runnable
+   `Bot` through the same `assemble`/`build` path a native bot uses — no second
+   interpreter and no second execution path, so the two produce the same
+   operation trace. Admission is all-or-nothing: every presently knowable unmet
+   need is reported in one attributed `NeedSet`, and a registry with a duplicate
+   identifier is refused rather than dispatched by declaration order. See
+   [the materializer](guides/lgwks-bot/domains.md);
+   `experience/invariants/sdk.yaml` records it as landed.
 
-   The crate doc used to argue that this absence was a design position rather
-   than a gap. That reading was put to the project owner on 2026-09-21 and
-   rejected: the ledger is right and the registry is to be built. Two constraints
-   survive the decision and bind the implementation, because they are what made
-   the absence defensible in the first place — grants still come from a
-   `GrantSet` the caller holds and never from the spec, so wire data cannot
-   choose what a bot reaches; and there is still no `bot!` proc-macro. This is
-   also the same missing registry the `Lambda`/`Workers` comparison arrived at
-   from the other direction.
+   The crate doc used to argue that the absence was a design position rather than
+   a gap. That reading was put to the project owner on 2026-09-21 and rejected:
+   the ledger was right and the registry was to be built. Two constraints survive
+   and bind the implementation, because they are what made the absence
+   defensible in the first place — grants still come from a `GrantSet` the caller
+   holds and never from the spec, so wire data cannot choose what a bot reaches;
+   and there is still no `bot!` proc-macro. This is also the same registry the
+   `Lambda`/`Workers` comparison arrived at from the other direction.
 3. **Build-time schedule validation**: ✅ landed with step 2, since it has
    nowhere else to live: `Schedule::initialize()` plus `ambiguity_detection:
    LogLevel::Error`, surfaced as `BotError` from `build()`, with a control test

@@ -151,7 +151,7 @@ use lgwks_std::json::{Deserialize, Serialize};
 use std::any::{Any, TypeId, type_name};
 
 use super::cap::{Auth, Cap};
-use super::error::BotError;
+use super::error::{BotError, Escaped};
 use super::gate::GrantSet;
 
 // ── Serializable spec ──────────────────────────────────────────────────────
@@ -168,28 +168,91 @@ use super::gate::GrantSet;
 #[serde(crate = "lgwks_std::json::serde", deny_unknown_fields)]
 #[non_exhaustive]
 pub struct BotSpec {
+    /// The document version this build materializes.
+    ///
+    /// Defaulted on parse, so a spec written before the field existed reads as
+    /// [`BotSpec::CURRENT_VERSION`]. A version this build does not implement is
+    /// refused by [`BotSpec::from_json`] and by the materializer rather than
+    /// partially interpreted, because a later version may give an existing field
+    /// a meaning this one does not have.
+    #[serde(default = "current_spec_version")]
+    pub version: u32,
     /// The bot's unique name. Must be non-empty: both builder entry points
     /// refuse an empty name with [`BotError::IncompleteSpec`]. `from_json`
     /// accepts one because it validates shape only; the build-time check is
-    /// the one that binds.
-    pub name: String,
+    /// the one that binds. Read it with [`BotSpec::name`].
+    pub(crate) name: String,
     /// Observation chains in declaration order. [`Bot::tick`] polls and fires in
     /// this order, so reordering changes which side effects run before an error.
-    /// Empty is valid: a bot with no chains still serves direct
+    /// Empty is valid for the builder: a bot with no chains still serves direct
     /// [`Query`](crate::verb::Query) and [`Execute`](crate::verb::Execute) calls.
-    pub chains: Vec<ChainSpec>,
+    /// The materializer is stricter and refuses an empty list, because a
+    /// materialized bot with nothing to observe is almost always a truncated
+    /// document rather than an intentional one. Read it with [`BotSpec::chains`].
+    ///
+    /// Private with an accessor rather than a `pub` field: the wire contract is
+    /// a transparent *view*, not a mutable handle a caller can reach into and
+    /// invalidate a bound through. Serde still reads and writes it; a consumer
+    /// reads it through [`BotSpec::chains`].
+    pub(crate) chains: Vec<ChainSpec>,
+}
+
+/// The default `version` a parsed [`BotSpec`] carries when the field is absent.
+///
+/// A free function because `#[serde(default = "…")]` names a path, and a spec
+/// written before the field existed must keep parsing as the current version.
+fn current_spec_version() -> u32 {
+    BotSpec::CURRENT_VERSION
 }
 
 impl BotSpec {
-    /// Assemble a spec from its parts. The arguments are taken verbatim; no
-    /// shape validation runs here, because validation belongs to
-    /// [`BotSpec::from_json`] and to the builder, not to construction.
+    /// The one document version this build materializes.
+    ///
+    /// Bump it when a field's meaning changes or a field is removed; a purely
+    /// additive field is a compatible change and does not need a bump.
+    pub const CURRENT_VERSION: u32 = 1;
+
+    /// Assemble a spec from its parts, at [`BotSpec::CURRENT_VERSION`]. The
+    /// arguments are taken verbatim; no shape validation runs here, because
+    /// validation belongs to [`BotSpec::from_json`] and to the builder, not to
+    /// construction.
     #[must_use]
     pub fn new(name: impl Into<String>, chains: Vec<ChainSpec>) -> Self {
         Self {
+            version: Self::CURRENT_VERSION,
             name: name.into(),
             chains,
         }
+    }
+
+    /// The bot's unique name.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use lgwks_bot::BotSpec;
+    ///
+    /// let spec = BotSpec::from_json(r#"{"name":"larry","chains":[]}"#)?;
+    /// assert_eq!(spec.name(), "larry");
+    /// assert_eq!(spec.version(), BotSpec::CURRENT_VERSION);
+    /// assert!(spec.chains().is_empty());
+    /// # Ok::<(), lgwks_bot::BotError>(())
+    /// ```
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The observation chains, in declaration order.
+    #[must_use]
+    pub fn chains(&self) -> &[ChainSpec] {
+        &self.chains
+    }
+
+    /// The document version this spec declares.
+    #[must_use]
+    pub fn version(&self) -> u32 {
+        self.version
     }
 }
 
@@ -203,14 +266,17 @@ impl BotSpec {
 pub struct ChainSpec {
     /// The domain identifier of the observed source (e.g. `"gh::pr_status"`).
     /// The builder resolves it against a concrete [`Observe`](crate::verb::Observe)
-    /// implementation; the spec itself never carries code.
-    pub source: String,
+    /// implementation; the spec itself never carries code. Read it with
+    /// [`ChainSpec::source`].
+    pub(crate) source: String,
     /// The target parameter for the source (e.g. `"owner/repo"`). Its meaning is
-    /// defined by the source domain, not by the spec.
-    pub target: String,
+    /// defined by the source domain, not by the spec. Read it with
+    /// [`ChainSpec::target`].
+    pub(crate) target: String,
     /// Condition–action pairs: `[condition_id, { domain: target }]`. Evaluated
-    /// in order, so the same pair placed earlier fires earlier on a tick.
-    pub on: Vec<(String, ActionSpec)>,
+    /// in order, so the same pair placed earlier fires earlier on a tick. Read
+    /// it with [`ChainSpec::on`].
+    pub(crate) on: Vec<(String, ActionSpec)>,
 }
 
 impl ChainSpec {
@@ -227,6 +293,40 @@ impl ChainSpec {
             on,
         }
     }
+
+    /// The source domain identifier, spelled as the spec spells it.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use lgwks_bot::spec::{ActionSpec, ChainSpec};
+    ///
+    /// let chain = ChainSpec::new(
+    ///     "gh::pr_status",
+    ///     "owner/repo",
+    ///     vec![("changed".to_owned(), ActionSpec::new("notify::slack", "#deploys"))],
+    /// );
+    /// assert_eq!(chain.source(), "gh::pr_status");
+    /// assert_eq!(chain.target(), "owner/repo");
+    /// assert_eq!(chain.on()[0].1.domain(), "notify::slack");
+    /// # Ok::<(), lgwks_bot::BotError>(())
+    /// ```
+    #[must_use]
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// The source's target parameter, whose meaning the domain defines.
+    #[must_use]
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    /// The `(condition, action)` pairs, in declaration order.
+    #[must_use]
+    pub fn on(&self) -> &[(String, ActionSpec)] {
+        &self.on
+    }
 }
 
 /// A serializable action reference.
@@ -237,10 +337,12 @@ impl ChainSpec {
 #[serde(crate = "lgwks_std::json::serde", deny_unknown_fields)]
 #[non_exhaustive]
 pub struct ActionSpec {
-    /// The domain identifier (e.g. `"notify::slack"`).
-    pub domain: String,
-    /// The target parameter (e.g. `"#deploys"`). Interpreted by `domain`.
-    pub target: String,
+    /// The domain identifier (e.g. `"notify::slack"`). Read it with
+    /// [`ActionSpec::domain`].
+    pub(crate) domain: String,
+    /// The target parameter (e.g. `"#deploys"`). Interpreted by `domain`. Read
+    /// it with [`ActionSpec::target`].
+    pub(crate) target: String,
 }
 
 impl ActionSpec {
@@ -251,6 +353,29 @@ impl ActionSpec {
             domain: domain.into(),
             target: target.into(),
         }
+    }
+
+    /// The action's domain identifier.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use lgwks_bot::spec::ActionSpec;
+    ///
+    /// let action = ActionSpec::new("notify::slack", "#deploys");
+    /// assert_eq!(action.domain(), "notify::slack");
+    /// assert_eq!(action.target(), "#deploys");
+    /// # Ok::<(), lgwks_bot::BotError>(())
+    /// ```
+    #[must_use]
+    pub fn domain(&self) -> &str {
+        &self.domain
+    }
+
+    /// The action's target parameter, whose meaning the domain defines.
+    #[must_use]
+    pub fn target(&self) -> &str {
+        &self.target
     }
 }
 
@@ -268,32 +393,43 @@ where
     A::Input: 'static,
     A::Output: 'static,
 {
-    struct TypedEval<C, T> {
-        inner: C,
-        _marker: std::marker::PhantomData<T>,
-    }
-
-    impl<C: super::verb::Evaluate<T>, T: 'static> EvaluateAny for TypedEval<C, T> {
-        fn check_any(&self, value: &Erased) -> Result<bool, BotError> {
-            match value.as_any().downcast_ref::<T>() {
-                Some(typed) => self.inner.check(typed),
-                None => Err(BotError::EvaluateError {
-                    cause: format!(
-                        "type mismatch in evaluate — expected {}, got {}",
-                        type_name::<T>(),
-                        value.witness.name(),
-                    ),
-                }),
-            }
-        }
-    }
-
     ChainEntry {
         condition: Box::new(TypedEval {
             inner: condition,
             _marker: std::marker::PhantomData::<T>,
         }),
         action: Box::new(TypedExec::new(action)),
+    }
+}
+
+/// Erases one [`Evaluate`](crate::verb::Evaluate) to [`EvaluateAny`], the way
+/// [`TypedExec`] erases an action.
+///
+/// Both erasure wrappers have one implementation each: this one is reached both
+/// by [`typed_entry`], where the condition and the action are typed against the
+/// source together, and by [`Condition::new`](crate::Condition), where a
+/// materializer pairs a condition it built against an already-erased source.
+/// Keeping them on one type is what stops the two paths from diverging on the
+/// downcast and the type-mismatch report.
+pub(crate) struct TypedEval<C, T> {
+    /// The condition, typed against `T`.
+    pub(crate) inner: C,
+    /// The type it was built for, carried only to tie `T` to this value.
+    pub(crate) _marker: std::marker::PhantomData<T>,
+}
+
+impl<C: super::verb::Evaluate<T>, T: 'static> EvaluateAny for TypedEval<C, T> {
+    fn check_any(&self, value: &Erased) -> Result<bool, BotError> {
+        match value.as_any().downcast_ref::<T>() {
+            Some(typed) => self.inner.check(typed),
+            None => Err(BotError::EvaluateError {
+                cause: format!(
+                    "type mismatch in evaluate — expected {}, got {}",
+                    type_name::<T>(),
+                    value.witness.name(),
+                ),
+            }),
+        }
     }
 }
 
@@ -332,6 +468,20 @@ pub(crate) struct ChainEntry {
     /// The action half. Type-erased for the same reason; it downcasts the
     /// observed value back to the action's `Input` before running.
     pub(crate) action: Box<dyn ExecuteAny>,
+}
+
+impl ChainEntry {
+    /// Assemble one entry from halves that are already erased.
+    ///
+    /// The materializer's seam: a chain built from wire data pairs a condition
+    /// the [`Source`](crate::Source) built for its own output type with an
+    /// action the registry built. The two arrive erased because that is the
+    /// only shape a document can name, and this constructor is the one place
+    /// they are joined, so the join cannot be re-implemented with a different
+    /// pairing rule somewhere else.
+    pub(crate) fn erased(condition: Box<dyn EvaluateAny>, action: Box<dyn ExecuteAny>) -> Self {
+        Self { condition, action }
+    }
 }
 
 // ── Type-erased verb wrappers ──────────────────────────────────────────────
@@ -653,16 +803,18 @@ impl BotSpec {
     }
 
     /// Parse a spec previously produced by [`BotSpec::to_json`]; a missing or
-    /// unknown field is rejected rather than defaulted, and input over
+    /// unknown field is rejected rather than defaulted, an absent `version`
+    /// reads as [`BotSpec::CURRENT_VERSION`], and input over
     /// [`MAX_SPEC_BYTES`] is refused before parsing.
     ///
     /// # Errors
     ///
     /// [`BotError::SpecTooLarge`] if `source` is longer than
     /// [`MAX_SPEC_BYTES`]; [`BotError::MalformedSpec`] if `source` is not
-    /// schema-valid JSON. The malformed diagnostic is the parser's positional
-    /// message with control characters escaped, because an unknown field name is
-    /// attacker-chosen.
+    /// schema-valid JSON; [`BotError::UnsupportedSpecVersion`] if it parses but
+    /// declares a `version` this build does not implement. The malformed
+    /// diagnostic is the parser's positional message with control characters
+    /// escaped, because an unknown field name is attacker-chosen.
     pub fn from_json(source: &str) -> Result<Self, BotError> {
         if source.len() > MAX_SPEC_BYTES {
             return Err(BotError::SpecTooLarge {
@@ -670,9 +822,316 @@ impl BotSpec {
                 limit: MAX_SPEC_BYTES,
             });
         }
-        crate::json::from_str(source).map_err(|error| BotError::MalformedSpec {
-            cause: error.to_string().escape_debug().to_string(),
-        })
+        let spec: Self =
+            crate::json::from_str(source).map_err(|error| BotError::MalformedSpec {
+                cause: error.to_string().escape_debug().to_string(),
+            })?;
+        if spec.version != Self::CURRENT_VERSION {
+            return Err(BotError::UnsupportedSpecVersion {
+                found: spec.version,
+                supported: Self::CURRENT_VERSION,
+            });
+        }
+        Ok(spec)
+    }
+}
+
+// ── Admission: the complete NeedSet ─────────────────────────────────────────
+
+/// Why a spec could not be materialized into a runnable bot.
+///
+/// Two refusals with two different repairs. [`Admission::Refused`] is a defect
+/// in the document or the registry itself — a version this build does not
+/// implement, an empty chain list, a registry that declares one identifier
+/// twice — and no amount of authority closes it. [`Admission::Needs`] is a
+/// complete, attributable report of everything a *well-formed* document asked
+/// for that this host cannot supply yet; the repair is a decision the caller
+/// makes (grant a capability, install an adapter), never something this crate
+/// performs on its own.
+///
+/// Neither arm is a partial build. A refused spec produces no bot, so no source
+/// is polled and no action runs: the materializer is all-or-nothing by
+/// construction, because the object a caller would otherwise hold is one whose
+/// chains are half-real.
+#[non_exhaustive]
+#[derive(Debug)]
+pub enum Admission {
+    /// The document or the registry is malformed, independently of authority.
+    Refused(BotError),
+    /// Every presently knowable unmet need, in declaration order.
+    Needs(NeedSet),
+}
+
+impl std::fmt::Display for Admission {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::Refused(ref cause) => write!(formatter, "{cause}"),
+            Self::Needs(ref needs) => write!(formatter, "admission refused: {needs}"),
+        }
+    }
+}
+
+impl std::error::Error for Admission {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match *self {
+            Self::Refused(ref cause) => Some(cause),
+            Self::Needs(_) => None,
+        }
+    }
+}
+
+impl From<BotError> for Admission {
+    fn from(cause: BotError) -> Self {
+        Self::Refused(cause)
+    }
+}
+
+/// Every presently knowable unmet need of one materialization, in one value.
+///
+/// The DX-08 report. A materializer that returned at the first unmet need made
+/// admission a loop in which each refusal revealed one more requirement, so a
+/// spec short of four things cost four round trips to learn and the repair could
+/// not be written until the last of them. This is the whole difference computed
+/// in one pass, each entry attributed to the chain index — and, where it belongs
+/// to a specific action, the action index — that needs it.
+///
+/// **A report, never a grant.** [`NeedSet::proposed_grants`] derives the grant
+/// set that would close the capability needs, and it is a *proposal*: the
+/// trusted host accepts, narrows, or refuses it, and this crate never folds it
+/// into authority on its own. No `grant_all` fallback exists, and a spec cannot
+/// grant itself anything by naming a domain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NeedSet {
+    /// The needs, in declaration order.
+    needs: Vec<Need>,
+}
+
+impl NeedSet {
+    /// Assemble a need set from its entries, taken verbatim and in order.
+    #[must_use]
+    pub fn new(needs: Vec<Need>) -> Self {
+        Self { needs }
+    }
+
+    /// The needs, in declaration order.
+    #[must_use]
+    pub fn needs(&self) -> &[Need] {
+        &self.needs
+    }
+
+    /// Every need, in declaration order.
+    pub fn iter(&self) -> std::slice::Iter<'_, Need> {
+        self.needs.iter()
+    }
+
+    /// How many needs the report carries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.needs.len()
+    }
+
+    /// Whether the report is empty. An empty set never reaches a caller — the
+    /// materializer returns a bot instead — so this exists for a caller holding
+    /// one, not as a "success" signal.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.needs.is_empty()
+    }
+
+    /// The grant set that would close the capability needs, as a **proposal**.
+    ///
+    /// A repair proposal, not authority: the returned set is data the caller may
+    /// inspect, narrow, or refuse, and no code path in this crate admits a bot
+    /// through it. Only the [`GrantSet`] the caller passes to the materializer
+    /// supplies authority, so a spec still cannot choose what a bot reaches.
+    /// Needs that are not about capabilities (an unknown domain, a rejected
+    /// target) contribute nothing here, because no grant repairs them.
+    #[must_use]
+    pub fn proposed_grants(&self) -> GrantSet {
+        let mut grants = GrantSet::empty();
+        for need in &self.needs {
+            if let Need::MissingCapability { ref capability, .. } = *need {
+                grants = grants.grant(capability.clone());
+            }
+        }
+        grants
+    }
+}
+
+impl std::fmt::Display for NeedSet {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{} unmet need(s)", self.needs.len())?;
+        for (index, need) in self.needs.iter().enumerate() {
+            formatter.write_str(if index == 0 { ": " } else { ", " })?;
+            write!(formatter, "{need}")?;
+        }
+        Ok(())
+    }
+}
+
+/// One unmet need, attributed to the chain (and action) that raised it.
+///
+/// The attribution is the repair: "an unknown domain" is a fact about the
+/// document, while "chain 3, action 1 names unknown domain `notify::absent`" is
+/// a location in it. Indices are declaration positions, zero-based, matching the
+/// order [`BotSpec::chains`] and [`ChainSpec::on`] are walked.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Need {
+    /// A chain's source identifier is not in the registry.
+    UnknownSource {
+        /// The chain's index in the spec.
+        chain: usize,
+        /// The identifier the spec named.
+        domain: String,
+    },
+    /// An action's domain identifier is not in the registry.
+    UnknownAction {
+        /// The owning chain's index in the spec.
+        chain: usize,
+        /// The action's index within the chain's `on` list.
+        action: usize,
+        /// The identifier the spec named.
+        domain: String,
+    },
+    /// A source constructor refused the target the spec gave it.
+    SourceTargetRejected {
+        /// The chain's index in the spec.
+        chain: usize,
+        /// The source identifier the spec named.
+        domain: String,
+        /// The constructor's own refusal, escaped.
+        cause: String,
+    },
+    /// An action constructor refused the target the spec gave it.
+    ActionTargetRejected {
+        /// The owning chain's index in the spec.
+        chain: usize,
+        /// The action's index within the chain's `on` list.
+        action: usize,
+        /// The action identifier the spec named.
+        domain: String,
+        /// The constructor's own refusal, escaped.
+        cause: String,
+    },
+    /// A chain names a condition outside the supported wire vocabulary.
+    UnknownCondition {
+        /// The owning chain's index in the spec.
+        chain: usize,
+        /// The condition's index within the chain's `on` list.
+        action: usize,
+        /// The condition identifier the spec spelled.
+        condition: String,
+    },
+    /// A domain requires a capability the caller's grant set does not carry.
+    MissingCapability {
+        /// The owning chain's index in the spec.
+        chain: usize,
+        /// The action's index when the requirement is an action's, or `None`
+        /// when it is the source's.
+        action: Option<usize>,
+        /// The domain that declared the requirement.
+        domain: String,
+        /// The capability it requires and was not granted.
+        capability: Cap,
+    },
+}
+
+impl Need {
+    /// The chain index this need is attributed to.
+    #[must_use]
+    pub fn chain(&self) -> usize {
+        match *self {
+            Self::UnknownSource { chain, .. }
+            | Self::UnknownAction { chain, .. }
+            | Self::SourceTargetRejected { chain, .. }
+            | Self::ActionTargetRejected { chain, .. }
+            | Self::UnknownCondition { chain, .. }
+            | Self::MissingCapability { chain, .. } => chain,
+        }
+    }
+
+    /// The action index within the chain, when the need belongs to one action
+    /// rather than the source or the chain as a whole.
+    #[must_use]
+    pub fn action(&self) -> Option<usize> {
+        match *self {
+            Self::UnknownAction { action, .. }
+            | Self::ActionTargetRejected { action, .. }
+            | Self::UnknownCondition { action, .. } => Some(action),
+            Self::MissingCapability { action, .. } => action,
+            Self::UnknownSource { .. } | Self::SourceTargetRejected { .. } => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Need {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::UnknownSource { chain, ref domain } => write!(
+                formatter,
+                "chain {chain}: unknown source domain {}",
+                Escaped(domain)
+            ),
+            Self::UnknownAction {
+                chain,
+                action,
+                ref domain,
+            } => write!(
+                formatter,
+                "chain {chain} action {action}: unknown action domain {}",
+                Escaped(domain)
+            ),
+            Self::SourceTargetRejected {
+                chain,
+                ref domain,
+                ref cause,
+            } => write!(
+                formatter,
+                "chain {chain}: source {} refused its target: {}",
+                Escaped(domain),
+                Escaped(cause)
+            ),
+            Self::ActionTargetRejected {
+                chain,
+                action,
+                ref domain,
+                ref cause,
+            } => write!(
+                formatter,
+                "chain {chain} action {action}: action {} refused its target: {}",
+                Escaped(domain),
+                Escaped(cause)
+            ),
+            Self::UnknownCondition {
+                chain,
+                action,
+                ref condition,
+            } => write!(
+                formatter,
+                "chain {chain} action {action}: unknown condition {}",
+                Escaped(condition)
+            ),
+            Self::MissingCapability {
+                chain,
+                action,
+                ref domain,
+                ref capability,
+            } => match action {
+                Some(action) => write!(
+                    formatter,
+                    "chain {chain} action {action}: {} requires ungranted capability {}",
+                    Escaped(domain),
+                    capability
+                ),
+                None => write!(
+                    formatter,
+                    "chain {chain}: {} requires ungranted capability {}",
+                    Escaped(domain),
+                    capability
+                ),
+            },
+        }
     }
 }
 
@@ -848,6 +1307,7 @@ mod tests {
     #[test]
     fn spec_round_trips_json() -> Result<(), BotError> {
         let spec = BotSpec {
+            version: BotSpec::CURRENT_VERSION,
             name: "larry".into(),
             chains: vec![ChainSpec {
                 source: "gh::pr_status".into(),

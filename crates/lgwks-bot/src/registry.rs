@@ -33,9 +33,14 @@
 //! written because `clippy::panic` is forbidden workspace-wide, which leaves no
 //! way to fail a `const` evaluation from this module.
 
+use std::any::Any;
+
+use crate::cap::Cap;
+use crate::ecs::{AdmittedInput, identify_output, same_output};
+use crate::effect::InputIdentity;
 use crate::error::BotError;
-use crate::spec::{ExecuteAny, ObserveAny, TypedExec};
-use crate::verb::{Execute, Observe};
+use crate::spec::{EvaluateAny, ExecuteAny, ObserveAny, TypedEval, TypedExec, Witness};
+use crate::verb::{Evaluate, Execute, Observe};
 
 /// Builds one source from the `target` its spec names.
 ///
@@ -48,34 +53,208 @@ pub type SourceCtor = fn(&str) -> Result<Source, BotError>;
 /// A function pointer for the same reason as [`SourceCtor`].
 pub type ActionCtor = fn(&str) -> Result<Action, BotError>;
 
-/// A source, erased to the view the runner calls.
+/// A source, erased to the view the runner calls, plus the metadata a chain
+/// needs and the type a condition must be built against.
 ///
 /// The erase happens at the registry boundary because that is the last point at
 /// which the concrete type is known, and it is also where the output's
-/// `PartialEq` can still be demanded — see [`Source::new`].
-pub struct Source(Box<dyn ObserveAny>);
+/// `PartialEq` can still be demanded — see [`Source::new`]. The metadata the
+/// chain needs (`same`, `identify`, `witness`) is captured in the same breath,
+/// because it is a function of `O::Output` and this constructor is the last
+/// place that type is a type parameter.
+///
+/// # Why the type key travels with the source
+///
+/// A spec names a condition as text, and a condition is generic over the value
+/// it evaluates ([`Changed<T>`](crate::domain::eval::Changed) compares two
+/// `T`s). The document cannot carry `T`, and a `TypeId` is process-local, so the
+/// only durable statement of the type is the source that produces it: this
+/// handle answers [`Source::condition`] for its *own* output type, so a
+/// condition identifier resolves against the type it will actually see rather
+/// than against a guess. See [`InputIdentity::SCHEMA_ID`] for the durable key
+/// the change filter binds, and [`Source::new`] for the bounds this needs.
+///
+/// [`InputIdentity::SCHEMA_ID`]: crate::effect::InputIdentity::SCHEMA_ID
+pub struct Source {
+    /// The observer, erased to the view the runner calls.
+    inner: Box<dyn ObserveAny>,
+    /// Equality for this source's output, captured from `O::Output: PartialEq`
+    /// where the type was still a parameter.
+    same: fn(&dyn Any, &dyn Any) -> bool,
+    /// The admitted-input identity of this source's output.
+    identify: fn(&dyn Any) -> AdmittedInput,
+    /// What type this source produces, taken here where it is a parameter.
+    witness: Witness,
+    /// Builds a condition for this source's own output type from a wire
+    /// identifier, so a spec's condition resolves against the type it will see.
+    condition: fn(&str) -> Result<Condition, BotError>,
+}
 
 impl Source {
     /// Erase a concrete source into the handle a registry entry returns.
     ///
-    /// The `PartialEq` bound is not a new requirement on a source: the ECS
-    /// builder already demands it for its change filter, so a source that could
-    /// reach this constructor without it could not have been put in a chain
-    /// anyway. It is stated here rather than discovered at the blanket impl.
+    /// The bounds are what any chain already needs: the ECS builder demands
+    /// `PartialEq + InputIdentity` for its change filter and its admitted-input
+    /// identity, and `Clone` is what [`Changed`](crate::domain::eval::Changed)
+    /// keeps the previous value with. A source built here answers the
+    /// order-free wire conditions, `changed` and `always`, for any output type,
+    /// a struct included. A source whose output is ordered and parseable uses
+    /// [`Source::ordered`] to answer the threshold conditions as well.
     #[must_use]
     pub fn new<O>(source: O) -> Self
     where
         O: Observe + 'static,
-        O::Output: PartialEq + 'static,
+        O::Output: Clone + PartialEq + InputIdentity + 'static,
     {
-        Self(Box::new(source))
+        Self::erase(source, make_condition::<O>)
+    }
+
+    /// Erase a source whose output is ordered, so a spec may also name
+    /// `threshold::above(<n>)` and `threshold::below(<n>)` against it.
+    ///
+    /// `PartialOrd` is what [`Above`](crate::domain::eval::Above) and
+    /// [`Below`](crate::domain::eval::Below) compare with, and `FromStr` is how
+    /// the threshold's argument is read from wire text as the source's own
+    /// output type. Kept apart from [`Source::new`] so those bounds bind only
+    /// the sources that offer thresholds, rather than every source a registry
+    /// can hold.
+    #[must_use]
+    pub fn ordered<O>(source: O) -> Self
+    where
+        O: Observe + 'static,
+        O::Output: Clone + PartialEq + PartialOrd + std::str::FromStr + InputIdentity + 'static,
+    {
+        Self::erase(source, make_ordered_condition::<O>)
+    }
+
+    /// Capture the chain metadata where `O::Output` is still a type
+    /// parameter, with the condition vocabulary the caller chose.
+    fn erase<O>(source: O, condition: fn(&str) -> Result<Condition, BotError>) -> Self
+    where
+        O: Observe + 'static,
+        O::Output: Clone + PartialEq + InputIdentity + 'static,
+    {
+        Self {
+            inner: Box::new(source),
+            same: same_output::<O>,
+            identify: identify_output::<O>,
+            witness: Witness::of::<O::Output>(),
+            condition,
+        }
     }
 
     /// The domain identifier the source declares for itself.
     #[must_use]
     pub fn domain_id(&self) -> &str {
-        self.0.domain_id()
+        self.inner.domain_id()
     }
+
+    /// The capabilities this source requires, for admission.
+    #[must_use]
+    pub fn required_caps(&self) -> &[Cap] {
+        self.inner.required_caps()
+    }
+
+    /// Build the condition a spec names, for this source's output type.
+    ///
+    /// The vocabulary is closed and versioned with the type it evaluates:
+    /// `changed` and `always` for every source, plus `threshold::above(<n>)`
+    /// and `threshold::below(<n>)` for one built with [`Source::ordered`]. An
+    /// identifier outside it is
+    /// [`BotError::UnknownCondition`] — never a silently always-true condition,
+    /// because an inert gate is how an effect a person expected to guard fires
+    /// anyway.
+    ///
+    /// # Errors
+    ///
+    /// [`BotError::UnknownCondition`] when `condition_id` is not in the
+    /// vocabulary, or when a threshold's argument does not parse as this
+    /// source's output type.
+    pub fn condition(&self, condition_id: &str) -> Result<Condition, BotError> {
+        (self.condition)(condition_id)
+    }
+
+    /// Split the handle into the erased observer and the chain metadata.
+    ///
+    /// The one seam the ECS chain assembler uses. Kept crate-internal because
+    /// the pieces are the substrate's own types, not a second public surface.
+    pub(crate) fn into_parts(self) -> SourceParts {
+        (self.inner, self.same, self.identify, self.witness)
+    }
+}
+
+/// The erased pieces of a [`Source`]: the observer, then the `same`,
+/// `identify` and `witness` metadata a chain needs.
+///
+/// One name for the tuple, so [`Source::into_parts`] and the chain assembler
+/// agree on the order without either spelling out four types.
+pub(crate) type SourceParts = (
+    Box<dyn ObserveAny>,
+    fn(&dyn Any, &dyn Any) -> bool,
+    fn(&dyn Any) -> AdmittedInput,
+    Witness,
+);
+
+/// Build the order-free wire condition `condition_id` names, for source `O`.
+///
+/// Monomorphized on `O`, so `O::Output` is the concrete type the condition
+/// evaluates and no schema table has to be matched by hand.
+fn make_condition<O>(condition_id: &str) -> Result<Condition, BotError>
+where
+    O: Observe + 'static,
+    O::Output: Clone + PartialEq + 'static,
+{
+    let identifier = condition_id.trim();
+    match identifier {
+        "changed" => Ok(Condition::new::<O::Output, _>(
+            crate::domain::eval::Changed::new(),
+        )),
+        "always" => Ok(Condition::new::<O::Output, _>(|_: &O::Output| true)),
+        _ => Err(BotError::UnknownCondition {
+            condition: identifier.to_owned(),
+        }),
+    }
+}
+
+/// Build the wire condition `condition_id` names for an ordered source `O`:
+/// the two thresholds, then the order-free vocabulary of [`make_condition`].
+fn make_ordered_condition<O>(condition_id: &str) -> Result<Condition, BotError>
+where
+    O: Observe + 'static,
+    O::Output: Clone + PartialEq + PartialOrd + std::str::FromStr + 'static,
+{
+    let identifier = condition_id.trim();
+    if let Some(argument) = parenthesized(identifier, "threshold::above") {
+        let bound = parse_bound::<O::Output>(argument, identifier)?;
+        return Ok(Condition::new::<O::Output, _>(
+            crate::domain::eval::Above::new(bound),
+        ));
+    }
+    if let Some(argument) = parenthesized(identifier, "threshold::below") {
+        let bound = parse_bound::<O::Output>(argument, identifier)?;
+        return Ok(Condition::new::<O::Output, _>(
+            crate::domain::eval::Below::new(bound),
+        ));
+    }
+    make_condition::<O>(identifier)
+}
+
+/// The argument inside `prefix(...)`, or `None` when `identifier` is not that.
+fn parenthesized<'a>(identifier: &'a str, prefix: &str) -> Option<&'a str> {
+    identifier
+        .strip_prefix(prefix)?
+        .strip_prefix('(')?
+        .strip_suffix(')')
+}
+
+/// Parse a threshold argument as `T`, reporting the whole identifier on failure.
+fn parse_bound<T: std::str::FromStr>(argument: &str, identifier: &str) -> Result<T, BotError> {
+    argument
+        .trim()
+        .parse::<T>()
+        .map_err(|_| BotError::UnknownCondition {
+            condition: identifier.to_owned(),
+        })
 }
 
 impl std::fmt::Debug for Source {
@@ -113,6 +292,17 @@ impl Action {
     pub fn domain_id(&self) -> &str {
         self.0.domain_id()
     }
+
+    /// The capabilities this action requires, for admission.
+    #[must_use]
+    pub fn required_caps(&self) -> &[Cap] {
+        self.0.required_caps()
+    }
+
+    /// Take the erased action, for the chain assembler.
+    pub(crate) fn into_execute_any(self) -> Box<dyn ExecuteAny> {
+        self.0
+    }
 }
 
 impl std::fmt::Debug for Action {
@@ -122,6 +312,51 @@ impl std::fmt::Debug for Action {
             .debug_tuple("Action")
             .field(&self.domain_id())
             .finish()
+    }
+}
+
+/// A condition, erased to the view a chain's walk calls.
+///
+/// A spec names a condition as text and [`Source::condition`] builds one for its
+/// own output type; a native chain names one directly through
+/// [`ObserveBuilder::on`](crate::spec::ObserveBuilder::on). Both arrive here, so
+/// the two paths share one erasure and one type-mismatch report rather than each
+/// carrying its own.
+///
+/// This is the *only* way a condition is built for a materialized chain. The
+/// constructor is generic over the value it evaluates — as the verb traits are —
+/// and the downcast to that value is checked when the condition runs, so a
+/// condition built for one type and handed a value of another reports
+/// [`BotError::EvaluateError`](crate::BotError::EvaluateError) rather than
+/// answering a false.
+pub struct Condition(Box<dyn EvaluateAny>);
+
+impl Condition {
+    /// Erase a concrete condition, typed against `T`.
+    #[must_use]
+    pub fn new<T, C>(condition: C) -> Self
+    where
+        T: 'static,
+        C: Evaluate<T> + 'static,
+    {
+        Self(Box::new(TypedEval {
+            inner: condition,
+            _marker: std::marker::PhantomData::<T>,
+        }))
+    }
+
+    /// Take the erased condition, for the chain assembler.
+    pub(crate) fn into_evaluate_any(self) -> Box<dyn EvaluateAny> {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for Condition {
+    /// Prints `Condition`, because an erased condition carries no identity of
+    /// its own: what it evaluates is the source's output type, which the chain,
+    /// not this handle, is what names.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Condition")
     }
 }
 

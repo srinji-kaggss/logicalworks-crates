@@ -422,16 +422,62 @@ let json = spec.to_json()?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-`BotSpec` is validate-only today: there is no `from_spec` materializer, so a spec
-that validates still has to be built through `Bot::builder`. Materializing a bot
-from a spec needs a `domain_id -> constructor` registry, and none exists; that
-absence is recorded as open work in `experience/invariants/sdk.yaml`, not as a
-design position. Whenever it lands, grants keep coming from a `GrantSet` the
-caller holds and never from the spec, so wire data cannot choose what a bot
-reaches. The builder chain is the DSL. There is deliberately no `bot!`
-proc-macro: it would hide the per-call `Auth::check` that auditors read. The
-orchestration *between* calls is a different matter, and has one:
-[`script!`](#orchestration-script).
+### Materializing a spec
+
+`BotSpec` is a document. `Bot::from_spec` turns one into a running bot against a
+[`DomainRegistry`](https://docs.rs/lgwks_bot) — the `domain_id -> constructor`
+list a binary declares with `domains!`:
+
+```rust,no_run
+# use lgwks_bot::broker::Broker;
+# use lgwks_bot::effect::{EnvironmentId, FlowRevision, RunId};
+# use lgwks_bot::journal::MemoryJournal;
+# use lgwks_bot::spec::{EffectIdentity, EffectScope};
+# use lgwks_bot::{Admission, Bot, BotSpec, DomainRegistry, GrantSet};
+# let environment = EnvironmentId::from_hex("2122232425262728292a2b2c2d2e2f30")?;
+# let mut broker = Broker::new();
+# broker.register(environment)?;
+# let effects = EffectScope::new(
+#     EffectIdentity::new(
+#         RunId::from_hex("0102030405060708090a0b0c0d0e0f10")?,
+#         environment,
+#         FlowRevision::from_tagged(
+#             "blake3_256",
+#             "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+#         )?,
+#     ),
+#     broker,
+#     Box::new(MemoryJournal::new()),
+# );
+let spec = BotSpec::from_json(r#"{"version":1,"name":"larry","chains":[]}"#)?;
+// Your binary's registry, declared with `domains!`; the real, runnable example
+// is on `Bot::from_spec`.
+let bot: Result<Bot, Admission> =
+    Bot::from_spec(&spec, &DomainRegistry::empty(), &GrantSet::empty(), effects);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Materialization runs through the **same** `assemble`/`build` path a native bot
+does — no second interpreter and no second execution path — so a bot built from
+JSON and one built from `Bot::builder` with the same domains produce the same
+operation trace. It is **all-or-nothing**: every presently knowable unmet need —
+an unknown source or action domain, a constructor that rejects its target, a
+missing capability, an unknown condition — is collected into one attributed
+[`NeedSet`](https://docs.rs/lgwks_bot), and the materialization is refused with
+that report; nothing is polled and nothing runs. A `NeedSet` is a report and a
+repair *proposal*, never a grant.
+
+Authority keeps coming from the `GrantSet` the caller holds and never from the
+spec, so wire data cannot choose what a bot reaches. A condition is named in the
+document from a closed vocabulary — `changed`, `always`, `threshold::above(<n>)`,
+`threshold::below(<n>)`, the two thresholds only for a source registered with
+`Source::ordered` — resolved against the source's own output type; an
+identifier outside it is a reported need, never a silently always-true gate.
+
+The builder chain remains the DSL for anything a document cannot express. There
+is deliberately no `bot!` proc-macro: it would hide the per-call `Auth::check`
+that auditors read. The orchestration *between* calls is a different matter, and
+has one: [`script!`](#orchestration-script).
 
 ## Orchestration: `script!`
 

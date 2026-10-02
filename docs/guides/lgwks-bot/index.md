@@ -26,7 +26,7 @@ each tick and runs the action on the ticks where the polled value moved. A
 condition that stays true does not re-fire, which is the difference between this
 and a timer that re-evaluates a predicate every interval.
 
-`Bot` is not a separate type with a separate implementation. `crates/lgwks-bot/src/spec.rs:319`
+`Bot` is not a separate type with a separate implementation. `crates/lgwks-bot/src/spec.rs:455`
 re-exports the ECS bot under the shorter name:
 
 ```rust
@@ -41,10 +41,10 @@ There is one execution path. `crates/lgwks-bot/Cargo.toml` states that
 "would mean nothing exercises it, the workspace gate never compiles it, and it
 rots into a second opinion nobody chose."
 
-`Bot::tick` is the synchronous adapter (`crates/lgwks-bot/src/ecs.rs:3923`): it
+`Bot::tick` is the synchronous adapter (`crates/lgwks-bot/src/ecs.rs:4123`): it
 drives the non-`Send` verb futures on a thread-parking executor, so there is
 nothing to await. `Bot::tick_async` is the same tick awaited on the caller's
-executor (`crates/lgwks-bot/src/ecs.rs:3820`), and it is the one to call from
+executor (`crates/lgwks-bot/src/ecs.rs:4020`), and it is the one to call from
 inside a runtime — `tick` refuses there with `BotError::TickInsideRuntime`
 rather than park the thread that owns the reactor. Do not write
 `bot.tick().await`; that is `tick` returning `usize`, then a `usize` that is not
@@ -100,15 +100,14 @@ you to discover.
   directly" (`crates/lgwks-bot/src/cap.rs:15`). See [authority](authority.md).
 - **No revocable authority.** `GrantSet` has no `revoke`, and a built bot holds
   a clone of the set it was admitted with. See [authority](authority.md).
-- **No spec materializer yet.** `BotSpec` validates a JSON document. There is no
-  `Bot::from_spec`; you build through the builder chain, and
-  `crates/lgwks-bot/src/spec.rs:666` validates shape only. Unlike the entries
-  around it, this one is scheduled work rather than a permanent limit: it is
-  recorded as open in `experience/invariants/sdk.yaml`. Half of it exists —
-  `DomainRegistry` and the `domains!` list, see [domains](domains.md) — and the
-  materializer that would consume it is blocked by two named obstacles rather
-  than by plumbing: a condition has no slot in the wire format for its
-  parameters, and an erased source states no durable type.
+- **A spec is a document, not the DSL.** `Bot::from_spec` materializes a
+  validated `BotSpec` against a `DomainRegistry` — see [domains](domains.md) —
+  through the same `assemble`/`build` path a native bot uses. It is
+  all-or-nothing and reports every presently knowable unmet need in one
+  attributed `NeedSet`; authority still comes only from the `GrantSet` the
+  caller holds. A condition is named from a closed wire vocabulary (`changed`,
+  `always`, `threshold::above(<n>)`, `threshold::below(<n>)`); anything the
+  document cannot express stays on the builder chain.
 - **No `#[tokio::main]` equivalent.** Entry to the async surface is
   `Runtime::block_on`.
 - **No exactly-once delivery.** An action that may have taken effect after its
