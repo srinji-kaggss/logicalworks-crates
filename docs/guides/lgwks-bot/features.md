@@ -24,13 +24,13 @@ storefront, and `lgwks_deps` is the only crate in the workspace that authors a
 | `macros` | `rt` | the `join!`, `select!`, and `try_join!` re-exports at the crate root |
 | `io` | `rt` | `rt::io`: `AsyncRead`, `AsyncWrite`, `AsyncBufRead`, `BufReader`, `BufWriter`, `duplex`, `copy` |
 | `net` | `io` | `rt::net`: `TcpListener`, `TcpStream`, `UdpSocket`, `lookup_host` |
-| `process` | `io`, `sync` | `rt::process`: `Command` — how to describe a child. Running one is `Supervisor::spawn_process` (`sync`), and it is the only way: `Child` and its pipes are deliberately not exported |
+| `process` | `io`, `sync` | `rt::process`: `Command` — how to describe a child, with `StdioPolicy::Capture` for a bounded stream. Running one is `Supervisor::spawn_process` (reported later) or `Supervisor::run_process` (returns its `ProcessRun`), and they are the only ways: `Child` and its pipes are deliberately not exported |
 | `fs` | `io` | `rt::fs`: an async filesystem, a blocking-threadpool wrapper |
-| `signal` | `rt` | `rt::signal`: OS signal streams. Compiled only on `unix` or `windows` (`crates/lgwks-bot/src/rt/mod.rs:96`) |
+| `signal` | `rt` | `rt::signal`: OS signal streams. Compiled only on `unix` or `windows` (`crates/lgwks-bot/src/rt/mod.rs:97`) |
 | `ephemeral` | | `EffectScope::ephemeral()`, `RunId::mint()`, `EnvironmentId::mint()`. Host-only: minting needs OS entropy, and `lgwks_std::random` is linux/macOS/windows only. Off by default for the same reason `signal` is — the default set is built for `wasm32-wasip1` |
 | `full` | | `rt`, `time`, `sync`, `macros`, `io`, `net`, `process`, `fs`, `signal`, `ephemeral` |
 
-The module gates are in `crates/lgwks-bot/src/rt/mod.rs:85`. `rt::supervise` and
+The module gates are in `crates/lgwks-bot/src/rt/mod.rs:86`. `rt::supervise` and
 `rt::sync` are both behind `sync`, so disabling `sync` removes the supervisor as
 well as the channels.
 
@@ -67,7 +67,7 @@ which this workspace bans.
 
 ## Limits by feature
 
-**`rt` is not a scheduler with realtime guarantees.** `crates/lgwks-bot/src/rt/mod.rs:75`
+**`rt` is not a scheduler with realtime guarantees.** `crates/lgwks-bot/src/rt/mod.rs:76`
 states the bound: future completion order across worker threads is not
 deterministic, and only the result order of `join_all_bounded` is.
 

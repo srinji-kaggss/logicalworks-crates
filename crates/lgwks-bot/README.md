@@ -590,7 +590,7 @@ On `wasm32-wasip1`, the `rt` feature uses a current-thread runtime;
 | `rt::sync` | `sync` | `CancellationToken`, `mpsc`, `oneshot`, `broadcast`, `watch`, `Mutex`, `RwLock`, `Semaphore`, `Notify`, `Barrier`, `OnceCell` |
 | `rt::io` | `io` | `AsyncRead`/`AsyncWrite`/`AsyncBufRead` and their extensions, `BufReader`, `BufWriter`, `duplex`, `copy` |
 | `rt::net` | `net` | `TcpListener`, `TcpStream`, `UdpSocket`, `lookup_host` |
-| `rt::process` | `process` | `Command` — describing what to run. Running it is `Supervisor::spawn_process`; `Child` and its pipes are not exported |
+| `rt::process` | `process` | `Command` — describing what to run, with `StdioPolicy::Capture` for a bounded stream. Running it is `Supervisor::spawn_process` (reported later) or `Supervisor::run_process` (returns its output); `Child` and its pipes are not exported |
 | `rt::fs` | `fs` | async filesystem (blocking-threadpool wrapper) |
 | `rt::signal` | `signal` | OS signal streams (Unix/Windows) |
 
@@ -674,6 +674,15 @@ to drop. The child is placed in its own process group and the **group** is
 killed — when the task is cancelled, and when the supervisor drops or aborts —
 because a shell's grandchildren are the case that matters and `Child::kill`
 cannot reach them.
+
+`run_process(command)` is the same machinery with the result handed back: it
+awaits the child and returns a `ProcessRun` — the exit status or signal, the
+captured stdout and stderr with their truncation accounting, whether a deadline
+stopped it, and the process-group cleanup receipt. A stream set to
+`StdioPolicy::Capture(limit)` keeps its first `limit` bytes, keeps draining so a
+chatty child never blocks, and reports the exact total. Neither
+`spawn_process` nor `run_process` is `#[cfg]`-gated differently: one owns
+completion, the other reports it, and both are the supervisor.
 
 A loop cannot run away. `repeat` cannot be written without a `Budget`, and every
 iteration *races* the token rather than checking it between iterations, so a
