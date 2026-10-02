@@ -8,6 +8,14 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### Fixed
+
+- `tests/http_alloc.rs` joins every single-shot server thread (warm-up, exact and
+  cut) before the next measurement is armed, so a detached server can no longer
+  free its `reply` inside a later window and net the eager peak to zero; the
+  servers carry bounded read/write timeouts so the join cannot block. No
+  assertion, ceiling or bound changed; the probe is deterministic across 30 runs.
+
 ### lgwks_std Added
 
 - `tests/fixtures/wire/consumer_record_v1.hex` is a retained archive that pins
