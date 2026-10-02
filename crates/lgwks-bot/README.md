@@ -470,7 +470,8 @@ repair *proposal*, never a grant.
 Authority keeps coming from the `GrantSet` the caller holds and never from the
 spec, so wire data cannot choose what a bot reaches. A condition is named in the
 document from a closed vocabulary — `changed`, `always`, `threshold::above(<n>)`,
-`threshold::below(<n>)` — resolved against the source's own output type; an
+`threshold::below(<n>)`, the two thresholds only for a source registered with
+`Source::ordered` — resolved against the source's own output type; an
 identifier outside it is a reported need, never a silently always-true gate.
 
 The builder chain remains the DSL for anything a document cannot express. There

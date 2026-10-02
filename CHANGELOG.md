@@ -35,10 +35,13 @@ explicitly under that crate.
 
 ### lgwks_bot Breaking
 
-- `Source::new` now requires `O::Output: Clone + PartialOrd + FromStr +
-  InputIdentity` (was `PartialEq` only). Every source usable in a chain already
-  satisfied `InputIdentity` and `PartialEq`; the added bounds are what let a
-  condition be built for the source's own output type from a wire identifier.
+- `Source::new` now requires `O::Output: Clone + PartialEq + InputIdentity`
+  (was `PartialEq` only); every source usable in a chain already satisfied
+  `PartialEq + InputIdentity`, and `Clone` is what the wire `changed` condition
+  keeps. Such a source answers `changed` and `always`. A source whose output is
+  also `PartialOrd + FromStr` registers with the new `Source::ordered` to answer
+  `threshold::above(<n>)` and `threshold::below(<n>)` too, so the threshold
+  bounds bind only the sources that offer thresholds.
 - `BotSpec`, `ChainSpec` and `ActionSpec` no longer expose their string/collection
   fields as `pub`: read them through `BotSpec::version`/`name`/`chains`,
   `ChainSpec::source`/`target`/`on`, and `ActionSpec::domain`/`target`. The types

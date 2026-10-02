@@ -95,6 +95,9 @@ the wire contract:
 - **A condition carries its parameters in its identifier.** `ChainSpec::on` is
   still `Vec<(String, ActionSpec)>`, and the identifier is what names the
   condition: `always`, `changed`, `threshold::above(5)`, `threshold::below(5)`.
+  The two thresholds are offered only by a source registered with
+  `Source::ordered` (its output is `PartialOrd + FromStr`); a struct-output
+  source registers with `Source::new` and answers `always` and `changed`.
   The vocabulary is closed and resolved by the source itself, against the type
   it actually produces.
 - **A source states its own durable type.** `Source::new` captures the output's

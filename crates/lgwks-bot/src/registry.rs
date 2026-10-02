@@ -93,28 +93,53 @@ pub struct Source {
 impl Source {
     /// Erase a concrete source into the handle a registry entry returns.
     ///
-    /// The bounds are not new requirements: the ECS builder already demands
+    /// The bounds are what any chain already needs: the ECS builder demands
     /// `PartialEq + InputIdentity` for its change filter and its admitted-input
-    /// identity, and `Clone + PartialOrd + FromStr` is what the shipped wire
-    /// conditions ([`Changed`](crate::domain::eval::Changed),
-    /// [`Above`](crate::domain::eval::Above),
-    /// [`Below`](crate::domain::eval::Below)) need to be built from an
-    /// identifier. A source that could reach this constructor without them could
-    /// not have been put in a chain anyway, so the requirements are stated here
-    /// where they bind rather than discovered at the materializer.
+    /// identity, and `Clone` is what [`Changed`](crate::domain::eval::Changed)
+    /// keeps the previous value with. A source built here answers the
+    /// order-free wire conditions, `changed` and `always`, for any output type,
+    /// a struct included. A source whose output is ordered and parseable uses
+    /// [`Source::ordered`] to answer the threshold conditions as well.
     #[must_use]
     pub fn new<O>(source: O) -> Self
     where
         O: Observe + 'static,
-        O::Output: Clone + PartialEq + PartialOrd + std::str::FromStr + 'static,
-        O::Output: InputIdentity,
+        O::Output: Clone + PartialEq + InputIdentity + 'static,
+    {
+        Self::erase(source, make_condition::<O>)
+    }
+
+    /// Erase a source whose output is ordered, so a spec may also name
+    /// `threshold::above(<n>)` and `threshold::below(<n>)` against it.
+    ///
+    /// `PartialOrd` is what [`Above`](crate::domain::eval::Above) and
+    /// [`Below`](crate::domain::eval::Below) compare with, and `FromStr` is how
+    /// the threshold's argument is read from wire text as the source's own
+    /// output type. Kept apart from [`Source::new`] so those bounds bind only
+    /// the sources that offer thresholds, rather than every source a registry
+    /// can hold.
+    #[must_use]
+    pub fn ordered<O>(source: O) -> Self
+    where
+        O: Observe + 'static,
+        O::Output: Clone + PartialEq + PartialOrd + std::str::FromStr + InputIdentity + 'static,
+    {
+        Self::erase(source, make_ordered_condition::<O>)
+    }
+
+    /// Capture the chain metadata where `O::Output` is still a type
+    /// parameter, with the condition vocabulary the caller chose.
+    fn erase<O>(source: O, condition: fn(&str) -> Result<Condition, BotError>) -> Self
+    where
+        O: Observe + 'static,
+        O::Output: Clone + PartialEq + InputIdentity + 'static,
     {
         Self {
             inner: Box::new(source),
             same: same_output::<O>,
             identify: identify_output::<O>,
             witness: Witness::of::<O::Output>(),
-            condition: make_condition::<O>,
+            condition,
         }
     }
 
@@ -133,8 +158,9 @@ impl Source {
     /// Build the condition a spec names, for this source's output type.
     ///
     /// The vocabulary is closed and versioned with the type it evaluates:
-    /// `changed`, `always`, `threshold::above(<n>)`, and
-    /// `threshold::below(<n>)`. An identifier outside it is
+    /// `changed` and `always` for every source, plus `threshold::above(<n>)`
+    /// and `threshold::below(<n>)` for one built with [`Source::ordered`]. An
+    /// identifier outside it is
     /// [`BotError::UnknownCondition`] — never a silently always-true condition,
     /// because an inert gate is how an effect a person expected to guard fires
     /// anyway.
@@ -169,16 +195,14 @@ pub(crate) type SourceParts = (
     Witness,
 );
 
-/// Build the wire condition `condition_id` names, for source `O`.
+/// Build the order-free wire condition `condition_id` names, for source `O`.
 ///
 /// Monomorphized on `O`, so `O::Output` is the concrete type the condition
-/// evaluates and no schema table has to be matched by hand. The `FromStr` bound
-/// is used only by the two threshold arms; the two constant arms are available
-/// for any output type.
+/// evaluates and no schema table has to be matched by hand.
 fn make_condition<O>(condition_id: &str) -> Result<Condition, BotError>
 where
     O: Observe + 'static,
-    O::Output: Clone + PartialEq + PartialOrd + std::str::FromStr + 'static,
+    O::Output: Clone + PartialEq + 'static,
 {
     let identifier = condition_id.trim();
     match identifier {
@@ -186,24 +210,33 @@ where
             crate::domain::eval::Changed::new(),
         )),
         "always" => Ok(Condition::new::<O::Output, _>(|_: &O::Output| true)),
-        _ => {
-            if let Some(argument) = parenthesized(identifier, "threshold::above") {
-                let bound = parse_bound::<O::Output>(argument, identifier)?;
-                Ok(Condition::new::<O::Output, _>(
-                    crate::domain::eval::Above::new(bound),
-                ))
-            } else if let Some(argument) = parenthesized(identifier, "threshold::below") {
-                let bound = parse_bound::<O::Output>(argument, identifier)?;
-                Ok(Condition::new::<O::Output, _>(
-                    crate::domain::eval::Below::new(bound),
-                ))
-            } else {
-                Err(BotError::UnknownCondition {
-                    condition: identifier.to_owned(),
-                })
-            }
-        }
+        _ => Err(BotError::UnknownCondition {
+            condition: identifier.to_owned(),
+        }),
     }
+}
+
+/// Build the wire condition `condition_id` names for an ordered source `O`:
+/// the two thresholds, then the order-free vocabulary of [`make_condition`].
+fn make_ordered_condition<O>(condition_id: &str) -> Result<Condition, BotError>
+where
+    O: Observe + 'static,
+    O::Output: Clone + PartialEq + PartialOrd + std::str::FromStr + 'static,
+{
+    let identifier = condition_id.trim();
+    if let Some(argument) = parenthesized(identifier, "threshold::above") {
+        let bound = parse_bound::<O::Output>(argument, identifier)?;
+        return Ok(Condition::new::<O::Output, _>(
+            crate::domain::eval::Above::new(bound),
+        ));
+    }
+    if let Some(argument) = parenthesized(identifier, "threshold::below") {
+        let bound = parse_bound::<O::Output>(argument, identifier)?;
+        return Ok(Condition::new::<O::Output, _>(
+            crate::domain::eval::Below::new(bound),
+        ));
+    }
+    make_condition::<O>(identifier)
 }
 
 /// The argument inside `prefix(...)`, or `None` when `identifier` is not that.

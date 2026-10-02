@@ -67,7 +67,7 @@ impl SimCounter {
 
     /// Build a cap-free one from the `target` its spec names.
     fn from_target(target: &str) -> Result<Source, BotError> {
-        Ok(Source::new(Self::with_caps(
+        Ok(Source::ordered(Self::with_caps(
             parse_sim_count(target)?,
             Vec::new(),
         )))
@@ -75,7 +75,7 @@ impl SimCounter {
 
     /// Build one that requires `bot.net`.
     fn net_from_target(target: &str) -> Result<Source, BotError> {
-        Ok(Source::new(Self::with_caps(
+        Ok(Source::ordered(Self::with_caps(
             parse_sim_count(target)?,
             vec![Cap::net()],
         )))
