@@ -5,9 +5,11 @@
 //! ```
 //!
 //! `<way>` is `script` (`script!`), `join_all` (`join_all_bounded` with the
-//! retry and deadline written by hand) or `joinset` (a `JoinSet` gated by a
-//! `Semaphore`, the pattern most tokio code reaches for). `<scenario>` is one
-//! of `throughput`, `failfast`, `cancel`, `storm` and `deadline`, specified in
+//! retry and deadline written by hand), `joinset` (a `JoinSet` gated by a
+//! `Semaphore`, the pattern most tokio code reaches for) or `host`
+//! ([`Host::run`] per item, bounded by the host's own admission ceiling).
+//! `<scenario>` is one of `throughput`, `failfast`, `cancel`, `storm` and
+//! `deadline`, specified in
 //! `bench/orchestration/README.md` and shared with the Python, Go and Node
 //! versions beside it. Every way runs the same site model below; only the
 //! orchestration differs. One JSON line is printed; the runner adds peak RSS.
@@ -19,6 +21,7 @@
 
 use std::collections::HashSet;
 use std::io::Write;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -26,7 +29,8 @@ use std::time::{Duration, Instant};
 use lgwks_bot::rt::sync::{CancellationToken, Semaphore};
 use lgwks_bot::rt::task::{JoinSet, join_all_bounded};
 use lgwks_bot::rt::time::{sleep, timeout};
-use lgwks_bot::script::{FlowError, Scope, Tenant};
+use lgwks_bot::script::{FlowError, Scope, Tenant, within};
+use lgwks_bot::task::{Host, task};
 
 /// Which workload runs.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -280,6 +284,91 @@ async fn by_joinset(ctx: Arc<Ctx>, tenant: Arc<str>, items: Vec<u32>) -> Result<
 }
 // END joinset
 
+// BEGIN host
+/// One item's attempt loop, run as a `Host` task body.
+///
+/// A permanent failure cancels the host, so the fan-out stops at the first
+/// failure rather than running every remaining item; a retryable one waits and
+/// tries again.
+async fn host_item(host: Host, ctx: Arc<Ctx>, scope: Scope, item: u32) -> Result<u64, FlowError> {
+    // The same instrument the hand-written ways use, so the live/peak and
+    // latency numbers are comparable across ways.
+    let live = Live::enter(&ctx.probe);
+    // The key the hand-written ways build by hand: `tenant/item`. The item
+    // index is the association, so the key is per item rather than per task.
+    let key = format!("{}/{item}", scope.tenant());
+    let mut attempt: u32 = 1;
+    let value = loop {
+        let outcome = within(
+            &scope,
+            "attempt",
+            ctx.spec.deadline,
+            ctx.attempt(key.clone(), item),
+        )
+        .await;
+        match outcome {
+            Ok(value) => break value,
+            Err(error) => {
+                if !error.is_retryable() || attempt >= ctx.spec.attempts {
+                    host.cancel();
+                    return Err(error);
+                }
+                attempt = attempt.saturating_add(1);
+                sleep(ctx.spec.wait).await;
+            }
+        }
+    };
+    live.finish();
+    Ok(value)
+}
+
+/// `Host::run` per item: the host's own admission ceiling bounds the fan-out,
+/// its default deadline bounds a run, and a permanent failure cancels it.
+///
+/// This is the matched-semantics counterpart of `by_joinset`: the same site
+/// model, the same bound, the same retries, the same per-attempt deadline, the
+/// same stop-on-first-failure and the same cancellation. The difference is that
+/// the bound is the host's admission semaphore rather than one this way built.
+async fn by_host(ctx: Arc<Ctx>, tenant: Arc<str>, items: Vec<u32>) -> Result<u64, FlowError> {
+    let bound = NonZeroUsize::new(ctx.spec.bound)
+        .ok_or_else(|| FlowError::failed("the fan-out bound must be non-zero"))?;
+    let host = Host::builder(&tenant)?
+        .max_concurrent_tasks(bound)
+        .default_deadline(ctx.spec.deadline)
+        .build()
+        .map_err(|error| FlowError::failed(format!("the host could not be built: {error}")))?;
+    let body_ctx = Arc::clone(&ctx);
+    let body_host = host.clone();
+    let item_task = task("item", move |scope: Scope, item: u32| {
+        let ctx = Arc::clone(&body_ctx);
+        let host = body_host.clone();
+        async move { host_item(host, ctx, scope, item).await }
+    })?;
+    let reports =
+        lgwks_std::task::join_all(items.into_iter().map(|item| host.run(&item_task, item))).await;
+    let mut total: u64 = 0;
+    for report in reports {
+        total = total.saturating_add(report.into_result()?);
+    }
+    Ok(total)
+}
+
+/// Run one tenant's items through the host, stopping when `stop` fires.
+///
+/// Local (non-`Send`): `Host::run` polls its body on the calling task, so this
+/// is awaited on the runtime's own task rather than spawned.
+async fn tenant_run_host(
+    ctx: Arc<Ctx>,
+    tenant: Arc<str>,
+    stop: CancellationToken,
+) -> Result<u64, FlowError> {
+    let items: Vec<u32> = (0..ctx.spec.items).collect();
+    stop.run_until_cancelled(by_host(Arc::clone(&ctx), Arc::clone(&tenant), items))
+        .await
+        .unwrap_or_else(|| Err(FlowError::failed("cancelled")))
+}
+// END host
+
 /// Run one tenant's items the chosen way, stopping when `stop` fires.
 ///
 /// Owns its inputs so it can be spawned: every way runs each tenant as its own
@@ -342,6 +431,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let started = Instant::now();
     let way: Arc<str> = Arc::from(way.as_str());
     let outcome: Result<u64, FlowError> = runtime.block_on(async {
+        // The host way is local (non-`Send`), so its tenants are awaited on this
+        // task rather than spawned. The cancellation race is driven by `join!`,
+        // so one tenant's cancel reaches the others through the shared stop.
+        if &*way == "host" {
+            let names: Vec<Arc<str>> = ["acme", "globex"]
+                .iter()
+                .take(usize::try_from(ctx.spec.tenants).unwrap_or(1))
+                .map(|name| Arc::from(*name))
+                .collect();
+            let runs = lgwks_std::task::join_all(
+                names
+                    .iter()
+                    .map(|name| tenant_run_host(Arc::clone(&ctx), Arc::clone(name), stop.clone())),
+            );
+            let cancel = async {
+                if let Some(after) = ctx.spec.cancel_after {
+                    sleep(after).await;
+                    stop.cancel();
+                }
+            };
+            let ((), results) = lgwks_bot::join!(cancel, runs);
+            let mut total: u64 = 0;
+            for outcome in results {
+                total = total.saturating_add(outcome?);
+            }
+            return Ok(total);
+        }
         let mut tenants = JoinSet::new();
         for tenant in ["acme", "globex"]
             .iter()
