@@ -1242,6 +1242,10 @@ impl Supervisor {
     /// opposite and is why the two are distinguishable.
     #[cfg(all(unix, feature = "process"))]
     pub async fn run_process(&mut self, spec: &ProcessSpec) -> Result<ProcessRun, ProcessRunError> {
+        lgwks_std::trace::warn!(
+            operation = "run_process",
+            "operation refused its request; the typed error carries the facts"
+        );
         let Some(permit) = self.claim().await else {
             return Err(ProcessRunError::Refused);
         };

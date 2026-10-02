@@ -210,6 +210,10 @@ impl Process {
     /// established that it did run, so it is [`BotError::EffectIndeterminate`]
     /// and never `Refused`.
     async fn run_once(&self) -> Result<ProcessState, BotError> {
+        lgwks_std::trace::warn!(
+            operation = "run_once",
+            "operation refused its request; the typed error carries the facts"
+        );
         let Ok(_slot) = self.slots.acquire().await else {
             return Err(BotError::DomainError {
                 domain: String::from("sys::process"),
