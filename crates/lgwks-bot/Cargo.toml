@@ -150,3 +150,8 @@ required-features = ["script"]
 name = "inspect_scale"
 path = "examples/inspect_scale.rs"
 required-features = ["inspect", "script"]
+
+[[example]]
+name = "measure_overhead"
+path = "examples/measure_overhead.rs"
+required-features = ["script", "rt", "time", "sync", "process"]

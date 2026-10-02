@@ -8,6 +8,37 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### lgwks_std Added
+
+- `tests/fixtures/wire/consumer_record_v1.hex` is a retained archive that pins
+  an application schema and the effective rkyv format (pointer width 32,
+  little-endian, `u32` alignment 4). `tests/wire_fixture.rs` reads it on every
+  target whose format matches and reproduces it byte for byte, so a format or
+  schema drift is caught on every OS rather than inferred from the host.
+  `tests/wire_feature_unification.rs` builds a separate consumer crate that
+  selects `rkyv/pointer_width_16`, `rkyv/big_endian` and `rkyv/unaligned` and
+  proves `wire::format_descriptor()` and the emitted bytes move with the
+  unified features, and `tests/sim_wire.rs`
+  checks 64 seeded nested values for byte-repeatability, round-trip and refusal
+  of truncated or misaligned archives. (#167)
+- The HTTP body ceiling is measured, not merely asserted (#163).
+  `tests/http_alloc.rs` builds a throwaway consumer crate with a counting global
+  allocator and reports separately the retained body bytes, retained header
+  bytes, the live heap held while a `Response` is alive, the peak heap during a
+  call, and an eager reader's peak. At a 3 003-byte ceiling the retained body is
+  324 bytes and the peak is ~267 KB whether the body is 3 KB or 3 MB, while an
+  eager reader of the same 3 MB reports a 3 MB peak — so the same metric
+  discriminates the mutant the ceiling exists to stop. `tests/sim_http.rs`
+  checks 48 seeded scripts per family against a model: ceiling outcomes at
+  non-power-of-two sizes, a transport torn before its declared length,
+  and two tenants polling one endpoint concurrently without header bleed.
+  `http::tests::the_read_window_is_a_fixed_chunk_and_capacity_is_clamped_to_the_ceiling`
+  records that the body reader is handed one `READ_CHUNK_BYTES` window and that
+  retained capacity clamps to the ceiling. No public behaviour changes; the
+  tests pin INV-STD-HTTP-2.
+- `online::tests::a_whole_probe_fits_one_wall_clock_budget` observes, from
+  outside the injected dial, that one probe's resolved candidates share a single
+  wall-clock budget rather than restarting per address. (#163)
 ### Documentation
 
 - **#155/#170 — documentation claims reconciled to the code at this revision.**
@@ -116,6 +147,11 @@ explicitly under that crate.
   Concurrent verb calls on one `Process` share a bounded slot pool
   (`DEFAULT_MAX_CONCURRENT`, set with `Process::max_concurrent`), claimed
   before the fork, so a burst of calls never forks a burst of children.
+- The `compare_orchestration` example gains a `host` way — `Host::run` per item
+  with the host's admission ceiling as the fan-out bound and matched semantics
+  against the hand-written `JoinSet`+`Semaphore` and `join_all_bounded` ways —
+  and a `measure_overhead` example prints p50/p95/p99 for `Host::run` and
+  `sys::Process`.
 
 ### lgwks_bot Changed
 
@@ -156,6 +192,20 @@ explicitly under that crate.
   the new `stderr`, through the `ProcessState::stdout()`/`stderr()` accessors.
   The state is a report of what the process wrote, so it is read, never edited
   in place.
+
+### Documentation
+
+- The frontier comparisons now cite primary sources with pinned versions and an
+  access date (2026-10-02). `docs/framework-comparison.md` and
+  `docs/async-parity.md` name each external project's release or tag
+  (`spider-rs` v2.52.2, `discord.py` 2.7.1, `serenity` v0.12.5, Stagehand
+  `@browserbasehq/stagehand@3.7.3`, `@crawlee/core` 3.18.2, Scrapy 2.19.0,
+  tokio 1.53.1, tokio-util 0.7.19, async-std 1.13.2, smol 2.0.2, Bevy 0.19.1).
+  Claims a source contradicts are corrected (the `spider-rs` managed-mode and
+  declared-limits quotes, which were `main`'s wording rather than the `v2.52.2`
+  tag's; smol's missing cancellation token) and claims that cannot be sourced are
+  marked *unsourced* rather than deleted (`docs/framework-comparison.md`,
+  `docs/frontier.md`). No code, gate or ledger changes. (#155)
 
 ## [lgwks_std 0.10.0 / lgwks_ast 0.4.0 / lgwks_deps 0.4.0 / lgwks_bot 0.8.0 / lgwks_macros 0.1.2] - 2026-09-30
 

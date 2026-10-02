@@ -4,8 +4,9 @@ This document compares the surface of `lgwks_bot::rt` against the third-party
 runtime crates a consumer would otherwise reach for, measured against their
 current exported surfaces rather than against advertised feature lists.
 
-Status: audited 2026-09-20 for the 0.4.0 release. Three gaps were found and
-closed; four remain open and are named in §4.
+Status: audited 2026-09-20 for the 0.4.0 release; the third-party surface was
+re-pinned on 2026-10-02. Three gaps were found and closed; four remain open and
+are named in §4.
 
 ## 1. Method
 
@@ -21,6 +22,13 @@ and `smol` are listed for shape: both are alternatives a consumer might pick
 instead of the facade entirely, so a capability they have and this does not is a
 reason to leave.
 
+The matrix is pinned to **tokio 1.53.1**, **tokio-util 0.7.19**, **async-std
+1.13.2** and **smol 2.0.2** (published crate versions, accessed 2026-10-02), and
+compares surfaces only — it is not a benchmark. `async-std` is deprecated by its
+own crate metadata in favour of `smol`; it is listed here only as shape. The
+virtual-clock path named in §4 leans on `bevy_time`; Bevy's latest stable release
+at that date is **0.19.1** (`0.20.0-rc.2` is a pre-release).
+
 ## 2. Matrix
 
 | Capability | tokio | async-std | smol | `lgwks_bot::rt` |
@@ -29,10 +37,10 @@ reason to leave.
 | `block_on` | ✅ | ✅ | ✅ | ✅ `rt::runtime::block_on` |
 | Spawn a `Send` task | ✅ | ✅ | ✅ | ❌ **by design** — `Supervisor::spawn`: bounded by an in-flight ceiling and reported, and it returns no handle to drop |
 | Spawn non-`Send` | ✅ `LocalSet` | ✅ `spawn_local` | ✅ | ❌ **by design**, and neither escape route is a workaround: a non-`Send` future is awaited inline, or handed to a **caller-owned single-threaded driver**, not to `join_all_bounded` or `Supervisor::spawn` (both require `Send + 'static`) |
-| Structured task set | ✅ `JoinSet` | ✅ | ✅ | ✅ `rt::task::JoinSet` |
+| Structured task set | ✅ `JoinSet` | ◐ `spawn`/`JoinHandle`, no set type | ◐ `spawn`/`Task`, no set type | ✅ `rt::task::JoinSet` |
 | Off-thread blocking call | ✅ `spawn_blocking` | ✅ | ✅ | ✅ `lgwks_std::task::spawn_blocking` — not in `rt`, and it returns a future for the result rather than a handle |
 | `yield_now` | ✅ | ✅ | ✅ | ✅ |
-| Cancellation token | ✅ `tokio-util` | ❌ | ✅ | ✅ **closed 0.4.0** |
+| Cancellation token | ✅ `tokio-util` | ❌ | ❌ | ✅ **closed 0.4.0** |
 | `sleep`/`timeout`/`interval` | ✅ | ✅ | ✅ | ✅ `rt::time` |
 | Virtual / paused test clock | ✅ `pause`+`advance` | ❌ | ❌ | ❌ **open** |
 | `mpsc`/`oneshot`/`broadcast`/`watch` | ✅ | ✅ | ✅ | ✅ `rt::sync` |
@@ -50,6 +58,15 @@ reason to leave.
 | Task id / introspection | ✅ `task::id` | ❌ | ❌ | ❌ minor |
 | `#[main]` / `#[test]` attribute | ✅ | ✅ | ❌ | ❌ **by design** |
 | `tracing` integration | ✅ feature | ❌ | ❌ | ✅ via `lgwks_std::trace` |
+
+◐ means the capability is present only in the weaker shape named. `async-std`
+and `smol` return a spawned, awaitable handle (`task::spawn`; `Task`) but export
+no `JoinSet` that owns and aborts the whole set, so their "structured task set"
+cells are not full matches (`docs.rs/async-std/1.13.2`,
+`docs.rs/smol/2.0.2`). `smol`'s public modules at 2.0.2 are `channel`, `fs`,
+`future`, `io`, `lock`, `net`, `process` and `stream` — no cancellation token —
+so its `CancellationToken` cell was corrected from ✅ to ❌; only `tokio-util`
+ships one.
 
 ## 3. The capabilities that were closed, and why each mattered
 

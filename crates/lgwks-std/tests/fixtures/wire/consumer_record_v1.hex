@@ -1,0 +1,18 @@
+# lgwks_std wire retained fixture — schema and format pinned for cross-target reading.
+# Format (rkyv 0.8.18, lgwks_std `wire` feature, default format controls):
+#   pointer_width_32, little_endian, aligned (archived u32 alignment 4 bytes).
+# Schema (application-owned, not carried by rkyv):
+#   ConsumerRecordV1 {
+#     name: String,
+#     indices: Vec<usize>,
+#     signed_index: isize,
+#     fields: BTreeMap<String, u32>,
+#     child: Option<Box<ConsumerChildV1 { value: u64 }>>,
+#   }
+# Value:
+#   name = "consumer fixture"
+#   indices = [3, 5, 8]
+#   signed_index = -13
+#   fields = { "height": 200, "width": 100 }
+#   child = Some(ConsumerChildV1 { value: 42 })
+636f6e73756d6572206669787475726503000000050000000800000000000000686569676874ffff7769647468ffffff000000000000000000000000000000000000000000000000c800000064000000000000000000000000000000020000002a000000000000009000000098ffffffa0ffffff03000000f3ffffffa0ffffff0200000001000000d8ffffff

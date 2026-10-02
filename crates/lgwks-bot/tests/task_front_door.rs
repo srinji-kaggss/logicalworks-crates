@@ -24,15 +24,17 @@
 
 #![cfg(feature = "script")]
 
+// The shared live/peak load body, so this target and `sim_task_axes` measure the
+// same instrument.
+#[path = "support/load.rs"]
+mod load;
+
 use std::cell::{Cell, RefCell};
 use std::error::Error;
-use std::future::Future;
 use std::num::NonZeroUsize;
-use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use lgwks_bot::script::{FlowError, Scope, Tenant, each, within};
@@ -52,21 +54,7 @@ fn bounded_host(tenant: &str, tasks: usize) -> Result<Host, Box<dyn Error>> {
     Ok(Host::builder(tenant)?.max_concurrent_tasks(limit).build()?)
 }
 
-/// Drive one future to completion on a fresh current-thread runtime.
-fn drive<T>(future: impl Future<Output = T>) -> T {
-    lgwks_bot::block_on(future)
-}
-
-/// Poll `future` once and report whether it is still pending.
-///
-/// Used to park a run inside its body without awaiting it to completion. One
-/// helper rather than the same `poll_fn` closure written at four call sites,
-/// because a body that must park is the shape of three of these rows.
-fn pending_once<F: Future>(mut future: Pin<&mut F>) -> bool {
-    drive(std::future::poll_fn(|context| {
-        Poll::Ready(future.as_mut().poll(context).is_pending())
-    }))
-}
+use load::{drive, pending_once};
 
 /// A task behind a reference count, so a body can call one task from another.
 ///
@@ -662,69 +650,23 @@ fn a_thousand_concurrent_runs_stay_under_the_ceiling() -> TestResult {
     let host = bounded_host("acme", CEILING)?;
     let live = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
-    // The body takes its own handles per call, so the outer bindings stay
-    // readable afterwards for the assertions below.
-    let body_live = Arc::clone(&live);
-    let body_peak = Arc::clone(&peak);
-
-    let work = task("tick", move |_scope: Scope, value: usize| {
-        let live = Arc::clone(&body_live);
-        let peak = Arc::clone(&body_peak);
-        async move {
-            let now = live.fetch_add(1, Ordering::Relaxed).saturating_add(1);
-            let _previous = peak.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |high| {
-                (now > high).then_some(now)
-            });
-            // Yield, so the runs genuinely overlap rather than completing one
-            // at a time inside the first poll.
-            for _ in 0..4 {
-                lgwks_bot::rt::task::yield_now().await;
-            }
-            let _previous = live.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                count.checked_sub(1)
-            });
-            Ok(value)
-        }
-    })?;
+    // The shared instrument clones the handles per call, so the outer bindings
+    // stay readable afterwards for the assertions below. Four yields, so the
+    // runs genuinely overlap rather than completing inside the first poll.
+    let work = load::ticking_task!(live, peak, 4)?;
 
     let reports: Vec<Report<usize>> = drive(lgwks_std::task::join_all(
         (0..RUNS).map(|index| host.run(&work, index)),
     ));
     assert_eq!(reports.len(), RUNS, "every run produced a report");
-    for (index, report) in reports.iter().enumerate() {
-        assert_eq!(
-            report.disposition(),
-            Disposition::Succeeded,
-            "run {index} completed: {:?}",
-            report.error()
-        );
-        assert_eq!(
-            report.output().copied(),
-            Some(index),
-            "run {index} kept its own output; association is by input order"
-        );
-    }
+    load::assert_runs_succeeded(&reports, "the thousand runs");
 
     let observed_peak = peak.load(Ordering::Relaxed);
-    assert!(
-        observed_peak <= CEILING,
-        "the bodies observed {observed_peak} concurrent, over the ceiling {CEILING}"
-    );
     assert!(
         observed_peak > 1,
         "the runs must have overlapped; the peak was {observed_peak}"
     );
-    assert_eq!(
-        host.admission().peak_in_flight(),
-        observed_peak,
-        "the host's own high-water mark agrees with what the bodies saw"
-    );
-    assert_eq!(
-        host.admission().available_permits(),
-        CEILING,
-        "every permit came back"
-    );
-    assert_eq!(host.admission().in_flight(), 0, "nothing is left in flight");
+    load::assert_admission_conserved(&host, observed_peak, CEILING, "the thousand runs");
     assert_eq!(
         live.load(Ordering::Relaxed),
         0,
