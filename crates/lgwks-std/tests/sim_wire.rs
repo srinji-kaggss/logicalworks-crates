@@ -6,6 +6,8 @@
 //! regression replays identically.
 #![forbid(unsafe_code)]
 
+#[path = "support/rng.rs"]
+mod rng;
 #[path = "support/wire_record.rs"]
 mod wire_record;
 
@@ -15,34 +17,8 @@ mod sim {
 
     use lgwks_std::wire::{WireError, access, from_bytes, to_bytes};
 
+    use crate::rng::Rng;
     use crate::wire_record::{ArchivedConsumerRecord, ConsumerChild, ConsumerRecord};
-
-    /// A deterministic xorshift64* generator: one seed, one stream.
-    struct Rng(u64);
-
-    impl Rng {
-        fn new(seed: u64) -> Self {
-            // Avoid the all-zero fixed point.
-            Self(seed ^ 0x9e37_79b9_7f4a_7c15)
-        }
-
-        fn next(&mut self) -> u64 {
-            let mut state = self.0;
-            state ^= state >> 12;
-            state ^= state << 25;
-            state ^= state >> 27;
-            self.0 = state;
-            state.wrapping_mul(0x2545_f491_4f6c_dd1d)
-        }
-
-        fn below(&mut self, bound: usize) -> usize {
-            let bound = u64::try_from(bound).unwrap_or(u64::MAX);
-            if bound == 0 {
-                return 0;
-            }
-            usize::try_from(self.next().checked_rem(bound).unwrap_or(0)).unwrap_or(0)
-        }
-    }
 
     /// A lowercase letter drawn from the generator.
     fn letter(rng: &mut Rng) -> char {

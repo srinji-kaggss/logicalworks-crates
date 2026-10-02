@@ -164,6 +164,21 @@ Each of these was a shipped defect. Treat the list as the spec.
   `http::tests::eof_probe_timeout_preserves_stage_and_class`,
   `http::tests::legal_header_bytes_and_repeated_values_are_preserved`, and
   `http::tests::redirect_loop_refuses_at_the_configured_limit`
+- **INV-STD-HTTP-2** The HTTP body ceiling is a measured bound, not an
+  assertion. The body reader is handed one window of `min(remaining,
+  READ_CHUNK_BYTES)` per call, never the declared body length; retained `Vec`
+  capacity clamps to the declared ceiling at non-power-of-two sizes; retained
+  header value bytes and the live heap held while a `Response` is alive are
+  countable separately; the peak heap of a call is dominated by the engine's
+  fixed buffering rather than by the body, so a preview of a body thousands of
+  times the ceiling peaks within a fixed slack of a call whose body is at the
+  ceiling; and an eager reader that reserves the declared length and drains the
+  transport is measurably outside that bound. · why: #163 A5 · enforced by:
+  `http::tests::the_read_window_is_a_fixed_chunk_and_capacity_is_clamped_to_the_ceiling`,
+  `tests/sim_http.rs` (`seeded_ceiling_families_match_the_declared_outcome`,
+  `a_seeded_torn_transport_is_never_a_complete_body`,
+  `two_tenants_on_one_endpoint_stay_isolated`), and `tests/http_alloc.rs`
+  (`the_read_path_retains_the_ceiling_not_the_body`).
 - **INV-STD-ONLINE-1** Resolved reachability candidates share one monotonic
   connection budget and at most 64 addresses are attempted; each is offered an
   equal share of what remains, so a blackholed candidate cannot starve the
