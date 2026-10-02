@@ -212,6 +212,12 @@ explicitly under that crate.
   fault-injection and liveness instrument whose held gate parks every append on
   that journal by design, opened only through `open_with_stalled_storage`, never
   by `open` (#122 item 2).
+- The registry-identifier invariant and the ambiguous-append invariant were
+  renumbered `INV-BOT-21`/`INV-BOT-22` to `INV-BOT-46`/`INV-BOT-47`, because
+  `INV-BOT-21` (structural inspection) and `INV-BOT-70` (task front door) were
+  already taken on `main`. Only the identifiers moved; both invariants' `enforced
+  by` references still resolve, and `main`'s `INV-BOT-21` is unchanged (#122,
+  #118).
 
 ### lgwks_bot Breaking
 
