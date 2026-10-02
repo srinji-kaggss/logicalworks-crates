@@ -330,6 +330,193 @@ fn calendar_roundtrips_endpoints_neighbors_and_overflow_transition() {
     );
 }
 
+#[test]
+/// Asserts the exact repaired values #153 T5 names at both signed endpoints.
+///
+/// The comment's arithmetic model reported `i64::MAX` mapping to
+/// `(25252734927768524, 7, 27)` and returning `9223372036854056339` — an error
+/// of `-719468` days caused by saturating before the epoch subtraction. These
+/// are the repaired-SHA Rust results that item asks to be attached.
+fn t5_endpoints_are_exact_under_the_repaired_narrowing() {
+    // Upper endpoint: the civil date and its exact inverse.
+    let (year, month, day) = civil_from_days(i64::MAX);
+    assert_eq!(
+        (year, month, day),
+        (25_252_734_927_768_524, 7, 27),
+        "the civil date at i64::MAX is fixed by the proleptic Gregorian calendar"
+    );
+    assert_eq!(
+        days_from_civil(year, month, day),
+        i64::MAX,
+        "the upper endpoint must round-trip exactly, not 719468 days short"
+    );
+
+    // The endpoint's immediate neighbour must not collapse onto it, which is
+    // exactly what the saturated model lost.
+    let (neighbour_year, neighbour_month, neighbour_day) = civil_from_days(i64::MAX - 1);
+    assert_eq!(
+        (neighbour_year, neighbour_month, neighbour_day),
+        (25_252_734_927_768_524, 7, 26),
+        "i64::MAX-1 is the preceding day of the same month"
+    );
+    assert_eq!(
+        days_from_civil(neighbour_year, neighbour_month, neighbour_day),
+        i64::MAX - 1,
+        "the neighbour must round-trip to its own value, not saturate to i64::MAX"
+    );
+
+    // Lower endpoint and its neighbour.
+    let (min_year, min_month, min_day) = civil_from_days(i64::MIN);
+    assert_eq!(
+        days_from_civil(min_year, min_month, min_day),
+        i64::MIN,
+        "the lower endpoint must round-trip exactly"
+    );
+    let (below_year, below_month, below_day) = civil_from_days(i64::MIN + 1);
+    assert_eq!(
+        days_from_civil(below_year, below_month, below_day),
+        i64::MIN + 1,
+        "the lower neighbour must round-trip to its own value"
+    );
+
+    // Representative Gregorian-era and leap-day boundaries, against the
+    // independent wide reference, both directions.
+    for days in [
+        0_i64,
+        1,
+        -1,
+        -719_468,
+        -719_469,
+        719_468,
+        146_096,
+        146_097,
+        365_242,
+        i64::MIN.checked_div_euclid(2).unwrap_or(i64::MIN),
+        i64::MAX.checked_div_euclid(2).unwrap_or(i64::MAX),
+    ] {
+        let (year, month, day) = civil_from_days(days);
+        assert_eq!(
+            reference_days_from_civil(year, month, day),
+            i128::from(days),
+            "the wide reference must agree at day {days}"
+        );
+        assert_eq!(
+            days_from_civil(year, month, day),
+            days,
+            "the public inverse must round-trip day {days}"
+        );
+    }
+}
+
+#[test]
+/// Checks the overflow-transition region against the wide reference.
+///
+/// Every value in a window around the point where the complete day count
+/// leaves `i64` must either round-trip exactly or saturate to the declared
+/// endpoint, and the declared endpoint must be the one reached.
+fn t5_overflow_transition_region_is_exact_or_declared_saturated() {
+    let boundary = i64::MAX;
+    for offset in 0_i64..16 {
+        let days = boundary.saturating_sub(offset);
+        let (year, month, day) = civil_from_days(days);
+        assert_eq!(
+            days_from_civil(year, month, day),
+            days,
+            "inside the representable domain, day {days} must round-trip exactly"
+        );
+        let reference = reference_days_from_civil(year, month, day);
+        assert_eq!(
+            reference,
+            i128::from(days),
+            "the wide reference must agree at day {days}"
+        );
+    }
+
+    // Beyond the endpoint the mathematical count is out of range, and only the
+    // final narrowing may saturate — upwards, to exactly i64::MAX.
+    for step in 1_i64..8 {
+        let (year, month, day) = next_date(
+            25_252_734_927_768_524,
+            7,
+            27_u32.saturating_add(u32::try_from(step).unwrap_or(1)),
+        );
+        let mathematical = reference_days_from_civil(year, month, day);
+        assert!(
+            mathematical > i128::from(boundary),
+            "the probe date {year}-{month}-{day} must be beyond i64::MAX, got {mathematical}"
+        );
+        assert_eq!(
+            days_from_civil(year, month, day),
+            boundary,
+            "only the final narrowing may saturate, and only upwards"
+        );
+    }
+
+    // The same on the lower side.
+    let (min_year, min_month, min_day) = civil_from_days(i64::MIN);
+    let (prior_year, prior_month, prior_day) = previous_date(min_year, min_month, min_day);
+    assert!(
+        reference_days_from_civil(prior_year, prior_month, prior_day) < i128::from(i64::MIN),
+        "the prior civil date must be below i64::MIN"
+    );
+    assert_eq!(
+        days_from_civil(prior_year, prior_month, prior_day),
+        i64::MIN,
+        "only the final narrowing may saturate, and only downwards"
+    );
+}
+
+#[test]
+/// Exercises representative Gregorian-era and leap-day civil boundaries.
+fn t5_gregorian_and_leap_day_boundaries_match_the_wide_reference() {
+    for (year, month, day) in [
+        (0_i64, 1_u32, 1_u32),
+        (0, 2, 29),
+        (1, 2, 28),
+        (4, 2, 29),
+        (100, 3, 1),
+        (400, 2, 29),
+        (1582, 10, 15),
+        (1600, 2, 29),
+        (1700, 3, 1),
+        (1900, 3, 1),
+        (1970, 1, 1),
+        (2000, 2, 29),
+        (9999, 12, 31),
+        (10_000, 1, 1),
+        (-1, 12, 31),
+        (-4, 2, 29),
+        (-100, 3, 1),
+        (-400, 2, 29),
+        (-401, 2, 28),
+    ] {
+        let expected = reference_days_from_civil(year, month, day);
+        let observed = days_from_civil(year, month, day);
+        // Every year here is inside the `i64` day domain except the largest
+        // positive one, so the assertion states which case it is rather than
+        // assuming.
+        if expected >= i128::from(i64::MIN) && expected <= i128::from(i64::MAX) {
+            assert_eq!(
+                i128::from(observed),
+                expected,
+                "the wide reference must verify Gregorian boundary {year}-{month}-{day}"
+            );
+            let (round_trip_year, round_trip_month, round_trip_day) = civil_from_days(observed);
+            assert_eq!(
+                (round_trip_year, round_trip_month, round_trip_day),
+                (year, month, day),
+                "{year}-{month}-{day} must round-trip through the public inverse"
+            );
+        } else {
+            assert_eq!(
+                observed,
+                i64::MAX,
+                "a day count beyond i64::MAX must saturate to the declared endpoint"
+            );
+        }
+    }
+}
+
 /// Runs seeded day and civil-date samples and returns their deterministic trace.
 fn run_seeded_calendar_samples(seed: u64) -> u64 {
     let mut state = seed;
