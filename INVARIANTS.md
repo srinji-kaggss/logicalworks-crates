@@ -365,9 +365,12 @@ Each of these was a shipped defect. Treat the list as the spec.
   process-group cleanup receipt; a refusal before the fork (`Refused`,
   `NotStarted`) is distinguishable from a failure after it (`AfterStart`); and
   an exit of zero is reported as an exit of zero, never as a completed task.
+  Concurrent verb calls on one `sys::Process` share one bounded slot pool,
+  claimed before the fork, so a burst of calls never forks past the ceiling.
   · why: #151 sys part, T05/T19/T20/T35 · enforced by:
-  `tests/sys_process_binding.rs`, `tests/sim_process.rs`, and
-  `rt::supervise::tests`
+  `tests/sys_process_binding.rs` (including
+  `concurrent_calls_on_one_process_share_its_ceiling`), `tests/sim_process.rs`,
+  and `rt::supervise::tests`
 - **INV-BOT-19** After a delivered group signal, an `EPERM` from a further
   `killpg` against the still-present, unreaped group is an observation that the
   group is present, not a refused termination: cleanup stays pending and is
