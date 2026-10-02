@@ -1082,17 +1082,18 @@ impl CheckedSimilarity for Geometry {
 ///   takes `Box<dyn CheckedSimilarity<Value = Value> + Send + Sync>`.
 /// - Every scorer shipped here is `Copy` with no interior mutability, so the
 ///   bounds are satisfied without a lock.
-/// - [`CheckedSimilarity`] requires [`Clone`], because a composition is
-///   clonable and a clone is how a second tenant gets its own policy.
+/// - [`CheckedSimilarity::Value`] being [`Sync`] is what lets a caller hold a
+///   `&str` or a `&[f32]` across the concurrent calls it shares.
 ///
 /// A caller whose own scorer is not `Sync` still composes: the trait carries
 /// the bound, so such a scorer cannot be installed rather than silently
 /// producing a policy that is `Sync` on the outside and racy inside.
 ///
-/// [`Clone`] is derived rather than hand-written, and that is what makes a
-/// *second* tenant possible: a caller holding one composition clones it per
-/// tenant, so each tenant's policy is a distinct value even when two were
-/// built from the same scorers.
+/// The per-tenant route is to build one composition per tenant rather than to
+/// share one. Two [`CheckedEvidence`] values built from the same scorer type are
+/// already two independent configurations, and that is the shape
+/// `tests/sim_tenant_isolation.rs` drives across three tenants at every
+/// concurrency tier.
 ///
 /// [`verdict`]: CheckedEvidence::verdict
 ///
@@ -1110,11 +1111,13 @@ impl CheckedSimilarity for Geometry {
 /// assert_eq!(verdict.score(), None);
 /// assert_eq!(verdict.refusals()[0].index(), 0);
 /// // One policy, shared: the bound that makes it shareable is part of the API.
-/// fn spawn<T: Sync>(value: &T) -> &'static T {
-///     Box::leak(Box::new(value))
+/// fn shared<T: Sync>(value: T) -> std::sync::Arc<T> {
+///     std::sync::Arc::new(value)
 /// }
-/// let shared = spawn(&policy);
-/// assert!(shared.verdict("kitten", "kitten")?.is_accepted());
+/// let shared = shared(policy);
+/// /// // Within the three-character budget, so the same policy measures rather than
+/// // refuses, and one `Arc` hands the identical value to any number of callers.
+/// assert!(shared.verdict("cat", "cat")?.is_accepted());
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub struct CheckedEvidence<Value: ?Sized> {
