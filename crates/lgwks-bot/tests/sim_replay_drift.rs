@@ -64,7 +64,9 @@ use shared::{ran, record_run};
 
 use lgwks_bot::effect::InputIdentity;
 use lgwks_bot::script::{FlowError, Scope, remember};
-use lgwks_bot::task::{DefinitionIdentity, Disposition, Host, RunStore, Task, task};
+use lgwks_bot::task::{
+    DefinitionIdentity, Disposition, Drift, Host, RunStore, StoreError, Task, task,
+};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -410,41 +412,82 @@ fn attempt(
     })
 }
 
-/// The axis a refusal named, read off the crate's own rendering of it.
+/// The typed `Drift` a refusal carries, or `None` for any other error.
 ///
-/// `Display` rather than a pattern match on the payload, for two reasons and
-/// neither is convenience. The workspace forbids `pattern_type_mismatch` and the
-/// implicit binding it would otherwise need, so every way of reaching a
-/// non-`Copy` field out of a borrowed enum is a lint error in one direction or the
-/// other; and `Drift`'s own rendering is the crate's statement of what each axis
-/// *is*, so asserting against it checks the vocabulary a reader actually sees.
-///
-/// A refusal that named no axis renders none of the four words, so a check that
-/// had collapsed into one generic refusal returns `None` here — which is the
-/// failure the row exists to catch.
-fn drift_axis(error: &FlowError) -> Option<&'static str> {
-    if !matches!(error, FlowError::Incompatible { .. }) {
-        return None;
+/// The exact variant, cloned out of the refusal, so a caller asserts against the
+/// crate's own vocabulary rather than against a rendering of it. `match *error`
+/// with a `ref` binding is the spelling the workspace's `pattern_type_mismatch`
+/// rule requires: matching a `&FlowError` with an owned pattern is a lint error,
+/// and the clone is the one the clone-free rule permits because the value has to
+/// leave the borrow to be compared by value.
+fn drift_of(error: &FlowError) -> Option<Drift> {
+    match *error {
+        FlowError::Incompatible { ref drift, .. } => Some(drift.clone()),
+        _ => None,
     }
-    // Each `Drift` rendering opens with its own clause, so matching the opening
-    // phrase identifies the arm rather than merely finding the word somewhere in
-    // a sentence that mentions another axis — which is what a `contains` over the
-    // whole message did, and it reported `definition` for an order drift.
-    let rendered = error.to_string();
-    let phrases: [(&'static str, &str); 4] = [
-        ("definition", "the definition revision is"),
-        ("input", "the input is"),
-        ("order", "the definition declares"),
-        ("schema", "the durable-value schema is"),
-    ];
-    let mut found = None;
-    for (axis, phrase) in phrases {
-        if rendered.contains(phrase) {
-            found = Some(axis);
-            break;
+}
+
+/// The axis a refusal named, as its stable tag, read from the typed drift.
+///
+/// [`Drift::kind`] rather than the `Display` text: the tag is the crate's own
+/// statement of which axis moved, and a check that read a rendered sentence could
+/// pass on a message that merely mentioned another axis's word — which a
+/// `contains` over the whole message once did, reporting `definition` for an
+/// order drift. A refusal that named no axis renders no tag, so a check that had
+/// collapsed into one generic refusal is `None` here, which is the failure the
+/// drift families exist to catch.
+fn drift_axis(error: &FlowError) -> Option<&'static str> {
+    drift_of(error).as_ref().map(Drift::kind)
+}
+
+/// Assert `drift` is `kind`'s axis *and* carries the two values that axis moved.
+///
+/// The axis tag alone is satisfied by a refusal that names the right axis with
+/// the wrong numbers, so each arm destructures the typed `Drift` and compares
+/// both payload fields against the values this scenario declared. The `match` is
+/// over an owned `Drift`, which is what lets the `String` field of the schema arm
+/// be read without a borrowed-pattern lint.
+///
+/// # Errors
+///
+/// When the refusal carries a different axis, or the same axis with different
+/// values, or when `kind` is the control that must not have been refused at all.
+fn assert_exact_drift(
+    tenant: &str,
+    kind: DriftKind,
+    drift: Drift,
+    recorded_input: lgwks_std::hash::Digest,
+) -> TestResult {
+    match (kind, drift) {
+        (DriftKind::Revision, Drift::Definition { declared, recorded }) => assert_eq!(
+            (declared, recorded),
+            (FIRST_REVISION.saturating_add(1), FIRST_REVISION),
+            "{tenant}: the definition axis must name both revisions"
+        ),
+        (DriftKind::Input, Drift::Input { named, recorded }) => assert_eq!(
+            (named, recorded),
+            (input_digest_value(u32::MAX), recorded_input),
+            "{tenant}: the input axis must name both input digests"
+        ),
+        (DriftKind::Order, Drift::Order { declared, recorded }) => assert_eq!(
+            (declared, recorded),
+            (STEPS.saturating_add(1), STEPS),
+            "{tenant}: the order axis must name both durable-step counts"
+        ),
+        (DriftKind::Schema, Drift::Schema { named, recorded }) => assert_eq!(
+            (named.as_str(), recorded.as_str()),
+            (SECOND_CODEC, FIRST_CODEC),
+            "{tenant}: the schema axis must name both schema ids"
+        ),
+        (kind, other) => {
+            return Err(format!(
+                "{tenant}/{}: refused with the wrong typed drift: {other:?}",
+                kind.tag()
+            )
+            .into());
         }
     }
-    found
+    Ok(())
 }
 
 // ── The families ───────────────────────────────────────────────────────────
@@ -660,6 +703,69 @@ fn every_axis_is_distinguishable(band: sim::Band) -> TestResult {
     sim::assert_replays(band, body)
 }
 
+/// Each axis is refused with its exact typed `Drift`, payloads included.
+///
+/// The typed half of T15 and R2. [`drift_axis`] checks *which* axis a refusal
+/// named; this family checks *what it said*, by requiring
+/// [`FlowError::Incompatible`] and destructuring the `Drift` down to the two
+/// values the axis moved. A refusal that reported the right axis word while
+/// carrying another run's revision, another input's digest, another flow's step
+/// count or another codec id would satisfy an axis-only check and fail here,
+/// which is what makes the payload part of the claim rather than decoration.
+///
+/// Every attempt goes through `Host::resume_under` over a **reopened** file
+/// store — the first host is dropped and the resume is on a fresh handle over the
+/// same bytes — so the typed refusal is the one a restart meets, not one a warm
+/// in-memory index could have answered.
+fn every_axis_is_refused_with_its_exact_drift(band: sim::Band) -> TestResult {
+    let body = |sim: &mut sim::Sim| -> TestResult {
+        for tenant in TENANTS {
+            let dir = Scratch(sim.scratch("exact")?);
+            let host = host_for(tenant, &dir.0)?;
+            let work = drift_task()?;
+            let first = first_identity(&host, FIRST_INPUT, FIRST_CODEC)?;
+            let recorded_input = first.input();
+            let job = Job {
+                input: FIRST_INPUT,
+                dir: dir.0.clone(),
+            };
+            let initial = lgwks_bot::block_on(host.run_under(&first, &work, job.clone()));
+            assert_eq!(
+                initial.disposition(),
+                Disposition::Succeeded,
+                "{tenant}: the first attempt must succeed before it can be drifted"
+            );
+            let run = initial
+                .run_id()
+                .ok_or("a stored run must name its run id")?;
+            drop(initial);
+            drop(host);
+
+            let reopened = host_for(tenant, &dir.0)?;
+            for kind in DriftKind::DRIFTED {
+                let drifted = kind.declare(&first);
+                let resumed =
+                    lgwks_bot::block_on(reopened.resume_under(run, &drifted, &work, job.clone()));
+                let error = resumed.error().ok_or_else(|| -> Box<dyn Error> {
+                    format!("{tenant}/{}: a drifted resume must be refused", kind.tag()).into()
+                })?;
+                let drift = drift_of(error).ok_or_else(|| -> Box<dyn Error> {
+                    format!(
+                        "{tenant}/{}: the refusal must be FlowError::Incompatible",
+                        kind.tag()
+                    )
+                    .into()
+                })?;
+                sim.record(&format!("{tenant}:{}", kind.tag()));
+                sim.trace.record_u64("axis", axis_id(drift.kind()));
+                assert_exact_drift(tenant, kind, drift, recorded_input)?;
+            }
+        }
+        Ok(())
+    };
+    sim::assert_replays(band, body)
+}
+
 /// A refused resume leaves the store byte-identical.
 ///
 /// The device half of "before any new effect": a typed refusal that wrote a
@@ -823,6 +929,113 @@ fn a_pre_version_store_is_refused_naming_both_versions(band: sim::Band) -> TestR
     sim::assert_replays(band, body)
 }
 
+/// A store that cannot be read is refused as itself, never as a drift.
+///
+/// The seed draws whether the read fault is armed at all, so the sweep carries the
+/// control beside the fault rather than only the fault. That matters here more
+/// than in most families: the property INV-BOT-7 names — a read failure reaches the
+/// caller as itself — is only meaningful against a store that would otherwise have
+/// succeeded, and a sweep of nothing but refusals would be satisfied by a store
+/// that refuses everything.
+///
+/// Every armed arm must agree on two things. The refusal is never
+/// [`FlowError::Incompatible`], which is the defect this family exists to catch:
+/// the old check turned a device error into `false` and then rendered that as a
+/// claim about a definition. And the step's body was never constructed, because a
+/// store that cannot say whether it holds a record must not run the work as though
+/// it held none.
+fn an_unreadable_store_is_refused_as_itself(band: sim::Band) -> TestResult {
+    let body = |sim: &mut sim::Sim| -> TestResult {
+        for tenant in TENANTS {
+            let input = sim.rng().below(64);
+            // Drawn before anything else, so the trace's first fact is the one that
+            // selects the scenario rather than a value derived later.
+            let armed = sim.rng().chance(500);
+            let dir = Scratch(sim.scratch("read-failure")?);
+
+            let host = host_for(tenant, &dir.0)?;
+            let work = drift_task()?;
+            let identity = first_identity(&host, input, FIRST_CODEC)?;
+            let job = Job {
+                input,
+                dir: dir.0.clone(),
+            };
+            let first = lgwks_bot::block_on(host.run_under(&identity, &work, job.clone()));
+            assert_eq!(
+                first.disposition(),
+                Disposition::Succeeded,
+                "{tenant}: the first attempt must succeed before a read can fail"
+            );
+            let run = first.run_id().ok_or("a stored run must name its run id")?;
+            drop(first);
+            drop(host);
+
+            // A fresh handle over a fresh replay of the file, so the resume below is
+            // a restart rather than a map the first attempt left warm.
+            let reopened = host_for(tenant, &dir.0)?;
+            if armed {
+                reopened
+                    .run_store()
+                    .ok_or("a stored host keeps a store")?
+                    .fail_next_index_read();
+            }
+
+            let before = constructions();
+            let refused = lgwks_bot::block_on(reopened.resume_under(run, &identity, &work, job));
+
+            if armed {
+                let error = refused.error().ok_or_else(|| -> Box<dyn Error> {
+                    format!("{tenant}: a store that cannot be read must not succeed").into()
+                })?;
+                assert!(
+                    !matches!(error, FlowError::Incompatible { .. }),
+                    "{tenant}: a read failure must not be reported as a definition drift, got: \
+                     {error}"
+                );
+                // The typed half of INV-BOT-7: the refusal is the store's own,
+                // reached by its variant and its wrapped kind, not by reading the
+                // rendered text. A rendering that merely mentioned a device would
+                // satisfy a `contains` while the payload was another arm.
+                let refusal = shared::store_refusal(error).ok_or_else(|| -> Box<dyn Error> {
+                    format!("{tenant}: a read failure must reach the caller as FlowError::Store")
+                        .into()
+                })?;
+                assert!(
+                    matches!(refusal, StoreError::Storage { .. }),
+                    "{tenant}: the wrapped refusal must be the device's own storage error, got: \
+                     {refusal:?}"
+                );
+                assert_eq!(
+                    constructions().saturating_sub(before),
+                    0,
+                    "{tenant}: a refused step constructed its body, so the fault did not stop it"
+                );
+            } else {
+                assert_eq!(
+                    refused.disposition(),
+                    Disposition::Succeeded,
+                    "{tenant}: the control arm must replay, got: {:?}",
+                    refused.error()
+                );
+                assert_eq!(
+                    constructions().saturating_sub(before),
+                    0,
+                    "{tenant}: the control arm re-ran a durable step"
+                );
+            }
+
+            sim.record(tenant);
+            sim.trace.record_u64("armed", u64::from(armed));
+            sim.trace.record_u64(
+                "disposition",
+                shared::disposition_code(refused.disposition()),
+            );
+        }
+        Ok(())
+    };
+    sim::assert_replays(band, body)
+}
+
 /// The same seed produces the same trace, and a different seed a different one.
 ///
 /// The replay receipt, asserted directly as well as through
@@ -886,6 +1099,10 @@ band_family::band_family! {
     a_refusal_leaves_the_store_byte_identical_band_13 => a_refusal_leaves_the_store_byte_identical, 13;
     a_pre_version_store_is_refused_naming_both_versions_band_16 => a_pre_version_store_is_refused_naming_both_versions, 16;
     a_pre_version_store_is_refused_naming_both_versions_band_17 => a_pre_version_store_is_refused_naming_both_versions, 17;
+    an_unreadable_store_is_refused_as_itself_band_18 => an_unreadable_store_is_refused_as_itself, 18;
+    an_unreadable_store_is_refused_as_itself_band_19 => an_unreadable_store_is_refused_as_itself, 19;
+    every_axis_is_refused_with_its_exact_drift_band_20 => every_axis_is_refused_with_its_exact_drift, 20;
+    every_axis_is_refused_with_its_exact_drift_band_21 => every_axis_is_refused_with_its_exact_drift, 21;
     same_seed_same_trace_hash_band_14 => same_seed_same_trace_hash, 14;
     same_seed_same_trace_hash_band_15 => same_seed_same_trace_hash, 15;
 }

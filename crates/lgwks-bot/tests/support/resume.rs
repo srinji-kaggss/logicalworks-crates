@@ -49,23 +49,19 @@ pub type BodyFuture = Pin<Box<dyn Future<Output = Result<u32, FlowError>>>>;
 #[cfg(feature = "script")]
 pub type OneStep = Task<fn(Scope, u32) -> BodyFuture>;
 
-/// A task whose whole body is one `remember` call over a caller-chosen value.
-///
-/// One task rather than one per test, because the durable claim is about the
-/// `remember` and not about the body around it, and two differently-shaped bodies
-/// would be two different things being measured.
-#[cfg(feature = "script")]
 /// The marker file naming one step's body.
 ///
 /// A file rather than an in-memory counter because the claims these support are
 /// about a body that was *not* polled, and a counter in the process that would
 /// have polled it is a claim about nothing. The file also survives the reopen a
 /// resume performs, which is the whole of the observation.
+#[cfg(feature = "script")]
 pub fn marker(dir: &Path, step: &str) -> PathBuf {
     dir.join(format!("{step}.ran"))
 }
 
 /// How many times a step's body has run, as the filesystem records it.
+#[cfg(feature = "script")]
 pub fn ran(dir: &Path, step: &str) -> Result<u32, Box<dyn Error>> {
     match std::fs::read_to_string(marker(dir, step)) {
         Ok(text) => Ok(text.trim().parse::<u32>().unwrap_or_default()),
@@ -75,11 +71,18 @@ pub fn ran(dir: &Path, step: &str) -> Result<u32, Box<dyn Error>> {
 }
 
 /// Append one to a step's marker. The file is the count, so it survives the kill.
+#[cfg(feature = "script")]
 pub fn record_run(dir: &Path, step: &str) -> Result<(), FlowError> {
     let next = ran(dir, step).map_err(FlowError::failed)?.saturating_add(1);
     std::fs::write(marker(dir, step), next.to_string()).map_err(FlowError::failed)
 }
 
+/// A task whose whole body is one `remember` call over a caller-chosen value.
+///
+/// One task rather than one per test, because the durable claim is about the
+/// `remember` and not about the body around it, and two differently-shaped bodies
+/// would be two different things being measured.
+#[cfg(feature = "script")]
 pub fn one_step_task() -> Result<OneStep, FlowError> {
     task("step", boxed_body)
 }
@@ -112,6 +115,28 @@ pub fn boxed_body(scope: Scope, value: u32) -> BodyFuture {
 pub fn format_version(error: &lgwks_bot::task::StoreError) -> Option<(u8, u8)> {
     match error {
         &lgwks_bot::task::StoreError::FormatVersion { found, expected } => Some((found, expected)),
+        _ => None,
+    }
+}
+
+/// The store's own refusal inside a flow error, or `None` for any other arm.
+///
+/// The typed half of the read-failure claim (INV-BOT-7): a store that cannot be
+/// read must reach the caller as `FlowError::Store` wrapping the store's own
+/// error, not as a `Failed` string and never as a definition drift. A test that
+/// matched a rendering would pass on text that happened to mention a device
+/// while the payload was something else, so the discrimination is on the variant
+/// and on the wrapped [`StoreError`](lgwks_bot::task::StoreError) itself.
+///
+/// One function rather than a `match` per call site: the workspace forbids
+/// `pattern_type_mismatch`, so every way of reaching the boxed source out of a
+/// borrowed error is a lint error in one direction or the other, and three
+/// copies of the same discrimination is the block the commit guard refuses.
+#[cfg(feature = "script")]
+#[must_use]
+pub fn store_refusal(error: &FlowError) -> Option<&lgwks_bot::task::StoreError> {
+    match *error {
+        FlowError::Store { ref source, .. } => Some(&**source),
         _ => None,
     }
 }
