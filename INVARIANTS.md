@@ -53,6 +53,55 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
   position; valid unique fields have order-independent meaning, and parsed
   approvals cannot be mutated outside the crate. · why: #157 ·
   enforced by: `contract::tests::invariant_register_uses_the_shared_duplicate_key_refusal`
+- **INV-DEP-12** A source class is not an approved origin: an admission compares
+  the Cargo origin (a complete registry source, a Git repository plus its
+  admitted revision/reference policy, or an external path authority), so a
+  substitution inside an approved class is `OriginDrift`, never a pass. A legacy
+  class-only entry is exact for crates.io — both its Git and sparse spellings —
+  and insufficient for a Git or path edge; an unknown scheme is neither
+  authorable nor an ordinary admitted origin. · why: #158 A1 · enforced by:
+  `tests/origin_binding.rs`, `tests/sim_origin.rs`, and
+  `lgwks_deps::tests::an_approved_git_origin_admits_only_that_repository`,
+  `lgwks_deps::tests::a_git_revision_policy_change_is_an_origin_drift`,
+  `lgwks_deps::tests::an_approved_registry_origin_refuses_a_different_registry`,
+  `lgwks_deps::tests::a_class_only_registry_approval_admits_crates_io_only`,
+  `lgwks_deps::tests::a_class_only_git_approval_is_insufficient_for_exact_origin`,
+  `lgwks_deps::tests::an_approved_path_origin_refuses_a_different_path`,
+  `lgwks_deps::tests::an_unknown_scheme_is_not_an_admitted_origin`,
+  `lgwks_deps::tests::multiple_approvals_report_the_relevant_failed_dimension`,
+  `metadata::tests::a_sparse_registry_source_is_classified_as_a_registry`
+- **INV-DEP-13** An approval may author admitted-capability policy: `features`
+  (the complete set of upstream features the edge may enable), `required_features`
+  (a subset that must be enabled), `uses_default_features` and `optional` (the
+  exact authored bit) and `target` (the exact scope; `""` is unconditional). A
+  dimension an entry authors is enforced exactly — an enabled feature outside the
+  set, a missing required feature, a flipped bit, a changed scope is a typed
+  `Refusal::{FeatureDrift, DefaultFeaturesDrift, OptionalityDrift, TargetDrift}`;
+  a dimension an entry does not author is grandfathered rather than refused.
+  Mandatory and allowed features are distinguished, so ordering is never
+  significant. · why: #158 A2 · enforced by: `tests/feature_policy.rs`,
+  `tests/sim_dependency_policy.rs`, and
+  `lgwks_deps::tests::a_class_only_registry_approval_admits_crates_io_only`
+- **INV-DEP-14** Cargo package identity is byte-exact: an approval admits an
+  observed package name only when it is that name, or a name the entry lists in
+  its explicit `aliases`. There is no implicit `-`/`_` fold or case fold, so two
+  distinct packages whose spellings fold alike cannot share one authority. An
+  alias names exactly one package (collision-checked at load, including against
+  another package's real name), and a `package =` rename stays a local spelling
+  of the upstream identity rather than a second one. · why: #158 A2 · enforced by:
+  `tests/identity_binding.rs`,
+  `contract::tests::lookup_is_exact_and_only_an_explicit_alias_is_tolerated`,
+  `contract::tests::aliases_collide_rather_than_share_authority`
+- **INV-DEP-15** A `check` receipt binds the subject root, the contract identity
+  and schema version (a stable digest of the register text), the exact metadata
+  subject (a stable digest over every direct edge's identity), the policy mode
+  (`--contract` diagnosis versus committed enforcement) and the assurance scope;
+  the `--json` form exposes the same under stable keys. The digest is an identity
+  fingerprint, not an adversarial integrity claim. · why: #158 A6 · enforced by:
+  `tests/check_cli.rs` (`the_human_receipt_binds_contract_subject_and_mode`,
+  `the_json_receipt_has_stable_identity_fields`,
+  `the_receipt_changes_when_its_subject_changes`)
+
 ## lgwks_bot — durable execution
 
 Each of these was a shipped defect. Treat the list as the spec.

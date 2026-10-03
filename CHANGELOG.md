@@ -248,6 +248,59 @@ explicitly under that crate.
   and a `measure_overhead` example prints p50/p95/p99 for `Host::run` and
   `sys::Process`.
 
+### lgwks_deps Added
+
+- `[[approved]]` entries accept an optional `origin`: the exact admitted origin
+  for the entry's source class — a complete registry source, a Git repository
+  plus its admitted revision/reference policy, or an external path authority.
+  Admission now compares origin as well as class, so replacing an approved Git
+  repository, registry, path, or Git revision produces a typed
+  `Refusal::OriginDrift` carrying the approved and observed identities. A legacy
+  class-only entry is exact for crates.io (both its Git and sparse spellings)
+  and insufficient for a Git or path edge; an unknown origin scheme is refused
+  at load and never admitted (INV-DEP-12, #158 A1).
+- Sparse-registry sources (`sparse+…`) are classified as the `registry` source
+  class rather than an unknown scheme, so a sparse crates.io mirror compares as
+  crates.io.
+- Drift diagnosis with several approvals for one crate reports the dimension on
+  the approval that admits the edge's source class, instead of the first
+  mismatch from an unrelated class (#158 acceptance).
+- `[[approved]]` entries accept the admitted-capability policy keys `features`,
+  `required_features`, `uses_default_features`, `optional` and `target`, and an
+  explicit `aliases` list. `DirectEdge` now carries Cargo's authored `features`,
+  `uses_default_features`, `target` and `rename`, so a capability that changes
+  without a class or origin change is a typed `Refusal::FeatureDrift`,
+  `DefaultFeaturesDrift`, `OptionalityDrift` or `TargetDrift` instead of a pass.
+  A dimension an entry does not author is grandfathered (#158 A2, INV-DEP-13).
+- `metadata::DirectEdge::features`/`uses_default_features`/`target`/`rename` are
+  readable through accessors; `rename` is the manifest-local spelling and
+  `package` remains the upstream Cargo identity (#158 A2).
+- `check` prints a receipt binding the subject root, the contract identity and
+  schema version, the exact metadata subject, the policy mode and the assurance
+  scope, and `check --json` exposes the same under the stable keys `mode`,
+  `contract.{digest,schema,entries,repository}`, `subject.{digest,edges,resolved}`
+  and `scope`. `Contract::digest`/`schema` and the `Subject`/`Verdict` types back
+  it; `check_verdict` returns the receipt-bearing verdict (#158 A6, INV-DEP-15).
+- A register may author `[policy] schema`; the committed register is migrated to
+  `schema = 2`. Schema 1 remains readable (#158 A7).
+
+### lgwks_deps Changed
+
+- **Breaking for a Git or path edge: a class-only approval is insufficient.**
+  An `[[approved]]` entry whose `source` is `git` or `path` and that authors no
+  `origin` admits nothing in that class; it is no longer an implicit approval of
+  every origin. **Migration:** add `origin = "<exact source>"` to each Git or
+  path entry (a Git repository plus its `?rev=`/`?branch=` policy, or the exact
+  path authority). A class-only `registry` entry still admits crates.io in both
+  its Git and sparse spellings, so registry entries need no change (#158 A1,
+  INV-DEP-12).
+- Package and owner matching is now byte-exact against the Cargo-authored
+  identity. **Migration:** a register that relied on the implicit `-`/`_` (or
+  case) fold to match a differently-spelled package must either write the exact
+  Cargo name or add `aliases = "<spelling>"` to that entry; an alias is
+  collision-checked and names exactly one package. The committed register uses
+  exact names throughout and needs no alias (#158 A2, INV-DEP-14).
+
 ### lgwks_bot Changed
 
 - `BotSpec` carries a `version`, defaulted to `BotSpec::CURRENT_VERSION` when
