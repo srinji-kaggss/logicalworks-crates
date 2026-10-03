@@ -328,6 +328,44 @@ fn a_review_list_exactly_at_the_ceiling_is_read() -> TestResult {
     Ok(())
 }
 
+/// The fake receiver's read-back never hands out a record another run is still
+/// appending. On tmpfs a concurrent reader can see the front half of an append
+/// (CI read a store cut mid-string at byte 8,193), so the fixture commits each
+/// record with its trailing newline and reads only committed lines. Without
+/// that, the adapter would see a torn document, and a saturation run whose
+/// own review landed fine would be reported `Unknown`.
+#[test]
+fn a_record_still_being_appended_is_not_read_back() -> TestResult {
+    let fake = FakeGh::install("torn-append", HEAD)?;
+    fake.configure(Scenario::new(HEAD))?;
+    std::fs::write(
+        fake.dir().join("reviews.jsonl"),
+        format!(
+            ",{{\"id\":9001,\"commit_id\":\"{HEAD}\",\"state\":\"COMMENTED\",\"body\":\"b\",\"comment_count\":0}}\n\
+             ,{{\"id\":9002,\"commit_id\":\"{HEAD}\",\"sta"
+        ),
+    )?;
+    let gh = Gh::new(Repository::new("acme/widgets")?)
+        .program(fake.program())
+        .capture_limit(limit(64 * 1024)?)
+        .deadline(Some(Duration::from_secs(10)))
+        .env("PATH", fake.search_path()?);
+
+    let reviews = lgwks_bot::Runtime::new()?.block_on(async {
+        gh.read_reviews(&lgwks_bot::domain::gh::PullRequest::new(
+            Repository::new("acme/widgets")?,
+            7,
+        ))
+        .await
+    })?;
+    assert_eq!(
+        reviews.len(),
+        1,
+        "the committed record is read and the half-appended one is not: {reviews:?}"
+    );
+    Ok(())
+}
+
 #[test]
 fn a_malformed_review_list_is_refused_rather_than_decoded_into_a_partial_answer() -> TestResult {
     for shape in ["garbage", "truncated"] {

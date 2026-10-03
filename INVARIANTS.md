@@ -1104,6 +1104,17 @@ Each of these was a shipped defect. Treat the list as the spec.
   handle. · why: #122 item 4 / #156 · enforced by: `tests/journal_liveness.rs`
   (`a_slow_store_lets_the_runtime_and_the_release_progress`,
   `a_cancelled_append_leaves_the_runtime_and_the_handle_live`)
+- **INV-BOT-140** An awaited answer registers its waker before it reads the
+  slot. The owner writes the slot and only then takes the waker to fire it, and
+  a wake is fired once, so read-then-register is a lost wakeup: the poll
+  decides the answer is absent, the publish finds no waker, and the task parks
+  for ever; registering first and reading second means whichever side moves
+  second observes the other. · why: GitHub CI parked
+  `tests/sim_repair.rs::saturation_applies_each_ticket_once_band_09` (PR #239)
+  and `_band_03` (PR #241) past 600 s and cancelled the job at its 15-minute
+  timeout; the run ledger's charge goes through this owner (INV-BOT-35/51).
+  · enforced by:
+  `crates/lgwks-bot/src/journal/owner.rs::tests::an_answer_published_during_registration_still_wakes_the_poll`
 - **INV-BOT-44** A real process kill while an append is in flight, against a
   store that has not answered, leaves a clean journal: the reopen reports no
   committed event and no torn tail, and the retry lands exactly once. The kill
@@ -1190,7 +1201,8 @@ Each of these was a shipped defect. Treat the list as the spec.
   `head_moved_between_snapshot_and_publish_r32`,
   `malformed_and_oversized_answers_r32`,
   `a_publication_the_ceiling_cannot_verify_stays_unknown`,
-  `same_seed_same_trace_hash_r32`, `saturation_r32`,
+  `same_seed_same_trace_hash_r32`, `saturation_r32_tier_100`,
+  `saturation_r32_tier_1000`, `saturation_r32_tier_10000`,
   `two_tenants_on_one_pull_request_r32`, `cancellation_under_faults_r16`,
   `duplicate_submission_r16`, `two_repositories_on_one_host_r16`) and
   `tests/gh_binding.rs` (`a_review_list_past_the_ceiling_is_refused_not_truncated`,
@@ -1294,7 +1306,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   defect satisfies as readily as a correct run — and read-backs are at least
   creates per receiver as well as in total. The fixture is what does not
   survive scale, so the tier is sharded across receivers of at most 100 runs:
-  every read-back `cat`s its receiver's whole `reviews.jsonl`, so one receiver
+  every read-back reads its receiver's whole `reviews.jsonl`, so one receiver
   holding the whole tier pipes a quadratic answer, and past ~590 reviews that
   answer exceeds `CAPTURE` and past 1,000 it is refused with `ReviewCeiling` —
   which ends each run `Unknown` while every inequality the family asserted
@@ -1305,9 +1317,10 @@ Each of these was a shipped defect. Treat the list as the spec.
   share is cancelled out by a healthy one in the totals, is a measurement that
   proved nothing; the per-receiver assertions exist to make that visible
   instead of arithmetic. · why: #151 review finding on
-  `tests/sim_review_path.rs::saturation_r32` (a >300 s family that also timed a
-  degenerate world) · enforced by: `tests/sim_review_path.rs`
-  (`saturation_r32`, which asserts per receiver and in total, and
+  `tests/sim_review_path.rs`'s saturation tiers (a >300 s family that also timed
+  a degenerate world) · enforced by: `tests/sim_review_path.rs`
+  (`saturation_r32_tier_100`, `saturation_r32_tier_1000`,
+  `saturation_r32_tier_10000`, which assert per receiver and in total, and
   `same_seed_same_trace_hash_r32` for the replay the tier still owes)
 
 - **INV-BOT-90** Model output is an untrusted *task input*, and crossing into the
