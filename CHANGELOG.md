@@ -109,7 +109,7 @@ explicitly under that crate.
 
 ### Fixed
 
-- `lgwks_bot`: `tests/sim_review_path.rs::saturation_r32` shards each
+- `lgwks_bot`: `tests/sim_review_path.rs`'s saturation tiers shard each
   saturation tier across receivers of at most 100 runs, so the fixture's
   read-back stays linear. The merged receiver `cat`'d its whole
   `reviews.jsonl` on every read, so 1,000 and 10,000 runs piped ~10 GB and
@@ -120,6 +120,25 @@ explicitly under that crate.
   rather than `<=`. The tiers, the single `Host`, the `join_all_bounded`
   pipeline and its `min(N, 64)` bound are unchanged; measured
   143.202s → see INV-BOT-97 (#151 review finding).
+- `lgwks_bot`: the fake `gh` in `tests/support/fake_gh.rs` no longer forks an
+  external helper on the common path. One `gh api` create or read used to fork
+  `sed`/`cat`/`tail`/`tr` several times (a saturation family runs five calls per
+  review); the behaviour file and the create payload are now cut with shell
+  parameter expansion, the receiver's store is read back with the `read`
+  builtin and its leading separator dropped with `${store#?}`, and the two
+  append-only counters take their byte count with `read` and `${#..}` rather
+  than `wc -c`. Measured: one clean run forks 21 helper processes before and 0
+  after; a `gh api` create went 9 → 0, a review-list read 2 → 0, a pull-request
+  read 4 → 0. The race-free store is unchanged — one `O_APPEND` write with a
+  leading separator, the first byte dropped on read, an empty store reading
+  `[]` — and every existing assertion is untouched. `saturation_r32` fell
+  152.964s → 72.063s on this host (ubuntu CI runs it under `dash`, where the
+  removed forks cost more). The family is now one `#[test]` per tier
+  (`saturation_r32_tier_100`, `saturation_r32_tier_1000`,
+  `saturation_r32_tier_10000`) calling the same `run_saturation_tier`, so
+  nextest schedules the tiers alongside the rest of the suite instead of a
+  serialized loop: 0.610s / 5.372s / 60.388s sequential, 66.371s combined. No
+  tier was dropped, shrunk or `#[ignore]`d.
 - `tests/http_alloc.rs` joins every single-shot server thread (warm-up, exact and
   cut) before the next measurement is armed, so a detached server can no longer
   free its `reply` inside a later window and net the eager peak to zero; the

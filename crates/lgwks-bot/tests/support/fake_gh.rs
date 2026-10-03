@@ -248,40 +248,39 @@ behaviour="$dir/behaviour.json"
 # the calls that *started* is the measurement the duplicate-post tests need.
 # The whole line is assembled in memory and written with one append, so two
 # concurrent runs of the fake cannot interleave halves of a line.
-tab=$(printf '\tx')
-tab=${tab%x}
+# A literal tab, kept out of a command substitution: a saturation family makes
+# tens of thousands of calls and every `$(...)` is a fork of its own.
+tab='	'
 line=""
 for arg in "$@"; do
   line="$line$arg$tab"
 done
 printf '%s\n' "$line" >> "$log"
 
-# Every field is read once, in one `sed`, into a single line that is then cut
-# with shell parameter expansion. A saturation family runs four calls per review
-# and each of those used to fork `sed` three or more times, so the fixture's own
-# bookkeeping dominated the measurement; the behaviour file is one short line, so
-# reading it once per invocation is the same work for a fraction of the forks.
+# The behaviour file is one line of JSON the fixture itself writes, so a field
+# is read once per invocation and cut with parameter expansion rather than by
+# forking `sed` per lookup. A saturation family runs five calls per review
+# (snapshot, diff, freshness, publish, verify), and the fixture's own
+# bookkeeping must not dominate the measurement, so the read is one builtin and
+# each lookup is one expansion.
 #
-# The result is a flat `key=value` line, which the cut below relies on: the
-# fixture writes the behaviour file itself, so the separator is one this file
-# controls rather than one parsed from arbitrary input.
-flatten() {
-  sed -e 's/,/\n/g' "$behaviour" | sed -n 's/.*"\([A-Za-z_]*\)":"\{0,1\}\([^,"}]*\).*/\1=\2/p'
-}
-BEHAVIOUR=$(flatten)
+# Read once rather than per lookup: a key present under neither the quoted nor
+# the numeric shape yields the empty string, which is exactly what the callers
+# treat as "unspecified". The value charset is the fixture's own — alphanumeric
+# plus `:._-` — so a value ends at the first character outside it.
+BEHAVIOUR=""
+IFS= read -r BEHAVIOUR < "$behaviour"
 
-# One scalar field out of the behaviour file, left in `$val`. A quoted string
-# keeps its spaces, because the shell splits on them otherwise.
-#
-# Read once per invocation rather than per lookup: a key present under neither
-# shape yields the empty string, which is exactly what the callers treat as
-# "unspecified". The answer is a variable rather than printed output, because
-# capturing printed output forks a subshell per lookup and this runs every call.
 field() {
   val=""
-  rest=${BEHAVIOUR#*"$1="}
+  q="\"$1\":\""
+  rest=${BEHAVIOUR#*"$q"}
   if [ "$rest" = "$BEHAVIOUR" ]; then
-    return 0
+    u="\"$1\":"
+    rest=${BEHAVIOUR#*"$u"}
+    if [ "$rest" = "$BEHAVIOUR" ]; then
+      return 0
+    fi
   fi
   val=${rest%%[!a-zA-Z0-9:._-]*}
 }
@@ -291,7 +290,9 @@ payload=""
 previous=""
 for arg in "$@"; do
   if [ "$previous" = "--input" ] && [ -f "$arg" ]; then
-    payload=$(cat "$arg")
+    # The staged payload is one line of JSON the adapter wrote, so it is read
+    # with the builtin rather than forked through `cat`.
+    IFS= read -r payload < "$arg"
     # The adapter removes the staged file as soon as the child exits, so the
     # payload is copied into the receiver's own store here: what the receiver
     # actually received, which is what a test asserts against.
@@ -333,19 +334,26 @@ if [ "$method" = "POST" ]; then
   field create; create=$val
   case "$create" in
     accept|accept_then_drop|pending|partial)
-      # A real receiver assigns a fresh id per accepted create. The counter is a
-      # single append, so two concurrent creates cannot be handed the same id —
-      # and a test that checks two identities verify *distinct* reviews depends
-      # on that being true rather than on the ids happening to differ.
+      # A real receiver assigns a fresh id per accepted create. The append is
+      # one atomic write, so the count of accepted creates is exact; the count
+      # is read back with the builtin (`read` takes the append log whole and
+      # `${#..}` is its byte count) rather than by forking `wc`. The read
+      # follows the append, so two creates racing here can read the same count
+      # and share an id — the same window this counter always had — and that is
+      # safe: a read-back reconciles on subject, body and state, and every
+      # id-asserting family runs its creates sequentially.
       printf 'x' >> "$dir/creates"
-      seen=$(wc -c < "$dir/creates" | tr -d ' ')
+      seen_raw=""
+      IFS= read -r seen_raw < "$dir/creates"
+      seen=${#seen_raw}
       field next_review_id
       id=$(( val + seen - 1 ))
       # GitHub reports the state a review is *in*, not the event that created
       # it: `COMMENT` reads back as `COMMENTED`, and so on. A fake that echoed
       # the event would let a verifier pass here that never matches GitHub.
       field created_state; state=$val
-      event=$(printf '%s' "$payload" | sed -n 's/.*"event":"\([A-Z_]*\)".*/\1/p')
+      event=${payload##*\"event\":\"}
+      event=${event%%\"*}
       case "$event" in
         COMMENT) state=COMMENTED ;;
         APPROVE) state=APPROVED ;;
@@ -365,9 +373,11 @@ if [ "$method" = "POST" ]; then
       # comments array is removed before the top-level body is read: otherwise a
       # payload with comments would record the last comment's text as the review
       # body.
-      top=$(printf '%s' "$payload" | sed 's/,"comments".*//')
-      body=$(printf '%s' "$top" | sed -n 's/.*"body":"\([^"]*\)".*/\1/p')
-      commit=$(printf '%s' "$payload" | sed -n 's/.*"commit_id":"\([^"]*\)".*/\1/p')
+      top=${payload%%,\"comments\"*}
+      body=${top##*\"body\":\"}
+      body=${body%%\"*}
+      commit=${payload##*\"commit_id\":\"}
+      commit=${commit%%\"*}
       # How many inline comments this review reports: none for everything but a
       # partial landing, which reports the configured applied count — fewer than
       # the payload intended, which is what makes it a *partial* submission.
@@ -456,14 +466,18 @@ if [ "$is_reviews" -eq 1 ]; then
     # the kernel interleaved into `[,,{...}]`, and a separator decided by an
     # existence probe, which two creates could both read as absent.
     #
-    # So the store's leading separator is dropped on the way out: `tail -c +2`
-    # is one fork and a byte copy, against `cut`'s one fork and a *line* copy,
-    # and a trailing-separator store cannot be trimmed that way at all — a
-    # reversal reads the bytes a third time. An absent or empty store yields an
-    # empty string, so `[` is still followed by `]` and a pull request with no
-    # reviews reads back as `[]`.
+    # So the store's leading separator is dropped on the way out. A record is
+    # written with no newline, so the builtin `read` takes the whole store in one
+    # call and `${store#?}` drops its first character — one byte, exactly what
+    # `tail -c +2` copied, without forking a reader on every read-back. An
+    # absent or empty store yields an empty string, so `[` is still followed by
+    # `]` and a pull request with no reviews reads back as `[]`.
     printf '['
-    if [ -s "$dir/reviews.jsonl" ]; then tail -c +2 "$dir/reviews.jsonl"; fi
+    if [ -s "$dir/reviews.jsonl" ]; then
+      store=""
+      IFS= read -r store < "$dir/reviews.jsonl"
+      printf '%s' "${store#?}"
+    fi
     # Filler reviews, for the review-ceiling probe. They are real records on
     # another commit: what matters is that the adapter would have had to read
     # them to call the list complete, so returning only the prefix would be a
@@ -537,11 +551,21 @@ else
     # reports `head_after_first` — so a freshness check comparing the two reads
     # sees exactly the change it is meant to catch. The counter is bumped with a
     # single append per call, so two concurrent runs cannot interleave it.
-    printf 'x' >> "$dir/reads"
-    read_count=$(wc -c < "$dir/reads" | tr -d ' ')
     field head_sha; head=$val
     field head_after_first; moved=$val
-    if [ -n "${moved:-}" ] && [ "$read_count" -gt 1 ]; then head="$moved"; fi
+    # Only a scenario that names a second head pays for the read counter: the
+    # count decides whether this is the first read or a later one, and when no
+    # second head is configured the answer is never consulted. The count is the
+    # builtin byte count of the appends (see `creates` above), and it still
+    # bumps with one atomic append per read, so two concurrent reads cannot
+    # interleave it.
+    if [ -n "${moved:-}" ]; then
+      printf 'x' >> "$dir/reads"
+      read_raw=""
+      IFS= read -r read_raw < "$dir/reads"
+      read_count=${#read_raw}
+      if [ "$read_count" -gt 1 ]; then head="$moved"; fi
+    fi
     # GitHub's shape: the commits are nested under `head` and `base`.
     field base_sha; base=$val
     printf '{"number":7,"head":{"ref":"feature","sha":"%s"},"base":{"ref":"main","sha":"%s"}}\n' \
