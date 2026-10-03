@@ -580,6 +580,32 @@ Each of these was a shipped defect. Treat the list as the spec.
   (`seeded_takeover_orders_keep_the_generation_on_the_disk_band_04..07`,
   `same_seed_same_trace_hash_band_08..09`)
 
+- **INV-BOT-116** A test's store directory is never a name two runs can share, and
+  no run leaves one behind. A directory a test builds under the system temp root
+  from a *fixed* name is a second ledger the test does not own: an earlier run on
+  the same host leaves records there, and the next run reopens them rather than
+  writing its own, so a format or budget refusal can be inherited from a world
+  nobody in this run created. Every such directory comes from the one
+  `shared::Scratch::new(tag)` guard — random hex in the name, `remove_dir_all` on
+  drop — held for the whole test, so a run cannot see another run's files and a
+  finished run leaves nothing to be inherited. The guard is the ephemerality rule
+  (INV-DEP-6) applied to the durable stores rather than to an in-memory value:
+  state that outlives a run belongs to a directory that dies with it. The store's
+  own format refusal stays exactly as strict, because the fix is isolation and not
+  a loosened `check_format_version` — a `\x01` store inside *this* run's own
+  directory is still `FormatVersion { found, expected }` (INV-BOT-55). · why: the
+  seven `tests/sim_repair.rs` arms that failed with
+  `FormatVersion { found: 1, expected: 2 }` on a branch that had never written a
+  `\x01` record · enforced by: `tests/sim_repair.rs`
+  (`the_step_that_reaches_is_the_step_that_blocks`,
+  `a_wide_need_set_costs_one_analysis`,
+  `a_ticket_never_names_another_tenants_run`,
+  `a_custom_capability_is_refused_at_every_width`,
+  `a_repaired_run_survives_a_reopened_host`,
+  `a_host_spent_on_one_run_still_repairs_the_next`,
+  `a_bounded_sweep_repairs_every_ticket_once`) and
+  `tests/task_resume.rs::a_pre_version_store_is_refused_naming_both_versions`
+
 - **INV-BOT-57** Each boundary of the durable ladder recovers its own answer, and
   recovery is itself a window the crashing process can do damage in. A kill
   after the intent ack and before the preparation recovers `Prepared` and

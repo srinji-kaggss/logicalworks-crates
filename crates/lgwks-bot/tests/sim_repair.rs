@@ -938,11 +938,8 @@ fn the_declared_repair_tiers_are_measured() -> TestResult {
         .into());
     }
     for tier in TIERS {
-        let dir = std::env::temp_dir().join(format!("lgwks-repair-tier-{tier}"));
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir)?;
-        }
-        let host = blocked_host(TENANTS[0], &dir)?;
+        let dir = shared::Scratch::new("repair-tier")?;
+        let host = blocked_host(TENANTS[0], dir.path())?;
         let declared = shared::journey_task()?;
         let grants = exact_grant(candidate_needs().len());
 
@@ -980,7 +977,6 @@ fn the_declared_repair_tiers_are_measured() -> TestResult {
             host.admission().admitted(),
             host.admission().refused()
         );
-        drop(std::fs::remove_dir_all(&dir));
     }
     Ok(())
 }
@@ -1005,8 +1001,8 @@ fn the_step_that_reaches_is_the_step_that_blocks() -> TestResult {
     // T23's "one complete presently knowable NeedSet" at its extreme. The sweep
     // over the narrower widths is the family below.
     let declared_needs = candidate_needs();
-    let scratch = std::env::temp_dir().join("lgwks-first-step");
-    let host = repairable_host(TENANTS[0], &scratch, GrantSet::empty())?;
+    let scratch = shared::Scratch::new("first-step")?;
+    let host = repairable_host(TENANTS[0], scratch.path(), GrantSet::empty())?;
     let polls = Polls::shared();
     let declared = first_step_task(declared_needs.clone())?;
 
@@ -1069,8 +1065,8 @@ fn the_step_that_reaches_is_the_step_that_blocks() -> TestResult {
 fn a_wide_need_set_costs_one_analysis() -> TestResult {
     let whole = candidate_needs();
     for reach in 1..=whole.len() {
-        let scratch = std::env::temp_dir().join(format!("lgwks-wide-need-{reach}"));
-        let host = repairable_host(TENANTS[0], &scratch, GrantSet::empty())?;
+        let scratch = shared::Scratch::new("wide-need")?;
+        let host = repairable_host(TENANTS[0], scratch.path(), GrantSet::empty())?;
         let polls = Polls::shared();
         let declared = shared::journey_task()?;
         let needs: Vec<Cap> = whole.iter().take(reach).cloned().collect();
@@ -1128,8 +1124,8 @@ fn a_wide_need_set_costs_one_analysis() -> TestResult {
 /// time and the publication ran exactly once, on the run that asked for it.
 #[test]
 fn a_repaired_run_survives_a_reopened_host() -> TestResult {
-    let scratch = std::env::temp_dir().join("lgwks-reopened-repair");
-    let first = repairable_host(TENANTS[0], &scratch, GrantSet::empty())?;
+    let scratch = shared::Scratch::new("reopened-repair")?;
+    let first = repairable_host(TENANTS[0], scratch.path(), GrantSet::empty())?;
     let polls = Polls::shared();
     let declared = shared::journey_task()?;
 
@@ -1145,7 +1141,7 @@ fn a_repaired_run_survives_a_reopened_host() -> TestResult {
     // left is the directory.
     drop(first);
 
-    let second = repairable_host(TENANTS[0], &scratch, GrantSet::empty())?;
+    let second = repairable_host(TENANTS[0], scratch.path(), GrantSet::empty())?;
     let after = charged(&second, run)?;
     assert_eq!(
         (after.attempts(), after.epoch(), after.applied()),
@@ -1193,9 +1189,9 @@ fn a_repaired_run_survives_a_reopened_host() -> TestResult {
 fn a_custom_capability_is_refused_at_every_width() -> TestResult {
     let whole = candidate_needs();
     for reach in 1..=whole.len() {
-        let scratch = std::env::temp_dir().join(format!("lgwks-custom-cap-{reach}"));
-        let host = repairable_host(TENANTS[0], &scratch, GrantSet::empty())?;
-        let case = block(TENANTS[0], &scratch, reach)?;
+        let scratch = shared::Scratch::new("custom-cap")?;
+        let host = repairable_host(TENANTS[0], scratch.path(), GrantSet::empty())?;
+        let case = block(TENANTS[0], scratch.path(), reach)?;
         let bytes = ledger_bytes(&host)?;
 
         let smuggled = exact_grant(reach).grant(Cap::new("vendor.payments.charge"));
@@ -1252,9 +1248,9 @@ fn a_custom_capability_is_refused_at_every_width() -> TestResult {
 /// tenant's run is not in it.
 #[test]
 fn a_ticket_never_names_another_tenants_run() -> TestResult {
-    let scratch = std::env::temp_dir().join("lgwks-cross-tenant-ticket");
-    let mine = repairable_host(TENANTS[0], &scratch, GrantSet::empty())?;
-    let theirs = repairable_host(TENANTS[1], &scratch, GrantSet::empty())?;
+    let scratch = shared::Scratch::new("cross-tenant-ticket")?;
+    let mine = repairable_host(TENANTS[0], scratch.path(), GrantSet::empty())?;
+    let theirs = repairable_host(TENANTS[1], scratch.path(), GrantSet::empty())?;
     let declared = shared::journey_task()?;
 
     // The wide shortfall: a ticket naming every candidate, so the refusal cannot be
@@ -1736,8 +1732,8 @@ fn a_spent_budget_refuses_every_later_attempt() -> TestResult {
 /// form, and INV-BOT-50's poison is what makes it the only one.
 #[test]
 fn a_host_spent_on_one_run_still_repairs_the_next() -> TestResult {
-    let dir = std::env::temp_dir().join("lgwks-repair-recovery");
-    let host = bounded_host(TENANTS[0], &dir, ATTEMPT_CEILING, u64::MAX)?;
+    let dir = shared::Scratch::new("repair-recovery")?;
+    let host = bounded_host(TENANTS[0], dir.path(), ATTEMPT_CEILING, u64::MAX)?;
     let declared = shared::journey_task()?;
 
     let first = block_with(&host, candidate_needs().len())?;
@@ -1794,7 +1790,7 @@ fn a_host_spent_on_one_run_still_repairs_the_next() -> TestResult {
     // rather than through the poisoned handle, and the reopen has to replay both \
     // runs' budgets off the file to be worth anything.
     drop(host);
-    let reopened = repairable_host(TENANTS[0], &dir, GrantSet::empty())?;
+    let reopened = repairable_host(TENANTS[0], dir.path(), GrantSet::empty())?;
     assert_eq!(
         charged(&reopened, second.run)?,
         spent,
@@ -1862,8 +1858,8 @@ fn a_host_spent_on_one_run_still_repairs_the_next() -> TestResult {
 #[test]
 fn a_bounded_sweep_repairs_every_ticket_once() -> TestResult {
     for tier in SWEPT_TIERS {
-        let dir = std::env::temp_dir().join(format!("lgwks-repair-sweep-{tier}"));
-        let host = blocked_host(TENANTS[0], &dir)?;
+        let dir = shared::Scratch::new("repair-sweep")?;
+        let host = blocked_host(TENANTS[0], dir.path())?;
         let declared = shared::journey_task()?;
         let grants = exact_grant(candidate_needs().len());
 

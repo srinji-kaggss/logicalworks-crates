@@ -29,6 +29,24 @@ explicitly under that crate.
   `tests/task_resume.rs::a_pre_version_store_is_refused_naming_both_versions` and
   `::a_foreign_file_is_still_refused_as_not_a_store`.
 
+### lgwks_bot Fixed
+
+- `tests/sim_repair.rs`: seven repair arms no longer reopen a store an earlier run
+  on the same host left behind. The tests built their store directory under the
+  system temp root from a *fixed* name (`lgwks-first-step`,
+  `lgwks-reopened-repair`, `lgwks-repair-recovery`,
+  `lgwks-cross-tenant-ticket`, and the `-{reach}`/`-{tier}` families), so the
+  directory was a ledger the test did not own: a run that predated the `\x02`
+  format left records there, and every later run refused to open them with
+  `StoreError::FormatVersion { found: 1, expected: 2 }` — a refusal that named a
+  version this branch has never written. Each now takes its directory from the
+  `shared::Scratch` guard already shared with `tests/repair.rs` (random hex in the
+  name, removed when the guard drops), held for the whole test, so no run can see
+  another run's files and none leaves one behind (INV-BOT-116). This is a test
+  isolation and ephemerality fix, not a format change: `check_format_version` is
+  untouched, and a `\x01` store written inside a run's *own* scratch directory is
+  still refused by `tests/task_resume.rs::a_pre_version_store_is_refused_naming_both_versions`.
+
 ### lgwks_bot Added
 
 - `task::DefinitionIdentity` and `task::Drift`: a recorded step value is only
