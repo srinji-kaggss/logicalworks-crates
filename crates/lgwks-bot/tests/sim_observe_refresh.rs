@@ -51,15 +51,18 @@ mod band_family;
 
 use std::cell::{Cell, RefCell};
 use std::error::Error;
+use std::future::Future;
 use std::rc::Rc;
+use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 
 use lgwks_bot::broker::Broker;
 use lgwks_bot::effect::{EnvironmentId, EventId, FlowRevision, RunId};
 use lgwks_bot::journal::MemoryJournal;
 use lgwks_bot::spec::{EffectEvidence, EffectIdentity, EffectScope};
 use lgwks_bot::{
-    Auth, Bot, BotError, Cap, DispatchCertainty, EffectLifetime, Execute, GrantSet, Observe,
-    RefreshReason,
+    Auth, Bot, BotError, Cap, DEFAULT_POLL_DEADLINE, DispatchCertainty, EffectLifetime, Execute,
+    GrantSet, MAX_POLL_DEADLINE, Observe, RefreshReason,
 };
 
 use sim::Band;
@@ -607,6 +610,14 @@ struct ChainHandles {
     /// first is cancelled by the substrate's deadline and the second reports its
     /// own error, and a fixture that conflated them would test neither.
     pace: Rc<Cell<u32>>,
+    /// How many polls still return `Pending` before answering.
+    ///
+    /// A source that yields once is a third thing beside *slow* and *refused*:
+    /// it made no progress on its first poll, so the wave had to start a
+    /// deadline watcher for it, and yet it answered before the budget was spent
+    /// — the case that separates "a wave with something pending" from "a wave
+    /// whose every source answered on its first poll".
+    pending: Rc<Cell<u32>>,
 }
 
 impl ChainHandles {
@@ -617,6 +628,7 @@ impl ChainHandles {
             declared: Rc::new(Cell::new(None)),
             refusing: Rc::new(Cell::new(false)),
             pace: Rc::new(Cell::new(0)),
+            pending: Rc::new(Cell::new(0)),
         }
     }
 }
@@ -1787,4 +1799,1027 @@ band_family::band_family! {
     stall_replay_band_33 => the_same_seed_replays_a_stalled_wave, 33;
     watchdog_budget_band_34 => a_wave_spends_one_watchdog_and_a_fast_wave_spends_none, 34;
     watchdog_budget_band_35 => a_wave_spends_one_watchdog_and_a_fast_wave_spends_none, 35;
+}
+
+// ── INV-BOT-120..124: the deadline, watchdog and attribution families ───────
+//
+// The bands above sweep a *fixed* chain count. These families are the other
+// axis: a seed that decides the wave *width* itself — how many chains share one
+// deadline, whether any of them yields once or parks forever, and which chain
+// of the wave a stall, a forced refresh or a pass-over is reported against. A
+// chain count the band families fix is a claim about one shape; these are
+// claims about the shape as a function of the width.
+//
+// They are declared as plain `#[test]` functions rather than through
+// `band_family!` because each asserts a *different* property of the same
+// machinery rather than the same property over more seeds, and the source
+// counter reads a literal `#[test]` line where it deliberately does not read a
+// macro invocation. The seeded bands the file already declares are untouched:
+// widening them would buy no evidence and would move the seeds those families
+// already record.
+
+/// The width of one observation wave, as this file reads it.
+///
+/// A copy of the substrate's own fan-out rather than a re-derivation, exactly
+/// as the corresponding non-simulation fixture does: it is the number that
+/// decides how many chains share one deadline watchdog, and a family that
+/// derived it would follow a change to the fan-out rather than noticing one.
+const WAVE_WIDTH: usize = 32;
+
+/// A source whose entire answer is the scenario's: it can answer, yield once,
+/// park forever, refuse, and declare its own cached baseline unsound, all from
+/// the cells one [`ChainHandles`] carries.
+///
+/// One source type rather than the two the bands use, because a builder's type
+/// follows its source: a family that varies the chain count at runtime needs
+/// every chain to be the same concrete type, and a source that can express
+/// every shape these families need is what makes the count a draw instead of a
+/// constant.
+struct Scripted {
+    /// The value this poll reports once it answers.
+    value: Rc<Cell<u32>>,
+    /// What `cache_state` answers.
+    declared: Rc<Cell<Option<RefreshReason>>>,
+    /// Whether this poll refuses instead of reading.
+    refusing: Rc<Cell<bool>>,
+    /// [`WEDGED_PACE`] parks the poll forever; anything else lets it answer.
+    pace: Rc<Cell<u32>>,
+    /// How many polls still return `Pending` before answering.
+    pending: Rc<Cell<u32>>,
+    /// The chain's index, for the domain identity a report names it by.
+    chain: usize,
+    /// The tenant this source belongs to, for the same reason.
+    tenant: u32,
+}
+
+impl Observe for Scripted {
+    type Output = u32;
+
+    fn required_caps(&self) -> &[Cap] {
+        &[]
+    }
+
+    async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+        call.0.check(Observe::required_caps(self))?;
+        if self.refusing.get() {
+            return Err(BotError::DomainError {
+                domain: format!("sim::t{}-c{}", self.tenant, self.chain),
+                certainty: DispatchCertainty::NotDelivered,
+                cause: "the seeded source refused".to_owned(),
+            });
+        }
+        if self.pace.get() == WEDGED_PACE {
+            // Parks without ever resolving, which is the shape the per-poll
+            // deadline exists to bound. A yield is a *different* shape and is
+            // handled below, so a fixture cannot confuse "slow" with "stopped".
+            std::future::pending::<()>().await;
+        }
+        let pending = Rc::clone(&self.pending);
+        let value = Rc::clone(&self.value);
+        std::future::poll_fn(move |context: &mut Context<'_>| {
+            if pending.get() > 0 {
+                pending.set(pending.get().saturating_sub(1));
+                // Wakes itself, so the wave re-polls without waiting out the
+                // budget: the poll made no progress, but it did not stop.
+                context.waker().wake_by_ref();
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(value.get()))
+            }
+        })
+        .await
+    }
+
+    fn cache_state(&self) -> Option<RefreshReason> {
+        self.declared.get()
+    }
+
+    fn domain_id(&self) -> &str {
+        DOMAINS[usize::try_from(self.tenant).unwrap_or(0)][self.chain % 8]
+    }
+}
+
+/// Build one scripted source over `held`, as chain `chain` of `tenant`.
+fn scripted(held: &ChainHandles, chain: usize, tenant: u32) -> Scripted {
+    Scripted {
+        value: Rc::clone(&held.value),
+        declared: Rc::clone(&held.declared),
+        refusing: Rc::clone(&held.refusing),
+        pace: Rc::clone(&held.pace),
+        pending: Rc::clone(&held.pending),
+        chain,
+        tenant,
+    }
+}
+
+/// The action one chain's entry runs: it logs the value it ran with, and either
+/// lands or reports its own outcome unknown.
+fn logs(ran: &Rc<RefCell<Vec<(usize, u32)>>>, chain: usize, holds: &Rc<Cell<bool>>) -> Logs {
+    Logs {
+        ran: Rc::clone(ran),
+        chain,
+        holds: Rc::clone(holds),
+    }
+}
+
+/// Arm one chain for one tick: its value, its pace, its declaration and how many
+/// polls it yields for.
+///
+/// One helper rather than a field write per call site, because every family here
+/// arms the same four cells and a site that forgot one would arm a chain the
+/// previous tick left wedged.
+fn arm_chain(
+    held: &ChainHandles,
+    value: u32,
+    pace: u32,
+    declared: Option<RefreshReason>,
+    pending: u32,
+) {
+    held.value.set(value);
+    held.pace.set(pace);
+    held.declared.set(declared);
+    held.pending.set(pending);
+    held.refusing.set(false);
+}
+
+/// Build one tenant's bot over `width` scripted chains under `deadline`.
+///
+/// The chain count is a parameter rather than a constant because every chain is
+/// the same concrete [`Scripted`] type, which is what lets the builder be
+/// extended in a loop: the erasure boundary the band families run into only
+/// binds when the source types differ.
+fn scripted_bot(
+    name: &str,
+    tenant: u32,
+    width: usize,
+    deadline: Duration,
+    holds: Rc<Cell<bool>>,
+) -> Result<Tenant, Box<dyn Error>> {
+    assert!(width >= 1, "a scripted bot needs at least one chain");
+    let ran = Rc::new(RefCell::new(Vec::new()));
+    let first = ChainHandles::new();
+    let mut builder = Bot::builder(name)
+        .with_poll_deadline(deadline)
+        .observe(scripted(&first, 0, tenant))
+        .on(|observed: &u32| *observed > 0, logs(&ran, 0, &holds));
+    let mut handles = vec![first];
+    for chain in 1..width {
+        let held = ChainHandles::new();
+        builder = builder
+            .observe(scripted(&held, chain, tenant))
+            .on(|observed: &u32| *observed > 0, logs(&ran, chain, &holds));
+        handles.push(held);
+    }
+    let bot = builder
+        .with_effects(tenant_scope(tenant)?)
+        .build(&GrantSet::empty())?;
+    Ok(Tenant {
+        bot,
+        handles,
+        ran,
+        tenant,
+    })
+}
+
+/// Build one tenant's bot over `width` scripted chains and run one clean
+/// baseline tick, so every chain has a committed value before it is armed.
+///
+/// Shared by the two families that need a pre-stall baseline, because "arm
+/// every chain to a distinct value and tick once" is the same three-step setup
+/// in both and a copy would drift the moment one of them changed what it
+/// considered a baseline.
+fn baseline_bot(
+    name: &str,
+    width: usize,
+    deadline: Duration,
+    holds: Rc<Cell<bool>>,
+) -> Result<Tenant, Box<dyn Error>> {
+    let mut subject = scripted_bot(name, 0, width, deadline, holds)?;
+    for (index, held) in subject.handles.iter().enumerate() {
+        let value = u32::try_from(index).unwrap_or(0).saturating_add(1);
+        arm_chain(held, value, 0, None, 0);
+    }
+    let _baseline = subject.bot.tick();
+    Ok(subject)
+}
+
+/// A wave whose every source answers on its first poll starts no watchdog at all.
+///
+/// The lazy half of INV-BOT-124 as a function of the width: at 1 chain and at 32
+/// the ordinary tick pays nothing, because a poll that answered never reaches
+/// the arm that starts a watcher. The widths are drawn, so the property is
+/// checked across the wave rather than at one point in it.
+#[test]
+fn a_fast_wave_spends_no_watchdog_across_seeded_widths() -> TestResult {
+    const SEED: u64 = 0x1240_0001;
+    let mut rng = Rng::new(SEED);
+    let ceiling = u32::try_from(WAVE_WIDTH).unwrap_or(32);
+    for _ in 0..6_u32 {
+        let width = usize::try_from(rng.between(1, ceiling)).unwrap_or(1);
+        let holds = Rc::new(Cell::new(false));
+        let mut subject = scripted_bot("sim-observe-fast-wave", 0, width, SIM_DEADLINE, holds)?;
+        for (index, held) in subject.handles.iter().enumerate() {
+            let value = u32::try_from(index).unwrap_or(0).saturating_add(1);
+            arm_chain(held, value, 0, None, 0);
+        }
+        let _outcome = subject.bot.tick();
+        let report = subject.bot.tick_report();
+        assert_eq!(
+            report.watchdogs(),
+            0,
+            "seed {SEED} width {width}: an ordinary tick — every source answered \
+             on its first poll — starts no deadline thread at all"
+        );
+        assert!(
+            report.stalled().is_empty(),
+            "seed {SEED} width {width}: and reports no stall, because nothing was \
+             given up on: {:?}",
+            report.stalled()
+        );
+    }
+    Ok(())
+}
+
+/// A source that yields once before it answers spends exactly one watchdog for
+/// its wave, and the waves beside it spend none.
+///
+/// INV-BOT-124's other half. The bot is wider than one wave, and the seed picks
+/// which chain yields, so the assertion is that *one* wave — the one holding the
+/// poll that went `Pending` — spends a watcher, and the resolved waves do not.
+/// A source that yields once is the case a per-poll watcher would miss and a
+/// never-started one would also miss; only a lazy, per-wave watcher gets it.
+#[test]
+fn a_pending_source_spends_one_watchdog_for_its_wave() -> TestResult {
+    const SEED: u64 = 0x1240_0002;
+    let mut rng = Rng::new(SEED);
+    let wave = u32::try_from(WAVE_WIDTH).unwrap_or(32);
+    let width =
+        usize::try_from(rng.between(wave.saturating_add(1), wave.saturating_mul(2))).unwrap_or(33);
+    let yields = usize::try_from(rng.below(u32::try_from(width).unwrap_or(33))).unwrap_or(0);
+    let holds = Rc::new(Cell::new(false));
+    let mut subject = scripted_bot("sim-observe-pending", 0, width, SIM_DEADLINE, holds)?;
+    for (index, held) in subject.handles.iter().enumerate() {
+        let pending = u32::from(index == yields);
+        let value = u32::try_from(index).unwrap_or(0).saturating_add(1);
+        arm_chain(held, value, 0, None, pending);
+    }
+    let _outcome = subject.bot.tick();
+    let report = subject.bot.tick_report();
+    assert_eq!(
+        report.watchdogs(),
+        1,
+        "seed {SEED}: width {width} is {} waves and chain {yields} yielded once \
+         before answering, so exactly its wave spends one watcher and the rest \
+         spend none",
+        width.div_ceil(WAVE_WIDTH)
+    );
+    assert!(
+        report.stalled().is_empty(),
+        "seed {SEED}: the poll that yielded once answered before the budget, so \
+         nothing is reported stalled: {:?}",
+        report.stalled()
+    );
+    Ok(())
+}
+
+/// The watchdog count summed over a run equals the number of ticks whose wave
+/// was left pending.
+///
+/// The aggregate form of the wave rule, read from the reports rather than
+/// inferred from the schedule: a tick where every source answered spends zero
+/// and a tick that left one poll pending spends one, so the two sums are one
+/// fact. A counter that drifted — a watcher started but not counted, or counted
+/// but never started — would separate them.
+#[test]
+fn a_seeded_run_spends_one_watchdog_per_pending_tick() -> TestResult {
+    const SEED: u64 = 0x1240_0003;
+    let mut rng = Rng::new(SEED);
+    let ticks = rng.between(3, 6);
+    let holds = Rc::new(Cell::new(false));
+    let mut subject = scripted_bot("sim-observe-pending-ticks", 0, 3, SIM_DEADLINE, holds)?;
+    let mut watchdogs = 0_u32;
+    let mut pending_ticks = 0_u32;
+    for tick in 1..=ticks {
+        let mut pending = false;
+        for (index, held) in subject.handles.iter().enumerate() {
+            let wedged = rng.chance(350);
+            pending = pending || wedged;
+            let pace = if wedged { WEDGED_PACE } else { 0 };
+            let value = tick
+                .saturating_mul(10)
+                .saturating_add(u32::try_from(index).unwrap_or(0));
+            arm_chain(held, value, pace, None, 0);
+        }
+        let _outcome = subject.bot.tick();
+        let report = subject.bot.tick_report();
+        let expected = u32::from(pending);
+        assert_eq!(
+            report.watchdogs(),
+            expected,
+            "seed {SEED} tick {tick}: a tick that left a poll pending spends one \
+             watcher and a tick where every source answered spends none"
+        );
+        watchdogs = watchdogs.saturating_add(report.watchdogs());
+        pending_ticks = pending_ticks.saturating_add(expected);
+    }
+    assert_eq!(
+        watchdogs, pending_ticks,
+        "seed {SEED}: the watchdog count summed over {ticks} ticks equals the \
+         number of ticks with a pending wave, both read from the reports"
+    );
+    Ok(())
+}
+
+/// A tick dropped mid-wave leaves the bot usable, and the next tick reports
+/// normally.
+///
+/// The cancellation INV-BOT-123 documents is between phases; this is the other
+/// drop the tick's own contract names. The future is polled once — far enough
+/// to enter the wave and park on a wedged source — and then dropped. What the
+/// family asserts is that the world it left behind is not poisoned: the next
+/// tick re-polls every source, commits, and reports no stall of its own.
+#[test]
+fn a_cancelled_tick_leaves_the_bot_usable() -> TestResult {
+    const SEED: u64 = 0x1240_0004;
+    let mut rng = Rng::new(SEED);
+    let holds = Rc::new(Cell::new(false));
+    let mut subject = baseline_bot("sim-observe-cancelled-tick", 3, SIM_DEADLINE, holds)?;
+
+    let wedged = usize::try_from(rng.below(3)).unwrap_or(0);
+    for (index, held) in subject.handles.iter().enumerate() {
+        let pace = if index == wedged { WEDGED_PACE } else { 0 };
+        arm_chain(held, 7, pace, None, 0);
+    }
+    // `Bot::tick` parks the thread until the future resolves, so the only way
+    // to drop a tick mid-flight is to drive `tick_async` by hand. `Waker::noop`
+    // is the legal waker that never needs to wake: the future is dropped before
+    // anything would.
+    let mut context = Context::from_waker(Waker::noop());
+    {
+        let mut future = std::pin::pin!(subject.bot.tick_async());
+        let first = Future::poll(future.as_mut(), &mut context);
+        assert!(
+            matches!(first, Poll::Pending),
+            "seed {SEED}: the wedged source parks, so the first poll of the tick \
+             returns Pending with the wave still in flight"
+        );
+    }
+
+    for (index, held) in subject.handles.iter().enumerate() {
+        let value = u32::try_from(index).unwrap_or(0).saturating_add(20);
+        arm_chain(held, value, 0, None, 0);
+    }
+    let _recovered = subject.bot.tick();
+    let report = subject.bot.tick_report();
+    assert_eq!(
+        report.watchdogs(),
+        0,
+        "seed {SEED}: the tick after a cancelled one is ordinary — every source \
+         answered on its first poll and no watcher was needed"
+    );
+    assert!(
+        report.stalled().is_empty(),
+        "seed {SEED}: nothing is reported stalled after the cancelled tick was \
+         dropped: {:?}",
+        report.stalled()
+    );
+    assert!(
+        subject.ran.borrow().iter().any(|entry| entry.0 == wedged),
+        "seed {SEED}: the chain that was wedged during the cancelled tick \
+         committed on the next tick, so the bot is usable rather than poisoned"
+    );
+    Ok(())
+}
+
+/// A wedged source keeps its baseline and its forced-refresh mark standing, and
+/// the next tick re-polls it.
+///
+/// INV-BOT-123's stall rule and INV-BOT-120's mark rule, together: a
+/// cancellation commits nothing, so the value the source was to replace is
+/// still there and the declaration that made it unsound is still standing. The
+/// recovery tick re-enters the source and commits the value it reports, which is
+/// the difference between a deferral and a retirement.
+#[test]
+fn a_stalled_chain_keeps_its_mark_and_is_re_polled_next_tick() -> TestResult {
+    const SEED: u64 = 0x1230_0005;
+    let mut rng = Rng::new(SEED);
+    let cause = CAUSES[usize::try_from(rng.below(4)).unwrap_or(0)];
+    let holds = Rc::new(Cell::new(false));
+    let mut subject = baseline_bot("sim-observe-stall-mark", 3, SIM_DEADLINE, holds)?;
+
+    for (index, held) in subject.handles.iter().enumerate() {
+        if index == 0 {
+            arm_chain(held, 1, WEDGED_PACE, Some(cause), 0);
+        } else {
+            arm_chain(held, 10, 0, None, 0);
+        }
+    }
+    let _stalled = subject.bot.tick();
+    let after = subject.bot.tick_report();
+    assert_eq!(
+        after.stalled().len(),
+        1,
+        "seed {SEED}: chain 0's poll was cancelled: {:?}",
+        after.stalled()
+    );
+    assert!(
+        after
+            .forced()
+            .iter()
+            .any(|row| row.chain() == 0 && row.reason() == cause),
+        "seed {SEED}: the forced-refresh mark survives the stall, naming chain 0 \
+         and the cause it declared: {:?}",
+        after.forced()
+    );
+
+    arm_chain(&subject.handles[0], 42, 0, None, 0);
+    let _recovered = subject.bot.tick();
+    assert!(
+        subject
+            .ran
+            .borrow()
+            .iter()
+            .any(|entry| entry.0 == 0 && entry.1 == 42),
+        "seed {SEED}: the next tick re-polled the stalled chain and committed the \
+         value it reported: {:?}",
+        subject.ran.borrow()
+    );
+    let recovered = subject.bot.tick_report();
+    assert!(
+        recovered.stalled().is_empty(),
+        "seed {SEED}: the tick that read the source reports no stall: {:?}",
+        recovered.stalled()
+    );
+    Ok(())
+}
+
+/// A per-poll deadline is accepted at both boundaries and refused one step past
+/// the ceiling, seeded around the edges.
+///
+/// The bound is only a bound if it cannot be set to something that is not one.
+/// The smallest positive budget is a bounded wait and is accepted; the declared
+/// ceiling is accepted; zero — which cancels every poll before its first poll —
+/// and anything past the ceiling are typed refusals naming the number, because
+/// a clamped deadline is indistinguishable from the one the caller asked for.
+#[test]
+fn a_poll_deadline_around_both_edges_is_accepted_or_refused_at_build() -> TestResult {
+    const SEED: u64 = 0x1230_0006;
+    let mut rng = Rng::new(SEED);
+    let slack = u64::from(rng.between(1, 1_000));
+
+    let smallest = Duration::from_nanos(slack);
+    let accepted = Bot::builder("sim-deadline-smallest")
+        .with_poll_deadline(smallest)
+        .with_effects(tenant_scope(0)?)
+        .build(&GrantSet::empty());
+    assert!(
+        accepted.is_ok(),
+        "seed {SEED}: a positive budget is a bound, so it is accepted: {accepted:?}"
+    );
+
+    let at_ceiling = Bot::builder("sim-deadline-ceiling")
+        .with_poll_deadline(MAX_POLL_DEADLINE)
+        .with_effects(tenant_scope(0)?)
+        .build(&GrantSet::empty());
+    assert!(
+        at_ceiling.is_ok(),
+        "seed {SEED}: the declared ceiling is itself accepted: {at_ceiling:?}"
+    );
+
+    let default = Bot::builder("sim-deadline-default")
+        .with_effects(tenant_scope(0)?)
+        .build(&GrantSet::empty());
+    assert!(
+        default.is_ok(),
+        "seed {SEED}: the declared default is inside both bounds: {default:?}"
+    );
+    assert!(
+        DEFAULT_POLL_DEADLINE > Duration::ZERO && DEFAULT_POLL_DEADLINE <= MAX_POLL_DEADLINE,
+        "seed {SEED}: the default budget is a bounded one"
+    );
+
+    let zero = Bot::builder("sim-deadline-zero")
+        .with_poll_deadline(Duration::ZERO)
+        .with_effects(tenant_scope(0)?)
+        .build(&GrantSet::empty());
+    assert!(
+        matches!(zero, Err(BotError::PollDeadlineUnbounded { deadline }) if deadline.is_zero()),
+        "seed {SEED}: zero bounds nothing and is refused, naming the number: {zero:?}"
+    );
+
+    let past = MAX_POLL_DEADLINE.saturating_add(Duration::from_nanos(slack));
+    let over = Bot::builder("sim-deadline-over")
+        .with_poll_deadline(past)
+        .with_effects(tenant_scope(0)?)
+        .build(&GrantSet::empty());
+    match over {
+        Err(BotError::PollDeadlineExceeded { deadline, ceiling }) => {
+            assert_eq!(
+                deadline, past,
+                "seed {SEED}: the refusal names the budget that was asked for"
+            );
+            assert_eq!(
+                ceiling, MAX_POLL_DEADLINE,
+                "seed {SEED}: and the ceiling that would have been accepted, so the \
+                 repair is a number rather than a guess"
+            );
+        }
+        other => {
+            return Err(
+                format!("seed {SEED}: a budget past the ceiling was accepted: {other:?}").into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Among a wave of scripted sources, only the chain the seed wedged is reported
+/// stalled — named by its own chain, its own `domain_id` and the applied budget.
+///
+/// The per-chain half of INV-BOT-123's report: the stall is not a wave-level
+/// fact garbled across the chains in it. A report that named the wave, or the
+/// first chain, or a neighbour would pass a "something stalled" assertion and
+/// fail this one.
+#[test]
+fn only_the_seeded_wedged_chain_is_reported_stalled() -> TestResult {
+    const SEED: u64 = 0x1230_0007;
+    let mut rng = Rng::new(SEED);
+    let ceiling = u32::try_from(WAVE_WIDTH).unwrap_or(32);
+    let width = usize::try_from(rng.between(2, ceiling)).unwrap_or(2);
+    let wedged = usize::try_from(rng.below(u32::try_from(width).unwrap_or(2))).unwrap_or(0);
+    let holds = Rc::new(Cell::new(false));
+    let mut subject = scripted_bot("sim-observe-one-stalled", 0, width, SIM_DEADLINE, holds)?;
+    for (index, held) in subject.handles.iter().enumerate() {
+        let pace = if index == wedged { WEDGED_PACE } else { 0 };
+        let value = u32::try_from(index).unwrap_or(0).saturating_add(1);
+        arm_chain(held, value, pace, None, 0);
+    }
+    let _outcome = subject.bot.tick();
+    let report = subject.bot.tick_report();
+    assert_eq!(
+        report.stalled().len(),
+        1,
+        "seed {SEED} width {width}: exactly the chain the seed wedged is \
+         reported: {:?}",
+        report.stalled()
+    );
+    let row = report
+        .stalled()
+        .first()
+        .ok_or_else(|| format!("seed {SEED}: the wedged chain is named"))?;
+    assert_eq!(
+        row.chain(),
+        wedged,
+        "seed {SEED}: the reported chain is the wedged one"
+    );
+    assert_eq!(
+        row.domain(),
+        DOMAINS[0][wedged % 8],
+        "seed {SEED}: named by its own domain_id, not a neighbour's"
+    );
+    assert_eq!(
+        row.deadline(),
+        SIM_DEADLINE,
+        "seed {SEED}: and carrying the budget that was actually applied"
+    );
+    Ok(())
+}
+
+/// The siblings of a wedged source commit and act in the *same* tick, at seeded
+/// widths.
+///
+/// INV-BOT-123's "the chains beside it commit and act in the same tick", stated
+/// where a tick boundary can be seen: a cancellation is not a park, so the tick
+/// reaches the walk with every other chain's observation committed. Exactly one
+/// sibling moves, so the change-selection rule cannot hide it, and the wedged
+/// chain's own action must not appear.
+#[test]
+fn siblings_of_a_wedged_source_act_in_the_same_tick() -> TestResult {
+    const SEED: u64 = 0x1230_0008;
+    let mut rng = Rng::new(SEED);
+    let width = usize::try_from(rng.between(3, 12)).unwrap_or(3);
+    let wedged = usize::try_from(rng.below(u32::try_from(width).unwrap_or(3))).unwrap_or(0);
+    let mover = wedged.saturating_add(1) % width;
+    let holds = Rc::new(Cell::new(false));
+    let mut subject = scripted_bot("sim-observe-siblings", 0, width, SIM_DEADLINE, holds)?;
+    for (index, held) in subject.handles.iter().enumerate() {
+        let value = u32::try_from(index).unwrap_or(0).saturating_add(1);
+        arm_chain(held, value, 0, None, 0);
+    }
+    let _baseline = subject.bot.tick();
+    let before = subject.ran.borrow().len();
+
+    for (index, held) in subject.handles.iter().enumerate() {
+        let pace = if index == wedged { WEDGED_PACE } else { 0 };
+        let value = if index == mover {
+            999
+        } else {
+            u32::try_from(index).unwrap_or(0).saturating_add(1)
+        };
+        arm_chain(held, value, pace, None, 0);
+    }
+    let _stalled = subject.bot.tick();
+    let ran = subject.ran.borrow().clone();
+    let added: Vec<(usize, u32)> = ran.iter().skip(before).copied().collect();
+    assert!(
+        ran.len() > before,
+        "seed {SEED} width {width}: the sibling that moved acted in the same tick \
+         the wedged source was cancelled: {ran:?}"
+    );
+    assert!(
+        added.iter().any(|entry| entry.0 == mover && entry.1 == 999),
+        "seed {SEED}: the moving sibling acted with the value it moved to: {added:?}"
+    );
+    assert!(
+        !added.iter().any(|entry| entry.0 == wedged),
+        "seed {SEED}: the wedged chain committed nothing and acted nothing, \
+         because its poll was cancelled: {added:?}"
+    );
+    Ok(())
+}
+
+/// Each chain's own declared cause is reported against that chain in `forced`.
+///
+/// INV-BOT-120's per-chain mark: the report is a bijection with the
+/// declarations, so a chain that declared nothing is not forced and a chain
+/// that declared a cause names its own cause — not a sibling's, and not a
+/// bot-wide guess about which transport is up.
+#[test]
+fn a_seeded_reason_per_chain_is_reported_against_its_own_chain() -> TestResult {
+    const SEED: u64 = 0x1200_0009;
+    let mut rng = Rng::new(SEED);
+    let holds = Rc::new(Cell::new(false));
+    let mut subject = scripted_bot("sim-observe-reasons", 0, 3, SIM_DEADLINE, holds)?;
+    let mut expected: Vec<(usize, RefreshReason)> = Vec::new();
+    for (index, held) in subject.handles.iter().enumerate() {
+        let cause = if rng.chance(700) {
+            let cause = CAUSES[usize::try_from(rng.below(4)).unwrap_or(0)];
+            expected.push((index, cause));
+            Some(cause)
+        } else {
+            None
+        };
+        let value = u32::try_from(index).unwrap_or(0).saturating_add(1);
+        arm_chain(held, value, 0, cause, 0);
+    }
+    let _outcome = subject.bot.tick();
+    let report = subject.bot.tick_report();
+    let got: Vec<(usize, RefreshReason)> = report
+        .forced()
+        .iter()
+        .map(|row| (row.chain(), row.reason()))
+        .collect();
+    assert_eq!(
+        got, expected,
+        "seed {SEED}: the forced report is a bijection with the declarations — \
+         each chain names its own cause and no undeclared chain is forced"
+    );
+    for row in report.forced() {
+        assert_eq!(
+            row.domain(),
+            DOMAINS[0][row.chain() % 8],
+            "seed {SEED}: chain {} is named by its own domain",
+            row.chain()
+        );
+    }
+    Ok(())
+}
+
+/// A forced refresh whose poll keeps failing stays marked until a read that
+/// commits spends it.
+///
+/// The two halves of INV-BOT-120's spend rule that a single-tick family cannot
+/// see: while every forced poll fails, the mark outlives each tick and the
+/// report still names the chain; once the source answers, the committing read
+/// spends the mark, and the tick after that is quiet. A repair that cleared the
+/// mark on the failed poll would return the bot to comparing against the
+/// unsound baseline it just failed to replace.
+#[test]
+fn a_failed_forced_refresh_keeps_the_mark_until_a_committed_read_spends_it() -> TestResult {
+    const SEED: u64 = 0x1200_0010;
+    let mut rng = Rng::new(SEED);
+    let cause = CAUSES[usize::try_from(rng.below(4)).unwrap_or(0)];
+    let failures = rng.between(2, 4);
+    let holds = Rc::new(Cell::new(false));
+    let mut subject = scripted_bot("sim-observe-failed-mark", 0, 2, SIM_DEADLINE, holds)?;
+    arm_chain(&subject.handles[0], 1, 0, Some(cause), 0);
+    subject.handles[0].refusing.set(true);
+    arm_chain(&subject.handles[1], 2, 0, None, 0);
+
+    for tick in 1..=failures {
+        let _outcome = subject.bot.tick();
+        let report = subject.bot.tick_report();
+        assert!(
+            report
+                .forced()
+                .iter()
+                .any(|row| row.chain() == 0 && row.reason() == cause),
+            "seed {SEED} failure {tick} of {failures}: chain 0's forced poll \
+             refused, so its mark stands and the report still names it: {:?}",
+            report.forced()
+        );
+        assert!(
+            report.stalled().is_empty(),
+            "seed {SEED} failure {tick}: a refused poll is a domain failure, not a \
+             cancellation: {:?}",
+            report.stalled()
+        );
+    }
+
+    subject.handles[0].refusing.set(false);
+    subject.handles[0].declared.set(None);
+    subject.handles[0].value.set(50);
+    let _spend = subject.bot.tick();
+    assert!(
+        subject
+            .ran
+            .borrow()
+            .iter()
+            .any(|entry| entry.0 == 0 && entry.1 == 50),
+        "seed {SEED}: the committed read spent the mark by acting on the value it \
+         read: {:?}",
+        subject.ran.borrow()
+    );
+
+    let _quiet = subject.bot.tick();
+    let after = subject.bot.tick_report();
+    assert!(
+        after.forced().iter().all(|row| row.chain() != 0),
+        "seed {SEED}: the mark was spent by the read that committed, so the quiet \
+         tick does not force chain 0 again: {:?}",
+        after.forced()
+    );
+    Ok(())
+}
+
+/// A seeded sequence of value changes under a held action reports each replaced
+/// unacted revision exactly once, and never as a fired effect.
+///
+/// INV-BOT-121 in the shape a counter cannot express: the generation that first
+/// acted on the value stays held, so every later value is committed and passed
+/// over. `superseded` must name each replaced revision once — the intermediates
+/// between the admitted first value and the newest — and `fired` must count
+/// none of them, because a pass-over is not work done.
+#[test]
+fn a_seeded_value_sequence_under_a_held_action_reports_each_replaced_revision_once() -> TestResult {
+    const SEED: u64 = 0x1210_0011;
+    let mut rng = Rng::new(SEED);
+    let steps = rng.between(3, 6);
+    let holds = Rc::new(Cell::new(true));
+    let mut subject = scripted_bot(
+        "sim-observe-superseded",
+        0,
+        1,
+        SIM_DEADLINE,
+        Rc::clone(&holds),
+    )?;
+    let mut values: Vec<u32> = Vec::new();
+    for step in 0..steps {
+        values.push(step.saturating_mul(7).saturating_add(10));
+    }
+
+    let mut superseded: Vec<u64> = Vec::new();
+    let mut fired = 0_usize;
+    for value in &values {
+        arm_chain(&subject.handles[0], *value, 0, None, 0);
+        let _outcome = subject.bot.tick();
+        let report = subject.bot.tick_report();
+        fired = fired.saturating_add(report.fired());
+        assert!(
+            !report.forced_any(),
+            "seed {SEED}: a pass-over is not a forced refresh: {:?}",
+            report.forced()
+        );
+        for row in report.superseded() {
+            superseded.push(row.revision());
+        }
+    }
+
+    let expected: Vec<u64> = (2..u64::from(steps)).collect();
+    assert_eq!(
+        superseded, expected,
+        "seed {SEED}: each replaced unacted revision is reported exactly once, in \
+         order — the intermediates between the first, admitted value and the \
+         newest"
+    );
+    assert_eq!(
+        subject.ran.borrow().clone(),
+        vec![(0, values[0])],
+        "seed {SEED}: the held generation ran only on the first value, so no \
+         superseded value is counted as fired"
+    );
+    assert_eq!(
+        fired, 0,
+        "seed {SEED}: no effect was counted as fired — the only generation that \
+         ran reported its outcome unknown, and a pass-over is never counted as \
+         either"
+    );
+    Ok(())
+}
+
+/// A seeded mass of held chains never starves an independent chain, at every
+/// tier the host can build.
+///
+/// INV-BOT-122's saturation claim on one bot: the independent chain is declared
+/// first and its effect lands, while every held chain occupies a transition the
+/// walk reaches and cannot drop. The independent chain still runs, every held
+/// chain still reaches its own action once, and every one is still *reported*
+/// as held — a dropped hold is a lost effect nobody would see. The tier reached
+/// is recorded rather than clamped.
+#[test]
+fn a_seeded_mass_of_held_chains_never_starves_an_independent_chain() -> TestResult {
+    const SEED: u64 = 0x1220_0012;
+    let mut rng = Rng::new(SEED);
+    let bias = rng.below(64);
+    let mut reached: Vec<usize> = Vec::new();
+    for requested in [100_usize, 1_000, 10_000] {
+        let independent = Rc::new(RefCell::new(Vec::new()));
+        let held_seen = Rc::new(RefCell::new(Vec::new()));
+        let first = ChainHandles::new();
+        arm_chain(&first, bias.saturating_add(1), 0, None, 0);
+        let mut builder = Bot::builder("sim-observe-mass")
+            .with_poll_deadline(SIM_DEADLINE)
+            .observe(scripted(&first, 0, 0))
+            .on(
+                |observed: &u32| *observed > 0,
+                Logs {
+                    ran: Rc::clone(&independent),
+                    chain: 0,
+                    holds: Rc::new(Cell::new(false)),
+                },
+            );
+        for chain in 1..=requested {
+            let held = ChainHandles::new();
+            arm_chain(&held, bias.saturating_add(2), 0, None, 0);
+            builder = builder.observe(scripted(&held, chain, 0)).on(
+                |observed: &u32| *observed > 0,
+                Logs {
+                    ran: Rc::clone(&held_seen),
+                    chain,
+                    holds: Rc::new(Cell::new(true)),
+                },
+            );
+        }
+        let mut bot = builder
+            .with_effects(tenant_scope(0)?)
+            .build(&GrantSet::empty())?;
+        let _outcome = bot.tick();
+        assert_eq!(
+            independent.borrow().len(),
+            1,
+            "seed {SEED} tier {requested}: the independent chain's action ran while \
+             {requested} held chains occupied the walk"
+        );
+        assert_eq!(
+            held_seen.borrow().len(),
+            requested,
+            "seed {SEED} tier {requested}: every held chain reached its own action \
+             once: a walk that stopped at the first hold would have run one"
+        );
+        assert_eq!(
+            bot.pending().len(),
+            requested,
+            "seed {SEED} tier {requested}: and every one of them is still reported \
+             as held rather than dropped to make room"
+        );
+        assert_eq!(
+            bot.source_domains().len(),
+            requested.saturating_add(1),
+            "seed {SEED} tier {requested}: the bot declares one independent chain and \
+             {requested} held ones"
+        );
+        reached.push(requested);
+    }
+    assert_eq!(
+        reached,
+        vec![100, 1_000, 10_000],
+        "seed {SEED}: the tiers this run reached, recorded rather than clamped, so \
+         a reader is never told a concurrency number nobody ran"
+    );
+    Ok(())
+}
+
+/// Two tenants interleaved over one host never cross stalled, forced or
+/// superseded attribution.
+///
+/// Two bots of different widths, so a chain index that crossed is detectable: a
+/// five-chain tenant's chain 4 is impossible in a three-chain one. Each tenant
+/// forces one chain, wedges another and holds its actions, so all three report
+/// kinds are live on every tick and the assertion is not vacuous.
+#[test]
+fn two_tenants_interleaved_ticks_never_cross_attribution() -> TestResult {
+    const SEED: u64 = 0x1250_0013;
+    let mut rng = Rng::new(SEED);
+    let ticks = rng.between(3, 6);
+    let holds_left = Rc::new(Cell::new(true));
+    let holds_right = Rc::new(Cell::new(true));
+    let mut left = scripted_bot("sim-observe-two-left", 0, 3, SIM_DEADLINE, holds_left)?;
+    let mut right = scripted_bot("sim-observe-two-right", 1, 5, SIM_DEADLINE, holds_right)?;
+    let mut superseded_seen = 0_usize;
+
+    for tick in 1..=ticks {
+        for subject in [&mut left, &mut right] {
+            let cause = CAUSES[usize::try_from(rng.below(4)).unwrap_or(0)];
+            for (index, held) in subject.handles.iter().enumerate() {
+                let pace = if index == 1 { WEDGED_PACE } else { 0 };
+                let declared = if index == 0 { Some(cause) } else { None };
+                let value = tick
+                    .saturating_mul(10)
+                    .saturating_add(u32::try_from(index).unwrap_or(0));
+                arm_chain(held, value, pace, declared, 0);
+            }
+            let _outcome = subject.bot.tick();
+            let report = subject.bot.tick_report();
+            let prefix = format!("sim::t{}", subject.tenant);
+            let width = subject.handles.len();
+            assert!(
+                report.forced().iter().any(|row| row.chain() == 0),
+                "seed {SEED} tick {tick}: tenant {} forced its declared chain",
+                subject.tenant
+            );
+            assert!(
+                report.stalled().iter().any(|row| row.chain() == 1),
+                "seed {SEED} tick {tick}: tenant {} stalled its wedged chain",
+                subject.tenant
+            );
+            for row in report.forced() {
+                assert!(
+                    row.domain().starts_with(&prefix),
+                    "seed {SEED} tick {tick}: tenant {} reported a forced source \
+                     belonging to another tenant: {}",
+                    subject.tenant,
+                    row.domain()
+                );
+                assert!(
+                    row.chain() < width,
+                    "seed {SEED} tick {tick}: tenant {} reported a forbidden chain {}",
+                    subject.tenant,
+                    row.chain()
+                );
+            }
+            for row in report.stalled() {
+                assert!(
+                    row.domain().starts_with(&prefix),
+                    "seed {SEED} tick {tick}: tenant {} reported a stalled source \
+                     belonging to another tenant: {}",
+                    subject.tenant,
+                    row.domain()
+                );
+            }
+            for row in report.superseded() {
+                assert!(
+                    row.chain() < width,
+                    "seed {SEED} tick {tick}: tenant {} reported a superseded chain \
+                     it does not declare: {}",
+                    subject.tenant,
+                    row.chain()
+                );
+                superseded_seen = superseded_seen.saturating_add(1);
+            }
+        }
+    }
+    assert!(
+        superseded_seen > 0,
+        "seed {SEED}: the run exercised supersession, so the cross-tenant \
+         assertion about it is not vacuous"
+    );
+    Ok(())
+}
+
+/// The deadline and watchdog families replay exactly, twice over.
+///
+/// `assert_replays` sweeps the band twice and compares the two hash vectors, so
+/// a run that decided a different stall set — or started a different number of
+/// watchers — fails even though every assertion above passed. The trace records
+/// the *set* of stalled chains and the watchdog count rather than any timing, so
+/// the receipt is a statement about what the run decided and not about how fast
+/// it decided it.
+#[test]
+fn the_same_seed_replays_a_deadline_wave() -> TestResult {
+    sim::assert_replays(sim::band_of(40), |sim| {
+        let holds = Rc::new(Cell::new(false));
+        let mut subject = scripted_bot("sim-observe-deadline-replay", 0, 3, SIM_DEADLINE, holds)?;
+        let ticks = sim.rng().between(2, 3);
+        for tick in 1..=ticks {
+            for (index, held) in subject.handles.iter().enumerate() {
+                let wedged = sim.rng().chance(250);
+                let yields = sim.rng().between(0, 1);
+                let pace = if wedged { WEDGED_PACE } else { 0 };
+                let value = tick
+                    .saturating_mul(10)
+                    .saturating_add(u32::try_from(index).unwrap_or(0));
+                arm_chain(held, value, pace, None, yields);
+            }
+            let _outcome = subject.bot.tick();
+            let report = subject.bot.tick_report();
+            sim.record(&format!("tick {tick} watchdogs {}", report.watchdogs()));
+            for row in report.stalled() {
+                sim.record(&format!("stalled {} {}", row.chain(), row.domain()));
+            }
+        }
+        for entry in subject.ran.borrow().iter() {
+            sim.record(&format!("ran {} {}", entry.0, entry.1));
+        }
+        Ok(())
+    })
 }

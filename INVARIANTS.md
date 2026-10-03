@@ -1336,7 +1336,10 @@ Each of these was a shipped defect. Treat the list as the spec.
   `two_tenants_sources_forced_refreshes_stay_attributed_to_their_own_chain`),
   `tests/sim_observe_refresh.rs` (`forced_refresh_matches_the_schedule` and
   `a_refresh_that_never_lands_stays_marked`, each swept over bands 00–05 and
-  06–09 by the shared `band_family!` declaration) and
+  06–09 by the shared `band_family!` declaration, and
+  `a_seeded_reason_per_chain_is_reported_against_its_own_chain`,
+  `a_failed_forced_refresh_keeps_the_mark_until_a_committed_read_spends_it`,
+  `two_tenants_interleaved_ticks_never_cross_attribution`) and
   `verb::tests::only_supersession_leaves_the_baseline_sound`
 - **INV-BOT-121** An observation the substrate passes over is reported as its own
   outcome, not as a fired effect and not as a retire. `Committed` records per
@@ -1359,7 +1362,9 @@ Each of these was a shipped defect. Treat the list as the spec.
   `identical_payloads_with_distinct_event_ids_both_execute_and_a_redelivery_does_not`)
   and `tests/sim_observe_refresh.rs` (`event_identities_are_per_event` and
   `tenants_never_cross`, swept over bands 14–17 and 10–13 by the shared
-  `band_family!` declaration)
+  `band_family!` declaration, and
+  `a_seeded_value_sequence_under_a_held_action_reports_each_replaced_revision_once`,
+  `two_tenants_interleaved_ticks_never_cross_attribution`)
 - **INV-BOT-122** A chain held open does not starve an independent chain. A
   generation whose action reports an indeterminate outcome stays held, so its
   transition is walked on every tick and never released; the walk stops *at that
@@ -1373,7 +1378,9 @@ Each of these was a shipped defect. Treat the list as the spec.
   nobody would ever see. The tier reached is recorded rather than clamped.
   · why: #87 step 3 (T06, LC-03), first half · enforced by: `tests/observe_refresh.rs`
   (`a_chain_held_at_capacity_does_not_starve_an_independent_chain`,
-  `a_saturated_mass_does_not_starve_an_independent_chain_at_every_tier`)
+  `a_saturated_mass_does_not_starve_an_independent_chain_at_every_tier`) and
+  `tests/sim_observe_refresh.rs`
+  (`a_seeded_mass_of_held_chains_never_starves_an_independent_chain`)
 - **INV-BOT-123** One slow source cannot hold the tick. Every source poll in the
   observation wave runs under a **declared per-poll deadline** — the wall watchdog
   half of the crate's one declared clock (`Clock`, INV-BOT-30), never its
@@ -1405,7 +1412,12 @@ Each of these was a shipped defect. Treat the list as the spec.
   `tests/sim_observe_refresh.rs`
   (`a_wedged_source_is_reported_and_costs_its_neighbours_nothing`,
   `a_saturated_wave_stalls_every_chain_and_still_lets_the_next_tenant_commit`,
-  `the_same_seed_replays_a_stalled_wave`)
+  `the_same_seed_replays_a_stalled_wave`,
+  `a_stalled_chain_keeps_its_mark_and_is_re_polled_next_tick`,
+  `a_poll_deadline_around_both_edges_is_accepted_or_refused_at_build`,
+  `only_the_seeded_wedged_chain_is_reported_stalled`,
+  `siblings_of_a_wedged_source_act_in_the_same_tick`,
+  `two_tenants_interleaved_ticks_never_cross_attribution`)
 - **INV-BOT-124** The per-poll deadline's watchdog is one per observation wave
   and is started lazily. `MAX_IN_FLIGHT_POLLS` chains form one wave under one
   `poll_deadline`, so a wave has one deadline to watch and exactly one
@@ -1431,7 +1443,13 @@ Each of these was a shipped defect. Treat the list as the spec.
   `tests/observe_refresh.rs`
   (`a_wave_spends_one_watchdog_and_a_mass_of_waves_spends_one_each`) and
   `tests/sim_observe_refresh.rs`, whose `band_family!` declaration runs
-  (`a_wave_spends_one_watchdog_and_a_fast_wave_spends_none`).
+  (`a_wave_spends_one_watchdog_and_a_fast_wave_spends_none`), and its
+  source-visible deadline-watchdog families
+  (`a_fast_wave_spends_no_watchdog_across_seeded_widths`,
+  `a_pending_source_spends_one_watchdog_for_its_wave`,
+  `a_seeded_run_spends_one_watchdog_per_pending_tick`,
+  `a_cancelled_tick_leaves_the_bot_usable`,
+  `the_same_seed_replays_a_deadline_wave`).
 
 - **INV-BOT-81** A review's subject is the repository the caller named and the
   diff that was read, and a publication is reported only from evidence of the

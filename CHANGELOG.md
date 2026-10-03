@@ -59,6 +59,19 @@ explicitly under that crate.
   actually started, beside `stalled`: zero for the ordinary tick where every
   source answered on its first poll, and one per observation wave that had a
   source still pending. **Migration:** none; it is an accessor.
+- Source-visible simulation evidence for the observation layer's deadline,
+  watchdog, refresh and attribution rows (INV-BOT-120..124). Fourteen seeded
+  properties in `tests/sim_observe_refresh.rs` drive the public
+  `Bot`/`TickReport` surface over wave widths from 1 to 64: an ordinary wave
+  starts no watchdog while a wave with a poll that yielded once starts exactly
+  one, and the count over a run equals the number of ticks with a pending wave;
+  a tick dropped mid-wave leaves the bot usable; a wedged chain keeps its
+  baseline and forced-refresh mark and is re-polled next tick; a per-poll
+  deadline is accepted at both edges and refused one step past the ceiling; each
+  chain's own declared cause, each replaced unacted revision and every stall is
+  reported against the right chain; a mass of 100/1,000/10,000 held chains never
+  starves an independent chain; and two tenants never cross attribution. No
+  production code changed.
 - `rt::process::CapturedStream::frames(ceiling)`, the door a caller reads its own
   child's output through: infallible, and the reason a `ProcessRun`'s captured
   stdout can be read as frames without the caller re-plumbing the bytes into a
