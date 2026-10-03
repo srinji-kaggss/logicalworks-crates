@@ -81,14 +81,15 @@
 //! across worker threads is not deterministic; only the *result* order of
 //! [`join_all_bounded`](crate::rt::task::join_all_bounded) is.
 
-// Gated on `rt` rather than `time` because the clock is `std`-only and is
-// reached by two surfaces with different gates: `time` re-exports it beside
-// `Deadline`, and `supervise` (gate `sync`, which does not imply `time`) reads
-// it to measure its budgets. Gating it on the narrower of the two would make
-// `sync`-without-`time` a build that cannot name the clock its own deadlines
-// are measured on.
+// The clock lives at the crate root (`crate::clock`) because it is `std`-only
+// and the observation phase's per-poll deadline needs it in builds that have no
+// engine here at all: a `--no-default-features` tick still runs and still has to
+// bound a source that stops answering. This is the same module re-exported, not a
+// second one — the re-export exists so a caller that already writes `rt::` for
+// its deadlines does not have to learn a second path for the clock that governs
+// them.
 #[cfg(feature = "rt")]
-pub mod clock;
+pub use crate::clock;
 pub mod runtime;
 pub mod task;
 

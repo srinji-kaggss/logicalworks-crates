@@ -167,6 +167,21 @@ pub mod domain {
     pub mod notify;
     pub mod sys;
 }
+/// The one declared clock, which every deadline this crate evaluates names.
+///
+/// Ungated because the module is `std`-only — it imports `fmt`, `sync::Arc`, an
+/// atomic and `time::Instant`, and no engine facade — and it is reached by three
+/// surfaces with different gates: `rt::time` re-exports it beside `Deadline`,
+/// `rt::supervise` reads it to measure its budgets, and the observation phase
+/// reads its wall watchdog to bound a source poll. Gating it on the narrowest of
+/// those would leave a `--no-default-features` build — whose tick phase still
+/// runs and still needs a bound on its sources — unable to name the clock that
+/// governs it.
+///
+/// Re-exported unchanged from `rt::clock` for every build that has `rt`, so
+/// this is one clock reached two ways and never two clocks: `rt::clock` is the
+/// path a caller who has the async surface already writes.
+pub mod clock;
 /// The `bevy_ecs` substrate the verbs execute on. Private: it is the
 /// implementation, not a second way to run a bot.
 mod ecs;
@@ -367,6 +382,10 @@ pub mod task;
 pub mod verb;
 
 pub use cap::{Auth, Cap, Deficit, Demand, Shortage};
+pub use ecs::{
+    DEFAULT_POLL_DEADLINE, ForcedRefresh, MAX_POLL_DEADLINE, StalledSource, SupersededObservation,
+    TickReport,
+};
 pub use effect::{EventId, InputIdentity};
 pub use error::{BotError, DispatchCertainty, RetryClass};
 pub use gate::GrantSet;
@@ -394,6 +413,14 @@ pub use spec::{Admission, Bot, BotSpec, Need, NeedSet};
 #[cfg(feature = "script")]
 pub use lgwks_macros::script;
 pub use verb::EffectLifetime;
+/// Why a source cannot be trusted to answer "has this changed?" this tick, and the
+/// statement it makes through [`Observe::cache_state`].
+///
+/// Re-exported on its own line rather than inside the four-verb list below,
+/// because it is not a verb. `verb::tests::the_crate_root_reexports_exactly_those_four_verbs`
+/// reads that list as the four verbs and nothing else, so a fifth name beside them
+/// would make the invariant it guards fail for a type that is not a verb.
+pub use verb::RefreshReason;
 pub use verb::{Evaluate, Execute, Observe, Query};
 
 /// Typed in-process structural inspection (feature `inspect`).

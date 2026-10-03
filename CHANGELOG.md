@@ -59,6 +59,68 @@ explicitly under that crate.
 
 ### lgwks_bot Added
 
+- `EcsBuilder::with_poll_deadline`, `DEFAULT_POLL_DEADLINE` and
+  `MAX_POLL_DEADLINE` (INV-BOT-123). Every source poll in a tick's observation
+  wave now runs under a declared per-poll deadline, so one source that never
+  resolves can no longer hold the whole tick. `MAX_IN_FLIGHT_POLLS` bounded the
+  wave's fan-out but not its wait, and the wave is joined on the calling thread,
+  so every other chain's action was held behind a source nobody could make
+  progress for. A poll that misses its deadline is dropped mid-flight: it commits
+  nothing, keeps its chain's baseline and forced-refresh mark standing, and is
+  reported in `TickReport::stalled` with the chain, the source's `domain_id` and
+  the budget applied. The chains beside it commit and act in the same tick.
+  The deadline is measured on the wall watchdog of the crate's one declared
+  clock, not its caller-advanceable counter, because a wedged source is not
+  waiting for time; it is a watchdog thread the poll owns and joins on every
+  path, because `Bot::tick` is `lgwks_std::task::block_on` and has no reactor for
+  a timer. Zero and over-ceiling deadlines are refused at build rather than
+  clamped. **Migration:** none; the default is applied to every existing bot.
+  `clock` moved from `rt::clock` to the crate root (re-exported unchanged under
+  `rt`), so a `--no-default-features` build can bound its sources too.
+- `BotError::{PollStalled, PollDeadlineUnbounded, PollDeadlineExceeded}` and
+  `StalledSource`. A cancelled poll is `NotDelivered`, so a retry classifier
+  reads the next tick as a plain retry. **Migration:** a caller matching
+  `BotError` exhaustively must handle the three new arms; `BotError` is
+  `#[non_exhaustive]`, so an existing match already compiles with a wildcard.
+- `verb::RefreshReason` and `Observe::cache_state` (INV-BOT-120). A source that
+  caches can now declare that its cached baseline is unsound, naming which of
+  four failures it was: `Disconnected`, `WatchOverflow`, `StaleRemoteKey` or
+  `InvalidationFailed`. Before this the substrate's shortcut — do not re-poll a
+  source whose value compares equal — assumed a baseline was sound, and in all
+  four cases "unchanged" and "I stopped looking" are the same observation, so the
+  bot settled into a permanent quiet state whose only symptom was zero fired
+  effects. The reason is read from the source itself after its poll resolves and
+  never guessed, because the substrate cannot know whether somebody else's
+  transport is up. **Migration:** none. `cache_state` defaults to `None`, so
+  every existing `Observe` impl keeps compiling and keeps its current behaviour;
+  an existing source that overrides the deprecated `fingerprint` should move its
+  state to `cache_state`, since that method no longer suppresses anything.
+- `TickReport` and `Bot::tick_report` (INV-BOT-120, INV-BOT-121). What the last
+  tick observed about its own sources, beside the count of effects it fired:
+  `forced` names the chains whose baseline the tick refused and re-read and the
+  cause each source declared, `superseded` names the observations replaced before
+  any entry acted on them. The count says what ran; this says what had to be
+  re-read to decide, and a quiet bot is exactly where only the first is
+  uninformative. Published before the schedule step runs, so a tick that failed
+  still reports what its sources had already declared. Every field is private
+  behind an accessor. **Migration:** none; reading it is optional.
+- `TickReport::watchdogs` (INV-BOT-124). The deadline watchdog threads the tick
+  actually started, beside `stalled`: zero for the ordinary tick where every
+  source answered on its first poll, and one per observation wave that had a
+  source still pending. **Migration:** none; it is an accessor.
+- Source-visible simulation evidence for the observation layer's deadline,
+  watchdog, refresh and attribution rows (INV-BOT-120..124). Fourteen seeded
+  properties in `tests/sim_observe_refresh.rs` drive the public
+  `Bot`/`TickReport` surface over wave widths from 1 to 64: an ordinary wave
+  starts no watchdog while a wave with a poll that yielded once starts exactly
+  one, and the count over a run equals the number of ticks with a pending wave;
+  a tick dropped mid-wave leaves the bot usable; a wedged chain keeps its
+  baseline and forced-refresh mark and is re-polled next tick; a per-poll
+  deadline is accepted at both edges and refused one step past the ceiling; each
+  chain's own declared cause, each replaced unacted revision and every stall is
+  reported against the right chain; a mass of 100/1,000/10,000 held chains never
+  starves an independent chain; and two tenants never cross attribution. No
+  production code changed.
 - `task::DefinitionIdentity` and `task::Drift`: a recorded step value is only
   replayable under the definition that produced it. Every run-store record now
   carries the task name, a declared definition revision, the input digest, a
@@ -136,6 +198,26 @@ explicitly under that crate.
 
 ### lgwks_bot Fixed
 
+- The per-poll deadline no longer spawns and joins one OS thread per source
+  poll, per tick (INV-BOT-124). The watchdog is now one per observation wave
+  (`MAX_IN_FLIGHT_POLLS` chains) and starts lazily, only when the first poll in
+  the wave returns `Pending`; an ordinary wave whose every source answers on its
+  first poll starts no thread at all. The reaper is joined on every path and its
+  spawn is serialized, so a poll can never park against a thread that never
+  started. Measured release, 200 ticks per configuration
+  (`examples/poll_deadline_cost.rs`): ordinary-tick p50/p95/p99 in µs, AFTER
+  1/32/1,000/10,000 chains = 1/3/5, 9/9/12, 158/191/218, 1082/1120/1156 with 0
+  watchdogs at every tier, against BEFORE (`bad47c6d`) 30/37/48, 611/959/1047,
+  19171/19421/19512, 160646/191745/193909; 1,000 chains with one wedged source
+  under a 100 ms budget costs p50 104.7 ms (about one deadline, not one per
+  chain) with one watchdog per tick, against 127.9 ms before.
+- An intermediate observation overtaken before any entry acted on it is now
+  reported rather than vanishing between "fired" and "retired" (INV-BOT-121).
+  Which chain's committed value had been admitted into a generation was a
+  boolean, so "never observed" and "observed and overtaken" read the same — and
+  every chain's first commit was reported as a skip. It is three states now, and
+  admission is marked where a generation *takes* the value rather than where the
+  transition is handed back, which for an entry awaiting evidence is never.
 - The T15 drift check compared a run's records against themselves: `Host::execute`
   read the identity it was going to *check* from the same lookup its steps use to
   find their records, so every definition drift passed and every drifted resume

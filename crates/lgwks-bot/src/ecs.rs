@@ -168,7 +168,14 @@
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::future::Future;
 use std::num::{NonZeroU32, NonZeroU128};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::task::{Context, Poll, Waker};
+use std::thread;
+use std::time::Duration;
 
 // `self` is load-bearing: the `Component` and `Resource` derives expand to
 // `bevy_ecs::…` paths, so the crate name has to be in scope at the use site even
@@ -205,7 +212,16 @@ use super::spec::{
     Witness, typed_entry,
 };
 use super::verb::EffectLifetime;
+use super::verb::RefreshReason;
 use super::verb::{Evaluate, Execute, Observe};
+
+// The one declared clock every deadline in this crate names (INV-BOT-30). Only
+// its wall watchdog is read below — a source that stopped answering is not
+// waiting for time, so a logical counter a caller can advance is the wrong
+// authority for it — but it is reached through the crate's clock rather than
+// through a free-floating `Instant`, which is what makes the elapsed time that
+// cancelled a poll traceable to a named authority.
+use crate::clock::Clock;
 
 // ── The effect path: identity, fencing, and the write-ahead record ─────────
 
@@ -1329,6 +1345,363 @@ struct Moving(Vec<bool>);
 #[derive(Resource, Debug)]
 struct Policy(RetryPolicy);
 
+/// The chains whose cached baseline cannot be trusted, and why.
+///
+/// One flag per chain, indexed exactly as [`Chains`] is, and one entry per tick
+/// per chain — so this is bounded by the chain count for the life of the bot and
+/// cannot grow with the number of ticks. The lifecycle is deliberately one tick
+/// long: a chain marked here is polled with `None` handed to it as its
+/// baseline, so whatever the source reports *is* committed as its new baseline,
+/// and the flag is spent. A flag that outlived the forced poll would keep the
+/// baseline out of the comparison indefinitely, which is the permanent quiet
+/// state this resource exists to prevent — a slower version of the defect.
+///
+/// Spent rather than cleared for the same reason: a chain whose forced poll
+/// *failed* has committed nothing, so its baseline is still whatever it was,
+/// and the next tick must be forced again. Clearing the flag there would return
+/// the bot to comparing against the unsound baseline it just failed to replace.
+#[derive(Debug, Default)]
+struct Invalidated {
+    /// The reason each chain declared, or `None` where it declared nothing.
+    reasons: Vec<Option<RefreshReason>>,
+}
+
+/// The bot's declared per-poll deadline, as the commit step reads it.
+///
+/// A resource beside `EcsBot::poll_deadline` rather than a second source of
+/// truth: `observe_fold` is a schedule step and can only reach the world, so the
+/// value it needs to put on a typed cancellation has to be there. It is inserted
+/// from the same field the observation phase reads, so the number on the error and
+/// the number that bounded the poll cannot differ.
+#[derive(Debug, Clone, Copy, Resource)]
+struct PollBudget(Duration);
+
+impl Invalidated {
+    /// Mark `chain` invalid for `reason`, keeping the reason it already had.
+    ///
+    /// First-write-wins rather than last-write-wins, because the driver walks the
+    /// chains in declaration order and a report that varied with poll resolution
+    /// order would not be comparable across two runs of one seed. One reason per
+    /// chain is what makes the report a statement about the run rather than
+    /// about how its sources happened to resolve.
+    fn mark(&mut self, chain: usize, reason: RefreshReason) {
+        if let Some(slot) = self.reasons.get_mut(chain)
+            && slot.is_none()
+        {
+            *slot = Some(reason);
+        }
+    }
+
+    /// Whether `chain` must be polled without a baseline this tick.
+    fn is_invalid(&self, chain: usize) -> bool {
+        self.reasons
+            .get(chain)
+            .is_some_and(|reason| reason.is_some())
+    }
+}
+
+/// One chain's entry on a tick report: a baseline the source itself declared
+/// unsound, and the reason it named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForcedRefresh {
+    /// The chain whose cached baseline was refused.
+    chain: usize,
+    /// The source's own domain identifier, read through `domain`.
+    domain: String,
+    /// The reason, read through `reason`.
+    reason: RefreshReason,
+}
+
+impl ForcedRefresh {
+    /// The chain whose cached baseline was refused.
+    ///
+    /// The chain's index in declaration order, which is what `pending()` and the
+    /// settlement reports name too.
+    #[must_use]
+    pub const fn chain(&self) -> usize {
+        self.chain
+    }
+
+    /// The source's own domain identifier.
+    ///
+    /// The same spelling `Observe::domain_id` returns, so a report is readable
+    /// without the caller having to hold the declaration order.
+    #[must_use]
+    pub fn domain(&self) -> &str {
+        &self.domain
+    }
+
+    /// Why the source declared its baseline unsound.
+    #[must_use]
+    pub const fn reason(&self) -> RefreshReason {
+        self.reason
+    }
+}
+
+/// One source whose poll this tick cancelled at its per-poll deadline.
+///
+/// Reported rather than dropped, and beside [`ForcedRefresh`] rather than folded
+/// into it, because the two are different facts with different repairs: a forced
+/// refresh is a source that *told* the substrate its baseline was unsound, and a
+/// stall is a source that *stopped answering*. The first is fixed by the domain
+/// reconnecting; the second is bounded by the deadline, and a bot that reported
+/// one as the other would send a reader to the wrong place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StalledSource {
+    /// The chain whose poll was cancelled, read through `chain`.
+    chain: usize,
+    /// The source's own domain identifier, read through `domain`.
+    domain: String,
+    /// The budget that was applied, read through `deadline`.
+    deadline: Duration,
+}
+
+impl StalledSource {
+    /// The chain whose poll was cancelled.
+    ///
+    /// The chain's index in declaration order, which is what `pending()` and the
+    /// settlement reports name too, so one index identifies a chain across every
+    /// report this bot produces.
+    #[must_use]
+    pub const fn chain(&self) -> usize {
+        self.chain
+    }
+
+    /// The source's own domain identifier.
+    ///
+    /// The same spelling `Observe::domain_id` returns, so a caller triaging a
+    /// stall can name the domain without holding the declaration order — which is
+    /// the whole reason the report carries it.
+    #[must_use]
+    pub fn domain(&self) -> &str {
+        &self.domain
+    }
+
+    /// The per-poll budget that was applied when this poll was cancelled.
+    #[must_use]
+    pub const fn deadline(&self) -> Duration {
+        self.deadline
+    }
+}
+
+/// What one tick observed about its own sources, beside the effects it fired.
+///
+/// The count of fired effects answers "what did this tick do"; this answers
+/// "what did it have to look at again, and why", which is a different question
+/// and the one a caller needs when a bot has gone quiet. A tick that fired
+/// nothing because every source legitimately held still is a healthy tick. A
+/// tick that fired nothing because a source's baseline stopped being a fact is
+/// a bug the count cannot see, and this is where it becomes visible.
+///
+/// Read through [`EcsBot::tick_report`] rather than off the tick's return
+/// value, because the tick's `Result` carries an *error* and this carries what
+/// was true about the sources either way: a tick that failed still observed, and
+/// a caller triaging the failure needs to know whether the sources were the
+/// reason.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Resource)]
+pub struct TickReport {
+    /// Effects that fired on this tick, read through `fired`.
+    fired: usize,
+    /// The chains whose baseline this tick refused, read through `forced`.
+    forced: Vec<ForcedRefresh>,
+    /// The observations this tick passed over, read through `superseded`.
+    superseded: Vec<SupersededObservation>,
+    /// The sources this tick stopped waiting for, read through `stalled`.
+    stalled: Vec<StalledSource>,
+    /// Deadline watchdogs this tick started, read through `watchdogs`.
+    watchdogs: u32,
+}
+
+impl TickReport {
+    /// Effects that fired on this tick.
+    #[must_use]
+    pub const fn fired(&self) -> usize {
+        self.fired
+    }
+
+    /// Chains whose cached baseline this tick refused and re-read.
+    ///
+    /// In chain order, at most one entry per chain: the first reason the tick
+    /// recorded for a chain, which is the one whose forced read has not landed.
+    /// Empty when every source legitimately held still — which is the answer a
+    /// caller most needs to be able to distinguish from the next one.
+    #[must_use]
+    pub fn forced(&self) -> &[ForcedRefresh] {
+        &self.forced
+    }
+
+    /// Intermediate observations replaced before any entry acted on them.
+    ///
+    /// In chain order, at most one entry per chain. Reported here rather than
+    /// as a fired effect or as a retired one, because it is neither: the value
+    /// was never due. Counting it as work done would overstate what the tick
+    /// did, and counting it as work retired would understate how many values the
+    /// run passed over.
+    #[must_use]
+    pub fn superseded(&self) -> &[SupersededObservation] {
+        &self.superseded
+    }
+
+    /// Whether this tick re-read anything it had decided it could keep.
+    #[must_use]
+    pub fn forced_any(&self) -> bool {
+        !self.forced.is_empty()
+    }
+
+    /// Whether this tick passed over an intermediate observation.
+    #[must_use]
+    pub fn superseded_any(&self) -> bool {
+        !self.superseded.is_empty()
+    }
+
+    /// Sources whose poll this tick cancelled at the per-poll deadline.
+    ///
+    /// In chain order, at most one entry per chain. Every one of them committed
+    /// nothing, so a caller reconciling "what did the tick see" against the fired
+    /// count must read this beside `fired` rather than instead of it: the chains
+    /// named here are the ones whose absence from the effects is explained, not
+    /// the ones that had nothing to say.
+    ///
+    /// Empty is the ordinary answer, and it is distinguishable from a tick that
+    /// never happened because this is published by the tick that ran, whatever
+    /// that tick's own result was.
+    #[must_use]
+    pub fn stalled(&self) -> &[StalledSource] {
+        &self.stalled
+    }
+
+    /// Whether this tick gave up on any source.
+    #[must_use]
+    pub fn stalled_any(&self) -> bool {
+        !self.stalled.is_empty()
+    }
+
+    /// Deadline watchdogs this tick started.
+    ///
+    /// An OS thread is a real cost on a host with a real thread ceiling, so the
+    /// count belongs in the operator's view of the tick beside the stall it may
+    /// have produced. It is zero for the ordinary tick — every source answered
+    /// on its first poll, so no poll ever needed watching — and at most one per
+    /// observation wave that had a source still pending, because a wave shares
+    /// one deadline and therefore one watcher.
+    ///
+    /// A watchdog that could not be started is not counted here: the count is
+    /// what the host actually started, and a source reported stalled beside a
+    /// zero is the one honest shape that combination can have.
+    #[must_use]
+    pub const fn watchdogs(&self) -> u32 {
+        self.watchdogs
+    }
+}
+
+/// One intermediate observation the substrate passed over in latest-state mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SupersededObservation {
+    /// The chain, read through `chain`.
+    chain: usize,
+    /// The revision, read through `revision`.
+    revision: u64,
+}
+
+impl SupersededObservation {
+    /// The chain whose value was replaced.
+    #[must_use]
+    pub const fn chain(&self) -> usize {
+        self.chain
+    }
+
+    /// The revision the replaced value was committed under.
+    ///
+    /// The revision of the *replaced* value, not of the one that took its place:
+    /// what a caller wants to correlate is "the generation for revision 4 never
+    /// ran", and revision 4 is the one this names.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+}
+
+/// Whether each chain's committed observation has been admitted into a
+/// generation yet, and under which revision.
+///
+/// One entry per chain, so the answer is per-chain constant time rather than a
+/// walk of the transitions. The distinction it records is the one that decides
+/// what a replaced value *was*:
+///
+/// - **Admitted.** The value is sitting in the slot because the generation that
+///   ran on it has finished and handed it back. Replacing it loses nothing: it
+///   has already been acted on.
+/// - **Not admitted.** The value is sitting in the slot because a generation was
+///   still being walked when it arrived, so it could not be admitted yet — and a
+///   newer one arrived before the walk finished. This value will *never* be
+///   acted on, because the substrate admits only the newest observation once the
+///   walk releases the chain. Replacing it passes over an intermediate state,
+///   which is what latest-state mode means and what has to be reported.
+///
+/// Without this, the two are indistinguishable from the outside and the second
+/// is silently dropped: a caller watching a counter see it jump 1 → 2 → 3 has no
+/// way to learn that 2 was never observed as a state, only that it was never
+/// acted on. Those are different facts and only one of them is a loss.
+#[derive(Debug, Default)]
+struct Committed {
+    /// Per chain: has the value in the observation slot been admitted, and
+    /// under which revision was it committed.
+    slots: Vec<SlotAdmission>,
+}
+
+/// What one chain's committed observation is waiting for.
+///
+/// Three states rather than one boolean, because "was replaced before it was
+/// acted on" and "has never been observed at all" both read as `false` in the
+/// two-state form, and conflating them reports the *first* observation of every
+/// chain as a pass-over. That is not cosmetic: it would make a fresh bot claim
+/// it had skipped a state it had never seen.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum SlotState {
+    /// Nothing has been committed for this chain yet.
+    #[default]
+    Nothing,
+    /// A value is committed and a generation has run over it.
+    Admitted,
+    /// A value is committed and no generation has run over it.
+    Unacted,
+}
+
+/// What one chain's committed observation is waiting for.
+#[derive(Debug, Clone, Copy, Default)]
+struct SlotAdmission {
+    /// Where the chain's committed value stands.
+    state: SlotState,
+    /// The revision the value in the slot was committed under.
+    revision: u64,
+}
+
+impl Committed {
+    /// Note that `chain` committed a value under `revision`, not yet admitted.
+    fn commit(&mut self, chain: usize, revision: u64) {
+        if let Some(slot) = self.slots.get_mut(chain) {
+            slot.state = SlotState::Unacted;
+            slot.revision = revision;
+        }
+    }
+
+    /// Note that a generation has been opened over `chain`'s committed value.
+    ///
+    /// Called from the handover, where the binding leaves the transition and
+    /// becomes the slot's standing baseline. The value is then *acted on*, and
+    /// replacing it later is not a supersession.
+    fn admit(&mut self, chain: usize) {
+        if let Some(slot) = self.slots.get_mut(chain) {
+            slot.state = SlotState::Admitted;
+        }
+    }
+
+    /// The admission of `chain`'s committed value, for the supersession check.
+    fn slot(&self, chain: usize) -> SlotAdmission {
+        self.slots.get(chain).copied().unwrap_or_default()
+    }
+}
+
 // ── Non-send state: the verbs and the values ───────────────────────────────
 
 /// One observation chain, holding the same erased halves a
@@ -1481,7 +1854,542 @@ struct Plan {
 /// occupy one `spawn_blocking` thread, so this caps the blocking-thread fan-out
 /// regardless of how many chains a spec declares. Chains beyond the cap are
 /// polled in additional waves.
+///
+/// Also the width of the deadline watchdog: a wave is one unit of waiting, so a
+/// wave has one watcher and the number of threads a tick can spend on the
+/// deadline is the number of waves rather than the number of chains.
 const MAX_IN_FLIGHT_POLLS: usize = 32;
+
+/// How long one source poll may take before the tick stops waiting for it.
+///
+/// `MAX_IN_FLIGHT_POLLS` above bounds how many sources are polled at once; this
+/// bounds how long the tick waits for any one of them. Without it a source that
+/// never resolves holds the whole tick — the observation wave is joined through
+/// `lgwks_std::task::join_all_boxed`, which polls on the calling thread and
+/// returns only when the wave has resolved — and every other chain's action is
+/// held behind a source nobody can make progress for. That is T06's slow-source
+/// half, and it was the one claim this substrate could not make.
+///
+/// Thirty seconds, and the reasoning is about what the number has to be rather
+/// than about taste. It is long enough that a source reading a socket, a
+/// `spawn_blocking` thread, or an ordinary remote call finishes first, so an
+/// ordinary tick is never cut short by it; and it is short enough that "the
+/// source is wedged" is a fact a caller waits one poll budget to observe rather
+/// than a change observed at the next deploy. [`MAX_POLL_DEADLINE`] is the
+/// ceiling a caller may raise it to, and the builder refuses anything past it.
+pub const DEFAULT_POLL_DEADLINE: Duration = Duration::from_secs(30);
+
+/// The largest per-poll deadline [`EcsBuilder::with_poll_deadline`] will grant.
+///
+/// A ceiling rather than an unconstrained field, because the deadline is the one
+/// bound between a wedged source and a bot that never ticks again. A caller who
+/// needs longer than this is making a statement about their whole fan-out, and
+/// the refusal is where that statement belongs.
+pub const MAX_POLL_DEADLINE: Duration = Duration::from_secs(600);
+
+/// Take `mutex`, treating poisoning as non-fatal.
+///
+/// The watchdog state is three writes that have to happen in one order across
+/// two threads. Every critical section here moves whole values in or out and
+/// writes no partial state, so a poisoned lock still guards a consistent value
+/// and the panic is already the watchdog's to report. Recovering the guard is
+/// therefore correct, and it is why this is not an `unwrap`.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// One observation wave's deadline watchdog, shared with every poll in it.
+///
+/// Two halves under two primitives rather than a set of atomics, because the
+/// invariant is an *ordering* between three writes across two threads and a
+/// lock is what makes "install the waker, then read the flag" one indivisible
+/// step. With atomics the same sequence needs a re-check after every publish,
+/// and the window that produces is exactly the lost wakeup that hangs a tick.
+///
+/// One per **wave**, not per poll. Every poll in a wave starts together under
+/// the same budget, so the wave has one deadline to watch and one thread to
+/// watch it with: a bot of *n* chains spent a thread per chain per tick before,
+/// and a wave whose sources all answered on their first poll had nothing to
+/// watch at all. The per-poll *report* is unchanged — a poll is still named
+/// stalled, with its own chain index — because what a watcher does is set a flag
+/// every poll in the wave reads, not decide any one poll's fate.
+#[derive(Debug)]
+struct PollWatchdog {
+    /// What the two threads share.
+    ///
+    /// Shared *by* `Arc` rather than moved into the reaper, because both sides
+    /// read and write it: the polls install wakers and register as pending while
+    /// the reaper is waiting on the same flag that decides whether it is still
+    /// live. A copy on each side is two clocks with one name.
+    state: Arc<Mutex<WatchdogState>>,
+    /// How the reaper waits, and how the wave ends that wait early.
+    ///
+    /// A condition variable rather than a sleep, because a wave that resolves
+    /// must not leave a thread parked for the rest of its budget: that is the
+    /// cost this was built to remove, not to move.
+    settled: Arc<Condvar>,
+    /// The reaper's handle, owned by the wave that started it.
+    ///
+    /// Its own lock rather than a field of the guarded state, because the wave
+    /// takes it while the guarded state is *not* held, and nesting one mutex
+    /// inside another would be an acquisition order every reader has to hold in
+    /// their head for a handle two stores touch.
+    reaper: Mutex<Option<thread::JoinHandle<()>>>,
+}
+
+impl PollWatchdog {
+    /// A watchdog for one wave of `members` polls under `deadline`.
+    ///
+    /// The width is taken at construction because the reaper decides the wave is
+    /// over by comparing a resolved count against it, and a width it had to read
+    /// out of shared state would be one more thing the two threads could
+    /// disagree about.
+    fn new(deadline: Duration, members: usize) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(WatchdogState {
+                members,
+                resolved: 0,
+                expired: false,
+                released: false,
+                deadline,
+                pending: vec![false; members],
+                wakers: (0..members).map(|_| None).collect(),
+            })),
+            settled: Arc::new(Condvar::new()),
+            reaper: Mutex::new(None),
+        }
+    }
+
+    /// Mark one poll of this wave as finished.
+    ///
+    /// Once per poll, and by the *last* poll the wave is over and the reaper is
+    /// released — written and notified inside one critical section, because
+    /// setting `released` without the notification is the lost wakeup that leaves
+    /// a thread parked for the rest of the budget on a wave nobody waits for.
+    fn poll_finished(&self) {
+        let mut state = lock(&self.state);
+        state.resolved = state.resolved.saturating_add(1);
+        if state.resolved >= state.members {
+            state.released = true;
+            self.settled.notify_all();
+        }
+    }
+
+    /// Note that `slot` may still have to be waited for.
+    ///
+    /// Set once, under the same lock the poll read `expired` under, so a reaper
+    /// firing on that very turn cannot decide the wave was over while this poll
+    /// was still outstanding.
+    fn poll_pending(&self, slot: usize) {
+        let mut state = lock(&self.state);
+        if let Some(pending) = state.pending.get_mut(slot) {
+            *pending = true;
+        }
+    }
+
+    /// Whether the wave's deadline has already passed.
+    fn expired(&self) -> bool {
+        lock(&self.state).expired
+    }
+
+    /// Start the wave's reaper, unless one is running, the wave is over, or
+    /// nothing in it is still unresolved.
+    ///
+    /// Returns `false` only when the host refused the thread *and* some poll is
+    /// still unresolved. The caller reports that as a stall for the poll that
+    /// asked and the wave stops, rather than waiting for a deadline nobody is
+    /// watching — which is the failure this watchdog exists to prevent, so a
+    /// substrate that cannot watch must not pretend it is watching.
+    ///
+    /// Lazy, because a poll that resolved on its first turn never reaches this
+    /// with anything to watch: `true` with no thread started is the ordinary
+    /// answer. Once per wave, because every poll in a wave shares one deadline
+    /// and one thread watching it is the whole of the bound.
+    fn start(&self, clock: &Clock, armed: &AtomicBool) -> bool {
+        // Serialized on the handle's own lock for the whole decision *and* the
+        // spawn, so "already started" is only ever answered for a thread that
+        // really exists. A second poll arriving while the first is still
+        // spawning waits for the fact rather than reading an optimistic flag,
+        // and a refused spawn cannot leave a poll parked against a thread that
+        // never started. The lock order is reaper → state here and nowhere the
+        // reverse, and the reaper thread itself takes neither.
+        let mut owned = lock(&self.reaper);
+        if owned.is_some() {
+            return true;
+        }
+        {
+            let state = lock(&self.state);
+            // A wave with nothing pending — every source answered on its first
+            // poll — has nothing to watch, and an expired or released wave is
+            // already over: neither starts a thread.
+            if state.expired || state.released || !state.pending.iter().any(|held| *held) {
+                return true;
+            }
+        }
+        let shared = WatchdogShared {
+            deadline: lock(&self.state).deadline,
+            state: Arc::clone(&self.state),
+            settled: Arc::clone(&self.settled),
+        };
+        // `std::thread::Builder` rather than the `std::thread::spawn` this
+        // workspace bans: the handle is stored in the wave and joined by the wave,
+        // so the thread is owned for its whole life rather than being
+        // fire-and-forget with an invisible panic.
+        let built = thread::Builder::new()
+            .name("lgwks-poll-deadline".into())
+            .spawn({
+                let clock = clock.clone();
+                move || reaper(&clock, &shared)
+            });
+        match built {
+            Ok(handle) => {
+                *owned = Some(handle);
+                // The wave-level mirror the report reads, set only on the path
+                // that really did start one, so a zero in the report is an honest
+                // statement that no thread was started.
+                armed.store(true, Ordering::Relaxed);
+                true
+            }
+            // Not stored, so the next poll that goes Pending tries again rather
+            // than concluding from one refusal that the wave is already watched.
+            Err(_) => false,
+        }
+    }
+
+    /// Join the reaper if one was started.
+    ///
+    /// Split from the wave's own teardown because the join has to *happen* before
+    /// the wave reads its polls' outcomes — that ordering is what makes a
+    /// resolved wave leave no thread parked behind it.
+    fn join(&self) {
+        let handle = lock(&self.reaper).take();
+        if let Some(handle) = handle {
+            // A reaper panic is not this wave's outcome to report: the polls'
+            // own answers are the observation, and the thread has either done its
+            // work or given up. Joining rather than detaching is what keeps the
+            // thread owned to the wave that started it.
+            let _joined = handle.join();
+        }
+    }
+}
+
+/// The guarded half of [`PollWatchdog`].
+#[derive(Debug, Default)]
+struct WatchdogState {
+    /// Whether the wave's deadline has passed. Read on the polling thread,
+    /// written by the reaper.
+    expired: bool,
+    /// Whether every poll in the wave has finished, so the reaper has nothing
+    /// left to do.
+    ///
+    /// Distinct from the resolved count, because reaching the width is what sets
+    /// this and reading the count is not reading the fact.
+    released: bool,
+    /// How many polls in the wave have finished.
+    resolved: usize,
+    /// How many polls the wave has.
+    members: usize,
+    /// Whether each slot's poll may still have to be waited for.
+    ///
+    /// One entry per poll, indexed by the slot its waker occupies, rather than a
+    /// count: the question that matters before a thread is started is *which*
+    /// polls are outstanding, because that is the same index the wakers are
+    /// stored at, and a count a poll could decrement twice would answer it wrong.
+    pending: Vec<bool>,
+    /// The budget this wave is watched against.
+    deadline: Duration,
+    /// The wave's tasks to wake when the deadline passes.
+    ///
+    /// One slot per poll, left installed across the reaper's wait rather than
+    /// cleared before it: clearing is what loses the wakeup. The reaper clears a
+    /// slot on the way *out* by taking it, and a poll installs its own on every
+    /// turn, so the one case that must not happen — a deadline expiring against a
+    /// poll already parked with its slot empty — cannot be constructed.
+    wakers: Vec<Option<Waker>>,
+}
+
+/// What a spawned reaper runs on: the budget and the two halves both sides
+/// share.
+struct WatchdogShared {
+    /// The budget this wave is watched against.
+    deadline: Duration,
+    /// What the two threads share.
+    state: Arc<Mutex<WatchdogState>>,
+    /// How the reaper waits, and how the wave ends that wait early.
+    settled: Arc<Condvar>,
+}
+
+/// Watch one wave's deadline and wake every poll still in it when it passes.
+///
+/// The remaining budget is recomputed on every pass rather than slept once, so
+/// the deadline is honoured to the quantum rather than to a multiple of it, and
+/// a spurious wake — which a condition variable is free to produce — costs one
+/// extra turn rather than a missed deadline.
+///
+/// The wakers are *not* cleared before the wait, and `released` is *not* set
+/// without the notification. Those are the two halves of the same mistake: a
+/// poll installs its waker on the turn that finds `expired` false and then
+/// parks, so a reaper that cleared the slots on the way into its wait would
+/// expire against empty ones; and a reaper that published `released` before
+/// notifying would sleep out the whole budget on a wave that had already
+/// returned. Both are avoided by making the notification happen while the lock
+/// is held, which is what `settled.notify_all()` inside the same critical
+/// section as the write buys.
+fn reaper(clock: &Clock, watchdog: &WatchdogShared) {
+    let fired = clock.wall_watchdog();
+    let mut state = lock(&watchdog.state);
+    loop {
+        // A wave that finished before this thread reached its first wait must
+        // not be waited for. `released` is set and notified by the last poll's
+        // `Drop`; a notification that lands before the reaper waits is a wakeup
+        // a condition variable does not replay, so a per-poll watchdog that was
+        // spawned *before* the poll never saw the race, while a wave-level one
+        // spawned *during* the poll does — the source that yields and answers
+        // on its very next turn resolves in less time than this thread takes to
+        // start. Checked under the same guard `wait_timeout` releases
+        // atomically, so no poll can set `released` between this check and the
+        // wait.
+        if state.released {
+            return;
+        }
+        let remaining = watchdog.deadline.saturating_sub(fired.elapsed());
+        if remaining.is_zero() {
+            state.expired = true;
+            // Woken with the lock held, because each waker must be taken here: a
+            // poll that installs one immediately afterwards would otherwise park
+            // against a slot nobody holds.
+            for slot in &mut state.wakers {
+                if let Some(waker) = slot.take() {
+                    waker.wake();
+                }
+            }
+            return;
+        }
+        // Waited on a condition variable, never on a sleep. A poll that installs
+        // a waker while the reaper is parked against the *same* condition wakes
+        // it (`poll_finished` notifies inside its critical section), so a wave
+        // that resolved is not paid for with a thread parked out the rest of the
+        // budget; and a poll that installs a waker *after* the reaper's last
+        // check is one the reaper can still reach, because the waker slots are
+        // left installed across the wait rather than cleared before it. Clearing
+        // a slot on the way into the wait is the mistake this comment exists for:
+        // it loses the wakeup on exactly the turn the wave needs it, and the
+        // symptom is a tick that never returns.
+        let (woken, _) = watchdog
+            .settled
+            .wait_timeout(state, remaining)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state = woken;
+        if state.expired || state.released {
+            return;
+        }
+    }
+}
+
+/// One source poll's half of a wave: the future, its chain index, and the slot
+/// its waker occupies.
+///
+/// A named struct rather than positional arguments because the one thing a
+/// caller must not get wrong is *which* wave a poll belongs to, and a parameter
+/// list is where that goes wrong.
+struct WavePoll<'wave> {
+    /// The chain this poll reads, named in its own report.
+    chain: usize,
+    /// The wave's deadline watchdog.
+    watchdog: &'wave PollWatchdog,
+    /// This poll's position in the wave's waker slots.
+    slot: usize,
+    /// Whether the waker for this poll is installed in its slot.
+    ///
+    /// Part of the poll rather than the guarded state, so "install, then read"
+    /// can be *one* critical section: reading it back out of shared state would
+    /// need a second lock acquisition, and the window between the two is the
+    /// lost wakeup this whole structure exists to close.
+    installed: bool,
+    /// The source's own poll.
+    ///
+    /// Borrowed from the world's chains for the wave's lifetime rather than
+    /// `'static`, because the chain is erased in place and the poll is not: a
+    /// `'static` box would have to own a copy of the source it is reading, and
+    /// the substrate's promise is that it polls *the* source the caller declared.
+    poll: Pin<Box<dyn Future<Output = Result<Option<Erased>, BotError>> + 'wave>>,
+}
+
+impl WavePoll<'_> {
+    /// The typed stall this poll reports when it cannot be waited for any more.
+    ///
+    /// A whole poll result rather than a bare error, because every caller of it
+    /// is a `Poll::Ready` arm of this poll's own turn: a stall is what the
+    /// source's slot holds, and a caller that had to wrap it would be the second
+    /// place that shape is written.
+    fn stalled(&self, deadline: Duration) -> Result<Option<Erased>, BotError> {
+        Err(BotError::PollStalled {
+            chain: self.chain,
+            deadline,
+        })
+    }
+
+    /// Turn this poll once under the wave's deadline.
+    ///
+    /// Install, register, read `expired`, and poll are sequenced so that no arm
+    /// can park against a deadline nobody is watching and no deadline can expire
+    /// against a poll whose waker is not installed. The two registrations are the
+    /// half that is easy to get wrong and impossible to notice: a poll that
+    /// registered as pending *after* the reaper checked would never be woken, and
+    /// a poll that started a thread *after* the reaper decided the wave was
+    /// released would wait forever on a thread that has already gone.
+    fn turn(
+        &mut self,
+        cx: &mut Context<'_>,
+        clock: &Clock,
+        armed: &AtomicBool,
+        deadline: Duration,
+    ) -> Poll<Result<Option<Erased>, BotError>> {
+        {
+            let mut state = lock(&self.watchdog.state);
+            if state.expired {
+                return Poll::Ready(self.stalled(deadline));
+            }
+            // Whether the installed waker is one the executor will recognise. A
+            // poll that has not installed one yet, or whose installed waker
+            // belongs to a different task, has to write again — and writing the
+            // *same* waker on every turn would be a clone per turn for nothing.
+            let stale = if self.installed {
+                state
+                    .wakers
+                    .get(self.slot)
+                    .and_then(|slot| slot.as_ref())
+                    .is_none_or(|installed| !installed.will_wake(cx.waker()))
+            } else {
+                true
+            };
+            if let (true, Some(slot)) = (stale, state.wakers.get_mut(self.slot)) {
+                *slot = Some(cx.waker().clone());
+                self.installed = true;
+            }
+        }
+        match self.poll.as_mut().poll(cx) {
+            // Polled before a late expiry is consulted, so a poll that resolved
+            // in the same turn the deadline passed still answers with what it
+            // read. A cancellation landing on a poll that was about to finish is
+            // indistinguishable from one that never was going to, and only the
+            // value is a fact. A poll that answers on its first turn — the
+            // ordinary one — returns here without ever having started a thread,
+            // which is the whole of the lazy half.
+            Poll::Ready(outcome) => Poll::Ready(outcome),
+            Poll::Pending => {
+                // Registered before the wave is armed, so the reaper's first
+                // look at the wave already sees this poll as outstanding. The
+                // registration and the `expired` read below are two critical
+                // sections rather than one, and that is safe here in a way it is
+                // not above: `start` takes the same lock, so a reaper cannot be
+                // running to fire between them until this poll has registered.
+                self.watchdog.poll_pending(self.slot);
+                // Started only now, because a wave with nothing pending has
+                // nothing to watch. The first poll in the wave to go Pending is
+                // the one that spends the thread, and a wave whose every source
+                // answered spends none — the ordinary tick. Registering first and
+                // arming second is what makes a wave that will never be woken
+                // again, a wedged source, still bounded: the reaper exists before
+                // this turn returns `Pending`, so the deadline can still fire and
+                // wake it. A spawn the host refuses reports this poll stalled and
+                // leaves every already-resolved poll in the wave with its answer,
+                // because a poll that answered never reaches this arm.
+                if !self.watchdog.start(clock, armed) {
+                    return Poll::Ready(self.stalled(deadline));
+                }
+                if self.watchdog.expired() {
+                    Poll::Ready(self.stalled(deadline))
+                } else {
+                    Poll::Pending
+                }
+            }
+        }
+    }
+}
+
+impl Drop for WavePoll<'_> {
+    /// Count this poll as finished under the wave's lock.
+    ///
+    /// A `Drop` rather than a call at the end of the poll body, because a poll
+    /// future dropped *before* it resolves — a tick cancelled mid-wave — is no
+    /// longer going to ask, and a counter that missed it would leave a reaper
+    /// parked for the rest of the budget on a wave nobody is waiting for.
+    fn drop(&mut self) {
+        self.watchdog.poll_finished();
+    }
+}
+
+/// Run one wave's polls under a shared `deadline`, reporting a typed stall per
+/// poll rather than waiting forever.
+///
+/// This is the whole of T06's slow-source half, and it is one function because
+/// there is exactly one place in this crate where a source poll is awaited and
+/// exactly one place that can therefore bound it. Putting the bound anywhere
+/// else would mean a second place that could forget it.
+///
+/// # Why the *watchdog* half of the declared clock
+///
+/// The crate's one declared clock ([`crate::rt::clock::Clock`], INV-BOT-30) has
+/// two halves, and this takes the one that is always on: a real-time watchdog
+/// that keeps running when the logical counter is frozen. That is the correct
+/// authority here, and the reason is in the clock's own contract — a source that
+/// stopped answering is not waiting for time to pass, it has stopped making
+/// progress entirely. A logical deadline would either expire against a poll that
+/// was merely slow (because a test advanced the clock) or wait on the wedged one
+/// forever (because nothing advanced it).
+///
+/// The declaration is still load-bearing: the watchdog is obtained *through* a
+/// [`crate::rt::clock::Clock`], so the elapsed time that cancelled these polls
+/// traces back to a clock the crate named rather than to a free-floating
+/// `Instant` someone sampled at a call site.
+///
+/// # What "cancelled" means
+///
+/// A poll future is dropped where it stands. It committed nothing, so its
+/// chain's baseline and its forced-refresh mark are exactly as they were, and
+/// the next tick re-polls it — the same rule a failed poll already follows, and
+/// for the same reason: the value this poll was supposed to replace is still
+/// there. Dropping a future is cooperative, so a poll that already handed work
+/// to `spawn_blocking` has its handle released and its thread runs to
+/// completion; that is the documented behaviour of the estate's executor, and it
+/// is why the stall report is about *this bot's* observation and not about the
+/// source's side effects.
+///
+/// A sibling poll in the same wave is not stopped: the chains beside a wedged
+/// source still commit and act in the same tick. The budget bounds the *wave's*
+/// wait rather than each poll's separately, and the difference that makes is
+/// bounded by the cost of starting the wave — every poll begins together, so
+/// there is no second budget to spend and no poll can be cancelled twice.
+async fn bounded_wave(
+    deadline: Duration,
+    watchdog: &PollWatchdog,
+    polls: Vec<WavePoll<'_>>,
+) -> (Vec<Result<Option<Erased>, BotError>>, bool) {
+    let clock = Clock::wall();
+    // The wave-level mirror the report reads, set only on the path that really
+    // did start a reaper, so a report beside a zero is an honest statement that
+    // no thread was started.
+    let armed = AtomicBool::new(false);
+
+    let joined = lgwks_std::task::join_all_boxed(polls.into_iter().map(|mut poll| {
+        let clock = clock.clone();
+        let armed = &armed;
+        Box::pin(std::future::poll_fn(move |cx: &mut Context<'_>| {
+            poll.turn(cx, &clock, armed, deadline)
+        }))
+    }));
+    let results = joined.await;
+    // Joined before the results are read, so a wave that resolved leaves no
+    // thread parked behind it and an expired wave has its reaper reaped before
+    // the caller acts on what it decided. The watchdog is the wave's own — the
+    // one its polls borrowed — so there is exactly one handle in this scope and
+    // no thread can be started and left unjoined.
+    watchdog.join();
+    (results, armed.load(Ordering::Relaxed))
+}
 
 /// Compare two erased outputs as `S::Output`.
 ///
@@ -1570,11 +2478,25 @@ where
     }
 }
 
-/// The parked error, if the tick has already failed.
+/// Whether the tick is parked, so its steps commit and run nothing.
+///
+/// A **domain** failure parks a tick: the substrate could not act on what a chain
+/// told it, and the tick's contract is that such a tick commits nothing and fires
+/// nothing. A **cancelled** poll does not, and that distinction is the whole of
+/// T06's slow-source half. A source that stopped answering said nothing, so the
+/// chains beside it have real observations to commit — withholding them because
+/// one unrelated source was slow is exactly the starvation the per-poll deadline
+/// exists to prevent.
+///
+/// The report still names every cancelled chain, and the tick still returns the
+/// typed cancellation; what it does not do is stop the bot.
 fn parked(world: &World) -> bool {
-    world
-        .get_resource::<TickError>()
-        .is_some_and(|error| error.0.is_some())
+    world.get_resource::<TickError>().is_some_and(|error| {
+        error
+            .0
+            .as_ref()
+            .is_some_and(|error| !matches!(error, BotError::PollStalled { .. }))
+    })
 }
 
 // ── The work ledger: eligible work, separate from change detection ─────────
@@ -3113,9 +4035,24 @@ fn admitted_identity(world: &mut World, chain: usize, value: Option<&Erased>) ->
 /// once. Once a transition is bound to it, the transition is what speaks for
 /// it, and the slot being empty is not a loss — it is the record that the value
 /// is out on loan, which [`observe_fold`] reads back through the binding.
+///
+/// The take is also what admits the value: a generation is being opened over
+/// exactly this payload, so a later commit that overtakes it is superseding work
+/// that is already owed and being done, not work that is still unclaimed. Marking
+/// it here rather than on the handover is what makes a value that a *held*
+/// generation is holding count as acted-on — the handover happens only once the
+/// transition is finally dropped, which for an entry awaiting evidence is never
+/// on the tick the pass-over occurs.
 fn take_observed(world: &mut World, chain: usize) -> Option<Erased> {
-    let mut observed = world.non_send_mut::<Observed>();
-    observed.0.get_mut(chain).and_then(Option::take)
+    let taken = world
+        .non_send_mut::<Observed>()
+        .0
+        .get_mut(chain)
+        .and_then(Option::take);
+    if taken.is_some() {
+        world.non_send_mut::<Committed>().admit(chain);
+    }
+    taken
 }
 
 /// Whether the newest observation for `chain` should be admitted over the
@@ -3298,17 +4235,50 @@ fn observe_fold(world: &mut World) {
     // `BotError` is the caller's evidence and is deliberately not `Clone` —
     // copying it to report it would let a caller settle an effect against a
     // duplicate of the failure rather than the failure itself.
+    //
+    // A cancelled poll is **not** one of those errors, and that is the whole
+    // difference between the two rows it could otherwise be confused for. A
+    // source that refused reported a fact about itself, so the tick that heard
+    // it has nothing to commit and reports the failure. A source that stopped
+    // answering told the substrate nothing at all, so the chains *beside* it
+    // still have real observations to commit — the same rule that already lets
+    // one chain's failing action leave the effects before it live. Treating the
+    // cancellation as a failure here would mean one wedged source stopped every
+    // chain on the bot from committing for as long as it stayed wedged, which is
+    // precisely the starvation this deadline exists to prevent.
     let mut first_error = None;
-    for result in polled.iter_mut() {
-        if result.is_err() {
+    let mut first_stall = None;
+    for (index, result) in polled.iter_mut().enumerate() {
+        let stalled = matches!(result, Err(BotError::PollStalled { .. }));
+        if stalled {
+            first_stall.get_or_insert(index);
+            *result = Ok(None);
+        } else if result.is_err() && first_error.is_none() {
             first_error = std::mem::replace(result, Ok(None)).err();
-            break;
         }
     }
-    if let Some(error) = first_error {
-        world.resource_mut::<TickError>().0 = Some(error);
-        put_polled(world, polled);
-        return;
+    // One stall is reported and the rest are already named in the tick report, so
+    // the tick's own `Result` carries a single typed cancellation the way it
+    // carries a single first domain failure. The report is the complete list; this
+    // is the one a caller matching on the variant can act on.
+    match (first_stall, first_error) {
+        // A cancellation is reported and the commit *proceeds*: the chains beside
+        // the wedged one have real observations, and withholding them is the
+        // starvation this deadline exists to prevent.
+        (Some(chain), _) => {
+            world.resource_mut::<TickError>().0 = Some(BotError::PollStalled {
+                chain,
+                deadline: world.resource::<PollBudget>().0,
+            });
+        }
+        // A domain failure stops the commit, as it always did: the tick's contract
+        // is that a tick which could not act on what a chain said commits nothing.
+        (None, Some(error)) => {
+            world.resource_mut::<TickError>().0 = Some(error);
+            put_polled(world, polled);
+            return;
+        }
+        (None, None) => {}
     }
 
     // The rendezvous. The results arrived in chain order because `poll_sources`
@@ -3369,6 +4339,7 @@ fn observe_fold(world: &mut World) {
     let mut changed = std::mem::take(&mut world.non_send_mut::<Moved>().0);
     changed.clear();
     changed.resize(polled.len(), false);
+    let mut superseded: Vec<SupersededObservation> = Vec::new();
     {
         let mut observed = world.non_send_mut::<Observed>();
         for (index, result) in polled.iter_mut().enumerate() {
@@ -3404,6 +4375,42 @@ fn observe_fold(world: &mut World) {
             revision.0 = revision.0.wrapping_add(1);
         }
     }
+
+    // The revision the *replaced* value was committed under, read before the
+    // bump above. A value superseded by this tick carries the revision it was
+    // committed at, which is what a caller needs to line the pass-over up with
+    // the generation that did or did not run on it.
+    //
+    // Only `Unacted` is a pass-over. `Nothing` is a first observation, which
+    // replaced nothing; `Admitted` is a value a generation already ran on, which
+    // also replaced nothing that was still owed. Reading either of those as a
+    // pass-over would make a healthy bot claim it had skipped a state.
+    for index in changed
+        .iter()
+        .copied()
+        .enumerate()
+        .filter_map(|(index, moved)| moved.then_some(index))
+    {
+        let previous = world.non_send::<Committed>().slot(index);
+        if previous.state == SlotState::Unacted {
+            superseded.push(SupersededObservation {
+                chain: index,
+                revision: previous.revision,
+            });
+        }
+        let revision = revision_of(world, index);
+        world.non_send_mut::<Committed>().commit(index, revision);
+        // The mark is spent by the read it forced, and only by it. This is the
+        // point at which a forced poll has provably committed a value, so the
+        // baseline this tick holds is one the source produced rather than one the
+        // source disowned. A tick that never reaches here — parked, or stopped on
+        // a rendezvous miss — leaves the mark standing, which is the correct
+        // outcome for a refresh that did not land.
+        if let Some(slot) = world.non_send_mut::<Invalidated>().reasons.get_mut(index) {
+            *slot = None;
+        }
+    }
+    world.resource_mut::<TickReport>().superseded = superseded;
     world.non_send_mut::<Moved>().0 = changed;
 }
 
@@ -3552,6 +4559,11 @@ fn fire_plan(world: &mut World) {
             .non_send_mut::<Ledger>()
             .put(index, if retained { Some(transition) } else { None });
         if let Some(returned) = returned {
+            // Handed back only when the slot is empty, because a slot the
+            // observation phase filled this tick holds a newer value than the
+            // one being returned. Nothing to mark here: the value was admitted
+            // when its generation took it out of the slot, and a value standing
+            // in the slot again is *still* admitted — it has been acted on.
             let mut observed = world.non_send_mut::<Observed>();
             if let Some(slot) = observed.0.get_mut(index).filter(|slot| slot.is_none()) {
                 *slot = Some(returned);
@@ -3741,6 +4753,14 @@ pub struct EcsBot {
     world: World,
     /// The validated schedule.
     schedule: Schedule,
+    /// How long one source poll may take before the tick stops waiting for it.
+    ///
+    /// A field rather than a resource because nothing in the schedule reads it:
+    /// it bounds the observation phase alone, and a resource would put a second
+    /// writer next to the phase that owns it. The declared default is
+    /// [`DEFAULT_POLL_DEADLINE`] and the builder's override is the only other
+    /// value a bot can carry.
+    poll_deadline: Duration,
 }
 
 impl EcsBot {
@@ -3752,6 +4772,7 @@ impl EcsBot {
             chains: Vec::new(),
             policy: RetryPolicy::DEFAULT,
             effects: None,
+            poll_deadline: DEFAULT_POLL_DEADLINE,
         }
     }
 
@@ -4070,8 +5091,17 @@ impl EcsBot {
         // and a mutable borrow of a resource cannot be held across them.
         let mut polled = std::mem::take(&mut self.world.non_send_mut::<Polled>().0);
         polled.clear();
-        self.poll_sources(&mut polled).await;
+        let (invalidations, stalled, watchdogs) = self.poll_sources(&mut polled).await;
         self.world.non_send_mut::<Polled>().0 = polled;
+
+        // Published before the schedule runs, so the report describes this tick's
+        // observation phase even when the schedule step stops on a failure and
+        // the effects phase never runs. A caller reading the report after a
+        // failed tick is exactly the caller who needs to know a source had
+        // already declared its cache unsound when it failed.
+        self.record_invalidations(&invalidations);
+        self.publish_refreshes();
+        self.publish_stalls(&stalled, watchdogs);
 
         self.schedule.run(&mut self.world);
 
@@ -4099,6 +5129,7 @@ impl EcsBot {
         put_plan_buffers(&mut self.world, steps, failures);
 
         self.world.resource_mut::<Fired>().0 = fired;
+        self.world.resource_mut::<TickReport>().fired = fired;
         if let Some(error) = failure {
             self.world.resource_mut::<TickError>().0 = Some(error);
         }
@@ -4180,6 +5211,29 @@ impl EcsBot {
     fn begin_tick(&mut self) {
         self.world.resource_mut::<Fired>().0 = 0;
         self.world.resource_mut::<TickError>().0 = None;
+        // The previous tick's report is history, not this tick's. Overwritten
+        // rather than appended so a caller reading it before the next tick sees
+        // the tick it just ran and not a union of every tick the bot has ever
+        // run — which would answer "was a refresh ever forced", a different and
+        // much less useful question.
+        *self.world.resource_mut::<TickReport>() = TickReport::default();
+    }
+
+    /// What the most recent tick observed about its own sources.
+    ///
+    /// The companion to [`Self::tick`]'s return value rather than a second
+    /// channel into the same fact: the count says what fired, this says what the
+    /// bot had to re-read to decide, and a bot that has gone quiet is exactly
+    /// where only the first of those is uninformative.
+    ///
+    /// Reports the last tick that ran, whatever its result. A tick that returned
+    /// `Err` still observed, and the caller triaging the error needs to know
+    /// whether a declared cache failure is behind it. Reading this before the
+    /// first tick returns the empty report, which says no source was forced —
+    /// true, and true for a tick that never happened.
+    #[must_use]
+    pub fn tick_report(&self) -> TickReport {
+        self.world.resource::<TickReport>().clone()
     }
 
     /// Poll every source, `MAX_IN_FLIGHT_POLLS` at a time, awaiting each wave
@@ -4191,6 +5245,29 @@ impl EcsBot {
     /// The wave cap is what keeps that from becoming unbounded blocking-thread
     /// fan-out. Determinism is unaffected: the results are collected in
     /// declaration order whatever order they resolve in.
+    ///
+    /// # Bounded in time as well as in width
+    ///
+    /// Each poll runs under [`bounded_poll`], which gives it
+    /// [`Self::poll_deadline`] of *real* elapsed time before the wave drops it.
+    /// Without that, the fan-out cap is the only bound this phase has and a
+    /// source that never resolves holds the tick forever — which is T06's
+    /// slow-source half, and it was the one claim this substrate could not make.
+    ///
+    /// The bound is measured on the wall watchdog half of the crate's one
+    /// declared clock ([`crate::rt::clock::Clock`], INV-BOT-30) rather than on
+    /// its logical counter, because a source that stopped answering is not
+    /// waiting for time to pass: it has stopped making progress entirely, and a
+    /// logical clock a caller can advance would either fire the deadline for a
+    /// poll that was merely slow or wait on the wedged one forever. What the
+    /// clock names is the *source* of the elapsed time, so a reader can ask
+    /// which clock governed the cancellation.
+    ///
+    /// A cancelled poll commits nothing, keeps its chain's baseline and its
+    /// forced-refresh mark standing, and is reported through
+    /// [`TickReport::stalled`]. Its siblings in the wave are not stopped: the
+    /// deadline is per poll, so the chains beside a wedged one still commit and
+    /// act in the same tick.
     ///
     /// # Why the output is a parameter
     ///
@@ -4208,44 +5285,296 @@ impl EcsBot {
     /// that owns it — so the source itself can answer "did I move?" against a
     /// concrete value, before anything is boxed. A source that returned
     /// `Ok(None)` did not move, and nothing is allocated for it.
-    async fn poll_sources(&self, polled: &mut Vec<Result<Option<Erased>, BotError>>) {
-        let chains = self.world.non_send::<Chains>();
-        let grants = self.world.resource::<Grants>();
-        let seen = self.world.non_send::<Observed>();
-        let ledger = self.world.non_send::<Ledger>();
-
-        let count = chains.0.len();
+    ///
+    /// A source that declared its cache unsound is handed **`None`** instead,
+    /// whatever the substrate holds. That is the whole of the forced refresh:
+    /// with a baseline in hand the source can answer "equal to this" and the
+    /// substrate keeps a value it now knows is wrong. With `None` there is
+    /// nothing to be equal to, so the poll is a read and its value becomes the
+    /// new baseline — and because a read is a read, the chain also *moved*, so
+    /// the change filter re-evaluates the entries against the value that is
+    /// actually current rather than against the one the failure left behind.
+    ///
+    /// # Where the reason comes from
+    ///
+    /// Read from the source itself, after its poll resolves, never guessed by
+    /// this function: the substrate cannot know whether a domain's transport is
+    /// up or its queue overflowed, and a heuristic would be a guess about
+    /// somebody else's transport. A source that declares nothing is a source
+    /// with nothing to declare.
+    ///
+    /// # What it returns
+    ///
+    /// The chains whose baseline this tick could not trust: one entry per chain,
+    /// in declaration order, `None` where the chain declared nothing; the chains
+    /// whose poll the wave gave up on, in the same order; and how many deadline
+    /// threads those waves started. Handed back rather than written to the world
+    /// here, so `&self` stays a shared borrow across every poll. A `&mut World`
+    /// would have to be held while each poll future is alive, and holding it
+    /// across awaits to publish three words is exactly the shape that lets one
+    /// phase's ordering become another's.
+    async fn poll_sources(
+        &self,
+        polled: &mut Vec<Result<Option<Erased>, BotError>>,
+    ) -> (Vec<Option<RefreshReason>>, Vec<usize>, u32) {
+        let count = self.world.non_send::<Chains>().0.len();
         polled.clear();
         polled.resize_with(count, || Ok(None));
 
-        for (wave_index, wave) in chains.0.chunks(MAX_IN_FLIGHT_POLLS).enumerate() {
+        // What each chain declares about its own caching, one entry per chain and
+        // read once per tick. Copied out of the world rather than borrowed across
+        // the polls: the marks are written after the polls resolve, and the
+        // closures below borrow the world's sources immutably for their whole
+        // life.
+        let mut declared = self.declared_refresh(count);
+        // The chains whose poll was cancelled, in declaration order. Collected
+        // here rather than published by the caller because the poll phase is the
+        // only place that knows which poll was cut short, and the report must be
+        // published before the schedule step runs on the strength of this tick's
+        // observation — a tick that then failed still has to say which source it
+        // gave up on.
+        let mut stalled: Vec<usize> = Vec::new();
+        // The deadline threads this tick actually started, one per wave that had
+        // a poll left pending. Published beside the stalls they may have caused,
+        // because a caller triaging a wedged source wants to know whether the bot
+        // spent a thread on it and how many.
+        let mut watchdogs = 0_u32;
+
+        for wave_index in 0..count.div_ceil(MAX_IN_FLIGHT_POLLS) {
             let base = wave_index.saturating_mul(MAX_IN_FLIGHT_POLLS);
-            let index_of = |offset: usize| base.saturating_add(offset);
+            // The wave as `(chain index, source)` pairs, read out before the
+            // await: `join_all_boxed` takes an iterator of futures, and each of
+            // those borrows the world, so the slice has to be owned by the time
+            // the first one exists. A `Vec` of references into a resource that
+            // is not written across the await is the borrow; nothing here is
+            // `mut` borrowed while any poll is pending.
+            let wave: Vec<(usize, &EcsChain)> = self
+                .world
+                .non_send::<Chains>()
+                .0
+                .iter()
+                .enumerate()
+                .skip(base)
+                .take(MAX_IN_FLIGHT_POLLS)
+                .collect();
 
-            let batch =
-                lgwks_std::task::join_all_boxed(wave.iter().enumerate().map(|(offset, chain)| {
-                    // `chunks` gives no index, so the chain's position is
-                    // the wave's start plus the offset within it. This is
-                    // the same index `Observed` and `Ledger` are keyed by,
-                    // which is what makes the baseline below the right one
-                    // to hand over.
-                    let index = index_of(offset);
-                    let baseline = seen
-                        .0
-                        .get(index)
-                        .and_then(|slot| slot.as_ref())
-                        .or_else(|| ledger.bound(index));
-                    chain.source.poll_any(&grants.0, baseline)
-                }));
-            let results = batch.await;
+            // One watchdog for the wave rather than one per poll, and one
+            // deadline the whole wave shares: `bounded_wave` owns it and reports
+            // whether it really did start a thread, which is the number the tick
+            // report names.
+            let wave_watchdog = PollWatchdog::new(self.poll_deadline, wave.len());
+            let (results, armed) = {
+                let polls: Vec<WavePoll<'_>> = wave
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, &(index, chain))| {
+                        // `chunks` gives no index, so the chain's position is the
+                        // wave's start plus the offset within it. This is the same
+                        // index `Observed` and `Ledger` are keyed by, which is what
+                        // makes the baseline below the right one to hand over.
+                        let seen = self.world.non_send::<Observed>();
+                        let ledger = self.world.non_send::<Ledger>();
+                        let grants = self.world.resource::<Grants>();
+                        // `None` here means *the source declared nothing*, which
+                        // is the ordinary case and must hand the baseline over —
+                        // so the two are separated by an explicit test, not by an
+                        // `and_then` over the option. `and_then` treats "no
+                        // declaration" and "declares nothing usable" as the same
+                        // `None` and drops the baseline in the first case, which
+                        // is how every poll started reading as a fresh read and
+                        // every tick looked like a movement.
+                        let unsound = declared
+                            .get(index)
+                            .copied()
+                            .flatten()
+                            .is_some_and(|reason| reason.invalidates_baseline());
+                        let baseline = if unsound {
+                            None
+                        } else {
+                            seen.0
+                                .get(index)
+                                .and_then(|slot| slot.as_ref())
+                                .or_else(|| ledger.bound(index))
+                        };
+                        WavePoll {
+                            chain: index,
+                            slot,
+                            installed: false,
+                            poll: Box::pin(chain.source.poll_any(&grants.0, baseline)),
+                            watchdog: &wave_watchdog,
+                        }
+                    })
+                    .collect();
+                bounded_wave(self.poll_deadline, &wave_watchdog, polls).await
+            };
+            watchdogs = watchdogs.saturating_add(u32::from(armed));
 
-            for ((offset, _), result) in wave.iter().enumerate().zip(results) {
-                let index = index_of(offset);
-                if let Some(slot) = polled.get_mut(index) {
-                    *slot = result;
+            for (&(index, _), result) in wave.iter().zip(results) {
+                let Some(slot) = polled.get_mut(index) else {
+                    continue;
+                };
+                if matches!(result, Err(BotError::PollStalled { .. })) {
+                    stalled.push(index);
                 }
+                *slot = result;
             }
         }
+
+        // A poll that failed never reached the value that would have been
+        // compared, so its baseline is exactly as unsound as it was and the mark
+        // has to outlive this tick. A poll that succeeded is read once more,
+        // after it resolved: a source that reached its failure *inside* the poll
+        // has only now recorded it, and asking before the poll would have asked
+        // about the previous tick's state.
+        let chains = self.world.non_send::<Chains>();
+        for (index, reason) in declared.iter_mut().enumerate() {
+            let Some(chain) = chains.0.get(index) else {
+                continue;
+            };
+            match (
+                chain.source.cache_state(),
+                polled.get(index).map(Result::is_ok),
+            ) {
+                (Some(declared_now), Some(true)) => *reason = Some(declared_now),
+                // A failed poll carries no value at all, so the reason the source
+                // would have named is not the one that matters: nothing was read,
+                // and the baseline this tick did not replace is still standing.
+                // The mark stays whatever it already was, and defaults to
+                // `Disconnected` for a chain that had declared nothing, because a
+                // source that could not be read is a source whose transport is at
+                // least unavailable.
+                (_, Some(false)) if reason.is_none() => {
+                    *reason = Some(RefreshReason::Disconnected);
+                }
+                _ => {}
+            }
+        }
+        // The `Some(false)` arm above is exactly what a cancelled poll reaches,
+        // and that is deliberate: a stalled poll read nothing, so its baseline is
+        // as unsound as it was and the mark has to outlive this tick, which is
+        // the same rule a failed poll already follows. Clearing the mark on a
+        // stall would re-read the source against the very baseline the stall
+        // left standing, which is the quiet state INV-BOT-120 exists to rule
+        // out.
+        //
+        // Sorted rather than in wave-completion order: a chain's index is its
+        // identity everywhere else in this crate, and a report whose order
+        // depended on which wave finished first could not be compared across two
+        // runs of one seed.
+        stalled.sort_unstable();
+        (declared, stalled, watchdogs)
+    }
+
+    /// What each of `count` chains declares about its own caching right now.
+    ///
+    /// Read once per tick, in declaration order, and copied out so the callers
+    /// can hold it across the polls without borrowing the world. A chain that
+    /// declared a reason last tick and nothing this tick is not cleared here:
+    /// the mark is the substrate's record that the baseline it forced a read for
+    /// was never successfully replaced, and clearing it on silence would be the
+    /// permanent quiet state, one cause at a time.
+    fn declared_refresh(&self, count: usize) -> Vec<Option<RefreshReason>> {
+        let chains = self.world.non_send::<Chains>();
+        let invalidated = self.world.non_send::<Invalidated>();
+        let mut declared: Vec<Option<RefreshReason>> = vec![None; count];
+        for (index, chain) in chains.0.iter().enumerate() {
+            // A chain already marked this tick keeps the mark it has: re-reading
+            // it would let a later poll within the same tick overwrite the reason
+            // the report names with one that happened afterwards.
+            if invalidated.is_invalid(index) {
+                continue;
+            }
+            if let Some(reason) = chain.source.cache_state() {
+                declared[index] = Some(reason);
+            }
+        }
+        declared
+    }
+
+    /// Write this tick's marks into the world, so the schedule step and the
+    /// report read the same record the observation phase produced.
+    ///
+    /// A mark that is already standing keeps the reason it has. That is the
+    /// difference between "this source is currently unsound" and "this source's
+    /// baseline has not been successfully replaced since it first declared
+    /// itself unsound", and only the second one is worth re-reading a caller: a
+    /// source that reconnects and then overflows on the very next tick reported
+    /// two different facts, and the report names the first because the first is
+    /// the one whose forced read has not landed yet.
+    fn record_invalidations(&mut self, declared: &[Option<RefreshReason>]) {
+        let mut invalidated = self.world.non_send_mut::<Invalidated>();
+        for (chain, reason) in declared.iter().enumerate() {
+            if let Some(reason) = *reason {
+                invalidated.mark(chain, reason);
+            }
+        }
+    }
+
+    /// Copy this tick's invalidated marks onto the tick report, in chain order.
+    ///
+    /// Declaration order rather than mark order, for the reason
+    /// [`Invalidated::mark`] already gives: the report is compared across two
+    /// runs of one seed, and an order that varied with poll resolution would
+    /// make the comparison meaningless.
+    fn publish_refreshes(&mut self) {
+        // Built as a whole vector and then moved in, rather than pushed a row
+        // at a time: building it needs two shared borrows of the world (the
+        // marks and the source identities) and writing it needs a mutable one,
+        // and bevy's access rules cannot express "shared, shared, then mutable"
+        // through a chain of borrows on one `self`. One assignment at the end is
+        // also cheaper than a `clear` followed by a push per chain.
+        let forced: Vec<ForcedRefresh> = {
+            let invalidated = self.world.non_send::<Invalidated>();
+            let order = self.world.resource::<Order>();
+            invalidated
+                .reasons
+                .iter()
+                .enumerate()
+                .filter_map(|(chain, reason)| {
+                    let reason = (*reason)?;
+                    let domain = order
+                        .0
+                        .get(chain)
+                        .and_then(|entity| self.world.get::<SourceId>(*entity))
+                        .map_or_else(String::new, |id| id.domain().to_owned());
+                    Some(ForcedRefresh {
+                        chain,
+                        domain,
+                        reason,
+                    })
+                })
+                .collect()
+        };
+        self.world.resource_mut::<TickReport>().forced = forced;
+    }
+
+    /// Copy this tick's cancelled polls onto the tick report, in chain order.
+    ///
+    /// The same build-then-assign shape as [`Self::publish_refreshes`] and the
+    /// same reason: naming a chain's domain needs two shared borrows of the world
+    /// and writing the report needs a mutable one.
+    fn publish_stalls(&mut self, stalled: &[usize], watchdogs: u32) {
+        let rows: Vec<StalledSource> = {
+            let order = self.world.resource::<Order>();
+            stalled
+                .iter()
+                .map(|chain| {
+                    let domain = order
+                        .0
+                        .get(*chain)
+                        .and_then(|entity| self.world.get::<SourceId>(*entity))
+                        .map_or_else(String::new, |id| id.domain().to_owned());
+                    StalledSource {
+                        chain: *chain,
+                        domain,
+                        deadline: self.poll_deadline,
+                    }
+                })
+                .collect()
+        };
+        let mut report = self.world.resource_mut::<TickReport>();
+        report.stalled = rows;
+        report.watchdogs = watchdogs;
     }
 
     /// Run the effects the decision phase selected, in the order it selected
@@ -4872,9 +6201,78 @@ pub struct EcsBuilder {
     /// resend a merge. A default-off variant of the same bot would be worse
     /// still, because nothing would exercise it.
     effects: Option<EffectScope>,
+    /// How long one source poll may take before the tick stops waiting for it.
+    ///
+    /// A declared bound rather than a hidden one, so a caller who has been
+    /// waiting on a wedged source can read the budget from the builder instead of
+    /// discovering it as a mystery. Defaults to [`DEFAULT_POLL_DEADLINE`].
+    poll_deadline: Duration,
 }
 
 impl EcsBuilder {
+    /// Set how long one source poll may take before the tick stops waiting for it.
+    ///
+    /// The bound that makes T06's slow-source half true. A poll that misses it is
+    /// dropped mid-flight, commits nothing, leaves its chain's baseline and its
+    /// forced-refresh mark standing, and is reported in
+    /// [`TickReport::stalled`] — so the chains beside it commit and act in the
+    /// same tick rather than waiting on a source that will not answer.
+    ///
+    /// Bounded at both ends, because both ends are the same fact: a zero budget
+    /// cancels every poll before its first poll, and a budget past
+    /// [`MAX_POLL_DEADLINE`] is a caller asking for a bot that can still hang.
+    /// Both are [`BotError`]s at [`build`](Self::build), not panics and not
+    /// silently clamped values, because a clamp is indistinguishable from the
+    /// budget the caller asked for.
+    ///
+    /// ```
+    /// # use std::time::Duration;
+    /// # use lgwks_bot::broker::Broker;
+    /// # use lgwks_bot::effect::{EnvironmentId, FlowRevision, RunId};
+    /// # use lgwks_bot::journal::MemoryJournal;
+    /// # use lgwks_bot::spec::{EffectIdentity, EffectScope};
+    /// # use lgwks_bot::{Bot, BotError, GrantSet};
+    /// # fn effects() -> Result<EffectScope, Box<dyn std::error::Error>> {
+    /// #     let environment = EnvironmentId::from_hex("2122232425262728292a2b2c2d2e2f30")?;
+    /// #     let mut broker = Broker::new();
+    /// #     broker.register(environment)?;
+    /// #     let identity = EffectIdentity::new(
+    /// #         RunId::from_hex("0102030405060708090a0b0c0d0e0f10")?,
+    /// #         environment,
+    /// #         FlowRevision::from_tagged(
+    /// #             "blake3_256",
+    /// #             "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    /// #         )?,
+    /// #     );
+    /// #     Ok(EffectScope::new(identity, broker, Box::new(MemoryJournal::new())))
+    /// # }
+    /// let scope = effects()?;
+    /// let refused = Bot::builder("zero")
+    ///     .with_poll_deadline(Duration::ZERO)
+    ///     .with_effects(scope)
+    ///     .build(&GrantSet::empty());
+    /// assert!(matches!(
+    ///     refused,
+    ///     Err(BotError::PollDeadlineUnbounded { .. })
+    /// ));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// Defaults to [`DEFAULT_POLL_DEADLINE`] for a caller that never calls this,
+    /// which is what makes it a declared policy rather than a hidden constant.
+    ///
+    /// # Errors
+    ///
+    /// [`BotError::PollDeadlineUnbounded`] for [`Duration::ZERO`], and
+    /// [`BotError::PollDeadlineExceeded`] for a budget above
+    /// [`MAX_POLL_DEADLINE`]. Both surface from [`build`](Self::build), so this
+    /// call itself cannot fail.
+    #[must_use]
+    pub fn with_poll_deadline(mut self, deadline: Duration) -> Self {
+        self.poll_deadline = deadline;
+        self
+    }
+
     /// Set the retry budget for entries whose effect definitely did not happen.
     ///
     /// Additive and defaulted: a caller that never calls this gets
@@ -4941,13 +6339,26 @@ impl EcsBuilder {
             entries: Vec::new(),
             policy: self.policy,
             effects: self.effects,
+            poll_deadline: self.poll_deadline,
         }
     }
 
     /// Build with no observation chains: a bot that only serves direct
     /// `Query` and `Execute` calls.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`EcsBuilder::with_poll_deadline`] documents, plus the same
+    /// admission refusals every other build of a bot raises.
     pub fn build(self, grants: &GrantSet) -> Result<EcsBot, BotError> {
-        EcsBot::assemble(self.name, self.chains, grants, self.policy, self.effects)
+        EcsBot::assemble(
+            self.name,
+            self.chains,
+            grants,
+            self.policy,
+            self.effects,
+            self.poll_deadline,
+        )
     }
 }
 
@@ -5033,6 +6444,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
             entries,
             policy,
             effects,
+            poll_deadline,
         } = self;
         prior.push(EcsChain {
             source: Box::new(previous),
@@ -5048,6 +6460,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
             entries: Vec::new(),
             policy,
             effects,
+            poll_deadline,
         }
     }
 
@@ -5068,6 +6481,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
             entries,
             policy,
             effects,
+            poll_deadline,
         } = self;
         prior.push(EcsChain {
             source: Box::new(source),
@@ -5076,7 +6490,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
             witness: Witness::of::<S::Output>(),
             entries,
         });
-        EcsBot::assemble(name, prior, grants, policy, effects)
+        EcsBot::assemble(name, prior, grants, policy, effects, poll_deadline)
     }
 }
 
@@ -5105,8 +6519,10 @@ pub struct EcsObserveBuilder<S> {
     source: S,
     /// Tuples attached so far, each already erased for storage.
     entries: Vec<ChainEntry>,
-    /// Carried from [`EcsBuilder`] alongside `name`.
+    /// Carried from [`EcsBuilder`] alongside `policy`.
     policy: RetryPolicy,
+    /// Carried from [`EcsBuilder`] alongside `policy`.
+    poll_deadline: Duration,
 }
 
 impl EcsBot {
@@ -5119,9 +6535,26 @@ impl EcsBot {
         grants: &GrantSet,
         policy: RetryPolicy,
         effects: Option<EffectScope>,
+        poll_deadline: Duration,
     ) -> Result<Self, BotError> {
         if name.is_empty() {
             return Err(BotError::IncompleteSpec { field: "name" });
+        }
+        // Refused before anything is built or polled, and for the same reason the
+        // name is: a budget of zero cancels every poll before its first poll, so
+        // a bot built with one observes nothing forever and reports every chain
+        // as stalled. A refusal here names the number and the repair rather than
+        // producing a bot whose every tick is a cancellation.
+        if poll_deadline.is_zero() {
+            return Err(BotError::PollDeadlineUnbounded {
+                deadline: poll_deadline,
+            });
+        }
+        if poll_deadline > MAX_POLL_DEADLINE {
+            return Err(BotError::PollDeadlineExceeded {
+                deadline: poll_deadline,
+                ceiling: MAX_POLL_DEADLINE,
+            });
         }
         // Refused before the capability gate, because a bot that cannot record
         // a dispatch is not a bot that is missing a capability — it is one that
@@ -5189,6 +6622,7 @@ impl EcsBot {
         world.insert_resource(Fired::default());
         world.insert_resource(TickError::default());
         world.insert_resource(Policy(policy));
+        world.insert_resource(PollBudget(poll_deadline));
 
         let mut order = Vec::with_capacity(chains.len());
         for (index, chain) in chains.iter().enumerate() {
@@ -5330,6 +6764,23 @@ impl EcsBot {
         world.insert_non_send(Moving::default());
         world.insert_non_send(Moved::default());
         world.insert_non_send(Plan::default());
+        // One slot per chain, sized here so the observation phase never resizes
+        // it: a `resize` per tick would be an allocation the first time and a
+        // capacity check every tick after, for a buffer whose length is the
+        // chain count and is already known.
+        world.insert_non_send(Invalidated {
+            reasons: vec![None; count],
+        });
+        // Same shape and the same reason: the supersession check asks one
+        // question per chain, and a walk of the transitions to answer it would
+        // be a per-chain scan on every tick for a question that has one.
+        world.insert_non_send(Committed {
+            slots: vec![SlotAdmission::default(); count],
+        });
+        // A resource rather than a field on the bot, so the observation phase
+        // and the schedule step — two functions that can only reach the world —
+        // write one record and `tick_report` reads the same one they wrote.
+        world.insert_resource(TickReport::default());
 
         let mut schedule = schedule();
         validate(&mut schedule, &mut world)?;
@@ -5338,6 +6789,7 @@ impl EcsBot {
             name,
             world,
             schedule,
+            poll_deadline,
         })
     }
 }

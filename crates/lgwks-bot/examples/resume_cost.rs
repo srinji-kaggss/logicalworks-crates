@@ -37,6 +37,9 @@ use lgwks_bot::journal::{EffectEvent, EffectJournal, FileJournal, JournalPositio
 use lgwks_bot::script::{FlowError, Scope, Tenant, remember};
 use lgwks_bot::task::{Host, task};
 
+#[path = "support/measure.rs"]
+mod measure;
+
 /// How many steps each measurement performs.
 const STEPS: usize = 2_000;
 
@@ -49,51 +52,8 @@ const STEPS: usize = 2_000;
 /// not in how much it wrote.
 const PAYLOAD_BYTES: usize = 512;
 
-/// A percentile of a sorted sample, by nearest rank.
-///
-/// Nearest rank rather than interpolation: the report then names a sample that was
-/// actually observed, which is the property a reader of a latency claim needs and
-/// an interpolated number does not have.
-fn percentile(sorted: &[u128], per_mille: usize) -> u128 {
-    if sorted.is_empty() {
-        return 0;
-    }
-    let rank = sorted.len().saturating_mul(per_mille).div_ceil(1_000);
-    sorted[rank.clamp(1, sorted.len()).saturating_sub(1)]
-}
-
-/// The percentiles of one measurement, in microseconds.
-struct Summary {
-    /// Median.
-    p50: u128,
-    /// 95th.
-    p95: u128,
-    /// 99th.
-    p99: u128,
-}
-
-impl Summary {
-    /// The percentiles of `samples`, sorted in place.
-    fn of(samples: &mut [u128]) -> Self {
-        samples.sort_unstable();
-        Self {
-            p50: percentile(samples, 500),
-            p95: percentile(samples, 950),
-            p99: percentile(samples, 990),
-        }
-    }
-
-    /// The summary as one line.
-    fn line(&self, label: &str) -> String {
-        format!(
-            "{label}: p50={}us p95={}us p99={}us",
-            self.p50, self.p95, self.p99
-        )
-    }
-}
-
 /// Report one measurement.
-fn report(label: &str, summary: &Summary) {
+fn report(label: &str, summary: &measure::Summary) {
     let mut out = std::io::stdout().lock();
     let _written = writeln!(out, "{}", summary.line(label));
 }
@@ -244,7 +204,7 @@ fn report_concurrent(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone();
-    let summary = Summary::of(&mut sorted);
+    let summary = measure::Summary::of(&mut sorted);
     report(&format!("tier c={concurrency} n={acknowledged}"), &summary);
     let mut out = std::io::stdout().lock();
     let _written = writeln!(
@@ -288,7 +248,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("the unstored measurement step failed".into());
         }
     }
-    report("plain  (no store)", &Summary::of(&mut plain));
+    report("plain  (no store)", &measure::Summary::of(&mut plain));
 
     // Measurement 2: the same count through a real file-backed store, each step
     // under its own run so no step replays another step's record.
@@ -306,7 +266,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(format!("the stored measurement step failed: {:?}", report.error()).into());
         }
     }
-    report("stored (remember)", &Summary::of(&mut stored));
+    report("stored (remember)", &measure::Summary::of(&mut stored));
 
     // What that cost in flushes. One `sync_all` per record is the whole of the
     // defect #152 group commit removed, so the count is stated beside the latency
@@ -347,7 +307,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(format!("journal append {index} failed: {:?}", appended.err()).into());
         }
     }
-    report("journal (FileJournal)", &Summary::of(&mut journalled));
+    report(
+        "journal (FileJournal)",
+        &measure::Summary::of(&mut journalled),
+    );
 
     let _written = writeln!(
         out,

@@ -1475,6 +1475,147 @@ Each of these was a shipped defect. Treat the list as the spec.
   `tests/gh_binding.rs` (`a_review_list_past_the_ceiling_is_refused_not_truncated`,
   `a_review_list_exactly_at_the_ceiling_is_read`,
   `a_malformed_review_list_is_refused_rather_than_decoded_into_a_partial_answer`)
+- **INV-BOT-120** A source declares when its own cached baseline is unsound, and
+  the substrate acts on the declaration rather than on a heuristic it could not
+  have derived. `Observe::cache_state` returns a typed
+  `RefreshReason::{Disconnected, WatchOverflow, StaleRemoteKey, InvalidationFailed}`,
+  read from the source itself after its poll resolves and never guessed: the
+  substrate cannot know whether somebody else's transport is up, so a heuristic
+  would be a guess about a domain it does not own. A chain that declares one is
+  polled with `None` as its baseline, which makes the poll a read, which commits
+  the value the source reported and marks the chain moved — a forced refresh that
+  compared its fresh read against the baseline it had just been told was unsound
+  would keep the stale value forever and re-observe on every tick without ever
+  converging. The mark is spent only by a read that *committed*; a poll that
+  failed leaves it standing, because the baseline it was supposed to replace is
+  still there. The mark is per chain, so one source's failure never re-reads a
+  healthy sibling. `TickReport::forced` names the chain, the source's own
+  `domain_id` and the cause, published before the schedule runs so a failed tick
+  still reports what its sources had already declared. Every report field is
+  private behind an accessor: a caller that could edit the record of what a tick
+  observed could make a bot that went quiet for the wrong reason look like one
+  that went quiet for the right one. · why: #87 step 3 (T08, LC-04) · enforced by:
+  `tests/observe_refresh.rs`
+  (`a_declared_failure_forces_a_refresh_rather_than_a_permanent_quiet_state`,
+  `a_forced_refresh_commits_the_newer_value_and_then_returns_to_quiet`,
+  `a_failed_refresh_keeps_the_baseline_marked`,
+  `two_tenants_sources_forced_refreshes_stay_attributed_to_their_own_chain`),
+  `tests/sim_observe_refresh.rs` (`forced_refresh_matches_the_schedule` and
+  `a_refresh_that_never_lands_stays_marked`, each swept over bands 00–05 and
+  06–09 by the shared `band_family!` declaration, and
+  `a_seeded_reason_per_chain_is_reported_against_its_own_chain`,
+  `a_failed_forced_refresh_keeps_the_mark_until_a_committed_read_spends_it`,
+  `two_tenants_interleaved_ticks_never_cross_attribution`) and
+  `verb::tests::only_supersession_leaves_the_baseline_sound`
+- **INV-BOT-121** An observation the substrate passes over is reported as its own
+  outcome, not as a fired effect and not as a retire. `Committed` records per
+  chain whether the value sitting in the observation slot has been admitted into
+  a generation yet, and a commit that replaces an *unacted* value reports it in
+  `TickReport::superseded` with the revision the **replaced** value carried —
+  what a caller correlates is "the generation for revision 4 never ran", and
+  revision 4 is the one this names. Three states rather than one boolean, because
+  "replaced before it was acted on" and "never observed at all" both read as
+  `false` in the two-state form, and conflating them makes every chain's first
+  commit a reported skip. Admission is marked where a generation *takes* the
+  value out of the slot, not where the transition is handed back: for an entry
+  awaiting evidence the handover is never reached, so the handover would leave
+  every value a held generation is holding reported as unacted — a pass-over
+  claim about a value that was already owed work. A forced refresh is not a
+  supersession and a supersession is not a forced refresh; neither is counted
+  among the other's. · why: #87 step 3 (T09, DX-07) · enforced by:
+  `tests/observe_refresh.rs`
+  (`an_intermediate_value_is_reported_as_superseded_rather_than_fired_or_retired`,
+  `identical_payloads_with_distinct_event_ids_both_execute_and_a_redelivery_does_not`)
+  and `tests/sim_observe_refresh.rs` (`event_identities_are_per_event` and
+  `tenants_never_cross`, swept over bands 14–17 and 10–13 by the shared
+  `band_family!` declaration, and
+  `a_seeded_value_sequence_under_a_held_action_reports_each_replaced_revision_once`,
+  `two_tenants_interleaved_ticks_never_cross_attribution`)
+- **INV-BOT-122** A chain held open does not starve an independent chain. A
+  generation whose action reports an indeterminate outcome stays held, so its
+  transition is walked on every tick and never released; the walk stops *at that
+  chain* and the chains behind it are still reached, which is what the existing
+  "a failure stops its own chain" rule already gives and this names from the
+  capacity side. The saturation is bounded: a transition is one state per entry of
+  the spec, so a held chain costs its declared slots and nothing more. At 100,
+  1,000 and 10,000 held chains on one bot an independent chain declared beside
+  them still completes, every held chain still reaches its own action once, and
+  every one is still **reported** as held — a dropped hold is a lost effect
+  nobody would ever see. The tier reached is recorded rather than clamped.
+  · why: #87 step 3 (T06, LC-03), first half · enforced by: `tests/observe_refresh.rs`
+  (`a_chain_held_at_capacity_does_not_starve_an_independent_chain`,
+  `a_saturated_mass_does_not_starve_an_independent_chain_at_every_tier`) and
+  `tests/sim_observe_refresh.rs`
+  (`a_seeded_mass_of_held_chains_never_starves_an_independent_chain`)
+- **INV-BOT-123** One slow source cannot hold the tick. Every source poll in the
+  observation wave runs under a **declared per-poll deadline** — the wall watchdog
+  half of the crate's one declared clock (`Clock`, INV-BOT-30), never its
+  caller-advanceable counter, because a source that stopped answering is not
+  waiting for time to pass — and `MAX_IN_FLIGHT_POLLS` bounds the fan-out while
+  this bounds the wait, which is the half it never did. A poll that
+  misses it is **dropped mid-flight**: it commits nothing, keeps its chain's
+  baseline and its forced-refresh mark standing (the same rule a failed poll
+  already follows, since the value it was to replace is still there), and is
+  reported in `TickReport::stalled` naming the chain, the source's own
+  `domain_id` and the budget applied. A cancellation is **not** a park: it does
+  not stop the tick, so the chains beside a wedged source commit and act in the
+  *same* tick — the rule a domain failure follows is deliberately not extended to
+  it, because a source that said nothing cannot be a reason to withhold the
+  observations other sources did read. The bound is `DEFAULT_POLL_DEADLINE` with
+  `EcsBuilder::with_poll_deadline` as the override, refused at build for zero and
+  for anything above `MAX_POLL_DEADLINE`, because a silently clamped deadline is
+  indistinguishable from the one the caller asked for. The watchdog thread is
+  joined on every path, so a resolved poll leaves no thread parked and a cancelled
+  one leaves none outliving the tick. **Not claimed:** that cancelling a poll stops
+  its side effects. Dropping a future is cooperative, so a poll that handed work to
+  `spawn_blocking` has its handle released and its thread runs to completion — the
+  stall is about this bot's observation, not about the source's work. · why:
+  #87 step 3 (T06, LC-03), slow-source half, closing the gap INV-BOT-122 named ·
+  enforced by: `tests/observe_refresh.rs`
+  (`a_slow_source_does_not_block_an_independent_chain`,
+  `a_stalled_chain_is_re_polled_and_commits_when_it_answers`,
+  `a_poll_deadline_that_bounds_nothing_is_refused_at_build`) and
+  `tests/sim_observe_refresh.rs`
+  (`a_wedged_source_is_reported_and_costs_its_neighbours_nothing`,
+  `a_saturated_wave_stalls_every_chain_and_still_lets_the_next_tenant_commit`,
+  `the_same_seed_replays_a_stalled_wave`,
+  `a_stalled_chain_keeps_its_mark_and_is_re_polled_next_tick`,
+  `a_poll_deadline_around_both_edges_is_accepted_or_refused_at_build`,
+  `only_the_seeded_wedged_chain_is_reported_stalled`,
+  `siblings_of_a_wedged_source_act_in_the_same_tick`,
+  `two_tenants_interleaved_ticks_never_cross_attribution`)
+- **INV-BOT-124** The per-poll deadline's watchdog is one per observation wave
+  and is started lazily. `MAX_IN_FLIGHT_POLLS` chains form one wave under one
+  `poll_deadline`, so a wave has one deadline to watch and exactly one
+  `lgwks-poll-deadline` thread to watch it with; that thread starts only when the
+  first poll in the wave returns `Pending`, so a wave whose every source answers
+  on its first poll — the ordinary tick — starts no thread at all and
+  `TickReport::watchdogs()` is zero. The spawn is serialized on the reaper's own
+  lock, so a poll can never park against a thread that was never started; a
+  refused spawn stalls only the poll that asked and leaves every already-resolved
+  sibling with its answer; and the reaper is joined on every path, so a resolved
+  wave leaves no thread parked and an expired wave is reaped before its stalls
+  are acted on. The per-chain `PollStalled` report is unchanged. Measured here
+  (`examples/poll_deadline_cost.rs`, release, 200 ticks per configuration) —
+  AFTER (this change): ordinary tick p50/p95/p99 in µs — 1 chain 1/3/5, 32
+  chains 9/9/12, 1,000 chains 158/191/218, 10,000 chains 1082/1120/1156, every
+  tier 0 watchdogs; 1,000 chains with one wedged source under a 100 ms budget
+  104724/110578/110632, about one deadline rather than one per chain, with one
+  watchdog per tick. BEFORE (`bad47c6d`, same harness with the `watchdogs()`
+  report removed): 30/37/48, 611/959/1047, 19171/19421/19512,
+  160646/191745/193909; the wedged run 127945/137216/140410. A 1,000-chain tick
+  therefore paid ~19 ms of thread churn per ordinary tick before and ~0.16 ms
+  after. · why: #87 step 3 (T06, LC-03) · enforced by:
+  `tests/observe_refresh.rs`
+  (`a_wave_spends_one_watchdog_and_a_mass_of_waves_spends_one_each`) and
+  `tests/sim_observe_refresh.rs`, whose `band_family!` declaration runs
+  (`a_wave_spends_one_watchdog_and_a_fast_wave_spends_none`), and its
+  source-visible deadline-watchdog families
+  (`a_fast_wave_spends_no_watchdog_across_seeded_widths`,
+  `a_pending_source_spends_one_watchdog_for_its_wave`,
+  `a_seeded_run_spends_one_watchdog_per_pending_tick`,
+  `a_cancelled_tick_leaves_the_bot_usable`,
+  `the_same_seed_replays_a_deadline_wave`).
 
 - **INV-BOT-81** A review's subject is the repository the caller named and the
   diff that was read, and a publication is reported only from evidence of the
