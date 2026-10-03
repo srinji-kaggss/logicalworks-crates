@@ -205,6 +205,7 @@ use super::spec::{
     Witness, typed_entry,
 };
 use super::verb::EffectLifetime;
+use super::verb::RefreshReason;
 use super::verb::{Evaluate, Execute, Observe};
 
 // ── The effect path: identity, fencing, and the write-ahead record ─────────
@@ -1328,6 +1329,246 @@ struct Moving(Vec<bool>);
 /// The retry policy in force: one authority per world, like `Grants`.
 #[derive(Resource, Debug)]
 struct Policy(RetryPolicy);
+
+/// The chains whose cached baseline cannot be trusted, and why.
+///
+/// One flag per chain, indexed exactly as [`Chains`] is, and one entry per tick
+/// per chain — so this is bounded by the chain count for the life of the bot and
+/// cannot grow with the number of ticks. The lifecycle is deliberately one tick
+/// long: a chain marked here is polled with `None` handed to it as its
+/// baseline, so whatever the source reports *is* committed as its new baseline,
+/// and the flag is spent. A flag that outlived the forced poll would keep the
+/// baseline out of the comparison indefinitely, which is the permanent quiet
+/// state this resource exists to prevent — a slower version of the defect.
+///
+/// Spent rather than cleared for the same reason: a chain whose forced poll
+/// *failed* has committed nothing, so its baseline is still whatever it was,
+/// and the next tick must be forced again. Clearing the flag there would return
+/// the bot to comparing against the unsound baseline it just failed to replace.
+#[derive(Debug, Default)]
+struct Invalidated {
+    /// The reason each chain declared, or `None` where it declared nothing.
+    reasons: Vec<Option<RefreshReason>>,
+}
+
+impl Invalidated {
+    /// Mark `chain` invalid for `reason`, keeping the reason it already had.
+    ///
+    /// First-write-wins rather than last-write-wins, because the driver walks the
+    /// chains in declaration order and a report that varied with poll resolution
+    /// order would not be comparable across two runs of one seed. One reason per
+    /// chain is what makes the report a statement about the run rather than
+    /// about how its sources happened to resolve.
+    fn mark(&mut self, chain: usize, reason: RefreshReason) {
+        if let Some(slot) = self.reasons.get_mut(chain)
+            && slot.is_none()
+        {
+            *slot = Some(reason);
+        }
+    }
+
+    /// Whether `chain` must be polled without a baseline this tick.
+    fn is_invalid(&self, chain: usize) -> bool {
+        self.reasons
+            .get(chain)
+            .is_some_and(|reason| reason.is_some())
+    }
+}
+
+/// One chain's entry on a tick report: a baseline the source itself declared
+/// unsound, and the reason it named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForcedRefresh {
+    /// The chain whose cached baseline was refused.
+    chain: usize,
+    /// The source's own domain identifier, read through `domain`.
+    domain: String,
+    /// The reason, read through `reason`.
+    reason: RefreshReason,
+}
+
+impl ForcedRefresh {
+    /// The chain whose cached baseline was refused.
+    ///
+    /// The chain's index in declaration order, which is what `pending()` and the
+    /// settlement reports name too.
+    #[must_use]
+    pub const fn chain(&self) -> usize {
+        self.chain
+    }
+
+    /// The source's own domain identifier.
+    ///
+    /// The same spelling `Observe::domain_id` returns, so a report is readable
+    /// without the caller having to hold the declaration order.
+    #[must_use]
+    pub fn domain(&self) -> &str {
+        &self.domain
+    }
+
+    /// Why the source declared its baseline unsound.
+    #[must_use]
+    pub const fn reason(&self) -> RefreshReason {
+        self.reason
+    }
+}
+
+/// What one tick observed about its own sources, beside the effects it fired.
+///
+/// The count of fired effects answers "what did this tick do"; this answers
+/// "what did it have to look at again, and why", which is a different question
+/// and the one a caller needs when a bot has gone quiet. A tick that fired
+/// nothing because every source legitimately held still is a healthy tick. A
+/// tick that fired nothing because a source's baseline stopped being a fact is
+/// a bug the count cannot see, and this is where it becomes visible.
+///
+/// Read through [`EcsBot::tick_report`] rather than off the tick's return
+/// value, because the tick's `Result` carries an *error* and this carries what
+/// was true about the sources either way: a tick that failed still observed, and
+/// a caller triaging the failure needs to know whether the sources were the
+/// reason.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Resource)]
+pub struct TickReport {
+    /// Effects that fired on this tick, read through `fired`.
+    fired: usize,
+    /// The chains whose baseline this tick refused, read through `forced`.
+    forced: Vec<ForcedRefresh>,
+    /// The observations this tick passed over, read through `superseded`.
+    superseded: Vec<SupersededObservation>,
+}
+
+impl TickReport {
+    /// Effects that fired on this tick.
+    #[must_use]
+    pub const fn fired(&self) -> usize {
+        self.fired
+    }
+
+    /// Chains whose cached baseline this tick refused and re-read.
+    ///
+    /// In chain order, at most one entry per chain: the first reason the tick
+    /// recorded for a chain, which is the one whose forced read has not landed.
+    /// Empty when every source legitimately held still — which is the answer a
+    /// caller most needs to be able to distinguish from the next one.
+    #[must_use]
+    pub fn forced(&self) -> &[ForcedRefresh] {
+        &self.forced
+    }
+
+    /// Intermediate observations replaced before any entry acted on them.
+    ///
+    /// In chain order, at most one entry per chain. Reported here rather than
+    /// as a fired effect or as a retired one, because it is neither: the value
+    /// was never due. Counting it as work done would overstate what the tick
+    /// did, and counting it as work retired would understate how many values the
+    /// run passed over.
+    #[must_use]
+    pub fn superseded(&self) -> &[SupersededObservation] {
+        &self.superseded
+    }
+
+    /// Whether this tick re-read anything it had decided it could keep.
+    #[must_use]
+    pub fn forced_any(&self) -> bool {
+        !self.forced.is_empty()
+    }
+
+    /// Whether this tick passed over an intermediate observation.
+    #[must_use]
+    pub fn superseded_any(&self) -> bool {
+        !self.superseded.is_empty()
+    }
+}
+
+/// One intermediate observation the substrate passed over in latest-state mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SupersededObservation {
+    /// The chain, read through `chain`.
+    chain: usize,
+    /// The revision, read through `revision`.
+    revision: u64,
+}
+
+impl SupersededObservation {
+    /// The chain whose value was replaced.
+    #[must_use]
+    pub const fn chain(&self) -> usize {
+        self.chain
+    }
+
+    /// The revision the replaced value was committed under.
+    ///
+    /// The revision of the *replaced* value, not of the one that took its place:
+    /// what a caller wants to correlate is "the generation for revision 4 never
+    /// ran", and revision 4 is the one this names.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+}
+
+/// Whether each chain's committed observation has been admitted into a
+/// generation yet, and under which revision.
+///
+/// One entry per chain, so the answer is per-chain constant time rather than a
+/// walk of the transitions. The distinction it records is the one that decides
+/// what a replaced value *was*:
+///
+/// - **Admitted.** The value is sitting in the slot because the generation that
+///   ran on it has finished and handed it back. Replacing it loses nothing: it
+///   has already been acted on.
+/// - **Not admitted.** The value is sitting in the slot because a generation was
+///   still being walked when it arrived, so it could not be admitted yet — and a
+///   newer one arrived before the walk finished. This value will *never* be
+///   acted on, because the substrate admits only the newest observation once the
+///   walk releases the chain. Replacing it passes over an intermediate state,
+///   which is what latest-state mode means and what has to be reported.
+///
+/// Without this, the two are indistinguishable from the outside and the second
+/// is silently dropped: a caller watching a counter see it jump 1 → 2 → 3 has no
+/// way to learn that 2 was never observed as a state, only that it was never
+/// acted on. Those are different facts and only one of them is a loss.
+#[derive(Debug, Default)]
+struct Committed {
+    /// Per chain: has the value in the observation slot been admitted, and
+    /// under which revision was it committed.
+    slots: Vec<SlotAdmission>,
+}
+
+/// What one chain's committed observation is waiting for.
+#[derive(Debug, Clone, Copy, Default)]
+struct SlotAdmission {
+    /// Whether a generation has been opened over the value in the slot.
+    admitted: bool,
+    /// The revision the value in the slot was committed under.
+    revision: u64,
+}
+
+impl Committed {
+    /// Note that `chain` committed a value under `revision`, not yet admitted.
+    fn commit(&mut self, chain: usize, revision: u64) {
+        if let Some(slot) = self.slots.get_mut(chain) {
+            slot.admitted = false;
+            slot.revision = revision;
+        }
+    }
+
+    /// Note that a generation has been opened over `chain`'s committed value.
+    ///
+    /// Called from the handover, where the binding leaves the transition and
+    /// becomes the slot's standing baseline. The value is then *acted on*, and
+    /// replacing it later is not a supersession.
+    fn admit(&mut self, chain: usize) {
+        if let Some(slot) = self.slots.get_mut(chain) {
+            slot.admitted = true;
+        }
+    }
+
+    /// The admission of `chain`'s committed value, for the supersession check.
+    fn slot(&self, chain: usize) -> SlotAdmission {
+        self.slots.get(chain).copied().unwrap_or_default()
+    }
+}
 
 // ── Non-send state: the verbs and the values ───────────────────────────────
 
@@ -3369,6 +3610,7 @@ fn observe_fold(world: &mut World) {
     let mut changed = std::mem::take(&mut world.non_send_mut::<Moved>().0);
     changed.clear();
     changed.resize(polled.len(), false);
+    let mut superseded: Vec<SupersededObservation> = Vec::new();
     {
         let mut observed = world.non_send_mut::<Observed>();
         for (index, result) in polled.iter_mut().enumerate() {
@@ -3404,6 +3646,28 @@ fn observe_fold(world: &mut World) {
             revision.0 = revision.0.wrapping_add(1);
         }
     }
+
+    // The revision the *replaced* value was committed under, read before the
+    // bump above. A value superseded by this tick carries the revision it was
+    // committed at, which is what a caller needs to line the pass-over up with
+    // the generation that did or did not run on it.
+    for index in changed
+        .iter()
+        .copied()
+        .enumerate()
+        .filter_map(|(index, moved)| moved.then_some(index))
+    {
+        let previous = world.non_send::<Committed>().slot(index);
+        if !previous.admitted {
+            superseded.push(SupersededObservation {
+                chain: index,
+                revision: previous.revision,
+            });
+        }
+        let revision = revision_of(world, index);
+        world.non_send_mut::<Committed>().commit(index, revision);
+    }
+    world.resource_mut::<TickReport>().superseded = superseded;
     world.non_send_mut::<Moved>().0 = changed;
 }
 
@@ -3552,9 +3816,23 @@ fn fire_plan(world: &mut World) {
             .non_send_mut::<Ledger>()
             .put(index, if retained { Some(transition) } else { None });
         if let Some(returned) = returned {
-            let mut observed = world.non_send_mut::<Observed>();
-            if let Some(slot) = observed.0.get_mut(index).filter(|slot| slot.is_none()) {
-                *slot = Some(returned);
+            let handed_back = {
+                let mut observed = world.non_send_mut::<Observed>();
+                observed
+                    .0
+                    .get_mut(index)
+                    .filter(|slot| slot.is_none())
+                    .map(|slot| *slot = Some(returned))
+                    .is_some()
+            };
+            // The generation that ran on this value has finished, so the value is
+            // now *acted on*: replacing it later loses nothing and is not a
+            // supersession. Marked on the handover rather than where the
+            // generation is opened, because the handover is what makes the value
+            // standing in the slot again — and a value still out on loan is
+            // exactly the one a supersession can overtake.
+            if handed_back {
+                world.non_send_mut::<Committed>().admit(index);
             }
         }
     }
@@ -4070,8 +4348,16 @@ impl EcsBot {
         // and a mutable borrow of a resource cannot be held across them.
         let mut polled = std::mem::take(&mut self.world.non_send_mut::<Polled>().0);
         polled.clear();
-        self.poll_sources(&mut polled).await;
+        let invalidations = self.poll_sources(&mut polled).await;
         self.world.non_send_mut::<Polled>().0 = polled;
+
+        // Published before the schedule runs, so the report describes this tick's
+        // observation phase even when the schedule step stops on a failure and
+        // the effects phase never runs. A caller reading the report after a
+        // failed tick is exactly the caller who needs to know a source had
+        // already declared its cache unsound when it failed.
+        self.record_invalidations(&invalidations);
+        self.publish_refreshes();
 
         self.schedule.run(&mut self.world);
 
@@ -4099,6 +4385,7 @@ impl EcsBot {
         put_plan_buffers(&mut self.world, steps, failures);
 
         self.world.resource_mut::<Fired>().0 = fired;
+        self.world.resource_mut::<TickReport>().fired = fired;
         if let Some(error) = failure {
             self.world.resource_mut::<TickError>().0 = Some(error);
         }
@@ -4180,6 +4467,29 @@ impl EcsBot {
     fn begin_tick(&mut self) {
         self.world.resource_mut::<Fired>().0 = 0;
         self.world.resource_mut::<TickError>().0 = None;
+        // The previous tick's report is history, not this tick's. Overwritten
+        // rather than appended so a caller reading it before the next tick sees
+        // the tick it just ran and not a union of every tick the bot has ever
+        // run — which would answer "was a refresh ever forced", a different and
+        // much less useful question.
+        *self.world.resource_mut::<TickReport>() = TickReport::default();
+    }
+
+    /// What the most recent tick observed about its own sources.
+    ///
+    /// The companion to [`Self::tick`]'s return value rather than a second
+    /// channel into the same fact: the count says what fired, this says what the
+    /// bot had to re-read to decide, and a bot that has gone quiet is exactly
+    /// where only the first of those is uninformative.
+    ///
+    /// Reports the last tick that ran, whatever its result. A tick that returned
+    /// `Err` still observed, and the caller triaging the error needs to know
+    /// whether a declared cache failure is behind it. Reading this before the
+    /// first tick returns the empty report, which says no source was forced —
+    /// true, and true for a tick that never happened.
+    #[must_use]
+    pub fn tick_report(&self) -> TickReport {
+        self.world.resource::<TickReport>().clone()
     }
 
     /// Poll every source, `MAX_IN_FLIGHT_POLLS` at a time, awaiting each wave
@@ -4208,44 +4518,208 @@ impl EcsBot {
     /// that owns it — so the source itself can answer "did I move?" against a
     /// concrete value, before anything is boxed. A source that returned
     /// `Ok(None)` did not move, and nothing is allocated for it.
-    async fn poll_sources(&self, polled: &mut Vec<Result<Option<Erased>, BotError>>) {
-        let chains = self.world.non_send::<Chains>();
-        let grants = self.world.resource::<Grants>();
-        let seen = self.world.non_send::<Observed>();
-        let ledger = self.world.non_send::<Ledger>();
-
-        let count = chains.0.len();
+    ///
+    /// A source that declared its cache unsound is handed **`None`** instead,
+    /// whatever the substrate holds. That is the whole of the forced refresh:
+    /// with a baseline in hand the source can answer "equal to this" and the
+    /// substrate keeps a value it now knows is wrong. With `None` there is
+    /// nothing to be equal to, so the poll is a read and its value becomes the
+    /// new baseline — and because a read is a read, the chain also *moved*, so
+    /// the change filter re-evaluates the entries against the value that is
+    /// actually current rather than against the one the failure left behind.
+    ///
+    /// # Where the reason comes from
+    ///
+    /// Read from the source itself, after its poll resolves, never guessed by
+    /// this function: the substrate cannot know whether a domain's transport is
+    /// up or its queue overflowed, and a heuristic would be a guess about
+    /// somebody else's transport. A source that declares nothing is a source
+    /// with nothing to declare.
+    ///
+    /// # What it returns
+    ///
+    /// The chains whose baseline this tick could not trust: one entry per chain,
+    /// in declaration order, `None` where the chain declared nothing. Handed
+    /// back rather than written to the world here, so `&self` stays a shared
+    /// borrow across every poll. A `&mut World` would have to be held while each
+    /// poll future is alive, and holding it across awaits to publish three words
+    /// is exactly the shape that lets one phase's ordering become another's.
+    async fn poll_sources(
+        &self,
+        polled: &mut Vec<Result<Option<Erased>, BotError>>,
+    ) -> Vec<Option<RefreshReason>> {
+        let count = self.world.non_send::<Chains>().0.len();
         polled.clear();
         polled.resize_with(count, || Ok(None));
 
-        for (wave_index, wave) in chains.0.chunks(MAX_IN_FLIGHT_POLLS).enumerate() {
-            let base = wave_index.saturating_mul(MAX_IN_FLIGHT_POLLS);
-            let index_of = |offset: usize| base.saturating_add(offset);
+        // What each chain declares about its own caching, one entry per chain and
+        // read once per tick. Copied out of the world rather than borrowed across
+        // the polls: the marks are written after the polls resolve, and the
+        // closures below borrow the world's sources immutably for their whole
+        // life.
+        let mut declared = self.declared_refresh(count);
 
-            let batch =
-                lgwks_std::task::join_all_boxed(wave.iter().enumerate().map(|(offset, chain)| {
-                    // `chunks` gives no index, so the chain's position is
-                    // the wave's start plus the offset within it. This is
-                    // the same index `Observed` and `Ledger` are keyed by,
-                    // which is what makes the baseline below the right one
-                    // to hand over.
-                    let index = index_of(offset);
-                    let baseline = seen
-                        .0
-                        .get(index)
-                        .and_then(|slot| slot.as_ref())
-                        .or_else(|| ledger.bound(index));
-                    chain.source.poll_any(&grants.0, baseline)
-                }));
+        for wave_index in 0..count.div_ceil(MAX_IN_FLIGHT_POLLS) {
+            let base = wave_index.saturating_mul(MAX_IN_FLIGHT_POLLS);
+            // The wave as `(chain index, source)` pairs, read out before the
+            // await: `join_all_boxed` takes an iterator of futures, and each of
+            // those borrows the world, so the slice has to be owned by the time
+            // the first one exists. A `Vec` of references into a resource that
+            // is not written across the await is the borrow; nothing here is
+            // `mut` borrowed while any poll is pending.
+            let wave: Vec<(usize, &EcsChain)> = self
+                .world
+                .non_send::<Chains>()
+                .0
+                .iter()
+                .enumerate()
+                .skip(base)
+                .take(MAX_IN_FLIGHT_POLLS)
+                .collect();
+
+            let batch = lgwks_std::task::join_all_boxed(wave.iter().map(|&(index, chain)| {
+                // `chunks` gives no index, so the chain's position is the wave's
+                // start plus the offset within it. This is the same index
+                // `Observed` and `Ledger` are keyed by, which is what makes the
+                // baseline below the right one to hand over.
+                let seen = self.world.non_send::<Observed>();
+                let ledger = self.world.non_send::<Ledger>();
+                let grants = self.world.resource::<Grants>();
+                let baseline = declared
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .filter(|reason| !reason.invalidates_baseline())
+                    .and_then(|_| {
+                        seen.0
+                            .get(index)
+                            .and_then(|slot| slot.as_ref())
+                            .or_else(|| ledger.bound(index))
+                    });
+                chain.source.poll_any(&grants.0, baseline)
+            }));
             let results = batch.await;
 
-            for ((offset, _), result) in wave.iter().enumerate().zip(results) {
-                let index = index_of(offset);
+            for (&(index, _), result) in wave.iter().zip(results) {
                 if let Some(slot) = polled.get_mut(index) {
                     *slot = result;
                 }
             }
         }
+
+        // A poll that failed never reached the value that would have been
+        // compared, so its baseline is exactly as unsound as it was and the mark
+        // has to outlive this tick. A poll that succeeded is read once more,
+        // after it resolved: a source that reached its failure *inside* the poll
+        // has only now recorded it, and asking before the poll would have asked
+        // about the previous tick's state.
+        let chains = self.world.non_send::<Chains>();
+        for (index, reason) in declared.iter_mut().enumerate() {
+            let Some(chain) = chains.0.get(index) else {
+                continue;
+            };
+            match (
+                chain.source.cache_state(),
+                polled.get(index).map(Result::is_ok),
+            ) {
+                (Some(declared_now), Some(true)) => *reason = Some(declared_now),
+                // A failed poll carries no value at all, so the reason the source
+                // would have named is not the one that matters: nothing was read,
+                // and the baseline this tick did not replace is still standing.
+                // The mark stays whatever it already was, and defaults to
+                // `Disconnected` for a chain that had declared nothing, because a
+                // source that could not be read is a source whose transport is at
+                // least unavailable.
+                (_, Some(false)) if reason.is_none() => {
+                    *reason = Some(RefreshReason::Disconnected);
+                }
+                _ => {}
+            }
+        }
+        declared
+    }
+
+    /// What each of `count` chains declares about its own caching right now.
+    ///
+    /// Read once per tick, in declaration order, and copied out so the callers
+    /// can hold it across the polls without borrowing the world. A chain that
+    /// declared a reason last tick and nothing this tick is not cleared here:
+    /// the mark is the substrate's record that the baseline it forced a read for
+    /// was never successfully replaced, and clearing it on silence would be the
+    /// permanent quiet state, one cause at a time.
+    fn declared_refresh(&self, count: usize) -> Vec<Option<RefreshReason>> {
+        let chains = self.world.non_send::<Chains>();
+        let invalidated = self.world.non_send::<Invalidated>();
+        let mut declared: Vec<Option<RefreshReason>> = vec![None; count];
+        for (index, chain) in chains.0.iter().enumerate() {
+            // A chain already marked this tick keeps the mark it has: re-reading
+            // it would let a later poll within the same tick overwrite the reason
+            // the report names with one that happened afterwards.
+            if invalidated.is_invalid(index) {
+                continue;
+            }
+            if let Some(reason) = chain.source.cache_state() {
+                declared[index] = Some(reason);
+            }
+        }
+        declared
+    }
+
+    /// Write this tick's marks into the world, so the schedule step and the
+    /// report read the same record the observation phase produced.
+    ///
+    /// A mark that is already standing keeps the reason it has. That is the
+    /// difference between "this source is currently unsound" and "this source's
+    /// baseline has not been successfully replaced since it first declared
+    /// itself unsound", and only the second one is worth re-reading a caller: a
+    /// source that reconnects and then overflows on the very next tick reported
+    /// two different facts, and the report names the first because the first is
+    /// the one whose forced read has not landed yet.
+    fn record_invalidations(&mut self, declared: &[Option<RefreshReason>]) {
+        let mut invalidated = self.world.non_send_mut::<Invalidated>();
+        for (chain, reason) in declared.iter().enumerate() {
+            if let Some(reason) = *reason {
+                invalidated.mark(chain, reason);
+            }
+        }
+    }
+
+    /// Copy this tick's invalidated marks onto the tick report, in chain order.
+    ///
+    /// Declaration order rather than mark order, for the reason
+    /// [`Invalidated::mark`] already gives: the report is compared across two
+    /// runs of one seed, and an order that varied with poll resolution would
+    /// make the comparison meaningless.
+    fn publish_refreshes(&mut self) {
+        // Built as a whole vector and then moved in, rather than pushed a row
+        // at a time: building it needs two shared borrows of the world (the
+        // marks and the source identities) and writing it needs a mutable one,
+        // and bevy's access rules cannot express "shared, shared, then mutable"
+        // through a chain of borrows on one `self`. One assignment at the end is
+        // also cheaper than a `clear` followed by a push per chain.
+        let forced: Vec<ForcedRefresh> = {
+            let invalidated = self.world.non_send::<Invalidated>();
+            let order = self.world.resource::<Order>();
+            invalidated
+                .reasons
+                .iter()
+                .enumerate()
+                .filter_map(|(chain, reason)| {
+                    let reason = (*reason)?;
+                    let domain = order
+                        .0
+                        .get(chain)
+                        .and_then(|entity| self.world.get::<SourceId>(*entity))
+                        .map_or_else(String::new, |id| id.domain().to_owned());
+                    Some(ForcedRefresh {
+                        chain,
+                        domain,
+                        reason,
+                    })
+                })
+                .collect()
+        };
+        self.world.resource_mut::<TickReport>().forced = forced;
     }
 
     /// Run the effects the decision phase selected, in the order it selected
@@ -5330,6 +5804,23 @@ impl EcsBot {
         world.insert_non_send(Moving::default());
         world.insert_non_send(Moved::default());
         world.insert_non_send(Plan::default());
+        // One slot per chain, sized here so the observation phase never resizes
+        // it: a `resize` per tick would be an allocation the first time and a
+        // capacity check every tick after, for a buffer whose length is the
+        // chain count and is already known.
+        world.insert_non_send(Invalidated {
+            reasons: vec![None; count],
+        });
+        // Same shape and the same reason: the supersession check asks one
+        // question per chain, and a walk of the transitions to answer it would
+        // be a per-chain scan on every tick for a question that has one.
+        world.insert_non_send(Committed {
+            slots: vec![SlotAdmission::default(); count],
+        });
+        // A resource rather than a field on the bot, so the observation phase
+        // and the schedule step — two functions that can only reach the world —
+        // write one record and `tick_report` reads the same one they wrote.
+        world.insert_resource(TickReport::default());
 
         let mut schedule = schedule();
         validate(&mut schedule, &mut world)?;

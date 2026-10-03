@@ -153,6 +153,7 @@ use std::any::{Any, TypeId, type_name};
 use super::cap::{Auth, Cap};
 use super::error::{BotError, Escaped};
 use super::gate::GrantSet;
+use super::verb::RefreshReason;
 
 // ── Serializable spec ──────────────────────────────────────────────────────
 
@@ -598,6 +599,15 @@ pub(crate) trait ObserveAny {
     fn domain_id(&self) -> &str;
     /// Forwards to [`Observe::required_caps`](crate::verb::Observe::required_caps).
     fn required_caps(&self) -> &[Cap];
+    /// Forwards to
+    /// [`Observe::cache_state`](crate::verb::Observe::cache_state).
+    ///
+    /// Read on the same tick as `poll_any`, immediately after it resolves, so a
+    /// source that reached a failure inside its own poll has already recorded it
+    /// by the time this is asked. That ordering is why the reason is a
+    /// *statement* about the source's caching rather than a second call: a
+    /// second call could not see a poll that has not finished.
+    fn cache_state(&self) -> Option<RefreshReason>;
     /// Issue an [`Auth`] for the observer's own caps and poll it.
     ///
     /// Returns `Ok(None)` when the source produced a value **equal** to
@@ -648,6 +658,10 @@ where
 
     fn required_caps(&self) -> &[Cap] {
         super::verb::Observe::required_caps(self)
+    }
+
+    fn cache_state(&self) -> Option<RefreshReason> {
+        super::verb::Observe::cache_state(self)
     }
 
     fn poll_any<'a>(

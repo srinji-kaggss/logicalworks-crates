@@ -326,6 +326,7 @@ pub mod task;
 pub mod verb;
 
 pub use cap::{Auth, Cap, Deficit, Demand, Shortage};
+pub use ecs::{ForcedRefresh, SupersededObservation, TickReport};
 pub use effect::{EventId, InputIdentity};
 pub use error::{BotError, DispatchCertainty, RetryClass};
 pub use gate::GrantSet;
@@ -353,7 +354,7 @@ pub use spec::{Admission, Bot, BotSpec, Need, NeedSet};
 #[cfg(feature = "script")]
 pub use lgwks_macros::script;
 pub use verb::EffectLifetime;
-pub use verb::{Evaluate, Execute, Observe, Query};
+pub use verb::{Evaluate, Execute, Observe, Query, RefreshReason};
 
 /// Typed in-process structural inspection (feature `inspect`).
 ///
