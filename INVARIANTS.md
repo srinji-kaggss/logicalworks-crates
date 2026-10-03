@@ -147,6 +147,63 @@ Each of these was a shipped defect. Treat the list as the spec.
   `reading_a_snapshot_has_no_side_effect_on_admission`,
   `a_fresh_snapshot_admits_at_the_declared_ceiling`,
   `a_bounded_repeating_task_reports_exhaustion_not_a_hang`).
+- **INV-BOT-60** A readiness is a typed, generation-bound fact, and a dependant
+  never learns it by sleeping. `script::Readiness<T>` releases its dependants
+  with a `Ready<T>` that carries the `Generation` the instance was admitted
+  under, so four refusals are four different facts rather than one boolean: a
+  signal from an older instance is `StaleGeneration`, one from a generation this
+  readiness never issued is `UnknownGeneration`, a second release at a settled
+  generation is `AlreadyReady` (the first release survives it, and it is not a
+  second release), and a duplicate failure is `AlreadyFailed`. Every one of them
+  released nobody, and `ReadinessError::released` says so for all of them. A
+  failure *after* the release cancels the token of every dependant it released,
+  so a dependant still running learns the service is gone, and `failed_at`
+  distinguishes that from a failure before anyone was released. A shutdown is a
+  stop rather than a failure: the waiting side sees `FlowError::Cancelled`, so a
+  routine restart does not read as an outage. `Generation` is a monotone
+  saturating counter, never a timestamp — cross-host clock skew is unmeasured
+  (INV-BOT-30) — and a restart is a *new* readiness at a *new* generation, which
+  is what makes a surviving handle from the old instance unable to release
+  anybody. The wait is one admission, one `watch` subscription and one
+  `select!`: no sleep and no poll loop, charged to the step's own budget through
+  `within` so it is bounded and stopped by the scope's stop, and an
+  already-released readiness resolves without spending its budget. Admission is
+  charged **before** a slot is taken against `MAX_DEPENDANTS`, so a refused
+  admission leaves capacity exactly as it was. · why: #87 T18 / LC-09 · enforced
+  by: `tests/ready.rs` (`a_failure_before_ready_reaches_the_dependant_and_the_report`,
+  `a_duplicate_ready_signal_is_refused_and_releases_nothing`,
+  `a_stale_generation_is_refused_and_releases_nothing`,
+  `a_restarted_service_arms_a_new_readiness`,
+  `a_failure_after_ready_cancels_every_dependant_still_running`,
+  `a_shutdown_is_a_stop_and_not_a_failure`,
+  `a_wait_is_budgeted_cancellable_and_immediate_when_already_released`,
+  `dependants_are_capped_at_the_declared_bound`,
+  `no_readiness_path_sleeps_or_polls`) and `tests/sim_ready.rs`
+  (`an_interleaving_never_releases_a_stale_generation`,
+  `a_duplicate_releases_once_in_every_interleaving`,
+  `a_failure_after_ready_reaches_every_running_dependant`,
+  `two_tenants_never_cross_a_readiness`,
+  `saturation_admits_up_to_the_declared_cap`,
+  `the_same_seed_replays_the_same_trace`).
+- **INV-BOT-61** A long-lived service's readiness is observed from its own
+  output, never from a clock. `Supervisor::run_process_observed` hands the
+  caller each newline-terminated line of the child's **stdout** from inside the
+  same pipe read that retains it, so the observation and the capture are the same
+  bytes seen once and cannot disagree about what the child wrote; the observer is
+  called before the capture ceiling is consulted and whether or not the bytes are
+  retained, so a chatty child cannot make its own readiness unobservable. A
+  trailing fragment with no newline is not delivered — a partial line is not a
+  line. The unterminated tail is capped at `MAX_OBSERVED_LINE_BYTES`, so a child
+  that prints a megabyte without a newline cannot make the observer the
+  unbounded buffer the capture ceiling exists to prevent. The observer arms no
+  timer, and `Supervisor::run_process` is that same call with `None`: there is no
+  second process driver and no second readiness path, on any target. · why: #87
+  T18 / LC-09 · enforced by: `tests/ready.rs::real_process`
+  (`a_child_printing_its_address_releases_the_dependants`,
+  `a_child_that_dies_without_printing_never_releases_the_dependants`,
+  `a_child_that_dies_after_announcing_stops_the_dependants`) and
+  `tests/ready.rs::no_readiness_path_sleeps_or_polls`, which asserts against the
+  module's own source that neither the wait nor the observer arms one.
 
 - **INV-BOT-32** A reach for authority is checked at the step that reaches, and
   the refusal carries the whole shortfall. `Scope::require` names every capability
