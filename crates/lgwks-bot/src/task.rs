@@ -118,7 +118,7 @@ pub mod repair;
 mod request;
 mod store;
 
-pub use ledger::{LeaseRefusal, RunLedger};
+pub use ledger::{Control, LeaseRefusal, RunLedger};
 pub use repair::{MAX_TICKET_NEEDS, RepairError, RepairTicket};
 pub use request::{
     InFlight, InputDigest, MAX_REQUEST_KEY_BYTES, RequestConflict, RequestError, RequestKey,

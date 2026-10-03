@@ -1892,7 +1892,7 @@ fn over_ceiling_draw(index: u64) -> SubjectDraw {
 
 /// Run one seed under one subject fault and return the receiver's record.
 ///
-/// The same [`run_subject_seed`] the banded families drive, so an arm family
+/// [`run_subject_seed`] is this with the seed's own fault, so an arm family
 /// cannot be testing a different run than the sweep does. The fault is named
 /// rather than taken from the seed so an arm family sweeps *one* arm across
 /// many draws, which is the sampling the arm properties are about.

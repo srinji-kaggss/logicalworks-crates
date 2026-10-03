@@ -14,6 +14,30 @@
 //! | `saturation_applies_each_ticket_once` | 100 / 1,000 / 10,000 runs: every run gets its own ticket, every repair applies exactly once, no ledger state is lost |
 //! | `seeded_orders_reach_the_same_state` | the same seed produces the same trace hash, twice, and whatever order it draws the run ends in the same state |
 //!
+//! ## The arms
+//!
+//! The three families above are *order* properties: what a run holds however the
+//! decisions are sequenced. The families below take one refusal or outcome arm at a
+//! time and prove what a caller would observe for it, and the properties are kept
+//! separate on purpose — a family that asserted "a duplicate, a stale ticket and a
+//! denial all leave the run where it was" would pass on an implementation that got
+//! two of the three arms wrong and the third right. Each arm below is a different
+//! fact about the repair door:
+//!
+//! | Family | Row | Property it pins |
+//! |---|---|---|
+//! | `the_step_that_reaches_is_the_step_that_blocks` | T23 | a task that reaches in its *first* step is `Blocked` before its body is polled, and the ticket names every declared need |
+//! | `a_wide_need_set_costs_one_analysis` | T23 | the analysis is recorded once however many capabilities the shortfall names, and the ticket's needs are exactly the shortfall's |
+//! | `a_repaired_run_survives_a_reopened_host` | T23 | the repair's replay rests on the *bytes* on the disk, not on a live handle |
+//! | `a_custom_capability_is_refused_at_every_width` | T24 | the over-wide check is width-independent: a custom name the ticket never asked for is refused for one need and for all four |
+//! | `a_ticket_never_names_another_tenants_run` | T24 | the ticket's own tenant check refuses before the ledger's, and a host sees no ledger entry |
+//! | `a_mixed_decision_order_pins_each_arm` | T24 | the same draws the order family permutes, asserted per arm: a denial charges nothing, a duplicate moves the epoch at most once |
+//! | `every_repair_charges_the_root_budget_once` | T13 | the sequence `attempts = charged attempts + 1` holds however a repair is reached |
+//! | `a_reopen_reads_back_the_charged_budget` | T13 | a fresh handle over the same file reports the same attempts, spend, epoch and applied count |
+//! | `a_spent_budget_refuses_every_later_attempt` | T13 | at either ceiling the budget reaches a finite typed refusal, a refused attempt charges nothing, and the refusal is stable across later deliveries |
+//! | `a_bounded_sweep_repairs_every_ticket_once` | T13 | at 100 and 1,000 runs over one ledger, every ticket applies exactly once and every run is charged exactly twice |
+//! | `a_host_spent_on_one_run_still_repairs_the_next` | T13 | a host that has refused one run at its ceiling still closes the next one, and no run's epoch or charge leaks onto it |
+//!
 //! # What is real and what is seeded
 //!
 //! The host, the ledger's storage-owner thread, the frame codec, the chain
@@ -35,15 +59,16 @@ use std::error::Error;
 use std::io::Write as _;
 use std::sync::Arc;
 
-use lgwks_bot::cap::Cap;
+use lgwks_bot::cap::{Cap, Deficit};
 use lgwks_bot::effect::RunId;
 use lgwks_bot::gate::GrantSet;
-use lgwks_bot::task::{Disposition, Host, RepairError, RepairTicket};
+use lgwks_bot::script::{FlowError, Scope};
+use lgwks_bot::task::{Disposition, Host, RepairError, RepairTicket, Report, RunLedger, task};
 
 #[path = "support/repair.rs"]
 mod shared;
 
-use shared::{Journey, Polls, TestResult, input, input_needing};
+use shared::{BodyFuture, Journey, JourneyInput, Polls, TestResult, input, input_needing, missing};
 
 use sim::Band;
 use sim::Rng;
@@ -62,6 +87,19 @@ const TENANTS: [&str; 2] = ["acme", "globex"];
 /// it reached so a reader is never told a number nobody ran.
 const TIERS: [usize; 3] = [100, 1_000, 10_000];
 
+/// The tiers the saturation sweep below drives on every ordinary run, each in its
+/// own directory so a tier's run never collides with another's or with a previous
+/// run's.
+///
+/// Two of the three declared tiers, and the omission is measured rather than
+/// assumed: a repair is a `sync_all` on the ledger and another on the step store,
+/// so the 10,000 tier measured at 488 s against 48 s for these two together — an
+/// eight-minute test is a measurement, not a gate. The third tier is what
+/// [`TIERS`] is for, driven on request by the `#[ignore]`d measurement below, which
+/// prints the level it reached. Every figure here is stated rather than discovered,
+/// in the spirit of INV-BOT-16.
+const SWEPT_TIERS: [usize; 2] = [100, 1_000];
+
 /// The most runs one seeded saturation band drives.
 ///
 /// Small on purpose, and the reason is written here rather than discovered: each
@@ -77,6 +115,15 @@ const SATURATING_BAND_RUNS: u32 = 12;
 const fn saturating_levels() -> u32 {
     SATURATING_BAND_RUNS
 }
+
+/// The most root attempts the recovery family lets a run spend before its budget
+/// refuses it, and the loop bound that keeps that walk finite.
+///
+/// Small on purpose and stated rather than discovered: the family walks the budget
+/// down to this number of `sync_all`-ed attempts, so a ceiling of a hundred would be
+/// a hundred device round trips per run of a test. It is the same kind of bound as
+/// [`SATURATING_BAND_RUNS`], and for the same reason.
+const ATTEMPT_CEILING: u64 = 4;
 
 /// The environment variable that arms the explicit three-tier measurement.
 ///
@@ -189,6 +236,19 @@ fn blocked_host(tenant: &str, dir: &std::path::Path) -> Result<Host, Box<dyn Err
     shared::repairable_host(tenant, dir, GrantSet::empty())
 }
 
+/// The grant a repair door always answers a ticket with.
+///
+/// `Host::repair` checks the grant against the ticket, so a caller that has a
+/// ticket but not its grant would be told the ticket's needs twice. One spelling
+/// for "exactly what was asked for" rather than one per test.
+fn repairable_host(
+    tenant: &str,
+    dir: &std::path::Path,
+    grants: GrantSet,
+) -> Result<Host, Box<dyn Error>> {
+    shared::repairable_host(tenant, dir, grants)
+}
+
 /// The grant that answers a ticket needing the first `reach` capabilities.
 fn exact_grant(reach: usize) -> GrantSet {
     candidate_needs()
@@ -226,6 +286,17 @@ fn wide_grant(reach: usize) -> GrantSet {
 /// than quietly different.
 fn block(tenant: &str, dir: &std::path::Path, reach: usize) -> Result<Case, Box<dyn Error>> {
     let host = blocked_host(tenant, dir)?;
+    block_with(&host, reach)
+}
+
+/// Drive one blocked run for `tenant` on a host the caller already built.
+///
+/// [`block`] with the host supplied, because a family that needs its own budget
+/// bounds cannot also open a *second* ledger over the same directory: two handles
+/// on one chain each hold a length fence the other's writes invalidate, so the
+/// second charge is refused as corrupt and the family's fixture — not the property
+/// under test — is what fails.
+fn block_with(host: &Host, reach: usize) -> Result<Case, Box<dyn Error>> {
     let declared = shared::journey_task()?;
     let polls = Polls::shared();
     let needs: Vec<Cap> = candidate_needs().into_iter().take(reach).collect();
@@ -240,11 +311,11 @@ fn block(tenant: &str, dir: &std::path::Path, reach: usize) -> Result<Case, Box<
     }
     let ticket = report
         .repair()
-        .ok_or("a blocked run on a repairable host carries a ticket")?
+        .ok_or_else(|| shared::missing("a blocked run on a repairable host carries a ticket"))?
         .clone();
     let run = report.run_id().ok_or("a stored run names its run id")?;
     Ok(Case {
-        host,
+        host: host.clone(),
         ticket,
         run,
         declared,
@@ -341,6 +412,118 @@ fn decide(
 /// repairs: one, however many deliveries were attempted.
 fn converged(applied: usize) -> (u64, usize) {
     if applied == 0 { (0, 0) } else { (1, 1) }
+}
+
+/// The control state `run` currently holds, or an error naming why it has none.
+///
+/// One accessor rather than four call sites spelling the same `.ok_or(..)`: a
+/// family that forgot the missing case would report "no control state" as an
+/// `Option::None` it then silently treated as zero, which is how a run that was
+/// never charged reads as a run charged nothing.
+fn charged(host: &Host, run: RunId) -> Result<lgwks_bot::task::Control, Box<dyn Error>> {
+    shared::ledger_of(host)?
+        .control(run)
+        .ok_or_else(|| missing("the attempt charged its run"))
+}
+
+/// The ticket's needs as names, for comparing against a refusal or a report.
+fn names(caps: &[Cap]) -> Vec<&str> {
+    caps.iter().map(Cap::as_str).collect()
+}
+
+/// A host for `tenant` over `dir` with its root budget bounded by
+/// (`attempts`, `spend`).
+///
+/// The builder spelled once because T13's arms are all about those two ceilings
+/// and three families that each spelled the chain would be three places for a
+/// missing `.repair_ledger` to hide.
+fn bounded_host(
+    tenant: &str,
+    dir: &std::path::Path,
+    attempts: u64,
+    spend: u64,
+) -> Result<Host, Box<dyn Error>> {
+    Ok(Host::builder(tenant)?
+        .grants(GrantSet::empty())
+        .run_store(dir)?
+        .repair_ledger(dir)?
+        .repair_bounds(attempts, spend)
+        .build()?)
+}
+
+/// A task that reaches for `needs` in its **first** step, declared with
+/// [`Task::requiring`] rather than reached from inside the body.
+///
+/// The counterpart to the journey: the journey reaches after its analysis, so it
+/// blocks with the analysis already recorded, and a repair has something to
+/// replay. This one reaches before any work, so it is refused at the admission
+/// boundary and the store holds nothing. Both are the reach mechanism the front
+/// door offers, and only the second has been swept.
+fn first_step_task(needs: Vec<Cap>) -> Result<Journey, Box<dyn Error>> {
+    // The binding is what turns the fn item into the fn pointer the journey type
+    // names; `journey_task` above gets the same coercion from its own signature.
+    let body: fn(Scope, JourneyInput) -> BodyFuture = reach_first;
+    Ok(task("reach-first", body)?.requiring(&needs))
+}
+
+/// The body [`first_step_task`] declares: it reaches, then counts one poll.
+///
+/// The `require` is belt and braces — [`Task::requiring`] has already refused the
+/// run at the admission boundary — and it is here so the task is honest about the
+/// capability it uses if it is ever run under a grant that covers it.
+fn reach_first(scope: Scope, input: JourneyInput) -> BodyFuture {
+    Box::pin(async move {
+        scope.enter("reach")?.require(input.needs())?;
+        input.polls().published();
+        Ok::<_, FlowError>(input.analysis())
+    })
+}
+
+/// Report the byte length of `host`'s ledger, or an error naming why it has none.
+///
+/// Bytes rather than the control state, because "a refused repair left the ledger
+/// byte-identical" is a claim about the file and reading the *index* back would
+/// confirm only that the handle agrees with itself.
+fn ledger_bytes(host: &Host) -> Result<u64, Box<dyn Error>> {
+    Ok(std::fs::metadata(shared::ledger_of(host)?.path())?.len())
+}
+
+/// A description of the arm a decision hit, for the trace and for failures.
+///
+/// One `&'static str` rather than the `Debug` of an error: a refusal that arrives
+/// as `Err(RepairError::AlreadyApplied)` and the same refusal that arrives as a
+/// `Refused` report would otherwise print differently under the same label, and
+/// the trace hash would depend on which door reported it.
+fn arm_of(outcome: &Result<Report<u32>, RepairError>) -> &'static str {
+    match *outcome {
+        Ok(ref report) => disposition_arm(report.disposition()),
+        Err(RepairError::AlreadyApplied) => "already-applied",
+        Err(RepairError::StaleEpoch { .. }) => "stale-epoch",
+        Err(RepairError::NotAuthorized { .. }) => "not-authorized",
+        Err(RepairError::OverWide { .. }) => "over-wide",
+        Err(RepairError::BudgetSpent { .. }) => "budget-spent",
+        Err(RepairError::ForeignTenant { .. }) => "foreign-tenant",
+        Err(RepairError::LedgerForeignTenant { .. }) => "ledger-foreign-tenant",
+        Err(RepairError::UnknownRun { .. }) => "unknown-run",
+        Err(RepairError::NoLedger) => "no-ledger",
+        Err(RepairError::Store { .. }) => "store",
+        Err(_) => "unrecognized",
+    }
+}
+
+/// The arm a report's disposition names, without the repair door's error arm.
+///
+/// A [`Host::resume`](lgwks_bot::task::Host::resume) is not a repair and has no
+/// `RepairError` to classify, so this is how the two doors are labelled in one
+/// vocabulary — which is the only way a family can say that the budget refused a
+/// resume and a repair the same way.
+fn disposition_arm(disposition: Disposition) -> &'static str {
+    match disposition {
+        Disposition::Succeeded => "succeeded",
+        Disposition::Blocked => "blocked",
+        Disposition::Refused => "refused-at-budget",
+        _ => "other-report",
+    }
 }
 
 // ── Families ───────────────────────────────────────────────────────────────
@@ -798,6 +981,948 @@ fn the_declared_repair_tiers_are_measured() -> TestResult {
             host.admission().refused()
         );
         drop(std::fs::remove_dir_all(&dir));
+    }
+    Ok(())
+}
+
+// ── Arms ───────────────────────────────────────────────────────────────────
+
+/// T23: a task that reaches in its **first** step is blocked at the admission
+/// boundary, and the ticket names every need it declared.
+///
+/// The journey blocks *after* its analysis, which is the case a repair exists for;
+/// this is the other half of the front door, and it has a different shape at every
+/// step. Nothing is recorded (so there is nothing for a repair to replay and a
+/// repair's grant is the whole of the run's authority), no body is polled, the run
+/// is never admitted, the ledger is never charged — and no ticket minted for it
+/// could be applied, because there is no budget to apply it against — while the
+/// report still names the complete shortfall and the ticket names the same set.
+#[test]
+fn the_step_that_reaches_is_the_step_that_blocks() -> TestResult {
+    // The declared need set is the whole of the candidate vocabulary at its widest:
+    // a task declaring all four against a host granting none is the largest
+    // complete shortfall the admission boundary has to name in one pass, which is
+    // T23's "one complete presently knowable NeedSet" at its extreme. The sweep
+    // over the narrower widths is the family below.
+    let declared_needs = candidate_needs();
+    let scratch = std::env::temp_dir().join("lgwks-first-step");
+    let host = repairable_host(TENANTS[0], &scratch, GrantSet::empty())?;
+    let polls = Polls::shared();
+    let declared = first_step_task(declared_needs.clone())?;
+
+    let report = lgwks_bot::block_on(host.run(
+        &declared,
+        input_needing(Arc::clone(&polls), 7, declared_needs.clone()),
+    ));
+
+    assert_eq!(
+        report.disposition(),
+        Disposition::Blocked,
+        "a first-step reach is Blocked, not Failed: {:?}",
+        report.error()
+    );
+    assert_eq!(
+        names(shared::ticket_of(&report)?.needs()),
+        names(&declared_needs),
+        "the ticket names the complete declared shortfall, in the order it was declared"
+    );
+    assert_eq!(
+        report.needs().map(Deficit::len),
+        Some(declared_needs.len()),
+        "the report's shortfall holds one entry per declared need: a caller granting what \
+         they were told must not be refused once per capability to learn all four"
+    );
+    assert_eq!(
+        polls.publish(),
+        0,
+        "the boundary refusal is before the body, so no step ran"
+    );
+    let run = shared::run_of(&report)?;
+    assert_eq!(
+        shared::store_of(&host)?.record_count(run),
+        0,
+        "a run refused before admission records nothing, so a repair would replay nothing \
+         and the ticket's grant would be the whole of the run's authority"
+    );
+    assert_eq!(
+        host.admission().admitted(),
+        0,
+        "the run never reached admission, so no permit was taken"
+    );
+    assert!(
+        shared::ledger_of(&host)?.control(run).is_none(),
+        "a run refused at the boundary is not charged a root attempt: there is no budget to \
+         decide a later repair against, which is why the ticket is still answerable only \
+         by a host that would have to create it"
+    );
+    Ok(())
+}
+
+/// T23: the analysis is recorded once however wide the shortfall is, and the
+/// ticket's needs are exactly that shortfall.
+///
+/// The multi-capability end of T23's "one complete NeedSet", swept across the
+/// whole candidate vocabulary rather than at one width: a four-capability
+/// shortfall must cost the same one analysis as a one-capability one, because the
+/// reach happens at the publication step and the analysis committed before it.
+#[test]
+fn a_wide_need_set_costs_one_analysis() -> TestResult {
+    let whole = candidate_needs();
+    for reach in 1..=whole.len() {
+        let scratch = std::env::temp_dir().join(format!("lgwks-wide-need-{reach}"));
+        let host = repairable_host(TENANTS[0], &scratch, GrantSet::empty())?;
+        let polls = Polls::shared();
+        let declared = shared::journey_task()?;
+        let needs: Vec<Cap> = whole.iter().take(reach).cloned().collect();
+
+        let report = lgwks_bot::block_on(host.run(
+            &declared,
+            input_needing(Arc::clone(&polls), 7, needs.clone()),
+        ));
+
+        assert_eq!(
+            report.disposition(),
+            Disposition::Blocked,
+            "reach {reach}: the run is blocked on what it is short of: {:?}",
+            report.error()
+        );
+        assert_eq!(
+            names(shared::ticket_of(&report)?.needs()),
+            names(&needs),
+            "reach {reach}: the ticket names the shortfall in the order the reach named it"
+        );
+        assert_eq!(
+            names(
+                &report
+                    .needs()
+                    .ok_or("a blocked run names its shortfall")?
+                    .shortages()
+                    .map(|shortage| shortage.required().clone())
+                    .collect::<Vec<_>>()
+            ),
+            names(&needs),
+            "reach {reach}: the report and the ticket come from one Deficit, so they \
+             cannot disagree about what the run was missing"
+        );
+        assert_eq!(
+            polls.analysis(),
+            1,
+            "reach {reach}: {reach} missing capabilities cost one analysis, not {reach}"
+        );
+        assert_eq!(
+            shared::store_of(&host)?.record_count(shared::run_of(&report)?),
+            1,
+            "reach {reach}: the one record is the analysis, and it is the whole of what a \
+             repair replays"
+        );
+    }
+    Ok(())
+}
+
+/// T23: the repaired run's replay rests on the bytes on the disk, not on a handle.
+///
+/// The repair is delivered to a **second** host built over the same directory. If
+/// the replay were served from anything the first handle kept, this would fail;
+/// what it asserts instead is the claim INV-BOT-54 makes — the analysis was read
+/// back from the record store's own file, so its body was not polled a second
+/// time and the publication ran exactly once, on the run that asked for it.
+#[test]
+fn a_repaired_run_survives_a_reopened_host() -> TestResult {
+    let scratch = std::env::temp_dir().join("lgwks-reopened-repair");
+    let first = repairable_host(TENANTS[0], &scratch, GrantSet::empty())?;
+    let polls = Polls::shared();
+    let declared = shared::journey_task()?;
+
+    let blocked = lgwks_bot::block_on(first.run(
+        &declared,
+        input_needing(Arc::clone(&polls), 7, shared::default_needs()),
+    ));
+    let ticket = shared::ticket_of(&blocked)?.clone();
+    let run = shared::run_of(&blocked)?;
+    assert_eq!(polls.analysis(), 1, "the first host recorded the analysis");
+
+    // Drop the first host entirely: its handles, its ledger and its store. What is
+    // left is the directory.
+    drop(first);
+
+    let second = repairable_host(TENANTS[0], &scratch, GrantSet::empty())?;
+    let after = charged(&second, run)?;
+    assert_eq!(
+        (after.attempts(), after.epoch(), after.applied()),
+        (1, 0, 0),
+        "a reopened ledger replays the charged budget and the epoch off the file, so the \
+         ticket is still answerable by a host that was never running"
+    );
+
+    let repaired = lgwks_bot::block_on(second.repair(
+        &ticket,
+        &GrantSet::empty().grant(Cap::new(Cap::NET)),
+        &declared,
+        input(Arc::clone(&polls), 7),
+        1,
+    ))?;
+    assert_eq!(
+        repaired.disposition(),
+        Disposition::Succeeded,
+        "the second host closed the run: {:?}",
+        repaired.error()
+    );
+    assert_eq!(repaired.run_id(), Some(run));
+    assert_eq!(
+        polls.analysis(),
+        1,
+        "the analysis body was not polled again: its value came off the disk"
+    );
+    assert_eq!(
+        polls.publish(),
+        1,
+        "the blocked remainder ran exactly once, on the host that answered the ticket"
+    );
+    Ok(())
+}
+
+/// T24: the over-wide check is width-independent, and it sees a name the ticket
+/// never asked for even when it is the only one the grant adds.
+///
+/// The defect this pins once stood: the check asked about a fixed list of the four
+/// shipped capabilities, so a grant carrying one of them *plus* a custom name
+/// passed and the repair applied the whole grant. One need and four are the two
+/// widths at which a candidate-driven check and a whole-grant check disagree, and
+/// both must refuse.
+#[test]
+fn a_custom_capability_is_refused_at_every_width() -> TestResult {
+    let whole = candidate_needs();
+    for reach in 1..=whole.len() {
+        let scratch = std::env::temp_dir().join(format!("lgwks-custom-cap-{reach}"));
+        let host = repairable_host(TENANTS[0], &scratch, GrantSet::empty())?;
+        let case = block(TENANTS[0], &scratch, reach)?;
+        let bytes = ledger_bytes(&host)?;
+
+        let smuggled = exact_grant(reach).grant(Cap::new("vendor.payments.charge"));
+        match lgwks_bot::block_on(case.host.repair(
+            &case.ticket,
+            &smuggled,
+            &case.declared,
+            input(Arc::clone(&case.polls), 7),
+            1,
+        )) {
+            Err(RepairError::OverWide { ref beyond }) => assert_eq!(
+                names(beyond),
+                vec!["vendor.payments.charge"],
+                "reach {reach}: the refusal names the one capability the ticket never asked for"
+            ),
+            other => {
+                return Err(format!(
+                    "reach {reach}: a custom capability outside the ticket must be refused: \
+                     got {other:?}"
+                )
+                .into());
+            }
+        }
+        assert_eq!(
+            case.polls.publish(),
+            0,
+            "reach {reach}: a refused repair runs no step"
+        );
+        assert_eq!(
+            charged(&case.host, case.run)?.epoch(),
+            0,
+            "reach {reach}: a refused repair mints no epoch"
+        );
+        assert_eq!(
+            ledger_bytes(&case.host)?,
+            bytes,
+            "reach {reach}: the refused repair left the ledger byte-identical"
+        );
+        assert!(
+            host.admission().refused() == 0,
+            "reach {reach}: the refusal happened before admission, so the host saw no run"
+        );
+    }
+    Ok(())
+}
+
+/// T24: a ticket never reaches another tenant's host, and its refusal leaves no
+/// trace in the ledger the asking host can read.
+///
+/// Two hosts of two tenants over one directory, which is the only arrangement in
+/// which a cross-tenant repair is even expressible. The refusal has to be the
+/// *ticket's* tenant check rather than the ledger's, and that is observable rather
+/// than asserted: the ledger names `RepairError::ForeignTenant` and the other
+/// tenant's run is not in it.
+#[test]
+fn a_ticket_never_names_another_tenants_run() -> TestResult {
+    let scratch = std::env::temp_dir().join("lgwks-cross-tenant-ticket");
+    let mine = repairable_host(TENANTS[0], &scratch, GrantSet::empty())?;
+    let theirs = repairable_host(TENANTS[1], &scratch, GrantSet::empty())?;
+    let declared = shared::journey_task()?;
+
+    // The wide shortfall: a ticket naming every candidate, so the refusal cannot be
+    // a grant check that happened to pass.
+    let report = lgwks_bot::block_on(mine.run(
+        &declared,
+        input_needing(Polls::shared(), 7, candidate_needs()),
+    ));
+    let ticket = shared::ticket_of(&report)?.clone();
+    let run = shared::run_of(&report)?;
+
+    match lgwks_bot::block_on(theirs.repair(
+        &ticket,
+        &exact_grant(candidate_needs().len()),
+        &declared,
+        input(Polls::shared(), 7),
+        1,
+    )) {
+        Err(RepairError::ForeignTenant {
+            ref ticket,
+            ref host,
+        }) => assert_eq!(
+            (ticket.as_str(), host.as_str()),
+            (TENANTS[0], TENANTS[1]),
+            "the refusal names the ticket's tenant and the host's, so a reader can see which \
+             is which"
+        ),
+        other => {
+            return Err(format!("another tenant's ticket must be refused: got {other:?}").into());
+        }
+    }
+    assert_eq!(
+        charged(&mine, run)?.epoch(),
+        0,
+        "the refused repair minted no epoch on the tenant that owns the run"
+    );
+    assert!(
+        theirs
+            .run_ledger()
+            .is_some_and(|ledger| ledger.control(run).is_none()),
+        "the asking tenant's ledger has no entry for a run it does not own: the run \
+         belongs to the other tenant's ledger file, and it is never created here"
+    );
+    assert_eq!(
+        theirs.admission().admitted(),
+        0,
+        "the refusal was before admission, so the asking host never took a permit for it"
+    );
+    Ok(())
+}
+
+/// T24: each arm of the repair door, asserted against the draws that reach it.
+///
+/// The order family sweeps the *endpoint* however the decisions were sequenced;
+/// this sweeps the *witnesses*, so a caller can see which arm each refusal is and
+/// that a denial charges nothing. It is the one seeded family that pins the typed
+/// arm rather than the counts, which is the gap the endpoint-only assertion leaves:
+/// two arms that both left the run where it was would both pass there.
+#[test]
+fn a_mixed_decision_order_pins_each_arm() -> TestResult {
+    sim::assert_replays(Band::new(96, 8), |sim| {
+        let plan = plan(sim.rng());
+        let dir = sim.scratch("repair-arms")?;
+        let case = block(TENANTS[0], &dir, plan.reach)?;
+        let Case {
+            ref host,
+            ref ticket,
+            run,
+            ref declared,
+            ref polls,
+        } = case;
+
+        for (index, action) in plan.actions.iter().enumerate() {
+            let before = charged(host, run)?;
+            let grant = match *action {
+                Action::Repair | Action::Duplicate => exact_grant(plan.reach),
+                Action::Deny => short_grant(plan.reach),
+                Action::OverWide => wide_grant(plan.reach),
+                Action::Inspect => continue,
+            };
+            let outcome = lgwks_bot::block_on(host.repair(
+                ticket,
+                &grant,
+                declared,
+                input(Arc::clone(polls), 7),
+                1,
+            ));
+            let arm = arm_of(&outcome);
+            let after = charged(host, run)?;
+
+            match *action {
+                Action::Repair | Action::Duplicate => assert!(
+                    matches!(arm, "succeeded" | "already-applied" | "stale-epoch"),
+                    "decision {index}: an exact grant applies the ticket or is refused for \
+                     having applied it already, never for its content; got {arm}"
+                ),
+                Action::Deny => {
+                    assert!(
+                        matches!(arm, "not-authorized" | "over-wide"),
+                        "decision {index}: a short grant is a denial; at a one-capability \
+                         ticket the over-wide check fires first, so one width reports one \
+                         arm and the wider ones the other. Got {arm}"
+                    );
+                    assert_eq!(
+                        (after.attempts(), after.spend(), after.epoch()),
+                        (before.attempts(), before.spend(), before.epoch()),
+                        "decision {index}: a denial charges nothing and mints no epoch"
+                    );
+                }
+                Action::OverWide => {
+                    assert_eq!(
+                        arm, "over-wide",
+                        "decision {index}: a wide grant is refused"
+                    );
+                    assert_eq!(
+                        (after.attempts(), after.spend(), after.epoch()),
+                        (before.attempts(), before.spend(), before.epoch()),
+                        "decision {index}: an over-wide grant charges nothing and mints no epoch"
+                    );
+                }
+                Action::Inspect => {}
+            }
+            if matches!(arm, "succeeded" | "already-applied" | "stale-epoch") {
+                assert!(
+                    after.epoch() <= 1,
+                    "decision {index}: one ticket applies at most once, whatever the order; \
+                     the run is at epoch {}",
+                    after.epoch()
+                );
+            }
+            sim.record(&format!("decision {index} {} arm={arm}", action.label()));
+        }
+        let end = charged(host, run)?;
+        assert_eq!(
+            end.epoch(),
+            u64::try_from(end.applied()).unwrap_or(u64::MAX),
+            "the epoch and the applied count are one fact: one at each after a repair, zero \
+             at both without one"
+        );
+        sim.record(&format!(
+            "ordinal={} reach={} decisions={} epoch={} applied={} attempts={}",
+            plan.ordinal,
+            plan.reach,
+            plan.actions.len(),
+            end.epoch(),
+            end.applied(),
+            end.attempts()
+        ));
+        Ok(())
+    })
+}
+
+/// T13: a fresh handle over the same file reports the charged budget back, run
+/// after run, whatever each run spent.
+///
+/// The counters are stored as absolute state in each ledger entry and folded on
+/// replay, so the fact under test is that the replay and the live write agree: a
+/// caller that reopened its ledger must not find a run at zero, and must not find
+/// it at a *different* number than it left. The seed decides how many runs the one
+/// ledger serves and how much each is charged, so the chain is walked rather than
+/// sampled at one point — a fold that dropped the last entry would pass a
+/// one-run check and fail the second.
+#[test]
+fn a_reopen_reads_back_the_charged_budget() -> TestResult {
+    sim::assert_replays(Band::new(112, 8), |sim| {
+        let dir = sim.scratch("repair-replay")?;
+        let host = blocked_host(TENANTS[0], &dir)?;
+        let runs = usize::try_from(sim.rng().between(2, 6))?;
+        let mut live = Vec::with_capacity(runs);
+
+        for _ in 0..runs {
+            let polls = Polls::shared();
+            let case = block(TENANTS[0], &dir, 1)?;
+            let spend = u64::from(sim.rng().below(4));
+            let outcome = lgwks_bot::block_on(case.host.repair(
+                &case.ticket,
+                &exact_grant(1),
+                &case.declared,
+                input(Arc::clone(&polls), 7),
+                spend,
+            ));
+            if arm_of(&outcome) != "succeeded" {
+                return Err(format!(
+                    "a one-capability ticket answered exactly must succeed, \
+                     got {}",
+                    arm_of(&outcome)
+                )
+                .into());
+            }
+            let control = charged(&case.host, case.run)?;
+            assert_eq!(
+                (control.epoch(), control.applied()),
+                converged(1),
+                "one repair is at epoch one with one applied ticket, on the live reader"
+            );
+            live.push((case.run, control));
+        }
+
+        let path = shared::ledger_of(&host)?.path().to_path_buf();
+        let reopened = RunLedger::open(&path)?;
+        for (index, entry) in live.iter().enumerate() {
+            let (run, expected) = (entry.0, entry.1.clone());
+            let read_back = reopened
+                .control(run)
+                .ok_or("the replayed ledger knows every run the live one charged")?;
+            assert_eq!(
+                (read_back.tenant(), read_back.attempts(), read_back.spend()),
+                (expected.tenant(), expected.attempts(), expected.spend()),
+                "run {index}: a reopened ledger reports the same tenant, attempts and spend \
+                 the live one does"
+            );
+            assert_eq!(
+                (read_back.epoch(), read_back.applied()),
+                (expected.epoch(), expected.applied()),
+                "run {index}: the epoch and the applied-ticket count replay exactly, so which \
+                 handle a caller read cannot decide what the run holds"
+            );
+        }
+        sim.record(&format!(
+            "runs={runs} replayed={} first-spend={} last-spend={}",
+            live.len(),
+            live.first().map_or(0, |entry| entry.1.spend()),
+            live.last().map_or(0, |entry| entry.1.spend())
+        ));
+        Ok(())
+    })
+}
+
+/// T13: every authorized repair charges the root budget exactly once, and every
+/// refusal charges nothing.
+///
+/// The sequence is asserted rather than a total, because the total is exactly what
+/// a reset would leave unchanged — a repair that *refilled* the budget would hold
+/// the same final number on a run with one blocked attempt and one repair, and
+/// only the per-delivery step tells the two apart. The refusal half is here rather
+/// than in the order family because it is the same measurement against the other
+/// side of the door: a refusal that charged one attempt instead of none would pass
+/// every endpoint assertion and fail here.
+#[test]
+fn every_repair_charges_the_root_budget_once() -> TestResult {
+    sim::assert_replays(Band::new(104, 8), |sim| {
+        let plan = plan(sim.rng());
+        let dir = sim.scratch("repair-charge")?;
+        let case = block(TENANTS[0], &dir, plan.reach)?;
+        let Case {
+            ref host,
+            ref ticket,
+            run,
+            ref declared,
+            ..
+        } = case;
+
+        // The seed decides how many times the ticket is delivered and how much
+        // each delivery is charged, so the sequence is walked under draws rather
+        // than read off a hand-written list.
+        let deliveries = usize::try_from(sim.rng().between(3, 9))?;
+        let mut applied = 0_usize;
+        let mut refused = 0_usize;
+        for index in 0..deliveries {
+            let before = charged(host, run)?;
+            let spend = u64::from(sim.rng().below(4));
+            let outcome = lgwks_bot::block_on(host.repair(
+                ticket,
+                &exact_grant(plan.reach),
+                declared,
+                input(Polls::shared(), 7),
+                spend,
+            ));
+            let arm = arm_of(&outcome);
+            let after = charged(host, run)?;
+
+            if arm == "succeeded" {
+                applied = applied.saturating_add(1);
+                assert_eq!(
+                    after.attempts(),
+                    before.attempts().saturating_add(1),
+                    "delivery {index}: a repair is an attempt, charged on top of what the run \
+                     had already spent and never as a reset of it"
+                );
+                assert_eq!(
+                    after.spend(),
+                    before.spend().saturating_add(spend),
+                    "delivery {index}: the repair's own spend lands on the run's root spend"
+                );
+                assert_eq!(
+                    after.epoch(),
+                    before.epoch().saturating_add(1),
+                    "delivery {index}: applying a ticket advances the epoch exactly once"
+                );
+            } else {
+                refused = refused.saturating_add(1);
+                assert!(
+                    matches!(
+                        arm,
+                        "already-applied"
+                            | "stale-epoch"
+                            | "not-authorized"
+                            | "over-wide"
+                            | "budget-spent"
+                            | "refused-at-budget"
+                    ),
+                    "delivery {index}: a delivered ticket either applies or is refused with a \
+                     typed arm; got {arm}"
+                );
+                assert_eq!(
+                    (after.attempts(), after.spend(), after.epoch()),
+                    (before.attempts(), before.spend(), before.epoch()),
+                    "delivery {index} ({arm}): a refused repair charges nothing and mints no \
+                     epoch, however much the caller offered to spend"
+                );
+            }
+            sim.record(&format!(
+                "delivery {index} arm={arm} attempts={} spend={} epoch={}",
+                after.attempts(),
+                after.spend(),
+                after.epoch()
+            ));
+        }
+        assert_eq!(
+            (applied, refused),
+            (1, deliveries.saturating_sub(1)),
+            "the first delivery of a ticket applies it and every later one is a typed \
+             refusal, which is what makes the sequence above readable"
+        );
+        sim.record(&format!(
+            "ordinal={} reach={} deliveries={deliveries} applied={applied}",
+            plan.ordinal, plan.reach
+        ));
+        Ok(())
+    })
+}
+
+/// T13: a spent budget is a finite typed refusal, a refused attempt charges
+/// nothing, and the refusal is stable rather than a momentary one.
+///
+/// The two ceilings a host can be built with are drawn separately, because they
+/// refuse at different points and a bug that moved one into the other would be
+/// invisible if only one were swept; both spend the same number of *unit* attempts
+/// against their own ceiling, so the refusal arrives after the same number of
+/// attempts whichever ceiling binds. The attempts after the first are
+/// [`Host::resume`]s rather than repairs, and that is the point rather than a
+/// convenience: a repair whose ticket has already applied is refused `StaleEpoch`
+/// at the door *before* the ledger is charged, so the budget arm is only reachable
+/// through a plain attempt — which is exactly T13's claim that a permanent refusal
+/// plus repeated `NotApplied` reaches a finite answer.
+///
+/// What is deliberately **not** claimed is that the two ceilings are
+/// distinguishable from each other: both arrive as `BudgetSpent`, and a family
+/// asserting otherwise would be asserting a distinction the type does not make.
+#[test]
+fn a_spent_budget_refuses_every_later_attempt() -> TestResult {
+    sim::assert_replays(Band::new(120, 8), |sim| {
+        let ceiling = u64::from(sim.rng().between(2, 5));
+        // Every attempt — the blocked one and every resume — charges one unit of
+        // spend and one attempt, so bounding the two by the same number is what
+        // makes either ceiling bind on the same attempt and the two arms differ
+        // only in which check fired.
+        let over_attempts = sim.rng().below(2) == 0;
+        let (attempts, spend) = if over_attempts {
+            (ceiling, u64::MAX)
+        } else {
+            (u64::MAX, ceiling)
+        };
+        let dir = sim.scratch("repair-spent")?;
+        let host = bounded_host(TENANTS[0], &dir, attempts, spend)?;
+        let declared = shared::journey_task()?;
+        let case = block_with(&host, 1)?;
+        let opened = charged(&host, case.run)?;
+        assert_eq!(
+            opened.attempts(),
+            1,
+            "the blocked attempt charged one of the {ceiling} the run is allowed; the \
+             attempts below are what is left of the ceiling"
+        );
+
+        // One attempt per remaining unit of budget until the ceiling refuses. The
+        // loop is bounded by the ceiling plus two, so a budget that never refused
+        // would fail here rather than run forever.
+        let mut admitted = 0_usize;
+        let mut arm = "succeeded";
+        for index in 0..ceiling.saturating_add(2) {
+            let before = charged(&host, case.run)?;
+            let report =
+                lgwks_bot::block_on(host.resume(case.run, &declared, input(Polls::shared(), 7)));
+            arm = disposition_arm(report.disposition());
+            let after = charged(&host, case.run)?;
+            if arm == "refused-at-budget" {
+                assert_eq!(
+                    (after.attempts(), after.spend()),
+                    (before.attempts(), before.spend()),
+                    "attempt {index}: a refused attempt charged nothing at all, so the \
+                     counters it would have moved are the ones it left"
+                );
+                break;
+            }
+            admitted = admitted.saturating_add(1);
+            assert_eq!(
+                after.attempts(),
+                opened
+                    .attempts()
+                    .saturating_add(u64::try_from(admitted).unwrap_or(u64::MAX)),
+                "attempt {index}: every admitted attempt is charged once, so the count the \
+                 ceiling is measured against is the number of attempts that ran"
+            );
+            assert_eq!(
+                after.spend(),
+                after.attempts(),
+                "attempt {index}: a plain attempt spends one unit and takes one attempt, so \
+                 the two counters move together and either ceiling binds on the same one"
+            );
+        }
+        assert_eq!(
+            arm, "refused-at-budget",
+            "a run past either ceiling reaches a finite typed refusal rather than retrying; \
+             the last arm was {arm}"
+        );
+        assert_eq!(
+            admitted,
+            usize::try_from(ceiling.saturating_sub(1)).unwrap_or(usize::MAX),
+            "the blocked attempt took one of the {ceiling} attempts and each resume took one \
+             of the rest, so the refusal lands on the attempt after the last one admitted"
+        );
+        let exhausted = charged(&host, case.run)?;
+        assert!(
+            exhausted.attempts() <= ceiling && exhausted.spend() <= ceiling,
+            "no counter was pushed past the ceiling that refused: attempts={} spend={} against \
+             attempts={attempts} spend={spend}",
+            exhausted.attempts(),
+            exhausted.spend()
+        );
+
+        // Two more attempts of the same run: the refusal is stable, not a single
+        // lucky tick, and neither moves a counter.
+        for _ in 0..2 {
+            let again =
+                lgwks_bot::block_on(host.resume(case.run, &declared, input(Polls::shared(), 7)));
+            assert_eq!(
+                disposition_arm(again.disposition()),
+                "refused-at-budget",
+                "a spent budget refuses every later attempt, not only the first one past the \
+                 ceiling"
+            );
+            assert_eq!(
+                charged(&host, case.run)?,
+                exhausted,
+                "a refused attempt charges nothing at all: the counters the ceiling was \
+                 measured against never move afterwards"
+            );
+        }
+        sim.record(&format!(
+            "ceiling={ceiling} bound-attempts={over_attempts} admitted={admitted} attempts={} \
+             spend={} epoch={} refused={}",
+            exhausted.attempts(),
+            exhausted.spend(),
+            exhausted.epoch(),
+            host.admission().refused()
+        ));
+        Ok(())
+    })
+}
+
+/// T13: a run whose root budget is spent is refused for good, and the host keeps
+/// repairing the runs whose budgets are not.
+///
+/// The recovery half of the saturation case, and the one that makes the refusal
+/// meaningful: a budget that refused permanently would be a host that stopped
+/// working, not a budget. The budget lives in a *per-run* ledger entry, so the
+/// claim is that a spent run's ceiling reaches its finite refusal without touching
+/// the other runs sharing the host — one that was blocked at the same time and one
+/// started afterwards.
+///
+///
+/// The refused attempts are [`Host::resume`]s rather than repairs, because that is
+/// where T13's "permanent refusal plus repeated `NotApplied`" lives: a repair whose
+/// ticket has already applied is refused `StaleEpoch` at the door before the ledger
+/// is consulted. What this does **not** claim is that the poisoned handle stays
+/// usable: a budget refusal drops the step store's handle with the refused append
+/// outstanding, so recovery here is *through a reopen* — which is the only honest
+/// form, and INV-BOT-50's poison is what makes it the only one.
+#[test]
+fn a_host_spent_on_one_run_still_repairs_the_next() -> TestResult {
+    let dir = std::env::temp_dir().join("lgwks-repair-recovery");
+    let host = bounded_host(TENANTS[0], &dir, ATTEMPT_CEILING, u64::MAX)?;
+    let declared = shared::journey_task()?;
+
+    let first = block_with(&host, candidate_needs().len())?;
+    let second = block_with(&host, candidate_needs().len())?;
+    assert_ne!(
+        first.run, second.run,
+        "two runs over one host mint two identities: the ceiling is per run, and two runs \
+         sharing one identity would share one budget"
+    );
+
+    // The second run spends its budget on plain attempts: each resume takes one
+    // attempt, and the next past the ceiling is the refusal — T13's "permanent \
+    // refusal plus repeated NotApplied reaches a finite answer", driven at a stated \
+    // ceiling rather than at a hand-written count.
+    let mut admitted = 1_usize;
+    let mut arm = disposition_arm(
+        lgwks_bot::block_on(host.resume(second.run, &declared, input(Polls::shared(), 7)))
+            .disposition(),
+    );
+    // A resume of a run with no authority is still `Blocked`, not admitted: the
+    // admission check is in front of the budget charge, so "blocked" is the run
+    // arriving under its own shortfall and "refused-at-budget" is the ceiling.
+    while arm == "blocked" {
+        admitted = admitted.saturating_add(1);
+        assert!(
+            admitted <= usize::try_from(ATTEMPT_CEILING).unwrap_or(usize::MAX),
+            "a ceiling of {ATTEMPT_CEILING} refused nothing in {admitted} attempts: the bound \
+             would be no bound at all"
+        );
+        arm = disposition_arm(
+            lgwks_bot::block_on(host.resume(second.run, &declared, input(Polls::shared(), 7)))
+                .disposition(),
+        );
+    }
+    assert_eq!(
+        arm, "refused-at-budget",
+        "past the ceiling the run is refused rather than blocked again or retried; the \
+         arm was {arm}"
+    );
+    let spent = charged(&host, second.run)?;
+    assert_eq!(
+        spent.attempts(),
+        u64::try_from(admitted).unwrap_or(u64::MAX),
+        "the refused attempt charged nothing: the run stands at the attempts it admitted"
+    );
+    assert_eq!(
+        spent.epoch(),
+        0,
+        "a run that was never repaired never left epoch zero, however many attempts it took"
+    );
+
+    // Reopen. A budget refusal drops the step store's handle with the refused \
+    // append outstanding — INV-BOT-50's poison — so recovery is *through a reopen* \
+    // rather than through the poisoned handle, and the reopen has to replay both \
+    // runs' budgets off the file to be worth anything.
+    drop(host);
+    let reopened = repairable_host(TENANTS[0], &dir, GrantSet::empty())?;
+    assert_eq!(
+        charged(&reopened, second.run)?,
+        spent,
+        "the refusal left the durable budget where it was, and a reopened ledger reads it \
+         back byte for byte"
+    );
+
+    // The other run, blocked at the same time and sharing the directory, still closes.
+    let repaired = lgwks_bot::block_on(reopened.repair(
+        &first.ticket,
+        &exact_grant(candidate_needs().len()),
+        &declared,
+        input(Polls::shared(), 7),
+        1,
+    ))?;
+    assert_eq!(
+        repaired.disposition(),
+        Disposition::Succeeded,
+        "a run that never exhausted its own budget still closes on a host whose other run \
+         did: {:?}",
+        repaired.error()
+    );
+    assert_eq!(
+        charged(&reopened, first.run)?.epoch(),
+        1,
+        "the recovered run is at epoch one: the refused run's counters did not leak onto it"
+    );
+    assert_eq!(
+        charged(&reopened, first.run)?.attempts(),
+        2,
+        "it charged one attempt for its block and one for this repair, from its own untouched \
+         budget"
+    );
+
+    // And a run started after the refusal is still repairable.
+    let third = block_with(&reopened, candidate_needs().len())?;
+    let closed = lgwks_bot::block_on(reopened.repair(
+        &third.ticket,
+        &exact_grant(candidate_needs().len()),
+        &declared,
+        input(Polls::shared(), 7),
+        1,
+    ))?;
+    assert_eq!(
+        closed.disposition(),
+        Disposition::Succeeded,
+        "a run started after the refusal still closes, so the refusal bound one run and not \
+         the host: {:?}",
+        closed.error()
+    );
+    Ok(())
+}
+
+/// T13 at scale: over one ledger, at 100 and at 1,000 runs, every run gets its
+/// own ticket and every ticket is applied exactly once.
+///
+/// One sweep rather than two families, because the property is a property of the
+/// *chain* and a chain of a hundred is a chain. What it proves is that at a scale
+/// no other family in this file reaches — one ledger holding a thousand runs'
+/// charges — each ticket applied exactly once and each run charged exactly twice:
+/// once for its block and once for its repair. The 10,000 tier of the declared
+/// claim is [`TIERS`], measured on request by the `#[ignore]`d test below; the
+/// level this sweep reached is printed rather than inferred, which is the
+/// INV-BOT-16 rule stated for this sweep.
+#[test]
+fn a_bounded_sweep_repairs_every_ticket_once() -> TestResult {
+    for tier in SWEPT_TIERS {
+        let dir = std::env::temp_dir().join(format!("lgwks-repair-sweep-{tier}"));
+        let host = blocked_host(TENANTS[0], &dir)?;
+        let declared = shared::journey_task()?;
+        let grants = exact_grant(candidate_needs().len());
+
+        let mut runs = Vec::with_capacity(tier);
+        for _ in 0..tier {
+            let case = block_with(&host, candidate_needs().len())?;
+            runs.push((case.run, case.ticket, case.polls));
+        }
+
+        let mut applied = 0_usize;
+        let mut refused = 0_usize;
+        for (index, entry) in runs.iter().enumerate() {
+            let run = entry.0;
+            let repaired = lgwks_bot::block_on(host.repair(
+                &entry.1,
+                &grants,
+                &declared,
+                input(Arc::clone(&entry.2), 7),
+                1,
+            ));
+            match arm_of(&repaired) {
+                "succeeded" => applied = applied.saturating_add(1),
+                "already-applied" | "stale-epoch" => refused = refused.saturating_add(1),
+                arm => {
+                    return Err(format!(
+                        "tier {tier}: repair {index} must apply or be refused as a replay, \
+                         got {arm}"
+                    )
+                    .into());
+                }
+            }
+            assert_eq!(
+                charged(&host, run)?.applied(),
+                1,
+                "tier {tier}: run {index} has one applied ticket and no more, however many \
+                 times it was delivered"
+            );
+            assert_eq!(
+                charged(&host, run)?.attempts(),
+                2,
+                "tier {tier}: run {index} was charged once for the block and once for the \
+                 repair, and never a third time"
+            );
+        }
+        assert_eq!(
+            (applied, refused),
+            (tier, 0),
+            "tier {tier}: every ticket is delivered once here, so every one of them applies \
+             and none is refused as a replay"
+        );
+        let mut line = std::io::stdout().lock();
+        let _written = writeln!(
+            line,
+            "repair sweep tier {tier}: requested={tier} reached={applied} runs={} refused={refused} \
+             admitted={} peaks={}",
+            runs.len(),
+            host.admission().admitted(),
+            host.admission().peak_in_flight()
+        );
     }
     Ok(())
 }

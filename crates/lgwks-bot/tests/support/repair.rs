@@ -67,6 +67,16 @@ impl Polls {
         Arc::new(Self::default())
     }
 
+    /// Record one poll of the publication body.
+    ///
+    /// A method rather than the raw counter because the counters are private to
+    /// this harness, and a variant journey that reaches *before* its analysis — the
+    /// admission-boundary form — has to count from a body declared in the test
+    /// target rather than from the one above.
+    pub fn published(&self) {
+        self.publish.fetch_add(1, Ordering::SeqCst);
+    }
+
     /// How many times the analysis body was polled.
     pub fn analysis(&self) -> u64 {
         self.analysis.load(Ordering::SeqCst)
@@ -115,6 +125,12 @@ impl JourneyInput {
     #[must_use]
     pub fn needs(&self) -> &[Cap] {
         &self.needs
+    }
+
+    /// What the analysis step computes and the publication step publishes.
+    #[must_use]
+    pub const fn analysis(&self) -> u32 {
+        self.analysis
     }
 }
 
