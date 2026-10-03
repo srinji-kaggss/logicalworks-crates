@@ -105,20 +105,24 @@ CARGO_TARGET_DIR=/tmp/lgwks-bench-async \
 Recorded output, Apple M5 Pro, macOS 27.0, rustc 1.98.0, 512 tasks at bound 8:
 
 ```
-refused, as required: completed: facade 509 vs baseline 512
+refused, as required: completed: facade 505 vs baseline 512
 the refusal names a work-count field, so the gate discriminates on work
 
-mutant tally:  placed 512 completed 509 cancelled 0 aborted 0 work_units 512
+mutant tally:  placed 512 completed 505 cancelled 0 aborted 0 work_units 509
 honest tally:  placed 512 completed 512 cancelled 0 aborted 0 work_units 512
 ```
 
-`completed` is the field that fired here, not `work_units`, because the body
-bumps its counter before it yields and most bodies were still sitting in that
-yield when the early reap landed. A slower host would diverge on `work_units`
-instead, which is why the check accepts any work-count field and prints which
-one fired rather than pinning one. The mutant is deliberately *unfair* and not
-merely slow: a slower-but-identical mutant would pass the gate and print a
-meaningless ratio, which is the failure this control exists to rule out.
+The mutant is the honest facade body with one parameter flipped — `Drain::GiveUp`
+instead of `Drain::Complete` — so the defect is readable in a diff of one line
+rather than by comparing two functions. Both fields diverge here: `completed`
+505 against 512, and `work_units` 509 against 512. Which one the gate *names*
+depends on the order it checks them and on how far the workers got before the
+early reap, so the check accepts any work-count field and prints which one fired
+rather than pinning one; a slower host would name `work_units` first.
+
+The mutant is deliberately *unfair* and not merely slow: a slower-but-identical
+mutant would pass the gate and print a meaningless ratio, which is the failure
+this control exists to rule out.
 
 The mutant check runs alone and exits non-zero if the gate ever accepts it, so a
 regression in the gate itself cannot pass quietly.

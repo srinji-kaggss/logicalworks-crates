@@ -132,10 +132,36 @@ async fn body_unit(counter: Arc<AtomicU64>) {
 
 /// Run `total` bodies through the facade at a ceiling of `bound`.
 ///
+/// How a facade run ends: drain everything, or stop early and report anyway.
+///
+/// The drain policy is the only thing that separates an honest facade run from
+/// the mutant, and it is a parameter rather than a copied function so the two
+/// cannot drift on anything *else* — the spawn loop, the tally, the body and the
+/// ceiling are one piece of code, and the negative control differs from the
+/// honest run in exactly one named decision.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Drain {
+    /// Reap until every placed task has reached a terminal state.
+    Complete,
+    /// Reap whatever is ready at this instant and stop. The defect.
+    GiveUp,
+}
+
+/// Run `total` bodies through the facade at a ceiling of `bound`.
+///
+/// The honest side of every comparison: same spawn loop, same body, same tally,
+/// and the drain policy that waits for all of them.
+async fn facade_side(total: usize, bound: usize) -> (f64, Tally) {
+    facade_side_draining(total, bound, Drain::Complete).await
+}
+
+/// Run `total` bodies through the facade at a ceiling of `bound`, under
+/// `drain`.
+///
 /// Reports the wall time of the whole drain and the tally the fairness gate
 /// compares. Uses `Supervisor`'s bounded `spawn`, so the facade's admission
 /// ceiling, its terminal outcomes and its cancellation all apply.
-async fn facade_side(total: usize, bound: usize) -> (f64, Tally) {
+async fn facade_side_draining(total: usize, bound: usize, drain: Drain) -> (f64, Tally) {
     let counter = Arc::new(AtomicU64::new(0));
     let mut supervisor = Supervisor::new(bound);
     let started = Instant::now();
@@ -155,11 +181,18 @@ async fn facade_side(total: usize, bound: usize) -> (f64, Tally) {
     // completion counter reaches the placed count. This is the drain a caller who
     // cares about completion rather than about shutdown performs.
     let target = u64::try_from(total).unwrap_or(0);
-    while supervisor.stats().completed < target {
-        if supervisor.reap() == 0 {
-            // Nothing has ended yet; give the workers a real moment. A spin here
-            // would burn a core and change the timing being measured.
-            tokio::time::sleep(std::time::Duration::from_micros(50)).await;
+    if drain == Drain::GiveUp {
+        // The defect, in one line: reap whatever is ready and stop. A real
+        // harness that made this mistake would report success for work it never
+        // waited for.
+        supervisor.reap();
+    } else {
+        while supervisor.stats().completed < target {
+            if supervisor.reap() == 0 {
+                // Nothing has ended yet; give the workers a real moment. A spin
+                // here would burn a core and change the timing being measured.
+                tokio::time::sleep(std::time::Duration::from_micros(50)).await;
+            }
         }
     }
     let stats = supervisor.stats();
@@ -461,33 +494,12 @@ async fn measure(
 /// would pass the gate and produce a meaningless ratio; one that is *unfair*
 /// must fail it, and the failure must name the diverging field so a reader can
 /// see the gate is discriminating rather than merely strict.
+///
+/// Because it is the same body as the honest run with one parameter flipped, a
+/// reader can check the defect by reading the parameter rather than by
+/// diffing two functions.
 async fn mutant_side(total: usize, bound: usize) -> (f64, Tally) {
-    let counter = Arc::new(AtomicU64::new(0));
-    let mut supervisor = Supervisor::new(bound);
-    let started = Instant::now();
-    for _ in 0..total {
-        let counter = Arc::clone(&counter);
-        supervisor
-            .spawn(move |_token| async move { body_unit(counter).await })
-            .await;
-    }
-    // The defect, in one line: reap whatever is ready and stop. A real harness
-    // that made this mistake would report success for work it never waited for.
-    supervisor.reap();
-    let stats = supervisor.stats();
-    let elapsed = started.elapsed().as_secs_f64();
-    let tally = Tally {
-        completed: stats.succeeded,
-        cancelled: stats.cancelled,
-        aborted: stats.aborted,
-        refused: stats.refused,
-        placed: stats.spawned,
-        retained: 0,
-        dropped_detail: stats.reports_dropped,
-        work_units: counter.load(Ordering::SeqCst),
-    };
-    drop(supervisor);
-    (elapsed, tally)
+    facade_side_draining(total, bound, Drain::GiveUp).await
 }
 
 /// Run the gate's negative control and print exactly what it refused.
