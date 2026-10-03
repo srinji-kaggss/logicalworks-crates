@@ -52,6 +52,42 @@ Two real asymmetries were found and fixed *in the harness*, not in the crate:
 The gate is not decoration: it refused four times during development, each time on
 a real difference between the two sides.
 
+## The concurrency ladder — every tier, both sides
+
+`--tiers` measures facade and raw baseline at 100, 1,000, 10,000 and 100,000
+tasks, bound 64 on every tier, 5 paired rounds each, gated on identical work
+*per round*.
+
+```sh
+CARGO_TARGET_DIR=/tmp/lgwks-bench-async \
+  /usr/bin/time -l cargo run --release --manifest-path bench/async/Cargo.toml -- \
+    --tiers --json=bench/async/results.json
+```
+
+Apple M5 Pro, macOS 27.0, rustc 1.98.0, `opt-level=3`, `lto=true`. Seconds.
+
+| tasks | facade p50 | facade p95 | facade p99 | baseline p50 | baseline p95 | baseline p99 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 100 | 0.001796 | 0.001881 | 0.001893 | 0.000123 | 0.000321 | 0.000356 |
+| 1,000 | 0.003482 | 0.003910 | 0.003943 | 0.001223 | 0.001300 | 0.001311 |
+| 10,000 | 0.023004 | 0.028101 | 0.028219 | 0.013128 | 0.016464 | 0.016890 |
+| 100,000 | 0.231890 | 0.299734 | 0.303659 | 0.134186 | 0.158088 | 0.160293 |
+
+**Peak RSS for the whole four-tier process: 3,637,248 bytes** (`/usr/bin/time -l`
+maximum resident set size). Wall time for the ladder: **2.57 s**.
+
+**Ceiling reached: 100,000 tasks, the top tier the contract names.** The host
+drove every tier to completion with `work_units` matching on both sides at every
+tier, so nothing here is extrapolated and no figure is carried over from another
+platform. The issue's ">1M" is above what this host sustains in a gate lane; the
+level actually reached is 100,000 and it is named rather than scaled up.
+
+Peak RSS is read in-process from `/proc/self/status` on Linux. macOS has no
+in-process equivalent without a `getrusage` edge, so the column is reported as
+`null` there and measured by the `/usr/bin/time -l` wrapper above — a peak-RSS
+cell a host cannot fill is worse than none, because an empty cell reads as
+"small".
+
 ## The mutant baseline — proving the gate can refuse
 
 A gate that has only ever been shown agreeing runs cannot be told apart from one
