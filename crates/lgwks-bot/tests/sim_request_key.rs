@@ -12,6 +12,7 @@
 //! | `drop_and_reattach` | a waiter dropped mid-effect leaves an in-flight request a later client reattaches to, with the receipt and the first record intact |
 //! | `tier_submissions` | a drawn tier of distinct keys over two tenants derives as many distinct runs, and the requested/reached/ceiling levels are recorded together |
 //! | `host_stops_never_poison_a_key` | a drawn stop point and disposition across two tenants: no key ever reattaches to a host stop, and every request reaches exactly one recorded terminal once driven on a healthy host, with each recorded step's body run once |
+//! | `expired_deadlines_are_recorded` | a drawn declared budget across two tenants: the deadline *is* the request's own verdict, so `@terminal` is recorded, a repeat reattaches carrying `DeadlineExceeded`, and the recorded step's body never runs twice |
 //! | `same_seed_replays` | the same seed produces the same trace hash, twice |
 //!
 //! # What is real and what is seeded
@@ -52,8 +53,9 @@ use std::time::Instant;
 use lgwks_bot::task::{Disposition, InputDigest, RequestError, RequestKey, RunStore, Submission};
 
 use request::{
-    FirstStepRuns, counting_task, distinct_runs, drop_after_first_step, host_on, hosts_over,
-    parking_task, stop_mid_run, stored_host, two_step_task,
+    FirstStepRuns, counting_task, distinct_runs, drop_after_first_step, host_on,
+    host_with_deadline, hosts_over, overrunning_task, parking_task, stop_mid_run, stored_host,
+    two_step_task,
 };
 use shared::{Scratch, Summary, peak_rss_mib};
 
@@ -446,6 +448,145 @@ fn host_stops_never_poison_a_key(band: Band) -> TestResult {
     Ok(())
 }
 
+/// The shortest budget a deadline sweep draws, in milliseconds.
+///
+/// Not zero: a budget of zero would refuse the run *before* its first step
+/// recorded, which is a different observation — a run that never started cannot
+/// show that a request's recorded work survives its own overrun. The floor keeps
+/// every drawn request in the state this family is about: progress committed,
+/// then the deadline ends it.
+const MIN_DEADLINE_MILLIS: u32 = 20;
+
+/// The longest budget a deadline sweep draws, in milliseconds.
+///
+/// Well above the floor so the sweep covers a range rather than one number, and
+/// below any budget that would let a parked body finish — which it never does,
+/// because the body waits on something that never arrives.
+const MAX_DEADLINE_MILLIS: u32 = 200;
+
+/// How many requests one seeded deadline sweep drives.
+const MAX_DEADLINE_REQUESTS: u32 = 2;
+
+/// A seeded deadline sweep: a drawn budget per request, over both tenants
+/// sharing one store file.
+///
+/// The claim is the one a host stop does *not* make, and the two families sit
+/// together so neither can be true by accident. A deadline is the run reaching
+/// the budget its own declaration fixed: a fact about the request, not about
+/// this host, so it is recorded and a later client reattaches to it. Every drawn
+/// request must therefore show all four of:
+///
+/// 1. the submission reports `DeadlineExceeded`;
+/// 2. the key's `@terminal` **is** recorded — proven by the reattach below
+///    rather than by reading the store, because the reattach is the door a
+///    caller actually comes through;
+/// 3. a later submission of the same key reattaches carrying
+///    `DeadlineExceeded`, and the body did not run a second time;
+/// 4. the recorded first step's effect ran exactly once across the overrun, the
+///    reattach and the sweep's other requests.
+fn deadline_scenario(sim_run: &mut sim::Sim) -> TestResult {
+    let requests = sim_run.rng().between(1, MAX_DEADLINE_REQUESTS);
+    let scratch = Scratch::new("sim-req-deadline")?;
+    // Each host opens the shared store file itself, so the two tenants meet on
+    // one file without either holding a second writer to it.
+    // Every request shares one counter, so "each recorded step ran once" is one
+    // number for the whole sweep rather than a per-request tally a defect could
+    // hide inside.
+    let runs = FirstStepRuns::new();
+    let mut reached_terminal = 0_u32;
+
+    for index in 0..requests {
+        let tenants = u32::try_from(TENANTS.len())?;
+        let which = usize::try_from(index.checked_rem(tenants).ok_or("a nonzero tenant count")?)
+            .map_err(|_| "the tenant index is in range")?;
+        let tenant = TENANTS.get(which).ok_or("the tenant index is in range")?;
+        let millis = sim_run
+            .rng()
+            .between(MIN_DEADLINE_MILLIS, MAX_DEADLINE_MILLIS);
+        let payload = sim_run.rng().between(0, 1000);
+        let key = RequestKey::new(&format!("deadline-{tenant}-{index}"))?;
+
+        // A fresh host per request, because the declared budget is part of what
+        // the request is and a host carries one budget for its whole life.
+        let host = host_with_deadline(
+            tenant,
+            scratch.path(),
+            std::time::Duration::from_millis(u64::from(millis)),
+        )?;
+        let work = overrunning_task(runs.clone())?;
+
+        let first = lgwks_bot::block_on(host.submit(&key, &work, payload))?;
+        let disposition = first
+            .report()
+            .map(lgwks_bot::task::Report::disposition)
+            .ok_or("a first submission carries a report")?;
+        assert_eq!(
+            disposition,
+            Disposition::DeadlineExceeded,
+            "a body waiting on something that never arrives outruns its declared budget \
+             ({millis}ms for {tenant}/{index}); got {disposition}"
+        );
+        sim_run.trace.record_u64("budget-millis", u64::from(millis));
+        sim_run.trace.record(&format!("overran {disposition}"));
+
+        // A fresh host over the same store file — a new *host*, which is what a
+        // restart is, rather than a second writer, which the store's chain fence
+        // refuses. It carries the *same* declared budget, because the budget is
+        // part of what this request is: a repeat under a longer budget is a
+        // different declaration, and letting the crate default in here would let
+        // the body overrun for thirty seconds and report a fresh `Executed`
+        // rather than reattaching to the recorded verdict. That is the defect
+        // this assertion exists to catch, not a nuisance to work around.
+        let reopened = host_with_deadline(
+            tenant,
+            scratch.path(),
+            std::time::Duration::from_millis(u64::from(millis)),
+        )?;
+        let seen = lgwks_bot::block_on(reopened.submit(&key, &work, payload))?;
+        let recorded = match seen {
+            Submission::Reattached(report) => report.disposition(),
+            other => {
+                return Err(format!(
+                    "a request that overran its budget reported {other:?} on a repeat; the \
+                     deadline is the request's own verdict and must be recorded"
+                )
+                .into());
+            }
+        };
+        assert_eq!(
+            recorded,
+            Disposition::DeadlineExceeded,
+            "the reattached report carries the recorded deadline"
+        );
+        reached_terminal = reached_terminal.saturating_add(1);
+        sim_run.trace.record(&format!("reattached {recorded}"));
+    }
+
+    // One count for the whole sweep, and exactly one effect per request: a
+    // reattach that re-entered a body would show up here as an extra.
+    assert_eq!(
+        runs.count(),
+        requests,
+        "each request's recorded step ran exactly once across its overrun and its reattach"
+    );
+    assert_eq!(
+        reached_terminal, requests,
+        "every drawn request recorded its deadline, so none is left in flight forever"
+    );
+    sim_run.trace.record_u64("requests", u64::from(requests));
+    sim_run
+        .trace
+        .record_u64("recorded", u64::from(reached_terminal));
+    sim_run.trace.record_u64("effects", u64::from(runs.count()));
+    Ok(())
+}
+
+/// A seeded sweep of the deadline family.
+fn expired_deadlines_are_recorded(band: Band) -> TestResult {
+    sim::assert_replays(band, deadline_scenario)?;
+    Ok(())
+}
+
 /// The same seed produces the same trace hash, twice, over the stop family.
 ///
 /// The stop family is the one whose whole claim is a *replay receipt*: a key
@@ -497,6 +638,14 @@ band_family::band_family! {
     same_seed_replays_host_stops_band_01 => same_seed_replays_host_stops, 1;
     same_seed_replays_host_stops_band_02 => same_seed_replays_host_stops, 2;
     same_seed_replays_host_stops_band_03 => same_seed_replays_host_stops, 3;
+    expired_deadlines_are_recorded_band_16 => expired_deadlines_are_recorded, 16;
+    expired_deadlines_are_recorded_band_17 => expired_deadlines_are_recorded, 17;
+    expired_deadlines_are_recorded_band_18 => expired_deadlines_are_recorded, 18;
+    expired_deadlines_are_recorded_band_19 => expired_deadlines_are_recorded, 19;
+    expired_deadlines_are_recorded_band_20 => expired_deadlines_are_recorded, 20;
+    expired_deadlines_are_recorded_band_21 => expired_deadlines_are_recorded, 21;
+    expired_deadlines_are_recorded_band_22 => expired_deadlines_are_recorded, 22;
+    expired_deadlines_are_recorded_band_23 => expired_deadlines_are_recorded, 23;
     same_seed_replays_band_00 => same_seed_replays, 0;
     same_seed_replays_band_01 => same_seed_replays, 1;
     same_seed_replays_band_02 => same_seed_replays, 2;

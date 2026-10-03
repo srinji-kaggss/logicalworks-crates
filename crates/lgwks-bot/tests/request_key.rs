@@ -18,6 +18,7 @@ use std::error::Error;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 use lgwks_bot::script::FlowError;
 use lgwks_bot::task::{Disposition, Host, RequestError, RequestKey, RunStore, Submission, task};
@@ -30,8 +31,8 @@ mod shared;
 mod request;
 
 use request::{
-    counting_task, drop_after_first_step, host_on, parking_task, stop_mid_run, stored_host,
-    two_step_task,
+    counting_task, drop_after_first_step, host_on, host_with_deadline, overrunning_task,
+    parking_task, stop_mid_run, stored_host, two_step_task,
 };
 use shared::Scratch;
 
@@ -587,6 +588,58 @@ fn a_failed_run_is_the_requests_recorded_outcome() -> TestResult {
         counter.get(),
         0,
         "the counter task was never submitted under this key"
+    );
+    Ok(())
+}
+
+/// The declared deadline expiring mid-run is the request's own verdict, so it is
+/// recorded: the control that separates it from a host stop.
+///
+/// The two dispositions differ in the way that matters to a key. A stop is the
+/// host declining to finish the run, so it records nothing and the key stays
+/// completable. A deadline is the run reaching the budget its own declaration
+/// fixed, which is a fact about the request and not about this host — so it is
+/// recorded, and a later client of the same key reattaches to it instead of
+/// re-running a body that has already overrun once.
+#[test]
+fn an_expired_deadline_is_the_requests_recorded_outcome() -> TestResult {
+    let scratch = Scratch::new("req-deadline")?;
+    let runs = request::FirstStepRuns::new();
+    let budget = Duration::from_millis(50);
+    let host = host_with_deadline("acme", scratch.path(), budget)?;
+    let work = overrunning_task(runs.clone())?;
+    let key = RequestKey::new("overruns-its-budget")?;
+
+    let first = lgwks_bot::block_on(host.submit(&key, &work, 3u32))?;
+    assert_eq!(
+        disposition_of(&first)?,
+        Disposition::DeadlineExceeded,
+        "a body that outruns its declared budget is DeadlineExceeded"
+    );
+    assert_eq!(
+        runs.count(),
+        1,
+        "the first durable step ran and recorded before the deadline fired"
+    );
+    let run = first.run_id().ok_or("the overrunning run names a run")?;
+
+    let again = lgwks_bot::block_on(host.submit(&key, &work, 3u32))?;
+    assert!(
+        matches!(again, Submission::Reattached(_)),
+        "the recorded deadline is the request's outcome, so a repeat reattaches to it; got {:?}",
+        again.report().map(lgwks_bot::task::Report::disposition)
+    );
+    assert_eq!(
+        again.report().map(lgwks_bot::task::Report::disposition),
+        Some(Disposition::DeadlineExceeded),
+        "the reattached report carries the recorded deadline"
+    );
+    assert_eq!(again.run_id(), Some(run), "a reattach names the same run");
+    assert_eq!(
+        runs.count(),
+        1,
+        "the reattach never entered the body again: a request that already overran \
+         its budget must not overrun it a second time"
     );
     Ok(())
 }

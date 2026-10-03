@@ -290,3 +290,66 @@ pub fn two_step_task(
         })
     })
 }
+
+/// A task whose body records one durable step and then waits for something that
+/// never arrives.
+///
+/// The shape a *deadline* ends rather than a host stop: the first step's record
+/// is committed and its effect counted, so the run has demonstrably made
+/// progress, and the second part can only end by the host's declared deadline
+/// firing. That is the whole point of the fixture — a deadline that fires before
+/// the first step records would prove nothing about a request whose recorded
+/// work has to survive it, and a host stop would be the wrong disposition
+/// (INV-BOT-102 records neither, so the two must not be confused).
+///
+/// `runs` is the same [`FirstStepRuns`] the stop fixture uses, so "the recorded
+/// step ran once" means one thing across the stopped, dropped and overrun
+/// families.
+///
+/// # Errors
+///
+/// [`FlowError::InvalidName`] for the fixed name.
+pub fn overrunning_task(
+    runs: FirstStepRuns,
+) -> Result<Task<impl Fn(Scope, u32) -> BodyFuture>, FlowError> {
+    let counter = Arc::new(runs.0);
+    task(
+        "overrunning",
+        move |scope: Scope, value: u32| -> BodyFuture {
+            let counter = Arc::clone(&counter);
+            Box::pin(async move {
+                let first = remember(&scope, "first", || {
+                    let counter = Arc::clone(&counter);
+                    async move {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, FlowError>(value)
+                    }
+                })
+                .await?;
+                std::future::pending::<()>().await;
+                Ok(first)
+            })
+        },
+    )
+}
+
+/// A host for `tenant` over the store at `path`, with the deadline `budget`.
+///
+/// Separate from [`stored_host`] because a deadline is part of what a request's
+/// *declaration* fixes, and a fixture that let one target declare it and another
+/// inherit the crate default would make "the declared deadline expired" mean two
+/// different things in the two places it is claimed.
+///
+/// # Errors
+///
+/// The tenant validation, the store open or the host build.
+pub fn host_with_deadline(
+    tenant: &str,
+    dir: &Path,
+    budget: std::time::Duration,
+) -> Result<Host, Box<dyn Error>> {
+    Ok(Host::builder(tenant)?
+        .default_deadline(budget)
+        .run_store(dir)?
+        .build()?)
+}
