@@ -30,6 +30,40 @@
 //!   never trimmed, because the frame may have been acknowledged, and an
 //!   acknowledgment the journal quietly rewrites is not a record.
 //!
+//! # The acknowledged-final-frame case that is still repaired rather than refused
+//!
+//! The rule above holds for a frame whose length field is *true*. It does **not**
+//! currently hold for the last case, and the exception is stated here rather
+//! than left to be discovered, because a doc claim that reads as universal while
+//! one reachable shape truncates is worse than a smaller true claim.
+//!
+//! If the final frame is **acknowledged and complete**, and its stored length is
+//! then changed from `L` to `L + 1`, the tail claims one more payload byte than
+//! the disk holds. Two files are byte-identical here: an append a writer never
+//! finished, and a complete frame whose prefix lies. `resolve_ambiguous_tail`
+//! discriminates them by trying the bytes actually present (the tail minus a
+//! head) as a frame — if they decode, chain from the committed history and
+//! reproduce the stored head exactly, the complete frame was already on disk and
+//! its prefix lied, and the file is **refused with
+//! [`JournalError::Corrupt`] and left untouched**. Anything else was never a
+//! complete frame, and is repaired as the torn tail it is.
+//!
+//! The reported defect is in that middle step: a tail of `L + 1 - 32` bytes is
+//! a whole frame **except** for its final 32-byte head, so the
+//! minus-a-head reconstruction cannot reproduce the stored head it is checked
+//! against, and the case falls to the torn-tail arm and is **truncated**. That
+//! truncates bytes an acknowledged writer committed, which is the reasoning the
+//! "never trimmed" rule above exists to forbid.
+//!
+//! **This is an open finding, not a documented behaviour.** Owner
+//! [#143](https://github.com/srinji-kaggss/logicalworks-crates/issues/143); the
+//! concrete `L -> L+1` trace is in that issue's Sep-27 comment. The fix must
+//! make the public regression *discriminate* the two dispositions — a real
+//! acknowledged frame whose length moved must be refused, and only a genuinely
+//! partial tail may be truncated — without weakening the no-resend safety the
+//! refusal exists for. Until it lands, **unattended durable automation stays
+//! held**; do not read the sentence above as a claim that it does not.
+//!
 //! # Bounds
 //!
 //! One frame may not exceed [`MAX_FRAME_BYTES`]; a journal whose events were
@@ -45,21 +79,46 @@
 //!
 //! The [`EffectJournal::compare_and_append`] fence is a fence over positions,
 //! and this adapter adds a byte-length staleness check: an append from a view
-//! that no longer matches the file is refused. What no std-only adapter can
-//! provide is mutual exclusion between two live writers, because the platform's
-//! advisory locks are outside `std`; concurrent controllers on one file remain
-//! a caller obligation. The stored heads make any interleaving they produce
-//! detectable on the next open rather than silently accepted, and detection
-//! here is permanent: [`JournalError::Corrupt`] is never trimmed and no tool
-//! in this module rewrites refused bytes, so a bricked file stays bricked
-//! until an operator takes it in hand.
+//! that no longer matches the file is refused.
+//!
+//! On top of that, [`FileJournal::open`] takes the file's **exclusive advisory
+//! lock** through `File::try_lock` *before* it reads, scans or repairs a byte,
+//! and refuses a second opener with [`JournalError::Locked`] rather than
+//! scanning a file somebody else is writing. The lock lives for the lifetime of
+//! the returned journal, and a writer that dies releases it, so the next
+//! `open` succeeds.
+//!
+//! What that lock is, stated precisely, because the difference matters:
+//!
+//! - It is an **advisory** lock. It binds writers that come through
+//!   [`FileJournal::open`]. A writer that never asks for the lock is outside
+//!   its reach entirely, and a hostile editor that truncates or rewrites the
+//!   file behind the owner's back is not detected by it.
+//! - It is **lifetime-scoped and local**. It is an operating-system file lock
+//!   on one host. It is not a distributed lease, and two controllers on two
+//!   hosts pointed at one network file are not serialized by it.
+//! - It depends on the **filesystem** implementing advisory locks. A
+//!   filesystem that does not is not refused; see [`JournalError::Locked`],
+//!   which states this.
+//!
+//! Both limits are stated on the error rather than hidden. The stored heads
+//! additionally make an interleaved write detectable on the next open rather
+//! than silently accepted, and that detection is permanent:
+//! [`JournalError::Corrupt`] is never trimmed and no tool in this module
+//! rewrites refused bytes, so a bricked file stays bricked until an operator
+//! takes it in hand.
+//!
+//! The cross-process half of this — that the fence actually holds between two
+//! live processes and is reacquired when the holder dies — is exercised by
+//! `tests/journal_writer_fence.rs`, which re-executes this test binary as a
+//! second process rather than simulating one.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
-use super::frame::{HEAD_BYTES, LENGTH_BYTES, Piece, Prefix};
+use super::frame::{HEAD_BYTES, LENGTH_BYTES, Piece, Prefix, read_exact_or_eof};
 use super::owner::{StorageGate, StorageOwner};
 use super::{
     ChainBreak, DurabilityPromise, DurableAck, EffectEvent, EffectEvidence, EffectJournal,
@@ -437,6 +496,146 @@ impl FileView {
     }
 }
 
+/// A bounded, streaming replay of a journal file.
+///
+/// [`FileJournal::open`] must materialize the complete history, because the
+/// append fence, the ladder index and the outcome index are all built from it.
+/// A caller that only needs to *fold* the record — a recovery pass, an audit, a
+/// migration — does not need that, and this is the door for it: it reads one
+/// frame at a time from its own read-only descriptor and retains at most one
+/// decoded event, so its memory is the largest single frame rather than the
+/// whole log.
+///
+/// It applies the same frame validation the open scan does — an impossible or
+/// lying length prefix and a head that does not follow are refusals, an early
+/// end is a torn tail that ends the stream — so a streamed replay cannot accept
+/// bytes the handle would refuse. It is bounded by [`MAX_JOURNAL_EVENTS`]; a
+/// file longer than that ends the stream with
+/// [`JournalError::CapacityExceeded`] rather than continuing past the ceiling.
+pub struct Replay {
+    /// The streaming frame reader, on its own descriptor.
+    reader: BufReader<File>,
+    /// The position the next event must chain from.
+    position: JournalPosition,
+    /// How many events the stream has already yielded, for the event ceiling.
+    yielded: u64,
+    /// Whether the stream has reached its end (clean, torn, or refused).
+    done: bool,
+}
+
+impl Replay {
+    /// Open a fresh read-only descriptor at `path` and stream its frames.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::Storage`] when the file cannot be opened or seeks.
+    fn open(path: &Path) -> Result<Self, JournalError> {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .open(path)
+            .map_err(JournalError::Storage)?;
+        file.seek_read_zero()?;
+        Ok(Self {
+            reader: BufReader::new(file),
+            position: JournalPosition::genesis(),
+            yielded: 0,
+            done: false,
+        })
+    }
+
+    /// Read exactly one more committed event, or end the stream.
+    ///
+    /// `None` means the acknowledged prefix is exhausted at a clean end or a
+    /// torn tail, which is never an error: the tail was never acknowledged, so
+    /// the stream of committed events is complete without it.
+    fn read_one(&mut self) -> Option<Result<EffectEvent, JournalError>> {
+        let index = self.yielded;
+        let mut prefix = [0u8; LENGTH_BYTES];
+        match read_exact_or_eof(&mut self.reader, &mut prefix) {
+            Err(error) => return Some(Err(error)),
+            Ok(None) => return None,
+            Ok(Some(read_len)) if read_len < LENGTH_BYTES => return None,
+            Ok(Some(_)) => {}
+        }
+        let limit = u64::try_from(MAX_JOURNAL_EVENTS).unwrap_or(u64::MAX);
+        if index >= limit {
+            return Some(Err(JournalError::CapacityExceeded {
+                resource: JournalLimitKind::Events,
+                limit,
+                requested: index.saturating_add(1),
+            }));
+        }
+        let payload_len = usize::try_from(u32::from_be_bytes(prefix)).unwrap_or(usize::MAX);
+        if payload_len == 0 || payload_len > MAX_FRAME_BYTES {
+            return Some(Err(JournalError::Corrupt(Box::new(Corruption::new(
+                index,
+                CorruptionKind::Framed,
+            )))));
+        }
+        let mut payload = vec![0u8; payload_len];
+        match read_exact_classified(&mut self.reader, &mut payload) {
+            Ok(FramePiece::Interrupted) => return None,
+            Err(error) => return Some(Err(error)),
+            Ok(FramePiece::Filled) => {}
+        }
+        let mut head = [0u8; HEAD_BYTES];
+        match read_exact_classified(&mut self.reader, &mut head) {
+            Ok(FramePiece::Interrupted) => return None,
+            Err(error) => return Some(Err(error)),
+            Ok(FramePiece::Filled) => {}
+        }
+        let event: EffectEvent = match from_bytes::<EffectEvent, WireError>(&payload) {
+            Ok(event) => event,
+            Err(_) => {
+                return Some(Err(JournalError::Corrupt(Box::new(Corruption::new(
+                    index,
+                    CorruptionKind::Undecodable,
+                )))));
+            }
+        };
+        let head_digest = match chain(self.position, &event) {
+            Ok(digest) => digest,
+            Err(error) => return Some(Err(error)),
+        };
+        let recorded = JournalPosition {
+            sequence: self.position.sequence().saturating_add(1),
+            head: lgwks_std::hash::Digest::from_bytes(head),
+        };
+        let recomputed = JournalPosition {
+            sequence: recorded.sequence(),
+            head: head_digest,
+        };
+        if recorded != recomputed {
+            return Some(Err(JournalError::Corrupt(Box::new(Corruption::new(
+                index,
+                CorruptionKind::Chain(ChainBreak::Disagreement {
+                    at: recorded.sequence(),
+                    recorded,
+                    recomputed,
+                }),
+            )))));
+        }
+        self.position = recorded;
+        self.yielded = self.yielded.saturating_add(1);
+        Some(Ok(event))
+    }
+}
+
+impl Iterator for Replay {
+    type Item = Result<EffectEvent, JournalError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        let item = self.read_one();
+        if item.is_none() {
+            self.done = true;
+        }
+        item
+    }
+}
+
 impl FileJournal {
     /// Open the journal at `path`, creating the file when it does not exist
     /// and replaying it when it does.
@@ -613,6 +812,23 @@ impl FileJournal {
     /// The committed events, in append order.
     pub fn events(&self) -> impl Iterator<Item = &EffectEvent> {
         self.committed.iter().map(JournalEntry::event)
+    }
+
+    /// Stream the committed events from the file, frame by frame.
+    ///
+    /// This is the bounded replay path: unlike [`Self::events`], which borrows
+    /// the history `open` already materialized, a `Replay` reads from its own
+    /// descriptor and retains one event at a time, so a caller folding a large
+    /// log pays for the largest frame rather than the whole history. What it
+    /// yields is exactly the acknowledged prefix: a torn tail ends the stream
+    /// and an impossible or lying frame refuses it, the same dispositions the
+    /// open scan gives them.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::Storage`] when the read-only descriptor cannot be opened.
+    pub fn replay(&self) -> Result<Replay, JournalError> {
+        Replay::open(&self.path)
     }
 
     /// What the journal has learned about each attempt.
@@ -857,11 +1073,22 @@ impl FileJournal {
 
     /// A handle that can release the stall, independently of this journal.
     ///
+    /// This is a fault-injection and liveness instrument, not a production
+    /// door: while the gate is held closed — the state a journal opened with
+    /// [`Self::open_with_stalled_storage`] starts in — **every append on this
+    /// journal parks on the device by design**. Nothing is acknowledged until
+    /// [`StorageGate::release`] runs, which is exactly what a stalled device
+    /// does, and it is what lets a caller ask "what does this bot do while its
+    /// disk has stopped answering" against a real process rather than a mock.
+    ///
     /// Returned alongside the journal rather than only as
     /// [`Self::release_storage`] because the caller that most needs to un-stick
     /// the device is the one awaiting an append on it, and that caller holds
-    /// the journal's borrow for the whole wait.
-    fn storage_gate(&self) -> StorageGate {
+    /// the journal's borrow for the whole wait. It is the instrument a
+    /// slow-store liveness test releases from an independent thread; an
+    /// ordinary journal is opened with [`Self::open`] and is never gated.
+    #[must_use]
+    pub fn storage_gate(&self) -> StorageGate {
         self.storage.gate()
     }
 
@@ -1042,6 +1269,14 @@ impl EffectJournal for FileJournal {
         key: crate::effect::EffectKey,
     ) -> Result<Option<(JournalPosition, EffectEvidence)>, JournalError> {
         Ok(self.outcomes.get(&key).copied())
+    }
+
+    /// Reserve room for the whole three-rung handoff before any of it is
+    /// written, so an attempt can never be left admitted and unprepared to
+    /// settle. The ceiling is the same [`MAX_JOURNAL_EVENTS`] the appends
+    /// enforce, checked here against the count this serialized path reads.
+    fn reserve_handoff_capacity(&self, rungs: u64) -> Result<(), JournalError> {
+        self.bound_events(rungs)
     }
 
     /// Append one event at `expected_tail`, or refuse.

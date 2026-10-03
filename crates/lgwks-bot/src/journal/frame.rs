@@ -31,6 +31,38 @@ use std::io::Read;
 
 use lgwks_std::hash::Digest;
 
+use super::JournalError;
+
+/// Read as much of `buf` as the reader will give, and report how much that was.
+///
+/// `None` for a reader that has nothing left at all, `Some(n)` for one that
+/// stopped short — a short read is the *torn tail* signal rather than an error,
+/// because a write that was cut off leaves exactly this shape. Reading in a loop
+/// is what makes it a torn-tail detector rather than a single-`read` guess: a
+/// reader whose first `read` returns a few bytes is not at end of file, and
+/// treating it as such would silently truncate a record that was merely
+/// fragmented across reads.
+pub(crate) fn read_exact_or_eof(
+    reader: &mut impl Read,
+    buf: &mut [u8],
+) -> Result<Option<usize>, JournalError> {
+    let mut filled = 0usize;
+    while filled < buf.len() {
+        let read = reader
+            .read(&mut buf[filled..])
+            .map_err(JournalError::Storage)?;
+        if read == 0 {
+            break;
+        }
+        filled = filled.saturating_add(read);
+    }
+    if filled == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(filled))
+    }
+}
+
 /// The byte width of a frame's length prefix.
 ///
 /// A `u32`, because that is what both stores write and what a reader that has
