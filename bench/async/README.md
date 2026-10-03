@@ -127,8 +127,11 @@ maximum resident set size). Wall time for the ladder: **2.57 s**.
 **Ceiling reached: 100,000 tasks, the top tier the contract names.** The host
 drove every tier to completion with `work_units` matching on both sides at every
 tier, so nothing here is extrapolated and no figure is carried over from another
-platform. The issue's ">1M" is above what this host sustains in a gate lane; the
-level actually reached is 100,000 and it is named rather than scaled up.
+platform. This ladder's top tier is 100,000 because it is a gate lane run on
+every change. The issue's ">1M" is measured separately, without extrapolation,
+by `crates/lgwks-bot/tests/task_million.rs` (`LGWKS_MILLION=1`): 1,048,576
+admitted `Host::run` executions across sixteen tenant hosts, all suspended in
+their bodies at once, peak RSS 6.45 GB — recorded in `CHANGELOG.md`.
 
 Peak RSS is read in-process from `/proc/self/status` on Linux. macOS has no
 in-process equivalent without a `getrusage` edge, so the column is reported as
