@@ -195,6 +195,27 @@ explicitly under that crate.
 
 ### lgwks_bot Added
 
+- Two missing arms of the request-keyed submission are now covered rather than
+  assumed. `DeadlineExceeded` is the request's own verdict — the same declaration
+  that fixed the key also fixed the run's budget — so a request that overran its
+  budget reattaches to that recorded deadline instead of re-running a body that
+  has already overrun once, and the durable step recorded before the overrun
+  survives it. A store that refuses the `@terminal` write during `Host::resume`
+  is reported as `Failed` naming both that the outcome went unrecorded and which
+  bound refused it, and records **nothing**, so the request stays unsettled and a
+  later client reads `InFlight` rather than a verdict that was never written.
+  Enforced by `tests/request_key.rs`
+  (`an_expired_deadline_is_the_requests_recorded_outcome`,
+  `a_store_that_refuses_the_terminal_write_reports_the_refusal`) and by the
+  seeded families `expired_deadlines_are_recorded_band_16..23` and
+  `settle_refusals_are_reported_and_leave_the_request_unsettled_seed_a..p` in
+  `tests/sim_request_key.rs`, two tenants over one store file, each seed swept
+  twice for an identical trace hash. No production behaviour changed.
+- `Disposition::Blocked` is not the request's own verdict, so a blocked run
+  records no `@terminal` — recording it would poison its key exactly as a host
+  stop does, and an authorized repair can still move it. It carries a
+  `DISPOSITION_BLOCKED` code so `disposition_code` stays an exhaustive match over
+  `Disposition`, which is what INV-BOT-102 relies on to catch a later variant.
 - `Host::submit`: a request-keyed durable submission. A caller supplies a
   `RequestKey`; the host derives the run identity from the tenant and the key,
   records the input's canonical `InputDigest` under a reserved `@request` record

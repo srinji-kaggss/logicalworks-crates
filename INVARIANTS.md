@@ -827,8 +827,10 @@ Each of these was a shipped defect. Treat the list as the spec.
   `distinct_request_keys_are_distinct_runs`,
   `two_tenants_never_share_a_request_run`,
   `a_submission_without_a_store_is_refused`,
-  `a_recorded_request_answers_over_a_changed_body`) and
+  `a_recorded_request_answers_over_a_changed_body`,
+  `an_expired_deadline_is_the_requests_recorded_outcome`) and
   `tests/sim_request_key.rs` (`collisions_across_two_tenants`, `same_seed_replays`,
+  `expired_deadlines_are_recorded_band_16..23`,
   `concurrent_submissions_across_tiers`).
 - **INV-BOT-101** A durable submission's receipt outlives the client that
   submitted it, and the in-flight state is reported as two separate facts. If a
@@ -876,14 +878,24 @@ Each of these was a shipped defect. Treat the list as the spec.
   *read* while checking an outcome nobody will write cannot turn a cross-tenant
   `Refused` into a `Failed`. A store that refuses to record a verdict a run
   *reached* is reported as `Failed`, because recording an outcome and reporting
-  success are one fact. · why: #87 step 7 (T30), the review defect where one
-  shutdown poisoned a key permanently · enforced by: `tests/request_key.rs`
+  success are one fact. The same declaration that fixed the key also fixed the
+  run's budget, so `DeadlineExceeded` is the request's own verdict and is
+  recorded: a request that overran its own budget reattaches to that deadline
+  rather than re-running a body that has already overrun once, and the recorded
+  step before the overrun survives it. A refused settlement records **nothing**,
+  so the request stays unsettled and a later client reads `InFlight` rather than
+  a verdict that was never written. · why: #87 step 7 (T30), the review defect
+  where one shutdown poisoned a key permanently · enforced by: `tests/request_key.rs`
   (`a_host_stop_mid_run_leaves_the_request_resumable`,
   `a_refusal_before_admission_is_not_recorded_as_the_outcome`,
   `a_failed_run_is_the_requests_recorded_outcome`,
+  `an_expired_deadline_is_the_requests_recorded_outcome`,
+  `a_store_that_refuses_the_terminal_write_reports_the_refusal`,
   `a_dropped_client_leaves_the_request_in_flight_for_a_later_client`) and
   `tests/sim_request_key.rs` (`host_stops_never_poison_a_key_band_00..03`,
-  `same_seed_replays_host_stops_band_00..03`).
+  `same_seed_replays_host_stops_band_00..03`,
+  `expired_deadlines_are_recorded_band_16..23`,
+  `settle_refusals_are_reported_and_leave_the_request_unsettled_seed_a..p`).
 - **INV-BOT-40** The committed record can be replayed without materializing it:
   `FileJournal::replay` streams frames from its own read-only descriptor,
   retaining at most one event, applies the same frame validation and event
