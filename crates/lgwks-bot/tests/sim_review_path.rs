@@ -1264,7 +1264,6 @@ fn retention_is_bounded_by_the_declared_ceiling() -> TestResult {
     Ok(())
 }
 
-
 /// The cancellation family: a run stopped mid-flight keeps its effect knowledge.
 ///
 /// The seed chooses *when* the stop arrives, which is the whole question: a run

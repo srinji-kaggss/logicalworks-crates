@@ -384,7 +384,6 @@ fn the_argument_vector_is_a_vector_and_names_the_method_and_path() -> TestResult
     Ok(())
 }
 
-
 /// The one extension the fixture needs so a test can read the raw outcome
 /// without going through a typed verb call that would reject a truncated or a
 /// hung answer first.

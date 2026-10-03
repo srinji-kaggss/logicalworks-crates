@@ -816,10 +816,9 @@ impl Host {
     ///
     /// # Errors
     ///
-    /// Nothing here fails: with no store the body runs exactly as
-    /// [`Host::run`] would and the report carries no run id. The refusal a caller
-    /// needs is *not* silently swallowed — it is that [`Report::run_id`] is
-    /// `None`, which is the same statement this doc makes.
+    /// None returned: a refusal is a [`Disposition::Refused`] report with no
+    /// step run, given when this host has no store, when the run belongs to
+    /// another tenant, and when a store host cannot mint a run identity.
     pub async fn resume<I, O, F, Fut>(&self, run: RunId, task: &Task<F>, input: I) -> Report<O>
     where
         F: Fn(Scope, I) -> Fut,
@@ -895,29 +894,47 @@ impl Host {
             && let Some(owner) = store.tenant_of(run)
             && owner != self.inner.tenant.as_str()
         {
-            self.inner.refused.fetch_add(1, Ordering::Relaxed);
             let error = StoreError::ForeignTenant {
                 owner,
                 asked: self.inner.tenant.as_str().to_owned(),
             };
-            return self.report(Terminal {
+            return self.refuse(started, task_name, error.to_string());
+        }
+        // A resume on a host with nothing to replay from would run every step
+        // again under a caller's belief that finished steps are kept. That is
+        // the silent downgrade a resume exists to rule out, so it is refused
+        // before any step runs.
+        if let Some(run) = resume
+            && self.inner.store.is_none()
+        {
+            return self.refuse(
                 started,
-                task: task_name.clone(),
-                disposition: Disposition::Refused,
-                output: None,
-                error: Some(FlowError::Failed {
-                    at: Arc::from(task_name.as_str()),
-                    reason: error.to_string(),
-                }),
-                trail: TrailSnapshot::Empty,
-                run: None,
-            });
+                task_name,
+                format!(
+                    "this host has no run store, so run {} has nothing to resume from",
+                    run.id().to_hex()
+                ),
+            );
         }
 
         // The run identity, decided before admission so a refused run still has
         // the identity a caller can ask about — a run refused at admission ran
         // nothing, and a run id attached to it names a run with no records.
         let run = self.adopt_run(resume);
+        // A host given a store promised durable steps. A build that cannot mint
+        // the identity those steps are keyed by refuses rather than running
+        // them unrecorded and reporting a run nobody can resume.
+        if run.is_none() && self.inner.store.is_some() {
+            return self.refuse(
+                started,
+                task_name,
+                String::from(
+                    "this host has a run store but could not mint a run identity \
+                     (the `ephemeral` feature is off or its entropy source failed); \
+                     no step ran unrecorded",
+                ),
+            );
+        }
 
         // Admission first, so a run that never starts is never counted as one
         // and never leaves a step in the trail.
@@ -1034,6 +1051,22 @@ impl Host {
         })
     }
 
+    /// A run refused before admission: `Refused`, no body, no step, no run id,
+    /// and the reason located at the task.
+    fn refuse<O>(&self, started: Instant, task: TaskName, reason: String) -> Report<O> {
+        self.inner.refused.fetch_add(1, Ordering::Relaxed);
+        let at = Arc::from(task.as_str());
+        self.report(Terminal {
+            started,
+            task,
+            disposition: Disposition::Refused,
+            output: None,
+            error: Some(FlowError::Failed { at, reason }),
+            trail: TrailSnapshot::Empty,
+            run: None,
+        })
+    }
+
     /// The run identity for a run, given the one a resume supplied.
     ///
     /// A resume keeps its own identity. A *fresh* run mints one only when a store
@@ -1041,9 +1074,9 @@ impl Host {
     /// which is the estate's one entropy source. Without a store there is
     /// nothing to key a record by, so a minted id would be an identity nothing
     /// is stored under; without `ephemeral` there is no source to mint from, and
-    /// INV-RANDOM-ONE-SOURCE refuses a cheaper substitute. In either case
-    /// [`Report::run_id`] is `None` — a caller that wants a durable fresh run
-    /// builds with `ephemeral` (or supplies the run id through [`Host::resume`]).
+    /// INV-RANDOM-ONE-SOURCE refuses a cheaper substitute. Without a store the
+    /// run proceeds with no run id; with a store and no identity, `execute`
+    /// refuses rather than run steps the store promised to keep.
     fn adopt_run(&self, resume: Option<RunId>) -> Option<RunId> {
         match (self.inner.store.is_some(), resume) {
             (true, Some(run)) => Some(run),

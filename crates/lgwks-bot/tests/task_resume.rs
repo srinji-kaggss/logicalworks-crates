@@ -177,9 +177,24 @@ fn a_run_without_a_store_claims_no_durability() -> TestResult {
 
     // The same work again re-runs every step: at-least-once is the whole of the
     // claim when nothing is recorded.
-    let again = lgwks_bot::block_on(host.run(&three_step_task()?, input));
+    let again = lgwks_bot::block_on(host.run(&three_step_task()?, input.clone()));
     assert_eq!(again.output(), Some(&10));
     assert_eq!(ran(scratch.path(), "alpha")?, 2);
+
+    // A *resume* on this host is refused before any step: running every step
+    // again under a caller's belief that finished ones are kept is the silent
+    // downgrade a resume exists to rule out.
+    let resumed = lgwks_bot::block_on(host.resume(RunId::mint()?, &three_step_task()?, input));
+    assert_eq!(resumed.disposition(), Disposition::Refused);
+    assert_eq!(resumed.run_id(), None);
+    assert!(
+        resumed
+            .error()
+            .is_some_and(|error| error.to_string().contains("no run store")),
+        "the refusal names the missing store: {:?}",
+        resumed.error()
+    );
+    assert_eq!(ran(scratch.path(), "alpha")?, 2, "no step ran");
     Ok(())
 }
 
