@@ -1808,30 +1808,56 @@ fn validate_node(
         "operation refused its request; the typed error carries the facts"
     );
     match *kind {
-        NodeKind::Say { ref text } => validate_say_node(spec, node_id, text, limits)?,
+        NodeKind::Handoff { .. } | NodeKind::End => {}
+        ref other => validate_kind(spec, node_id, other, limits, writers)?,
+    }
+    Ok(())
+}
+
+/// Validates every kind that has something to check.
+///
+/// The two kinds this skips are `handoff` and `end`, which carry no text, no
+/// variable and no edge to resolve: there is nothing about them that a load-time
+/// check could refuse. That is a claim about the kinds, so it is stated here
+/// rather than left as two empty arms inside the dispatch.
+///
+/// One call rather than a `match` of seven: every arm was a single validator
+/// call, which is the right shape for the reader and the wrong shape for a gate
+/// that reads the whole `match` as one statement.
+fn validate_kind(
+    spec: &FlowSpec,
+    node_id: &str,
+    kind: &NodeKind,
+    limits: ResourceLimits,
+    writers: &mut BTreeSet<String>,
+) -> Result<(), BotError> {
+    lgwks_std::trace::warn!(
+        operation = "validate_kind",
+        "operation refused its request; the typed error carries the facts"
+    );
+    match *kind {
+        NodeKind::Say { ref text } => validate_say_node(spec, node_id, text, limits),
         NodeKind::Ask {
             ref var,
             ref options,
             ref routes,
-        } => validate_ask_node(spec, node_id, var, options, routes, limits, writers)?,
+        } => validate_ask_node(spec, node_id, var, options, routes, limits, writers),
         NodeKind::Branch {
             ref var,
             ref when,
             ref then,
             ref otherwise,
-        } => validate_branch_node(spec, node_id, var, when, then, otherwise)?,
-        NodeKind::Handoff { .. } => {}
-        NodeKind::Refer { ref text, .. } => validate_refer_node(spec, node_id, text, limits)?,
+        } => validate_branch_node(spec, node_id, var, when, then, otherwise),
+        NodeKind::Refer { ref text, .. } => validate_refer_node(spec, node_id, text, limits),
         NodeKind::Route {
             ref dispatch,
             ref fallback,
         } => {
             check_target(&spec.nodes, node_id, dispatch)?;
-            check_target(&spec.nodes, node_id, fallback)?;
+            check_target(&spec.nodes, node_id, fallback)
         }
-        NodeKind::End => {}
+        NodeKind::Handoff { .. } | NodeKind::End => Ok(()),
     }
-    Ok(())
 }
 
 /// Returns how answers writing `name` are read in `spec`.
@@ -3818,6 +3844,88 @@ impl Session {
     /// whose answer could not then be stored — which is the direction an audit
     /// record must err in, and the opposite of an accepted answer with no
     /// record of why.
+    /// Applies a resolved verdict: receipt, bind, record, then continue.
+    ///
+    /// A helper rather than the arm inline: as one block the arm held the
+    /// option lookup, the route lookup, the receipt, the binding, the
+    /// transcript line and the transition -- six fallible steps in one
+    /// statement. The order is the contract `answer` documents above and is
+    /// enforced here: a journal that refuses the receipt aborts the answer with
+    /// the session untouched.
+    fn accept_resolved(
+        &mut self,
+        node_id: &str,
+        var: &str,
+        index: usize,
+        options: &[String],
+        routes: &BTreeMap<String, NodeId>,
+        verdict: &Verdict,
+        utterance: &str,
+    ) -> Result<(), BotError> {
+        lgwks_std::trace::warn!(
+            operation = "accept_resolved",
+            "operation refused its request; the typed error carries the facts"
+        );
+        let Some(option) = options.get(index) else {
+            return Err(BotError::ResolverReturnedInvalidOption {
+                node: node_id.to_owned(),
+            });
+        };
+        let Some(target) = routes.get(option).cloned() else {
+            return Err(BotError::MissingAskRoute {
+                node: node_id.to_owned(),
+                option: option.clone(),
+            });
+        };
+        self.write_receipt(
+            node_id,
+            options,
+            verdict,
+            Some(option.clone()),
+            Some(&target),
+        )?;
+        self.scope
+            .set_from_answer_within(var, option, self.limits.get(ResourceAxis::Value))?;
+        self.last_utterance = Some(utterance.to_owned());
+        self.record(node_id, "user", utterance)?;
+        self.current = Some(target);
+        self.drive()
+    }
+
+    /// Submit one free-text answer. Unrecognized input is recorded, the same
+    /// ask remains current, and the prompt is recorded again.
+    ///
+    /// Every verdict — resolved, ambiguous, absent, or degraded — writes a
+    /// [`DecisionReceipt`], because a re-ask is a decision too and the one an
+    /// operator most needs to see afterwards.
+    ///
+    /// The receipt is written through the journal before the transition it
+    /// describes is applied, and a journal that refuses it aborts the answer
+    /// with [`BotError::ReceiptNotRecorded`] leaving the session exactly as it
+    /// was: not advanced, not terminated, the variable unwritten, the
+    /// transcript untouched, and no receipt held. Recording is part of
+    /// accepting an answer, not a report written beside it, so the one failure
+    /// this ordering leaves behind is a decision that was reached and recorded
+    /// whose answer could not then be stored — which is the direction an audit
+    /// record must err in, and the opposite of an accepted answer with no
+    /// record of why.
+    /// Submit one free-text answer. Unrecognized input is recorded, the same
+    /// ask remains current, and the prompt is recorded again.
+    ///
+    /// Every verdict — resolved, ambiguous, absent, or degraded — writes a
+    /// [`DecisionReceipt`], because a re-ask is a decision too and the one an
+    /// operator most needs to see afterwards.
+    ///
+    /// The receipt is written through the journal before the transition it
+    /// describes is applied, and a journal that refuses it aborts the answer
+    /// with [`BotError::ReceiptNotRecorded`] leaving the session exactly as it
+    /// was: not advanced, not terminated, the variable unwritten, the
+    /// transcript untouched, and no receipt held. Recording is part of
+    /// accepting an answer, not a report written beside it, so the one failure
+    /// this ordering leaves behind is a decision that was reached and recorded
+    /// whose answer could not then be stored — which is the direction an audit
+    /// record must err in, and the opposite of an accepted answer with no
+    /// record of why.
     pub fn answer(&mut self, utterance: &str) -> Result<(), BotError> {
         lgwks_std::trace::warn!(
             operation = "answer",
@@ -3854,38 +3962,9 @@ impl Session {
             Question::new(&node_id, &options).with_domain(self.scope.answer_domain(&var));
         let verdict = self.resolver.resolve(utterance, &question);
         match verdict.resolution().clone() {
-            Resolution::Resolved { index, .. } => {
-                let Some(option) = options.get(index) else {
-                    return Err(BotError::ResolverReturnedInvalidOption { node: node_id });
-                };
-                let Some(target) = routes.get(option).cloned() else {
-                    return Err(BotError::MissingAskRoute {
-                        node: node_id,
-                        option: option.clone(),
-                    });
-                };
-                // Written before the transition it describes, which is the
-                // ordering `answer`'s contract above requires: a journal that
-                // refuses the receipt aborts the answer with the session
-                // untouched — not advanced, the variable unwritten, the
-                // transcript bare.
-                self.write_receipt(
-                    &node_id,
-                    &options,
-                    &verdict,
-                    Some(option.clone()),
-                    Some(&target),
-                )?;
-                self.scope.set_from_answer_within(
-                    &var,
-                    option,
-                    self.limits.get(ResourceAxis::Value),
-                )?;
-                self.last_utterance = Some(utterance.to_owned());
-                self.record(&node_id, "user", utterance)?;
-                self.current = Some(target);
-                self.drive()
-            }
+            Resolution::Resolved { index, .. } => self.accept_resolved(
+                &node_id, &var, index, &options, &routes, &verdict, utterance,
+            ),
             Resolution::Ambiguous { tied, .. } => {
                 // Narrow the re-ask to the options still in play. Repeating the
                 // full list is what a two-way verdict forced, and it is why an
