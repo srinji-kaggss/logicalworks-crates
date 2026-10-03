@@ -197,6 +197,18 @@ DROP_CLAUSE_BY_TASK = {
     "recovery": "dropping_the_future_leaves_no_unit_live",
 }
 
+
+def cleanup_ok(task: str, oracle: dict) -> bool:
+    """Whether the task's own drop clause passed.
+
+    The drop clause is the cleanup half of every task's contract: a task whose
+    "dropping the future leaves nothing live" test did not run — because the
+    crate never compiled — has not demonstrated cleanup at all, and reporting
+    that as a clean run would read a compile failure as a cleanup result.
+    """
+    clause = DROP_CLAUSE_BY_TASK.get(task)
+    return clause is not None and oracle.get(clause) == "pass"
+
 #: The `/usr/bin/time` that measures the oracle process. macOS's `-l` is the
 #: long form, and it is the one that reports `maximum resident set size` in
 #: bytes; without it there is no RSS number to record rather than a default one.
@@ -654,11 +666,6 @@ def run_job(job: dict, work: pathlib.Path, bot_sha: str) -> dict:
 
     pass_count = sum(1 for value in oracle.values() if value == "pass")
     sites = count_orchestration_sites(code)
-    # The drop clause is the cleanup half of every task's contract: a task whose
-    # "dropping the future leaves nothing live" test did not run — because the
-    # crate never compiled — has not demonstrated cleanup at all, and reporting
-    # that as a clean run would read a compile failure as a cleanup result.
-    cleanup_ok = oracle.get(DROP_CLAUSE_BY_TASK.get(task, ""), "not_run") == "pass"
 
     (trial_dir / "lib.rs").write_text(code)
     (trial_dir / "raw.ndjson").write_text("\n".join(raw_calls))
@@ -678,7 +685,7 @@ def run_job(job: dict, work: pathlib.Path, bot_sha: str) -> dict:
         "oracle": oracle,
         "oracle_pass_count": pass_count,
         "oracle_total": len(oracle),
-        "cleanup_ok": cleanup_ok,
+        "cleanup_ok": cleanup_ok(task, oracle),
         "oracle_wall_ms": round(oracle_wall_ms, 3),
         "oracle_peak_rss_bytes": oracle_peak_rss_bytes,
         "tokens_in": tokens_in,

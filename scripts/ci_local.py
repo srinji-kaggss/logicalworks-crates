@@ -352,6 +352,16 @@ def builtin_invariants(root: Path, env: dict[str, str], out=None) -> tuple[int, 
             defined.add(match.group(1))
         for match in re.finditer(r"^\s*fn\s+([a-z0-9_]+)\s*\(", source, re.MULTILINE):
             defined.add(match.group(1))
+    # A bench rig's invariant names the runner function that enforces it
+    # (`bench/ai-authoring/run.py`), so the bench's own definitions resolve too:
+    # unindexed, every such reference reads as missing, and the only way to pass
+    # would be to strip the backticks and stop checking the claim at all.
+    for path in sorted((root / "bench").glob("**/*")):
+        if path.suffix not in (".rs", ".py") or {"target", "runs"} & set(path.parts):
+            continue
+        source = path.read_text(encoding="utf-8")
+        for match in re.finditer(r"^\s*(?:def|fn)\s+([a-z0-9_]+)\s*\(", source, re.MULTILINE):
+            defined.add(match.group(1))
 
     # Collect the references: `enforced by:` runs to the end of the bullet, and
     # each backticked item is either a test path or a module path.

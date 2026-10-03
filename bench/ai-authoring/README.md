@@ -224,6 +224,47 @@ into each trial, rewriting the root package name to the trial's. `cargo
 build --locked --offline` therefore works from the already-downloaded registry
 cache with no resolution.
 
+## Results: the profile matrix (`runs/20261003T154213Z-models/`)
+
+Two models x two APIs x three tasks (recovery is new-API only) x five profiles x
+two trials: 100 trials, run once, `--parallel 6`, 8,085 s wall, harness peak RSS
+1,031,733,248 bytes (`/usr/bin/time -l`). "Full pass" is compiled *and* every
+oracle clause passed; repairs are the per-trial compiler-repair counts, sorted.
+The per-`(model, api, task, profile)` rows are in `results.jsonl`, and
+`summary.json` carries the same grouped by profile.
+
+| model | api | task | full pass | compiled | repairs (per trial) |
+|---|---|---|---|---|---|
+| `deepseek-v4.1-flash` | new | aggregate | 10/10 | 10/10 | 0 0 0 0 0 0 0 0 1 1 |
+| `deepseek-v4.1-flash` | new | pipeline | 10/10 | 10/10 | 0 0 0 0 0 0 0 0 1 1 |
+| `deepseek-v4.1-flash` | new | recovery | 2/10 | 3/10 | 1 2 4 4 4 4 4 4 4 4 |
+| `deepseek-v4.1-flash` | old | aggregate | 10/10 | 10/10 | 0 0 0 0 0 0 0 0 0 1 |
+| `deepseek-v4.1-flash` | old | pipeline | 10/10 | 10/10 | 0 0 0 0 0 0 0 1 1 2 |
+| `space-bunny-alpha` | new | aggregate | 6/10 | 9/10 | 0 0 1 1 1 1 2 3 3 4 |
+| `space-bunny-alpha` | new | pipeline | 6/10 | 7/10 | 0 0 0 1 1 2 2 3 4 4 |
+| `space-bunny-alpha` | new | recovery | 0/10 | 3/10 | 2 3 4 4 4 4 4 4 4 4 |
+| `space-bunny-alpha` | old | aggregate | 8/10 | 10/10 | 0 0 0 0 0 0 0 1 2 2 |
+| `space-bunny-alpha` | old | pipeline | 7/10 | 10/10 | 0 0 0 0 0 0 0 1 3 3 |
+
+What the run shows, stated at the level the data supports:
+
+- **Recovery is not learnable from the sheet within the repair budget.** It is
+  2/20 full passes across both models and every profile, against 32/40 for the
+  other new-API cells. The failures are not near misses: the first compiler
+  error is a guessed name — `ai_task_support::recovery::Store`, `RunStore`, a
+  `.units()` method, `script::Store` — or a reply with no Rust block at all
+  (four trials). The new durable surface (`Host::submit`, `remember`, a run
+  store) is the part a fixed model cannot reconstruct from 250 lines.
+- **On aggregate and pipeline the new API matches the old for deepseek** (40/40
+  vs 40/40 full passes) **and trails it for space-bunny** (12/20 vs 15/20).
+- **The profile axis did not separate the cells** at two trials each: no profile
+  is consistently better or worse across models and tasks. Two trials per cell
+  cannot show a difference of that size, and this does not claim one.
+- **Two trials hung the oracle for its 1,800 s timeout** (space-bunny, new,
+  aggregate/expert-hurry t1 and pipeline/agent t1). They are recorded as crashed
+  trials (`trial_id: "crashed"`, with the timeout in `error`) and count as
+  failures above.
+
 ## Proof the plumbing works: references and mutants
 
 `reference/<api>-<task>.rs` are hand-written correct solutions, one per API and
