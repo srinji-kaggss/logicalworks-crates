@@ -1894,6 +1894,10 @@ fn subject_scenario(fault: SubjectFault, head: &str, draw: SubjectDraw) -> Scena
 }
 
 /// Run one seed's subject fault through the real path.
+///
+/// The fault is this seed's own, so this is [`run_subject_fault`] with the fault
+/// taken from the seed rather than named by the caller. It delegates rather than
+/// repeating the run, so the sweep and the arm families cannot drift apart.
 fn run_subject_seed(index: u64) -> Result<(SubjectFault, Run), Box<dyn std::error::Error>> {
     run_subject_fault(SubjectFault::for_index(index), index)
 }

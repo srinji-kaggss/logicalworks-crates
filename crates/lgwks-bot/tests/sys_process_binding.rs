@@ -70,6 +70,31 @@ fn captured_shell(script: &str, limit: usize) -> ProcessSpec {
     spec
 }
 
+/// The capture ceiling the capture-cut tests share: smaller than any of their
+/// streams, so the capture always cuts.
+const SMALL_CAPTURE: usize = 8;
+
+/// Run `script` once on a one-slot supervisor, capturing at most `capture` bytes
+/// of each stream.
+fn run_captured(
+    script: &str,
+    capture: usize,
+) -> Result<lgwks_bot::rt::process::ProcessRun, Box<dyn std::error::Error>> {
+    let runtime = lgwks_bot::Runtime::new()?;
+    Ok(runtime.block_on(async {
+        let mut supervisor = Supervisor::new(1);
+        supervisor
+            .run_process(&captured_shell(script, capture))
+            .await
+    })?)
+}
+
+/// A script printing `count` whole framed records, each the four-byte prefix
+/// `[0, 0, 0, 2]` and the payload `ok`.
+fn ok_records(count: usize) -> String {
+    format!("printf '{}'", "\\000\\000\\000\\002ok".repeat(count))
+}
+
 /// A `domain::sys::Process` for `script`, at the documented defaults.
 fn process_for(script: &str) -> Process {
     let mut spec = shell(script);
@@ -394,21 +419,14 @@ fn a_capture_ceiling_ends_the_framed_read_rather_than_the_child() -> TestResult 
     // Three whole two-byte records: 4 + 3 + 3 = 10 bytes, and a capture of 8
     // stops inside the second record's prefix. The two complete records before
     // the cut are decoded; the third never arrived within the ceiling.
-    const CAPTURE: usize = 8;
-    let script = "printf '\\000\\000\\000\\002ok\\000\\000\\000\\002ok\\000\\000\\000\\002ok'";
-    let runtime = lgwks_bot::Runtime::new()?;
-    let run = runtime.block_on(async {
-        let mut supervisor = Supervisor::new(1);
-        supervisor
-            .run_process(&captured_shell(script, CAPTURE))
-            .await
-    })?;
+    let script = ok_records(3);
+    let run = run_captured(&script, SMALL_CAPTURE)?;
     assert!(
         run.stdout().truncated(),
-        "the child wrote more than the {CAPTURE}-byte ceiling, so the capture cut it"
+        "the child wrote more than the {SMALL_CAPTURE}-byte ceiling, so the capture cut it"
     );
 
-    let frames = run.stdout().frames(CAPTURE);
+    let frames = run.stdout().frames(SMALL_CAPTURE);
     assert_eq!(
         frames.ended(),
         &FrameRead::CeilingReached {
@@ -465,24 +483,17 @@ fn a_capture_ceiling_ends_the_framed_read_rather_than_the_child() -> TestResult 
 /// ceiling and go looking for a large record instead.
 #[test]
 fn a_rot_prefix_before_the_capture_cut_stays_refused() -> TestResult {
-    const CAPTURE: usize = 8;
     // `\000\000\000\000` is the prefix `[0, 0, 0, 0]` — a declared length of zero.
     // 32 more bytes follow, so the 8-byte capture certainly cut.
     let script = "printf '\\000\\000\\000\\000'; head -c 32 /dev/zero | tr '\\0' 'x'";
-    let runtime = lgwks_bot::Runtime::new()?;
-    let run = runtime.block_on(async {
-        let mut supervisor = Supervisor::new(1);
-        supervisor
-            .run_process(&captured_shell(script, CAPTURE))
-            .await
-    })?;
+    let run = run_captured(script, SMALL_CAPTURE)?;
     assert!(
         run.stdout().truncated(),
         "36 bytes into an 8-byte capture, so the retained bytes are a prefix the capture cut"
     );
     assert_eq!(
         run.stdout().bytes().len(),
-        CAPTURE,
+        SMALL_CAPTURE,
         "the whole 8-byte window is retained, so every prefix inside it was read whole"
     );
 
@@ -521,14 +532,8 @@ fn a_reader_ceiling_over_a_truncated_capture_is_the_readers_own() -> TestResult 
     // `[0,0,0,2] ok` six bytes each, four of them: 24 bytes against a 20-byte
     // capture. The three whole records inside the capture are exactly the reader's
     // ceiling of six payload bytes, and the fourth is the cut.
-    let script = "printf '\\000\\000\\000\\002ok\\000\\000\\000\\002ok\\000\\000\\000\\002ok\\000\\000\\000\\002ok'";
-    let runtime = lgwks_bot::Runtime::new()?;
-    let run = runtime.block_on(async {
-        let mut supervisor = Supervisor::new(1);
-        supervisor
-            .run_process(&captured_shell(script, CAPTURE))
-            .await
-    })?;
+    let script = ok_records(4);
+    let run = run_captured(&script, CAPTURE)?;
     assert!(
         run.stdout().truncated(),
         "24 bytes into a 20-byte capture, so the capture did cut its retained prefix"
