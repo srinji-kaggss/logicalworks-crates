@@ -529,7 +529,9 @@ Each of these was a shipped defect. Treat the list as the spec.
   `the_fault_is_one_shot_and_the_step_after_it_replays`,
   `a_compatible_resume_still_replays_after_no_fault`), and `tests/task_resume.rs`
   (`a_pre_version_store_is_refused_naming_both_versions`,
-  `a_foreign_file_is_still_refused_as_not_a_store`)
+  `a_foreign_file_is_still_refused_as_not_a_store`), and
+  `tests/sim_store_faults.rs`
+  (`only_the_current_format_is_admitted_band_04..07`)
 
 - **INV-BOT-59** The durable run store's refusals reach the caller as
   themselves. A store that cannot read its own records answers `Err`, never a
@@ -548,7 +550,10 @@ Each of these was a shipped defect. Treat the list as the spec.
   `the_fault_is_one_shot_and_the_step_after_it_replays`,
   `a_compatible_resume_still_replays_after_no_fault`) and
   `tests/sim_replay_drift.rs`
-  (`an_unreadable_store_is_refused_as_itself_band_18..19`)
+  (`an_unreadable_store_is_refused_as_itself_band_18..19`) and
+  `tests/sim_store_faults.rs`
+  (`read_fault_reaches_the_report_as_the_store_band_00..03`,
+  `same_seed_same_trace_hash_band_08..09`)
 
 - **INV-BOT-56** An owner epoch is a fact on the disk, not a constant each
   process chooses for itself. `Broker::register` starts an environment at
@@ -570,7 +575,10 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_generation_the_broker_never_issued_is_not_a_supersession`,
   `a_generation_and_a_tail_are_two_fences_and_both_answer`,
   `an_acknowledged_position_reads_back_identically_after_a_reopen`,
-  `the_current_generation_may_still_settle_its_own_attempt`)
+  `the_current_generation_may_still_settle_its_own_attempt`) and
+  `tests/sim_epoch_identity.rs`
+  (`seeded_takeover_orders_keep_the_generation_on_the_disk_band_04..07`,
+  `same_seed_same_trace_hash_band_08..09`)
 
 - **INV-BOT-57** Each boundary of the durable ladder recovers its own answer, and
   recovery is itself a window the crashing process can do damage in. A kill
@@ -615,7 +623,9 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_settlement_carrying_another_runs_identity_is_refused`,
   `a_refused_settlement_leaves_a_real_file_journal_byte_identical`,
   `a_checked_counter_exhaustion_never_aliases_an_issued_identity`,
-  `a_journal_position_carries_a_head_so_a_wrapped_sequence_is_detectable`)
+  `a_journal_position_carries_a_head_so_a_wrapped_sequence_is_detectable`) and
+  `tests/sim_epoch_identity.rs`
+  (`every_identity_field_is_refused_by_its_own_check_band_00..03`)
 
 ## lgwks_std
 

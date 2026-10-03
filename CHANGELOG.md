@@ -89,6 +89,23 @@ explicitly under that crate.
   `CapturedStream::frames`/`read_frames` (INV-BOT-110/114) previously had no
   production caller; the domain's verbs are now that caller (INV-BOT-115).
 
+### lgwks_bot Tests
+
+- `tests/sim_store_faults.rs` and `tests/sim_epoch_identity.rs`: seeded
+  deterministic families for this branch's T15/T16/T12 claims, each a
+  source-visible `#[test]` driving the real path through the `sim::assert_replays`
+  band pattern. The read-fault family arms `RunStore::fail_next_index_read` at
+  drawn store shapes and replays and asserts the refusal reaches the report as
+  `FlowError::Store` carrying the store's own `StoreError::Storage` while a
+  reopen recovers (INV-BOT-59); the version family re-stamps a real store with a
+  drawn version byte and asserts only `\x02` is admitted (INV-BOT-55); the
+  takeover family sweeps open/takeover/append orders and asserts adoption claims
+  the generation after the journal's own history (INV-BOT-56); and the identity
+  family draws one of the seven fields per seed and asserts each is refused by
+  the check that is about it (INV-BOT-58). Two tenants are swept in the store
+  family; the concurrency rows stay with the pre-existing families
+  (`sim_store_scale.rs`, `sim_task_resume.rs`).
+
 ### lgwks_bot Fixed
 
 - The T15 drift check compared a run's records against themselves: `Host::execute`
