@@ -693,7 +693,12 @@ where
 /// never declared a revision — and it is deliberately *not* stable across two
 /// different run ids, so a caller that resumes a run it does not hold cannot
 /// inherit a definition from wherever it looked.
-fn definition_of(scope: &Scope, step: &str) -> DefinitionIdentity {
+///
+/// `pub(crate)` because it is derived once here rather than at each call site:
+/// a caller that stages or appends a record by hand — the storage owner's own
+/// tests do — needs the same identity a `remember` would have written, or the
+/// record it commits is one no replay would recognise.
+pub(crate) fn definition_of(scope: &Scope, step: &str) -> DefinitionIdentity {
     let mut hasher = lgwks_std::hash::Hasher::new();
     hasher.write_framed(b"lgwks.bot.definition.v1");
     hasher.write_framed(scope.tenant().as_str().as_bytes());

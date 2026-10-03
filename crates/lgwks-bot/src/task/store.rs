@@ -47,7 +47,7 @@ use lgwks_std::wire::{WireError, from_bytes, to_bytes};
 
 use crate::effect::RunId;
 use crate::journal::frame::{self, HEAD_BYTES, LENGTH_BYTES, Piece, Prefix};
-use crate::journal::owner::{self, StorageGate, StorageOwner, SubmitError};
+use crate::journal::owner::{self, Stage, StorageGate, StorageOwner, SubmitError};
 use crate::script::run_store::{Appended, RunRecords, StagedRecord, StoredValue};
 use crate::script::{FlowError, StepKey};
 
@@ -624,6 +624,19 @@ impl RunStore {
         self.storage_gate().release();
     }
 
+    /// Arm a refusal of the next batch's covering `sync_all`.
+    ///
+    /// The seam the storage owner's `fail_next_flush` reaches through, so the
+    /// all-or-nothing answer of a failed group commit — every member refused, no
+    /// fold run, one poison latched, and a reopen that reads the file rather than
+    /// the handle — is proved on the shipped store rather than a copy of it. A
+    /// test-only door for the same reason `StorageOwner::fail_next_commit` is: no
+    /// filesystem refuses a flush on demand.
+    #[cfg(test)]
+    pub(crate) fn fail_next_flush(&self) {
+        self.inner.owner.fail_next_flush();
+    }
+
     /// Open a store under `dir`, named by the tenant that owns it.
     ///
     /// The form [`HostBuilder::run_store`](crate::task::HostBuilder::run_store)
@@ -683,6 +696,22 @@ impl RunStore {
     #[must_use]
     pub fn committed_bytes(&self) -> u64 {
         self.index().committed
+    }
+
+    /// How many `fsync`s this store has paid, and how many records it has staged.
+    ///
+    /// The evidence that a group commit formed rather than a claim that one could:
+    /// the first number counts the `sync_all` calls the storage owner actually
+    /// made, the second counts the records it actually staged. A store that flushed
+    /// once per record has a ratio of one; a store that batched has a ratio below
+    /// one, and the smaller it is the more records each flush carried.
+    ///
+    /// Both are counted on the owner thread rather than by the callers, so a caller
+    /// that gave up on its answer is still counted as a staged record — leaving it
+    /// out would report a better batching factor than the store achieved.
+    #[must_use]
+    pub fn flush_counts(&self) -> (u64, u64) {
+        self.inner.owner.flush_counts()
     }
 
     /// Whether this store has a record under `run`.
@@ -1002,6 +1031,11 @@ impl RunStore {
 /// it runs on the storage owner's thread with a closure that must own everything it
 /// touches: the `Arc` the store's state lives in and the record itself.
 ///
+/// The lock is taken for the stage half only. The settle half is a fold into the
+/// same index, and it runs on this same thread under the owner's ordering — after
+/// the batch's one `sync_all`, never before it — so no append can observe a
+/// half-committed index and no `.await` is ever reached holding it.
+///
 /// # Errors
 ///
 /// Every [`StoreError`] an append can produce, carried as the device's own error so
@@ -1011,23 +1045,24 @@ fn append_on_owner(
     shared: &Arc<Mutex<Index>>,
     stored: &Stored,
     key: StepKey,
-) -> std::io::Result<Appended> {
-    // Taken for the whole decision, the write and the fold, so a second append on
-    // this store cannot observe a half-committed index. The wait is bounded by the
-    // device rather than by the map, and it happens on the owner's thread, never on
-    // the executor's.
+) -> std::io::Result<Stage<Appended, Arc<Mutex<Index>>>> {
     let mut index = owner::lock(shared);
     decide_and_write(file, &mut index, stored, key)
-        .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
-/// The decision and the write, in one ordered step over the file and the index.
+/// The decision, the write, and the fold this record owes its batch's flush.
 ///
 /// Every check that can refuse in memory runs before a byte moves, and the length
 /// fence runs inside the owner's ordered step where no other append can overtake it
 /// — which is why the file's `metadata` is read here rather than through the
 /// read-only view: the authoritative answer is the one taken at the moment of the
 /// write.
+///
+/// The three ceilings and the tenant and duplicate checks are decided *here*, at
+/// stage time, exactly as they were before group commit: a refusal is the same
+/// refusal and refuses the same single record. The fold into the index is what the
+/// settle half does, after the batch's one `sync_all` returns, so an index never
+/// names a record the device did not take.
 ///
 /// # Errors
 ///
@@ -1038,81 +1073,110 @@ fn decide_and_write(
     index: &mut Index,
     stored: &Stored,
     key: StepKey,
-) -> Result<Appended, StoreError> {
+) -> std::io::Result<Stage<Appended, Arc<Mutex<Index>>>> {
     let owned = index.runs.get(&stored.run);
     if let Some(owned) = owned {
         if owned.tenant != stored.tenant {
-            return Err(StoreError::ForeignTenant {
+            return Err(refusal(StoreError::ForeignTenant {
                 owner: owned.tenant.clone(),
                 asked: stored.tenant.clone(),
-            });
+            }));
         }
         if let Some(step) = owned.steps.get(&key.to_hex()) {
             // Already recorded. An identical record is the same fact seen
             // twice — a step whose value was returned and whose caller
             // recorded it again — and a different one is a conflict. Neither
             // writes a byte.
-            return Ok(if step.bytes == stored.value {
+            return Ok(Stage::Settled(Ok(if step.bytes == stored.value {
                 Appended::AlreadyRecorded
             } else {
                 Appended::Conflicting
-            });
+            })));
         }
         if u64::try_from(owned.steps.len()).unwrap_or(u64::MAX) >= MAX_RECORDS_PER_RUN {
-            return Err(StoreError::Limit {
+            return Err(refusal(StoreError::Limit {
                 kind: StoreLimitKind::Records,
                 requested: u64::try_from(owned.steps.len())
                     .unwrap_or(u64::MAX)
                     .saturating_add(1),
                 limit: MAX_RECORDS_PER_RUN,
-            });
+            }));
         }
     }
 
     let previous = tail_head(index);
-    let (framed, head) = frame(stored, &previous)?;
+    let (framed, head) = frame(stored, &previous).map_err(refusal)?;
 
     let staged = u64::try_from(framed.len()).unwrap_or(u64::MAX);
     let next = index
         .committed
         .checked_add(staged)
-        .ok_or_else(|| store_full(u64::MAX))?;
+        .ok_or_else(|| refusal(store_full(u64::MAX)))?;
     if next > MAX_STORE_BYTES {
-        return Err(store_full(next));
+        return Err(refusal(store_full(next)));
     }
 
     // The fence, checked before a byte is written: the length this handle
     // indexed must be the length on the disk, so a file another writer moved
     // under it is refused here rather than forked. It runs on the owner thread,
     // so the check and the write it guards cannot be split by another append.
-    let on_disk = file.metadata().map_err(StoreError::storage)?.len();
+    let on_disk = file
+        .metadata()
+        .map_err(StoreError::storage)
+        .map_err(refusal)?
+        .len();
     if on_disk != index.committed {
-        return Err(StoreError::Corrupt {
+        return Err(refusal(StoreError::Corrupt {
             at: u64::try_from(index.runs.get(&stored.run).map_or(0, |run| run.steps.len()))
                 .unwrap_or(u64::MAX),
-        });
+        }));
     }
 
-    file.write_all(&framed).map_err(StoreError::storage)?;
-    file.sync_all().map_err(StoreError::storage)?;
-
+    // The chain head and the committed length move *before* the write, and are the
+    // batch's own bookkeeping rather than a claim the device took anything: the next
+    // member of this batch must chain over this record, and the next batch's length
+    // fence must expect these bytes. A head that lagged a write would fork the chain.
     index.committed = next;
     index.tail = head;
-    index.runs.entry(stored.run).or_insert_with(|| RunIndex {
-        tenant: stored.tenant.clone(),
-        definition: stored.definition.to_identity(),
-        steps: HashMap::new(),
-    });
-    if let Some(run) = index.runs.get_mut(&stored.run) {
-        run.steps.insert(
-            hex_of(&stored.key),
-            Held {
-                path: stored.path.clone(),
-                bytes: stored.value.clone(),
-            },
-        );
-    }
-    Ok(Appended::Recorded)
+
+    file.write_all(&framed)
+        .map_err(StoreError::storage)
+        .map_err(refusal)?;
+
+    // The readable half of the fold waits for the flush: a record a lookup can find
+    // is a record whose bytes the device has acknowledged, so publishing it earlier
+    // would let a concurrent reader see a value a crash could take back.
+    let held = Held {
+        path: stored.path.clone(),
+        bytes: stored.value.clone(),
+    };
+    let key = hex_of(&stored.key);
+    let run = stored.run;
+    let tenant = stored.tenant.clone();
+    let definition = stored.definition.to_identity();
+    Ok(Stage::Unsynced {
+        answer: Appended::Recorded,
+        bytes: framed.len(),
+        settle: Box::new(move |index: &mut Arc<Mutex<Index>>| {
+            let mut index = owner::lock(index);
+            let entry = index.runs.entry(run).or_insert_with(|| RunIndex {
+                tenant: tenant.clone(),
+                definition: definition.clone(),
+                steps: HashMap::new(),
+            });
+            entry.steps.insert(key, held);
+        }),
+    })
+}
+
+/// A store refusal as the device error the owner's one reply channel carries.
+///
+/// One conversion rather than a `map_err` per arm, because every `?` on a store
+/// refusal wraps the same fact — this store said no — and a literal per site would
+/// be seven chances to name a different message for one event. The refusal's own
+/// `Display` carries the ceiling or the tenant that names it.
+fn refusal(cause: StoreError) -> std::io::Error {
+    std::io::Error::other(cause.to_string())
 }
 
 /// The chain head the next frame in this file follows.

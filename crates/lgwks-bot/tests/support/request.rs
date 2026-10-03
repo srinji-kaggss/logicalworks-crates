@@ -247,31 +247,6 @@ impl FirstStepRuns {
     }
 }
 
-/// The one durable first step both request fixtures record: it counts its run
-/// and returns the value, so "the recorded step ran once" means the same thing
-/// in the stopped and the overrun family.
-///
-/// Shared rather than written twice: the two bodies had the same six lines, and
-/// a copy is how one fixture's "ran once" stops meaning the other's.
-///
-/// # Errors
-///
-/// Whatever [`remember`] reports.
-async fn record_first(
-    scope: &Scope,
-    counter: Arc<AtomicU32>,
-    value: u32,
-) -> Result<u32, FlowError> {
-    remember(scope, "first", || {
-        let counted = Arc::clone(&counter);
-        async move {
-            counted.fetch_add(1, Ordering::SeqCst);
-            Ok::<_, FlowError>(value)
-        }
-    })
-    .await
-}
-
 /// A task with two durable `remember` steps, the first of which signals once
 /// its record is committed.
 ///
@@ -296,13 +271,13 @@ pub fn two_step_task(
     after_first: Arc<AtomicBool>,
     runs: FirstStepRuns,
 ) -> Result<Task<impl Fn(Scope, u32) -> BodyFuture>, FlowError> {
-    let counter = Arc::new(runs.0);
+    let counter = runs.0;
     task("two-step", move |scope: Scope, value: u32| -> BodyFuture {
         let recorded = Arc::clone(&recorded);
         let after_first = Arc::clone(&after_first);
-        let counter = Arc::clone(&counter);
+        let first_step = counted_first_step(scope.clone(), &counter, value);
         Box::pin(async move {
-            let first = record_first(&scope, Arc::clone(&counter), value).await?;
+            let first = first_step.await?;
             recorded.store(true, Ordering::SeqCst);
             // The second step runs only when the caller has released this body;
             // until then the run ends by the host's stop, which is the state the
@@ -318,6 +293,31 @@ pub fn two_step_task(
             .await
         })
     })
+}
+
+/// The durable step both interrupted-request fixtures open with: `value`
+/// recorded under `first`, with `counter` counting each time the step's body
+/// actually runs.
+///
+/// One definition so "the recorded step ran once" means the same thing for the
+/// stopped, dropped and overrun families: a resume that replays the record does
+/// not run the body, so the count stays where the first run left it.
+fn counted_first_step(
+    scope: Scope,
+    counter: &Arc<AtomicU32>,
+    value: u32,
+) -> impl Future<Output = Result<u32, FlowError>> + use<> {
+    let counter = Arc::clone(counter);
+    async move {
+        remember(&scope, "first", || {
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, FlowError>(value)
+            }
+        })
+        .await
+    }
 }
 
 /// A task whose body records one durable step and then waits for something that
@@ -341,13 +341,13 @@ pub fn two_step_task(
 pub fn overrunning_task(
     runs: FirstStepRuns,
 ) -> Result<Task<impl Fn(Scope, u32) -> BodyFuture>, FlowError> {
-    let counter = Arc::new(runs.0);
+    let counter = runs.0;
     task(
         "overrunning",
         move |scope: Scope, value: u32| -> BodyFuture {
-            let counter = Arc::clone(&counter);
+            let first_step = counted_first_step(scope, &counter, value);
             Box::pin(async move {
-                let first = record_first(&scope, Arc::clone(&counter), value).await?;
+                let first = first_step.await?;
                 std::future::pending::<()>().await;
                 Ok(first)
             })
