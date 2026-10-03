@@ -195,6 +195,39 @@ explicitly under that crate.
     tenants are two artifacts; writes to one key serialized and idempotent by
     content, reads lock-free of the writer, every bound a typed refusal that
     leaves the store unchanged.
+- `script::admit` (feature `script`): the one step a task body uses to admit model
+  or tool output, and the fix for the defect a reviewer found on the `proposal`
+  module above — it shipped with **no production caller**, so every property
+  INV-BOT-90..94 state held for a boundary nothing invoked. The estate rule is
+  "wired or it does not exist", so the capability lands called from the run path
+  in the same change rather than deleted (#87 T26–T29).
+  - It is a `script` block rather than a helper because a task body can only act on
+    a `FlowError`: it enters its step, so a refusal reads `admit/plan` like every
+    other located failure; it charges one **run-scoped** `Gate` — decoder, surface,
+    `PlanBudget`, `RepairLedger` — so the fourth identical refusal across four
+    separate `Host::run`s is a finite typed `Intervention` rather than four
+    refusals a caller has to correlate; and it records each refusal through the
+    run store under `<step>/refusal` *before* returning the error, so a run resumed
+    on a fresh host reads back what the first run refused rather than re-deriving
+    that nothing was refused.
+  - `FlowError` gains two arms, `Refused { at, refusal, provenance }` and
+    `Intervention { at, intervention }`. Both are typed and both carry the
+    `Provenance` of the refused bytes, so no refusal reaching a `Report` is a
+    string a caller must parse or an unattributable failure. Both are non-retryable:
+    a payload refused for its content is refused however often it is re-read, and
+    another attempt is exactly the repair an intervention refused.
+  - `Gate` is shared by clone and its lock is held across the charge, the decode
+    and the ledger update and **never across an `.await`**, so a fan-out can hand
+    one gate to every body without the budget becoming per-body.
+  - It admits a `Plan` of operation *names* and performs nothing. Not a fifth verb,
+    and not an untyped plan interpreter: performing a plan's operations is still
+    the caller's job through the existing verbs, and `EffectKnowledge` continues
+    to report that a run performed no external effect.
+- `task::RunStore::lookup`: the reader's door onto a durable step's value — the
+  archived bytes committed for a step key under a run, or `None`. Without it, the
+  only way to see what a previous instance recorded was to re-run the step that
+  wrote it, which is why a resumed run could not read back a refusal. `Err` is a
+  read failure (a run another tenant owns), never a miss (INV-BOT-7).
 - More than one million task executions in flight at once on one node, measured
   (#152 §4). `tests/task_million.rs` (opt-in, `LGWKS_MILLION=1`) admits
   1,048,576 `Host::run` executions across sixteen tenant hosts, each saturated

@@ -66,6 +66,8 @@
 //! [`each`]: crate::script::each
 //! [`within`]: crate::script::within
 //! [`retry`]: crate::script::retry
+//! [`admit`]: crate::script::admit
+//! [`Gate`]: crate::script::Gate
 //! [`Scope`]: crate::script::Scope
 //! [`Scope::enter`]: crate::script::Scope::enter
 //! [`Tenant`]: crate::script::Tenant

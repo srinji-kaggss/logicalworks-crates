@@ -5,8 +5,19 @@
 //! | T26 | malformed output and instruction injection cannot change trusted intent, install tools or obtain credentials; sandbox-escape refusals stay observable | `a_malformed_payload_never_becomes_work`, `an_injected_instruction_is_refused_by_name`, `a_tool_install_is_refused_and_the_surface_is_unchanged`, `a_credential_read_is_refused`, `a_sandbox_escape_stays_an_observable_refusal`, `an_unknown_operation_is_refused_whatever_asked_for_it` |
 //! | T27 | a context reset preserves completed work, corrections, Unknown effects and evidence; truncated data never becomes a full-coverage claim | `a_context_reset_preserves_completed_work_corrections_unknowns_and_evidence`, `a_truncated_payload_never_becomes_a_full_coverage_claim`, `a_checkpoint_round_trips_through_the_run_store` |
 //! | T28 | parallel workers cannot read another tenant's same-digest artifact; conflicting writes are serialized while independent reads progress | `two_tenants_on_one_digest_stay_isolated`, `conflicting_writes_to_one_key_are_serialized_and_idempotent`, `reads_progress_while_a_write_is_in_flight` |
-//! | T29 | repeated unchanged failure reaches finite typed intervention; new evidence is recorded and does not erase root spend | `repeated_unchanged_failure_reaches_a_finite_intervention`, `new_evidence_does_not_erase_root_spend`, `a_plan_budget_bounds_repair` |
+//! | T29 | repeated unchanged failure reaches finite typed intervention; new evidence is recorded and does not erase root spend | `repeated_unchanged_failure_reaches_a_finite_intervention`, `new_evidence_does_not_erase_root_spend`, `a_plan_budget_bounds_repair`, `repeated_unchanged_failure_reaches_a_finite_intervention_across_runs`, `a_plan_budget_bounds_repair_across_runs` |
 //! | T35 | exit-zero-with-invalid-result, done-without-evidence and draft-ok-publish-failed report distinct true outcomes | `the_three_untrue_successes_report_distinct_outcomes` |
+//!
+//! Every row also has at least one falsifier below that drives a real
+//! `Host::run` whose task body calls `script::admit`, because a capability
+//! nothing calls proves nothing about the run path: T26 through
+//! `an_injected_instruction_is_refused_at_its_step_on_a_real_run`,
+//! `a_well_formed_proposal_is_admitted_on_a_real_run` and
+//! `a_capability_the_run_does_not_hold_is_refused_by_name_on_a_real_run`; T27
+//! through `a_resumed_run_reads_back_the_refusal_the_first_run_recorded`, which
+//! resumes the same run id on a fresh host over the same store; T29 through the
+//! two `*_across_runs` cases; T35 through the admitted-run case, whose output is a
+//! `Plan` whose coverage is `Partial` however the payload spelled its claim.
 //!
 //! Every assertion here goes through a public item of `lgwks_bot::proposal`
 //! and observes what a caller would read. Nothing reaches for a private field or

@@ -236,6 +236,23 @@ pub mod language;
 /// It sits on `script` because the checkpoint round-trips through the run store
 /// ([`proposal::Checkpoint`] is [`Durable`](script::run_store::Durable)) and the
 /// artifact store is what a task's steps reach.
+///
+/// # It is wired, and how
+///
+/// Nothing in this module calls itself: a task body reaches the boundary through
+/// [`script::admit`](script::admit), the one step a run uses to admit model or
+/// tool output. A [`Gate`](script::Gate) bundles the decoder, the surface and one
+/// **run-scoped** [`proposal::PlanBudget`] and [`proposal::RepairLedger`], and
+/// `admit` charges both — so the fourth identical refusal across four separate
+/// [`Host::run`](task::Host::run)s is a finite typed
+/// [`proposal::Intervention`] rather than four refusals a caller must correlate.
+/// It enters its step, so a refusal reads `admit/plan` like every other located
+/// failure, and it returns [`FlowError::Refused`](script::FlowError::Refused) or
+/// [`FlowError::Intervention`](script::FlowError::Intervention), both typed and
+/// both carrying the [`proposal::Provenance`] of the exact refused bytes. When the
+/// run has a store installed, each refusal is recorded through it under
+/// `<step>/refusal` before the error is returned, so a run resumed on a fresh host
+/// reads back what the first run refused. See `INV-BOT-95`.
 #[cfg(feature = "script")]
 pub mod proposal;
 /// The `domain_id -> constructor` registry: what a spec's strings resolve to.
