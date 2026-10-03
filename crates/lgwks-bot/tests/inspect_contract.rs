@@ -180,6 +180,23 @@ async fn await_until(mut condition: impl FnMut() -> bool) {
     }
 }
 
+/// Reap until `expected` tasks are counted completed, or fail.
+///
+/// A body counting its own exit has returned, but its task's terminal state is
+/// read by the wrapper *after* that — from the token — and is absorbed only when
+/// a reap finds it join-ready. A test that called `shutdown` straight after
+/// `await_exits` would race both: the cancel `shutdown` issues first can land
+/// between the body's return and the wrapper's read, turning a success into a
+/// cancellation. Reaping every outcome first settles each task's state before
+/// anything is cancelled.
+async fn reap_until_completed(supervisor: &mut Supervisor, expected: u64) {
+    await_until(|| {
+        supervisor.reap();
+        supervisor.stats().completed >= expected
+    })
+    .await;
+}
+
 /// A fresh supervisor of `bound` in the runtime under test.
 fn supervisor(bound: usize) -> Result<(Runtime, Supervisor), Box<dyn Error>> {
     let runtime = Runtime::new()?;
@@ -282,6 +299,7 @@ fn the_snapshot_and_the_admission_decision_agree() -> Result<(), Box<dyn Error>>
         // token first, and a body that has not yet observed the released permit
         // is reported as cancelled even though its work finished.
         gate.await_exits(2).await;
+        reap_until_completed(&mut supervisor, 2).await;
         let report = supervisor.shutdown().await;
         assert_eq!(
             report.stats().succeeded,
@@ -343,6 +361,7 @@ fn the_live_listing_is_bounded_by_the_ceiling_and_says_it_truncated() -> Result<
 
         gate.release(3);
         gate.await_exits(3).await;
+        reap_until_completed(&mut supervisor, 3).await;
         let report = supervisor.shutdown().await;
         assert_eq!(
             report.stats().succeeded,
@@ -433,6 +452,15 @@ fn an_undrained_supervisor_reports_dropped_detail_without_growing() -> Result<()
         // asserted: the counter says what was lost, and the outcome list says
         // what survived. A caller that read either alone would be guessing.
         gate.await_exits(6).await;
+        // A body counting its exit is not yet a task the join set can hand back,
+        // and `shutdown` absorbs whatever is left *uncapped*. Left to the
+        // scheduler, a runner where no body was join-ready at any spawn would
+        // drain all six at shutdown and drop nothing — and a body whose wrapper
+        // had not yet read its token when `shutdown` cancelled it would be
+        // reported cancelled rather than succeeded. Every outcome is therefore
+        // absorbed here, through the capped reap an undrained caller gets, so the
+        // loss is a fact of the cap and not of the runner's timing.
+        reap_until_completed(&mut supervisor, 6).await;
         let report = supervisor.shutdown().await;
         let stats = report.stats();
         assert_eq!(stats.spawned, 6, "all six bodies were placed");
@@ -444,11 +472,11 @@ fn an_undrained_supervisor_reports_dropped_detail_without_growing() -> Result<()
             stats.spawned, stats.completed,
             "the accounting total adds up: six spawned, six finished"
         );
-        assert!(
-            stats.reports_dropped > 0,
+        assert_eq!(
+            stats.reports_dropped, 4,
             "a caller that spawned six bodies into a report buffer of two \\
-             without draining it lost retained detail; the counter says so \\
-             rather than the loss being silent"
+             without draining it lost exactly the four outcomes past the cap; \\
+             the counter says so rather than the loss being silent"
         );
         assert!(
             stats.reports_dropped < stats.completed,
@@ -495,6 +523,7 @@ fn repeated_snapshots_do_not_accumulate() -> Result<(), Box<dyn Error>> {
         );
         gate.release(1);
         gate.await_exits(1).await;
+        reap_until_completed(&mut supervisor, 1).await;
         let report = supervisor.shutdown().await;
         assert_eq!(report.stats().succeeded, 1, "the one body completed");
     });
@@ -530,6 +559,7 @@ fn reading_a_snapshot_has_no_side_effect_on_admission() -> Result<(), Box<dyn Er
         gate2.release(1);
         gate.await_exits(1).await;
         gate2.await_exits(1).await;
+        reap_until_completed(&mut supervisor, 2).await;
         let report = supervisor.shutdown().await;
         assert_eq!(report.stats().succeeded, 2, "both bodies completed");
     });
@@ -568,14 +598,7 @@ fn a_bounded_repeating_task_reports_exhaustion_not_a_hang() -> Result<(), Box<dy
         // `stats().completed` advances only on a reap, so drive one. This is the
         // fact the assertion below turns on: the loop's outcome is accounted as
         // a completion, which requires the terminal join to have happened.
-        while supervisor.reap() == 0 {
-            assert!(
-                std::time::Instant::now() < patience_deadline(),
-                "the repeating loop finished its budget but was never joined \\
-                 within {PATIENCE:?}"
-            );
-            sleep(Duration::from_millis(1)).await;
-        }
+        reap_until_completed(&mut supervisor, 1).await;
         let report = supervisor.shutdown().await;
         assert_eq!(
             ran.load(Ordering::SeqCst),

@@ -120,6 +120,16 @@ pub enum FlowError {
         /// What is wrong with it.
         reason: &'static str,
     },
+    /// A request key did not validate.
+    ///
+    /// A request key is the caller-supplied idempotency identity of a durable
+    /// submission ([`Host::submit`](crate::task::Host::submit)), so it is
+    /// validated before it is hashed into a run identity and refused here
+    /// rather than at the first submission.
+    InvalidRequestKey {
+        /// What is wrong with it.
+        reason: &'static str,
+    },
     /// A step reached for authority this run does not have.
     ///
     /// The one flow failure that is not a defect in the step and not a transient
@@ -189,6 +199,7 @@ impl FlowError {
             | Self::TooDeep { .. }
             | Self::InvalidTenant { .. }
             | Self::InvalidName { .. }
+            | Self::InvalidRequestKey { .. }
             | Self::InvalidBound { .. } => false,
         }
     }
@@ -214,7 +225,10 @@ impl FlowError {
             | Self::Refused { ref at, .. }
             | Self::Intervention { ref at, .. }
             | Self::TooDeep { ref at, .. } => at,
-            Self::InvalidTenant { .. } | Self::InvalidName { .. } | Self::InvalidBound { .. } => "",
+            Self::InvalidTenant { .. }
+            | Self::InvalidName { .. }
+            | Self::InvalidRequestKey { .. }
+            | Self::InvalidBound { .. } => "",
         }
     }
 
@@ -261,7 +275,10 @@ impl FlowError {
                     *at = Arc::clone(path);
                 }
             }
-            Self::InvalidTenant { .. } | Self::InvalidName { .. } | Self::InvalidBound { .. } => {}
+            Self::InvalidTenant { .. }
+            | Self::InvalidName { .. }
+            | Self::InvalidRequestKey { .. }
+            | Self::InvalidBound { .. } => {}
         }
         self
     }
@@ -317,6 +334,9 @@ impl fmt::Display for FlowError {
             }
             Self::InvalidTenant { reason } => write!(formatter, "invalid tenant: {reason}"),
             Self::InvalidName { reason } => write!(formatter, "invalid task name: {reason}"),
+            Self::InvalidRequestKey { reason } => {
+                write!(formatter, "invalid request key: {reason}")
+            }
             Self::InvalidBound { what, value, max } => {
                 write!(formatter, "{what}: {value} is outside 1..={max}")
             }
@@ -341,6 +361,7 @@ impl std::error::Error for FlowError {
             | Self::TooDeep { .. }
             | Self::InvalidTenant { .. }
             | Self::InvalidName { .. }
+            | Self::InvalidRequestKey { .. }
             | Self::InvalidBound { .. } => None,
         }
     }

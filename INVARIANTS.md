@@ -984,6 +984,97 @@ Each of these was a shipped defect. Treat the list as the spec.
   `finished_steps_run_once`, `tenants_stay_isolated`, `same_seed_replays`),
   which sweeps every step boundary of every seeded run twice for an identical
   trace hash.
+- **INV-BOT-100** A request key is an identity, not a lock, and `Host::submit`
+  makes the three outcomes distinct. The run identity is derived, not minted:
+  it is a domain-separated hash of the host's tenant and the key, so the same
+  request on another process or day derives the same run and its receipt is
+  findable without a second table. The input's canonical `InputDigest` (the
+  `InputIdentity` schema id framed with its identity bytes) is recorded under
+  `@request` before any step runs; the terminal outcome is recorded under
+  `@terminal` after, and **only for the dispositions that are the request's own
+  verdict** — `Succeeded`, `Failed` and `DeadlineExceeded` (INV-BOT-102).
+  A repeat with the same key and digest reattaches to the recorded terminal and
+  never re-enters the body; a repeat with the same key and a different digest is
+  a typed `RequestError::Conflict` naming both digests and writes nothing;
+  distinct keys derive distinct runs and are never collapsed; one key under two
+  tenants derives two runs over a shared store file. A host with no store
+  refuses with `RequestError::NoStore` rather than downgrading to a plain run.
+  · why: #87 step 7 (T30) · enforced by: `tests/request_key.rs`
+  (`a_duplicate_identical_request_reattaches_without_rerunning`,
+  `a_reattach_survives_a_reopened_store`,
+  `same_key_with_a_different_payload_is_a_typed_conflict`,
+  `distinct_request_keys_are_distinct_runs`,
+  `two_tenants_never_share_a_request_run`,
+  `a_submission_without_a_store_is_refused`,
+  `a_recorded_request_answers_over_a_changed_body`,
+  `an_expired_deadline_is_the_requests_recorded_outcome`) and
+  `tests/sim_request_key.rs` (`collisions_across_two_tenants`, `same_seed_replays`,
+  `expired_deadlines_are_recorded_band_16..23`,
+  `concurrent_submissions_across_tiers`).
+- **INV-BOT-101** A durable submission's receipt outlives the client that
+  submitted it, and the in-flight state is reported as two separate facts. If a
+  waiter is dropped while the body is in flight, the `@request` receipt and any
+  completed step records are already on the disk and no `@terminal` record is;
+  a later client that submits the same key and input receives
+  `Submission::InFlight` — not a fabricated success and not a re-run of the
+  parked body — which names the run to settle (`InFlight::run`) and how many
+  records survived (`InFlight::records`). A host stop leaves the same state, for
+  the same reason and with the same answer (INV-BOT-102). The host remains the
+  cleanup owner: the run store is the host's, so settling the un-recorded step is
+  a `resume` of that run, never the client's to hold. The crate deliberately does
+  not drive a dropped non-`Send` body in the background; what survives is the
+  durable record, which is what a resume needs. · why: #87 step 7 (T17) ·
+  enforced by: `tests/request_key.rs`
+  (`a_dropped_client_leaves_the_request_in_flight_for_a_later_client`,
+  `a_host_stop_mid_run_leaves_the_request_resumable`) and
+  `tests/sim_request_key.rs` (`drop_and_reattach`,
+  `host_stops_never_poison_a_key_band_00..03`).
+- **INV-BOT-102** A host-side stop is not the request's outcome, so it is never
+  recorded as one. `Host::submit` records `@terminal` for exactly the three
+  dispositions that are **the request's own verdict** under its declared task —
+  `Succeeded`, `Failed` and `DeadlineExceeded`, the deadline included because
+  the same declaration that fixed the key also fixed the run's budget.
+  `Disposition::Cancelled` (the host's stop arrived after admission) and
+  `Disposition::Refused` (the host declined before it) are this host declining
+  to finish the run, and record **no** terminal path: a key whose terminal
+  record names a host stop is a key nothing can ever complete, because the key
+  *is* the request's identity, its body runs at most once, and the one fact that
+  made the request resumable — that no terminal record exists — is the very fact
+  a stop recorded as the verdict destroys. The stop is still reported to the
+  caller that saw it (`Submission::Executed` carrying the disposition), so the
+  call is never silent; what it does not do is turn one restart into a request
+  that can never succeed. The classification is one **exhaustive** match over
+  `Disposition` (`task::terminal_for`), so a variant added later breaks the build
+  until its relationship to a request key is decided by hand. `Host::resume` is
+  the door that **settles** a request a `submit` left incomplete — it records
+  the same three verdicts, under the same rule — because `submit` reports an
+  incomplete request rather than re-running its body; without it a stopped
+  request would report `InFlight` forever, which is the permanent outcome this
+  entry removes. Settling is deliberately narrow: `Host::run` writes no reserved
+  record, a resume of a run with no `@request` receipt is an ordinary resume and
+  records nothing, a run already holding a terminal record is left alone, and a
+  `Refused`/`Cancelled` report is returned untouched so a store that cannot be
+  *read* while checking an outcome nobody will write cannot turn a cross-tenant
+  `Refused` into a `Failed`. A store that refuses to record a verdict a run
+  *reached* is reported as `Failed`, because recording an outcome and reporting
+  success are one fact. The same declaration that fixed the key also fixed the
+  run's budget, so `DeadlineExceeded` is the request's own verdict and is
+  recorded: a request that overran its own budget reattaches to that deadline
+  rather than re-running a body that has already overrun once, and the recorded
+  step before the overrun survives it. A refused settlement records **nothing**,
+  so the request stays unsettled and a later client reads `InFlight` rather than
+  a verdict that was never written. · why: #87 step 7 (T30), the review defect
+  where one shutdown poisoned a key permanently · enforced by: `tests/request_key.rs`
+  (`a_host_stop_mid_run_leaves_the_request_resumable`,
+  `a_refusal_before_admission_is_not_recorded_as_the_outcome`,
+  `a_failed_run_is_the_requests_recorded_outcome`,
+  `an_expired_deadline_is_the_requests_recorded_outcome`,
+  `a_store_that_refuses_the_terminal_write_reports_the_refusal`,
+  `a_dropped_client_leaves_the_request_in_flight_for_a_later_client`) and
+  `tests/sim_request_key.rs` (`host_stops_never_poison_a_key_band_00..03`,
+  `same_seed_replays_host_stops_band_00..03`,
+  `expired_deadlines_are_recorded_band_16..23`,
+  `settle_refusals_are_reported_and_leave_the_request_unsettled_seed_a..p`).
 - **INV-BOT-40** The committed record can be replayed without materializing it:
   `FileJournal::replay` streams frames from its own read-only descriptor,
   retaining at most one event, applies the same frame validation and event
