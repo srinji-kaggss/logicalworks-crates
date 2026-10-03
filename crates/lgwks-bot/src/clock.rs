@@ -86,6 +86,11 @@
 //! require a runtime, and constructing one inside an existing runtime is
 //! allowed. Nothing here starts a runtime, promotes local work to remote
 //! execution, or nests one runtime per task.
+//!
+//! [`Clock`]: crate::clock::Clock
+//! [`Clock::wall`]: crate::clock::Clock::wall
+//! [`WallClock`]: crate::clock::WallClock
+//! [`ClockSnapshot::remaining_from`]: crate::clock::ClockSnapshot::remaining_from
 
 use std::fmt;
 use std::sync::Arc;

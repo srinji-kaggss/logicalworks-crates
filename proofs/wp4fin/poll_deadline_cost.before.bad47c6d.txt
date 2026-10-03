@@ -106,12 +106,12 @@
    Compiling bevy_tasks v0.19.1
    Compiling bevy_ecs v0.19.1
    Compiling rkyv v0.8.18
-   Compiling lgwks_std v0.10.0 (/Users/srinji/lwc-wt/wp4-before/crates/lgwks-std)
-   Compiling lgwks_deps v0.4.0 (/Users/srinji/lwc-wt/wp4-before/crates/lgwks-deps)
-   Compiling lgwks_macros v0.1.2 (/Users/srinji/lwc-wt/wp4-before/crates/lgwks-macros)
+   Compiling lgwks_std v0.10.0 (<repo>-before/crates/lgwks-std)
+   Compiling lgwks_deps v0.4.0 (<repo>-before/crates/lgwks-deps)
+   Compiling lgwks_macros v0.1.2 (<repo>-before/crates/lgwks-macros)
    Compiling ureq v3.4.2
-   Compiling lgwks_bot v0.8.0 (/Users/srinji/lwc-wt/wp4-before/crates/lgwks-bot)
-warning: linker stderr: ld64.lld: /Users/srinji/lwc-wt/wp4-before/target/release/examples/rustcc0Wl7L/libblake3-06f0dfb96acfd4e6.rlib(a1edd97dd51cd48d-blake3_neon.o) has version 27.0.0, which is newer than target minimum of 11.0.0
+   Compiling lgwks_bot v0.8.0 (<repo>-before/crates/lgwks-bot)
+warning: linker stderr: ld64.lld: <repo>-before/target/release/examples/rustcc0Wl7L/libblake3-06f0dfb96acfd4e6.rlib(a1edd97dd51cd48d-blake3_neon.o) has version 27.0.0, which is newer than target minimum of 11.0.0
   |
   = note: `#[warn(linker_messages)]` on by default
 
@@ -125,13 +125,13 @@ always-ready sources, 200 ticks per tier
     32 chains: p50=611us p95=959us p99=1047us
   1000 chains: p50=19171us p95=19421us p99=19512us
  10000 chains: p50=160646us p95=191745us p99=193909us
-scratch: /var/folders/_x/pjjf0dh11vq8_4_pz9kxphk80000gn/T/lgwks-poll-cost-d5f0777d8742558f
+scratch: <tmp>/lgwks-poll-cost-d5f0777d8742558f
 ------------------------------------------------------------------------
 one wedged source among 1,000, budget 100ms
 1000 chains, none wedged: p50=16200us p95=16738us p99=17051us
 1000 chains, one wedged: p50=127945us p95=137216us p99=140410us
   stalled reports: 200 over 200 ticks
-scratch: /var/folders/_x/pjjf0dh11vq8_4_pz9kxphk80000gn/T/lgwks-poll-cost-d5f0777d8742558f
+scratch: <tmp>/lgwks-poll-cost-d5f0777d8742558f
 
 real	1m21.064s
 user	0m12.366s

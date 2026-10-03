@@ -1,5 +1,5 @@
-   Compiling lgwks_bot v0.8.0 (/Users/srinji/lwc-wt/wp4/crates/lgwks-bot)
-warning: linker stderr: ld64.lld: /Users/srinji/lwc-wt/wp4/target/release/examples/rustcSNNzEB/libblake3-06f0dfb96acfd4e6.rlib(a1edd97dd51cd48d-blake3_neon.o) has version 27.0.0, which is newer than target minimum of 11.0.0
+   Compiling lgwks_bot v0.8.0 (<repo>/crates/lgwks-bot)
+warning: linker stderr: ld64.lld: <repo>/target/release/examples/rustcSNNzEB/libblake3-06f0dfb96acfd4e6.rlib(a1edd97dd51cd48d-blake3_neon.o) has version 27.0.0, which is newer than target minimum of 11.0.0
   |
   = note: `#[warn(linker_messages)]` on by default
 
@@ -17,14 +17,14 @@ always-ready sources, 200 ticks per tier
   watchdogs: 0 over 200 ticks, ten thousandths per tick: 0
  10000 chains: p50=1082us p95=1120us p99=1156us
   watchdogs: 0 over 200 ticks, ten thousandths per tick: 0
-scratch: /var/folders/_x/pjjf0dh11vq8_4_pz9kxphk80000gn/T/lgwks-poll-cost-c910ba9240e63930
+scratch: <tmp>/lgwks-poll-cost-c910ba9240e63930
 ------------------------------------------------------------------------
 one wedged source among 1,000, budget 100ms
 1000 chains, none wedged: p50=112us p95=115us p99=127us
   watchdogs: 0 over 200 ticks, ten thousandths per tick: 0
 1000 chains, one wedged: p50=104724us p95=110578us p99=110632us
   stalled reports: 200 over 200 ticks; watchdogs: 200
-scratch: /var/folders/_x/pjjf0dh11vq8_4_pz9kxphk80000gn/T/lgwks-poll-cost-c910ba9240e63930
+scratch: <tmp>/lgwks-poll-cost-c910ba9240e63930
 
 real	0m27.507s
 user	0m0.538s

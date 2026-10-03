@@ -6227,10 +6227,24 @@ impl EcsBuilder {
     ///
     /// ```
     /// # use std::time::Duration;
-    /// # use lgwks_bot::spec::EffectScope;
+    /// # use lgwks_bot::broker::Broker;
+    /// # use lgwks_bot::effect::{EnvironmentId, FlowRevision, RunId};
+    /// # use lgwks_bot::journal::MemoryJournal;
+    /// # use lgwks_bot::spec::{EffectIdentity, EffectScope};
     /// # use lgwks_bot::{Bot, BotError, GrantSet};
     /// # fn effects() -> Result<EffectScope, Box<dyn std::error::Error>> {
-    /// #     unreachable!("the doctest has no journal to build one from")
+    /// #     let environment = EnvironmentId::from_hex("2122232425262728292a2b2c2d2e2f30")?;
+    /// #     let mut broker = Broker::new();
+    /// #     broker.register(environment)?;
+    /// #     let identity = EffectIdentity::new(
+    /// #         RunId::from_hex("0102030405060708090a0b0c0d0e0f10")?,
+    /// #         environment,
+    /// #         FlowRevision::from_tagged(
+    /// #             "blake3_256",
+    /// #             "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    /// #         )?,
+    /// #     );
+    /// #     Ok(EffectScope::new(identity, broker, Box::new(MemoryJournal::new())))
     /// # }
     /// let scope = effects()?;
     /// let refused = Bot::builder("zero")
@@ -6334,8 +6348,8 @@ impl EcsBuilder {
     ///
     /// # Errors
     ///
-    /// Whatever [`EcsBuilder::with_poll_deadline`] documents, plus the
-    /// admission refusals [`EcsBot::assemble`] raises.
+    /// Whatever [`EcsBuilder::with_poll_deadline`] documents, plus the same
+    /// admission refusals every other build of a bot raises.
     pub fn build(self, grants: &GrantSet) -> Result<EcsBot, BotError> {
         EcsBot::assemble(
             self.name,
