@@ -2694,10 +2694,11 @@ where
 ///
 /// The same loop, and the same [`Outcome`], with one difference that matters:
 /// `Budget::For` is compared against the clock's own timeline rather than
-/// against a local [`Instant`]. A wall clock is the default through [`repeat`],
-/// so a caller that never asks for a clock observes the behaviour it always
-/// did — real elapsed time — and a caller that supplies a caller-advanceable
-/// one gets a budget that is exact and costs no real wait to exhaust.
+/// against a local monotonic instant. A wall clock is the default through
+/// [`repeat`], so a caller that never asks for a clock observes the behaviour it
+/// always did — real elapsed time — and a caller that supplies a
+/// caller-advanceable one gets a budget that is exact and costs no real wait to
+/// exhaust.
 ///
 /// The iteration bound is unaffected: a count of iterations is a fact about the
 /// body, not about time, and no clock governs it.
