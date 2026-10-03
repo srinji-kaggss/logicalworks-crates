@@ -43,21 +43,11 @@
 //! latches the poison and the handle refuses every later append until a reopen
 //! replays the truth.
 
+use std::collections::VecDeque;
 use std::fs::File;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::task::Waker;
 use std::time::Duration;
-
-/// The bounded channel the owner and its callers share.
-///
-/// The estate's one channel, from `rt::sync`, and the choice is checked rather than
-/// assumed: the owner thread runs with no runtime, so the channel it must use is the
-/// one whose `try_send` and `try_recv` are runtime-free. `std::sync::mpsc` is
-/// disallowed workspace-wide (INV-RT-BOUNDED) and tokio's bounded channel is what
-/// that rule points at; `crate::rt::sync::mpsc` is it.
-mod queue {
-    pub(crate) use crate::rt::sync::mpsc::{Receiver, Sender, channel};
-}
 
 /// The most requests one store may have outstanding at the owner.
 ///
@@ -179,19 +169,46 @@ impl<A> Answer<A> {
     }
 }
 
-/// The slot both sides read, and the poison the owner latches.
-#[derive(Default)]
-struct Slot {
+/// The slot both sides read, the bounded request ring, and the poison the owner
+/// latches.
+struct Slot<S, A> {
+    /// Requests admitted and not yet taken by the owner, in arrival order.
+    ///
+    /// A bounded ring rather than a channel, and the bound is what makes it one.
+    /// The estate's channel (`rt::sync::mpsc`) is the right choice *with a
+    /// runtime*, and this queue deliberately has none: the owner thread outlives
+    /// every future that ever waits on it, so it must not depend on a runtime
+    /// being alive to be driven. `std::sync::mpsc` is the alternative and is
+    /// disallowed workspace-wide (INV-RT-BOUNDED) precisely because it has no
+    /// bounded form. A `VecDeque` with a checked push is the bound written out,
+    /// and it costs one lock the owner already holds.
+    pending: VecDeque<Envelope<S, A>>,
     /// Whether bytes may be on the disk that no acknowledgment names.
     poisoned: bool,
     /// Whether the handle is gone and the owner should finish and exit.
     closed: bool,
     /// Whether the owner has dropped the file.
     released: bool,
-    /// Whether a flush should wait for an explicit release before syncing.
-    stalled: bool,
     /// Whether the next request should report a device refusal instead of writing.
     fail_next: bool,
+}
+
+/// `Slot::default` by hand rather than derived.
+///
+/// The derived one would demand `S: Default` and `A: Default` for a struct that
+/// stores neither: `S` and `A` appear only inside `pending`'s envelopes, which
+/// start empty. Requiring the caller's state to be constructible just to open an
+/// owner would be a bound neither store can satisfy.
+impl<S, A> Default for Slot<S, A> {
+    fn default() -> Self {
+        Self {
+            pending: VecDeque::new(),
+            poisoned: false,
+            closed: false,
+            released: false,
+            fail_next: false,
+        }
+    }
 }
 
 /// The one thread that owns a store's file.
@@ -227,11 +244,10 @@ where
     S: Send + 'static,
     A: Send + 'static,
 {
-    /// Where requests go. Bounded, so a caller that outruns the device is told so
-    /// instead of queueing without limit.
-    requests: queue::Sender<Envelope<S, A>>,
-    /// The poison latch and the stall gate.
-    slot: Arc<Mutex<Slot>>,
+    /// The poison latch, the stall gate and the bounded request ring.
+    slot: Arc<Mutex<Slot<S, A>>>,
+    /// The same latch as its own type, so a gate outlives the store's generics.
+    gate: Arc<Mutex<Gate>>,
     /// Woken on every state change, so a blocking drop and the owner's own wait
     /// both re-read rather than spin.
     signal: Arc<Condvar>,
@@ -246,18 +262,40 @@ where
 /// on the append that is waiting.
 #[derive(Clone)]
 pub struct StorageGate {
-    /// The stall gate and the poison latch.
-    slot: Arc<Mutex<Slot>>,
+    /// The stall latch, held apart from the request ring.
+    ///
+    /// Its own state rather than a parameterised view of the owner's `Slot`: a
+    /// gate is reachable from either store and from an operator's separate
+    /// handle, so a type parameterised by one store's state and another's answer
+    /// would make it nameable only from the store that made it. The latch holds
+    /// only the flag an operator changes and the poison a reader observes, which
+    /// is the whole of what a gate is.
+    latch: Arc<Mutex<Gate>>,
     /// Woken so the owner re-reads the gate.
     signal: Arc<Condvar>,
+}
+
+/// The flags a [`StorageGate`] can reach, shared with the owner.
+///
+/// Split out of [`Slot`] so the gate stays one type for both stores: the stall
+/// latch and the poison are the only state a releaser or an observer needs, and
+/// neither is specific to a store's request or answer type.
+#[derive(Default)]
+struct Gate {
+    /// Whether a flush should wait for an explicit release before syncing.
+    ///
+    /// The stall latch alone, not the poison: a releaser changes the stall and
+    /// nothing else, so the poison stays on the request side where the owner
+    /// writes it and the store's append path reads it. Carrying it here too
+    /// would be a second latch with no writer, which is the shape of a bug.
+    stalled: bool,
 }
 
 impl StorageGate {
     /// Let a flush that is waiting for a release proceed, and every flush after it.
     /// The stall is not re-armed.
     pub fn release(&self) {
-        let mut slot = lock(&self.slot);
-        slot.stalled = false;
+        lock(&self.latch).stalled = false;
         self.signal.notify_all();
     }
 }
@@ -334,27 +372,22 @@ where
     /// [`std::io::Error`] when the OS refuses to start the thread, which is the one
     /// way a store cannot be made durable at all.
     pub(crate) fn spawn(file: File, state: S, stalled: bool) -> std::io::Result<Self> {
-        let (requests, inbox) = queue::channel::<Envelope<S, A>>(DEFAULT_QUEUE_DEPTH);
-        let slot = Arc::new(Mutex::new(Slot {
-            stalled,
-            ..Slot::default()
-        }));
+        let slot = Arc::new(Mutex::new(Slot::<S, A>::default()));
+        let gate = Arc::new(Mutex::new(Gate { stalled }));
         let signal = Arc::new(Condvar::new());
         let owner = Self {
-            requests,
             slot: Arc::clone(&slot),
+            gate: Arc::clone(&gate),
             signal: Arc::clone(&signal),
         };
-        let _task = lgwks_std::task::spawn_blocking(move || {
-            serve(file, state, inbox, slot, signal);
-        });
+        let _task = lgwks_std::task::spawn_blocking(move || serve(file, state, slot, gate, signal));
         Ok(owner)
     }
 
     /// A gate that can release this owner's stall, independently of the store.
     pub(crate) fn gate(&self) -> StorageGate {
         StorageGate {
-            slot: Arc::clone(&self.slot),
+            latch: Arc::clone(&self.gate),
             signal: Arc::clone(&self.signal),
         }
     }
@@ -415,13 +448,22 @@ where
     }
 
     /// Hand one request to the owner, or report that this handle may not append.
+    ///
+    /// The bound is a refusal, not a wait: a caller that has outrun the device by
+    /// more than [`DEFAULT_QUEUE_DEPTH`] requests is told so immediately, because
+    /// queueing without limit is how a parked device turns into unbounded memory.
     fn enqueue(&self, job: Job<S, A>, reply: Arc<Answer<A>>) -> Result<(), SubmitError> {
-        if self.poisoned() {
+        let mut held = lock(&self.slot);
+        if held.poisoned {
             return Err(SubmitError::Poisoned);
         }
-        self.requests
-            .try_send(Envelope { job, reply })
-            .map_err(|_full| SubmitError::QueueFull)
+        if held.pending.len() >= DEFAULT_QUEUE_DEPTH {
+            return Err(SubmitError::QueueFull);
+        }
+        held.pending.push_back(Envelope { job, reply });
+        drop(held);
+        self.signal.notify_all();
+        Ok(())
     }
 }
 
@@ -516,11 +558,11 @@ where
 fn serve<S, A>(
     mut file: File,
     mut state: S,
-    mut inbox: queue::Receiver<Envelope<S, A>>,
-    slot: Arc<Mutex<Slot>>,
+    slot: Arc<Mutex<Slot<S, A>>>,
+    gate: Arc<Mutex<Gate>>,
     signal: Arc<Condvar>,
 ) {
-    while let Some(envelope) = next(&mut inbox, &slot, &signal) {
+    while let Some(envelope) = next(&slot, &gate, &signal) {
         // The whole critical section runs here: the fence, the write, the sync and
         // the fold into shared state, in one ordered step no other request can
         // overtake.
@@ -565,34 +607,39 @@ fn serve<S, A>(
 /// to the thread that has to answer it. A one-millisecond poll costs nothing next to
 /// an `fsync` and keeps every state change observable.
 fn next<S, A>(
-    inbox: &mut queue::Receiver<Envelope<S, A>>,
-    slot: &Mutex<Slot>,
+    slot: &Mutex<Slot<S, A>>,
+    gate: &Mutex<Gate>,
     signal: &Condvar,
 ) -> Option<Envelope<S, A>> {
+    let mut held = lock(slot);
     loop {
-        // A parked device holds the request back, and the gate is what releases it.
-        // The wait is timed rather than indefinite so a handle that closes during a
-        // stall still ends the loop.
-        let closed = {
-            let mut held = lock(slot);
-            while held.stalled && !held.closed {
-                let (guard, _timed_out) = signal
-                    .wait_timeout(held, Duration::from_millis(1))
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                held = guard;
-            }
-            held.closed
-        };
-        let got = inbox.try_recv();
-        if let Ok(job) = got {
-            return Some(job);
+        // A parked device holds the request back, and the gate is what releases
+        // it. This is checked *before* a request is taken, so a stalled device
+        // parks the append at the door rather than after the owner has claimed
+        // it — which is what an `fsync` that has not answered looks like, and
+        // what makes the caller's wait observable to the rest of the runtime.
+        //
+        // The wait is timed rather than indefinite so a handle that closes during
+        // a stall still ends the loop, and so a release arriving between requests
+        // is not missed.
+        while lock(gate).stalled && !held.closed {
+            let (guard, _timed_out) = signal
+                .wait_timeout(held, Duration::from_millis(1))
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            held = guard;
         }
-        if closed {
-            // Closed and empty: drained. A job that arrived just before the last
-            // handle went is the one `try_recv` above took, so nothing is stranded
-            // on the way out.
+        if let Some(envelope) = held.pending.pop_front() {
+            return Some(envelope);
+        }
+        if held.closed {
+            // Closed and empty: drained. A request admitted just before the last
+            // handle went is the one `pop_front` above took, so nothing is
+            // stranded on the way out.
             return None;
         }
-        std::thread::park_timeout(Duration::from_millis(1));
+        let (guard, _timed_out) = signal
+            .wait_timeout(held, Duration::from_millis(1))
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        held = guard;
     }
 }
