@@ -3932,6 +3932,31 @@ impl Session {
     /// by side is what makes the differences between them -- a narrowed re-ask,
     /// a withdrawn binding, a degraded cause under its own role -- visible.
     /// Inside `answer` they read as one statement.
+    /// Receipts a verdict, records the answer, then re-asks over `ask`.
+    ///
+    /// The shape every non-resolved verdict shares. `ask` is the option list the
+    /// prompt should carry: the full list for an absent, stale or degraded answer,
+    /// and a strictly smaller one for an ambiguous tie. That difference is the
+    /// whole reason an ambiguous answer terminates rather than looping, so it is
+    /// a parameter here instead of a branch repeated at each call site.
+    fn reask(
+        &mut self,
+        node_id: &str,
+        options: &[String],
+        verdict: &Verdict,
+        utterance: &str,
+        ask: &[String],
+    ) -> Result<(), BotError> {
+        self.receipt_and_record(node_id, options, verdict, utterance)?;
+        self.record_prompt(node_id, ask)
+    }
+
+    /// Applies one resolver verdict to the session.
+    ///
+    /// Each arm is its own refusal or its own transcript, and reading them side
+    /// by side is what makes the differences between them -- a narrowed re-ask,
+    /// a withdrawn binding, a degraded cause under its own role -- visible.
+    /// Inside `answer` they read as one statement.
     fn apply_resolution(
         &mut self,
         resolution: Resolution,
@@ -3956,18 +3981,17 @@ impl Session {
                     .iter()
                     .filter_map(|candidate| options.get(*candidate).cloned())
                     .collect();
-                self.receipt_and_record(&node_id, &options, &verdict, utterance)?;
-                if narrowed.len() >= 2 {
-                    self.record_prompt(&node_id, &narrowed)?;
+                // A narrowed set of one is not a question -- there is nothing
+                // to choose between -- so the full list is asked again.
+                let ask: &[String] = if narrowed.len() >= 2 {
+                    &narrowed
                 } else {
-                    self.record_prompt(&node_id, &options)?;
-                }
-                Ok(())
+                    options
+                };
+                self.reask(&node_id, &options, &verdict, utterance, ask)
             }
             Resolution::Absent { .. } => {
-                self.receipt_and_record(&node_id, &options, &verdict, utterance)?;
-                self.record_prompt(&node_id, &options)?;
-                Ok(())
+                self.reask(&node_id, &options, &verdict, utterance, &options)
             }
             Resolution::StaleAlias {
                 question: bound_question,
@@ -3982,20 +4006,16 @@ impl Session {
                 // A re-ask is a decision, so it is receipted like every other
                 // verdict; the receipt names the withdrawal, and the roles
                 // below name it again for whoever reads the transcript.
-                self.receipt_and_record(&node_id, &options, &verdict, utterance)?;
                 self.record_stale_alias(&node_id, &bound_question, &option)?;
-                self.record_prompt(&node_id, &options)?;
-                Ok(())
+                self.reask(&node_id, &options, &verdict, utterance, &options)
             }
             Resolution::Degraded { reason } => {
                 // Re-ask, as for `Absent`, but record the cause under its own
                 // role: a transcript that renders a degraded re-ask exactly as
                 // an unclear one is how an operator concludes the person was
                 // being difficult while the embedder was down.
-                self.receipt_and_record(&node_id, &options, &verdict, utterance)?;
                 self.record_degraded(&node_id, reason)?;
-                self.record_prompt(&node_id, &options)?;
-                Ok(())
+                self.reask(&node_id, &options, &verdict, utterance, &options)
             }
         }
     }
@@ -4196,21 +4216,66 @@ impl Session {
     ///
     /// `Ok(true)` means the session is waiting for an answer, which is the only
     /// kind that stops the loop short of an outcome.
+    /// Speaks a `say` node's text, then follows its single continuation.
+    ///
+    /// Speaking before the transition is the contract: a render that refuses must
+    /// leave the session on the node it was already on, not halfway to the next.
+    fn speak_then_follow(&mut self, node_id: &str, text: &str) -> Result<(), BotError> {
+        self.speak(node_id, text)?;
+        lgwks_std::trace::warn!(
+            operation = "speak_then_follow",
+            "operation refused its request; the typed error carries the facts"
+        );
+        let Some(target) = self.flow.edge_targets(node_id).into_iter().next() else {
+            return Err(BotError::MissingTransition {
+                node: node_id.to_owned(),
+            });
+        };
+        self.current = Some(target);
+        Ok(())
+    }
+
+    /// Moves to whichever edge the `branch` node's predicate selects.
+    ///
+    /// A `branch` has exactly two edges and its predicate chooses between them,
+    /// so this is a lookup rather than a decision: the predicate is the whole of
+    /// the choice and it has already been validated at load.
+    fn take_branch(
+        &mut self,
+        when: &Predicate,
+        then: NodeId,
+        otherwise: NodeId,
+    ) -> Result<(), BotError> {
+        self.current = Some(if when.evaluate(&self.scope)? {
+            then
+        } else {
+            otherwise
+        });
+        Ok(())
+    }
+
+    /// Speaks a `refer` node's text, then ends with the referral it declares.
+    ///
+    /// The text is emitted before the outcome is set, and the only declared
+    /// outcome a `refer` node can carry is the referral itself -- validation
+    /// refuses anything else -- so this text is never spoken for an outcome that
+    /// contradicts it.
+    fn refer(&mut self, node_id: &str, text: &str) -> Result<(), BotError> {
+        self.speak(node_id, text)?;
+        self.finish(node_id)
+    }
+
+    /// Advances one node, and answers whether the session must stop and wait.
+    ///
+    /// `Ok(true)` is the ask: the only kind that stops the loop short of an
+    /// outcome. Each arm is the one step its kind performs, named below.
     fn step(&mut self, node_id: &str, kind: NodeKind) -> Result<bool, BotError> {
         lgwks_std::trace::warn!(
             operation = "step",
             "operation refused its request; the typed error carries the facts"
         );
         match kind {
-            NodeKind::Say { text } => {
-                self.speak(node_id, &text)?;
-                let Some(target) = self.flow.edge_targets(node_id).into_iter().next() else {
-                    return Err(BotError::MissingTransition {
-                        node: node_id.to_owned(),
-                    });
-                };
-                self.current = Some(target);
-            }
+            NodeKind::Say { text } => self.speak_then_follow(node_id, &text),
             NodeKind::Ask { options, .. } => {
                 self.record_prompt(node_id, &options)?;
                 return Ok(true);
@@ -4220,35 +4285,22 @@ impl Session {
                 then,
                 otherwise,
                 ..
-            } => {
-                self.current = Some(if when.evaluate(&self.scope)? {
-                    then
-                } else {
-                    otherwise
-                });
-            }
+            } => self.take_branch(&when, then, otherwise),
             // The two terminal kinds that emit nothing before they end.
             // Both read the outcome from the document rather than
             // constructing it from the node, so a declared outcome is
             // executed here and not only checked at load.
-            NodeKind::Handoff { .. } | NodeKind::End => self.finish(node_id)?,
-            NodeKind::Refer { text, .. } => {
-                // The text is emitted before the outcome is set, and the
-                // only declared outcome a `refer` node can carry is the
-                // referral itself — validation refuses anything else — so
-                // this text is never spoken for an outcome that
-                // contradicts it.
-                self.speak(node_id, &text)?;
-                self.finish(node_id)?;
-            }
+            NodeKind::Handoff { .. } | NodeKind::End => self.finish(node_id),
+            NodeKind::Refer { text, .. } => self.refer(node_id, &text),
             NodeKind::Route { dispatch, fallback } => {
                 self.current = Some(if self.last_utterance.is_some() {
                     dispatch
                 } else {
                     fallback
                 });
+                Ok(())
             }
-        }
+        }?;
         Ok(false)
     }
 
