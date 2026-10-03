@@ -59,6 +59,17 @@ use lgwks_bot::effect::{
     ActionDigest, ActionId, AttemptId, EffectKey, EnvironmentEpoch, EnvironmentId, FlowRevision,
     Id128, RunId,
 };
+/// The scratch-path and cleanup-guard fixtures this file shares with the
+/// journal liveness and scale families.
+///
+/// One definition of "a unique scratch path" and of "remove it when the test
+/// ends", so this observation cannot drift into asserting a different cleanup
+/// discipline than the families that also observe a real kill.
+#[path = "support/journal.rs"]
+mod shared;
+
+use shared::{TempGuard, scratch_dir};
+
 use lgwks_bot::journal::{
     AttemptStatus, DurabilityPromise, EffectEvent, EffectEvidence, EffectJournal, FileJournal,
     JournalError, Verification, VerificationResult,
@@ -74,23 +85,6 @@ const PREDICATE: &str = "4142434445464748494a4b4c4d4e4f50";
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-/// Removes a test's scratch directory when the test ends, however it ends.
-///
-/// The guard is best effort: a scratch directory the system refuses to remove
-/// is litter, not a failed observation, so the error is dropped rather than
-/// allowed to mask the test's own verdict.
-struct TempGuard(std::path::PathBuf);
-
-impl Drop for TempGuard {
-    fn drop(&mut self) {
-        if self.0.is_dir() {
-            drop(std::fs::remove_dir_all(&self.0));
-        } else {
-            drop(std::fs::remove_file(&self.0));
-        }
-    }
-}
-
 /// One ladder rung, counted from one, in the order the journal enforces.
 const RUNG_PREPARED: usize = 2;
 const RUNG_APPLIED: usize = 3;
@@ -102,6 +96,9 @@ const PROBE_ENV: &str = "LGWKS_JOURNAL_PROBE";
 const PROBE_JOURNAL: &str = "LGWKS_PROBE_JOURNAL";
 const PROBE_EVENTS: &str = "LGWKS_PROBE_EVENTS";
 const PROBE_MARKER: &str = "LGWKS_PROBE_MARKER";
+/// Turns this test binary into a probe child that parks mid-append, with its
+/// storage device held closed, and waits to be killed with nothing written.
+const PROBE_STALLED: &str = "LGWKS_PROBE_STALLED";
 
 /// A key for one attempt at the shared intent, under `digest`.
 fn key(attempt: &str, digest: &str) -> Result<EffectKey, Box<dyn std::error::Error>> {
@@ -114,26 +111,6 @@ fn key(attempt: &str, digest: &str) -> Result<EffectKey, Box<dyn std::error::Err
         EnvironmentId::from_hex(ENV)?,
         EnvironmentEpoch::from_decimal("1")?,
     ))
-}
-
-/// A counter that gives concurrent test runs distinct scratch names.
-///
-/// Nanos plus a counter, not a process id: the OS reuses both pids and
-/// threads, and a reused id must never make two runs share a journal.
-static SCRATCH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// A unique scratch directory for one test.
-fn scratch(name: &str) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    use std::sync::atomic::Ordering;
-    let dir = std::env::temp_dir().join(format!(
-        "lgwks-obs-{name}-{}-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_nanos(),
-        SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
 }
 
 /// Append the first `rungs` events of the standard ladder for `key`, each
@@ -244,6 +221,17 @@ fn probe_body() -> TestResult {
     Err("the probe child parked for its whole bound and was never killed".into())
 }
 
+/// This test binary re-invoked as a named test with a fresh, empty environment.
+///
+/// One builder for every probe, so the executable and argument shape cannot
+/// drift between the acknowledged-append probes and the stalled-append one.
+fn probe_command(test_name: &str) -> Result<std::process::Command, Box<dyn std::error::Error>> {
+    let executable = std::env::current_exe()?;
+    let mut command = std::process::Command::new(executable);
+    command.args([test_name, "--exact", "--nocapture"]);
+    Ok(command)
+}
+
 /// Spawn this test binary as a probe child ordered to append `events` ladder
 /// rungs and then park.
 fn spawn_probe(
@@ -252,13 +240,69 @@ fn spawn_probe(
     marker_path: &std::path::Path,
     events: usize,
 ) -> Result<ProbeGuard, Box<dyn std::error::Error>> {
-    let executable = std::env::current_exe()?;
     Ok(ProbeGuard(Some(
-        std::process::Command::new(executable)
-            .args([test_name, "--exact", "--nocapture"])
+        probe_command(test_name)?
             .env(PROBE_ENV, "1")
             .env(PROBE_JOURNAL, journal_path)
             .env(PROBE_EVENTS, events.to_string())
+            .env(PROBE_MARKER, marker_path)
+            .spawn()?,
+    )))
+}
+
+/// Run the probe body instead of the test when this process is the child.
+///
+/// Every observation row is one function that is both the test and the probe it
+/// spawns, which is what keeps a row's pre-kill appends and its parent's
+/// post-restart reads in the same file. The dispatch is stated once here: a
+/// row that forgot it would run its real body in the child, whose environment
+/// names a journal it must instead park in, and the parent would hang waiting
+/// for a marker no child ever writes.
+fn dispatch_to_probe() -> Result<bool, Box<dyn std::error::Error>> {
+    if std::env::var_os(PROBE_ENV).is_some() {
+        probe_body()?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// One kill scenario's setup: a scratch directory, its guard, and the two paths
+/// the probe child and its parent both need.
+///
+/// Three of the rows below are the same observation with a different rung count
+/// and a different assertion after the restart, so the part before the
+/// assertion is what they share. Naming it means the probe's contract — a
+/// directory removed when the test ends, a journal under `journal.log`, a
+/// liveness marker under `marker` — is stated once instead of being re-spelled
+/// per row, and a row that forgets the guard fails the same way as the others
+/// instead of silently leaking a directory.
+///
+/// The guard is returned rather than bound inside, because a `_guard` bound by
+/// the caller is dropped at the end of that caller's scope, which is what makes
+/// it live as long as the test.
+fn kill_scenario(
+    tag: &str,
+    row: &str,
+    events: usize,
+) -> Result<(TempGuard, std::path::PathBuf), Box<dyn std::error::Error>> {
+    let dir = scratch_dir(tag)?;
+    let journal_path = dir.join("journal.log");
+    let marker = dir.join("marker");
+    let child = spawn_probe(row, &journal_path, &marker, events)?;
+    kill_after_marker(child, &marker)?;
+    Ok((TempGuard(dir), journal_path))
+}
+
+/// Spawn this test binary as a probe child that parks mid-append.
+fn spawn_stalled_probe(
+    test_name: &str,
+    journal_path: &std::path::Path,
+    marker_path: &std::path::Path,
+) -> Result<ProbeGuard, Box<dyn std::error::Error>> {
+    Ok(ProbeGuard(Some(
+        probe_command(test_name)?
+            .env(PROBE_STALLED, "1")
+            .env(PROBE_JOURNAL, journal_path)
             .env(PROBE_MARKER, marker_path)
             .spawn()?,
     )))
@@ -311,21 +355,14 @@ fn kill_after_marker(
 
 #[test]
 fn a_settlement_recorded_before_a_real_kill_is_the_recovered_answer() -> TestResult {
-    if std::env::var_os(PROBE_ENV).is_some() {
-        return probe_body();
+    if dispatch_to_probe()? {
+        return Ok(());
     }
-    let dir = scratch("settlement")?;
-    let _guard = TempGuard(dir.clone());
-    let journal_path = dir.join("journal.log");
-    let marker = dir.join("marker");
-
-    let child = spawn_probe(
+    let (_guard, journal_path) = kill_scenario(
+        "settlement",
         "a_settlement_recorded_before_a_real_kill_is_the_recovered_answer",
-        &journal_path,
-        &marker,
         RUNG_APPLIED,
     )?;
-    kill_after_marker(child, &marker)?;
 
     // The restart: a fresh controller opens what is on the disk.
     let mut journal = FileJournal::open(&journal_path)?;
@@ -367,21 +404,14 @@ fn a_settlement_recorded_before_a_real_kill_is_the_recovered_answer() -> TestRes
 
 #[test]
 fn a_kill_between_prepare_and_outcome_recovers_a_barrier_not_an_answer() -> TestResult {
-    if std::env::var_os(PROBE_ENV).is_some() {
-        return probe_body();
+    if dispatch_to_probe()? {
+        return Ok(());
     }
-    let dir = scratch("barrier")?;
-    let _guard = TempGuard(dir.clone());
-    let journal_path = dir.join("journal.log");
-    let marker = dir.join("marker");
-
-    let child = spawn_probe(
+    let (_guard, journal_path) = kill_scenario(
+        "barrier",
         "a_kill_between_prepare_and_outcome_recovers_a_barrier_not_an_answer",
-        &journal_path,
-        &marker,
         RUNG_PREPARED,
     )?;
-    kill_after_marker(child, &marker)?;
 
     let journal = FileJournal::open(&journal_path)?;
     let this_key = key("1", DIGEST_A)?;
@@ -422,21 +452,14 @@ fn a_kill_between_prepare_and_outcome_recovers_a_barrier_not_an_answer() -> Test
 
 #[test]
 fn a_restart_with_a_new_digest_cannot_fold_into_a_completed_attempt() -> TestResult {
-    if std::env::var_os(PROBE_ENV).is_some() {
-        return probe_body();
+    if dispatch_to_probe()? {
+        return Ok(());
     }
-    let dir = scratch("identity")?;
-    let _guard = TempGuard(dir.clone());
-    let journal_path = dir.join("journal.log");
-    let marker = dir.join("marker");
-
-    let child = spawn_probe(
+    let (_guard, journal_path) = kill_scenario(
+        "identity",
         "a_restart_with_a_new_digest_cannot_fold_into_a_completed_attempt",
-        &journal_path,
-        &marker,
         RUNG_APPLIED,
     )?;
-    kill_after_marker(child, &marker)?;
 
     // The restart re-admits the same logical action under a changed input:
     // attempt `"2"`, digest `B`. The binding is to the digest, so this is a
@@ -462,10 +485,10 @@ fn a_restart_with_a_new_digest_cannot_fold_into_a_completed_attempt() -> TestRes
 
 #[test]
 fn an_external_marker_appears_only_after_the_durable_ack() -> TestResult {
-    if std::env::var_os(PROBE_ENV).is_some() {
-        return probe_body();
+    if dispatch_to_probe()? {
+        return Ok(());
     }
-    let dir = scratch("handoff")?;
+    let dir = scratch_dir("handoff")?;
     let _guard = TempGuard(dir.clone());
     let journal_path = dir.join("journal.log");
     // For this row the marker is not scaffolding: it is the external effect
@@ -512,7 +535,7 @@ fn an_external_marker_appears_only_after_the_durable_ack() -> TestResult {
 
 #[test]
 fn a_settlement_followed_by_a_failed_recording_append_is_still_the_settlement() -> TestResult {
-    let dir = scratch("recording")?;
+    let dir = scratch_dir("recording")?;
     let _guard = TempGuard(dir.clone());
     let journal_path = dir.join("journal.log");
 
@@ -548,7 +571,7 @@ fn a_settlement_followed_by_a_failed_recording_append_is_still_the_settlement() 
 
 #[test]
 fn a_torn_final_frame_is_repaired_and_never_replayed() -> TestResult {
-    let dir = scratch("torn")?;
+    let dir = scratch_dir("torn")?;
     let _guard = TempGuard(dir.clone());
     let journal_path = dir.join("journal.log");
 
@@ -601,7 +624,7 @@ fn a_torn_final_frame_is_repaired_and_never_replayed() -> TestResult {
 
 #[test]
 fn a_tampered_committed_frame_is_refused_rather_than_trimmed() -> TestResult {
-    let dir = scratch("tamper")?;
+    let dir = scratch_dir("tamper")?;
     let _guard = TempGuard(dir.clone());
     let journal_path = dir.join("journal.log");
 
@@ -642,7 +665,7 @@ fn a_tampered_committed_frame_is_refused_rather_than_trimmed() -> TestResult {
 
 #[test]
 fn the_file_journal_recovers_exactly_what_the_memory_journal_recovers() -> TestResult {
-    let dir = scratch("parity")?;
+    let dir = scratch_dir("parity")?;
     let _guard = TempGuard(dir.clone());
     let journal_path = dir.join("journal.log");
 
@@ -663,6 +686,104 @@ fn the_file_journal_recovers_exactly_what_the_memory_journal_recovers() -> TestR
     assert_eq!(
         file_journal.recover().status(this_key),
         Some(AttemptStatus::Verified)
+    );
+    Ok(())
+}
+
+// ── A real kill while an append is in flight, on a store that is not answering
+
+/// The child that dies mid-append.
+///
+/// It opens a journal whose storage device is held closed, hands the owner one
+/// append — which cannot complete until the device is released — writes the
+/// marker, and waits to be killed. Nothing is on the disk when the kill lands,
+/// so the reopen must show an empty, clean journal and the retry must land
+/// exactly once: no duplicate, no lost receipt.
+fn stalled_probe_body() -> TestResult {
+    use std::task::{Context, Waker};
+
+    let path = std::env::var_os(PROBE_JOURNAL)
+        .ok_or("the stalled probe was started without a journal path")?;
+    let marker = std::env::var_os(PROBE_MARKER)
+        .ok_or("the stalled probe was started without a marker path")?;
+
+    let mut journal = FileJournal::open_with_stalled_storage(&path)?;
+    let event = EffectEvent::IntentAdmitted {
+        key: key("1", DIGEST_A)?,
+    };
+    let tail = journal.tail();
+    let mut append = Box::pin(journal.compare_and_append_async(tail, &event));
+    // One poll: the owner is handed the request and parks on the closed device.
+    // The append is now genuinely in flight, and no byte has reached the disk.
+    // A single poll needs no runtime, so this kill test runs under every feature
+    // set rather than only where `rt` is compiled in.
+    let mut cx = Context::from_waker(Waker::noop());
+    if append.as_mut().poll(&mut cx).is_ready() {
+        return Err("the stalled append completed before the kill".into());
+    }
+    std::fs::write(&marker, b"in-flight")?;
+
+    // Park until the parent kills us. Bounded, so a parent that never kills
+    // cannot leave a stray process behind.
+    for _ in 0..600 {
+        pause(100);
+    }
+    Err("the stalled probe parked for its whole bound and was never killed".into())
+}
+
+#[test]
+fn a_real_kill_mid_append_leaves_no_duplicate_and_no_lost_receipt() -> TestResult {
+    if std::env::var_os(PROBE_STALLED).is_some() {
+        return stalled_probe_body();
+    }
+    let dir = scratch_dir("midappend")?;
+    let journal_path = dir.join("journal.log");
+    let marker = dir.join("marker");
+    let _guard = TempGuard(dir);
+    let child = spawn_stalled_probe(
+        "a_real_kill_mid_append_leaves_no_duplicate_and_no_lost_receipt",
+        &journal_path,
+        &marker,
+    )?;
+    kill_after_marker(child, &marker)?;
+
+    // The append never completed: the owner was parked, so nothing reached the
+    // disk. A clean, empty journal is the only honest answer — not a torn tail
+    // and not a phantom committed event.
+    let mut journal = FileJournal::open(&journal_path)?;
+    assert!(
+        !journal.torn_tail_repaired(),
+        "an append that wrote nothing cannot leave a torn tail"
+    );
+    assert_eq!(
+        journal.committed()?.len(),
+        0,
+        "an in-flight append killed before its device answered must not commit"
+    );
+
+    // The retry lands exactly once: there was no acknowledgment to lose, and
+    // the fact on the disk is the first and only one for the attempt.
+    let this_key = key("1", DIGEST_A)?;
+    let ack = journal.compare_and_append(
+        journal.tail(),
+        &EffectEvent::IntentAdmitted { key: this_key },
+    )?;
+    assert_eq!(
+        ack.promise(),
+        DurabilityPromise::ProcessCrash,
+        "the retry earns the same durable promise the killed append would have"
+    );
+    drop(journal);
+    let reopened = FileJournal::open(&journal_path)?;
+    assert_eq!(
+        reopened.committed()?.len(),
+        1,
+        "the retry must land exactly once, never a duplicate"
+    );
+    assert_eq!(
+        reopened.recover().status(this_key),
+        Some(AttemptStatus::Prepared),
+        "the retry's own admission is the recovered answer"
     );
     Ok(())
 }
