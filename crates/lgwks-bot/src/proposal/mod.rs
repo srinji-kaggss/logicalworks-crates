@@ -17,10 +17,10 @@
 //! values the host already decided are legal, and everything a payload asks for
 //! beyond that boundary is a refusal. So:
 //!
-//! - **Validation** — [`decode`] is a hand-written bounded decoder, not a
+//! - **Validation** — [`Decoder::decode`] is a hand-written bounded decoder, not a
 //!   general document interpreter. There is no untyped plan, no expression
 //!   evaluator and no fourth execution path; the operations a proposal may name
-//!   are exactly the ones the host registered in [`Surface::register`], and the
+//!   are exactly the ones the host registered through [`Surface::builder`], and the
 //!   capabilities it may need are exactly the ones the run already holds.
 //! - **Provenance** — every refusal and every refusal count carries where the
 //!   bytes came from ([`Source::Model`]) and a digest of them, so "the model
@@ -46,7 +46,7 @@
 //! the untrusted input arrives as `&[u8]` from a caller that owns the transport.
 //! That is deliberate: the guarantee here is about *admission*, and it is the
 //! same guarantee whoever produced the bytes. The tests drive a deterministic
-//! [`crate::proposal::model::StubModel`], a pure function from a seed to output
+//! [`StubModel`], a pure function from a seed to output
 //! bytes, so "the model said something else" is a seed rather than a network.
 //!
 //! # How the bytes reach a run
@@ -69,6 +69,18 @@
 //! through a real
 //! [`Host::run`](crate::task::Host::run) so "wired" is observed rather than
 //! asserted. See `INV-BOT-95`.
+//!
+//! [`Refusal`]: crate::proposal::Refusal
+//! [`Provenance`]: crate::proposal::Provenance
+//! [`Decoder::decode`]: crate::proposal::Decoder::decode
+//! [`Surface::builder`]: crate::proposal::Surface::builder
+//! [`Source::Model`]: crate::proposal::Source::Model
+//! [`RepairLedger`]: crate::proposal::RepairLedger
+//! [`Intervention`]: crate::proposal::Intervention
+//! [`PlanBudget`]: crate::proposal::PlanBudget
+//! [`ArtifactStore`]: crate::proposal::ArtifactStore
+//! [`Checkpoint`]: crate::proposal::Checkpoint
+//! [`StubModel`]: crate::proposal::StubModel
 //!
 //! # Example
 //!
@@ -181,7 +193,7 @@ pub use codec::{Declared, Decoder, Plan, PlanLimits, Wanted, payload_digest};
 pub use completion::{Completion, CompletionKind, CompletionOutcome, Coverage, MAX_EVIDENCE_REFS};
 pub use ledger::{Intervention, LedgerLimits, RepairLedger};
 pub use model::StubModel;
-pub use surface::{Operation, Surface, SurfaceError};
+pub use surface::{Operation, Surface, SurfaceBuilder, SurfaceError};
 
 /// The longest a field's *name* may be, in bytes.
 ///

@@ -68,6 +68,7 @@
 //! [`retry`]: crate::script::retry
 //! [`admit`]: crate::script::admit
 //! [`Gate`]: crate::script::Gate
+//! [`FlowError`]: crate::script::FlowError
 //! [`Scope`]: crate::script::Scope
 //! [`Scope::enter`]: crate::script::Scope::enter
 //! [`Tenant`]: crate::script::Tenant
