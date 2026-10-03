@@ -434,10 +434,121 @@ async fn measure(
     })
 }
 
+/// A deliberately defective side, and why the gate must refuse it.
+///
+/// This is the negative control the fairness gate has never had. A gate that has
+/// only ever been shown agreeing runs cannot be distinguished from a gate that
+/// always says yes: both produce a green table every time. The only thing that
+/// shows a gate works is a variant it *refuses*, for the reason it is supposed
+/// to refuse it.
+///
+/// The defect is the one a real regression looks like, and it is not subtle:
+/// **it stops draining.** It places every task exactly as the honest facade
+/// does, then reaps whatever happens to be finished at the instant it looks and
+/// reports that as the run's work. The tally it therefore hands the gate claims
+/// `placed` tasks while some of them were never observed to finish — the precise
+/// shape of "the harness measured a different program than the one it was
+/// comparing", which is the failure the gate exists to catch.
+///
+/// Which field diverges depends on how far the workers got before the early
+/// reap, and that is not something to assert: on the observed host it is
+/// `completed` (509 of 512), because the counter bump happens before the yield
+/// that most bodies are still sitting in. A slower host would diverge on
+/// `work_units` instead. That is why the check matches on *any* work-count
+/// field and prints which one fired, rather than pinning one.
+///
+/// It is deliberately *not* a timing defect. A mutant that is merely slower
+/// would pass the gate and produce a meaningless ratio; one that is *unfair*
+/// must fail it, and the failure must name the diverging field so a reader can
+/// see the gate is discriminating rather than merely strict.
+async fn mutant_side(total: usize, bound: usize) -> (f64, Tally) {
+    let counter = Arc::new(AtomicU64::new(0));
+    let mut supervisor = Supervisor::new(bound);
+    let started = Instant::now();
+    for _ in 0..total {
+        let counter = Arc::clone(&counter);
+        supervisor
+            .spawn(move |_token| async move { body_unit(counter).await })
+            .await;
+    }
+    // The defect, in one line: reap whatever is ready and stop. A real harness
+    // that made this mistake would report success for work it never waited for.
+    supervisor.reap();
+    let stats = supervisor.stats();
+    let elapsed = started.elapsed().as_secs_f64();
+    let tally = Tally {
+        completed: stats.succeeded,
+        cancelled: stats.cancelled,
+        aborted: stats.aborted,
+        refused: stats.refused,
+        placed: stats.spawned,
+        retained: 0,
+        dropped_detail: stats.reports_dropped,
+        work_units: counter.load(Ordering::SeqCst),
+    };
+    drop(supervisor);
+    (elapsed, tally)
+}
+
+/// Run the gate's negative control and print exactly what it refused.
+///
+/// Exits non-zero unless the gate refused the mutant *for a work-count reason*.
+/// A refusal for any other reason would satisfy a weaker check and prove nothing
+/// — the gate must be discriminating, so the reason is matched, not merely
+/// present. The refusal is printed verbatim, because "the gate refused" is a
+/// claim and "the gate said this" is evidence.
+fn mutant_check(runtime: &Runtime) -> Result<(), Box<dyn std::error::Error>> {
+    const TASKS: usize = 512;
+    const BOUND: usize = 8;
+    println!("mutant baseline: a side that places every task and then stops draining");
+    println!("the gate must refuse it, naming the diverging field.\n");
+
+    let (mutant_time, mutant) = runtime.block_on(mutant_side(TASKS, BOUND));
+    let (_, honest) = runtime.block_on(facade_side(TASKS, BOUND));
+
+    match fair(&mutant, &honest) {
+        Ok(()) => {
+            return Err(format!(
+                "the fairness gate ACCEPTED a side that placed {} tasks but performed {} \
+                 work units against an honest {} / {} — a gate that passes an unfair \
+                 comparison is not a gate (mutant took {:.6}s)",
+                mutant.placed, mutant.work_units, honest.work_units, honest.placed, mutant_time
+            )
+            .into());
+        }
+        Err(reason) => {
+            println!("refused, as required: {reason}");
+            let discriminates = reason.contains("work units")
+                || reason.contains("completed")
+                || reason.contains("cancelled")
+                || reason.contains("aborted");
+            if !discriminates {
+                return Err(format!(
+                    "the gate refused the mutant for {reason:?}, which is not a work-count \
+                     reason: a gate that refused for an unrelated cause would pass this check \
+                     without ever checking work"
+                )
+                .into());
+            }
+            println!("the refusal names a work-count field, so the gate discriminates on work");
+            println!(
+                "\nmutant tally:  placed {} completed {} cancelled {} aborted {} work_units {}",
+                mutant.placed, mutant.completed, mutant.cancelled, mutant.aborted, mutant.work_units
+            );
+            println!(
+                "honest tally:  placed {} completed {} cancelled {} aborted {} work_units {}",
+                honest.placed, honest.completed, honest.cancelled, honest.aborted, honest.work_units
+            );
+        }
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rounds: usize = 15;
     let mut json: Option<String> = None;
 let mut alloc_report = false;
+    let mut mutant = false;
     for arg in std::env::args().skip(1) {
         if let Some(value) = arg.strip_prefix("--rounds=") {
             rounds = value.parse().map_err(|_| "rounds must be a number")?;
@@ -445,7 +556,16 @@ let mut alloc_report = false;
             json = Some(value.to_string());
         } else if arg == "--alloc-report" {
             alloc_report = true;
+        } else if arg == "--mutant-check" {
+            mutant = true;
         }
+    }
+
+    if mutant {
+        // The negative control runs alone and exits: a run that also produced a
+        // table would leave a reader unable to tell which number the refusal
+        // referred to.
+        return mutant_check(&Runtime::new()?);
     }
 
     println!("lgwks_bot async matched-semantics comparison (facade vs raw tokio)");

@@ -52,6 +52,41 @@ Two real asymmetries were found and fixed *in the harness*, not in the crate:
 The gate is not decoration: it refused four times during development, each time on
 a real difference between the two sides.
 
+## The mutant baseline — proving the gate can refuse
+
+A gate that has only ever been shown agreeing runs cannot be told apart from one
+that always says yes. `--mutant-check` runs the negative control: a side that
+places every task exactly as the honest facade does and then **stops draining**,
+so the tally it hands the gate claims 512 placed tasks while fewer bodies were
+observed to finish. The gate must refuse it, and must refuse it *for a
+work-count reason*.
+
+```sh
+CARGO_TARGET_DIR=/tmp/lgwks-bench-async \
+  cargo run --release --manifest-path bench/async/Cargo.toml -- --mutant-check
+```
+
+Recorded output, Apple M5 Pro, macOS 27.0, rustc 1.98.0, 512 tasks at bound 8:
+
+```
+refused, as required: completed: facade 509 vs baseline 512
+the refusal names a work-count field, so the gate discriminates on work
+
+mutant tally:  placed 512 completed 509 cancelled 0 aborted 0 work_units 512
+honest tally:  placed 512 completed 512 cancelled 0 aborted 0 work_units 512
+```
+
+`completed` is the field that fired here, not `work_units`, because the body
+bumps its counter before it yields and most bodies were still sitting in that
+yield when the early reap landed. A slower host would diverge on `work_units`
+instead, which is why the check accepts any work-count field and prints which
+one fired rather than pinning one. The mutant is deliberately *unfair* and not
+merely slow: a slower-but-identical mutant would pass the gate and print a
+meaningless ratio, which is the failure this control exists to rule out.
+
+The mutant check runs alone and exits non-zero if the gate ever accepts it, so a
+regression in the gate itself cannot pass quietly.
+
 ## Results
 
 Apple M5 Pro, macOS 27.0, rustc 1.98.0, `opt-level=3`, `lto=true`,
