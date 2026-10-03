@@ -33,7 +33,8 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use lgwks_bot::domain::sys::{DEFAULT_CAPTURE_LIMIT, DEFAULT_DEADLINE, Process};
-use lgwks_bot::rt::process::{ProcessRunError, ProcessSpec, StdioPolicy};
+use lgwks_bot::rt::process::{FrameRead, ProcessRunError, ProcessSpec, StdioPolicy, read_frames};
+use lgwks_bot::rt::runtime::Builder;
 use lgwks_bot::rt::supervise::{CleanupReceipt, Supervisor};
 use lgwks_bot::rt::time::sleep;
 use lgwks_bot::{Auth, BotError, Cap, DispatchCertainty, Execute, GrantSet, Observe, Query};
@@ -190,7 +191,214 @@ fn a_chatty_child_is_drained_and_truncated_within_its_ceiling() -> TestResult {
     Ok(())
 }
 
-/// T19, deadline half: a deadline stops the whole group and says so.
+/// T05, slow-consumer half: a flooding child against a deliberately slow reader
+/// stays inside its ceiling, and the exact total is still reported.
+///
+/// A single worker is the point rather than a detail. The three driver futures —
+/// the two pipe reads and the exit observation — share one task, so on one worker
+/// the reader's own cost is the only thing deciding when the child's next write
+/// is serviced. That is the tightest reader/writer ratio available without
+/// touching the production loop, and it is what makes the assertion meaningful:
+/// a ceiling that leaked would grow here, and a reader that stopped draining at
+/// the ceiling would deadlock this test rather than pass it.
+#[test]
+fn a_flooding_child_against_a_slow_reader_stays_within_its_ceiling() -> TestResult {
+    // Eight mebibytes on each stream. Far past the ceiling (so truncation is
+    // certain rather than incidental) and far past any pipe buffer (so the child
+    // blocks unless the reader keeps draining while it runs).
+    const TOTAL: u64 = 8 * 1024 * 1024;
+    const LIMIT: usize = 4096;
+    let script = format!("head -c {TOTAL} /dev/zero; head -c {TOTAL} /dev/zero 1>&2");
+    let runtime = Builder::new()
+        .worker_threads(NonZeroUsize::new(1))
+        .build()?;
+    let run = runtime.block_on(async {
+        let mut supervisor = Supervisor::new(1);
+        supervisor
+            .run_process(&captured_shell(&script, LIMIT))
+            .await
+            .map_err(Box::<dyn std::error::Error>::from)
+    })?;
+
+    for (name, stream) in [("stdout", run.stdout()), ("stderr", run.stderr())] {
+        process_probe::assert_capture_within_ceiling(name, stream, LIMIT, TOTAL);
+    }
+    Ok(())
+}
+
+/// The same flood with a deadline, to prove the drain is concurrent with the
+/// child's writing rather than sequenced after its exit.
+///
+/// Without this the flood test above passes on an implementation that waits for
+/// the child to exit *before* reading, which is correct for a child under its
+/// ceiling and a deadlock for one over it. Here the child writes far more than a
+/// pipe holds and the deadline is far shorter than the write takes, so the only
+/// way the run settles promptly is if the pipe is being drained while the child
+/// is still running.
+#[test]
+fn a_flooding_child_is_drained_while_it_runs_not_after_it_exits() -> TestResult {
+    const LIMIT: usize = 4096;
+    // A child's write to a full pipe blocks, so under a reader that waits for the
+    // exit this child never exits and the run only settles by the deadline.
+    // A deadline long enough for a real drain, and far too short for a
+    // write-then-exit child of this size on a loaded machine.
+    const DEADLINE_MS: u64 = 5_000;
+    const TOTAL: u64 = 32 * 1024 * 1024;
+    let script = format!("head -c {TOTAL} /dev/zero");
+    let mut spec = shell(&script);
+    spec.capture_stdout(NonZeroUsize::new(LIMIT).ok_or("a ceiling of at least one")?);
+    spec.capture_stderr(NonZeroUsize::new(LIMIT).ok_or("a ceiling of at least one")?);
+    spec.deadline(Duration::from_millis(DEADLINE_MS));
+    let runtime = lgwks_bot::Runtime::new()?;
+    let run = runtime.block_on(async {
+        let mut supervisor = Supervisor::new(1);
+        supervisor.run_process(&spec).await
+    })?;
+
+    assert!(
+        !run.deadline_fired(),
+        "a child drained while it runs finishes on its own; the deadline fired, so the \
+         reader was not draining concurrently with the write (retained {} of {} bytes)",
+        run.stdout().bytes().len(),
+        run.stdout().total_bytes()
+    );
+    assert_eq!(
+        run.exit_code(),
+        Some(0),
+        "the flood child must exit cleanly once its pipe is drained"
+    );
+    process_probe::assert_capture_within_ceiling("stdout", run.stdout(), LIMIT, TOTAL);
+    Ok(())
+}
+
+/// T05, framed half: a record cut off mid-frame is a typed refusal, never a
+/// decoded success.
+///
+/// The child emits one whole length-prefixed record and then a second whose
+/// payload stops half-way. A reader that trusted the prefix would report the
+/// short payload as the record; this one refuses it, and says how much arrived.
+#[test]
+fn a_framed_record_cut_off_mid_frame_is_a_typed_refusal() -> TestResult {
+    // `[0,0,0,4]` then `done`, then `[0,0,0,8]` and only `part`.
+    let script = "printf '\\000\\000\\000\\004done\\000\\000\\000\\010part'";
+    let runtime = lgwks_bot::Runtime::new()?;
+    let run = runtime.block_on(async {
+        let mut supervisor = Supervisor::new(1);
+        supervisor.run_process(&captured_shell(script, 4096)).await
+    })?;
+    assert_eq!(
+        run.exit_code(),
+        Some(0),
+        "the child completed its own work; the framing is what is under test"
+    );
+
+    let mut stream = run.stdout().bytes();
+    let frames = read_frames(&mut stream, 4096)?;
+    assert_eq!(
+        frames.records().len(),
+        1,
+        "only the record that arrived whole is a frame: {:?}",
+        frames.records()
+    );
+    assert_eq!(
+        frames.records()[0].payload(),
+        Some(&b"done"[..]),
+        "the whole record decodes to exactly what the child wrote"
+    );
+    assert_eq!(
+        frames.ended(),
+        &FrameRead::TruncatedPayload {
+            declared: 8,
+            partial: b"part".to_vec(),
+        },
+        "a prefix naming eight bytes that delivered four is a truncation, and it names \
+         both the declared length and what arrived"
+    );
+    assert!(
+        !frames.ended().is_frame(),
+        "the cut record must never read as a decoded frame"
+    );
+    assert!(
+        frames.ended().payload().is_none(),
+        "a refusal carries no payload, so there is no path from a cut record to bytes"
+    );
+    assert!(
+        !frames.is_complete(),
+        "a stream whose last record was cut off has no complete reading"
+    );
+    Ok(())
+}
+
+/// The same stream read whole is a complete reading, so the refusal above is
+/// about the bytes rather than about the reader.
+///
+/// The control the truncation test needs: without a positive case, "always
+/// refuse" would satisfy it. Here every record arrives and the pass reports the
+/// clean end, the whole count, and no truncation.
+#[test]
+fn a_framed_stream_that_ends_cleanly_is_complete() -> TestResult {
+    let script = "printf '\\000\\000\\000\\004done\\000\\000\\000\\002ok'";
+    let runtime = lgwks_bot::Runtime::new()?;
+    let run = runtime.block_on(async {
+        let mut supervisor = Supervisor::new(1);
+        supervisor.run_process(&captured_shell(script, 4096)).await
+    })?;
+
+    let mut stream = run.stdout().bytes();
+    let frames = read_frames(&mut stream, 4096)?;
+    assert_eq!(
+        frames.ended(),
+        &FrameRead::EndOfStream,
+        "a stream that ended between records is a complete read, not a failure"
+    );
+    assert!(frames.is_complete(), "the whole stream was decoded");
+    assert!(!frames.ended().is_refusal(), "a clean end is not a refusal");
+    let payloads: Vec<&[u8]> = frames
+        .records()
+        .iter()
+        .filter_map(FrameRead::payload)
+        .collect();
+    assert_eq!(
+        payloads,
+        vec![&b"done"[..], &b"ok"[..]],
+        "both records decode to exactly what the child wrote"
+    );
+    assert_eq!(
+        frames.retained_bytes(),
+        6,
+        "every payload byte is accounted for"
+    );
+    Ok(())
+}
+
+/// A prefix declaring a length past the reader's ceiling is refused, and never
+/// allocated for.
+///
+/// The half of the framing contract that is about this crate rather than the
+/// child: a complete prefix naming more than the caller declared is refused
+/// before a byte of it is read, so a stream cannot ask for an allocation by
+/// claiming a large record.
+#[test]
+fn a_prefix_past_the_ceiling_is_refused_before_it_is_allocated() -> TestResult {
+    let mut stream: &[u8] = &[0, 0, 0, 8, 1, 2, 3, 4, 5, 6, 7, 8];
+    let frames = read_frames(&mut stream, 4)?;
+    assert_eq!(
+        frames.ended(),
+        &FrameRead::MalformedPrefix {
+            declared: 8,
+            ceiling: 4,
+        },
+        "a complete prefix naming more than remains is refused, with both numbers"
+    );
+    assert_eq!(
+        frames.retained_bytes(),
+        0,
+        "a refused record is never charged, because it was never read"
+    );
+    Ok(())
+}
+
+/// A deadline stops the whole group and says so.
 #[test]
 fn a_deadline_kill_is_reported_as_a_deadline_and_reaps_the_group() -> TestResult {
     let dir = PidDir::new("deadline")?;

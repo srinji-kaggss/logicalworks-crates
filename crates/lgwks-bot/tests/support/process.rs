@@ -151,6 +151,169 @@ fn wait_for(pgid: i32, budget: Duration, done: fn(i32) -> bool) -> bool {
     }
 }
 
+/// Wait until `path` holds a pid, up to `budget`.
+///
+/// A pid file is the event a test waits on rather than a delay it guesses at: a
+/// child that records its own pid has provably reached the point under test, and
+/// a loaded host cannot make the test act before that point.
+pub fn wait_for_pid(path: &Path, budget: Duration) -> Option<i32> {
+    let deadline = std::time::Instant::now()
+        .checked_add(budget)
+        .unwrap_or_else(std::time::Instant::now);
+    loop {
+        if let Some(pid) = read_pid(path) {
+            return Some(pid);
+        }
+        if std::time::Instant::now() >= deadline {
+            return read_pid(path);
+        }
+        std::thread::park_timeout(Duration::from_millis(5));
+    }
+}
+
+/// Whether a process with `pid` is still running, asked through `kill -0`.
+///
+/// `kill -0` delivers no signal, so the probe observes without disturbing — which
+/// is the whole requirement for an unrelated process the supervisor must not
+/// touch. It exits zero while the pid may be signalled and non-zero once it is
+/// gone, so it answers "does this pid still exist" and nothing about *why*.
+pub fn pid_is_alive(pid: i32) -> bool {
+    std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Wait until `pid` is gone, up to `budget`.
+///
+/// `None` for a pid that is still running when the budget expires, so a caller
+/// cannot report a survivor as cleaned up by reading the timeout as success.
+pub fn wait_for_pid_gone(pid: i32, budget: Duration) -> Option<()> {
+    let deadline = std::time::Instant::now()
+        .checked_add(budget)
+        .unwrap_or_else(std::time::Instant::now);
+    while pid_is_alive(pid) {
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::park_timeout(Duration::from_millis(5));
+    }
+    Some(())
+}
+
+/// Assert that one captured stream kept exactly `ceiling` bytes of `total`.
+///
+/// The four facts a captured stream must report when a child wrote past its
+/// ceiling, in one place, because every test that floods a pipe needs all four
+/// and a test checking three would pass against a reader that kept growing.
+/// `total` is the exact byte count the child wrote, so this distinguishes "kept
+/// the ceiling and counted the rest" from "kept everything" and from "grew".
+pub fn assert_capture_within_ceiling(
+    name: &str,
+    stream: &lgwks_bot::rt::process::CapturedStream,
+    ceiling: usize,
+    total: u64,
+) {
+    assert_eq!(
+        stream.bytes().len(),
+        ceiling,
+        "{name} must retain exactly its first {ceiling} bytes"
+    );
+    assert!(
+        stream.retained_capacity() <= ceiling,
+        "{name} retained {} bytes of capacity, past the {ceiling}-byte ceiling",
+        stream.retained_capacity()
+    );
+    assert!(
+        stream.truncated(),
+        "{name} wrote {total} bytes, over its {ceiling}-byte ceiling"
+    );
+    assert_eq!(
+        stream.total_bytes(),
+        total,
+        "{name} must report the exact total it saw, past its own ceiling"
+    );
+}
+
+/// The command that leaves the caller's process group, on this host.
+///
+/// A child that calls `setsid` becomes a session and group leader of its own, so
+/// the supervisor's group kill cannot reach it: that is the escape T21 needs a
+/// real process for, because an in-process fake proves nothing about whether the
+/// syscall was actually issued.
+///
+/// `setsid(1)` is absent on macOS, so the interpreters follow it. `None` means
+/// this host has none of the three, which is a recorded limit rather than a
+/// silent skip — [`escape_unavailable_reason`] names it.
+///
+/// A table rather than three branches: the candidates are data, and a branch per
+/// candidate would put the "which one did we use" fact in control flow instead of
+/// where a reader can see all three at once.
+pub fn escape_command() -> Option<EscapeCommand> {
+    ESCAPE_COMMANDS
+        .iter()
+        .find(|candidate| which(candidate.program).is_some())
+        .copied()
+}
+
+/// One way to leave the caller's process group: a program, a flag, and the source
+/// it runs under that flag.
+///
+/// A flag of `-c` runs `source` as a shell command line; a flag of `-e` runs it
+/// as interpreter source. Both call `setsid` and then sleep, which is all a
+/// caller needs: the only fact asserted downstream is that the pid landed in
+/// another group.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EscapeCommand {
+    /// The interpreter or utility to run.
+    pub program: &'static str,
+    /// The single argument that selects the third field's meaning.
+    pub flag: &'static str,
+    /// The program, or the command line, that calls `setsid` and then sleeps.
+    pub source: &'static str,
+}
+
+/// Every way this suite knows to leave a process group, in preference order.
+const ESCAPE_COMMANDS: [EscapeCommand; 3] = [
+    EscapeCommand {
+        program: "setsid",
+        flag: "sh",
+        source: "-c 'sleep 30'",
+    },
+    EscapeCommand {
+        program: "perl",
+        flag: "-e",
+        source: "use POSIX; setsid(); sleep 30",
+    },
+    EscapeCommand {
+        program: "python3",
+        flag: "-c",
+        source: "import os,time; os.setsid(); time.sleep(30)",
+    },
+];
+
+/// Why [`escape_command`] is unavailable, as a sentence a test may report.
+///
+/// The recorded reason a skip is allowed to carry. A test that cannot run its
+/// subject says which host capability was missing instead of passing quietly,
+/// because "the escape was not exercised" and "the escape did not happen" look
+/// identical in a green suite.
+pub fn escape_unavailable_reason() -> String {
+    String::from(
+        "no setsid(1), perl with POSIX, or python3 on this host, so a real session escape \
+         could not be performed; T21's escape case was NOT exercised",
+    )
+}
+
+/// Whether `program` is on `PATH`, without running it.
+fn which(program: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(program))
+        .find(|candidate| candidate.is_file())
+}
+
 /// Wait for group `pgid` to disappear, up to `budget`.
 pub fn wait_group_gone(pgid: i32, budget: Duration) -> bool {
     wait_for(pgid, budget, group_is_gone)
