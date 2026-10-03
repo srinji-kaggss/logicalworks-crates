@@ -160,6 +160,29 @@ explicitly under that crate.
 
 ### lgwks_bot Added
 
+- `domain::gh::read_diff`, a bounded changed-file inventory for the PR-review
+  subject (#87 step 6, T31): `Gh::read_diff` reads a pull request's changed
+  files as **data** and bounds them on two separate axes — at most
+  `MAX_DIFF_FILES_PER_PULL` files (`GhError::DiffFileCeiling`) and at most
+  `MAX_DIFF_BYTES` bytes of patch text (`GhError::DiffTooLarge`) — refusing the
+  whole inventory rather than truncating it. A server that declines to render
+  the diff (`406`) is `GhError::DiffUnavailable`. A renamed repository is
+  `GhError::MovedRepository` naming both the requested and canonical
+  repositories, so the subject identity is never silently re-pointed. A client
+  that names an HTTP `401`/`403`/`404` is `GhError::Unauthorized` rather than a
+  transport failure. `GhOutcome::http_status` exposes the status the client
+  named. No file in the inventory — including a `build.rs` — is compiled,
+  imported, built, shelled or loaded (INV-BOT-21).
+- `ReviewOutcome::{Incomplete, Pending, Partial, Unverified}` (#87 step 6,
+  T31/T33/T34): an unavailable or over-ceiling diff is an `Incomplete` coverage
+  decision (nothing is published); a lost response reconciled onto an
+  unsubmitted draft is `Pending`; a submitted review that landed with fewer
+  inline comments than intended is `Partial` with both counts; and a create
+  that returned an id whose read-back lost permission is `Unverified` with the
+  applied review id retained. No path issues a second create, and a read that
+  failed for any other reason stays `Unknown`. `ReviewComment`,
+  `ReviewPayload::with_comments` and `ReviewRecord`'s comment-count comparison
+  carry the inline comments the partial check reads. INV-BOT-81.
 - More than one million task executions in flight at once on one node, measured
   (#152 §4). `tests/task_million.rs` (opt-in, `LGWKS_MILLION=1`) admits
   1,048,576 `Host::run` executions across sixteen tenant hosts, each saturated

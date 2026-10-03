@@ -54,7 +54,7 @@
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use lgwks_bot::domain::gh::{CommitId, Gh, PullRequest, Repository};
+use lgwks_bot::domain::gh::{CommitId, Gh, PullRequest, Repository, ReviewComment};
 use lgwks_bot::review::{ReviewOutcome, ReviewRequest};
 use lgwks_bot::script::Scope;
 use lgwks_bot::task::{Host, Report, Task, task};
@@ -259,6 +259,10 @@ impl Run {
                         ref current,
                     } => text_hash(&format!("moved:{reviewed}:{current}")).to_string(),
                     ReviewOutcome::Refused { .. } => String::from("refused"),
+                    ReviewOutcome::Incomplete { .. } => String::from("incomplete"),
+                    ReviewOutcome::Pending { .. } => String::from("pending"),
+                    ReviewOutcome::Partial { .. } => String::from("partial"),
+                    ReviewOutcome::Unverified { .. } => String::from("unverified"),
                     // A state this journey does not model yet. Named rather
                     // than collapsed, because the two facts a caller most needs
                     // to tell apart are "something else happened" and "nothing
@@ -1482,6 +1486,318 @@ fn two_repositories_on_one_host_r16() -> TestResult {
                 .iter()
                 .all(|payload| !payload.contains("other/gadgets")),
             "seed {index}: no payload crossed into the other repository"
+        );
+    }
+    Ok(())
+}
+
+// ── Subject, coverage and partial-submission family (T31, T33, T34) ─────────
+
+/// The fault family the subject/coverage/partial/permission rows sweep.
+///
+/// Named rather than indexed so a family's fault and its expectation read
+/// together, and exhaustive over the states those rows name: a rename, an
+/// unavailable diff, each diff ceiling, an unsubmitted draft, a partial
+/// submission, and a lost read permission.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum SubjectFault {
+    /// Everything works; the create answers and the read-back finds it whole.
+    Clean,
+    /// The repository answers with a renamed-repository redirect.
+    Moved,
+    /// The server declines to render the diff.
+    DiffUnavailable,
+    /// The changed-file inventory is past its file-count ceiling.
+    DiffOverFiles,
+    /// The changed-file patch text is past its byte ceiling.
+    DiffOverBytes,
+    /// The create landed as an unsubmitted draft and its response was lost.
+    PendingDraft,
+    /// The create landed with fewer inline comments than intended, response lost.
+    PartialComments,
+    /// The create landed and the read-back lost permission.
+    ReadDenied,
+}
+
+impl SubjectFault {
+    /// How many faults the family contains.
+    const VARIANTS: u64 = 8;
+
+    /// Every fault's label, so a coverage test does not re-list the enum.
+    const LABELS: [&'static str; 8] = [
+        "clean",
+        "moved",
+        "diff-unavailable",
+        "diff-over-files",
+        "diff-over-bytes",
+        "pending-draft",
+        "partial-comments",
+        "read-denied",
+    ];
+
+    /// The fault for `index`.
+    const fn for_index(index: u64) -> Self {
+        match index % Self::VARIANTS {
+            0 => Self::Clean,
+            1 => Self::Moved,
+            2 => Self::DiffUnavailable,
+            3 => Self::DiffOverFiles,
+            4 => Self::DiffOverBytes,
+            5 => Self::PendingDraft,
+            6 => Self::PartialComments,
+            _ => Self::ReadDenied,
+        }
+    }
+
+    /// A short label, for the trace and for the failure message.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Moved => "moved",
+            Self::DiffUnavailable => "diff-unavailable",
+            Self::DiffOverFiles => "diff-over-files",
+            Self::DiffOverBytes => "diff-over-bytes",
+            Self::PendingDraft => "pending-draft",
+            Self::PartialComments => "partial-comments",
+            Self::ReadDenied => "read-denied",
+        }
+    }
+
+    /// Whether a run under this fault may report a verified publication.
+    ///
+    /// Only the clean world can: every other fault is a refusal, a coverage
+    /// decision or an unverified effect, and a run that reported `Published`
+    /// under one would be reporting an effect it did not observe.
+    const fn can_be_verified(self) -> bool {
+        matches!(self, Self::Clean)
+    }
+
+    /// How much of a call's answer the family must retain for this fault.
+    ///
+    /// The two ceiling faults build an answer larger than the default capture,
+    /// so their envelope is raised: the refusal under test is the *diff*
+    /// ceiling, not the capture bound.
+    const fn capture(self) -> usize {
+        match self {
+            Self::DiffOverFiles | Self::DiffOverBytes => 4 * 1024 * 1024,
+            _ => CAPTURE,
+        }
+    }
+}
+
+/// The two inline comments a partial-submission run intends.
+fn two_comments() -> Vec<ReviewComment> {
+    vec![
+        ReviewComment::new("src/a.rs", 1, "first comment"),
+        ReviewComment::new("src/b.rs", 2, "second comment"),
+    ]
+}
+
+/// The scenario a subject fault describes.
+fn subject_scenario(fault: SubjectFault, head: &str) -> Scenario {
+    let scenario = Scenario::new(head);
+    match fault {
+        SubjectFault::Clean => scenario,
+        SubjectFault::Moved => scenario.repository_moved(),
+        SubjectFault::DiffUnavailable => scenario.diff_unavailable(),
+        SubjectFault::DiffOverFiles => scenario.with_filler_files(
+            u32::try_from(lgwks_bot::domain::gh::MAX_DIFF_FILES_PER_PULL)
+                .unwrap_or(0)
+                .saturating_add(1),
+        ),
+        SubjectFault::DiffOverBytes => scenario.with_diff_bytes(
+            u32::try_from(lgwks_bot::domain::gh::MAX_DIFF_BYTES)
+                .unwrap_or(0)
+                .saturating_add(64),
+        ),
+        SubjectFault::PendingDraft => scenario.records_pending_draft(),
+        SubjectFault::PartialComments => scenario.records_partial_comments(1),
+        SubjectFault::ReadDenied => scenario.deny_reads(),
+    }
+}
+
+/// Run one seed's subject fault through the real path.
+fn run_subject_seed(index: u64) -> Result<(SubjectFault, Run), Box<dyn std::error::Error>> {
+    let fault = SubjectFault::for_index(index);
+    let host = host()?;
+    let job = review_task()?;
+    let fake = FakeGh::install(fault.label(), HEAD)?;
+    fake.configure(subject_scenario(fault, HEAD))?;
+
+    let mut request = request(7)?;
+    if fault == SubjectFault::PartialComments {
+        request = request.with_comments(two_comments());
+    }
+    let report = host.block_on(&job, (gh_for(&fake, fault.capture())?, request))?;
+    let argv = normalized_argv(&fake.calls()?);
+    Ok((
+        fault,
+        Run {
+            report,
+            creates: fake.creates()?,
+            argv,
+        },
+    ))
+}
+
+/// The subject family: every fault reaches its own distinct outcome, and none
+/// but the clean world reports a publication.
+#[test]
+fn subject_coverage_and_partial_faults_r32() -> TestResult {
+    let mut seen = std::collections::HashSet::new();
+    for index in 0..SEEDS {
+        let (fault, run) = run_subject_seed(index)?;
+        seen.insert(fault.label());
+
+        assert!(
+            run.creates <= 1,
+            "seed {index} ({}): a run publishes at most once, never a duplicate post\n{}",
+            fault.label(),
+            run.argv
+        );
+
+        let Some(outcome) = run.report.output() else {
+            return Err(format!(
+                "seed {index} ({}): a reported refusal, not a run failure: {}",
+                fault.label(),
+                run.report
+                    .error()
+                    .map_or_else(String::new, ToString::to_string)
+            )
+            .into());
+        };
+        assert_eq!(
+            outcome.is_published(),
+            fault.can_be_verified(),
+            "seed {index} ({}): a verified publication is reported exactly when the \
+             fault allows an independent read to succeed: {outcome:?}",
+            fault.label()
+        );
+        match fault {
+            SubjectFault::Clean => {}
+            SubjectFault::Moved => assert!(
+                matches!(outcome, ReviewOutcome::Refused { .. }),
+                "seed {index}: a rename is a refusal: {outcome:?}"
+            ),
+            SubjectFault::DiffUnavailable
+            | SubjectFault::DiffOverFiles
+            | SubjectFault::DiffOverBytes => assert!(
+                outcome.is_incomplete(),
+                "seed {index} ({}): a diff that cannot be read whole is an incomplete \
+                 coverage: {outcome:?}",
+                fault.label()
+            ),
+            SubjectFault::PendingDraft => assert!(
+                outcome.is_pending(),
+                "seed {index}: a lost response onto a draft is Pending: {outcome:?}"
+            ),
+            SubjectFault::PartialComments => assert!(
+                outcome.is_partial(),
+                "seed {index}: a submission with fewer comments than intended is \
+                 Partial: {outcome:?}"
+            ),
+            SubjectFault::ReadDenied => assert!(
+                outcome.is_unverified(),
+                "seed {index}: a lost read permission after a create is Unverified: {outcome:?}"
+            ),
+        }
+    }
+    for expected in SubjectFault::LABELS {
+        assert!(
+            seen.contains(expected),
+            "the family must reach {expected:?}; it reached {seen:?}"
+        );
+    }
+    Ok(())
+}
+
+/// The same seed must produce the same subject trace, through the real path.
+#[test]
+fn same_seed_same_trace_hash_subject_r32() -> TestResult {
+    for index in 0..SEEDS {
+        let (first_fault, first) = run_subject_seed(index)?;
+        let (second_fault, second) = run_subject_seed(index)?;
+        assert_eq!(
+            first_fault, second_fault,
+            "seed {index} selects one fault twice"
+        );
+        assert_eq!(
+            trace_hash(&first.trace()),
+            trace_hash(&second.trace()),
+            "seed {index} ({}) must replay exactly: {:?} vs {:?}",
+            first_fault.label(),
+            first.trace(),
+            second.trace()
+        );
+        assert_eq!(
+            first.argv,
+            second.argv,
+            "seed {index} ({}) must issue the same calls twice",
+            first_fault.label()
+        );
+    }
+    Ok(())
+}
+
+/// Two identities on one pull request each verify only their own review.
+#[test]
+fn two_identities_subject_r16() -> TestResult {
+    for index in 0..16u64 {
+        let fake = FakeGh::install("subject-tenants", HEAD)?;
+        fake.configure(Scenario::new(HEAD))?;
+        let host = host()?;
+        let path = fake.search_path()?;
+
+        let run_tenant = |body: &'static str| -> Result<ReviewOutcome, Box<dyn std::error::Error>> {
+            let job = task(
+                "review-pr",
+                move |scope: Scope, (gh, request): (Gh, ReviewRequest)| async move {
+                    lgwks_bot::review::review_pr(scope, gh, request, move |_s, _scope| {
+                        Ok(String::from(body))
+                    })
+                    .await
+                },
+            )?;
+            let gh = Gh::new(Repository::new("acme/widgets")?)
+                .program(fake.program())
+                .capture_limit(NonZeroUsize::new(CAPTURE).ok_or("a non-zero limit")?)
+                .deadline(Some(Duration::from_secs(20)))
+                .env("PATH", &path);
+            let request = ReviewRequest::new(pull(7)?, "COMMENT", body).with_marker(body);
+            let report = host.block_on(&job, (gh, request))?;
+            report
+                .output()
+                .cloned()
+                .ok_or_else(|| "each identity must produce an outcome".into())
+        };
+
+        let first = run_tenant("first identity")?;
+        let second = run_tenant("second identity")?;
+        assert!(
+            first.is_published() && second.is_published(),
+            "seed {index}: both identities publish independently: {first:?} {second:?}"
+        );
+        assert_ne!(
+            first.review_id(),
+            second.review_id(),
+            "seed {index}: two identities must verify two distinct reviews: {first:?} {second:?}"
+        );
+        let payloads = fake.received()?;
+        assert_eq!(
+            payloads
+                .iter()
+                .filter(|payload| payload.contains("first identity"))
+                .count(),
+            1,
+            "seed {index}: exactly one payload carries the first identity's body"
+        );
+        assert_eq!(
+            payloads
+                .iter()
+                .filter(|payload| payload.contains("second identity"))
+                .count(),
+            1,
+            "seed {index}: exactly one payload carries the second identity's body"
         );
     }
     Ok(())
