@@ -69,7 +69,7 @@ crates/lgwks-bot/src/rt/supervise.rs:1297	let end =
 crates/lgwks-bot/src/rt/supervise.rs:2637	if let Some(text) = payload.downcast_ref::<String>() {
 crates/lgwks-bot/src/rt/supervise.rs:2650	if kept.len() < text.len() {
 crates/lgwks-bot/src/rt/supervise.rs:2673	/// private interval of iterations the loop yields to the executor, so a
-crates/lgwks-bot/src/rt/supervise.rs:2698	/// so a caller that never asks for a clock observes the behaviour it always
+crates/lgwks-bot/src/rt/supervise.rs:2698	/// [`repeat`], so a caller that never asks for a clock observes the behaviour it
 crates/lgwks-bot/src/rt/task.rs:170	where
 crates/lgwks-bot/src/semantic.rs:13	//! This tier is consulted only when the lexicon returns [`Resolution::Absent`] —
 crates/lgwks-bot/src/semantic.rs:117	pub trait Embedder {
