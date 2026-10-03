@@ -96,7 +96,8 @@ impl GrantSet {
     /// grant that reaches past its ticket, and "past" is only decidable over the
     /// whole grant. Asking `grants` about a list of candidates instead misses
     /// every capability the list does not name, and `Cap::new` accepts any
-    /// dotted name.
+    /// dotted name. Gated with `task`, its one caller's module.
+    #[cfg(feature = "script")]
     pub(crate) fn caps(&self) -> impl Iterator<Item = &Cap> {
         self.granted.iter()
     }
