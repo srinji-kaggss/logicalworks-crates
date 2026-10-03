@@ -42,6 +42,15 @@ explicitly under that crate.
   **Migration:** a caller whose task returns a value that is not archivable must
   return a `Durable` one, or route the run through `Host::run` plus an explicit
   run id it owns rather than a resume.
+- `Host::repair` settles a request too. A request `Host::submit` started that
+  blocked on authority records no verdict (`Blocked` is not the request's
+  outcome), and the repair is the attempt that reaches one — but it did not
+  record it, so a key repaired to success still answered `InFlight` to every
+  later submission until a separate `Host::resume` ran. The repair now settles
+  under the same rule as `resume`, and the key reattaches, from a reopened store
+  as well (`tests/request_key.rs::a_repaired_request_is_settled_and_reattaches`).
+- **Breaking:** `Host::repair` now requires `O: lgwks_bot::script::Durable`, for
+  the reason `Host::resume` does. **Migration:** as for `Host::resume`.
 
 ### lgwks_std Breaking
 

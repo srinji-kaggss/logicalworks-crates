@@ -1547,6 +1547,16 @@ impl Host {
     /// Every [`RepairError`] above. On success the returned [`Report`] is the run's
     /// own report — it is the same run, resumed, not a second run — so its output,
     /// its disposition and its step trail describe what the repaired run did.
+    ///
+    /// # A repaired request is settled
+    ///
+    /// A run [`Host::submit`] started and that blocked records no verdict
+    /// (`Blocked` is not the request's outcome: a repair can still move it), so
+    /// the repair is the attempt that reaches one, and it settles the request
+    /// exactly as [`Host::resume`] does. Without that, a blocked request repaired
+    /// to success would still answer [`Submission::InFlight`] to every later
+    /// submission of its key. `O: Durable` for the same reason as on
+    /// [`Host::resume`]: a recorded verdict is made of an archived output.
     pub async fn repair<I, O, F, Fut>(
         &self,
         ticket: &RepairTicket,
@@ -1556,9 +1566,11 @@ impl Host {
         spend: u64,
     ) -> Result<Report<O>, RepairError>
     where
+        O: Durable,
         F: Fn(Scope, I) -> Fut,
         Fut: Future<Output = Result<O, FlowError>>,
     {
+        let started = Instant::now();
         let ledger = self.inner.ledger.as_ref().ok_or(RepairError::NoLedger)?;
         if ticket.tenant() != self.inner.tenant.as_str() {
             return Err(RepairError::ForeignTenant {
@@ -1584,8 +1596,11 @@ impl Host {
             });
         }
         let delta = ticket.delta();
-        Ok(self
+        let report = self
             .execute(task, input, Some(ticket.run()), Some(ticket), &delta, spend)
+            .await;
+        Ok(self
+            .settle_request(ticket.run(), task.name_owned(), started, report)
             .await)
     }
 
