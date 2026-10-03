@@ -37,6 +37,7 @@ use lgwks_bot::rt::clock::{Clock, ClockError, TimeSource};
 use lgwks_bot::rt::supervise::{Budget, Outcome, Supervisor, TaskOutcome};
 use lgwks_bot::rt::task::JoinSet;
 use lgwks_bot::script::{Scope, Tenant};
+use lgwks_bot::task::{Disposition, Report};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
@@ -943,18 +944,12 @@ fn only_the_tenant_whose_clock_advanced_is_refused() -> Result<(), Box<dyn std::
         (acme_report, globex_report)
     });
 
-    assert_eq!(
-        acme_report.disposition(),
+    assert_spent_refused_and_idle_succeeded(
+        &acme_report,
         Disposition::DeadlineExceeded,
-        "acme's body spent acme's 60-second budget, so its run must report \
-         DeadlineExceeded ({:?})",
-        acme_report.error()
-    );
-    assert_eq!(
-        globex_report.disposition(),
+        &globex_report,
         Disposition::Succeeded,
-        "globex spent nothing, so its run must succeed ({:?})",
-        globex_report.error()
+        "60-second",
     );
 
     // The decisive isolation claim: acme's advance moved acme's clock and left
@@ -1054,17 +1049,12 @@ fn two_tenants_racing_the_same_task_id_stay_separate_under_their_own_clocks()
         .flatten()
         .ok_or("globex's body recorded no clock reading")?;
 
-    assert_eq!(
-        acme_report.disposition(),
+    assert_spent_refused_and_idle_succeeded(
+        &acme_report,
         Disposition::DeadlineExceeded,
-        "acme spent its own budget while globex was running, so acme alone must be refused ({:?})",
-        acme_report.error()
-    );
-    assert_eq!(
-        globex_report.disposition(),
+        &globex_report,
         Disposition::Succeeded,
-        "globex spent nothing while acme was running, so globex must succeed ({:?})",
-        globex_report.error()
+        "60-second",
     );
 
     // The reading each body took *during* the race: globex's must show the
@@ -1087,6 +1077,36 @@ fn two_tenants_racing_the_same_task_id_stay_separate_under_their_own_clocks()
         "acme's concurrent run must not leave a mark on globex's clock"
     );
     Ok(())
+}
+
+/// The pair of verdicts every isolation row in this family must produce: the
+/// tenant that spent its own budget is refused, and the one that spent nothing
+/// succeeds.
+///
+/// Written once because two rows assert it and the assertion is the family:
+/// the sequential twin and the joined race differ in *scheduling*, and a
+/// difference in verdicts between them is exactly the defect the second exists
+/// to find. Stating it in one place keeps the two rows from drifting into
+/// asserting different things under the same name.
+fn assert_spent_refused_and_idle_succeeded<O>(
+    spent: &Report<O>,
+    spent_want: Disposition,
+    idle: &Report<O>,
+    idle_want: Disposition,
+    shape: &str,
+) {
+    assert_eq!(
+        spent.disposition(),
+        spent_want,
+        "the tenant that spent its own {shape} budget must be refused ({:?})",
+        spent.error()
+    );
+    assert_eq!(
+        idle.disposition(),
+        idle_want,
+        "the tenant that spent nothing {shape} must be unaffected ({:?})",
+        idle.error()
+    );
 }
 
 #[test]
