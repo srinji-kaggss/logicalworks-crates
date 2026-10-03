@@ -354,7 +354,15 @@ pub use spec::{Admission, Bot, BotSpec, Need, NeedSet};
 #[cfg(feature = "script")]
 pub use lgwks_macros::script;
 pub use verb::EffectLifetime;
-pub use verb::{Evaluate, Execute, Observe, Query, RefreshReason};
+/// Why a source cannot be trusted to answer "has this changed?" this tick, and the
+/// statement it makes through [`Observe::cache_state`](crate::verb::Observe::cache_state).
+///
+/// Re-exported on its own line rather than inside the four-verb list below,
+/// because it is not a verb. `verb::tests::the_crate_root_reexports_exactly_those_four_verbs`
+/// reads that list as the four verbs and nothing else, so a fifth name beside them
+/// would make the invariant it guards fail for a type that is not a verb.
+pub use verb::RefreshReason;
+pub use verb::{Evaluate, Execute, Observe, Query};
 
 /// Typed in-process structural inspection (feature `inspect`).
 ///

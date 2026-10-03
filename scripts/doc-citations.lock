@@ -30,10 +30,10 @@ crates/lgwks-bot/src/ecs.rs:4034	.initialize(world)
 crates/lgwks-bot/src/ecs.rs:4264	pub fn name(&self) -> &str {
 crates/lgwks-bot/src/ecs.rs:4379	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
 crates/lgwks-bot/src/ecs.rs:4491	pub fn tick(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:4782	async fn run_steps(
-crates/lgwks-bot/src/ecs.rs:5531	pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
-crates/lgwks-bot/src/ecs.rs:5683	for chain in &chains {
-crates/lgwks-bot/src/ecs.rs:5700	world.insert_resource(Grants(grants.clone()));
+crates/lgwks-bot/src/ecs.rs:4791	async fn run_steps(
+crates/lgwks-bot/src/ecs.rs:5540	pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
+crates/lgwks-bot/src/ecs.rs:5692	for chain in &chains {
+crates/lgwks-bot/src/ecs.rs:5709	world.insert_resource(Grants(grants.clone()));
 crates/lgwks-bot/src/error.rs:151	/// handed may be the one that owns the runtime's driver. Parked, that
 crates/lgwks-bot/src/gate.rs:12	pub struct GrantSet {
 crates/lgwks-bot/src/gate.rs:44	pub fn grant(mut self, cap: Cap) -> Self {

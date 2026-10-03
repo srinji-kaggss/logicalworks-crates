@@ -53,7 +53,7 @@ a transition, and a chain with a transition outstanding is walked whether or not
 it moved — and records one ordered `Step` per condition that held
 (`crates/lgwks-bot/src/ecs.rs:3757`); the `run_steps` pass then awaits those steps
 on the caller's executor in exactly that order
-(`crates/lgwks-bot/src/ecs.rs:4782`). It breaks on the first failure and records
+(`crates/lgwks-bot/src/ecs.rs:4791`). It breaks on the first failure and records
 it, and there is no rollback:
 
 ```rust,ignore

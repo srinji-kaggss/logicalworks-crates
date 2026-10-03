@@ -935,23 +935,15 @@ fn an_intermediate_value_is_reported_as_superseded_rather_than_fired_or_retired(
         "settling generation 1 admits the newest committed value — 3 — and that is \
          the one that runs. Value 2 never ran, which is what the pass-over reported."
     );
-    // Each pass-over is reported on the tick that caused it. This tick's pass-over
-    // names value 3, because settling generation 1 admitted value 4 and value 3
-    // was the last value nothing had acted on. One pass-over per overtaken value
-    // is the property: a report that repeated the earlier one would be
-    // indistinguishable from "several values were skipped on this tick".
-    let overtaken = bot.tick_report().superseded().first().copied();
+    // No pass-over on the settling tick. Settling generation 1 admits value 3 and
+    // runs it, so nothing was overtaken: a pass-over is a value that was never
+    // acted on, and 3 was. Reporting one here would be the same defect in the
+    // other direction — a healthy bot claiming it skipped a state it did not.
     assert_eq!(
-        overtaken.map(|entry| (entry.chain(), entry.revision())),
-        Some((0, 3)),
-        "settling generation 1 admits value 4, so the value it replaces — value 3, \
-         committed and never acted on — is the pass-over this tick reports"
-    );
-    assert_eq!(
-        bot.tick_report().superseded().len(),
-        1,
-        "one pass-over per overtaken value, not a running total: an earlier \
-         pass-over re-reported here would say two values were skipped on one tick"
+        bot.tick_report().superseded(),
+        &[],
+        "admitting the newest value is not itself a pass-over: value 3 was admitted \
+         here, so nothing unacted was replaced"
     );
     Ok(())
 }

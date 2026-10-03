@@ -133,7 +133,7 @@ makes the proof load-bearing rather than decorative.
 
 `Observe::Output` must be `PartialEq`. `EcsObserveBuilder::observe` is where the
 requirement lands, on the call that closes a chain
-(`crates/lgwks-bot/src/ecs.rs:5531`), because the condition on this executor *is*
+(`crates/lgwks-bot/src/ecs.rs:5540`), because the condition on this executor *is*
 bevy's change detection, and a value that cannot be compared cannot be detected
 as changed. `Observe::poll` is `async fn` returning a future that is
 deliberately not `Send` (`crates/lgwks-bot/src/verb.rs`), so a domain may hold
@@ -146,7 +146,7 @@ it a `condition_id`.
 
 `Execute::execute_action` takes `(Auth, &Self::Input)`. The tick awaits each one
 before starting the next, in declaration order
-(`crates/lgwks-bot/src/ecs.rs:4782`), so the effects fire in the order you wrote
+(`crates/lgwks-bot/src/ecs.rs:4791`), so the effects fire in the order you wrote
 the `.on` calls.
 
 `build(&grants)` returns `Result<Bot, BotError>`. Two things make it fail:

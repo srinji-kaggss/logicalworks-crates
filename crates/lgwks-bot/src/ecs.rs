@@ -4623,17 +4623,26 @@ impl EcsBot {
                 let seen = self.world.non_send::<Observed>();
                 let ledger = self.world.non_send::<Ledger>();
                 let grants = self.world.resource::<Grants>();
-                let baseline = declared
+                // `None` here means *the source declared nothing*, which is the
+                // ordinary case and must hand the baseline over — so the two are
+                // separated by an explicit test, not by an `and_then` over the
+                // option. `and_then` treats "no declaration" and "declares
+                // nothing usable" as the same `None` and drops the baseline in
+                // the first case, which is how every poll started reading as a
+                // fresh read and every tick looked like a movement.
+                let unsound = declared
                     .get(index)
                     .copied()
                     .flatten()
-                    .filter(|reason| !reason.invalidates_baseline())
-                    .and_then(|_| {
-                        seen.0
-                            .get(index)
-                            .and_then(|slot| slot.as_ref())
-                            .or_else(|| ledger.bound(index))
-                    });
+                    .is_some_and(|reason| reason.invalidates_baseline());
+                let baseline = if unsound {
+                    None
+                } else {
+                    seen.0
+                        .get(index)
+                        .and_then(|slot| slot.as_ref())
+                        .or_else(|| ledger.bound(index))
+                };
                 chain.source.poll_any(&grants.0, baseline)
             }));
             let results = batch.await;
