@@ -544,7 +544,7 @@ impl FailAfterReady {
 /// same readiness re-signalled. That is what makes a stale signal refused rather
 /// than accepted: the old instance holds a handle to a readiness that has
 /// already settled, and any signal it sends is refused against that readiness's
-/// own released generation. See [`Readiness::fail_after_ready`] for the
+/// own released generation. See [`Readiness::fail`] for the
 /// alternative, where one readiness outlives its release and records the failure
 /// on itself.
 #[derive(Debug)]
@@ -885,12 +885,12 @@ impl<T: Clone> Readiness<T> {
     /// Signal that the instance at `generation` failed, with `reason`.
     ///
     /// A failure **before** the release settles the readiness as
-    /// [`Settled::Failed`] and every dependant waiting on it observes the
-    /// failure through [`Readiness::wait`]. A failure **after** the release also
+    /// a failure and every dependant waiting on it observes it through
+    /// [`Readiness::wait`]. A failure **after** the release also
     /// cancels every dependant that was admitted, which is what makes a service
     /// that dies mid-flight reach the dependants still running instead of leaving
     /// them talking to a dead process — see
-    /// [`Readiness::fail_after_ready`] and the module docs.
+    /// [`Readiness::fail`] and the module docs.
     ///
     /// Idempotent in the same way [`Readiness::ready`] is: a second failure for
     /// the same generation is [`ReadinessError::AlreadyFailed`] and cancels

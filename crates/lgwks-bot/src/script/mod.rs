@@ -60,6 +60,7 @@
 //! [`Tenant`]: crate::script::Tenant
 //! [`StepKey`]: crate::script::StepKey
 //! [`Architecture`]: crate::script::Architecture
+//! [`Readiness`]: crate::script::Readiness
 
 mod control;
 mod each;
