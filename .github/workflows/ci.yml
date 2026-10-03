@@ -37,6 +37,12 @@ jobs:
         with:
           toolchain: "1.98.0"
           components: clippy, rustfmt
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore on every run, save only from `main`: a pull request reads the
+          # last merged build instead of writing a cache entry per branch.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Verify lockfile is up-to-date
         run: >
           cargo metadata --locked --format-version 1 >/dev/null ||
@@ -70,6 +76,12 @@ jobs:
         with:
           toolchain: "1.98.0"
           components: rustfmt
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore on every run, save only from `main`: a pull request reads the
+          # last merged build instead of writing a cache entry per branch.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -95,6 +107,12 @@ jobs:
         with:
           toolchain: "1.98.0"
           components: clippy
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore on every run, save only from `main`: a pull request reads the
+          # last merged build instead of writing a cache entry per branch.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install nextest
         uses: taiki-e/install-action@nextest
       - name: Run all workspace tests
@@ -118,6 +136,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.98.0"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore on every run, save only from `main`: a pull request reads the
+          # last merged build instead of writing a cache entry per branch.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install nextest
         uses: taiki-e/install-action@nextest
       - name: Run lgwks-bot no-default-feature tests
@@ -137,10 +161,34 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.98.0"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore on every run, save only from `main`: a pull request reads the
+          # last merged build instead of writing a cache entry per branch.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install nextest
         uses: taiki-e/install-action@nextest
       - name: Run lgwks-bot async runner tests
         run: cargo nextest run -p lgwks_bot --all-targets --locked --features full
+
+  bench_fairness:
+    # Its own job: it builds a separate workspace root in release, and run after
+    # the bot suite in one job it added that build to the slowest job's wall.
+    name: Async fairness gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.98.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bench/async
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Async fairness gate and concurrency ladder
         run: cargo run --release --manifest-path bench/async/Cargo.toml -- --mutant-check && cargo run --release --manifest-path bench/async/Cargo.toml -- --tiers && cargo run --release --manifest-path bench/async/Cargo.toml -- --matrix
 
@@ -157,6 +205,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.98.0"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore on every run, save only from `main`: a pull request reads the
+          # last merged build instead of writing a cache entry per branch.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install nextest
         uses: taiki-e/install-action@nextest
       - name: Build storefront consumers
@@ -172,6 +226,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.98.0"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore on every run, save only from `main`: a pull request reads the
+          # last merged build instead of writing a cache entry per branch.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install nextest
         uses: taiki-e/install-action@nextest
       - name: Check successful simulation result
@@ -187,6 +247,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.98.0"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore on every run, save only from `main`: a pull request reads the
+          # last merged build instead of writing a cache entry per branch.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check successful end-to-end journey result
         run: python3 scripts/ci_local.py --lane debug-e2e
 
@@ -201,6 +267,12 @@ jobs:
         with:
           toolchain: "1.98.0"
           components: clippy
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore on every run, save only from `main`: a pull request reads the
+          # last merged build instead of writing a cache entry per branch.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Clippy all workspace targets
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Clippy feature matrix
@@ -242,6 +314,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.98.0"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore on every run, save only from `main`: a pull request reads the
+          # last merged build instead of writing a cache entry per branch.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Doc build with broken-link denial
         # Every feature on, per crate (gpui excluded: it needs the Xcode Metal
         # toolchain and is covered by the gpui-macos job, not ubuntu lanes).
@@ -309,6 +387,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.98.0"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore on every run, save only from `main`: a pull request reads the
+          # last merged build instead of writing a cache entry per branch.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check lgwks-std feature matrix
         run: |
           set -eu
@@ -343,6 +427,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.98.0"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore on every run, save only from `main`: a pull request reads the
+          # last merged build instead of writing a cache entry per branch.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check lgwks-bot async feature matrix
         run: |
           set -eu
@@ -426,6 +516,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.98.0"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore on every run, save only from `main`: a pull request reads the
+          # last merged build instead of writing a cache entry per branch.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check GPUI Windows renderer fixture
         run: >
           cargo check --locked
@@ -442,6 +538,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.98.0"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore on every run, save only from `main`: a pull request reads the
+          # last merged build instead of writing a cache entry per branch.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check normal GPUI renderer feature
         # The fixture is its own workspace, so by default it builds into its
         # own target directory and compiles the GPUI stack a second time.
@@ -464,6 +566,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.98.0"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore on every run, save only from `main`: a pull request reads the
+          # last merged build instead of writing a cache entry per branch.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check Candle Metal storefront features
         run: cargo check --locked -p lgwks_deps --all-targets --features ml-candle-metal,ml-tokenizers
 
@@ -487,5 +595,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.98.0"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore on every run, save only from `main`: a pull request reads the
+          # last merged build instead of writing a cache entry per branch.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run package smoke test
         run: ./scripts/lgwks-std-package-smoke.sh
