@@ -8,6 +8,31 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### Benchmarks
+
+- `bench/ai-authoring`: five fixed user profiles and a third held-out task.
+  `--profiles` takes `first-time`, `expert-hurry`, `anxious`, `misuser` and
+  `agent` and defaults to all five; each is a *fixed* persona prepended to the
+  same prompt skeleton, so the API sheet, the hidden oracle, the repair budget
+  and the `sandbox-exec` closed-book profile are identical across profiles and
+  the profile is the only thing that differs between two cells of one
+  `(model, api, task)`. `profile` is recorded in every `results.jsonl` line and
+  `summary.json` groups by `(model, api, task, profile)`.
+  The new task, `recovery`, needs host setup, a derived run identity, a task
+  helper and recovery together; its oracle has one test per clause and its
+  mutant fails `a_resume_does_not_rerun_a_completed_unit` and only that clause.
+  Three per-trial metrics are added and every existing one is kept:
+  `oracle_wall_ms` and `oracle_peak_rss_bytes`, both taken under
+  `/usr/bin/time -l` (the RSS parser reads macOS's value-before-label form and
+  GNU's kibibyte form), and `cleanup_ok`, which reads the task's drop clause and
+  reports `false` for a crate that never compiled.
+  **This is not a measurement of human authorability and no person was
+  consulted.** The README's earlier claim that authorability "needs the
+  Director" is replaced by a statement of what the profile axis does and does
+  not reach. `recovery` has no old-API cell, and the reason is recorded in each
+  run's `protocol.skipped_cells`: the old `rt` surface has no durable run store,
+  no `remember`, no run identity and no resume, so it cannot express the task.
+
 ### lgwks_bot Breaking
 
 - `task::StoreError`: a new `FormatVersion { found, expected }` variant, and the

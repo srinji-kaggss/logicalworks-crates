@@ -20,6 +20,13 @@ bench/*/target/
 # a few hundred megabytes of derived build output.
 crates/*/target/
 
+# A benchmark member can also be built from inside its own directory
+# (`cd bench/ai-authoring/support && cargo build -p ai_task_support`), which
+# makes cargo treat that directory as a workspace root of its own and puts the
+# target beside the crate. Same reason as the two rules above: without this a
+# `git add -A` from that directory stages derived build output.
+bench/*/*/target/
+
 # HOL4 theory output: compiled objects and the signature store are derived build
 # artifacts. The proof script is the source and is committed; these are not.
 proofs/sigobj/

@@ -85,6 +85,56 @@ FRAMING = (
     "block containing the complete contents of `src/lib.rs`, and nothing else."
 )
 
+#: The five required user profiles, as fixed persona preambles.
+#:
+#: Each is prepended to the SAME prompt skeleton — same task, same API sheet,
+#: same framing, same repair budget, same sandbox — so the only thing that
+#: differs between two cells of the same (model, api, task) is the sentence
+#: below. The profiles are fixed text and never generated, because a profile
+#: that varied per trial would be a second uncontrolled variable and the
+#: comparison would be measuring the draw rather than the profile.
+#:
+#: `agent` is deliberately the last instruction in the preamble it belongs to:
+#: the framing that follows it ("reply with exactly one fenced ```rust block")
+#: is the same for every profile, so `agent` cannot be given a shorter reply
+#: contract than the others without changing more than the persona.
+PROFILES = {
+    "first-time": (
+        "You have never used this crate's orchestration API before. Read the API "
+        "sheet literally and follow it exactly as written. Where it names an item "
+        "or a signature, use that item with that signature rather than reaching "
+        "for something you remember from elsewhere. If something is not on the "
+        "sheet, it is not available to you."
+    ),
+    "expert-hurry": (
+        "You know this domain well and you are in a hurry. You are looking for "
+        "the shortest thing that might work, and you will not re-read the API "
+        "sheet's prose a second time. Skim it, write the minimal correct answer, "
+        "and stop."
+    ),
+    "anxious": (
+        "You do not trust this API to clean up after itself. Assume every "
+        "resource you start stays live unless you explicitly stop it, and assume "
+        "every fallible call needs your own error handling rather than an "
+        "implicit one. Be explicit about cleanup and about every error path."
+    ),
+    "misuser": (
+        "You are confident but mistaken. The most plausible mistake here is to "
+        "write the obvious first solution, which quietly ignores the deadline or "
+        "the path that runs when the work is dropped. Write it anyway; when the "
+        "compiler or the oracle tells you it is wrong, read what it says and fix "
+        "it from that evidence."
+    ),
+    "agent": (
+        "You are an AI coding agent working on an automated pipeline. Output only "
+        "code. Do not explain, do not ask questions, and do not produce anything "
+        "outside the single required fenced block."
+    ),
+}
+
+#: The profiles a run covers when `--profiles` is not given.
+DEFAULT_PROFILES = tuple(PROFILES)
+
 RUST_FENCE = re.compile(r"```rust[ \t]*\r?\n(.*?)```", re.DOTALL)
 ANY_FENCE = re.compile(r"```[a-zA-Z0-9_+-]*[ \t]*\r?\n(.*?)```", re.DOTALL)
 TEST_LINE = re.compile(r"^test\s+(?P<name>[A-Za-z0-9_:]+)\s+\.\.\.\s+(?P<status>ok|FAILED|ignored)")
@@ -133,6 +183,97 @@ def run_cargo(args, cwd: pathlib.Path, work: pathlib.Path, timeout: int = 1800):
         )
 
 
+#: The cleanup clause of each task: the oracle test that says a dropped future
+#: left nothing live.
+#:
+#: Spelled per task because the harness's instruments are named per task — a
+#: fetch, a stage, a unit — and "the drop clause" has to name one test rather
+#: than a shape. `cleanup_ok` reads this map, so a task whose oracle renames its
+#: drop clause stops reporting a cleanup verdict rather than silently reporting
+#: the wrong one.
+DROP_CLAUSE_BY_TASK = {
+    "aggregate": "dropping_the_future_leaves_no_fetch_live",
+    "pipeline": "dropping_the_future_leaves_no_stage_live",
+    "recovery": "dropping_the_future_leaves_no_unit_live",
+}
+
+
+def cleanup_ok(task: str, oracle: dict) -> bool:
+    """Whether the task's own drop clause passed.
+
+    The drop clause is the cleanup half of every task's contract: a task whose
+    "dropping the future leaves nothing live" test did not run — because the
+    crate never compiled — has not demonstrated cleanup at all, and reporting
+    that as a clean run would read a compile failure as a cleanup result.
+    """
+    clause = DROP_CLAUSE_BY_TASK.get(task)
+    return clause is not None and oracle.get(clause) == "pass"
+
+#: The `/usr/bin/time` that measures the oracle process. macOS's `-l` is the
+#: long form, and it is the one that reports `maximum resident set size` in
+#: bytes; without it there is no RSS number to record rather than a default one.
+TIME_BIN = "/usr/bin/time"
+
+
+def run_timed_cargo(args, cwd: pathlib.Path, work: pathlib.Path, timeout: int = 1800):
+    """Run one cargo command under `/usr/bin/time -l`, under the same gate.
+
+    The timer wraps cargo, so what is measured is the cargo invocation that runs
+    the oracle's test binary — the compile is already done by this point, so the
+    number is the oracle's own cost rather than a build's. Falls back to a plain
+    cargo call when this host has no `/usr/bin/time`, so a Linux runner still
+    produces verdicts; the peak RSS is then `None`, which says "not measured"
+    rather than reporting a number nobody took.
+    """
+    if not pathlib.Path(TIME_BIN).exists():
+        return run_cargo(args, cwd, work, timeout)
+    with cargo_gate(work):
+        return subprocess.run(
+            [TIME_BIN, "-l", "cargo", *args],
+            cwd=str(cwd),
+            env=cargo_env(work),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
+
+def parse_peak_rss(stderr: str):
+    """The peak RSS in bytes from a `/usr/bin/time -l` report, or `None`.
+
+    The line is matched by its *label*, not by its start, because macOS and GNU
+    order the two fields differently: macOS prints `67911680  maximum resident
+    set size` and GNU prints `maximum resident set size (kbytes): 67911680`.
+    Matching on the line's first token silently loses the metric on one of the
+    two — and `None` is a loss that looks like "not measured" forever.
+
+    The value is taken as the first or last token depending on which side the
+    label sits, because the units differ too: macOS reports bytes and this
+    metric is named `_bytes`, while the GNU form reports kibibytes. A GNU host
+    therefore multiplies by 1024 rather than reporting a number 1024 times too
+    small under a name that says bytes.
+    """
+    for line in stderr.splitlines():
+        parts = line.strip().split()
+        # The label is matched case-insensitively because the two forms differ
+        # in case as well as order: GNU capitalises `Maximum resident set size`
+        # and macOS does not. A case-sensitive match reads the GNU form as an
+        # absent measurement rather than a wrong one, which is the harder of the
+        # two to notice.
+        lowered = [part.lower() for part in parts]
+        if "maximum" not in lowered:
+            continue
+        label = lowered.index("maximum")
+        if label == 0:
+            # GNU order: `maximum resident set size (kbytes): <value>`.
+            candidate = parts[-1]
+            return int(candidate) * 1024 if candidate.isdigit() else None
+        # macOS order: `<value>  maximum resident set size`.
+        candidate = parts[label - 1]
+        return int(candidate) if candidate.isdigit() else None
+    return None
+
+
 # ── prompt and model I/O ─────────────────────────────────────────────────────
 
 
@@ -144,15 +285,25 @@ def read_api_sheet(api: str) -> str:
     return (API_DIR / f"{api}.md").read_text()
 
 
-def full_prompt(task: str, api: str) -> str:
-    return (
-        FRAMING
-        + "\n\n=== TASK ===\n\n"
-        + read_task_prompt(task)
-        + "\n\n=== API SHEET ===\n\n"
-        + read_api_sheet(api)
-        + "\n"
-    )
+def profile_preamble(profile: str) -> str:
+    """The fixed persona text for `profile`, or an empty string for no profile."""
+    return PROFILES.get(profile, "")
+
+
+def full_prompt(task: str, api: str, profile: str = "") -> str:
+    """The one prompt skeleton, with `profile`'s preamble in front of it.
+
+    The preamble goes first and the framing last, so the reply contract — one
+    fenced block, nothing else — is the final instruction the model reads and
+    every profile answers under the same one.
+    """
+    preamble = profile_preamble(profile)
+    parts = []
+    if preamble:
+        parts.append("=== ROLE ===\n\n" + preamble)
+    parts.append("=== TASK ===\n\n" + read_task_prompt(task))
+    parts.append("=== API SHEET ===\n\n" + read_api_sheet(api))
+    return FRAMING + "\n\n" + "\n\n".join(parts) + "\n"
 
 
 def sbpl_string(path: str) -> str:
@@ -354,6 +505,33 @@ def oracle_test_names(oracle_source: str) -> list:
     return [match.group("name") for match in TEST_FN.finditer(oracle_source)]
 
 
+#: The reference a mutant is derived from, per task.
+#:
+#: `aggregate` and `pipeline` have both an old and a new reference, so their
+#: mutants are the *old* one plus a mutation. `recovery` has only a new
+#: reference — the old `rt` surface cannot express the task at all — so its
+#: mutant is the new one plus a mutation. Naming it here rather than guessing
+#: `old-` from the task name is what keeps "the mutant is one mutation away
+#: from a reference that passes" true for a task with only one reference.
+MUTANT_BASE = {"aggregate": "old", "pipeline": "old", "recovery": "new"}
+
+#: Tasks the old `lgwks_bot::rt` surface cannot express at all, with the reason.
+#:
+#: A cell that asked a model for one of these against the old sheet would be
+#: measuring a model guessing at a capability the API does not have, and any
+#: score it produced would be about the sheet's silence rather than about the
+#: model. The reason is recorded in the run's protocol block so the omission is
+#: in the evidence rather than inferred from a missing row.
+NEW_ONLY_TASKS = {"recovery"}
+
+#: Why `recovery` has no old-API arm.
+NEW_ONLY_TASK_WHY = (
+    "the old rt surface has no durable run store, no remember, no run identity "
+    "and no resume, so it keeps no record of a completed unit to consult and "
+    "cannot express 'finish the work without redoing a completed unit'"
+)
+
+
 # ── one trial ────────────────────────────────────────────────────────────────
 
 
@@ -363,8 +541,13 @@ def run_job(job: dict, work: pathlib.Path, bot_sha: str) -> dict:
     task = job["task"]
     trial = job["trial"]
     mode = job["mode"]
+    profile = job.get("profile", "")
 
-    trial_id = f"{sanitize(model)}__{api}__{task}__t{trial}"
+    # The profile is in the trial id, so two profiles of one (model, api, task)
+    # never share a package name and therefore never share a `-C metadata`: a
+    # shared one would let one trial's oracle binary stand in for another's,
+    # which is the same defect the per-trial package name exists to prevent.
+    trial_id = f"{sanitize(model)}__{api}__{task}__{profile or 'none'}__t{trial}"
     package = package_for(trial_id)
     trial_dir = work / trial_id
     # Each run owns a fresh work directory, so a trial directory never exists
@@ -376,6 +559,8 @@ def run_job(job: dict, work: pathlib.Path, bot_sha: str) -> dict:
     scratch.mkdir()
     (scratch / "prompt.md").write_text(read_task_prompt(task))
     (scratch / "api.md").write_text(read_api_sheet(api))
+    if profile:
+        (scratch / "role.md").write_text(profile_preamble(profile))
 
     tokens_in = 0
     tokens_out = 0
@@ -384,7 +569,7 @@ def run_job(job: dict, work: pathlib.Path, bot_sha: str) -> dict:
     raw_calls = []
 
     if mode == "model":
-        source_prompt = full_prompt(task, api)
+        source_prompt = full_prompt(task, api, profile)
         try:
             stdout, stderr = call_model(job["cmd"], model, source_prompt, scratch, work)
         except subprocess.TimeoutExpired:
@@ -399,14 +584,21 @@ def run_job(job: dict, work: pathlib.Path, bot_sha: str) -> dict:
             f"mutant-{task}.rs" if mode == "mutant" else f"{api}-{task}.rs"
         )
         code = reference.read_text()
-        source_prompt = full_prompt(task, api)
+        source_prompt = full_prompt(task, api, profile)
 
     write_template(trial_dir, package)
     if mode == "mutant":
-        # A mutant is the old reference plus one mutation, never a forked copy:
-        # the reference is placed beside it as `mod reference`.
+        # A mutant is its reference plus one mutation, never a forked copy: the
+        # reference is placed beside it as `mod reference`, so the two cannot
+        # drift and a mutant that stops differing from its reference in anything
+        # but the intended mutation shows up as a diff rather than as a verdict.
+        base = MUTANT_BASE.get(task)
+        if base is None:
+            raise KeyError(f"no mutant base is declared for task {task!r}")
         (trial_dir / "src").mkdir(parents=True, exist_ok=True)
-        (trial_dir / "src" / "reference.rs").write_text((REFERENCE / f"old-{task}.rs").read_text())
+        (trial_dir / "src" / "reference.rs").write_text(
+            (REFERENCE / f"{base}-{task}.rs").read_text()
+        )
 
     compile_wall_ms = 0.0
 
@@ -446,14 +638,25 @@ def run_job(job: dict, work: pathlib.Path, bot_sha: str) -> dict:
     names = oracle_test_names(oracle_raw)
     oracle = {name: "not_run" for name in names}
     test_output = ""
+    oracle_wall_ms = 0.0
+    oracle_peak_rss_bytes = None
     if compiled:
         tests_dir = trial_dir / "tests"
         tests_dir.mkdir(exist_ok=True)
         (tests_dir / "oracle.rs").write_text(oracle_source)
-        test = run_cargo(
+        # The oracle runs under `/usr/bin/time -l`, so the wall time and the peak
+        # RSS of the *test process* are both measured rather than inferred: the
+        # `time -l` report goes to stderr, which is appended to the same stream
+        # the verdicts are parsed out of. A plain cargo invocation would give the
+        # oracle's cost as "whatever cargo printed", which is not a measurement of
+        # anything the task cares about.
+        started = time.monotonic()
+        test = run_timed_cargo(
             ["test", "--locked", "--offline", "--", "--test-threads=1"], trial_dir, work
         )
+        oracle_wall_ms = (time.monotonic() - started) * 1000.0
         test_output = (test.stdout or "") + (test.stderr or "")
+        oracle_peak_rss_bytes = parse_peak_rss(test.stderr or "")
         for line in test_output.splitlines():
             match = TEST_LINE.match(line.strip())
             if match and match.group("name") in oracle:
@@ -473,6 +676,7 @@ def run_job(job: dict, work: pathlib.Path, bot_sha: str) -> dict:
         "model": model,
         "api": api,
         "task": task,
+        "profile": profile,
         "trial": trial,
         "trial_id": trial_id,
         "mode": mode,
@@ -481,6 +685,9 @@ def run_job(job: dict, work: pathlib.Path, bot_sha: str) -> dict:
         "oracle": oracle,
         "oracle_pass_count": pass_count,
         "oracle_total": len(oracle),
+        "cleanup_ok": cleanup_ok(task, oracle),
+        "oracle_wall_ms": round(oracle_wall_ms, 3),
+        "oracle_peak_rss_bytes": oracle_peak_rss_bytes,
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
         "model_wall_ms": model_wall_ms,
@@ -506,17 +713,29 @@ def median_or_none(values):
 
 
 def summarize(records: list) -> dict:
+    """The per-`(model, api, task, profile)` aggregate, with every trial listed.
+
+    Grouping by profile is what makes the profile axis readable at all: without
+    it, five trials that each behaved differently collapse into one row and the
+    profile comparison has to be reconstructed from `results.jsonl` by hand.
+    """
     groups = {}
     for record in records:
-        key = (record["model"], record["api"], record["task"])
+        key = (
+            record["model"],
+            record["api"],
+            record["task"],
+            record.get("profile", ""),
+        )
         groups.setdefault(key, []).append(record)
     output = []
-    for (model, api, task), rows in sorted(groups.items()):
+    for (model, api, task, profile), rows in sorted(groups.items()):
         repairs = [row["repairs"] for row in rows]
         per_trial = [
             {
                 "trial": row["trial"],
                 "compiled": row["compiled"],
+                "cleanup_ok": row.get("cleanup_ok"),
                 "oracle_pass_count": row["oracle_pass_count"],
                 "oracle_total": row["oracle_total"],
                 "oracle": row["oracle"],
@@ -530,8 +749,10 @@ def summarize(records: list) -> dict:
                 "model": model,
                 "api": api,
                 "task": task,
+                "profile": profile,
                 "n": len(rows),
                 "compiled": sum(1 for row in rows if row["compiled"]),
+                "cleanup_ok_all": all(row.get("cleanup_ok") for row in rows),
                 "repairs_mean": statistics.mean(repairs) if repairs else None,
                 "repairs_median": median_or_none(repairs),
                 "oracle_pass_rate": (passed / total) if total else None,
@@ -543,6 +764,12 @@ def summarize(records: list) -> dict:
                 ),
                 "orchestration_sites_median": median_or_none(
                     [row["orchestration_sites"] for row in rows]
+                ),
+                "oracle_wall_ms_median": median_or_none(
+                    [row.get("oracle_wall_ms") for row in rows]
+                ),
+                "oracle_peak_rss_bytes_median": median_or_none(
+                    [row.get("oracle_peak_rss_bytes") for row in rows]
                 ),
             }
         )
@@ -560,7 +787,17 @@ def main() -> int:
         help="comma-separated fixed model ids",
     )
     parser.add_argument("--apis", default="old,new")
-    parser.add_argument("--tasks", default="aggregate,pipeline")
+    parser.add_argument("--tasks", default="aggregate,pipeline,recovery")
+    parser.add_argument(
+        "--profiles",
+        default=",".join(DEFAULT_PROFILES),
+        help=(
+            "comma-separated user profiles to run, each a fixed persona preamble "
+            "prepended to the same prompt skeleton (default: all five: "
+            + ", ".join(DEFAULT_PROFILES)
+            + ")"
+        ),
+    )
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--parallel", type=int, default=4)
     parser.add_argument(
@@ -596,6 +833,15 @@ def main() -> int:
     models = [item for item in args.models.split(",") if item]
     apis = [item for item in args.apis.split(",") if item]
     tasks = [item for item in args.tasks.split(",") if item]
+    profiles = [item for item in args.profiles.split(",") if item]
+    unknown = [item for item in profiles if item not in PROFILES]
+    if unknown:
+        parser.error(
+            "unknown profile(s): "
+            + ", ".join(unknown)
+            + "; the known profiles are "
+            + ", ".join(sorted(PROFILES))
+        )
     mode = "mutants" if args.mutants else ("dry" if args.dry_run else "models")
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + mode
     # A run never reuses or overwrites another run's evidence: both the work root
@@ -620,6 +866,7 @@ def main() -> int:
                     "model": "__mutant__",
                     "api": "new",
                     "task": task,
+                    "profile": "",
                     "trial": 0,
                     "cmd": args.cmd,
                     "max_repairs": 0,
@@ -628,34 +875,60 @@ def main() -> int:
     elif args.dry_run:
         for api in apis:
             for task in tasks:
-                for trial in range(args.trials):
-                    jobs.append(
-                        {
-                            "mode": "dry",
-                            "model": "__dry-run__",
-                            "api": api,
-                            "task": task,
-                            "trial": trial,
-                            "cmd": args.cmd,
-                            "max_repairs": args.max_repairs,
-                        }
-                    )
-    else:
-        for model in models:
-            for api in apis:
-                for task in tasks:
+                # The dry run proves the plumbing, so it runs the *first* profile
+                # rather than all five: the profile only reaches the prompt the
+                # model reads, and a canned solution never reads one. Five copies
+                # of the same reference would be five identical trials wearing
+                # different labels.
+                for profile in profiles[:1]:
                     for trial in range(args.trials):
                         jobs.append(
                             {
-                                "mode": "model",
-                                "model": model,
+                                "mode": "dry",
+                                "model": "__dry-run__",
                                 "api": api,
                                 "task": task,
+                                "profile": profile,
                                 "trial": trial,
                                 "cmd": args.cmd,
                                 "max_repairs": args.max_repairs,
                             }
                         )
+    else:
+        for model in models:
+            for api in apis:
+                for task in tasks:
+                    for profile in profiles:
+                        for trial in range(args.trials):
+                            jobs.append(
+                                {
+                                    "mode": "model",
+                                    "model": model,
+                                    "api": api,
+                                    "task": task,
+                                    "profile": profile,
+                                    "trial": trial,
+                                    "cmd": args.cmd,
+                                    "max_repairs": args.max_repairs,
+                                }
+                            )
+    # `recovery` has no old-API arm, because the old `rt` surface has no durable
+    # run store, no `remember`, no run identity and no resume — so it cannot
+    # express the task at all, and a cell asking for one would measure a model
+    # guessing at a capability the API does not have. The omission is recorded in
+    # the run's protocol block rather than left for a reader to notice.
+    skipped = [
+        {"task": task, "api": "old", "why": NEW_ONLY_TASK_WHY}
+        for task in tasks
+        if task in NEW_ONLY_TASKS
+    ]
+    jobs = [job for job in jobs if not (job["task"] in NEW_ONLY_TASKS and job["api"] == "old")]
+    if skipped:
+        print(f"skipped {len(skipped)} old-API cell(s): " + ", ".join(
+            f"{item['task']}/old" for item in skipped
+        ))
+        for item in skipped:
+            print(f"  {item['task']}/old: {item['why']}")
 
     records = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.parallel)) as pool:
@@ -669,6 +942,7 @@ def main() -> int:
                     "model": job["model"],
                     "api": job["api"],
                     "task": job["task"],
+                    "profile": job.get("profile", ""),
                     "trial": job["trial"],
                     "trial_id": "crashed",
                     "mode": job["mode"],
@@ -677,6 +951,9 @@ def main() -> int:
                     "oracle": {},
                     "oracle_pass_count": 0,
                     "oracle_total": 0,
+                    "cleanup_ok": False,
+                    "oracle_wall_ms": 0.0,
+                    "oracle_peak_rss_bytes": None,
                     "tokens_in": 0,
                     "tokens_out": 0,
                     "model_wall_ms": 0,
@@ -694,12 +971,21 @@ def main() -> int:
                 records.append(record)
             print(
                 f"{record['model']:28} {record['api']:4} {record['task']:10} "
-                f"t{record['trial']} compiled={record['compiled']} "
+                f"{record.get('profile') or '-':13} t{record['trial']} "
+                f"compiled={record['compiled']} "
                 f"oracle={record['oracle_pass_count']}/{record['oracle_total']}",
                 flush=True,
             )
 
-    records.sort(key=lambda row: (row["model"], row["api"], row["task"], row["trial"]))
+    records.sort(
+        key=lambda row: (
+            row["model"],
+            row["api"],
+            row["task"],
+            row.get("profile", ""),
+            row["trial"],
+        )
+    )
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w") as handle:
         for record in records:
@@ -716,6 +1002,24 @@ def main() -> int:
             "repair_budget": args.max_repairs,
             "cargo_serialized": "one cargo process at a time under an fcntl lock",
             "closed_book": "each model call runs under sandbox-exec: home, /private/tmp and the work directory are unreadable except the CLI config and the trial scratch; no session, no skills",
+            "profiles": list(profiles),
+            "profile_text_is_fixed": (
+                "each profile is one fixed persona preamble prepended to the same "
+                "prompt skeleton; the framing, the API sheet, the oracle, the "
+                "repair budget and the sandbox are identical across profiles"
+            ),
+            "oracle_measured_under_time_l": (
+                "oracle_wall_ms is the wall time of the cargo test invocation that "
+                "runs the oracle, under /usr/bin/time -l; oracle_peak_rss_bytes is "
+                "that process's maximum resident set size in bytes, or null on a "
+                "host with no /usr/bin/time"
+            ),
+            "cleanup_ok_is_the_drop_clause": (
+                "cleanup_ok is true only when the task's 'dropping the future "
+                "leaves nothing live' oracle test passed; a crate that never "
+                "compiled reports false rather than a cleanup result"
+            ),
+            "skipped_cells": skipped,
         },
         "groups": summarize(records),
     }

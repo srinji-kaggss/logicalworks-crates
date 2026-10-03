@@ -13,4 +13,11 @@ publish = false
 [dependencies]
 # The async timer the instrumented world sleeps on. `time` implies `rt`; both
 # are named so the intent is readable. Never `std::thread::sleep`.
-lgwks_bot = { path = "../../../crates/lgwks-bot", default-features = false, features = ["rt", "time"] }
+#
+# `script` is here for the `recovery` module only, and it is why this crate may
+# use a feature the other two tasks' fixtures do not: those two worlds are plain
+# async instruments, while a durable unit has to record itself through
+# `lgwks_bot::script::remember`, and the whole recovery contract is that the
+# record rather than the body is what survives an interruption. A fixture that
+# hand-rolled its own durability would be testing the fixture.
+lgwks_bot = { path = "../../../crates/lgwks-bot", default-features = false, features = ["rt", "time", "script"] }

@@ -10,6 +10,9 @@
 //! - [`Stage`]: the `pipeline` task's named stages (`fetch_a`, `fetch_b`,
 //!   `combine`, `publish`), with configurable failures and slow stages, and the
 //!   same live-count instrumentation.
+//! - [`recovery::World`]: the `recovery` task's durable units and their shared
+//!   effect ledger, in a module of its own so a reader of the two above is not
+//!   reading a third instrument they never call.
 //!
 //! The world is owned by the harness, never by the solution: a solution calls
 //! these methods and returns the numbers; the oracle reads the counters. Nothing
@@ -20,6 +23,13 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
+
+/// The `recovery` task's durable units and its effect ledger.
+///
+/// A module of this crate rather than a second one, and a module rather than
+/// more items at the root because it is a third instrument the other two tasks
+/// never call: a reader of [`Fetcher`] and [`Stage`] should not have to read it.
+pub mod recovery;
 
 // ── The deterministic delay plan ─────────────────────────────────────────────
 
