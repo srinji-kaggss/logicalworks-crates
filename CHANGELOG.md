@@ -206,6 +206,39 @@ explicitly under that crate.
   failed for any other reason stays `Unknown`. `ReviewComment`,
   `ReviewPayload::with_comments` and `ReviewRecord`'s comment-count comparison
   carry the inline comments the partial check reads. INV-BOT-81.
+- Repairing a blocked run, end to end (feature `script`; `ephemeral` for minting
+  a run id). A step reaches for authority with `Scope::require(&[Cap])`, and a
+  run whose authority — the host's grant plus any repair delta — does not cover
+  it is `Blocked` with a complete `Deficit` rather than `Failed`: the host was
+  willing and the authority was missing, which is the distinction a repair acts
+  on. `Report::needs` and `Report::repair` are both derived from that one value,
+  so they cannot disagree. `Host::repair(ticket, grant, task, input, spend)`
+  resumes under the run's own id, so the steps recorded before the block replay
+  without their bodies being polled and only the blocked remainder runs. The
+  grant may not be short (`RepairError::NotAuthorized`) nor carry any capability,
+  shipped or custom, the ticket does not name (`OverWide`); the authority the
+  repaired run receives is built from the ticket's needs, never taken from the
+  grant, and the host's own grant is never widened — the next run on that host is
+  still blocked. `HostBuilder::grants`,
+  `repair_ledger` and `repair_bounds` configure it.
+- `task::RunLedger`: the durable per-run control ledger — root spend and attempt
+  budget, repair epoch, and the set of applied tickets — over the shared frame
+  grammar and the shared storage-owner thread (INV-BOT-51). A ticket's identity is
+  its content (run, tenant, epoch, sorted needs), so the same ticket delivered
+  twice is refused `AlreadyApplied` and an older ticket is refused `StaleEpoch`;
+  decide-and-write is one ordered step on the ledger's own thread, so "applied
+  once" is a fact about bytes. A refused repair charges nothing, mints no epoch
+  and leaves the ledger byte-identical. A repair consumes the root budget rather
+  than refilling it, so a permanent refusal plus repeated `NotApplied` reaches a
+  finite `BudgetSpent` (#87 step 3, T13/T23/T24).
+- `task::repair`: `RepairTicket` (a report, never a grant), `RepairError` with a
+  typed arm per refusal.
+- `Disposition::Blocked` on the front door, distinct from `Refused`: a `Refused`
+  run was refused by the host and no authority would change it, while a `Blocked`
+  run is the one an authorized repair can move. `Task::requiring` is the blunt
+  form for a task that reaches in its first step; `Scope::require` is the one that
+  leaves the work before the block replayable. `FlowError::Blocked` is
+  `#[non_exhaustive]`-added and never retryable.
 - `proposal` (feature `script`): the boundary where untrusted model output
   becomes work. Issue #87's rule is that an AI proposal is an **untrusted task
   input**, and that validation, provenance, no-progress detection, bounded repair,
