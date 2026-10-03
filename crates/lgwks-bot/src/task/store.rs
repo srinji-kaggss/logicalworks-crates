@@ -39,6 +39,7 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use lgwks_std::hash::{Digest, Hasher};
@@ -355,10 +356,21 @@ impl std::error::Error for StoreError {
 impl From<StoreError> for FlowError {
     /// A store refusal is permanent: repeating the step would ask the same store
     /// the same question and get the same refusal.
+    ///
+    /// Two arms and not one, because the refusal's *kind* is what the caller acts
+    /// on. A drift is already the flow's own typed [`FlowError::Incompatible`]
+    /// carrying its axis, so it stays that rather than being buried one level
+    /// down; every other store refusal — an unreadable device, a ceiling, a
+    /// foreign tenant — reaches the caller as `FlowError::Store` wrapping the
+    /// store's own error, so a read failure is never reported as a definition
+    /// drift and never as a rendered string (INV-BOT-7).
     fn from(error: StoreError) -> Self {
-        Self::Failed {
-            at: Arc::from(""),
-            reason: error.to_string(),
+        match error {
+            StoreError::Incompatible { drift, .. } => Self::incompatible("", drift),
+            other => Self::Store {
+                at: Arc::from(""),
+                source: Box::new(other),
+            },
         }
     }
 }
@@ -377,7 +389,8 @@ pub struct RunStore {
     inner: Arc<StoreInner>,
 }
 
-/// The state one store owns, shared by every clone of its handle.
+/// The one state every clone of a store handle shares, plus the fault the
+/// read-failure injector arms.
 struct StoreInner {
     /// The thread that holds the file, and the one door an append reaches the
     /// disk through. Its writes are `write_all` plus `sync_all`, so they belong
@@ -388,6 +401,22 @@ struct StoreInner {
     /// The index every clone reads, and the one the owner folds into: per run, per
     /// step key, the record.
     index: Arc<Mutex<Index>>,
+    /// Set once by [`RunStore::fail_next_index_read`], and taken by the first
+    /// *record* read that observes it.
+    ///
+    /// `AtomicBool` rather than a `Mutex<Option<..>>` so arming and firing are
+    /// two words wide and a read takes no second lock: the read path must not gain
+    /// a lock acquisition purely so a fault can be scheduled, and the injection is
+    /// a bounded one-shot — `swap`, not `load` — so two racing reads cannot both
+    /// take it and the injector cannot leave the store armed forever for a caller
+    /// who never expected a fault.
+    ///
+    /// Taken by [`Self::step_readable`] alone, and never by [`Self::index`]: the
+    /// host's own admission reads (`tenant_of`, `definition_of`) run before the
+    /// body and would otherwise spend the fault on themselves, which would test
+    /// the host's pre-flight rather than the durable step's replay check. A fault
+    /// that fires on the wrong read is a fault that proved the wrong thing.
+    unreadable: AtomicBool,
 }
 
 /// The index, and the committed length it accounts for.
@@ -537,8 +566,37 @@ impl RunStore {
         let owner =
             StorageOwner::spawn(file, Arc::clone(&index), stalled).map_err(StoreError::storage)?;
         Ok(Self {
-            inner: Arc::new(StoreInner { owner, path, index }),
+            inner: Arc::new(StoreInner {
+                owner,
+                path,
+                index,
+                unreadable: AtomicBool::new(false),
+            }),
         })
+    }
+
+    /// Make the next *durable step's* record read fail, as an unreadable device would.
+    ///
+    /// A fault injector, and public for the reason
+    /// [`RunStore::open_with_stalled_device`](Self::open_with_stalled_device) is:
+    /// "what does a durable step do when its store cannot be read" is a question
+    /// INV-BOT-7 answers in a fault nobody can schedule on a real process, and a
+    /// probe that exists only inside the crate's own test binary cannot answer it.
+    /// The records themselves are untouched — only the *read* of the in-memory
+    /// index fails — so the store is exactly one it holds records for, and the
+    /// question under test is what the step does with an answer it did not get.
+    ///
+    /// Aimed at the step rather than at every reader, because the host reads the
+    /// same index before the body runs: a fault spent on the host's admission
+    /// pre-flight would report `Disposition::Refused` at admission and would never
+    /// reach the check whose behaviour this exists to observe.
+    ///
+    /// One-shot, and bounded by construction: the first step read that observes it
+    /// takes it with a `swap`, so a caller that arms it and never reads is not left
+    /// with a store that fails forever, and two concurrent reads cannot both take
+    /// the same fault.
+    pub fn fail_next_index_read(&self) {
+        self.inner.unreadable.store(true, Ordering::SeqCst);
     }
 
     /// A handle that can release this store's parked device, independently of
@@ -627,8 +685,10 @@ impl RunStore {
     /// nothing to disagree with.
     #[must_use]
     pub fn definition_of(&self, run: RunId) -> Option<DefinitionIdentity> {
-        let index = self.index();
-        index.runs.get(&run).map(|held| held.definition.clone())
+        self.index()
+            .runs
+            .get(&run)
+            .map(|held| held.definition.clone())
     }
 
     /// Refuse `identity` for `run` if the records disagree with it.
@@ -692,6 +752,32 @@ impl RunStore {
     fn index(&self) -> MutexGuard<'_, Index> {
         owner::lock(&self.inner.index)
     }
+
+    /// Refuse a durable step's read when the injector is armed.
+    ///
+    /// The injector is aimed at the [`RunRecords`] doors rather than at the index
+    /// itself, and that placement is the whole design. Both the host's admission
+    /// pre-flight and the durable step's replay check read the same in-memory
+    /// index through [`Self::check_definition`], so a fault aimed at "the index"
+    /// would be spent by whichever of the two ran first — which for a resumed run
+    /// is always the host, and a fault the host absorbs tests the host's refusal
+    /// rather than the step's, proving nothing about `remember_at`. The
+    /// [`RunRecords`] trait is reached only from `Scope::remember`, so arming it
+    /// here makes the fault land on the check under test whatever else the run
+    /// path has already read.
+    ///
+    /// One-shot, and bounded by construction: the first step read that observes it
+    /// takes it with a `swap`, so a caller that arms it and never reads is not left
+    /// with a store that fails forever, and two concurrent reads cannot both take
+    /// the same fault.
+    fn step_readable(&self) -> Result<(), StoreError> {
+        if self.inner.unreadable.swap(false, Ordering::SeqCst) {
+            return Err(StoreError::storage(std::io::Error::other(
+                "the run store's device refused a read of its index",
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// The store as the script module reaches it: a typed lookup and a typed append
@@ -707,6 +793,7 @@ impl RunRecords for RunStore {
         run: RunId,
         key: StepKey,
     ) -> Result<Option<StoredValue>, FlowError> {
+        self.step_readable()?;
         let index = self.index();
         let Some(held) = index.runs.get(&run) else {
             return Ok(None);
@@ -745,14 +832,54 @@ impl RunRecords for RunStore {
     /// The check every durable step makes before it returns a recorded value. A
     /// run this store holds nothing for is compatible by definition: that is a
     /// first attempt, and refusing it would make the first record unreachable.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Self::check_definition`] reports, unchanged: a drift as
+    /// [`FlowError::Incompatible`], and a device refusal as itself. Neither is ever
+    /// collapsed into the other's answer.
     fn compatibility(
         &self,
         run: RunId,
         definition: &DefinitionIdentity,
     ) -> Result<bool, FlowError> {
+        self.step_readable()?;
         self.check_definition(run, definition)
             .map(|()| true)
             .map_err(FlowError::from)
+    }
+
+    /// Which axis of `run`'s recorded identity disagrees with `definition`.
+    ///
+    /// The same comparison [`Self::compatibility`] made, returning the axis rather
+    /// than the boolean. Two doors rather than one returning a richer type because
+    /// the boolean is asked on every durable step — including the ones that pass,
+    /// where the axis is never wanted — and building a [`Drift`] that names two
+    /// digests or two schema ids on a step that will replay cleanly is work spent
+    /// only to be thrown away.
+    ///
+    /// # Errors
+    ///
+    /// [`FlowError::Failed`] when this store holds no record for `run`, so there is
+    /// no recorded identity to compare against, or when the two doors disagree —
+    /// `compatibility` refused this pair while this comparison finds nothing to
+    /// refuse. Naming an axis in either case would mean inventing one.
+    fn drift(&self, run: RunId, definition: &DefinitionIdentity) -> Result<Drift, FlowError> {
+        let Some(recorded) = self.definition_of(run) else {
+            return Err(FlowError::failed(format!(
+                "this store holds no definition identity for run {}, so it cannot name a drift \
+                 axis; refusing to invent one",
+                run.id().to_hex()
+            )));
+        };
+        match definition.drift_from(&recorded) {
+            Some(drift) => Ok(drift),
+            None => Err(FlowError::failed(format!(
+                "run {} was refused as incompatible and yet agrees with the declared \
+                 definition; refusing to name an axis for a disagreement that is not there",
+                run.id().to_hex()
+            ))),
+        }
     }
 
     /// The awaited door, which is the one a durable step takes.

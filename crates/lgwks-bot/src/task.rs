@@ -1265,9 +1265,25 @@ impl Host {
         if let (Some(run), Some(store), Some(declared)) =
             (resume, self.inner.store.as_ref(), declared.as_ref())
             && let Err(error) = store.check_definition(run, declared)
-            && let StoreError::Incompatible { ref drift, .. } = error
         {
-            let located = FlowError::incompatible(task_name.as_str(), drift.clone());
+            // Every refusal is refused; only the *kind* differs, and the kind is
+            // the store's own. A drift is the flow's typed `Incompatible` carrying
+            // its axis; every other store refusal — an unreadable device, a
+            // ceiling, a foreign tenant — reaches the caller as `FlowError::Store`
+            // wrapping the store's own error. Matching on `Incompatible` alone
+            // once let a read failure through as though the check had passed,
+            // which is INV-BOT-7 in the host's own pre-flight: a store that could
+            // not be read admitted the run and let the step below discover it,
+            // having already told the caller nothing.
+            let located = match error {
+                StoreError::Incompatible { ref drift, .. } => {
+                    FlowError::incompatible(task_name.as_str(), drift.clone())
+                }
+                other => FlowError::Store {
+                    at: Arc::from(task_name.as_str()),
+                    source: Box::new(other),
+                },
+            };
             self.inner.refused.fetch_add(1, Ordering::Relaxed);
             return self.report(Terminal {
                 started,

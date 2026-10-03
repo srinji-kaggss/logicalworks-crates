@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::{BotError, RetryClass};
+use crate::task::StoreError;
 
 use super::Scope;
 
@@ -116,6 +117,22 @@ pub enum FlowError {
         /// Which axis disagreed, and what each side holds.
         drift: crate::task::Drift,
     },
+    /// The durable run store refused to read or write a step's record.
+    ///
+    /// Carried as the store's own typed error rather than as a rendering of it,
+    /// because the caller's repair depends on *which* refusal it was: an
+    /// unreadable device, a declared ceiling, a foreign tenant and a drift are
+    /// four different actions, and a `Failed` string leaves the caller parsing
+    /// prose to tell them apart. This is the run store's half of INV-BOT-7 —
+    /// a read failure is an error, never absence, and never another error's
+    /// answer — so an unreadable store reaches the caller as itself and is
+    /// never reported as a definition drift.
+    Store {
+        /// Where it happened.
+        at: Arc<str>,
+        /// The store's own refusal.
+        source: Box<StoreError>,
+    },
 }
 
 impl FlowError {
@@ -166,7 +183,8 @@ impl FlowError {
             | Self::InvalidTenant { .. }
             | Self::InvalidName { .. }
             | Self::InvalidBound { .. }
-            | Self::Incompatible { .. } => false,
+            | Self::Incompatible { .. }
+            | Self::Store { .. } => false,
         }
     }
 
@@ -189,6 +207,7 @@ impl FlowError {
             | Self::Bot { ref at, .. }
             | Self::TooDeep { ref at, .. } => at,
             Self::Incompatible { ref at, .. } => at,
+            Self::Store { ref at, .. } => at,
             Self::InvalidTenant { .. } | Self::InvalidName { .. } | Self::InvalidBound { .. } => "",
         }
     }
@@ -214,7 +233,8 @@ impl FlowError {
             | Self::Transient { ref mut at, .. }
             | Self::Bot { ref mut at, .. }
             | Self::TooDeep { ref mut at, .. }
-            | Self::Incompatible { ref mut at, .. } => {
+            | Self::Incompatible { ref mut at, .. }
+            | Self::Store { ref mut at, .. } => {
                 if at.is_empty() {
                     *at = Arc::clone(path);
                 }
@@ -267,6 +287,9 @@ impl fmt::Display for FlowError {
                 formatter,
                 "{at}: refusing to resume under a different definition: {drift}"
             ),
+            Self::Store { ref at, ref source } => {
+                write!(formatter, "{at}: the run store refused: {source}")
+            }
         }
     }
 }
@@ -275,6 +298,7 @@ impl std::error::Error for FlowError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match *self {
             Self::Bot { ref source, .. } => Some(&**source),
+            Self::Store { ref source, .. } => Some(&**source),
             Self::Exhausted { ref last, .. } | Self::Throttled { ref last, .. } => Some(&**last),
             Self::Cancelled { .. }
             | Self::TimedOut { .. }

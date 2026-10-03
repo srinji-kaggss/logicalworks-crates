@@ -28,7 +28,7 @@ use lgwks_std::wire::{Archive, Deserialize, Serialize, WireError};
 
 use crate::effect::RunId;
 use crate::rt::task_local;
-use crate::task::DefinitionIdentity;
+use crate::task::{DefinitionIdentity, Drift};
 
 use super::{FlowError, Scope, StepKey};
 
@@ -178,22 +178,60 @@ pub trait RunRecords: Send + Sync {
     /// Whether this store's records for `run` were written under `definition`.
     ///
     /// The replay's own pre-flight, asked by every durable step before it returns
-    /// a recorded value. A store that cannot answer says `true`: it holds no
-    /// record for the run at all, which is the same situation as a first attempt
-    /// and not a disagreement. Refusing to answer is not an option — a store that
-    /// could not read its own index must not have that read as permission to
-    /// replay, so it answers `false` and the step refuses.
+    /// a recorded value. A store that holds no record for the run at all answers
+    /// `true`: that is a first attempt, and refusing it would make the first
+    /// record unreachable.
+    ///
+    /// The default answers `true` because a store with no identity of its own has
+    /// nothing to compare against — but a store that *does* have one must report a
+    /// refusal as `Err` and never as `false`. A `false` is a claim that the
+    /// records disagree with this definition, and a store that could not read its
+    /// own records has established no such thing (INV-BOT-7): collapsing the two
+    /// reports an unreadable store as a drifted one, which sends the caller
+    /// looking for a change to a definition when the device is what failed.
     ///
     /// # Errors
     ///
-    /// [`FlowError`] when the store refused the question, which the caller treats
-    /// as a refusal rather than as a compatibility.
+    /// [`FlowError`] when the store could not answer the question. The caller
+    /// treats it as a refusal rather than as a compatibility, and it carries the
+    /// store's own typed error rather than a rendering of it.
     fn compatibility(
         &self,
         _run: RunId,
         _definition: &DefinitionIdentity,
     ) -> Result<bool, FlowError> {
         Ok(true)
+    }
+
+    /// Which axis of `run`'s records disagrees with `definition`.
+    ///
+    /// A second door beside [`RunRecords::compatibility`] and not a return value
+    /// of it, because the two answer different questions. `compatibility` answers
+    /// *whether* to proceed and must be cheap enough to ask on every durable step;
+    /// `drift` answers *which axis* and is asked only after a step has already been
+    /// told no, where the caller needs a repair — a new run, a decision, a
+    /// migration or an edit.
+    ///
+    /// Only the store knows the identity its records were written under, so the
+    /// caller cannot recompute this from the declared identity alone; folding it
+    /// into the boolean would have meant returning an `Option<Drift>` in place of
+    /// an answer that is also legitimately `None`, and a caller that ignored the
+    /// payload would have had no axis to report.
+    ///
+    /// # Errors
+    ///
+    /// [`FlowError`] when the store holds no record for `run`, and therefore has
+    /// no recorded identity to compare against. That is a state a caller cannot
+    /// reach through [`RunRecords::compatibility`] — it answers `true` for a run
+    /// the store never wrote — so the error is a refusal to invent an answer, not
+    /// a path the shipped step takes. A store with no identity of its own does not
+    /// need this door: it may report no drift, consistent with its `compatibility`
+    /// answering `true`.
+    fn drift(&self, _run: RunId, _definition: &DefinitionIdentity) -> Result<Drift, FlowError> {
+        Err(FlowError::failed(
+            "this store holds no definition identity for the run, so it cannot name a \
+             drift axis; refusing to invent one",
+        ))
     }
 
     /// Build the record this store is being asked to commit.
@@ -368,15 +406,44 @@ impl Records {
         self.0.lookup(tenant, run, key)
     }
 
-    /// Whether this store's records for `run` agree with `definition`.
+    /// Whether this store's records for `run` agree with `definition`, or the
+    /// store's own refusal.
     ///
     /// The check every durable step makes before it replays a value, and the
     /// reason a store that was handed a run from elsewhere cannot answer from
-    /// another definition's records. `Ok(true)` when the store cannot answer
-    /// either way — a run it holds no record for — which is the same answer it
-    /// gives a first attempt.
-    pub(crate) fn agrees(&self, run: RunId, definition: &DefinitionIdentity) -> bool {
-        self.0.compatibility(run, definition).unwrap_or_default()
+    /// another definition's records. `Ok(())` when the store holds no record for
+    /// the run at all, which is the same answer it gives a first attempt.
+    ///
+    /// Both failures leave as `Err`, and they are *different* errors. A store
+    /// refusal is propagated as itself, because it says nothing about the
+    /// definition: folding it into a boolean would tell the caller "recorded under
+    /// a different definition" — a specific, actionable claim — about a store
+    /// whose answer nobody knows, and would make the one fault an operator must
+    /// see indistinguishable from a genuine drift (INV-BOT-7). A disagreement
+    /// leaves as the typed [`FlowError::Incompatible`] carrying the axis, so the
+    /// caller learns whether it needs a new run, a decision, a migration or an
+    /// edit rather than having to parse a rendered sentence to find out.
+    ///
+    /// The two are raised from one call rather than from a boolean plus a second
+    /// question, because a store that answers "no" and then cannot name the axis
+    /// would otherwise leave the caller with a refusal it cannot repair — and
+    /// inventing an axis at that point is exactly the guess the typed arm rules
+    /// out.
+    ///
+    /// # Errors
+    ///
+    /// [`FlowError::Incompatible`] carrying the drift, or whatever typed error the
+    /// store itself reported.
+    pub(crate) fn agrees(
+        &self,
+        run: RunId,
+        definition: &DefinitionIdentity,
+    ) -> Result<(), FlowError> {
+        match self.0.compatibility(run, definition) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(FlowError::incompatible("", self.0.drift(run, definition)?)),
+            Err(error) => Err(error),
+        }
     }
 
     /// The durable append, refusing a conflicting record as an error.
@@ -570,16 +637,21 @@ where
     // a value this build never produced, and returning it is the failure T15
     // names; asking first means the refusal costs a hash-map probe rather than a
     // step body having already been trusted.
-    if !records.agrees(run, definition) {
-        return Err(FlowError::Failed {
-            at: scope.shared_path().as_ref().into(),
-            reason: format!(
-                "run {} was recorded under a different definition, so nothing this step could \
-                 replay is its own work",
-                run.id().to_hex()
-            ),
-        });
-    }
+    //
+    // Both failures arrive as themselves. A genuine drift is the typed
+    // `Incompatible` arm carrying its axis, so a caller can tell whether it needs
+    // a new run, a decision, a migration or an edit; a store that could not read
+    // its own records arrives as the store's own error rather than as a claim
+    // about the definition. Neither is a `Failed` reason string: that form could
+    // express neither, and the caller had no way to repair a drift from it.
+    //
+    // `located_at` fills the step path on the refusal. The typed arm is built
+    // with an empty location because it does not yet know the step, and a refusal
+    // that keeps its constructor's empty path would name the run boundary instead
+    // of the step that was about to replay.
+    records
+        .agrees(run, definition)
+        .map_err(|error| error.located_at(scope.shared_path()))?;
     let key = scope.key();
     let tenant = scope.tenant().as_str();
 
