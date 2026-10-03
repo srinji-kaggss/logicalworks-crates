@@ -43,7 +43,7 @@ use lgwks_bot::task::{Disposition, EffectKnowledge, Host, RunStore, StoreError, 
 #[path = "support/resume.rs"]
 mod shared;
 
-use shared::{Scratch, Summary, peak_rss_mib};
+use shared::{Scratch, Summary, marker, peak_rss_mib, ran, record_run};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -124,27 +124,6 @@ fn stored_host(tenant: &str, dir: &Path) -> Result<Host, Box<dyn Error>> {
 )]
 fn pause(millis: u64) {
     std::thread::sleep(Duration::from_millis(millis));
-}
-
-/// The marker naming one step's body.
-fn marker(dir: &Path, step: &str) -> PathBuf {
-    dir.join(format!("{step}.ran"))
-}
-
-/// How many times a step's body has run, as the filesystem records it.
-fn ran(dir: &Path, step: &str) -> Result<u32, Box<dyn Error>> {
-    match std::fs::read_to_string(marker(dir, step)) {
-        Ok(text) => Ok(text.trim().parse::<u32>().unwrap_or_default()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
-        Err(error) => Err(error.into()),
-    }
-}
-
-/// Append one to a step's marker. The file is the count, so it survives the kill.
-fn record_run(dir: &Path, step: &str) -> Result<(), FlowError> {
-    let next = ran(dir, step).map_err(FlowError::failed)?.saturating_add(1);
-    std::fs::write(marker(dir, step), next.to_string()).map_err(FlowError::failed)?;
-    Ok(())
 }
 
 /// Without a store the run claims nothing, and a durable step is just a step.

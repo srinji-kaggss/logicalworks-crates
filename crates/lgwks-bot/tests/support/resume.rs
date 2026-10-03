@@ -55,6 +55,31 @@ pub type OneStep = Task<fn(Scope, u32) -> BodyFuture>;
 /// `remember` and not about the body around it, and two differently-shaped bodies
 /// would be two different things being measured.
 #[cfg(feature = "script")]
+/// The marker file naming one step's body.
+///
+/// A file rather than an in-memory counter because the claims these support are
+/// about a body that was *not* polled, and a counter in the process that would
+/// have polled it is a claim about nothing. The file also survives the reopen a
+/// resume performs, which is the whole of the observation.
+pub fn marker(dir: &Path, step: &str) -> PathBuf {
+    dir.join(format!("{step}.ran"))
+}
+
+/// How many times a step's body has run, as the filesystem records it.
+pub fn ran(dir: &Path, step: &str) -> Result<u32, Box<dyn Error>> {
+    match std::fs::read_to_string(marker(dir, step)) {
+        Ok(text) => Ok(text.trim().parse::<u32>().unwrap_or_default()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Append one to a step's marker. The file is the count, so it survives the kill.
+pub fn record_run(dir: &Path, step: &str) -> Result<(), FlowError> {
+    let next = ran(dir, step).map_err(FlowError::failed)?.saturating_add(1);
+    std::fs::write(marker(dir, step), next.to_string()).map_err(FlowError::failed)
+}
+
 pub fn one_step_task() -> Result<OneStep, FlowError> {
     task("step", boxed_body)
 }

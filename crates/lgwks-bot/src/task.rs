@@ -747,6 +747,26 @@ enum Plan {
 }
 
 impl Plan {
+    /// The identity the caller declared, or `None` when it declared none.
+    ///
+    /// The distinction the drift check turns on. A declared identity is a claim
+    /// about what the run *is*, so a resume that contradicts it is refused. An
+    /// undeclared one is the host's own derivation from the run id, which is by
+    /// construction the identity that run was recorded under — comparing it would
+    /// compare a run's records against themselves and fence nothing, while
+    /// refusing would break every durable step that never declared anything.
+    fn declared(&self) -> Option<&DefinitionIdentity> {
+        // Each arm binds through a reference, because matching `self` — itself a
+        // reference — against a non-`Copy` payload is the one case this workspace's
+        // `pattern_type_mismatch` rule exists for.
+        match self {
+            &Self::Declared(ref identity) | &Self::ResumeUnder(_, ref identity) => Some(identity),
+            &Self::Fresh | &Self::Resume(_) => None,
+        }
+    }
+}
+
+impl Plan {
     /// The run this plan adopts, or `None` for one that mints its own.
     const fn run(&self) -> Option<RunId> {
         match *self {
@@ -1170,11 +1190,13 @@ impl Host {
         // be refused, which is the opposite of what a caller means. So the
         // identity a run is recorded under is its own first attempt's, and a
         // resume is measured against that.
-        let definition = match plan {
-            Plan::Declared(identity) | Plan::ResumeUnder(_, identity) => identity,
-            Plan::Fresh | Plan::Resume(_) => {
-                self.definition_for(task_name.as_str(), resume.as_ref())
-            }
+        // Read before the match consumes it: the drift check below needs to know
+        // whether the caller declared this identity or the host derived it, and
+        // only the first is a claim about the run.
+        let declared = plan.declared().cloned();
+        let definition = match declared.clone() {
+            Some(identity) => identity,
+            None => self.definition_for(task_name.as_str(), resume.as_ref()),
         };
 
         // A resume this store knows belongs to another tenant is refused before
@@ -1196,17 +1218,17 @@ impl Host {
             };
             return self.refuse(started, task_name, error.to_string());
         }
-        // What this call's records will be written under, decided before
+        // What this call's records will be *written* under, decided before
         // admission. The run a call adopts is not always the run it records
         // against — a fresh run mints one of its own below, and it is *that*
-        // run's records this call writes. So a resume reads the identity its own
-        // records already carry rather than the one its derivation would name,
-        // and the check and the write below read the same value; measuring one
-        // against a run this call never touches would refuse an unrelated run
-        // and let the real one through.
+        // run's records this call writes — so a resume reads the identity its own
+        // records already carry rather than the one its derivation would name.
+        // The steps need that: a durable step must be able to *find* the records
+        // it wrote under the identity the run was admitted with, whichever
+        // declaration the caller makes now.
         let recorded_definition = match resume {
             Some(adopted) => self.identity_for(adopted, &definition),
-            None => definition,
+            None => definition.clone(),
         };
         // The drift check, before admission and before the body is ever
         // constructed. Replaying a value the current definition never produced and
@@ -1214,8 +1236,13 @@ impl Host {
         // either side of this, so the run is refused rather than picked between,
         // and the refusal names the axis that disagrees so the caller knows which
         // repair it needs. Nothing is written and no permit is taken.
-        if let (Some(run), Some(store)) = (resume, self.inner.store.as_ref())
-            && let Err(error) = store.check_definition(run, &recorded_definition)
+        //
+        // Only a *declared* identity is checked. The recorded one is what the
+        // steps below write and look up under, so comparing a run's records
+        // against it would agree by construction and fence nothing.
+        if let (Some(run), Some(store), Some(declared)) =
+            (resume, self.inner.store.as_ref(), declared.as_ref())
+            && let Err(error) = store.check_definition(run, declared)
             && let StoreError::Incompatible { ref drift, .. } = error
         {
             let located = FlowError::incompatible(task_name.as_str(), drift.clone());

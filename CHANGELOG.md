@@ -8,6 +8,43 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### lgwks_bot Added
+
+- `task::DefinitionIdentity` and `task::Drift`: a recorded step value is only
+  replayable under the definition that produced it. Every run-store record now
+  carries the task name, a declared definition revision, the input digest, a
+  declared durable-value schema id and the count of durable steps (T15).
+  **Migration:** the run store's file format version moves from `\x01` to
+  `\x02` and a `\x01` store is refused at open with `StoreError::NotAStore`
+  rather than migrated — reading one as the unversioned identity would make
+  every pre-version resume look compatible rather than unprovable. A deployment
+  that needs its records keeps its own copy and re-runs.
+- `Host::run_under`, `Host::resume_under`, `Host::definition` and
+  `HostBuilder::durable_codec`: the doors that carry a declared definition
+  identity. `resume_under` returns a `Disposition::Refused` report carrying
+  `FlowError::Incompatible` — naming the axis that disagrees — before admission,
+  so no step body is polled and no record is written. Only a *declared* identity
+  is compared; a run that declares none gets an identity derived from its tenant,
+  task name and run id, so every durable step that already worked still records
+  something stable and still resumes. The declaration is an addition, never a
+  precondition.
+- `Broker::adopt`: takes ownership of an environment at the generation a journal
+  already on the disk was written at, and moves past it (T16). `Broker::register`
+  starts at generation 1 whatever the journal holds, so a process adopting
+  another worker's journal would mint warrants for a generation that worker had
+  been replaced past — internally consistent and jointly wrong. The new refusals
+  are `BrokerError::{Journal, ForeignEnvironment, NothingToAdopt}`.
+
+### lgwks_bot Fixed
+
+- The T15 drift check compared a run's records against themselves: `Host::execute`
+  read the identity it was going to *check* from the same lookup its steps use to
+  find their records, so every definition drift passed and every drifted resume
+  succeeded. It now compares the identity the caller declared against the one
+  recorded. The unit tests around `DefinitionIdentity` did not catch this — they
+  tested the identity type, not the check's placement — and
+  `tests/sim_replay_drift.rs` did, which is why the row now has a seeded sweep.
+
 ### lgwks_std Breaking
 
 - `similarity`: the `Similarity` implementation for `Cosine` now returns the
