@@ -9,6 +9,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::script::FlowError;
+use crate::script::scope::{NameFault, name_fault};
 
 /// The longest task name, in bytes.
 pub(crate) const MAX_TASK_NAME_BYTES: usize = 128;
@@ -29,23 +30,15 @@ impl TaskName {
     ///
     /// [`FlowError::InvalidName`] naming what is wrong with it.
     pub(crate) fn new(name: &str) -> Result<Self, FlowError> {
-        if name.is_empty() {
-            return Err(FlowError::InvalidName {
-                reason: "the task name is empty",
-            });
-        }
-        if name.len() > MAX_TASK_NAME_BYTES {
-            return Err(FlowError::InvalidName {
-                reason: "the task name is longer than MAX_TASK_NAME_BYTES",
-            });
-        }
-        let allowed = |byte: u8| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte);
-        if !name.bytes().all(allowed) {
-            return Err(FlowError::InvalidName {
-                reason: "the task name may hold only ASCII letters, digits, '-', '_', '.' and ':'",
-            });
-        }
-        Ok(Self(Arc::from(name)))
+        let reason = match name_fault(name, MAX_TASK_NAME_BYTES) {
+            None => return Ok(Self(Arc::from(name))),
+            Some(NameFault::Empty) => "the task name is empty",
+            Some(NameFault::TooLong) => "the task name is longer than MAX_TASK_NAME_BYTES",
+            Some(NameFault::BadChar) => {
+                "the task name may hold only ASCII letters, digits, '-', '_', '.' and ':'"
+            }
+        };
+        Err(FlowError::InvalidName { reason })
     }
 
     /// The validated name.

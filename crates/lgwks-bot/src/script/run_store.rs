@@ -279,6 +279,12 @@ impl StoredValue {
     pub(crate) fn new(path: String, bytes: Vec<u8>) -> Self {
         Self { path, bytes }
     }
+
+    /// The archived bytes this record holds, for a host that stores a fixed-width
+    /// reserved value (a request digest, a terminal record) under a step key.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 /// What a durable append did.
@@ -347,6 +353,30 @@ impl Records {
                 Err(error) => Err(error.located_at(&conflict)),
             }
         })
+    }
+
+    /// The durable append, reporting which [`Appended`] arm it landed on.
+    ///
+    /// The door a request key's first submission takes: `Recorded` is the caller
+    /// that may run the body, `AlreadyRecorded` is one that must reattach, and
+    /// `Conflicting` is a different payload under the same key. [`Self::record`]
+    /// collapses the first two because a durable *step* treats them the same;
+    /// a submission cannot, so it needs the arm itself.
+    ///
+    /// # Errors
+    ///
+    /// [`FlowError`] when the store refuses the read or the write.
+    pub(crate) async fn claim<'a>(
+        &'a self,
+        tenant: &'a str,
+        run: RunId,
+        key: StepKey,
+        path: &'a str,
+        bytes: Vec<u8>,
+    ) -> Result<Appended, FlowError> {
+        self.0
+            .append_async(self.0.stage(tenant, run, key, path, bytes))
+            .await
     }
 }
 

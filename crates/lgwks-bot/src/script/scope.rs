@@ -15,6 +15,38 @@ use super::{DEFAULT_TRAIL_STEPS, FlowError, MAX_DEPTH, MAX_TENANT_BYTES};
 
 // ── Tenant ──────────────────────────────────────────────────────────────────
 
+/// Why an identifier — a tenant, a task name or a request key — is illegal.
+///
+/// The three share one validation rule (non-empty, bounded, ASCII letters,
+/// digits and `-_.:`), so they share one check; each maps a fault to its own
+/// [`FlowError`] variant and reason text. A copy per type is how the three
+/// drift and one accepts a name the others refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NameFault {
+    /// The name was empty.
+    Empty,
+    /// The name was longer than the caller's ceiling.
+    TooLong,
+    /// The name held a byte outside the allowed set.
+    BadChar,
+}
+
+/// The fault in `name`, or `None` when it is a legal identifier of at most
+/// `max` bytes.
+pub(crate) fn name_fault(name: &str, max: usize) -> Option<NameFault> {
+    if name.is_empty() {
+        return Some(NameFault::Empty);
+    }
+    if name.len() > max {
+        return Some(NameFault::TooLong);
+    }
+    let allowed = |byte: u8| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte);
+    if !name.bytes().all(allowed) {
+        return Some(NameFault::BadChar);
+    }
+    None
+}
+
 /// The identity a flow runs on behalf of.
 ///
 /// Every [`Scope`] carries one, and every [`StepKey`] hashes it, so data keyed
@@ -32,23 +64,15 @@ impl Tenant {
     ///
     /// [`FlowError::InvalidTenant`](crate::script::FlowError::InvalidTenant) naming what is wrong with the name.
     pub fn new(name: &str) -> Result<Self, FlowError> {
-        if name.is_empty() {
-            return Err(FlowError::InvalidTenant {
-                reason: "the tenant name is empty",
-            });
-        }
-        if name.len() > MAX_TENANT_BYTES {
-            return Err(FlowError::InvalidTenant {
-                reason: "the tenant name is longer than MAX_TENANT_BYTES",
-            });
-        }
-        let allowed = |byte: u8| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte);
-        if !name.bytes().all(allowed) {
-            return Err(FlowError::InvalidTenant {
-                reason: "the tenant name may hold only ASCII letters, digits, '-', '_', '.' and ':'",
-            });
-        }
-        Ok(Self(Arc::from(name)))
+        let reason = match name_fault(name, MAX_TENANT_BYTES) {
+            None => return Ok(Self(Arc::from(name))),
+            Some(NameFault::Empty) => "the tenant name is empty",
+            Some(NameFault::TooLong) => "the tenant name is longer than MAX_TENANT_BYTES",
+            Some(NameFault::BadChar) => {
+                "the tenant name may hold only ASCII letters, digits, '-', '_', '.' and ':'"
+            }
+        };
+        Err(FlowError::InvalidTenant { reason })
     }
 
     /// The validated name.
@@ -89,6 +113,16 @@ impl StepKey {
     pub fn to_hex(&self) -> String {
         self.0.to_hex()
     }
+}
+
+/// The [`StepKey`] of `path` for `tenant`: one definition, so a reserved record a
+/// host writes and a step a body enters cannot key the same path differently.
+pub(crate) fn step_key(tenant: &str, path: &str) -> StepKey {
+    let mut hasher = Hasher::new();
+    hasher
+        .write_framed(tenant.as_bytes())
+        .write_framed(path.as_bytes());
+    StepKey(hasher.finalize())
 }
 
 impl fmt::Display for StepKey {
@@ -356,11 +390,7 @@ impl Scope {
     /// The idempotency key for this step and tenant. See [`StepKey`].
     #[must_use]
     pub fn key(&self) -> StepKey {
-        let mut hasher = Hasher::new();
-        hasher
-            .write_framed(self.inner.tenant.as_str().as_bytes())
-            .write_framed(self.inner.path.as_bytes());
-        StepKey(hasher.finalize())
+        step_key(self.inner.tenant.as_str(), &self.inner.path)
     }
 
     /// The token that stops this scope's work.

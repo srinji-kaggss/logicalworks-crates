@@ -91,20 +91,31 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::effect::RunId;
+use crate::effect::{InputIdentity, RunId};
 use crate::rt::clock::Clock;
 use crate::rt::runtime::{Handle, Runtime};
 use crate::rt::sync::{CancellationToken, OwnedSemaphorePermit, Semaphore};
 use crate::rt::task_local;
-use crate::script::run_store::Records;
+use crate::script::run_store::{Records, StoredValue};
+use crate::script::scope::step_key as reserved_step_key;
 use crate::script::trail::Trail;
-use crate::script::{DEFAULT_TRAIL_STEPS, FlowError, MAX_IN_FLIGHT, Scope, Tenant, within};
+use crate::script::{
+    Appended, DEFAULT_TRAIL_STEPS, Durable, FlowError, MAX_IN_FLIGHT, Scope, Tenant, within,
+};
 
 use self::name::TaskName;
+use self::request::{
+    BINDING_STEP, TERMINAL_STEP, TerminalRecord, derive_run as derive_request_run, digest_of_record,
+};
 
 mod name;
+mod request;
 mod store;
 
+pub use request::{
+    InFlight, InputDigest, MAX_REQUEST_KEY_BYTES, RequestConflict, RequestError, RequestKey,
+    Submission,
+};
 pub use store::{
     MAX_RECORD_BYTES, MAX_RECORDS_PER_RUN, MAX_STORE_BYTES, RunStore, StoreError, StoreLimitKind,
 };
@@ -602,6 +613,27 @@ impl fmt::Display for Ticket {
     }
 }
 
+// ── Existing ────────────────────────────────────────────────────────────────
+
+/// A request whose receipt is already on the disk, gathered so the reattach
+/// logic takes one borrowed value rather than eight positional arguments.
+struct Existing<'a> {
+    /// The host's store, for the run's record count.
+    store: &'a RunStore,
+    /// The receipt's host records handle.
+    records: &'a Records,
+    /// The tenant this host runs for.
+    tenant: &'a str,
+    /// The derived run identity.
+    run: RunId,
+    /// The caller's request key.
+    key: &'a RequestKey,
+    /// The stored receipt record.
+    held: &'a StoredValue,
+    /// The caller's input digest.
+    digest: InputDigest,
+}
+
 // ── Host ─────────────────────────────────────────────────────────────────────
 
 /// The installed owner of execution and policy for one tenant.
@@ -672,7 +704,7 @@ struct Installation {
     /// Top-level runs holding a permit right now. Counting them here rather than
     /// in a guard keeps the count correct when a run's future is dropped while
     /// suspended.
-    in_flight: InFlight,
+    in_flight: LiveRuns,
     /// The most top-level runs that ever held a permit at once.
     peak_in_flight: HighWater,
     /// Every run admitted since the host was built, nested runs included.
@@ -879,6 +911,196 @@ impl Host {
             });
         }
         Ok(self.execute(task, input, Some(ticket.run())).await)
+    }
+
+    /// Submit `task` over `input` under a caller-supplied [`RequestKey`],
+    /// durably.
+    ///
+    /// The idempotent-request form of [`Host::run`]: the run identity is derived
+    /// from this host's tenant and `key`, the input's canonical [`InputDigest`]
+    /// is recorded as a durable receipt *before* any step runs, and the
+    /// outcome is:
+    ///
+    /// - [`Submission::Executed`] for a first submission (the body ran or
+    ///   resumed under the derived run, and a terminal outcome is now recorded);
+    /// - [`Submission::Reattached`] when the same key with the same input had
+    ///   already reached a recorded outcome: the recorded report comes back with
+    ///   the body never re-run;
+    /// - [`Submission::InFlight`] when a previous client submitted the key and
+    ///   went away before the run reached a recorded outcome, so an effect may be
+    ///   live (see [`InFlight`]).
+    ///
+    /// A *different* input under the same key is [`RequestError::Conflict`],
+    /// carrying both digests. Distinct keys derive distinct runs and are never
+    /// collapsed.
+    ///
+    /// # Store required
+    ///
+    /// A durable submission is defined by its receipt, so a host with no store
+    /// refuses with [`RequestError::NoStore`] rather than silently degrading to a
+    /// plain run.
+    ///
+    /// # Errors
+    ///
+    /// [`RequestError::NoStore`], [`RequestError::Conflict`],
+    /// [`RequestError::Record`], [`RequestError::Store`] or
+    /// [`RequestError::IdCollision`].
+    pub async fn submit<I, O, F, Fut>(
+        &self,
+        key: &RequestKey,
+        task: &Task<F>,
+        input: I,
+    ) -> Result<Submission<O>, RequestError>
+    where
+        I: InputIdentity,
+        O: Durable,
+        F: Fn(Scope, I) -> Fut,
+        Fut: Future<Output = Result<O, FlowError>>,
+    {
+        let Some(store) = self.inner.store.as_ref() else {
+            return Err(RequestError::NoStore);
+        };
+        let tenant = self.inner.tenant.as_str();
+        let run = derive_request_run(tenant, key)?;
+        let records = self.records(Some(run)).ok_or(RequestError::NoStore)?;
+        let digest = InputDigest::of(&input);
+        let binding_key = reserved_step_key(tenant, BINDING_STEP);
+
+        // A receipt already on the disk decides everything: a repeat of the same
+        // input reattaches, and a different input is a conflict.
+        if let Some(held) = records.lookup(tenant, run, binding_key)? {
+            let existing = Existing {
+                store,
+                records: &records,
+                tenant,
+                run,
+                key,
+                held: &held,
+                digest,
+            };
+            return self.observe_existing(existing, task);
+        }
+
+        // No receipt yet: the claim decides which submitter may run the body.
+        match records
+            .claim(
+                tenant,
+                run,
+                binding_key,
+                BINDING_STEP,
+                digest.as_bytes().to_vec(),
+            )
+            .await?
+        {
+            Appended::Recorded => {}
+            Appended::AlreadyRecorded => {
+                let held = records
+                    .lookup(tenant, run, binding_key)?
+                    .ok_or(RequestError::IdCollision)?;
+                let existing = Existing {
+                    store,
+                    records: &records,
+                    tenant,
+                    run,
+                    key,
+                    held: &held,
+                    digest,
+                };
+                return self.observe_existing(existing, task);
+            }
+            Appended::Conflicting => {
+                let held = records
+                    .lookup(tenant, run, binding_key)?
+                    .ok_or(RequestError::IdCollision)?;
+                let existing = digest_of_record(held.bytes())?;
+                return Err(RequestError::Conflict(RequestConflict::new(
+                    key.clone(),
+                    existing,
+                    digest,
+                )));
+            }
+        }
+
+        // The body runs under the derived run, so its durable steps replay on a
+        // reattach exactly as a resume's do.
+        let report = self.execute(task, input, Some(run)).await;
+        let terminal = match (report.disposition().is_success(), report.output()) {
+            (true, Some(output)) => TerminalRecord::succeeded(output)?,
+            _ => {
+                let disposition = report.disposition();
+                let at = report.error().map(|error| error.at().to_owned());
+                let reason = report.error().map(ToString::to_string);
+                TerminalRecord::stopped(
+                    disposition,
+                    at.as_deref().unwrap_or(""),
+                    reason.unwrap_or_default(),
+                )
+            }
+        };
+        records
+            .record(
+                tenant,
+                run,
+                reserved_step_key(tenant, TERMINAL_STEP),
+                TERMINAL_STEP,
+                terminal.encode()?,
+            )
+            .await?;
+        Ok(Submission::Executed(report))
+    }
+
+    /// Observe a request whose receipt is already on the disk.
+    ///
+    /// The two facts this returns are the whole of T30 and T17: a recorded
+    /// terminal outcome is a [`Submission::Reattached`] report reproduced
+    /// without re-running the body, and a receipt with no terminal record is a
+    /// [`Submission::InFlight`] report that keeps the uncertainty and the
+    /// cleanup handle apart.
+    fn observe_existing<O, F>(
+        &self,
+        existing: Existing<'_>,
+        task: &Task<F>,
+    ) -> Result<Submission<O>, RequestError>
+    where
+        O: Durable,
+    {
+        let Existing {
+            store,
+            records,
+            tenant,
+            run,
+            key,
+            held,
+            digest,
+        } = existing;
+        let recorded = digest_of_record(held.bytes())?;
+        if recorded != digest {
+            return Err(RequestError::Conflict(RequestConflict::new(
+                key.clone(),
+                recorded,
+                digest,
+            )));
+        }
+        let terminal_key = reserved_step_key(tenant, TERMINAL_STEP);
+        if let Some(head) = records.lookup(tenant, run, terminal_key)? {
+            let (disposition, output, error) =
+                TerminalRecord::decode(head.bytes())?.parts::<O>()?;
+            let report = self.report(Terminal {
+                started: Instant::now(),
+                task: task.name_owned(),
+                disposition,
+                output,
+                error,
+                trail: TrailSnapshot::Empty,
+                run: Some(run),
+            });
+            return Ok(Submission::Reattached(report));
+        }
+        Ok(Submission::InFlight(InFlight::new(
+            run,
+            task.name().to_owned(),
+            store.record_count(run),
+        )))
     }
 
     /// The one body of a run, shared by [`Host::run`] and [`Host::resume`].
@@ -1333,7 +1555,7 @@ impl Host {
     }
 }
 
-impl Default for InFlight {
+impl Default for LiveRuns {
     /// A count of zero.
     fn default() -> Self {
         Self(AtomicUsize::new(0))
@@ -1401,7 +1623,7 @@ impl Drop for AdmissionCharge<'_> {
         if self.held {
             // The count was raised before this guard was built and nothing else
             // lowers it, so the substitution always succeeds. It is written
-            // through the same [`InFlight`] the raise path uses, so the two
+            // through the same [`LiveRuns`] the raise path uses, so the two
             // cannot drift on ordering or on how the previous value is handled.
             self.installation.in_flight.release_one();
         }
@@ -1420,9 +1642,9 @@ impl Default for HighWater {
 /// One type for the raise and the release, because a count that is written in
 /// two places with two orderings is a count whose two paths can disagree — and
 /// the disagreement is invisible until the ceiling stops bounding anything.
-struct InFlight(AtomicUsize);
+struct LiveRuns(AtomicUsize);
 
-impl InFlight {
+impl LiveRuns {
     /// Record that one more run holds a permit, and return the live count.
     fn raise(&self) -> usize {
         self.0.fetch_add(1, Ordering::Relaxed).saturating_add(1)
@@ -1706,7 +1928,7 @@ impl HostBuilder {
                     progress: self.progress,
                 },
                 admission: Arc::new(Semaphore::new(self.max_concurrent.get())),
-                in_flight: InFlight::default(),
+                in_flight: LiveRuns::default(),
                 peak_in_flight: HighWater::default(),
                 admitted: AtomicU64::new(0),
                 refused: AtomicU64::new(0),
