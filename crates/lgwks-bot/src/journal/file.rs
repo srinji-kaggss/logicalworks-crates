@@ -1188,16 +1188,23 @@ impl FileJournal {
     }
 }
 
-/// The ordered step that is the append: check the fence, write, sync.
+/// The ordered step that is the append: check the fence, write.
 ///
 /// It runs on the storage owner's thread, which is what makes the length check and
-/// the write it guards one step no other append can overtake.
+/// the write it guards one step no other append can overtake. The `sync_all` is
+/// *not* here: the frames are returned owed to the batch's one flush, so a journal
+/// that appends alongside other durable writes syncs once for all of them and is
+/// answered only after that flush has returned.
 ///
 /// # Errors
 ///
 /// Whatever the device reports. A length that is not the one the caller expected
 /// means the file moved, and is refused before any byte is written.
-fn commit(file: &mut File, expected_len: u64, frames: &[u8]) -> std::io::Result<()> {
+fn commit(
+    file: &mut File,
+    expected_len: u64,
+    frames: &[u8],
+) -> std::io::Result<super::owner::Stage<(), ()>> {
     let on_disk = file.metadata()?.len();
     if on_disk != expected_len {
         return Err(std::io::Error::new(
@@ -1206,7 +1213,16 @@ fn commit(file: &mut File, expected_len: u64, frames: &[u8]) -> std::io::Result<
         ));
     }
     file.write_all(frames)?;
-    file.sync_all()
+    // A journal folds no state of its own, so the settle closure is empty: the
+    // bytes and the acknowledgment are the whole of the step. The one thing that
+    // does move is `self.disk_len`, and that is the caller's, mutated after its
+    // answer lands rather than here — so two appends can never have folded a length
+    // the file had not reached.
+    Ok(super::owner::Stage::Unsynced {
+        answer: (),
+        bytes: frames.len(),
+        settle: Box::new(|_: &mut ()| {}),
+    })
 }
 
 /// Map one owner refusal onto this module's error vocabulary.

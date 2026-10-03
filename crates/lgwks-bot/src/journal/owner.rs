@@ -18,33 +18,67 @@
 //! the bytes would have to read its "what length does the file have" answer from
 //! shared state, and a second append admitted in between would make that answer
 //! stale before the owner's fence used it. Running the closure here makes the
-//! fence, the write, the sync and the fold of the answer into shared state one
-//! ordered step no other append can overtake — which is the property both stores
-//! actually rest on.
+//! fence and the write it guards un-overtakable — which is the property both
+//! stores actually rest on.
 //!
 //! It is also what makes an abandoned await safe. A caller that walks away from a
 //! record it asked for cannot un-write the bytes or un-fold the index, and needs
 //! no repair: the step's record either landed and will be replayed, or never
 //! started, and both are states a resume already knows how to read.
 //!
+//! # Group commit: one `sync_all` for a batch, not for a record
+//!
+//! A store that acknowledged every record behind its own `sync_all` runs at the
+//! device's flush rate. Under concurrency that is the whole ceiling: N steps that
+//! finish together pay N flushes where the device would have carried them in one.
+//! So an ordered step here is two phases. The **stage** phase is everything that
+//! must be ordered against the other members — the in-memory checks, the length
+//! fence, the framing, and the `write_all` — and it runs per record, in submission
+//! order. The **settle** phase is one `sync_all` for the whole batch, followed by
+//! the folds, also in submission order. An answer is published only after the
+//! `sync_all` that covers its bytes has returned, so nothing is acknowledged
+//! early; and a failure acknowledges *nobody* in the batch, so the poison is
+//! latched once for all of them rather than per record.
+//!
+//! Three properties of that split are load-bearing and are stated here because
+//! the code cannot show them:
+//!
+//! * The **layout order is the submission order.** The stage phase is per record
+//!   and strictly ordered, so the frames land in the order the ring admitted them
+//!   regardless of how they were grouped into flushes.
+//! * The **fold happens after the sync, never before.** The settle closure a
+//!   stage hands back is *not* run when the covering `sync_all` fails, which is
+//!   what keeps the index from claiming a record whose bytes never reached the
+//!   device. That is the same position an un-synced single append leaves today.
+//! * **A record's bytes are already in the file when it is staged.** So the byte
+//!   ceiling below bounds a batch's staged total to one record over the ceiling,
+//!   and that one record is bounded by the store's own per-record ceiling. There
+//!   is no path here that stages a record it will not answer.
+//!
+//! # Latency at low load
+//!
+//! There is no linger. The owner drains whatever the ring holds *at the moment it
+//! wakes*, stages it, and syncs once — so a lone append stages one record and pays
+//! exactly one `sync_all`, with no timer to wait out. Grouping happens because
+//! work was already queued, never because the owner decided to wait for more.
+//!
 //! # The bound
 //!
-//! One bounded queue, sized by the caller at [`StorageOwner::spawn`]. A journal
-//! serialises its appends through `&mut self`, so one request at a time is already
-//! all it can have; a run store's append takes `&self` and many runs reach it at
-//! once, so it asks for more and still gets a typed refusal rather than an
-//! unbounded wait once the queue is full.
+//! Three declared ceilings, all `usize`, all enforced rather than asserted:
+//! [`MAX_BATCH_RECORDS`] and [`MAX_BATCH_BYTES`] cap one flush's work, and
+//! [`DEFAULT_QUEUE_DEPTH`] plus [`MAX_WAITING_SUBMITTERS`] cap the two rings the
+//! requests pass through. A submitter that arrives at a full ring **waits for
+//! room** rather than growing it: the request is parked in the waiting ring and
+//! the owner promotes it as the pending ring drains. Only a submitter that
+//! outruns *both* rings is refused, with the typed [`SubmitError::QueueFull`].
 //!
-//! # What the owner preserves
-//!
-//! Ordering is the owner's: it is one thread taking one request at a time, so the
-//! order requests were admitted in is the order they reach the disk. A request that
-//! fails inside the ordered step may have moved a prefix of the bytes, so the owner
-//! latches the poison and the handle refuses every later append until a reopen
-//! replays the truth.
+//! A journal serialises its appends through `&mut self`, so one request at a time
+//! is already all it can have; a run store's append takes `&self` and many runs
+//! reach it at once, so both rings matter there.
 
 use std::collections::VecDeque;
 use std::fs::File;
+
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::task::Waker;
 use std::time::Duration;
@@ -53,9 +87,35 @@ use std::time::Duration;
 ///
 /// A journal asks for one, because `&mut self` already admits one. A run store's
 /// append is `&self` and many runs reach it, so it asks for more; the number is a
-/// bound, not a hint, and a caller that arrives at a full queue is told so rather
-/// than made to wait without limit.
+/// bound, not a hint, and a caller that arrives at a full ring waits for room
+/// rather than growing it.
 pub(crate) const DEFAULT_QUEUE_DEPTH: usize = 64;
+
+/// The most submissions that may wait for room in the request ring.
+///
+/// The second half of the backpressure: [`DEFAULT_QUEUE_DEPTH`] bounds the ring
+/// the owner drains, and this bounds the ring of submitters waiting to get into
+/// it. Both are bounded because both grow with callers — a run store's append is
+/// `&self`, so any number of steps may reach it — and a wait that is itself
+/// unbounded is a queue that never says it is full.
+pub(crate) const MAX_WAITING_SUBMITTERS: usize = 64;
+
+/// The most records one group commit stages and syncs together.
+///
+/// A ceiling on how much of a caller's record set is held under a single answer,
+/// not a target: the owner drains whatever is queued when it wakes and stops at
+/// whichever of the two batch ceilings it reaches first. A store whose per-record
+/// frame is larger than [`MAX_BATCH_BYTES`] still stages one record, because a
+/// record already written is a record whose answer is owed.
+pub(crate) const MAX_BATCH_RECORDS: usize = 64;
+
+/// The most bytes one group commit stages before it stops taking records.
+///
+/// A ceiling on the buffer one flush carries, checked against the staged total as
+/// records go in. One record may take the batch past it — see the module's note
+/// that a staged record is already written — so a batch's staged total is bounded
+/// by this plus the largest frame any single store admits.
+pub(crate) const MAX_BATCH_BYTES: usize = 256 * 1024;
 
 /// Take the lock, treating a poisoned one as recoverable.
 ///
@@ -69,39 +129,67 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// One durable request, as the storage owner receives it, and the answer it gives
-/// back to the caller that asked.
+/// One durable request's ordered step, as the storage owner runs it.
 ///
 /// Generic in both because both are the caller's: a journal's request returns no
-/// answer and has no state, and a run store's returns which of its three record
-/// outcomes happened and holds the index it folds into. Parameterising the owner in
-/// both is what lets one owner serve both without either store naming the other's
-/// vocabulary.
-pub(crate) type Job<S, A> = Box<dyn FnOnce(&mut File, &mut S) -> Result<A, std::io::Error> + Send>;
+/// answer and has no state to fold, and a run store's returns which of its three
+/// record outcomes happened and holds the index it settles into. Parameterising
+/// the owner in both is what lets one owner serve both without either store
+/// naming the other's vocabulary.
+pub(crate) type Job<S, A> =
+    Box<dyn FnOnce(&mut File, &mut S) -> Result<Stage<A, S>, std::io::Error> + Send>;
 
-/// One job and the slot its answer is written into.
+/// What one ordered step owes the batch after it returns.
 ///
-/// The owner loop owns the write rather than the closure: the closure's whole job is
-/// the ordered step, and making it also responsible for reporting means an early
-/// return inside it would leave a caller waiting on an answer nothing will ever
-/// write. Here the publish is one statement the loop cannot skip.
-struct Envelope<S, A> {
-    /// The ordered step.
-    job: Job<S, A>,
-    /// Where the answer goes, or nowhere if the caller has gone.
-    reply: Arc<Answer<A>>,
+/// The two-phase split that group commit is made of. `Settled` is a step that
+/// moved no byte — a refusal, or an answer the index already held — and owes
+/// nothing. `Unsynced` is a step whose bytes are on the file and whose answer is
+/// owed one `sync_all` covering it and every other `Unsynced` member of its batch.
+pub(crate) enum Stage<A, S> {
+    /// The step wrote nothing, so its answer owes no flush. The answer is itself
+    /// a `Result`, because a refusal is an answer and is answered the moment the
+    /// step returns rather than at the end of a batch it does not belong to.
+    Settled(Result<A, std::io::Error>),
+    /// The step's bytes are on the file; the answer and the fold are owed the
+    /// batch's one `sync_all`.
+    Unsynced {
+        /// The answer, published only after the covering sync returns `Ok`.
+        answer: A,
+        /// How many bytes this record added, charged against [`MAX_BATCH_BYTES`].
+        bytes: usize,
+        /// Fold the record into the caller's state, in submission order, once the
+        /// covering sync has returned. Not run when that sync fails, which is what
+        /// keeps the index from claiming bytes the device never took.
+        settle: Box<dyn FnOnce(&mut S) + Send>,
+    },
 }
 
-/// The slot one answer travels through, awaitable and blockable alike.
+impl<A, S> Stage<A, S> {
+    /// How many bytes this step put on the file.
+    fn staged_bytes(&self) -> usize {
+        match *self {
+            Self::Settled(_) => 0,
+            Self::Unsynced { bytes, .. } => bytes,
+        }
+    }
+
+    /// Whether this step's answer is owed the batch's one flush.
+    fn owes_flush(&self) -> bool {
+        matches!(self, Self::Unsynced { .. })
+    }
+}
+
+/// One durable request and the slot its answer travels through.
 ///
-/// A channel would not serve both doors: the blocking caller has no reactor to park
-/// a waker with, and the awaiting caller must not park its thread. One slot with a
-/// condvar serves the first, and a waker the owner fires serves the second, so one
-/// answer type answers both without either caller knowing which it is.
-struct Answer<A> {
+/// The request travels with its own reply rather than beside it, because a
+/// submission can be parked in the waiting ring before the owner has taken it and
+/// the two must be promoted together or not at all.
+struct Request<S, A> {
+    /// The ordered step, taken by the owner when it stages this request.
+    job: Mutex<Option<Job<S, A>>>,
     /// The answer, once the owner has written it.
     slot: Mutex<Option<Result<A, std::io::Error>>>,
-    /// Woken when it is written.
+    /// Woken when the answer is written.
     arrived: Condvar,
     /// The task to wake, when the caller is awaiting rather than blocking.
     waker: Mutex<Option<Waker>>,
@@ -109,15 +197,33 @@ struct Answer<A> {
     abandoned: Mutex<bool>,
 }
 
-impl<A> Answer<A> {
-    /// An empty answer slot.
+impl<S, A> Request<S, A> {
+    /// An empty request slot, carrying no step yet.
     fn new() -> Self {
         Self {
+            job: Mutex::new(None),
             slot: Mutex::new(None),
             arrived: Condvar::new(),
             waker: Mutex::new(None),
             abandoned: Mutex::new(false),
         }
+    }
+
+    /// Hand the ordered step to whoever stages this request.
+    fn arm(&self, job: Job<S, A>) {
+        *lock(&self.job) = Some(job);
+    }
+
+    /// Take the ordered step, or report that it is not there.
+    ///
+    /// The second arm is unreachable by construction: the owner only reaches a
+    /// request through a ring it pushed with the step armed. `Result` rather than a
+    /// panic because the owner must not be the thing that decides a caller's
+    /// request was malformed.
+    fn take_job(&self) -> Result<Job<S, A>, std::io::Error> {
+        lock(&self.job)
+            .take()
+            .ok_or_else(|| std::io::Error::other("the storage owner was handed an unarmed request"))
     }
 
     /// Record that the caller went away before its answer arrived.
@@ -143,6 +249,12 @@ impl<A> Answer<A> {
     /// the second is dropped rather than replacing it.
     fn publish(&self, outcome: Result<A, std::io::Error>) {
         *lock(&self.slot) = Some(outcome);
+        self.wake();
+    }
+
+    /// Wake the awaiting caller without an answer, which is how a request promoted
+    /// out of the waiting ring learns it no longer has to wait for room.
+    fn wake(&self) {
         if let Some(waker) = lock(&self.waker).take() {
             waker.wake();
         }
@@ -169,10 +281,10 @@ impl<A> Answer<A> {
     }
 }
 
-/// The slot both sides read, the bounded request ring, and the poison the owner
-/// latches.
+/// The two bounded rings, the poison the owner latches, and the flags a caller
+/// changes while the owner is busy.
 struct Slot<S, A> {
-    /// Requests admitted and not yet taken by the owner, in arrival order.
+    /// Requests admitted and not yet staged, in arrival order.
     ///
     /// A bounded ring rather than a channel, and the bound is what makes it one.
     /// The estate's channel (`rt::sync::mpsc`) is the right choice *with a
@@ -182,7 +294,13 @@ struct Slot<S, A> {
     /// disallowed workspace-wide (INV-RT-BOUNDED) precisely because it has no
     /// bounded form. A `VecDeque` with a checked push is the bound written out,
     /// and it costs one lock the owner already holds.
-    pending: VecDeque<Envelope<S, A>>,
+    pending: VecDeque<Arc<Request<S, A>>>,
+    /// Requests that found [`pending`] full and are waiting for room.
+    ///
+    /// The second half of the backpressure. They are promoted into `pending` by
+    /// the owner as it drains, in arrival order, so the order a submitter was
+    /// admitted in survives the wait.
+    waiting: VecDeque<Arc<Request<S, A>>>,
     /// Whether bytes may be on the disk that no acknowledgment names.
     poisoned: bool,
     /// Whether the handle is gone and the owner should finish and exit.
@@ -191,22 +309,72 @@ struct Slot<S, A> {
     released: bool,
     /// Whether the next request should report a device refusal instead of writing.
     fail_next: bool,
+    /// How many `sync_all` calls this owner has made.
+    ///
+    /// The observable that says whether a batch formed: one per flush, so
+    /// `flushes / acknowledged` is the fsyncs per record the mechanism actually
+    /// paid. A caller reads it through its store, so the number is measured rather
+    /// than inferred from a latency difference.
+    flushes: u64,
+    /// How many records the owner has staged since it started.
+    ///
+    /// The denominator for the ratio above, counted where the records are actually
+    /// staged rather than by the callers that asked for them — a caller that gave
+    /// up is still a staged record, and leaving it out would report a better
+    /// batching factor than the store really achieved.
+    staged_records: u64,
+}
+
+impl<S, A> Slot<S, A> {
+    /// Whether a request may be admitted, or why it may not.
+    fn admission(&self) -> Admission {
+        if self.poisoned {
+            Admission::Poisoned
+        } else if self.pending.len() < DEFAULT_QUEUE_DEPTH {
+            Admission::Admitted
+        } else if self.waiting.len() < MAX_WAITING_SUBMITTERS {
+            Admission::Waiting
+        } else {
+            Admission::Refused
+        }
+    }
+
+    /// Whether anything is left for the owner to do.
+    fn has_work(&self) -> bool {
+        !self.pending.is_empty() || !self.waiting.is_empty()
+    }
+}
+
+/// How one submission was admitted, or why it was not.
+enum Admission {
+    /// Straight into the ring the owner drains.
+    Admitted,
+    /// Parked in the waiting ring until the pending ring drains.
+    Waiting,
+    /// A previous request's outcome is unknown, so this handle cannot append.
+    Poisoned,
+    /// Both rings are full: the caller is told rather than made to wait without
+    /// limit.
+    Refused,
 }
 
 /// `Slot::default` by hand rather than derived.
 ///
 /// The derived one would demand `S: Default` and `A: Default` for a struct that
-/// stores neither: `S` and `A` appear only inside `pending`'s envelopes, which
+/// stores neither: `S` and `A` appear only inside the rings' requests, which
 /// start empty. Requiring the caller's state to be constructible just to open an
 /// owner would be a bound neither store can satisfy.
 impl<S, A> Default for Slot<S, A> {
     fn default() -> Self {
         Self {
             pending: VecDeque::new(),
+            waiting: VecDeque::new(),
             poisoned: false,
             closed: false,
             released: false,
             fail_next: false,
+            flushes: 0,
+            staged_records: 0,
         }
     }
 }
@@ -244,7 +412,7 @@ where
     S: Send + 'static,
     A: Send + 'static,
 {
-    /// The poison latch, the stall gate and the bounded request ring.
+    /// The poison latch, the stall gate and the two bounded rings.
     slot: Arc<Mutex<Slot<S, A>>>,
     /// The same latch as its own type, so a gate outlives the store's generics.
     gate: Arc<Mutex<Gate>>,
@@ -262,7 +430,7 @@ where
 /// on the append that is waiting.
 #[derive(Clone)]
 pub struct StorageGate {
-    /// The stall latch, held apart from the request ring.
+    /// The stall latch, held apart from the request rings.
     ///
     /// Its own state rather than a parameterised view of the owner's `Slot`: a
     /// gate is reachable from either store and from an operator's separate
@@ -303,15 +471,16 @@ impl StorageGate {
 /// Why an append did not reach the device, or reached it without an answer.
 ///
 /// Three refusals and one device error, kept apart because the repair differs per
-/// arm: a poison is fixed by reopening, a full queue by waiting, an undelivered
-/// answer by reading the file back, and a device error by whatever the device says.
+/// arm: a poison is fixed by reopening, a full pair of rings by retrying later, an
+/// undelivered answer by reading the file back, and a device error by whatever the
+/// device says.
 #[derive(Debug)]
 pub(crate) enum SubmitError {
     /// A previous request's outcome is unknown, so this handle cannot append
     /// again. Only a reopen, which replays the truth, clears it.
     Poisoned,
-    /// The bounded queue was full: more requests are outstanding than the ceiling
-    /// admits. Nothing was written, and the caller may retry.
+    /// Both bounded rings were full: more requests are outstanding than the two
+    /// declared ceilings admit. Nothing was written, and the caller may retry.
     QueueFull,
     /// The owner finished the request but the answer could not be delivered, so a
     /// prefix or all of the bytes may be on the disk.
@@ -397,6 +566,18 @@ where
         lock(&self.slot).poisoned
     }
 
+    /// How many `sync_all` calls this owner has made, and how many records it has
+    /// staged since it started.
+    ///
+    /// Read through [`crate::task::RunStore::flush_counts`], which is the only
+    /// caller: the counter exists to be measured from outside the crate, and a
+    /// feature set with no run store has no caller to be measured by.
+    #[cfg(feature = "script")]
+    pub(crate) fn flush_counts(&self) -> (u64, u64) {
+        let held = lock(&self.slot);
+        (held.flushes, held.staged_records)
+    }
+
     /// Make the next request report a device refusal instead of writing.
     ///
     /// Private, and deliberately so: the failure this models is a write that fails
@@ -414,13 +595,13 @@ where
     ///
     /// # Errors
     ///
-    /// Whatever `job` reports, plus the queue being full: an append refused for want
-    /// of room is a typed refusal, never a silent wait.
+    /// Whatever `job` reports, plus both rings being full: an append refused for
+    /// want of room anywhere is a typed refusal, never a silent wait.
     pub(crate) fn submit<F>(&self, job: F) -> Result<A, SubmitError>
     where
-        F: FnOnce(&mut File, &mut S) -> Result<A, std::io::Error> + Send + 'static,
+        F: FnOnce(&mut File, &mut S) -> Result<Stage<A, S>, std::io::Error> + Send + 'static,
     {
-        let reply = Arc::new(Answer::new());
+        let reply = Arc::new(Request::<S, A>::new());
         self.enqueue(Box::new(job), Arc::clone(&reply))?;
         match reply.wait_blocking() {
             Some(outcome) => outcome.map_err(SubmitError::Device),
@@ -431,15 +612,16 @@ where
     /// The same door, for a caller that awaits rather than blocks.
     ///
     /// The difference is only in how the answer is delivered: a blocking caller
-    /// waits on the channel, a task awaits it and is woken by the owner when the
-    /// answer lands. The append itself is the same ordered step either way, so a
-    /// caller choosing to await does not get a weaker write than one that chose to
-    /// sit through it.
+    /// waits on the request's slot, a task awaits it and is woken by the owner when
+    /// the answer lands — and when the waiting ring is full enough to park it, by
+    /// the owner when it is promoted back. The append itself is the same ordered
+    /// step either way, so a caller choosing to await does not get a weaker write
+    /// than one that chose to sit through it.
     pub(crate) fn submit_async<F>(&self, job: F) -> crate::BoxFuture<'_, Result<A, SubmitError>>
     where
-        F: FnOnce(&mut File, &mut S) -> Result<A, std::io::Error> + Send + 'static,
+        F: FnOnce(&mut File, &mut S) -> Result<Stage<A, S>, std::io::Error> + Send + 'static,
     {
-        let reply = Arc::new(Answer::new());
+        let reply = Arc::new(Request::<S, A>::new());
         let outcome = self.enqueue(Box::new(job), Arc::clone(&reply));
         Box::pin(Awaiting {
             enqueued: Some(outcome),
@@ -449,21 +631,32 @@ where
 
     /// Hand one request to the owner, or report that this handle may not append.
     ///
-    /// The bound is a refusal, not a wait: a caller that has outrun the device by
-    /// more than [`DEFAULT_QUEUE_DEPTH`] requests is told so immediately, because
+    /// The bound is backpressure rather than a refusal for the common case: a
+    /// submitter that finds the draining ring full is parked in the waiting ring
+    /// and is woken when the owner promotes it, so the memory the caller holds
+    /// while it waits is one [`Request`] against a declared ceiling. Only a
+    /// submitter that has outrun *both* rings is told so immediately, because
     /// queueing without limit is how a parked device turns into unbounded memory.
-    fn enqueue(&self, job: Job<S, A>, reply: Arc<Answer<A>>) -> Result<(), SubmitError> {
+    fn enqueue(&self, job: Job<S, A>, reply: Arc<Request<S, A>>) -> Result<(), SubmitError> {
         let mut held = lock(&self.slot);
-        if held.poisoned {
-            return Err(SubmitError::Poisoned);
+        match held.admission() {
+            Admission::Poisoned => Err(SubmitError::Poisoned),
+            Admission::Refused => Err(SubmitError::QueueFull),
+            Admission::Admitted => {
+                reply.arm(job);
+                held.pending.push_back(Arc::clone(&reply));
+                drop(held);
+                self.signal.notify_all();
+                Ok(())
+            }
+            Admission::Waiting => {
+                reply.arm(job);
+                held.waiting.push_back(Arc::clone(&reply));
+                drop(held);
+                self.signal.notify_all();
+                Ok(())
+            }
         }
-        if held.pending.len() >= DEFAULT_QUEUE_DEPTH {
-            return Err(SubmitError::QueueFull);
-        }
-        held.pending.push_back(Envelope { job, reply });
-        drop(held);
-        self.signal.notify_all();
-        Ok(())
     }
 }
 
@@ -474,15 +667,15 @@ where
 /// then park — which is exactly the shape that would need a second await to notice
 /// the answer. Here each poll reads the slot, so a missed wake costs a re-poll
 /// rather than a hang.
-struct Awaiting<A> {
+struct Awaiting<S, A> {
     /// Whether the request reached the owner at all. An error here is the queue's,
     /// and there is nothing to wait for. Taken on the first poll only.
     enqueued: Option<Result<(), SubmitError>>,
     /// Where the owner will write, and where this poll reads.
-    reply: Arc<Answer<A>>,
+    reply: Arc<Request<S, A>>,
 }
 
-impl<A> std::future::Future for Awaiting<A> {
+impl<S, A> std::future::Future for Awaiting<S, A> {
     type Output = Result<A, SubmitError>;
 
     fn poll(
@@ -505,7 +698,7 @@ impl<A> std::future::Future for Awaiting<A> {
     }
 }
 
-impl<A> Drop for Awaiting<A> {
+impl<S, A> Drop for Awaiting<S, A> {
     /// A caller that walks away before its answer arrives marks the request
     /// abandoned.
     ///
@@ -547,11 +740,11 @@ where
     }
 }
 
-/// The owner's loop: take a request, perform it, answer, repeat.
+/// The owner's loop: stage a batch, sync it once, answer everyone in it.
 ///
 /// The file and the caller's state are dropped before `released` is set, so a
 /// waiter that observes the release knows everything is already gone rather than
-/// about to be. The loop ends when the handle has closed *and* the queue has
+/// about to be. The loop ends when the handle has closed *and* both rings have
 /// drained, so a request submitted just before the last handle went is still
 /// performed: the bytes it would have written are the ones an acknowledgment may
 /// already name.
@@ -562,38 +755,7 @@ fn serve<S, A>(
     gate: Arc<Mutex<Gate>>,
     signal: Arc<Condvar>,
 ) {
-    while let Some(envelope) = next(&slot, &gate, &signal) {
-        // The whole critical section runs here: the fence, the write, the sync and
-        // the fold into shared state, in one ordered step no other request can
-        // overtake.
-        let Envelope { job, reply } = envelope;
-        let injected = {
-            let mut held = lock(&slot);
-            std::mem::take(&mut held.fail_next)
-        };
-        let outcome = if injected {
-            Err(std::io::Error::other("the injected device refusal"))
-        } else {
-            job(&mut file, &mut state)
-        };
-        // A caller that went away while the bytes were moving leaves the handle
-        // unable to say whether they landed, which is the same position a failed
-        // write leaves it in: poisoned until a reopen replays the truth.
-        let failed = outcome.is_err() || reply.was_abandoned();
-        if failed {
-            // A failure inside the ordered step may have moved a prefix of the
-            // bytes, so the handle cannot say what is on the disk and refuses every
-            // later append until a reopen replays the truth. Latched *before* the
-            // answer goes out: a caller woken by the failure may append again at
-            // once, and must find the handle already refusing.
-            lock(&slot).poisoned = true;
-        }
-        // The answer goes out whether or not anyone is listening: a caller that has
-        // gone cannot be told, but the bytes have moved either way, and the poison
-        // above is what makes the next caller read the file back rather than trust
-        // a view that may be behind it.
-        reply.publish(outcome);
-    }
+    while run_batch(&mut file, &mut state, &slot, &gate, &signal) {}
     drop(file);
     drop(state);
     let mut held = lock(&slot);
@@ -601,43 +763,204 @@ fn serve<S, A>(
     signal.notify_all();
 }
 
-/// Take the next job, or `None` once the handle has closed and the queue is drained.
+/// One staged member of a batch: the request it belongs to, and what it owes.
 ///
-/// The wait is a poll rather than a blocking receive, and that is deliberate: a
-/// blocking receive would hold the slot across the wait, which would make the stall
-/// gate — the one thing an operator reaches for while a flush is parked — invisible
-/// to the thread that has to answer it. A one-millisecond poll costs nothing next to
-/// an `fsync` and keeps every state change observable.
-fn next<S, A>(
+/// A named pair rather than a tuple because the two halves are read apart — the
+/// batch counts one, and each member's answer takes both — and a tuple would make
+/// a reader remember which element is which at every use.
+struct Member<S, A> {
+    /// Where this member's answer goes.
+    request: Arc<Request<S, A>>,
+    /// What its ordered step staged.
+    staged: Stage<A, S>,
+}
+
+/// Stage one batch, sync it once, and answer it. `false` once there is nothing left.
+///
+/// Three phases, in this order and never another:
+///
+/// 1. **Stage.** Take requests from the front of the pending ring and run each
+///    ordered step in arrival order. Every byte is on the file by the end of this
+///    phase, and every step that owes a flush owes it *to this batch*.
+/// 2. **Sync.** One `sync_all` if anything is owed, covering every record staged
+///    above. There is no linger before it and none after it.
+/// 3. **Answer.** Publish in arrival order: a settled answer as it stands, an
+///    unsynced one only after the sync returned, and the folds in the same order.
+///
+/// The poison latch is written *before* any answer of a failed batch goes out: a
+/// caller woken by a failure may append again at once and must find the handle
+/// already refusing.
+fn run_batch<S, A>(
+    file: &mut File,
+    state: &mut S,
     slot: &Mutex<Slot<S, A>>,
     gate: &Mutex<Gate>,
     signal: &Condvar,
-) -> Option<Envelope<S, A>> {
+) -> bool {
+    promote(&mut lock(slot));
+    let mut batch: Vec<Member<S, A>> = Vec::new();
+    let mut staged_bytes = 0usize;
+    loop {
+        // The stall gate is checked before a request is taken, so a parked device
+        // parks the append at the door rather than after the owner has claimed it.
+        // Only a *first* record waits: a batch already holding staged bytes owes
+        // them a flush, and waiting for company would be exactly the linger this
+        // design refuses.
+        if batch.is_empty() && !await_work(slot, gate, signal) {
+            break;
+        }
+        if batch.len() >= MAX_BATCH_RECORDS || staged_bytes >= MAX_BATCH_BYTES {
+            break;
+        }
+        // An empty ring means this batch is complete, not that it should be
+        // retried: only this thread takes requests out of it, so an empty one
+        // cannot fill again under us. An empty *batch* reaching here would mean
+        // `await_work` reported work that is not there, which the owner cannot
+        // recover from by waiting and must not report as a record.
+        let Some(request) = take(slot) else {
+            break;
+        };
+        let outcome = match request.take_job() {
+            Err(cause) => Err(cause),
+            Ok(job) => {
+                let injected = {
+                    let mut held = lock(slot);
+                    std::mem::take(&mut held.fail_next)
+                };
+                if injected {
+                    Err(std::io::Error::other("the injected device refusal"))
+                } else {
+                    job(file, state)
+                }
+            }
+        };
+        let staged = match outcome {
+            Ok(staged) => staged,
+            // A failure inside the ordered step may have moved a prefix of the
+            // bytes, so the handle cannot say what is on the disk and refuses every
+            // later append until a reopen replays the truth. The record still needs
+            // an answer, and the answer is the same failure.
+            Err(cause) => Stage::Settled(Err(cause)),
+        };
+        staged_bytes = staged_bytes.saturating_add(staged.staged_bytes());
+        {
+            let mut held = lock(slot);
+            held.staged_records = held.staged_records.saturating_add(1);
+        }
+        batch.push(Member { request, staged });
+    }
+
+    if batch.is_empty() {
+        return false;
+    }
+
+    // One flush for the batch. A member that owes nothing does not make the batch
+    // sync; a member whose flush fails takes the same failure as every other, and
+    // none of them is answered.
+    let owes = batch.iter().any(|member| member.staged.owes_flush());
+    let sync = if owes {
+        let outcome = file.sync_all();
+        let mut held = lock(slot);
+        held.flushes = held.flushes.saturating_add(1);
+        outcome
+    } else {
+        Ok(())
+    };
+
+    let mut failed = false;
+    let flush_ok = sync.is_ok();
+    let flush_kind = sync
+        .as_ref()
+        .err()
+        .map_or(std::io::ErrorKind::Other, |cause| cause.kind());
+    for Member { request, staged } in batch {
+        // A failure anywhere in the batch poisons the handle, so the latch is
+        // raised as each member is answered rather than once at the end: a caller
+        // woken by the first failure may append again at once and must find the
+        // handle already refusing.
+        let answer = match staged {
+            Stage::Settled(answer) => answer,
+            Stage::Unsynced { answer, settle, .. } if flush_ok => {
+                // The fold runs only on a flush that returned, and in submission
+                // order, so a store's index cannot name a record the device never
+                // took.
+                settle(state);
+                Ok(answer)
+            }
+            Stage::Unsynced { .. } => Err(std::io::Error::new(
+                flush_kind,
+                "the batch's flush failed, so this record's outcome is unknown",
+            )),
+        };
+        if answer.is_err() {
+            failed = true;
+        }
+        // A caller that went away while the bytes were moving leaves the handle
+        // unable to say whether they landed, which is the same position a failed
+        // write leaves it in: poisoned until a reopen replays the truth.
+        if request.was_abandoned() {
+            failed = true;
+        }
+        if failed {
+            lock(slot).poisoned = true;
+        }
+        // The answer goes out whether or not anyone is listening: a caller that has
+        // gone cannot be told, but the bytes have moved either way, and the poison
+        // above is what makes the next caller read the file back rather than trust
+        // a view that may be behind it.
+        request.publish(answer);
+    }
+    true
+}
+
+/// Move waiting requests into the ring the owner drains, in arrival order.
+///
+/// Bounded by the pending ring's own ceiling: a promotion that would overfill it is
+/// deferred to the next drain rather than raising the bound.
+fn promote<S, A>(held: &mut MutexGuard<'_, Slot<S, A>>) {
+    while held.pending.len() < DEFAULT_QUEUE_DEPTH {
+        let Some(request) = held.waiting.pop_front() else {
+            break;
+        };
+        request.wake();
+        held.pending.push_back(request);
+    }
+}
+
+/// Take one request from the front of the pending ring, or `None` if it is empty.
+fn take<S, A>(slot: &Mutex<Slot<S, A>>) -> Option<Arc<Request<S, A>>> {
+    lock(slot).pending.pop_front()
+}
+
+/// Wait until there is work, or report that there never will be again.
+///
+/// The wait is a poll rather than a blocking receive, and that is deliberate: a
+/// blocking receive would hold the slot across the wait, which would make the stall
+/// gate — the one thing an operator reaches for while a flush is parked —
+/// invisible to the thread that has to answer it. A one-millisecond poll costs
+/// nothing next to an `fsync` and keeps every state change observable.
+fn await_work<S, A>(slot: &Mutex<Slot<S, A>>, gate: &Mutex<Gate>, signal: &Condvar) -> bool {
     let mut held = lock(slot);
     loop {
         // A parked device holds the request back, and the gate is what releases
-        // it. This is checked *before* a request is taken, so a stalled device
-        // parks the append at the door rather than after the owner has claimed
-        // it — which is what an `fsync` that has not answered looks like, and
-        // what makes the caller's wait observable to the rest of the runtime.
-        //
-        // The wait is timed rather than indefinite so a handle that closes during
-        // a stall still ends the loop, and so a release arriving between requests
-        // is not missed.
+        // it. The wait is timed rather than indefinite so a handle that closes
+        // during a stall still ends the loop, and so a release arriving between
+        // batches is not missed.
         while lock(gate).stalled && !held.closed {
             let (guard, _timed_out) = signal
                 .wait_timeout(held, Duration::from_millis(1))
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             held = guard;
         }
-        if let Some(envelope) = held.pending.pop_front() {
-            return Some(envelope);
+        promote(&mut held);
+        if held.has_work() {
+            return true;
         }
         if held.closed {
             // Closed and empty: drained. A request admitted just before the last
-            // handle went is the one `pop_front` above took, so nothing is
-            // stranded on the way out.
-            return None;
+            // handle went is the one `take` above took, so nothing is stranded on
+            // the way out.
+            return false;
         }
         let (guard, _timed_out) = signal
             .wait_timeout(held, Duration::from_millis(1))
