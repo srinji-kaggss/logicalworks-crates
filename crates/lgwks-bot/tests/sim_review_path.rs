@@ -62,6 +62,12 @@ use lgwks_bot::task::{Host, Report, Task, task};
 #[path = "support/fake_gh.rs"]
 mod fake_gh;
 
+mod sim;
+
+// The band-declaration macro, defined once for the whole layer.
+#[path = "sim/bands.rs"]
+mod band_family;
+
 use fake_gh::{FakeGh, Scenario};
 
 /// What a simulation reports when a precondition did not hold.
@@ -1586,15 +1592,52 @@ impl SubjectFault {
 }
 
 /// The two inline comments a partial-submission run intends.
-fn two_comments() -> Vec<ReviewComment> {
-    vec![
-        ReviewComment::new("src/a.rs", 1, "first comment"),
-        ReviewComment::new("src/b.rs", 2, "second comment"),
-    ]
+fn comments(count: u32) -> Vec<ReviewComment> {
+    (1..=count)
+        .map(|line| {
+            ReviewComment::new(
+                format!("src/f{line}.rs"),
+                u64::from(line),
+                format!("comment {line}"),
+            )
+        })
+        .collect()
+}
+
+/// What one seed draws beyond its fault.
+///
+/// The fault is `index % 8`, so a band of eight seeds reaches every fault; the
+/// draw is what makes two seeds with one fault two different worlds — a diff one
+/// file or sixty-four files past the ceiling, a partial submission that landed
+/// none of five comments or four of them — rather than one scenario replayed.
+#[derive(Debug, Clone, Copy)]
+struct SubjectDraw {
+    /// Files past `MAX_DIFF_FILES_PER_PULL` the receiver reports.
+    files_over: u32,
+    /// Patch bytes past `MAX_DIFF_BYTES` the receiver reports.
+    bytes_over: u32,
+    /// Inline comments the run intends.
+    intended: u32,
+    /// How many of them the receiver says landed; always fewer than intended.
+    applied: u32,
+}
+
+impl SubjectDraw {
+    /// The draw for seed `index`, from the shared generator.
+    fn for_seed(index: u64) -> Self {
+        let mut rng = sim::Rng::new(index);
+        let intended = rng.between(2, 6);
+        Self {
+            files_over: rng.between(1, 64),
+            bytes_over: rng.between(1, 4096),
+            intended,
+            applied: rng.below(intended),
+        }
+    }
 }
 
 /// The scenario a subject fault describes.
-fn subject_scenario(fault: SubjectFault, head: &str) -> Scenario {
+fn subject_scenario(fault: SubjectFault, head: &str, draw: SubjectDraw) -> Scenario {
     let scenario = Scenario::new(head);
     match fault {
         SubjectFault::Clean => scenario,
@@ -1603,15 +1646,15 @@ fn subject_scenario(fault: SubjectFault, head: &str) -> Scenario {
         SubjectFault::DiffOverFiles => scenario.with_filler_files(
             u32::try_from(lgwks_bot::domain::gh::MAX_DIFF_FILES_PER_PULL)
                 .unwrap_or(0)
-                .saturating_add(1),
+                .saturating_add(draw.files_over),
         ),
         SubjectFault::DiffOverBytes => scenario.with_diff_bytes(
             u32::try_from(lgwks_bot::domain::gh::MAX_DIFF_BYTES)
                 .unwrap_or(0)
-                .saturating_add(64),
+                .saturating_add(draw.bytes_over),
         ),
         SubjectFault::PendingDraft => scenario.records_pending_draft(),
-        SubjectFault::PartialComments => scenario.records_partial_comments(1),
+        SubjectFault::PartialComments => scenario.records_partial_comments(draw.applied),
         SubjectFault::ReadDenied => scenario.deny_reads(),
     }
 }
@@ -1619,14 +1662,15 @@ fn subject_scenario(fault: SubjectFault, head: &str) -> Scenario {
 /// Run one seed's subject fault through the real path.
 fn run_subject_seed(index: u64) -> Result<(SubjectFault, Run), Box<dyn std::error::Error>> {
     let fault = SubjectFault::for_index(index);
+    let draw = SubjectDraw::for_seed(index);
     let host = host()?;
     let job = review_task()?;
     let fake = FakeGh::install(fault.label(), HEAD)?;
-    fake.configure(subject_scenario(fault, HEAD))?;
+    fake.configure(subject_scenario(fault, HEAD, draw))?;
 
     let mut request = request(7)?;
     if fault == SubjectFault::PartialComments {
-        request = request.with_comments(two_comments());
+        request = request.with_comments(comments(draw.intended));
     }
     let report = host.block_on(&job, (gh_for(&fake, fault.capture())?, request))?;
     let argv = normalized_argv(&fake.calls()?);
@@ -1642,10 +1686,9 @@ fn run_subject_seed(index: u64) -> Result<(SubjectFault, Run), Box<dyn std::erro
 
 /// The subject family: every fault reaches its own distinct outcome, and none
 /// but the clean world reports a publication.
-#[test]
-fn subject_coverage_and_partial_faults_r32() -> TestResult {
+fn subject_coverage_and_partial_faults(band: sim::Band) -> TestResult {
     let mut seen = std::collections::HashSet::new();
-    for index in 0..SEEDS {
+    for index in band.seeds() {
         let (fault, run) = run_subject_seed(index)?;
         seen.insert(fault.label());
 
@@ -1691,11 +1734,27 @@ fn subject_coverage_and_partial_faults_r32() -> TestResult {
                 outcome.is_pending(),
                 "seed {index}: a lost response onto a draft is Pending: {outcome:?}"
             ),
-            SubjectFault::PartialComments => assert!(
-                outcome.is_partial(),
-                "seed {index}: a submission with fewer comments than intended is \
-                 Partial: {outcome:?}"
-            ),
+            SubjectFault::PartialComments => {
+                let draw = SubjectDraw::for_seed(index);
+                let &ReviewOutcome::Partial {
+                    applied, intended, ..
+                } = outcome
+                else {
+                    return Err(format!(
+                        "seed {index}: a submission with fewer comments than intended \
+                         is Partial: {outcome:?}"
+                    )
+                    .into());
+                };
+                assert_eq!(
+                    (applied, intended),
+                    (
+                        usize::try_from(draw.applied)?,
+                        usize::try_from(draw.intended)?
+                    ),
+                    "seed {index}: Partial reports the counts that landed and were intended"
+                );
+            }
             SubjectFault::ReadDenied => assert!(
                 outcome.is_unverified(),
                 "seed {index}: a lost read permission after a create is Unverified: {outcome:?}"
@@ -1712,9 +1771,8 @@ fn subject_coverage_and_partial_faults_r32() -> TestResult {
 }
 
 /// The same seed must produce the same subject trace, through the real path.
-#[test]
-fn same_seed_same_trace_hash_subject_r32() -> TestResult {
-    for index in 0..SEEDS {
+fn same_seed_same_trace_hash_subject(band: sim::Band) -> TestResult {
+    for index in band.seeds() {
         let (first_fault, first) = run_subject_seed(index)?;
         let (second_fault, second) = run_subject_seed(index)?;
         assert_eq!(
@@ -1740,9 +1798,8 @@ fn same_seed_same_trace_hash_subject_r32() -> TestResult {
 }
 
 /// Two identities on one pull request each verify only their own review.
-#[test]
-fn two_identities_subject_r16() -> TestResult {
-    for index in 0..16u64 {
+fn two_identities_subject(band: sim::Band) -> TestResult {
+    for index in band.seeds() {
         let fake = FakeGh::install("subject-tenants", HEAD)?;
         fake.configure(Scenario::new(HEAD))?;
         let host = host()?;
@@ -1801,4 +1858,26 @@ fn two_identities_subject_r16() -> TestResult {
         );
     }
     Ok(())
+}
+
+// ── Band declarations ────────────────────────────────────────────────────────
+//
+// Eight seeds a band, each band starting on a multiple of eight, so every
+// subject band reaches all eight faults with its own draws.
+
+band_family::band_family! {
+    subject_coverage_and_partial_faults_band_00 => subject_coverage_and_partial_faults, 0;
+    subject_coverage_and_partial_faults_band_01 => subject_coverage_and_partial_faults, 1;
+    subject_coverage_and_partial_faults_band_02 => subject_coverage_and_partial_faults, 2;
+    subject_coverage_and_partial_faults_band_03 => subject_coverage_and_partial_faults, 3;
+    subject_coverage_and_partial_faults_band_04 => subject_coverage_and_partial_faults, 4;
+    subject_coverage_and_partial_faults_band_05 => subject_coverage_and_partial_faults, 5;
+    subject_coverage_and_partial_faults_band_06 => subject_coverage_and_partial_faults, 6;
+    subject_coverage_and_partial_faults_band_07 => subject_coverage_and_partial_faults, 7;
+    same_seed_same_trace_hash_subject_band_08 => same_seed_same_trace_hash_subject, 8;
+    same_seed_same_trace_hash_subject_band_09 => same_seed_same_trace_hash_subject, 9;
+    same_seed_same_trace_hash_subject_band_10 => same_seed_same_trace_hash_subject, 10;
+    same_seed_same_trace_hash_subject_band_11 => same_seed_same_trace_hash_subject, 11;
+    two_identities_subject_band_12 => two_identities_subject, 12;
+    two_identities_subject_band_13 => two_identities_subject, 13;
 }
