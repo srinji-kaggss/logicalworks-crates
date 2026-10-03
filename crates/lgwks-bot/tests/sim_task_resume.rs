@@ -69,7 +69,22 @@ type BodyFuture = Pin<Box<dyn Future<Output = Result<Outcome, FlowError>>>>;
 type WorkTask = Task<fn(Scope, (usize, usize)) -> BodyFuture>;
 
 /// What one simulated run produced: which step bodies ran, and their sum.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+///
+/// Archivable because `Host::resume` takes it: a resumed run may be settling a
+/// request, and a recorded verdict is made of an archived output. The derives
+/// are the `lgwks_std::wire` facade's, not rkyv's, exactly as the library spells
+/// them.
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    lgwks_std::wire::Archive,
+    lgwks_std::wire::Serialize,
+    lgwks_std::wire::Deserialize,
+)]
+#[rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
 struct Outcome {
     /// Which step bodies ran, in order. A replayed step contributes nothing new.
     ran: Vec<u32>,

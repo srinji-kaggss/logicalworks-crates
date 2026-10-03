@@ -121,6 +121,16 @@ pub enum FlowError {
         /// What is wrong with it.
         reason: &'static str,
     },
+    /// A request key did not validate.
+    ///
+    /// A request key is the caller-supplied idempotency identity of a durable
+    /// submission ([`Host::submit`](crate::task::Host::submit)), so it is
+    /// validated before it is hashed into a run identity and refused here
+    /// rather than at the first submission.
+    InvalidRequestKey {
+        /// What is wrong with it.
+        reason: &'static str,
+    },
     /// A step reached for authority this run does not have.
     ///
     /// The one flow failure that is not a defect in the step and not a transient
@@ -233,6 +243,7 @@ impl FlowError {
             | Self::TooDeep { .. }
             | Self::InvalidTenant { .. }
             | Self::InvalidName { .. }
+            | Self::InvalidRequestKey { .. }
             | Self::InvalidBound { .. }
             | Self::Incompatible { .. }
             | Self::Store { .. } => false,
@@ -262,7 +273,9 @@ impl FlowError {
             | Self::TooDeep { ref at, .. } => at,
             Self::Incompatible { ref at, .. } => at,
             Self::Store { ref at, .. } => at,
-            Self::InvalidTenant { .. } | Self::InvalidName { .. } | Self::InvalidBound { .. } => "",
+            // Every other variant is unlocated: it is raised before a step exists
+            // to name, so there is no path to report.
+            _ => "",
         }
     }
 
@@ -311,7 +324,12 @@ impl FlowError {
                     *at = Arc::clone(path);
                 }
             }
-            Self::InvalidTenant { .. } | Self::InvalidName { .. } | Self::InvalidBound { .. } => {}
+            // Every other variant carries no location: it is raised before a step
+            // exists to name, so there is nothing to fill in.
+            Self::InvalidTenant { .. }
+            | Self::InvalidName { .. }
+            | Self::InvalidRequestKey { .. }
+            | Self::InvalidBound { .. } => {}
         }
         self
     }
@@ -367,6 +385,9 @@ impl fmt::Display for FlowError {
             }
             Self::InvalidTenant { reason } => write!(formatter, "invalid tenant: {reason}"),
             Self::InvalidName { reason } => write!(formatter, "invalid task name: {reason}"),
+            Self::InvalidRequestKey { reason } => {
+                write!(formatter, "invalid request key: {reason}")
+            }
             Self::InvalidBound { what, value, max } => {
                 write!(formatter, "{what}: {value} is outside 1..={max}")
             }
@@ -400,6 +421,7 @@ impl std::error::Error for FlowError {
             | Self::InvalidTenant { .. }
             | Self::InvalidName { .. }
             | Self::Incompatible { .. }
+            | Self::InvalidRequestKey { .. }
             | Self::InvalidBound { .. } => None,
         }
     }
