@@ -846,8 +846,9 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_diff_past_its_file_ceiling_is_a_typed_coverage_refusal`,
   `an_unavailable_diff_is_a_typed_coverage_refusal`,
   `a_changed_file_inventory_is_read_as_data`),
-  `tests/sim_review_path.rs` (`subject_coverage_and_partial_faults_r32`,
-  `same_seed_same_trace_hash_subject_r32`, `two_identities_subject_r16`), and
+  `tests/sim_review_path.rs` (`subject_coverage_and_partial_faults` bands 00
+  through 07 (64 seeds), `same_seed_same_trace_hash_subject` bands 08 through
+  11 (32 seeds), `two_identities_subject` bands 12 through 13 (16 seeds)), and
   `tests/sim_review_pr.rs` (`review_comments_are_carried_and_omitted_r16`)
 
 ## Open questions for the Director
