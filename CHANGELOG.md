@@ -166,12 +166,14 @@ explicitly under that crate.
   it is `Blocked` with a complete `Deficit` rather than `Failed`: the host was
   willing and the authority was missing, which is the distinction a repair acts
   on. `Report::needs` and `Report::repair` are both derived from that one value,
-  so they cannot disagree. `Host::repair(ticket, grant, task, input, spend,
-  over_wide_candidates)` resumes under the run's own id, so the steps recorded
-  before the block replay without their bodies being polled and only the blocked
-  remainder runs. The grant may not be short (`RepairError::NotAuthorized`) nor
-  wider than the ticket (`OverWide`), and the host's own grant is never widened —
-  the next run on that host is still blocked. `HostBuilder::grants`,
+  so they cannot disagree. `Host::repair(ticket, grant, task, input, spend)`
+  resumes under the run's own id, so the steps recorded before the block replay
+  without their bodies being polled and only the blocked remainder runs. The
+  grant may not be short (`RepairError::NotAuthorized`) nor carry any capability,
+  shipped or custom, the ticket does not name (`OverWide`); the authority the
+  repaired run receives is built from the ticket's needs, never taken from the
+  grant, and the host's own grant is never widened — the next run on that host is
+  still blocked. `HostBuilder::grants`,
   `repair_ledger` and `repair_bounds` configure it.
 - `task::RunLedger`: the durable per-run control ledger — root spend and attempt
   budget, repair epoch, and the set of applied tickets — over the shared frame
@@ -184,8 +186,7 @@ explicitly under that crate.
   than refilling it, so a permanent refusal plus repeated `NotApplied` reaches a
   finite `BudgetSpent` (#87 step 3, T13/T23/T24).
 - `task::repair`: `RepairTicket` (a report, never a grant), `RepairError` with a
-  typed arm per refusal, and `repair_candidates` (the shipped four the over-wide
-  check considers by default; a caller with custom capabilities lists them).
+  typed arm per refusal.
 - `Disposition::Blocked` on the front door, distinct from `Refused`: a `Refused`
   run was refused by the host and no authority would change it, while a `Blocked`
   run is the one an authorized repair can move. `Task::requiring` is the blunt

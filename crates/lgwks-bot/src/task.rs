@@ -110,9 +110,7 @@ pub mod repair;
 mod store;
 
 pub use ledger::{LeaseRefusal, RunLedger};
-pub use repair::{
-    MAX_TICKET_NEEDS, RepairError, RepairTicket, shipped_candidates as repair_candidates,
-};
+pub use repair::{MAX_TICKET_NEEDS, RepairError, RepairTicket};
 pub use store::{
     MAX_RECORD_BYTES, MAX_RECORDS_PER_RUN, MAX_STORE_BYTES, RunStore, StoreError, StoreLimitKind,
 };
@@ -1048,21 +1046,20 @@ impl Host {
     /// 2. [`RepairError::ForeignTenant`] — the ticket names another tenant's run.
     /// 3. [`RepairError::NotAuthorized`] — the grant does not cover every
     ///    capability the ticket names, so the run would stay blocked.
-    /// 4. [`RepairError::OverWide`] — the grant reaches outside the ticket's
-    ///    needs. Refused rather than narrowed, so what the caller believes was
-    ///    granted cannot exceed what was asked.
+    /// 4. [`RepairError::OverWide`] — the grant carries any capability the ticket
+    ///    does not name, shipped or custom. Refused rather than narrowed, so what
+    ///    the caller believes was granted cannot exceed what was asked.
     /// 5. [`RepairError::StaleEpoch`] / [`RepairError::AlreadyApplied`] /
     ///    [`RepairError::BudgetSpent`] — decided by the ledger's one ordered step,
     ///    against the run's *current* epoch, so two repairs delivered together
     ///    cannot both apply.
     ///
-    /// Only after all five does the run resume. The repair is charged against the
-    /// run's root budget exactly as any other attempt is, so an authorized repair
-    /// consumes budget rather than resetting it (T13).
-    ///
-    /// `over_wide_candidates` is the set of capabilities the over-wide check
-    /// considers; a custom capability the caller is granting must be listed or
-    /// the check cannot see it. Pass [`repair_candidates`] for the shipped four.
+    /// Only after all five does the run resume, and it resumes with exactly the
+    /// ticket's needs added — the authority applied is built from the ticket, not
+    /// taken from `grant`, so it cannot exceed the request even in principle. The
+    /// repair is charged against the run's root budget exactly as any other
+    /// attempt is, so an authorized repair consumes budget rather than resetting
+    /// it (T13).
     ///
     /// # Errors
     ///
@@ -1076,7 +1073,6 @@ impl Host {
         task: &Task<F>,
         input: I,
         spend: u64,
-        over_wide_candidates: &[Cap],
     ) -> Result<Report<O>, RepairError>
     where
         F: Fn(Scope, I) -> Fut,
@@ -1092,7 +1088,7 @@ impl Host {
         // The grant is checked against the ticket *before* the run is admitted and
         // before the ledger is charged, so a denied repair costs nothing at all:
         // no budget, no epoch, no step.
-        ticket.check_grant(grant, over_wide_candidates)?;
+        ticket.check_grant(grant)?;
         // A run the ledger has never seen has no epoch and no budget, so its
         // authority cannot be attributed; refused rather than minted.
         let control = ledger
@@ -1106,8 +1102,9 @@ impl Host {
                 offered: ticket.epoch(),
             });
         }
+        let delta = ticket.delta();
         Ok(self
-            .execute(task, input, Some(ticket.run()), Some(ticket), grant, spend)
+            .execute(task, input, Some(ticket.run()), Some(ticket), &delta, spend)
             .await)
     }
 

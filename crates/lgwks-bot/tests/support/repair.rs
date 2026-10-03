@@ -229,11 +229,6 @@ pub fn store_of(host: &Host) -> Result<&RunStore, Box<dyn Error>> {
         .ok_or_else(|| missing("a repairable host keeps a run store"))
 }
 
-/// The capabilities the over-wide check considers by default.
-pub fn candidates() -> Vec<Cap> {
-    lgwks_bot::task::repair_candidates()
-}
-
 /// A repair ticket read off a blocked report, or an error naming why there is
 /// none.
 ///

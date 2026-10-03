@@ -43,7 +43,7 @@ use lgwks_bot::task::{Disposition, Host, RepairError, RepairTicket};
 #[path = "support/repair.rs"]
 mod shared;
 
-use shared::{Journey, Polls, TestResult, candidates, input, input_needing};
+use shared::{Journey, Polls, TestResult, input, input_needing};
 
 use sim::Band;
 use sim::Rng;
@@ -321,14 +321,8 @@ fn decide(
             });
         }
     };
-    match lgwks_bot::block_on(host.repair(
-        ticket,
-        &grant,
-        declared,
-        input(Arc::clone(polls), 7),
-        1,
-        &candidates(),
-    )) {
+    match lgwks_bot::block_on(host.repair(ticket, &grant, declared, input(Arc::clone(polls), 7), 1))
+    {
         Ok(report) => Ok(match report.disposition() {
             Disposition::Succeeded => "succeeded",
             other => {
@@ -563,7 +557,6 @@ fn tenants_keep_their_own_tickets_and_budgets(band: Band) -> TestResult {
             &mine.declared,
             input(Arc::clone(&mine.polls), 7),
             1,
-            &candidates(),
         )) {
             Err(RepairError::ForeignTenant {
                 ref ticket,
@@ -696,7 +689,6 @@ fn saturation_applies_each_ticket_once(band: Band) -> TestResult {
                 &declared,
                 input(Arc::clone(polls), 7),
                 1,
-                &candidates(),
             ))?;
             assert_eq!(
                 report.disposition(),
@@ -727,7 +719,6 @@ fn saturation_applies_each_ticket_once(band: Band) -> TestResult {
                 &declared,
                 input(Polls::shared(), 7),
                 1,
-                &candidates(),
             )) {
                 Err(RepairError::AlreadyApplied) | Err(RepairError::StaleEpoch { .. }) => {}
                 other => {
@@ -788,7 +779,6 @@ fn the_declared_repair_tiers_are_measured() -> TestResult {
                 &declared,
                 input(Arc::clone(&polls), 7),
                 1,
-                &candidates(),
             ))?;
             if repaired.disposition() != Disposition::Succeeded {
                 break;

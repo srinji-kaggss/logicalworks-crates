@@ -341,21 +341,33 @@ impl RepairTicket {
             .collect()
     }
 
-    /// The capabilities `grant` carries that the ticket never asked for, drawn
-    /// from `candidates`.
+    /// Every capability `grant` carries that the ticket never asked for, sorted.
     ///
-    /// Driven by the candidate list rather than by the grant's own contents,
-    /// because a [`GrantSet`] is a membership structure: it answers "is this one
-    /// granted" and has no enumeration to walk. So the check asks about each
-    /// capability the caller *could* be adding, and reports the ones the grant
-    /// carries that the ticket does not ask for. A caller with a custom
-    /// capability passes it in `candidates`; the shipped four are the default.
-    pub(crate) fn beyond_in(&self, grant: &GrantSet, candidates: &[Cap]) -> Vec<Cap> {
-        candidates
-            .iter()
-            .filter(|cap| grant.grants(cap) && !self.needs.contains(cap))
+    /// Walks the whole grant rather than asking about a list of candidates: a
+    /// candidate list cannot name a capability its author did not think of, and
+    /// `Cap::new` accepts any dotted name, so a candidate-driven check passed a
+    /// grant carrying a custom capability and the repair then applied it. Sorted
+    /// so the refusal names the excess in one order however the set iterates.
+    pub(crate) fn beyond(&self, grant: &GrantSet) -> Vec<Cap> {
+        let mut beyond: Vec<Cap> = grant
+            .caps()
+            .filter(|cap| !self.needs.contains(cap))
             .cloned()
-            .collect()
+            .collect();
+        beyond.sort();
+        beyond
+    }
+
+    /// The authority a successful repair applies: exactly the ticket's needs.
+    ///
+    /// Built from the ticket rather than taken from the caller's grant, so what a
+    /// repaired run may do is decided by what it was blocked on and never by what
+    /// a grant happened to carry. [`check_grant`](Self::check_grant) has already
+    /// refused any grant that differs; this is the second, independent bound.
+    pub(crate) fn delta(&self) -> GrantSet {
+        self.needs
+            .iter()
+            .fold(GrantSet::empty(), |set, cap| set.grant(cap.clone()))
     }
 
     /// Check a grant against this ticket, refusing both a short grant and a wide
@@ -365,30 +377,15 @@ impl RepairTicket {
     /// documents: the missing half is reported first, because that is the half a
     /// caller must fix, and a grant that is both short and wide is not repairable
     /// at all.
-    pub(crate) fn check_grant(
-        &self,
-        grant: &GrantSet,
-        candidates: &[Cap],
-    ) -> Result<(), RepairError> {
+    pub(crate) fn check_grant(&self, grant: &GrantSet) -> Result<(), RepairError> {
         let missing = self.missing_from(grant);
         if !missing.is_empty() {
             return Err(RepairError::NotAuthorized { missing });
         }
-        let beyond = self.beyond_in(grant, candidates);
+        let beyond = self.beyond(grant);
         if !beyond.is_empty() {
             return Err(RepairError::OverWide { beyond });
         }
         Ok(())
     }
-}
-
-/// The shipped capabilities, as the over-wide check's default candidate list.
-///
-/// A [`Cap`] may be any dotted name, so a grant carrying only custom capabilities
-/// would pass an over-wide check with an empty candidate list. The repair door
-/// therefore takes the candidate list explicitly — the caller knows which custom
-/// capabilities exist — and defaults it to these four.
-#[must_use]
-pub fn shipped_candidates() -> Vec<Cap> {
-    vec![Cap::net(), Cap::fs(), Cap::sys(), Cap::notify()]
 }

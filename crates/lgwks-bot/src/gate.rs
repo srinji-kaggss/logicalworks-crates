@@ -52,6 +52,17 @@ impl GrantSet {
         self.granted.contains(cap)
     }
 
+    /// Every capability this set grants, in no particular order.
+    ///
+    /// Crate-private, and used by exactly one decision: a repair must refuse a
+    /// grant that reaches past its ticket, and "past" is only decidable over the
+    /// whole grant. Asking `grants` about a list of candidates instead misses
+    /// every capability the list does not name, and `Cap::new` accepts any
+    /// dotted name.
+    pub(crate) fn caps(&self) -> impl Iterator<Item = &Cap> {
+        self.granted.iter()
+    }
+
     /// The requirements in `required` that this set does not grant, in
     /// declaration order, each named once, attributed to `demand`.
     ///

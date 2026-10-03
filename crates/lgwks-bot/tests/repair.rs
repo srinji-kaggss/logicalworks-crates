@@ -9,6 +9,7 @@
 //! | `a_ticket_from_an_older_epoch_is_refused_as_stale` | T24: an old ticket cannot re-apply authority the run has moved past |
 //! | `a_denied_repair_leaves_the_run_blocked_with_its_authority_unchanged` | T24: a grant that does not cover the ticket's needs runs no step, charges no budget and moves no epoch |
 //! | `an_over_wide_grant_is_refused_rather_than_narrowed` | T24: a grant reaching past the ticket is refused, and names what it reached for |
+//! | `a_custom_capability_outside_the_ticket_is_refused` | T24: the over-wide check sees every capability in the grant, not a candidate list, so a custom name cannot ride a repair into the run |
 //! | `a_host_without_a_ledger_refuses_every_repair` | T24: nothing to decide a repair against is a refusal, not an unchecked application |
 //! | `the_root_budget_stays_charged_across_repair_and_resume` | T13: a repair consumes the root budget rather than resetting it, and a spent budget refuses at a finite attempt |
 //! | `a_denied_repair_costs_nothing` | T13/T24: no budget, no epoch, no step — the run's ledger is byte-identical |
@@ -33,8 +34,8 @@ use lgwks_bot::task::{Disposition, Host, RepairError, RepairTicket, Report};
 mod shared;
 
 use shared::{
-    Journey, Polls, Scratch, TestResult, candidates, input, input_needing, repairable_host, run_of,
-    store_of, ticket_of, unrepairable_host,
+    Journey, Polls, Scratch, TestResult, input, input_needing, repairable_host, run_of, store_of,
+    ticket_of, unrepairable_host,
 };
 
 /// Run one attempt of the journey on `host`.
@@ -59,14 +60,7 @@ fn repair(
     spend: u64,
     polls: &Arc<Polls>,
 ) -> Result<Report<u32>, RepairError> {
-    lgwks_bot::block_on(host.repair(
-        ticket,
-        &grant,
-        declared,
-        input(Arc::clone(polls), 7),
-        spend,
-        &candidates(),
-    ))
+    lgwks_bot::block_on(host.repair(ticket, &grant, declared, input(Arc::clone(polls), 7), spend))
 }
 
 /// A blocked run that reached for `needs`, with everything a caller needs to
@@ -451,6 +445,55 @@ fn an_over_wide_grant_is_refused_rather_than_narrowed() -> TestResult {
             );
         }
         other => return Err(format!("a wider grant must be refused: got {other:?}").into()),
+    }
+    assert_eq!(case.polls.publish(), 0, "a refused repair runs no step");
+    assert_eq!(
+        shared::ledger_of(&case.host)?
+            .control(case.run)
+            .map_or(0, |control| control.epoch()),
+        0,
+        "a refused repair mints no epoch"
+    );
+    Ok(())
+}
+
+/// T24: a custom capability the ticket never named cannot ride a repair in.
+///
+/// The regression this pins: the over-wide check once asked about a fixed list
+/// of the shipped four, so a grant carrying `bot.net` plus a custom name passed,
+/// and the repair applied the whole grant to the run. Two custom names, so the
+/// refusal's order is checked as well as its content.
+#[test]
+fn a_custom_capability_outside_the_ticket_is_refused() -> TestResult {
+    let case = blocked("custom", vec![Cap::new(Cap::NET)])?;
+    let smuggled = GrantSet::empty()
+        .grant(Cap::new(Cap::NET))
+        .grant(Cap::new("vendor.payments.charge"))
+        .grant(Cap::new("vendor.admin.root"));
+
+    match repair(
+        &case.host,
+        &case.declared,
+        &case.ticket,
+        smuggled,
+        1,
+        &case.polls,
+    ) {
+        Err(RepairError::OverWide { ref beyond }) => {
+            let names: Vec<&str> = beyond.iter().map(Cap::as_str).collect();
+            assert_eq!(
+                names,
+                vec!["vendor.admin.root", "vendor.payments.charge"],
+                "the refusal names every custom capability the ticket never asked for, \
+                 sorted, however the grant's set happens to iterate"
+            );
+        }
+        other => {
+            return Err(format!(
+                "a grant carrying a custom capability must be refused: got {other:?}"
+            )
+            .into());
+        }
     }
     assert_eq!(case.polls.publish(), 0, "a refused repair runs no step");
     assert_eq!(
