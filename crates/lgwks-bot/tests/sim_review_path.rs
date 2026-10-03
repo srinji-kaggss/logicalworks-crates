@@ -54,13 +54,19 @@
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use lgwks_bot::domain::gh::{CommitId, Gh, PullRequest, Repository};
+use lgwks_bot::domain::gh::{CommitId, Gh, PullRequest, Repository, ReviewComment};
 use lgwks_bot::review::{ReviewOutcome, ReviewRequest};
 use lgwks_bot::script::Scope;
 use lgwks_bot::task::{Host, Report, Task, task};
 
 #[path = "support/fake_gh.rs"]
 mod fake_gh;
+
+mod sim;
+
+// The band-declaration macro, defined once for the whole layer.
+#[path = "sim/bands.rs"]
+mod band_family;
 
 use fake_gh::{FakeGh, Scenario};
 
@@ -259,6 +265,10 @@ impl Run {
                         ref current,
                     } => text_hash(&format!("moved:{reviewed}:{current}")).to_string(),
                     ReviewOutcome::Refused { .. } => String::from("refused"),
+                    ReviewOutcome::Incomplete { .. } => String::from("incomplete"),
+                    ReviewOutcome::Pending { .. } => String::from("pending"),
+                    ReviewOutcome::Partial { .. } => String::from("partial"),
+                    ReviewOutcome::Unverified { .. } => String::from("unverified"),
                     // A state this journey does not model yet. Named rather
                     // than collapsed, because the two facts a caller most needs
                     // to tell apart are "something else happened" and "nothing
@@ -1482,6 +1492,1104 @@ fn two_repositories_on_one_host_r16() -> TestResult {
                 .iter()
                 .all(|payload| !payload.contains("other/gadgets")),
             "seed {index}: no payload crossed into the other repository"
+        );
+    }
+    Ok(())
+}
+
+// ── Subject, coverage and partial-submission family (T31, T33, T34) ─────────
+
+/// The fault family the subject/coverage/partial/permission rows sweep.
+///
+/// Named rather than indexed so a family's fault and its expectation read
+/// together, and exhaustive over the states those rows name: a rename, an
+/// unavailable diff, each diff ceiling, an unsubmitted draft, a partial
+/// submission, and a lost read permission.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum SubjectFault {
+    /// Everything works; the create answers and the read-back finds it whole.
+    Clean,
+    /// The repository answers with a renamed-repository redirect.
+    Moved,
+    /// The server declines to render the diff.
+    DiffUnavailable,
+    /// The changed-file inventory is past its file-count ceiling.
+    DiffOverFiles,
+    /// The changed-file patch text is past its byte ceiling.
+    DiffOverBytes,
+    /// The create landed as an unsubmitted draft and its response was lost.
+    PendingDraft,
+    /// The create landed with fewer inline comments than intended, response lost.
+    PartialComments,
+    /// The create landed and the read-back lost permission.
+    ReadDenied,
+}
+
+impl SubjectFault {
+    /// How many faults the family contains.
+    const VARIANTS: u64 = 8;
+
+    /// Every fault's label, so a coverage test does not re-list the enum.
+    const LABELS: [&'static str; 8] = [
+        "clean",
+        "moved",
+        "diff-unavailable",
+        "diff-over-files",
+        "diff-over-bytes",
+        "pending-draft",
+        "partial-comments",
+        "read-denied",
+    ];
+
+    /// The fault for `index`.
+    const fn for_index(index: u64) -> Self {
+        match index % Self::VARIANTS {
+            0 => Self::Clean,
+            1 => Self::Moved,
+            2 => Self::DiffUnavailable,
+            3 => Self::DiffOverFiles,
+            4 => Self::DiffOverBytes,
+            5 => Self::PendingDraft,
+            6 => Self::PartialComments,
+            _ => Self::ReadDenied,
+        }
+    }
+
+    /// A short label, for the trace and for the failure message.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Moved => "moved",
+            Self::DiffUnavailable => "diff-unavailable",
+            Self::DiffOverFiles => "diff-over-files",
+            Self::DiffOverBytes => "diff-over-bytes",
+            Self::PendingDraft => "pending-draft",
+            Self::PartialComments => "partial-comments",
+            Self::ReadDenied => "read-denied",
+        }
+    }
+
+    /// Whether a run under this fault may report a verified publication.
+    ///
+    /// Only the clean world can: every other fault is a refusal, a coverage
+    /// decision or an unverified effect, and a run that reported `Published`
+    /// under one would be reporting an effect it did not observe.
+    const fn can_be_verified(self) -> bool {
+        matches!(self, Self::Clean)
+    }
+
+    /// How much of a call's answer the family must retain for this fault.
+    ///
+    /// The two ceiling faults build an answer larger than the default capture,
+    /// so their envelope is raised: the refusal under test is the *diff*
+    /// ceiling, not the capture bound.
+    const fn capture(self) -> usize {
+        match self {
+            Self::DiffOverFiles | Self::DiffOverBytes => 4 * 1024 * 1024,
+            _ => CAPTURE,
+        }
+    }
+}
+
+/// The two inline comments a partial-submission run intends.
+fn comments(count: u32) -> Vec<ReviewComment> {
+    (1..=count)
+        .map(|line| {
+            ReviewComment::new(
+                format!("src/f{line}.rs"),
+                u64::from(line),
+                format!("comment {line}"),
+            )
+        })
+        .collect()
+}
+
+/// What one seed draws beyond its fault.
+///
+/// The fault is `index % 8`, so a band of eight seeds reaches every fault; the
+/// draw is what makes two seeds with one fault two different worlds — a diff one
+/// file or sixty-four files past the ceiling, a partial submission that landed
+/// none of five comments or four of them — rather than one scenario replayed.
+#[derive(Debug, Clone, Copy)]
+struct SubjectDraw {
+    /// Files past `MAX_DIFF_FILES_PER_PULL` the receiver reports.
+    files_over: u32,
+    /// Patch bytes past `MAX_DIFF_BYTES` the receiver reports.
+    bytes_over: u32,
+    /// Inline comments the run intends.
+    intended: u32,
+    /// How many of them the receiver says landed; always fewer than intended.
+    applied: u32,
+}
+
+impl SubjectDraw {
+    /// The draw for seed `index`, from the shared generator.
+    fn for_seed(index: u64) -> Self {
+        let mut rng = sim::Rng::new(index);
+        let intended = rng.between(2, 6);
+        Self {
+            files_over: rng.between(1, 64),
+            bytes_over: rng.between(1, 4096),
+            intended,
+            applied: rng.below(intended),
+        }
+    }
+}
+
+/// The scenario a subject fault describes.
+fn subject_scenario(fault: SubjectFault, head: &str, draw: SubjectDraw) -> Scenario {
+    let scenario = Scenario::new(head);
+    match fault {
+        SubjectFault::Clean => scenario,
+        SubjectFault::Moved => scenario.repository_moved(),
+        SubjectFault::DiffUnavailable => scenario.diff_unavailable(),
+        SubjectFault::DiffOverFiles => scenario.with_filler_files(
+            u32::try_from(lgwks_bot::domain::gh::MAX_DIFF_FILES_PER_PULL)
+                .unwrap_or(0)
+                .saturating_add(draw.files_over),
+        ),
+        SubjectFault::DiffOverBytes => scenario.with_diff_bytes(
+            u32::try_from(lgwks_bot::domain::gh::MAX_DIFF_BYTES)
+                .unwrap_or(0)
+                .saturating_add(draw.bytes_over),
+        ),
+        SubjectFault::PendingDraft => scenario.records_pending_draft(),
+        SubjectFault::PartialComments => scenario.records_partial_comments(draw.applied),
+        SubjectFault::ReadDenied => scenario.deny_reads(),
+    }
+}
+
+/// Run one seed's subject fault through the real path.
+fn run_subject_seed(index: u64) -> Result<(SubjectFault, Run), Box<dyn std::error::Error>> {
+    run_subject_fault(SubjectFault::for_index(index), index)
+}
+
+/// The subject family: every fault reaches its own distinct outcome, and none
+/// but the clean world reports a publication.
+fn subject_coverage_and_partial_faults(band: sim::Band) -> TestResult {
+    let mut seen = std::collections::HashSet::new();
+    for index in band.seeds() {
+        let (fault, run) = run_subject_seed(index)?;
+        seen.insert(fault.label());
+
+        assert!(
+            run.creates <= 1,
+            "seed {index} ({}): a run publishes at most once, never a duplicate post\n{}",
+            fault.label(),
+            run.argv
+        );
+
+        let Some(outcome) = run.report.output() else {
+            return Err(format!(
+                "seed {index} ({}): a reported refusal, not a run failure: {}",
+                fault.label(),
+                run.report
+                    .error()
+                    .map_or_else(String::new, ToString::to_string)
+            )
+            .into());
+        };
+        assert_eq!(
+            outcome.is_published(),
+            fault.can_be_verified(),
+            "seed {index} ({}): a verified publication is reported exactly when the \
+             fault allows an independent read to succeed: {outcome:?}",
+            fault.label()
+        );
+        match fault {
+            SubjectFault::Clean => {}
+            SubjectFault::Moved => assert!(
+                matches!(outcome, ReviewOutcome::Refused { .. }),
+                "seed {index}: a rename is a refusal: {outcome:?}"
+            ),
+            SubjectFault::DiffUnavailable
+            | SubjectFault::DiffOverFiles
+            | SubjectFault::DiffOverBytes => assert!(
+                outcome.is_incomplete(),
+                "seed {index} ({}): a diff that cannot be read whole is an incomplete \
+                 coverage: {outcome:?}",
+                fault.label()
+            ),
+            SubjectFault::PendingDraft => assert!(
+                outcome.is_pending(),
+                "seed {index}: a lost response onto a draft is Pending: {outcome:?}"
+            ),
+            SubjectFault::PartialComments => {
+                let draw = SubjectDraw::for_seed(index);
+                let &ReviewOutcome::Partial {
+                    applied, intended, ..
+                } = outcome
+                else {
+                    return Err(format!(
+                        "seed {index}: a submission with fewer comments than intended \
+                         is Partial: {outcome:?}"
+                    )
+                    .into());
+                };
+                assert_eq!(
+                    (applied, intended),
+                    (
+                        usize::try_from(draw.applied)?,
+                        usize::try_from(draw.intended)?
+                    ),
+                    "seed {index}: Partial reports the counts that landed and were intended"
+                );
+            }
+            SubjectFault::ReadDenied => assert!(
+                outcome.is_unverified(),
+                "seed {index}: a lost read permission after a create is Unverified: {outcome:?}"
+            ),
+        }
+    }
+    for expected in SubjectFault::LABELS {
+        assert!(
+            seen.contains(expected),
+            "the family must reach {expected:?}; it reached {seen:?}"
+        );
+    }
+    Ok(())
+}
+
+/// The same seed must produce the same subject trace, through the real path.
+fn same_seed_same_trace_hash_subject(band: sim::Band) -> TestResult {
+    for index in band.seeds() {
+        let (first_fault, first) = run_subject_seed(index)?;
+        let (second_fault, second) = run_subject_seed(index)?;
+        assert_eq!(
+            first_fault, second_fault,
+            "seed {index} selects one fault twice"
+        );
+        assert_eq!(
+            trace_hash(&first.trace()),
+            trace_hash(&second.trace()),
+            "seed {index} ({}) must replay exactly: {:?} vs {:?}",
+            first_fault.label(),
+            first.trace(),
+            second.trace()
+        );
+        assert_eq!(
+            first.argv,
+            second.argv,
+            "seed {index} ({}) must issue the same calls twice",
+            first_fault.label()
+        );
+    }
+    Ok(())
+}
+
+/// Two identities on one pull request each verify only their own review.
+fn two_identities_subject(band: sim::Band) -> TestResult {
+    for index in band.seeds() {
+        let fake = FakeGh::install("subject-tenants", HEAD)?;
+        fake.configure(Scenario::new(HEAD))?;
+        let host = host()?;
+        let path = fake.search_path()?;
+
+        let run_tenant = |body: &'static str| -> Result<ReviewOutcome, Box<dyn std::error::Error>> {
+            let job = task(
+                "review-pr",
+                move |scope: Scope, (gh, request): (Gh, ReviewRequest)| async move {
+                    lgwks_bot::review::review_pr(scope, gh, request, move |_s, _scope| {
+                        Ok(String::from(body))
+                    })
+                    .await
+                },
+            )?;
+            let gh = Gh::new(Repository::new("acme/widgets")?)
+                .program(fake.program())
+                .capture_limit(NonZeroUsize::new(CAPTURE).ok_or("a non-zero limit")?)
+                .deadline(Some(Duration::from_secs(20)))
+                .env("PATH", &path);
+            let request = ReviewRequest::new(pull(7)?, "COMMENT", body).with_marker(body);
+            let report = host.block_on(&job, (gh, request))?;
+            report
+                .output()
+                .cloned()
+                .ok_or_else(|| "each identity must produce an outcome".into())
+        };
+
+        let first = run_tenant("first identity")?;
+        let second = run_tenant("second identity")?;
+        assert!(
+            first.is_published() && second.is_published(),
+            "seed {index}: both identities publish independently: {first:?} {second:?}"
+        );
+        assert_ne!(
+            first.review_id(),
+            second.review_id(),
+            "seed {index}: two identities must verify two distinct reviews: {first:?} {second:?}"
+        );
+        let payloads = fake.received()?;
+        assert_eq!(
+            payloads
+                .iter()
+                .filter(|payload| payload.contains("first identity"))
+                .count(),
+            1,
+            "seed {index}: exactly one payload carries the first identity's body"
+        );
+        assert_eq!(
+            payloads
+                .iter()
+                .filter(|payload| payload.contains("second identity"))
+                .count(),
+            1,
+            "seed {index}: exactly one payload carries the second identity's body"
+        );
+    }
+    Ok(())
+}
+
+// ── Band declarations ────────────────────────────────────────────────────────
+//
+// Eight seeds a band, each band starting on a multiple of eight, so every
+// subject band reaches all eight faults with its own draws.
+
+band_family::band_family! {
+    subject_coverage_and_partial_faults_band_00 => subject_coverage_and_partial_faults, 0;
+    subject_coverage_and_partial_faults_band_01 => subject_coverage_and_partial_faults, 1;
+    subject_coverage_and_partial_faults_band_02 => subject_coverage_and_partial_faults, 2;
+    subject_coverage_and_partial_faults_band_03 => subject_coverage_and_partial_faults, 3;
+    subject_coverage_and_partial_faults_band_04 => subject_coverage_and_partial_faults, 4;
+    subject_coverage_and_partial_faults_band_05 => subject_coverage_and_partial_faults, 5;
+    subject_coverage_and_partial_faults_band_06 => subject_coverage_and_partial_faults, 6;
+    subject_coverage_and_partial_faults_band_07 => subject_coverage_and_partial_faults, 7;
+    same_seed_same_trace_hash_subject_band_08 => same_seed_same_trace_hash_subject, 8;
+    same_seed_same_trace_hash_subject_band_09 => same_seed_same_trace_hash_subject, 9;
+    same_seed_same_trace_hash_subject_band_10 => same_seed_same_trace_hash_subject, 10;
+    same_seed_same_trace_hash_subject_band_11 => same_seed_same_trace_hash_subject, 11;
+    two_identities_subject_band_12 => two_identities_subject, 12;
+    two_identities_subject_band_13 => two_identities_subject, 13;
+}
+// ── Per-arm properties of the subject, coverage and partial families ───────
+//
+// The families above sweep the fault space and ask one question of each seed:
+// does every fault reach its own outcome? Each family below asks a *different*
+// question of the same seeded worlds, one property per arm. The distinction is
+// the point. "every fault reaches its own outcome" is satisfied by a world in
+// which the wrong arm is reached for the wrong reason, and it is satisfied by a
+// run that published a review nobody asked for, because the assertion is about
+// the outcome's *shape* and not about what the receiver holds.
+//
+// Every family below draws its own seed from the shared generator, so a fault's
+// severity — a diff one file or sixty-four files past the ceiling, a partial
+// submission that landed none of five comments or four of them — is a draw
+// rather than a fixed scenario. A single fixed scenario proves one world.
+
+/// The over-ceiling draws a family sweeps, shared by every arm family below.
+///
+/// One helper rather than a per-family literal: the arm families differ in what
+/// they assert about a draw, not in how a draw is produced, and four copies of
+/// the generator would be four chances for one arm's fault space to drift from
+/// the others'.
+fn over_ceiling_draw(index: u64) -> SubjectDraw {
+    SubjectDraw::for_seed(index)
+}
+
+/// Run one seed under one subject fault and return the receiver's record.
+///
+/// [`run_subject_seed`] is this with the seed's own fault, so an arm family
+/// cannot be testing a different run than the sweep does. The fault is named
+/// rather than taken from the seed so an arm family sweeps *one* arm across
+/// many draws, which is the sampling the arm properties are about.
+fn run_subject_fault(
+    fault: SubjectFault,
+    index: u64,
+) -> Result<(SubjectFault, Run), Box<dyn std::error::Error>> {
+    let draw = over_ceiling_draw(index);
+    let host = host()?;
+    let job = review_task()?;
+    let fake = FakeGh::install(fault.label(), HEAD)?;
+    fake.configure(subject_scenario(fault, HEAD, draw))?;
+
+    let mut request = request(7)?;
+    if fault == SubjectFault::PartialComments {
+        request = request.with_comments(comments(draw.intended));
+    }
+    let report = host.block_on(&job, (gh_for(&fake, fault.capture())?, request))?;
+    let argv = normalized_argv(&fake.calls()?);
+    Ok((
+        fault,
+        Run {
+            report,
+            creates: fake.creates()?,
+            argv,
+        },
+    ))
+}
+
+/// The reason a run recorded, wherever it recorded it.
+fn reason_of(run: &Run) -> String {
+    run.report
+        .output()
+        .filter(|outcome| !matches!(outcome, ReviewOutcome::Published { .. }))
+        .map_or_else(
+            || {
+                run.report
+                    .error()
+                    .map_or_else(String::new, ToString::to_string)
+            },
+            |outcome| match outcome.unknown_reason() {
+                Some(reason) => String::from(reason),
+                None => format!("{outcome:?}"),
+            },
+        )
+}
+
+/// An unavailable diff is a coverage decision, and it publishes nothing.
+///
+/// Distinct from the sweep above, which only checks that this fault produced
+/// *some* non-published outcome: this checks that nothing reached the receiver
+/// at all. A run that refused the diff and then published anyway would satisfy
+/// the sweep's shape assertion and violate T31's coverage claim, which is a
+/// defect that publishes a review against code nobody read.
+#[test]
+fn an_unavailable_diff_publishes_nothing() -> TestResult {
+    let band = sim::Band::new(14, 16);
+    for index in band.seeds() {
+        let (fault, run) = run_subject_fault(SubjectFault::DiffUnavailable, index)?;
+        assert!(
+            run.creates == 0,
+            "seed {index} ({}): an unreadable diff must create nothing, because a \
+             review against a partial scope claims coverage nobody had\n{}",
+            fault.label(),
+            run.argv
+        );
+        assert!(
+            run.report
+                .output()
+                .is_some_and(ReviewOutcome::is_incomplete),
+            "seed {index}: an unavailable diff is an incomplete coverage: {:?}",
+            run.report.output()
+        );
+    }
+    Ok(())
+}
+
+/// A diff past the file ceiling is a coverage decision, and it publishes nothing.
+#[test]
+fn a_diff_past_the_file_ceiling_publishes_nothing() -> TestResult {
+    let band = sim::Band::new(15, 16);
+    for index in band.seeds() {
+        let draw = over_ceiling_draw(index);
+        let (_fault, run) = run_subject_fault(SubjectFault::DiffOverFiles, index)?;
+        assert!(
+            run.creates == 0,
+            "seed {index} ({} files past): a refused inventory must create nothing\n{}",
+            draw.files_over,
+            run.argv
+        );
+        assert!(
+            run.report
+                .output()
+                .is_some_and(ReviewOutcome::is_incomplete),
+            "seed {index} ({draw:?}): a refused inventory is an incomplete coverage: {:?}",
+            run.report.output()
+        );
+        let reason = reason_of(&run);
+        assert!(
+            reason.contains("file") || reason.contains("ceiling"),
+            "seed {index}: the reason must name the bound the run hit, so a reader \
+             knows the scope was refused rather than reviewed: {reason}"
+        );
+    }
+    Ok(())
+}
+
+/// A diff past the byte ceiling is a coverage decision, and it publishes nothing.
+///
+/// On its own axis from the file ceiling: an implementation that charged both
+/// against one bound would pass the file family and fail this one, and an
+/// implementation that refused a heavy-but-short diff would pass both. The draw
+/// puts one enormous file over the byte bound with the file count far under its
+/// own, which is the only way to tell the two bounds apart.
+#[test]
+fn a_diff_past_the_byte_ceiling_publishes_nothing() -> TestResult {
+    let band = sim::Band::new(16, 16);
+    for index in band.seeds() {
+        let draw = over_ceiling_draw(index);
+        let ceiling = u32::try_from(lgwks_bot::domain::gh::MAX_DIFF_BYTES).unwrap_or(u32::MAX);
+        assert!(
+            draw.bytes_over > 0,
+            "seed {index}: the byte arm needs a draw past the byte ceiling"
+        );
+        assert!(
+            draw.files_over
+                <= u32::try_from(lgwks_bot::domain::gh::MAX_DIFF_FILES_PER_PULL)
+                    .unwrap_or(u32::MAX),
+            "seed {index}: the byte arm must stay under the *file* ceiling, or the \
+             refusal would be the other bound's and this family would prove nothing \
+             about the byte axis"
+        );
+        let (_fault, run) = run_subject_fault(SubjectFault::DiffOverBytes, index)?;
+        assert!(
+            run.creates == 0,
+            "seed {index} ({} bytes past): a refused inventory must create nothing\n{}",
+            ceiling.saturating_add(draw.bytes_over),
+            run.argv
+        );
+        assert!(
+            run.report
+                .output()
+                .is_some_and(ReviewOutcome::is_incomplete),
+            "seed {index} ({draw:?}): a heavy diff is an incomplete coverage: {:?}",
+            run.report.output()
+        );
+    }
+    Ok(())
+}
+
+/// The two diff ceilings are refused *separately*: the reason names the bound
+/// that fired, never the other one.
+///
+/// The property the two families above cannot express between them. A single
+/// combined "refused the diff" assertion is satisfied by an implementation that
+/// charges bytes against the file bound — it refuses everything past either
+/// ceiling and every assertion above still passes. What makes the two axes
+/// distinct is that each refusal *says which one* it is.
+#[test]
+fn the_two_diff_ceilings_are_refused_separately() -> TestResult {
+    let band = sim::Band::new(17, 16);
+    for index in band.seeds() {
+        let (files_fault, files_run) = run_subject_fault(SubjectFault::DiffOverFiles, index)?;
+        let (bytes_fault, bytes_run) = run_subject_fault(SubjectFault::DiffOverBytes, index)?;
+        let files_reason = reason_of(&files_run);
+        let bytes_reason = reason_of(&bytes_run);
+        assert!(
+            files_reason.to_lowercase().contains("file"),
+            "seed {index}: the file-ceiling refusal names files: {files_reason}"
+        );
+        assert!(
+            bytes_reason.to_lowercase().contains("byte"),
+            "seed {index}: the byte-ceiling refusal names bytes: {bytes_reason}"
+        );
+        assert_eq!(
+            files_fault,
+            SubjectFault::DiffOverFiles,
+            "seed {index}: the first run really was the file arm"
+        );
+        assert_eq!(
+            bytes_fault,
+            SubjectFault::DiffOverBytes,
+            "seed {index}: the second run really was the byte arm"
+        );
+    }
+    Ok(())
+}
+
+/// A renamed repository is a refusal naming both names, and it publishes
+/// nothing.
+///
+/// Distinct from the sweep's shape assertion: this checks the refusal *carries
+/// the canonical name*, which is the fact a caller needs to decide what to do.
+/// A refusal that said "the repository moved" and stopped there would satisfy
+/// the sweep and leave the caller with nothing to act on, and a run that
+/// followed the redirect would publish against code it never read.
+#[test]
+fn a_renamed_repository_is_refused_naming_both() -> TestResult {
+    let band = sim::Band::new(18, 16);
+    for index in band.seeds() {
+        let (fault, run) = run_subject_fault(SubjectFault::Moved, index)?;
+        let outcome = run.report.output().ok_or_else(|| {
+            format!("seed {index}: a rename is a reported outcome, not a failure")
+        })?;
+        assert!(
+            matches!(outcome, ReviewOutcome::Refused { .. }),
+            "seed {index}: a rename is a refusal, never a re-pointed subject: {outcome:?}"
+        );
+        let reason = reason_of(&run);
+        assert!(
+            reason.contains("acme/widgets"),
+            "seed {index}: the refusal names the repository the caller asked for: {reason}"
+        );
+        assert!(
+            reason.contains("acme/newrepo"),
+            "seed {index}: and the canonical name the answer reported, so a caller \
+             can decide rather than re-run: {reason}"
+        );
+        assert!(
+            run.creates == 0,
+            "seed {index} ({}): a renamed repository publishes nothing\n{}",
+            fault.label(),
+            run.argv
+        );
+    }
+    Ok(())
+}
+
+/// An untrusted build script in the changed-file inventory is never executed.
+///
+/// The oracle is a file the inventory's patch text names: the fake emits a
+/// `build.rs` whose patch is `rm -f $LGWKS_TEST_MARKER`, and the test writes
+/// that marker into the fixture's own directory and names it in the child's
+/// environment. A review path that executed the inventory — compiling,
+/// shelling, or handing the patch to anything — would remove the file. The
+/// review itself still publishes, because a hostile file in the inventory is
+/// data, not a defect in the review.
+#[test]
+fn an_untrusted_build_script_is_never_executed() -> TestResult {
+    let band = sim::Band::new(19, 8);
+    for index in band.seeds() {
+        let fake = FakeGh::install("build-script", HEAD)?;
+        fake.configure(Scenario::new(HEAD).hostile_build_script())?;
+        let marker = fake.dir().join(format!("LGWKS_MARKER-{index}"));
+        std::fs::write(&marker, b"present")?;
+
+        let host = host()?;
+        let job = review_task()?;
+        let gh = gh_for(&fake, CAPTURE)?.env("LGWKS_TEST_MARKER", marker.as_os_str());
+        let report = host.block_on(&job, (gh, request(7)?))?;
+
+        assert!(
+            marker.exists(),
+            "seed {index}: the review path executed the pull request's build \
+             script; the inventory is data and must never be run"
+        );
+        assert!(
+            report.output().is_some_and(ReviewOutcome::is_published),
+            "seed {index}: a hostile file in the inventory is data, so the review \
+             still publishes: {:?}",
+            report.output()
+        );
+    }
+    Ok(())
+}
+
+/// A lost response that landed as an unsubmitted draft is `Pending`, and the
+/// receiver sees exactly one create.
+///
+/// Distinct from the sweep, which checks the *variant*; this checks that the
+/// draft exists at the receiver and that reconciliation found it by reading
+/// rather than by posting again. A `Pending` reported from a run that created
+/// twice would satisfy the sweep and violate T33's no-duplicate-post claim.
+#[test]
+fn a_pending_draft_is_never_reposted() -> TestResult {
+    let band = sim::Band::new(20, 16);
+    for index in band.seeds() {
+        let fake = FakeGh::install("pending", HEAD)?;
+        fake.configure(Scenario::new(HEAD).records_pending_draft())?;
+        let host = host()?;
+        let job = review_task()?;
+        let report = host.block_on(&job, (gh_for(&fake, CAPTURE)?, request(7)?))?;
+
+        let outcome = report
+            .output()
+            .ok_or_else(|| format!("seed {index}: a pending draft is a reported outcome"))?;
+        assert!(
+            outcome.is_pending(),
+            "seed {index}: a lost response onto a draft is Pending: {outcome:?}"
+        );
+        assert!(
+            !outcome.is_published(),
+            "seed {index}: an unsubmitted draft is never a publication: {outcome:?}"
+        );
+        assert_eq!(
+            fake.creates()?,
+            1,
+            "seed {index}: the draft was created once and reconciliation issued no \
+             second create — a repost here is the duplicate T33 names"
+        );
+        assert!(
+            outcome.review_id().is_some(),
+            "seed {index}: the draft's id is retained, so recovery targets it: {outcome:?}"
+        );
+        assert!(
+            fake.reads_of("/pulls/7/reviews")? >= 1,
+            "seed {index}: the draft was found by an independent read, not assumed"
+        );
+    }
+    Ok(())
+}
+
+/// A partial submission is reported with the counts that actually landed.
+///
+/// Distinct from the sweep, which checks the outcome's *variant*. This checks
+/// that the two counts are the draw's counts: a `Partial` reporting the
+/// intended count twice would satisfy the sweep and tell a caller nothing was
+/// missing, which is the failure mode T33's recovery case exists to prevent.
+#[test]
+fn a_partial_submission_reports_both_counts() -> TestResult {
+    let band = sim::Band::new(21, 16);
+    for index in band.seeds() {
+        let draw = over_ceiling_draw(index);
+        let (fault, run) = run_subject_fault(SubjectFault::PartialComments, index)?;
+        let outcome = run
+            .report
+            .output()
+            .ok_or_else(|| format!("seed {index}: a partial submission is a reported outcome"))?;
+        let &ReviewOutcome::Partial {
+            applied, intended, ..
+        } = outcome
+        else {
+            return Err(format!(
+                "seed {index} ({}): a submission with fewer comments than intended is \
+                 Partial, not {outcome:?}",
+                fault.label()
+            )
+            .into());
+        };
+        assert_eq!(
+            (applied, intended),
+            (
+                usize::try_from(draw.applied)?,
+                usize::try_from(draw.intended)?
+            ),
+            "seed {index}: Partial reports the draw's counts — what landed and what \
+             was intended — so a caller can target only what remains"
+        );
+        assert!(
+            applied < intended,
+            "seed {index}: a *partial* submission landed fewer comments than it \
+             intended ({applied} of {intended})"
+        );
+        assert_eq!(
+            run.creates, 1,
+            "seed {index}: a partial submission is reconciled by a read, never a repost"
+        );
+    }
+    Ok(())
+}
+
+/// A lost read permission after a create is `Unverified`, and the applied
+/// review id survives.
+///
+/// Distinct from the sweep, which checks the variant. The id is the applied
+/// effect evidence T34 names: a `Unverified` without it would force a caller to
+/// re-post to find out whether anything landed, which is exactly the duplicate
+/// the module exists to prevent.
+#[test]
+fn an_unverified_effect_retains_its_review_id() -> TestResult {
+    let band = sim::Band::new(22, 16);
+    for index in band.seeds() {
+        let fake = FakeGh::install("unverified", HEAD)?;
+        fake.configure(Scenario::new(HEAD).deny_reads())?;
+        let host = host()?;
+        let job = review_task()?;
+        let report = host.block_on(&job, (gh_for(&fake, CAPTURE)?, request(7)?))?;
+
+        let outcome = report
+            .output()
+            .ok_or_else(|| format!("seed {index}: a lost permission is a reported outcome"))?;
+        assert!(
+            outcome.is_unverified(),
+            "seed {index}: a create whose read-back lost permission is Unverified, not \
+             Unknown — the effect is applied, only its verification is blocked: {outcome:?}"
+        );
+        let review_id = outcome.review_id().ok_or_else(|| {
+            format!("seed {index}: an Unverified outcome retains the id: {outcome:?}")
+        })?;
+        assert_eq!(
+            fake.creates()?,
+            1,
+            "seed {index}: the effect really landed, and no second create was issued"
+        );
+        assert!(
+            (FIRST_REVIEW_ID..=LAST_REVIEW_ID).contains(&review_id),
+            "seed {index}: the retained id must come from the receiver's own range \
+             {FIRST_REVIEW_ID}..={LAST_REVIEW_ID}, not be invented: {review_id}"
+        );
+        assert_eq!(
+            outcome.commit_id().map(CommitId::as_str),
+            Some(HEAD),
+            "seed {index}: the retained id is about the commit that was read"
+        );
+    }
+    Ok(())
+}
+
+/// `Unauthorized` and `Transport` are different faults, and the journey tells
+/// them apart.
+///
+/// T34's row is "lost read permission reports unverified/blocking while
+/// retaining applied-effect evidence"; a transport failure is a different fact
+/// and must stay `Unknown`. This checks the adapter's classification directly,
+/// across a seeded sweep of both: a `403` answer is `Unauthorized` and a
+/// dropped connection is `Transport`, never the reverse, and neither is
+/// collapsed into the other.
+#[test]
+fn unauthorized_and_transport_stay_distinct() -> TestResult {
+    let band = sim::Band::new(23, 16);
+
+    // One task body, used for both reads: the question is which *error* each
+    // read produced, so the read has to be reached the way a caller reaches
+    // it — through the host — and both faults must travel the same path for the
+    // comparison to mean anything.
+    let job = task(
+        "read-reviews",
+        |scope: Scope, (gh, pr): (Gh, PullRequest)| async move {
+            let step = scope.enter("reviews")?;
+            let read = gh.read_reviews(&pr).await;
+            drop(step);
+            read.map_err(lgwks_bot::script::FlowError::from)
+        },
+    )?;
+
+    for index in band.seeds() {
+        // The read-back loses permission: a real `403` from the receiver.
+        let fake = FakeGh::install("denied", HEAD)?;
+        fake.configure(Scenario::new(HEAD).deny_reads())?;
+        let denial = host()?.block_on(&job, (gh_for(&fake, CAPTURE)?, pull(7)?))?;
+
+        // The same read fails for a reason that names no HTTP status at all:
+        // the receiver refuses with a bare non-zero exit, which is the shape a
+        // dropped connection takes and the shape a permission answer never
+        // takes.
+        let other = FakeGh::install("transported", HEAD)?;
+        let refused = sim::Rng::new(index).between(1, 4);
+        other.configure(Scenario::new(HEAD).fail_reads(refused))?;
+        let outage = host()?.block_on(&job, (gh_for(&other, CAPTURE)?, pull(7)?))?;
+
+        let denial = denial
+            .error()
+            .ok_or("a denied read must report why it failed")?
+            .to_string();
+        let outage = outage
+            .error()
+            .ok_or("a refused read must report why it failed")?
+            .to_string();
+
+        // What a caller can actually observe: the permission arm names the HTTP
+        // status and the credential that could not reach the resource, and the
+        // transport arm names the child's exit and no status at all. A caller
+        // deciding between "fix my token" and "retry later" reads exactly these
+        // two facts, so collapsing the arms would remove the decision.
+        assert!(
+            denial.contains("HTTP 403") && denial.contains("credential"),
+            "seed {index}: a permission refusal names its HTTP status and the \
+             credential that could not reach the resource: {denial}"
+        );
+        assert!(
+            outage.contains("exit ") && !outage.contains("HTTP"),
+            "seed {index} ({refused} refusals): a failure naming no HTTP status is a \
+             transport failure that reports the child's exit, not a permission one \
+             that reports a status: {outage}"
+        );
+        // The arms are disjoint, not merely differently worded: neither message
+        // claims the other's evidence.
+        assert!(
+            !outage.contains("credential"),
+            "seed {index}: a transport failure must not be reported as a permission \
+             loss, which would tell a caller to fix a credential that is fine: \
+             {outage}"
+        );
+        assert!(
+            !denial.contains("exit "),
+            "seed {index}: a permission refusal must not be reported as a transport \
+             failure, which would hide a credential problem behind a network one \
+             and make a healthy credential look like a flaky link: {denial}"
+        );
+    }
+    Ok(())
+}
+
+/// The same two faults reach different outcomes through the whole journey.
+///
+/// The classification above is the adapter's; this is the journey's. A run
+/// whose read-back lost permission reports `Unverified` with the id retained,
+/// while a run whose read-back failed for a transport reason reports `Unknown`.
+/// Merging them would either discard applied-effect evidence or over-report a
+/// blocking state for a failure nobody can attribute to permissions.
+#[test]
+fn permission_loss_and_transport_outcome_differ() -> TestResult {
+    let band = sim::Band::new(24, 8);
+    for index in band.seeds() {
+        let denied = FakeGh::install("outcome-denied", HEAD)?;
+        denied.configure(Scenario::new(HEAD).deny_reads())?;
+        let host = host()?;
+        let job = review_task()?;
+        let denied_report = host.block_on(&job, (gh_for(&denied, CAPTURE)?, request(7)?))?;
+
+        let outage = FakeGh::install("outcome-transported", HEAD)?;
+        outage.configure(Scenario::new(HEAD).fail_reads(4))?;
+        let outage_report = host.block_on(&job, (gh_for(&outage, CAPTURE)?, request(7)?))?;
+
+        assert!(
+            denied_report
+                .output()
+                .is_some_and(ReviewOutcome::is_unverified),
+            "seed {index}: a lost permission after a create is Unverified: {:?}",
+            denied_report.output()
+        );
+        assert!(
+            outage_report
+                .output()
+                .is_some_and(ReviewOutcome::is_unknown),
+            "seed {index}: a transport failure leaves the effect unobserved, so it \
+             is Unknown — not Unverified, which would claim a permission loss \
+             nobody observed: {:?}",
+            outage_report.output()
+        );
+        assert_eq!(
+            denied.creates()?,
+            1,
+            "seed {index}: the denied run applied exactly one create"
+        );
+    }
+    Ok(())
+}
+
+/// Saturation over the subject path: many concurrent runs on one pull request,
+/// each creating at most once and publishing only what it observed.
+///
+/// The concurrency counterpart to the arm families above: a per-seed arm is one
+/// world at a time, and a bound that holds for one run says nothing about a
+/// host running a hundred. The observation is the receiver's record — N runs
+/// produce at most N creates (a duplicate-post defect produces more) and at
+/// least as many read-backs as creates (a publication reported without an
+/// independent observation produces fewer).
+#[test]
+fn subject_saturation_conserves_creates() -> TestResult {
+    for index in 0..16u64 {
+        let fake = FakeGh::install("subject-saturation", HEAD)?;
+        fake.configure(Scenario::new(HEAD).created_body(BODY))?;
+        let host = host()?;
+        let job = std::sync::Arc::new(review_task_send()?);
+        let work: Vec<(Gh, ReviewRequest)> = (0..64)
+            .map(|_| Ok((gh_for(&fake, CAPTURE)?, request(7)?)))
+            .collect::<Result<Vec<(Gh, ReviewRequest)>, Box<dyn std::error::Error>>>()?;
+        let host = std::sync::Arc::new(host);
+        let futures = work.into_iter().map(move |(gh, request)| {
+            let host = std::sync::Arc::clone(&host);
+            let job = std::sync::Arc::clone(&job);
+            async move { host.run(&job, (gh, request)).await }
+        });
+        let reports =
+            lgwks_bot::Runtime::new()?.block_on(lgwks_bot::rt::task::join_all_bounded(16, futures));
+
+        let published = reports
+            .iter()
+            .filter(|report| report.output().is_some_and(ReviewOutcome::is_published))
+            .count();
+        let creates = fake.creates()?;
+        let reads = fake.reads_of("/pulls/7/reviews")?;
+        assert_eq!(
+            reports.len(),
+            64,
+            "seed {index}: the owner must join every run it started"
+        );
+        assert!(
+            creates <= 64,
+            "seed {index}: {creates} creates for 64 runs means at least one run \
+             published twice"
+        );
+        assert!(
+            creates >= published,
+            "seed {index}: {creates} creates cannot account for only {published} \
+             reported publications — a create went missing"
+        );
+        assert!(
+            reads >= creates,
+            "seed {index}: {reads} read-backs cannot account for {creates} creates — \
+             a publication was reported without an independent read"
+        );
+    }
+    Ok(())
+}
+
+/// Two tenants' coverage decisions on one pull request stay apart.
+///
+/// A host that leaked a diff verdict between runs would tell one tenant its
+/// coverage was complete when the other tenant's oversized diff was the reason
+/// it was refused. The two tenants' inventories differ in size — one clean, one
+/// past the file ceiling — so a crossed verdict would be visible.
+#[test]
+fn two_tenants_coverage_stays_isolated() -> TestResult {
+    let band = sim::Band::new(25, 16);
+    for index in band.seeds() {
+        let clean = FakeGh::install("tenant-clean", HEAD)?;
+        clean.configure(Scenario::new(HEAD))?;
+        let refused = FakeGh::install("tenant-refused", HEAD)?;
+        refused.configure(subject_scenario(
+            SubjectFault::DiffOverFiles,
+            HEAD,
+            over_ceiling_draw(index),
+        ))?;
+
+        let host = host()?;
+        let job = review_task()?;
+        let clean_report = host.block_on(&job, (gh_for(&clean, CAPTURE)?, request(7)?))?;
+        let refused_report = host.block_on(
+            &job,
+            (
+                gh_for(&refused, fault_capture(SubjectFault::DiffOverFiles))?,
+                request(7)?,
+            ),
+        )?;
+
+        assert!(
+            clean_report
+                .output()
+                .is_some_and(ReviewOutcome::is_published),
+            "seed {index}: the clean tenant's coverage is complete and it publishes: {:?}",
+            clean_report.output()
+        );
+        assert!(
+            refused_report
+                .output()
+                .is_some_and(ReviewOutcome::is_incomplete),
+            "seed {index}: the over-ceiling tenant's coverage is incomplete and it \
+             publishes nothing — the two verdicts must not cross: {:?}",
+            refused_report.output()
+        );
+        assert_eq!(
+            refused.creates()?,
+            0,
+            "seed {index}: the refused tenant's receiver saw no create"
+        );
+        assert_eq!(
+            clean.creates()?,
+            1,
+            "seed {index}: the clean tenant's receiver saw exactly one create"
+        );
+    }
+    Ok(())
+}
+
+/// The capture ceiling the file-ceiling arm runs with.
+///
+/// One helper because the byte arm shares it and a per-family literal is a
+/// place for the two to drift: a family running the over-ceiling inventory
+/// under a capture ceiling that refused it for the *wrong* reason would report
+/// an incomplete coverage for a capture truncation and prove nothing about the
+/// file bound.
+fn fault_capture(fault: SubjectFault) -> usize {
+    fault.capture()
+}
+
+/// The review is pinned to the commit that was read, across every arm.
+///
+/// Every arm above checks a *refusal* arm. This one checks the success arm and
+/// the pinning that T31/T33/T34 all rest on: a publication is reported at the
+/// commit the run read and nowhere else. It runs through the whole path, so a
+/// run that somehow re-pointed the subject at the canonical name after a rename
+/// would publish at a commit it never read.
+#[test]
+fn a_publication_is_pinned_to_the_read_commit() -> TestResult {
+    let band = sim::Band::new(26, 16);
+    for index in band.seeds() {
+        let fake = FakeGh::install("pinned", HEAD)?;
+        fake.configure(Scenario::new(HEAD))?;
+        let host = host()?;
+        let job = review_task()?;
+        let report = host.block_on(&job, (gh_for(&fake, CAPTURE)?, request(7)?))?;
+
+        let outcome = report
+            .output()
+            .ok_or_else(|| format!("seed {index}: a clean run reports an outcome"))?;
+        assert!(
+            outcome.is_published(),
+            "seed {index}: a clean run publishes: {outcome:?}"
+        );
+        assert_eq!(
+            outcome.commit_id().map(CommitId::as_str),
+            Some(HEAD),
+            "seed {index}: the publication is pinned to the commit that was read, \
+             never re-pointed: {outcome:?}"
+        );
+        assert_eq!(
+            fake.creates()?,
+            1,
+            "seed {index}: a clean run creates exactly once"
         );
     }
     Ok(())
