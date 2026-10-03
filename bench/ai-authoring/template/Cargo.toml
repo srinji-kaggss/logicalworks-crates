@@ -1,0 +1,18 @@
+# The crate template a trial is built from. The runner copies this directory,
+# substitutes the placeholders below, writes `src/lib.rs` and `tests/oracle.rs`,
+# and builds it with `--locked --offline` against the copied `Cargo.lock`.
+#
+# `__NAME__` is the package name; `ai_trial` replaces it so the oracle can name
+# the crate without knowing the trial. The two paths are rewritten to absolute
+# paths by the runner, because a trial lives outside the repository.
+[package]
+name = "__NAME__"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# `script` implies `rt`, `time`, `sync` and `macros`, so a solution may use
+# either the new task/Host facade or the old rt surface.
+lgwks_bot = { path = "../../../crates/lgwks-bot", default-features = false, features = ["script"] }
+ai_task_support = { path = "../support" }

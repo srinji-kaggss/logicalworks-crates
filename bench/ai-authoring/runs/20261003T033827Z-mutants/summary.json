@@ -1,0 +1,74 @@
+{
+  "generated_by": "bench/ai-authoring/run.py",
+  "lgwks_bot_sha": "78dc70ccfa88b4d7620d0fa507bd926b3ada8a63",
+  "protocol": {
+    "same_prompt_skeleton": true,
+    "same_sheet_budget": "each API sheet <= 250 lines",
+    "same_oracle": true,
+    "hidden_oracle": true,
+    "repair_budget": 4,
+    "cargo_serialized": "one cargo process at a time under an fcntl lock",
+    "closed_book": "each model call runs under sandbox-exec: home, /private/tmp and the work directory are unreadable except the CLI config and the trial scratch; no session, no skills"
+  },
+  "groups": [
+    {
+      "model": "__mutant__",
+      "api": "new",
+      "task": "aggregate",
+      "n": 1,
+      "compiled": 1,
+      "repairs_mean": 0,
+      "repairs_median": 0,
+      "oracle_pass_rate": 0.6666666666666666,
+      "oracle_per_trial": [
+        {
+          "trial": 0,
+          "compiled": true,
+          "oracle_pass_count": 4,
+          "oracle_total": 6,
+          "oracle": {
+            "empty_input_sums_to_zero": "pass",
+            "at_most_four_fetches_are_in_flight": "fail",
+            "a_failure_is_reported_by_id": "pass",
+            "no_fetch_starts_after_the_failure_is_observed": "pass",
+            "the_overall_deadline_is_honoured": "fail",
+            "dropping_the_future_leaves_no_fetch_live": "pass"
+          }
+        }
+      ],
+      "tokens_in_median": 0,
+      "tokens_out_median": 0,
+      "consumer_lines_median": 25,
+      "orchestration_sites_median": 0
+    },
+    {
+      "model": "__mutant__",
+      "api": "new",
+      "task": "pipeline",
+      "n": 1,
+      "compiled": 1,
+      "repairs_mean": 0,
+      "repairs_median": 0,
+      "oracle_pass_rate": 0.8,
+      "oracle_per_trial": [
+        {
+          "trial": 0,
+          "compiled": true,
+          "oracle_pass_count": 4,
+          "oracle_total": 5,
+          "oracle": {
+            "success_publishes_the_combined_artifact": "pass",
+            "a_failed_fetch_a_stops_combine_and_publish": "pass",
+            "a_failed_fetch_b_stops_combine_and_publish": "pass",
+            "a_slow_stage_past_the_deadline_publishes_nothing": "pass",
+            "dropping_the_future_leaves_no_stage_live": "fail"
+          }
+        }
+      ],
+      "tokens_in_median": 0,
+      "tokens_out_median": 0,
+      "consumer_lines_median": 59,
+      "orchestration_sites_median": 9
+    }
+  ]
+}
