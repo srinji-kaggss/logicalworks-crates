@@ -8,6 +8,33 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### lgwks_bot Added
+
+- `rt::process::read_frames`, a bounded reader for the length-framed records a
+  supervised child's output carries. It reuses the crate's existing frame
+  grammar (`journal::frame`) rather than restating it, so a torn tail has one
+  meaning across the file stores and a subprocess's streams. A record is
+  `FrameRead::Frame` only when its prefix named the bytes that followed; the two
+  truncations, a malformed prefix and the caller's ceiling are refusals that
+  carry no payload, and `FrameRead::payload()` returns `None` for every one of
+  them. The payload ceiling is charged from the prefix before a payload is read,
+  so a stream cannot request an allocation by claiming a large record. Accepting
+  rows T03, T05, T21 and T22. No existing item changed.
+- `rt::process::DEFAULT_FRAME_CEILING`, the one retained-byte ceiling a caller
+  needs in order to read a child's framed output without inventing a bound.
+
+### lgwks_bot Changed
+
+- `rt::supervise::CleanupReceipt`'s documentation now states what
+  `CleanupConfirmed` does and does not claim. It claims that every process still
+  *in the supervised group* when the group was last observed is gone — an
+  observation of `killpg(group, 0)`. It does not claim that no process the
+  supervisor started is still running: a descendant that called `setsid` has
+  left the group by construction, so its survival is not a counterexample.
+  Nothing about the type or its variants changed; a caller needing the stronger
+  guarantee needs a kernel job object or a cgroup, which this crate does not
+  have. Accepting row T21.
+
 ### lgwks_std Breaking
 
 - `similarity`: the `Similarity` implementation for `Cosine` now returns the

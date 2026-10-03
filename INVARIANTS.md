@@ -183,6 +183,54 @@ Each of these was a shipped defect. Treat the list as the spec.
   release capacity and emit an attributed terminal receipt. · why: #143 R10
   ownerless-cleanup finding · enforced by: `rt::supervise::tests` and
   `tests/rt_process.rs`
+- **INV-BOT-81** A length-framed record a child's output carries is read through
+  the crate's one frame grammar (`journal::frame`, INV-BOT-51), so "what a torn
+  tail is" has one answer across the file stores and a subprocess's streams. A
+  record is `FrameRead::Frame` only when its prefix named the bytes that
+  followed; the two truncations, a malformed prefix and the caller's ceiling are
+  refusals that carry no payload, and `payload()` returns `None` for every one of
+  them, so there is no path from a truncated output to bytes a caller decodes. The
+  payload ceiling is charged from the prefix *before* a payload is read, so a
+  stream cannot ask for an allocation by claiming a large record. · why: #87
+  acceptance row T05 (LC-02/11) · enforced by: `tests/sys_process_binding.rs`
+  (`a_framed_record_cut_off_mid_frame_is_a_typed_refusal`,
+  `a_framed_stream_that_ends_cleanly_is_complete`,
+  `a_prefix_past_the_ceiling_is_refused_before_it_is_allocated`) and
+  `tests/sim_process_output.rs` (`cuts_are_refused_never_decoded_band_00`,
+  `cuts_are_refused_never_decoded_band_01`)
+- **INV-BOT-82** A captured stream's four facts — the retained head at the
+  ceiling, the retained capacity, the exact total and the truncation flag — are
+  reported from one drain that keeps reading past its ceiling, so a flooding child
+  against a slow reader is bounded by its declared ceiling rather than by a pipe
+  buffer, and the total is still exact when the output was truncated. A reader
+  that waits for the child to exit before reading would deadlock on such a child,
+  so the deadline-bounded variant is the control that distinguishes a concurrent
+  drain from a sequential one. · why: #87 acceptance row T05 (LC-02/11) ·
+  enforced by: `tests/sys_process_binding.rs`
+  (`a_flooding_child_against_a_slow_reader_stays_within_its_ceiling`,
+  `a_flooding_child_is_drained_while_it_runs_not_after_it_exits`) and
+  `tests/sim_process_output.rs` (`a_seeded_flood_stays_bounded_on_one_worker_band_00`,
+  `a_seeded_flood_stays_bounded_on_one_worker_band_01`)
+- **INV-BOT-83** `CleanupReceipt::CleanupConfirmed` claims that every process
+  still in the supervised group when the group was last observed is gone — an
+  observation of `killpg(group, 0)`. It does **not** claim that no process the
+  supervisor started is still running: a descendant that called `setsid` has left
+  the group by construction, so its survival is not a counterexample. A receipt
+  claiming the stronger thing would need a kernel job object or a cgroup, neither
+  of which this crate has, and the bound is stated on the receipt itself rather
+  than left to be inferred from a green test. · why: #87 acceptance row T21
+  (LC-10), observed against a real `setsid` escape · enforced by:
+  `tests/process_escape.rs` (`a_session_escape_is_not_reported_as_complete_tree_cleanup`,
+  `cleanup_never_signals_a_process_outside_the_supervisors_group`)
+- **INV-BOT-84** A callback that never reaches an await point is observable only
+  from outside the process that runs it, and the observation is **detection, not
+  preemption**. A thread watchdog shares the fate of the executor it watches, so
+  the row's oracle is a separately timed child process that the parent kills with
+  a real `SIGKILL`; nothing in this crate can stop a poll in flight, and
+  `Supervisor::shutdown` says so itself. · why: #87 acceptance row T03 (DX-05,
+  LC-08) · enforced by: `tests/t03_non_yielding.rs`
+  (`a_non_yielding_callback_is_detected_from_outside_and_not_preempted`,
+  `the_same_front_door_admits_a_callback_that_does_yield`)
 - **INV-BOT-14** Shipped journals refuse appends and opens beyond their explicit
   event/byte ceilings without deleting or partially replaying committed or
   unresolved evidence. · why: #143 R06 · enforced by:

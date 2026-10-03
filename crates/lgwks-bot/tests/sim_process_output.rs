@@ -357,33 +357,63 @@ fn a_seeded_flood_stays_bounded_on_one_worker(band: Band) -> TestResult {
     })
 }
 
-/// The declared bands, one test each.
-///
-/// Written out rather than declared through `band_family!`: the gate that counts
-/// simulation evidence reads `#[test]` attributes out of the sources, so a family
-/// declared through a macro runs but is invisible to it.
-macro_rules! seeded_families {
-    ($($name:ident => $family:path, $band:expr);+ $(;)?) => {
-        $(
-            /// A seeded sweep of this family's property.
-            #[test]
-            fn $name() -> TestResult {
-                $family($band)
-            }
-        )+
-    };
+// Each band is a written-out `#[test]` rather than a macro declaration. The
+// `invariants` lane resolves every name an invariant cites by scanning the
+// sources for `fn` definitions, and a macro-generated test has no `fn` there — so
+// a family declared through a macro runs but cannot be cited as evidence. The
+// `simulation-evidence` lane reads the same way, counting `#[test]` attributes.
+// `tests/sim_run_boundaries.rs` records the same constraint from the other side.
+
+/// A seeded sweep of `sizes_stay_at_the_ceiling` over seeds 0..8.
+#[test]
+fn sizes_stay_at_the_ceiling_band_00() -> TestResult {
+    sizes_stay_at_the_ceiling(Band::new(0, 8))
 }
 
-seeded_families!(
-    sizes_stay_at_the_ceiling_band_00 => sizes_stay_at_the_ceiling, Band::new(0, 8);
-    sizes_stay_at_the_ceiling_band_01 => sizes_stay_at_the_ceiling, Band::new(8, 8);
-    cuts_are_refused_never_decoded_band_00 => cuts_are_refused_never_decoded, Band::new(16, 8);
-    cuts_are_refused_never_decoded_band_01 => cuts_are_refused_never_decoded, Band::new(24, 8);
-    two_tenants_never_cross_band_00 => two_tenants_never_cross, Band::new(32, 8);
-    the_same_seed_replays_band_00 => the_same_seed_replays, Band::new(40, 8);
-    the_same_seed_replays_band_01 => the_same_seed_replays, Band::new(48, 8);
-    a_seeded_flood_stays_bounded_on_one_worker_band_00 => a_seeded_flood_stays_bounded_on_one_worker,
-        Band::new(56, 8);
-    a_seeded_flood_stays_bounded_on_one_worker_band_01 => a_seeded_flood_stays_bounded_on_one_worker,
-        Band::new(64, 8);
-);
+/// A seeded sweep of `sizes_stay_at_the_ceiling` over seeds 8..16.
+#[test]
+fn sizes_stay_at_the_ceiling_band_01() -> TestResult {
+    sizes_stay_at_the_ceiling(Band::new(8, 8))
+}
+
+/// A seeded sweep of `cuts_are_refused_never_decoded` over seeds 16..24.
+#[test]
+fn cuts_are_refused_never_decoded_band_00() -> TestResult {
+    cuts_are_refused_never_decoded(Band::new(16, 8))
+}
+
+/// A seeded sweep of `cuts_are_refused_never_decoded` over seeds 24..32.
+#[test]
+fn cuts_are_refused_never_decoded_band_01() -> TestResult {
+    cuts_are_refused_never_decoded(Band::new(24, 8))
+}
+
+/// A seeded sweep of `two_tenants_never_cross` over seeds 32..40.
+#[test]
+fn two_tenants_never_cross_band_00() -> TestResult {
+    two_tenants_never_cross(Band::new(32, 8))
+}
+
+/// A seeded sweep of `the_same_seed_replays` over seeds 40..48.
+#[test]
+fn the_same_seed_replays_band_00() -> TestResult {
+    the_same_seed_replays(Band::new(40, 8))
+}
+
+/// A seeded sweep of `the_same_seed_replays` over seeds 48..56.
+#[test]
+fn the_same_seed_replays_band_01() -> TestResult {
+    the_same_seed_replays(Band::new(48, 8))
+}
+
+/// A seeded sweep of the one-worker flood over seeds 56..64.
+#[test]
+fn a_seeded_flood_stays_bounded_on_one_worker_band_00() -> TestResult {
+    a_seeded_flood_stays_bounded_on_one_worker(Band::new(56, 8))
+}
+
+/// A seeded sweep of the one-worker flood over seeds 64..72.
+#[test]
+fn a_seeded_flood_stays_bounded_on_one_worker_band_01() -> TestResult {
+    a_seeded_flood_stays_bounded_on_one_worker(Band::new(64, 8))
+}
