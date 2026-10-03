@@ -8,6 +8,41 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### lgwks_bot Fixed
+
+- A host-side stop is no longer recorded as a request's outcome. `Host::submit`
+  wrote a `@terminal` record for every disposition that was not a success, so
+  `Cancelled` (the host's stop arrived mid-run) and `Refused` (the host declined
+  before admission) became the request's permanent recorded verdict. Since the
+  key *is* the request's identity and its body runs at most once under it, one
+  shutdown left a key that no later submission could ever complete: every repeat
+  reattached to the stop and the body's recorded durable steps were never
+  resumed. `@terminal` is now written for exactly the three dispositions that
+  are the request's own verdict under its declared task — `Succeeded`, `Failed`
+  and `DeadlineExceeded`, the deadline included because the same declaration
+  that fixed the key also fixed the run's budget — and a host stop writes
+  nothing. The classification is one exhaustive `match` over `Disposition`, so
+  a variant added later fails to compile until its relationship to a request
+  key is decided by hand. The stop is still reported to the caller that saw it
+  (`Submission::Executed` carrying the disposition); what no longer happens is a
+  restart turning into a request that can never succeed. INV-BOT-102.
+- `Host::resume` settles a request that `Host::submit` left incomplete, under
+  the same rule: a resumed run whose receipt exists and whose verdict does not
+  records that verdict, so a request interrupted by a host stop (or by a client
+  that walked away) can reach a recorded terminal at all instead of reporting
+  `InFlight` forever. Settling is deliberately narrow — `Host::run` writes no
+  reserved record, a resume of a run with no `@request` receipt is an ordinary
+  resume, an already-settled run is left alone, and a `Refused`/`Cancelled`
+  report is returned untouched, so a cross-tenant resume stays `Refused`. A
+  store that refuses to record a verdict a run *reached* is reported as
+  `Failed`, since recording an outcome and reporting success are one fact.
+- **Breaking:** `Host::resume` and `Host::resume_ticket` now require
+  `O: lgwks_bot::script::Durable`. A resumed run may be settling a request, and
+  a recorded verdict is made of an archived output. `Host::run` is unchanged.
+  **Migration:** a caller whose task returns a value that is not archivable must
+  return a `Durable` one, or route the run through `Host::run` plus an explicit
+  run id it owns rather than a resume.
+
 ### lgwks_std Breaking
 
 - `similarity`: the `Similarity` implementation for `Cosine` now returns the
