@@ -158,9 +158,9 @@ pub async fn recover(
     let run = RunId::from_hex(RUN).map_err(|_| RecoveryError::NoStore)?;
     let host = recovery_host(&store_dir, deadline)?;
     let failed: Failed = Arc::new(Mutex::new(None));
-    // The world is cloned into the task and kept here too: the caller reads the
-    // ledger from the world it handed us, so this frame still owns one.
-    let work = recovery_task(world.clone(), Arc::clone(&failed))?;
+    // The world moves into the task: the caller reads the ledger from the world
+    // it already holds, so this frame keeps no clone of its own.
+    let work = recovery_task(world, Arc::clone(&failed))?;
 
     // The first attempt. Whatever it reaches, its records are already on the disk
     // by the time `remember` returned, so the resume below can find them.
@@ -175,11 +175,11 @@ pub async fn recover(
     // did not reach run now. The task, the scope and the run identity are the
     // same on both attempts, which is the whole reason this compiles into a
     // resume rather than a fresh run.
+    //
+    // The resume is attempted whatever the first attempt reported, and including
+    // its own `Deadline`: a caller that asked for a budget has already been told
+    // the budget is exceeded, and the resume cannot make that answer worse — it
+    // can only turn an interrupted run into a finished one.
     let resumed = host.resume(run, &work, 0u32).await;
-    let settled = into_result(&resumed, &failed);
-    settled?;
-    // The ledger is the harness's, so the caller reads it there; here it is only
-    // reached to keep the borrow of `world` in this frame.
-    let _ = world.ledger().applies();
-    Ok(resumed.output().copied().ok_or(RecoveryError::NoLedger)?)
+    into_result(&resumed, &failed)
 }
