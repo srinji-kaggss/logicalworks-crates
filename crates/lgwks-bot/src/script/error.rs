@@ -53,6 +53,34 @@ pub enum FlowError {
         /// The last attempt's failure.
         last: Box<FlowError>,
     },
+    /// An untrusted payload was refused by the [`admit`](crate::script::admit) step.
+    ///
+    /// Typed rather than a [`FlowError::Failed`] with the refusal's text, because
+    /// the whole point of admitting model output as data is that a caller can match
+    /// on *why* without parsing a string — and because the [`Provenance`](crate::proposal::Provenance)
+    /// of the exact refused bytes travels with it, so no refusal in a report is
+    /// unattributable. Not retryable: a payload refused for its content will be
+    /// refused the same way however many times it is re-read.
+    Refused {
+        /// Where the refusal was located.
+        at: Arc<str>,
+        /// Why the payload did not become work.
+        refusal: Box<crate::proposal::Refusal>,
+        /// Where the refused bytes came from.
+        provenance: crate::proposal::Provenance,
+    },
+    /// The run reached a finite typed intervention instead of repairing again.
+    ///
+    /// Distinct from [`FlowError::Refused`]: the refusal is about *this* payload,
+    /// while an intervention is about the run's ledger and is reached by repeated
+    /// unchanged failure. Not retryable — another attempt would be exactly the
+    /// repair the intervention refused.
+    Intervention {
+        /// Where the intervention was located.
+        at: Arc<str>,
+        /// What the run reached.
+        intervention: Box<crate::proposal::Intervention>,
+    },
     /// A permanent failure: repeating the step gives the same answer.
     Failed {
         /// Where it failed.
@@ -124,8 +152,9 @@ impl FlowError {
     ///
     /// `TimedOut` and `Transient` are; a bot error is when its retry class is
     /// [`RetryClass::Safe`](crate::error::RetryClass::Safe) (the effect definitely did not happen). A
-    /// cancellation, a permanent failure, an exhausted retry, and every
-    /// validation failure are not: repeating them is a retry storm.
+    /// cancellation, a permanent failure, an exhausted retry, a refused payload,
+    /// an intervention, and every validation failure are not: repeating them is a
+    /// retry storm.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match *self {
@@ -135,6 +164,8 @@ impl FlowError {
             | Self::Exhausted { .. }
             | Self::Throttled { .. }
             | Self::Failed { .. }
+            | Self::Refused { .. }
+            | Self::Intervention { .. }
             | Self::TooDeep { .. }
             | Self::InvalidTenant { .. }
             | Self::InvalidName { .. }
@@ -159,6 +190,8 @@ impl FlowError {
             | Self::Failed { ref at, .. }
             | Self::Transient { ref at, .. }
             | Self::Bot { ref at, .. }
+            | Self::Refused { ref at, .. }
+            | Self::Intervention { ref at, .. }
             | Self::TooDeep { ref at, .. } => at,
             Self::InvalidTenant { .. } | Self::InvalidName { .. } | Self::InvalidBound { .. } => "",
         }
@@ -184,6 +217,8 @@ impl FlowError {
             | Self::Failed { ref mut at, .. }
             | Self::Transient { ref mut at, .. }
             | Self::Bot { ref mut at, .. }
+            | Self::Refused { ref mut at, .. }
+            | Self::Intervention { ref mut at, .. }
             | Self::TooDeep { ref mut at, .. } => {
                 if at.is_empty() {
                     *at = Arc::clone(path);
@@ -225,6 +260,15 @@ impl fmt::Display for FlowError {
                 write!(formatter, "{at}: failed (transient): {reason:?}")
             }
             Self::Bot { ref at, ref source } => write!(formatter, "{at}: {source}"),
+            Self::Refused {
+                ref at,
+                ref refusal,
+                ref provenance,
+            } => write!(formatter, "{at}: {refusal} (from {provenance})"),
+            Self::Intervention {
+                ref at,
+                ref intervention,
+            } => write!(formatter, "{at}: {intervention}"),
             Self::TooDeep { ref at, limit } => {
                 write!(formatter, "{at}: steps nested deeper than {limit}")
             }
@@ -241,6 +285,10 @@ impl std::error::Error for FlowError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match *self {
             Self::Bot { ref source, .. } => Some(&**source),
+            Self::Refused { ref refusal, .. } => Some(&**refusal),
+            Self::Intervention {
+                ref intervention, ..
+            } => Some(&**intervention),
             Self::Exhausted { ref last, .. } | Self::Throttled { ref last, .. } => Some(&**last),
             Self::Cancelled { .. }
             | Self::TimedOut { .. }
