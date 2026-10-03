@@ -258,16 +258,24 @@ Each of these was a shipped defect. Treat the list as the spec.
   byte is copied twice and a truncated partial is that same `Vec` truncated in
   place. A caller reads its child's output through
   `CapturedStream::frames(ceiling)`, the one door from a `ProcessRun` to the
-  grammar. · why: #87 acceptance row T05 (LC-02/11) · enforced by:
+  grammar, and the production door to that reading is the sys domain's own
+  verbs: a `Process` built with `Process::frame_stdout` reports the framed
+  reading on the `ProcessState` its `Observe`, `Execute` and `Query` calls
+  return, so the grammar is reached from the run path rather than only from a
+  test. · why: #87 acceptance row T05 (LC-02/11) · enforced by:
   `tests/sys_process_binding.rs`
   (`a_framed_record_cut_off_mid_frame_is_a_typed_refusal`,
   `a_framed_stream_that_ends_cleanly_is_complete`,
   `a_legal_record_without_room_is_the_ceiling_and_rot_is_still_refused`,
-  `a_prefix_past_the_ceiling_is_refused_before_it_is_allocated`) and
+  `a_prefix_past_the_ceiling_is_refused_before_it_is_allocated`,
+  `the_execute_verb_reports_stdout_frames_two_records_and_a_cut_third`,
+  `the_execute_verb_reports_the_capture_ceiling_when_the_child_overruns_it`) and
   `tests/sim_process_output.rs` (`cuts_are_refused_never_decoded_band_00`,
   `cuts_are_refused_never_decoded_band_01`,
   `room_without_a_record_is_the_ceiling_band_00`,
-  `room_without_a_record_is_the_ceiling_band_01`)
+  `room_without_a_record_is_the_ceiling_band_01`,
+  `verb_framed_reads_agree_with_the_model_band_00`,
+  `verb_framed_reads_agree_with_the_model_band_01`)
 - **INV-BOT-114** A capture's own cut is reported as the capture's ceiling, never
   as the child's truncation and never as a clean end — but only for the endings
   the cut could have decided. When `CapturedStream::truncated()` is true the
@@ -301,6 +309,28 @@ Each of these was a shipped defect. Treat the list as the spec.
   `capture_cuts_saturate_at_the_declared_tiers`,
   `rot_before_the_capture_cut_is_the_ending_band_00`,
   `rot_before_the_capture_cut_is_the_ending_band_01`)
+- **INV-BOT-115** The frame grammar a child's output carries is reached from the
+  sys domain's own verbs, not only from a reader a caller plumbs by hand. A
+  `Process` built with `Process::frame_stdout` reports each run's stdout as
+  `ProcessState::stdout_frames`, a reading of the same bytes the lossy
+  `ProcessState::stdout` decodes, so a binary record round-trips byte-exact where
+  the text view cannot, while a domain built without it reports `None` and an
+  unchanged `stdout`. The production door is the `Observe`, `Execute` and `Query`
+  verbs on `Process`: each calls the one private dispatch method, which runs the
+  process once, and `ProcessState::from_run` fills the framed reading through
+  `CapturedStream::frames` — so the capability `INV-BOT-110` and `INV-BOT-114`
+  describe has a caller on the real run path rather than only in a test. · why:
+  the wired-or-it-does-not-exist defect for T05 (INV-BOT-110 and INV-BOT-114
+  shipped with zero production callers) · enforced by: `tests/sys_process_binding.rs`
+  (`the_execute_verb_reports_stdout_frames_two_records_and_a_cut_third`,
+  `the_execute_verb_reports_the_capture_ceiling_when_the_child_overruns_it`,
+  `a_domain_without_frame_stdout_reports_no_frames_and_unchanged_stdout`,
+  `a_binary_record_round_trips_through_frames_while_stdout_is_lossy`) and
+  `tests/sim_process_output.rs`
+  (`verb_framed_reads_agree_with_the_model_band_00`,
+  `verb_framed_reads_agree_with_the_model_band_01`,
+  `verb_two_tenants_never_cross_band_00`,
+  `verb_two_tenants_never_cross_band_01`)
 - **INV-BOT-111** A captured stream's four facts — the retained head at the
   ceiling, the retained capacity, the exact total and the truncation flag — are
   reported from one drain that keeps reading past its ceiling, so a flooding child

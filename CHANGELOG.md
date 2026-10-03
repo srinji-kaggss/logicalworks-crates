@@ -28,6 +28,14 @@ explicitly under that crate.
   rows T03, T05, T21 and T22. No existing item changed.
 - `rt::process::DEFAULT_FRAME_CEILING`, the one retained-byte ceiling a caller
   needs in order to read a child's framed output without inventing a bound.
+- `domain::sys::Process::frame_stdout(ceiling)` and
+  `ProcessState::stdout_frames()`, which wire the frame reader above into the
+  sys domain's real verb path: a `Process` built with `frame_stdout` reports each
+  run's stdout as a framed reading on the `ProcessState` its `Observe`, `Execute`
+  and `Query` calls return, byte-exact where the lossy `stdout()` is not, and a
+  domain built without it reports `None` and an unchanged `stdout()`.
+  `CapturedStream::frames`/`read_frames` (INV-BOT-110/114) previously had no
+  production caller; the domain's verbs are now that caller (INV-BOT-115).
 
 ### lgwks_bot Fixed
 
