@@ -870,16 +870,41 @@ Each of these was a shipped defect. Treat the list as the spec.
   them still completes, every held chain still reaches its own action once, and
   every one is still **reported** as held — a dropped hold is a lost effect
   nobody would ever see. The tier reached is recorded rather than clamped.
-  **Not claimed:** that a slow *source* fails to block unrelated ready work. A
-  tick joins its observation wave through `lgwks_std::task::join_all_boxed`, which
-  polls on the calling thread and returns only when the wave has resolved, so a
-  source that never resolves holds the tick and no other chain's action can run
-  before the walk, which is after it; `MAX_IN_FLIGHT_POLLS` bounds the fan-out,
-  not the wait. Bounding it would mean a per-source deadline, which is an
-  admission surface this crate does not have — `GrantSet` is the one. · why:
-  #87 step 3 (T06, LC-03) · enforced by: `tests/observe_refresh.rs`
+  · why: #87 step 3 (T06, LC-03), first half · enforced by: `tests/observe_refresh.rs`
   (`a_chain_held_at_capacity_does_not_starve_an_independent_chain`,
   `a_saturated_mass_does_not_starve_an_independent_chain_at_every_tier`)
+- **INV-BOT-123** One slow source cannot hold the tick. Every source poll in the
+  observation wave runs under a **declared per-poll deadline** — the wall watchdog
+  half of the crate's one declared clock (`Clock`, INV-BOT-30), never its
+  caller-advanceable counter, because a source that stopped answering is not
+  waiting for time to pass — and `MAX_IN_FLIGHT_POLLS` bounds the fan-out while
+  this bounds the wait, which is the half it never did. A poll that
+  misses it is **dropped mid-flight**: it commits nothing, keeps its chain's
+  baseline and its forced-refresh mark standing (the same rule a failed poll
+  already follows, since the value it was to replace is still there), and is
+  reported in `TickReport::stalled` naming the chain, the source's own
+  `domain_id` and the budget applied. A cancellation is **not** a park: it does
+  not stop the tick, so the chains beside a wedged source commit and act in the
+  *same* tick — the rule a domain failure follows is deliberately not extended to
+  it, because a source that said nothing cannot be a reason to withhold the
+  observations other sources did read. The bound is `DEFAULT_POLL_DEADLINE` with
+  `EcsBuilder::with_poll_deadline` as the override, refused at build for zero and
+  for anything above `MAX_POLL_DEADLINE`, because a silently clamped deadline is
+  indistinguishable from the one the caller asked for. The watchdog thread is
+  joined on every path, so a resolved poll leaves no thread parked and a cancelled
+  one leaves none outliving the tick. **Not claimed:** that cancelling a poll stops
+  its side effects. Dropping a future is cooperative, so a poll that handed work to
+  `spawn_blocking` has its handle released and its thread runs to completion — the
+  stall is about this bot's observation, not about the source's work. · why:
+  #87 step 3 (T06, LC-03), slow-source half, closing the gap INV-BOT-122 named ·
+  enforced by: `tests/observe_refresh.rs`
+  (`a_slow_source_does_not_block_an_independent_chain`,
+  `a_stalled_chain_is_re_polled_and_commits_when_it_answers`,
+  `a_poll_deadline_that_bounds_nothing_is_refused_at_build`) and
+  `tests/sim_observe_refresh.rs`
+  (`a_wedged_source_is_reported_and_costs_its_neighbours_nothing`,
+  `a_saturated_wave_stalls_every_chain_and_still_lets_the_next_tenant_commit`,
+  `the_same_seed_replays_a_stalled_wave`)
 
 ## Open questions for the Director
 

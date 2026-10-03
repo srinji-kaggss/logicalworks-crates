@@ -10,6 +10,29 @@ explicitly under that crate.
 
 ### lgwks_bot Added
 
+- `EcsBuilder::with_poll_deadline`, `DEFAULT_POLL_DEADLINE` and
+  `MAX_POLL_DEADLINE` (INV-BOT-123). Every source poll in a tick's observation
+  wave now runs under a declared per-poll deadline, so one source that never
+  resolves can no longer hold the whole tick. `MAX_IN_FLIGHT_POLLS` bounded the
+  wave's fan-out but not its wait, and the wave is joined on the calling thread,
+  so every other chain's action was held behind a source nobody could make
+  progress for. A poll that misses its deadline is dropped mid-flight: it commits
+  nothing, keeps its chain's baseline and forced-refresh mark standing, and is
+  reported in `TickReport::stalled` with the chain, the source's `domain_id` and
+  the budget applied. The chains beside it commit and act in the same tick.
+  The deadline is measured on the wall watchdog of the crate's one declared
+  clock, not its caller-advanceable counter, because a wedged source is not
+  waiting for time; it is a watchdog thread the poll owns and joins on every
+  path, because `Bot::tick` is `lgwks_std::task::block_on` and has no reactor for
+  a timer. Zero and over-ceiling deadlines are refused at build rather than
+  clamped. **Migration:** none; the default is applied to every existing bot.
+  `clock` moved from `rt::clock` to the crate root (re-exported unchanged under
+  `rt`), so a `--no-default-features` build can bound its sources too.
+- `BotError::{PollStalled, PollDeadlineUnbounded, PollDeadlineExceeded}` and
+  `StalledSource`. A cancelled poll is `NotDelivered`, so a retry classifier
+  reads the next tick as a plain retry. **Migration:** a caller matching
+  `BotError` exhaustively must handle the three new arms; `BotError` is
+  `#[non_exhaustive]`, so an existing match already compiles with a wildcard.
 - `verb::RefreshReason` and `Observe::cache_state` (INV-BOT-120). A source that
   caches can now declare that its cached baseline is unsound, naming which of
   four failures it was: `Disconnected`, `WatchOverflow`, `StaleRemoteKey` or

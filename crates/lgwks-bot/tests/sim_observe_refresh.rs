@@ -13,6 +13,9 @@
 //! | `tenants_never_cross` | two tenants over one process keep separate reports, separate marks and separate action logs |
 //! | `event_identities_are_per_event` | a seeded stream of event ids over one fixed payload: each id fires on its first delivery and never again, including an older id redelivered |
 //! | `the_same_seed_replays` | the same seed produces the same trace hash, twice |
+//! | `a_wedged_source_is_reported_and_costs_its_neighbours_nothing` | a seeded mix of fast and never-resolving sources: every cancellation is reported once, by chain and by the source's own domain, and a chain that never stalled does byte-identical work to the same schedule run with nothing stalled |
+//! | `a_saturated_wave_stalls_every_chain_and_still_lets_the_next_tenant_commit` | every chain in a fully-wedged wave is reported, while the tenant beside it reports none and keeps committing |
+//! | `the_same_seed_replays_a_stalled_wave` | the stall families replay to the same trace hash, twice |
 //!
 //! # What is not here, and why
 //!
@@ -21,17 +24,20 @@
 //! `observe`/`on` pairs — a compile-time constant, not something a test can
 //! express at runtime. The 100 / 1,000 / 10,000 tier sweep therefore lives in
 //! `observe_refresh.rs`, which writes them out, and this file covers the fault
-//! dimension a fixed chain count is the right shape for.
+//! dimension a fixed chain count is the right shape for. The saturation family
+//! below pins the tier it *can* build and says so, rather than reporting a
+//! concurrency number nobody ran.
 //!
 //! # What is real and what is seeded
 //!
 //! The bot, the `bevy_ecs` schedule, the journal, the broker and the whole
 //! ledger are the shipped ones, driven through the public `Observe`/`Execute`
-//! traits. Seeded is only the *fault schedule*: which tenant's chain declares
-//! which cause, on which tick, for how many ticks, and whether the poll behind
-//! the declaration also refuses. No wall clock is read and no sleep is taken, so
-//! a run replays exactly — which is what makes the trace hash a receipt rather
-//! than a measurement.
+//! traits. Seeded is only the *schedule*: which tenant's source answers on which
+//! tick, with what value, and which declares a cache failure for how long. No
+//! wall clock decides anything — the per-poll deadline is the substrate's own,
+//! declared through the same builder a production caller uses — and the trace
+//! records *which* chains were cancelled rather than when, so a run replays
+//! exactly and the hash is a receipt rather than a measurement.
 //!
 //! The band sweep comes from `sim::band_of`, the shared seed space every other
 //! `sim_*` family draws from, so a seed recorded against this file means the
@@ -593,6 +599,14 @@ struct ChainHandles {
     declared: Rc<Cell<Option<RefreshReason>>>,
     /// Whether that source refuses.
     refusing: Rc<Cell<bool>>,
+    /// Whether that source answers or never resolves.
+    ///
+    /// Set to [`WEDGED_PACE`] to wedge a chain and to anything else to let it
+    /// answer. Shared by the families that do not model a refusal at all, so a
+    /// source that is *slow* is a different thing from one that *refused*: the
+    /// first is cancelled by the substrate's deadline and the second reports its
+    /// own error, and a fixture that conflated them would test neither.
+    pace: Rc<Cell<u32>>,
 }
 
 impl ChainHandles {
@@ -602,6 +616,7 @@ impl ChainHandles {
             value: Rc::new(Cell::new(1)),
             declared: Rc::new(Cell::new(None)),
             refusing: Rc::new(Cell::new(false)),
+            pace: Rc::new(Cell::new(0)),
         }
     }
 }
@@ -1017,6 +1032,587 @@ fn the_same_seed_replays(band: Band) -> TestResult {
     })
 }
 
+// ── T06 slow source: the per-poll deadline under a seeded mix ───────────────
+
+/// How a seeded source behaves on a tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pace {
+    /// Answers immediately, with the value the plan gave it.
+    Fast,
+    /// Never resolves: the poll parks forever and is cancelled at the deadline.
+    Wedged,
+}
+
+/// The pace and value one seed gave one chain.
+#[derive(Clone, Copy, Debug)]
+struct PaceWindow {
+    /// Whether the chain answers or never resolves on this tick.
+    pace: Pace,
+    /// The value it reports when it answers.
+    value: u32,
+}
+
+/// One tenant's seeded mix of fast and wedged chains over the run.
+///
+/// Fast chains dominate by construction, and that is the point: a run in which
+/// everything stalls proves that stalling is reported and nothing about what it
+/// costs the chains beside it. The healthy ones are what make "and the fast ones
+/// still committed" checkable.
+#[derive(Clone, Copy, Debug)]
+struct PacePlan {
+    /// Per chain, what it does on each tick.
+    windows: [[PaceWindow; MAX_CHAINS]; MAX_TICKS],
+    /// How many ticks the run drives.
+    ticks: u32,
+}
+
+impl PacePlan {
+    /// Chain `chain`'s behaviour on `tick`, defaulting to fast so a table this
+    /// short cannot leave a chain undefined and panic on it later.
+    ///
+    /// The row is `tick - 1`, because the table is filled one-based: row 0 is
+    /// tick 1. Reading `tick` directly would look one tick into the future and
+    /// hand back the fallback for the last tick of every run, so a schedule would
+    /// silently arm every chain *fast* on the tick after its last — and the run
+    /// would still pass every report assertion, because the arming and the
+    /// expectation would have shifted together.
+    fn at(&self, chain: usize, tick: u32) -> PaceWindow {
+        let row = tick.saturating_sub(1);
+        self.windows
+            .get(usize::try_from(row).unwrap_or(0))
+            .and_then(|row| row.get(chain))
+            .copied()
+            .unwrap_or(PaceWindow {
+                pace: Pace::Fast,
+                value: 1,
+            })
+    }
+
+    /// Whether `chain` answers on every tick of the run.
+    ///
+    /// "Never stalled" rather than "fast right now", because the differential it
+    /// gates compares a chain's *whole* log against a run with no wedging at all,
+    /// and a chain that stalled on one tick and not on another cannot be compared
+    /// that way. Deciding it here rather than at the call site is what keeps the
+    /// filter and the comparison describing the same set.
+    fn never_stalled(&self, chain: usize) -> bool {
+        (1..=self.ticks).all(|tick| self.at(chain, tick).pace == Pace::Fast)
+    }
+}
+
+/// The longest run this family drives.
+///
+/// Fixed rather than drawn: a seed that drew the tick count would renumber every
+/// other family for no added evidence, which is the reason the existing
+/// `plan` in this file fixes its own chain count the same way.
+const MAX_TICKS: usize = 6;
+
+/// Draw one tenant's pace schedule from `rng`.
+///
+/// Roughly a third of the chain-ticks are wedged. The draw is per chain *per
+/// tick* rather than per chain, because the property that matters is a source
+/// that recovers — a chain wedged for the whole run would satisfy "every
+/// cancellation is reported" without ever exercising "the next tick re-polls it".
+fn pace_plan(rng: &mut Rng, ticks: u32) -> PacePlan {
+    let drawn = usize::try_from(ticks).unwrap_or(0).min(MAX_TICKS);
+    let mut windows = [[PaceWindow {
+        pace: Pace::Fast,
+        value: 1,
+    }; MAX_CHAINS]; MAX_TICKS];
+    let span = u32::try_from(MAX_CHAINS).unwrap_or(1);
+    for (tick, row) in windows.iter_mut().enumerate().take(drawn) {
+        // One-based, because the families drive ticks from 1. A zero-based table
+        // read at tick 1 would describe the tick *before* the first one, so every
+        // arming decision in the run would be off by one — and an off-by-one here
+        // surfaces only as "the report does not match the schedule", which is the
+        // one failure mode a simulation family cannot debug from its trace.
+        let tick_index = u32::try_from(tick).unwrap_or(1).saturating_add(1);
+        for (chain, window) in row.iter_mut().enumerate() {
+            // Distinct per chain and tick, so a commit that did not happen is
+            // distinguishable from a commit of somebody else's value.
+            *window = PaceWindow {
+                pace: if rng.chance(350) {
+                    Pace::Wedged
+                } else {
+                    Pace::Fast
+                },
+                value: tick_index
+                    .saturating_mul(span)
+                    .saturating_add(u32::try_from(chain).unwrap_or(0))
+                    .saturating_add(1),
+            };
+        }
+    }
+    PacePlan { windows, ticks }
+}
+
+/// A tenant whose sources' paces are the plan's, under a short poll deadline.
+///
+/// The deadline is short because the simulation must run hundreds of seeds: a
+/// source that never resolves costs exactly this budget on every tick it is
+/// wedged, so a realistic 30-second default would turn a 64-seed band into
+/// minutes of real waiting. What the family observes does not depend on the
+/// number — every assertion is about *which* chain was reported and whether the
+/// others still committed — and the deadline is declared rather than faked, so
+/// the same machinery under test is the one `Bot::tick` runs in production.
+const SIM_DEADLINE: std::time::Duration = std::time::Duration::from_millis(40);
+
+/// Build one tenant's bot over [`MAX_CHAINS`] paced sources.
+///
+/// The chain count is the same written-out constant as [`tenant`]'s, for the
+/// same reason: `Bot::observe` returns a builder whose type follows its source,
+/// so a runtime chain count cannot be expressed.
+fn paced_tenant(tenant: u32, deadline: std::time::Duration) -> Result<Tenant, Box<dyn Error>> {
+    let ran = Rc::new(RefCell::new(Vec::new()));
+    let holds = Rc::new(Cell::new(false));
+    let (first, second, third) = (
+        ChainHandles::new(),
+        ChainHandles::new(),
+        ChainHandles::new(),
+    );
+    let (ran_a, ran_b, ran_c) = (Rc::clone(&ran), Rc::clone(&ran), Rc::clone(&ran));
+    let (hold_a, hold_b, hold_c) = (Rc::clone(&holds), Rc::clone(&holds), Rc::clone(&holds));
+
+    let bot = Bot::builder(format!("sim-observe-stall-t{tenant}"))
+        .with_poll_deadline(deadline)
+        .observe(Paced {
+            pace: Rc::clone(&first.pace),
+            value: Rc::clone(&first.value),
+            declared: Rc::clone(&first.declared),
+            polls: Rc::new(Cell::new(0)),
+            chain: 0,
+            tenant,
+        })
+        .on(
+            |observed: &u32| *observed > 0,
+            Logs {
+                ran: ran_a,
+                chain: 0,
+                holds: hold_a,
+            },
+        )
+        .observe(Paced {
+            pace: Rc::clone(&second.pace),
+            value: Rc::clone(&second.value),
+            declared: Rc::clone(&second.declared),
+            polls: Rc::new(Cell::new(0)),
+            chain: 1,
+            tenant,
+        })
+        .on(
+            |observed: &u32| *observed > 0,
+            Logs {
+                ran: ran_b,
+                chain: 1,
+                holds: hold_b,
+            },
+        )
+        .observe(Paced {
+            pace: Rc::clone(&third.pace),
+            value: Rc::clone(&third.value),
+            declared: Rc::clone(&third.declared),
+            polls: Rc::new(Cell::new(0)),
+            chain: 2,
+            tenant,
+        })
+        .on(
+            |observed: &u32| *observed > 0,
+            Logs {
+                ran: ran_c,
+                chain: 2,
+                holds: hold_c,
+            },
+        )
+        .with_effects(tenant_scope(tenant)?)
+        .build(&GrantSet::empty())?;
+
+    Ok(Tenant {
+        bot,
+        handles: vec![first, second, third],
+        ran,
+        tenant,
+    })
+}
+
+/// A source whose answer-or-not is the plan's, under a real per-poll deadline.
+struct Paced {
+    /// Whether this poll answers or never resolves.
+    pace: Rc<Cell<u32>>,
+    /// The value it reports when it answers.
+    value: Rc<Cell<u32>>,
+    /// What `cache_state` answers.
+    declared: Rc<Cell<Option<RefreshReason>>>,
+    /// How many times the body ran.
+    polls: Rc<Cell<u32>>,
+    /// The chain's index, for the domain identity a report names it by.
+    chain: usize,
+    /// The tenant this source belongs to, for the same reason.
+    tenant: u32,
+}
+
+impl Observe for Paced {
+    type Output = u32;
+
+    fn required_caps(&self) -> &[Cap] {
+        &[]
+    }
+
+    async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+        call.0.check(Observe::required_caps(self))?;
+        self.polls.set(self.polls.get().saturating_add(1));
+        if self.pace.get() == WEDGED_PACE {
+            // Parks forever without waking. The deadline is the only thing that
+            // ends this poll, which is the property the family is about.
+            std::future::pending::<()>().await;
+        }
+        Ok(self.value.get())
+    }
+
+    fn cache_state(&self) -> Option<RefreshReason> {
+        self.declared.get()
+    }
+
+    fn domain_id(&self) -> &str {
+        DOMAINS[usize::try_from(self.tenant).unwrap_or(0)][self.chain % 8]
+    }
+}
+
+/// The cell value that means "never resolves".
+///
+/// A named constant rather than a `bool` next to the value cell so the two
+/// channels cannot be confused by a call site that sets the wrong one: the value
+/// cell is a `u32` because the source's output is one, and a `bool` there would
+/// compile and mean nothing.
+const WEDGED_PACE: u32 = u32::MAX;
+
+/// Arm every chain for `tick` and run it, returning what the tick reported.
+fn paced_tick(
+    subject: &mut Tenant,
+    plan: &PacePlan,
+    tick: u32,
+) -> Result<Vec<ReportRow>, Box<dyn Error>> {
+    for (index, held) in subject.handles.iter().enumerate() {
+        let window = plan.at(index, tick);
+        held.pace.set(if window.pace == Pace::Wedged {
+            WEDGED_PACE
+        } else {
+            0
+        });
+        held.value.set(window.value);
+        held.declared.set(None);
+    }
+    let mut rows = Vec::new();
+    subject.observe(&mut rows);
+    Ok(rows)
+}
+
+/// Arm every chain for `tick` with the *same* values but with nothing wedged, and
+/// run it.
+///
+/// The counterfactual half of the differential: the same schedule, the same
+/// values, every source answering. Written beside [`paced_tick`] rather than as a
+/// flag on it so the two runs cannot drift apart in how they arm a chain — the
+/// only difference between them is the pace, which is the thing under test.
+fn unpace_tick(
+    subject: &mut Tenant,
+    plan: &PacePlan,
+    tick: u32,
+) -> Result<Vec<ReportRow>, Box<dyn Error>> {
+    for (index, held) in subject.handles.iter().enumerate() {
+        held.pace.set(0);
+        held.value.set(plan.at(index, tick).value);
+        held.declared.set(None);
+    }
+    let mut rows = Vec::new();
+    subject.observe(&mut rows);
+    Ok(rows)
+}
+
+/// Every wedged source is reported stalled, and the independent chains beside it
+/// do exactly what they would have done with no wedging at all.
+///
+/// # Why this is a differential, and not a count
+///
+/// The obvious assertion — "the chains that moved fired" — is wrong about this
+/// substrate, and finding out why is the reason the family is shaped this way.
+/// `fire_fold` selects its work through `Changed<Revision>`, which a change
+/// filter consumes on the tick it is seen, so several chains moving on one tick
+/// select one chain's generation and the others' work waits for the next tick.
+/// That is pre-existing behaviour (INV-BOT-121, latest-state mode), not something
+/// the deadline introduced, and a fixture that asserted "every mover fires" would
+/// have been asserting a rule the substrate never had.
+///
+/// So the claim is stated as what T06 actually asks: **a slow source costs nothing
+/// else.** The same seeded schedule is driven twice over, once with the wedging
+/// and once with every source answering, and the fast chains' action logs must be
+/// **identical**. That is stronger than a count — a substrate that fired
+/// everything twice would fail it — and it is immune to the selection rule above,
+/// because both runs are subject to it identically.
+///
+/// The differential also covers what the row is *not* about. A wedged chain's
+/// baseline must stay exactly where it was, so the chain that recovers is still
+/// compared against the value from before it stalled; a cancellation that spent
+/// the baseline would make the recovered chain's log diverge from the un-wedged
+/// run, which this catches.
+///
+/// The report is checked against the schedule per tick and per tenant, so a
+/// cancellation is named where it happened rather than in aggregate: one
+/// `stalled` row per wedged chain, naming that chain's own domain, and none for a
+/// chain that answered. Two tenants share the process and each is checked against
+/// its own schedule, so the "and not a neighbour's" half of the two-tenant case
+/// lives here rather than in a separate family.
+fn a_wedged_source_is_reported_and_costs_its_neighbours_nothing(band: Band) -> TestResult {
+    sim::assert_replays(band, |sim| {
+        // Both tenants draw from the same stream, so one seed fixes both schedules
+        // and both runs.
+        let left = pace_plan(sim.rng(), 4);
+        let right = pace_plan(sim.rng(), 4);
+        let schedules = [left, right];
+
+        let mut wedged = [
+            paced_tenant(0, SIM_DEADLINE)?,
+            paced_tenant(1, SIM_DEADLINE)?,
+        ];
+        let mut answered = [
+            paced_tenant(0, SIM_DEADLINE)?,
+            paced_tenant(1, SIM_DEADLINE)?,
+        ];
+
+        for tick in 1..=left.ticks {
+            for index in 0..wedged.len() {
+                let plan = schedules.get(index).copied().unwrap_or(left);
+
+                // The wedged run, as the schedule decided it.
+                let rows = paced_tick(&mut wedged[index], &plan, tick)?;
+                let report = wedged[index].bot.tick_report();
+
+                // The same tick over the same schedule with nothing wedged. Every
+                // source answers, so this run is the counterfactual the first is
+                // compared against.
+                let _answered = unpace_tick(&mut answered[index], &plan, tick)?;
+
+                // (1) and (2): the report is exactly the schedule's wedged chains,
+                // once each, named by the source's own domain.
+                let reported: Vec<(usize, String)> = report
+                    .stalled()
+                    .iter()
+                    .map(|row| (row.chain(), row.domain().to_owned()))
+                    .collect();
+                let wanted: Vec<(usize, String)> = (0..MAX_CHAINS)
+                    .filter(|chain| plan.at(*chain, tick).pace == Pace::Wedged)
+                    .map(|chain| (chain, DOMAINS[index][chain % 8].to_owned()))
+                    .collect();
+                assert_eq!(
+                    reported, wanted,
+                    "tick {tick}, tenant {index}: every source the schedule wedged is \
+                     reported stalled once, by chain and by its own domain, and no \
+                     source that answered is"
+                );
+
+                // (3): a chain that has *never* stalled did exactly what the same schedule
+                // would have had it do with no wedging anywhere — the whole log,
+                // every tick, in order.
+                //
+                // The whole log rather than this tick's slice, because a cumulative
+                // log cannot be filtered by the current tick without also dropping
+                // everything a chain did on the ticks when it *was* wedged, and
+                // dropping those is exactly what would hide a cancellation that
+                // stopped a recovering chain. A chain that stalled even once is
+                // excluded from this comparison and checked by the report above
+                // instead, which is where its cancellation is named.
+                let subject = &wedged[index];
+                let peer = &answered[index];
+                let (fast_log, answered_log): (Vec<_>, Vec<_>) = (0..MAX_CHAINS)
+                    .filter(|chain| plan.never_stalled(*chain))
+                    .map(|chain| {
+                        (
+                            subject
+                                .ran
+                                .borrow()
+                                .iter()
+                                .filter(|entry| entry.0 == chain)
+                                .copied()
+                                .collect::<Vec<(usize, u32)>>(),
+                            peer.ran
+                                .borrow()
+                                .iter()
+                                .filter(|entry| entry.0 == chain)
+                                .copied()
+                                .collect::<Vec<(usize, u32)>>(),
+                        )
+                    })
+                    .unzip();
+                assert_eq!(
+                    fast_log, answered_log,
+                    "tick {tick}, tenant {index}: a chain that never stalled did \
+                     different work with a sibling source stalled than it would have \
+                     with nothing stalled"
+                );
+
+                for row in &rows {
+                    sim.record(&format!("{} {}", row.kind, row.spell()));
+                }
+                let logged: Vec<(usize, u32)> = subject.ran.borrow().iter().copied().collect();
+                for (chain, value) in logged {
+                    sim.record(&format!("ran {index} {chain} {value}"));
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+/// The same property under saturation: many chains stall at once and the
+/// independent ones still commit.
+///
+/// The saturation tiers are 100 / 1,000 / 10,000 for the *held-chain* half of T06,
+/// which `observe_refresh.rs` writes out because a bot of *n* chains needs *n*
+/// written-out `observe`/`on` pairs. This family pins the tiers it can build at
+/// the fixed [`MAX_CHAINS`] the erasure boundary allows, and says so rather than
+/// claiming a tier number it did not run.
+///
+/// What it does add over the family above is *simultaneity*: every chain in the
+/// wave is wedged on the same tick, so there is no independent chain left to
+/// attribute the surviving commits to except the tenant beside it. Two tenants,
+/// one entirely stalled and one entirely fast, is the saturating shape at this
+/// chain count — and the assertion that the stalled tenant's report names every
+/// chain while the fast tenant's report names none is what would fail if a
+/// cancellation still parked the tick.
+fn a_saturated_wave_stalls_every_chain_and_still_lets_the_next_tenant_commit(
+    band: Band,
+) -> TestResult {
+    sim::assert_replays(band, |sim| {
+        // Tenant 0 is wedged on every chain for the whole run; tenant 1 is fast
+        // throughout. The draw is the seed's only contribution beyond that, so a
+        // family that stopped varying anything would still replay — and a
+        // schedule this asymmetric is the one that can actually distinguish "the
+        // cancellation is bounded" from "the whole tick is cancelled".
+        let ceiling = u32::try_from(MAX_TICKS).unwrap_or(6);
+        let ticks = sim.rng().between(2, ceiling);
+        let mut all_wedged = PacePlan {
+            windows: [[PaceWindow {
+                pace: Pace::Fast,
+                value: 1,
+            }; MAX_CHAINS]; MAX_TICKS],
+            ticks,
+        };
+        let mut all_fast = PacePlan {
+            windows: [[PaceWindow {
+                pace: Pace::Fast,
+                value: 1,
+            }; MAX_CHAINS]; MAX_TICKS],
+            ticks,
+        };
+        for tick in 0..MAX_TICKS {
+            for chain in 0..MAX_CHAINS {
+                all_wedged.windows[tick][chain] = PaceWindow {
+                    pace: Pace::Wedged,
+                    value: 9,
+                };
+                all_fast.windows[tick][chain] = PaceWindow {
+                    pace: Pace::Fast,
+                    value: u32::try_from(tick.saturating_add(1)).unwrap_or(1),
+                };
+            }
+        }
+        // The chain count this family reached, recorded rather than clamped.
+        let chains = subject_count(&all_wedged);
+
+        let mut stalled = paced_tenant(0, SIM_DEADLINE)?;
+        let mut ready = paced_tenant(1, SIM_DEADLINE)?;
+
+        for tick in 1..=ticks {
+            let _rows = paced_tick(&mut stalled, &all_wedged, tick)?;
+            let _ready = paced_tick(&mut ready, &all_fast, tick)?;
+
+            let stalled_report = stalled.bot.tick_report();
+            assert_eq!(
+                stalled_report.stalled().len(),
+                chains,
+                "every one of the {chains} chains in the saturated wave is reported \
+                 stalled — a dropped cancellation is a source nobody looks at again"
+            );
+            let ready_report = ready.bot.tick_report();
+            assert!(
+                ready_report.stalled().is_empty(),
+                "the tenant beside the saturated wave reports no stall: its sources \
+                 never stopped answering ({:?})",
+                ready_report.stalled()
+            );
+            assert!(
+                ready.ran.borrow().len() >= usize::try_from(tick).unwrap_or(0),
+                "and it still committed and acted while the other tenant's whole \
+                 wave was cancelled"
+            );
+            sim.record(&format!(
+                "tick {tick} saturated_stalled={} ready_ran={}",
+                stalled_report.stalled().len(),
+                ready.ran.borrow().len()
+            ));
+        }
+        sim.record(&format!("saturation chains={chains}"));
+        Ok(())
+    })
+}
+
+/// How many chains the saturated wave covers, as the tier it actually reached.
+fn subject_count(plan: &PacePlan) -> usize {
+    plan.windows
+        .first()
+        .map(|row| {
+            row.iter()
+                .filter(|window| window.pace == Pace::Wedged)
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// The stall families replay exactly, twice over.
+///
+/// `assert_replays` sweeps the band twice and compares the two hash vectors, so a
+/// nondeterministic run fails even when every assertion above passes — and a
+/// deadline under test is exactly where nondeterminism would hide, because how far
+/// into a budget a cancellation lands depends on how loaded the host is. The
+/// trace records the *set* of stalled chains rather than any timing, so the
+/// receipt stays a statement about what the run decided and not about how fast
+/// it decided it.
+///
+/// The body is the union of the two families above, so the hash covers forced
+/// refreshes, pass-overs, per-tenant reports, stall reports and the action logs
+/// rather than one scenario's shape.
+fn the_same_seed_replays_a_stalled_wave(band: Band) -> TestResult {
+    sim::assert_replays(band, |sim| {
+        let left = pace_plan(sim.rng(), 4);
+        let right = pace_plan(sim.rng(), 4);
+        let schedules = [left, right];
+        let mut subjects = [
+            paced_tenant(0, SIM_DEADLINE)?,
+            paced_tenant(1, SIM_DEADLINE)?,
+        ];
+
+        for tick in 1..=left.ticks {
+            for (index, subject) in subjects.iter_mut().enumerate() {
+                let plan = schedules.get(index).copied().unwrap_or(left);
+                let _rows = paced_tick(subject, &plan, tick)?;
+                for row in subject.bot.tick_report().stalled() {
+                    sim.record(&format!("stalled {index} {} {}", row.chain(), row.domain()));
+                }
+                for forced in subject.bot.tick_report().forced() {
+                    sim.record(&format!(
+                        "forced {index} {} {}",
+                        forced.chain(),
+                        forced.reason().as_str()
+                    ));
+                }
+                for &(chain, value) in subject.ran.borrow().iter() {
+                    sim.record(&format!("ran {index} {chain} {value}"));
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
 band_family::band_family! {
     forced_refresh_band_00 => forced_refresh_matches_the_schedule, 0;
     forced_refresh_band_01 => forced_refresh_matches_the_schedule, 1;
@@ -1044,4 +1640,12 @@ band_family::band_family! {
     same_seed_band_23 => the_same_seed_replays, 23;
     same_seed_band_24 => the_same_seed_replays, 24;
     same_seed_band_25 => the_same_seed_replays, 25;
+    wedged_sources_band_26 => a_wedged_source_is_reported_and_costs_its_neighbours_nothing, 26;
+    wedged_sources_band_27 => a_wedged_source_is_reported_and_costs_its_neighbours_nothing, 27;
+    wedged_sources_band_28 => a_wedged_source_is_reported_and_costs_its_neighbours_nothing, 28;
+    wedged_sources_band_29 => a_wedged_source_is_reported_and_costs_its_neighbours_nothing, 29;
+    saturation_band_30 => a_saturated_wave_stalls_every_chain_and_still_lets_the_next_tenant_commit, 30;
+    saturation_band_31 => a_saturated_wave_stalls_every_chain_and_still_lets_the_next_tenant_commit, 31;
+    stall_replay_band_32 => the_same_seed_replays_a_stalled_wave, 32;
+    stall_replay_band_33 => the_same_seed_replays_a_stalled_wave, 33;
 }
