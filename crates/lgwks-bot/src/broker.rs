@@ -110,6 +110,34 @@ pub enum BrokerError {
         /// The generation the broker currently holds.
         current: EnvironmentEpoch,
     },
+    /// The journal names an environment this broker was not asked to adopt.
+    ///
+    /// Its own arm rather than a fold into a read failure: adopting the wrong
+    /// environment would fence against a generation counter that has nothing to
+    /// do with the one the previous owner moved, which is a silent downgrade
+    /// wearing a successful return.
+    ForeignEnvironment {
+        /// The environment the caller asked to adopt.
+        asked: EnvironmentId,
+        /// The environment the journal's events name.
+        named: EnvironmentId,
+    },
+    /// There is nothing in the journal to take over.
+    ///
+    /// An empty history cannot say which generation the previous owner was at, so
+    /// claiming one would be a guess dressed as a fence. A caller that wants a
+    /// fresh environment over an empty journal wants [`Broker::register`], and
+    /// the difference between the two is exactly this refusal.
+    NothingToAdopt {
+        /// The environment with no committed history.
+        id: EnvironmentId,
+    },
+    /// The journal could not be read, so its generation is unknown.
+    ///
+    /// An error is never absence (INV-BOT-7): a journal that cannot answer is not
+    /// a journal with nothing in it, and adopting on the strength of an unread
+    /// file is how a takeover silently becomes a fresh start.
+    Journal(crate::journal::JournalError),
     /// The environment has no generations left.
     ///
     /// Reachable only after 2^64 replacements. Named rather than wrapped,
@@ -154,6 +182,17 @@ impl fmt::Display for BrokerError {
                 "a command for {environment} names generation {presented}, which \
                  this broker never issued; it holds {current}"
             ),
+            Self::ForeignEnvironment { asked, named } => write!(
+                f,
+                "the journal describes environment {named}, not the {asked} being adopted"
+            ),
+            Self::NothingToAdopt { id } => write!(
+                f,
+                "environment {id} has no committed history to take over; register it instead"
+            ),
+            Self::Journal(ref cause) => {
+                write!(f, "the journal being adopted could not be read: {cause}")
+            }
             Self::Exhausted { id } => {
                 write!(f, "environment {id} has no generations left")
             }
@@ -281,6 +320,68 @@ impl Broker {
             .checked_next()
             .ok_or(BrokerError::Exhausted { id })?;
         environment.epoch = next;
+        Ok(next)
+    }
+
+    /// Take ownership of this environment at the generation a journal that
+    /// already exists was last written at, and move past it.
+    ///
+    /// The honest form of a takeover, and the only one that means anything across
+    /// a process boundary. [`Self::register`] starts an environment at
+    /// generation 1 whatever is on the disk, so a process that adopts a journal
+    /// another worker wrote would mint warrants for a generation that worker had
+    /// already been replaced past — and two processes would then disagree about
+    /// which commands are current while each was internally consistent. This
+    /// reads the generation the journal's own committed history was written at
+    /// and claims the one after it, so the new owner's every warrant is fenced
+    /// against everything the previous owner ever prepared.
+    ///
+    /// A journal with no committed event, or one whose events name another
+    /// environment, is a refusal rather than a generation of 1: there is nothing
+    /// here to take over, and claiming generation 1 for it would be the same
+    /// silent downgrade [`Self::register`] is.
+    ///
+    /// # Errors
+    ///
+    /// [`BrokerError::UnknownEnvironment`] when this broker already owns `id`,
+    /// and [`JournalError`] when the journal cannot be read or does not describe
+    /// `id`.
+    pub fn adopt(
+        &mut self,
+        id: EnvironmentId,
+        journal: &dyn crate::journal::EffectJournal,
+    ) -> Result<EnvironmentEpoch, BrokerError> {
+        if self.environments.contains_key(&id) {
+            return Err(BrokerError::AlreadyRegistered { id });
+        }
+        let mut highest = None;
+        for event in journal.committed().map_err(BrokerError::Journal)? {
+            let key = event.key();
+            if key.environment() != id {
+                return Err(BrokerError::ForeignEnvironment {
+                    asked: id,
+                    named: key.environment(),
+                });
+            }
+            highest = Some(match highest {
+                None => key.epoch(),
+                Some(current) if key.epoch() > current => key.epoch(),
+                Some(current) => current,
+            });
+        }
+        let Some(highest) = highest else {
+            return Err(BrokerError::NothingToAdopt { id });
+        };
+        let next = highest
+            .checked_next()
+            .ok_or(BrokerError::Exhausted { id })?;
+        self.environments.insert(
+            id,
+            Environment {
+                epoch: next,
+                open: true,
+            },
+        );
         Ok(next)
     }
 

@@ -488,6 +488,172 @@ Each of these was a shipped defect. Treat the list as the spec.
   `file::tests::batch_admission_refuses_history_over_the_event_limit_without_writing`,
   and `file::tests::open_refuses_an_over_limit_file_without_truncating_it`
 
+- **INV-BOT-55** A recorded step value is only replayable under the definition
+  that produced it. Every run-store record carries a `DefinitionIdentity` — the
+  task name, a declared definition revision, the input digest, a declared
+  durable-value schema id and the count of durable steps — and a resume whose
+  declared identity disagrees on any axis is refused before admission with a
+  typed `FlowError::Incompatible` naming the axis, so no step body is polled and
+  no record is written. Only an identity the *caller declared* is compared:
+  the host's own derivation from the run id is what the run was recorded under,
+  so comparing it would fence nothing and would refuse every durable step that
+  declared nothing. The identity the steps write and look up under is the
+  recorded one, which is why a compatible resume finds its own records. The
+  check is the *declared* identity against the *recorded* one; an earlier
+  revision compared a run's records against themselves and every drift passed.
+  A refusal leaves the store byte-identical, and it is typed down to the axis's
+  own values: `FlowError::Incompatible` carries the exact `Drift`, naming for
+  each axis the two revisions, digests, step counts or schema ids that
+  disagreed, so a caller learns not merely which axis moved but against what.
+  A store that cannot read its own records is refused as itself and never as a
+  disagreement: its read answers `Err`, the step's compatibility check
+  propagates the store's own typed error rather than a `false`, and the host's
+  admission pre-flight refuses every non-drift store error as `FlowError::Store`
+  carrying the store's `StoreError` — so a device fault reaches the caller as a
+  device fault and never as a claim that the definition changed (INV-BOT-7).
+  "Order" here is the count of declared durable steps, the only form of order a
+  step key cannot see: two adjacent steps permuted inside the same shape keep
+  every path and every recorded value, so nothing there is a drift. The store's
+  format version is `\x02` and a `\x01` record is refused at open as
+  `StoreError::FormatVersion { found, expected }` naming both versions rather
+  than migrated, because inventing that migration would make every pre-version
+  resume look compatible rather than unprovable. · why: T15 · enforced by:
+  `tests/sim_replay_drift.rs` (`drift_kinds_are_refused_typed_band_00..03`,
+  `compatible_resume_replays_without_a_new_request_band_04..07`,
+  `tenants_drift_independently_band_08..10`, `every_axis_is_distinguishable`,
+  `every_axis_is_refused_with_its_exact_drift_band_20..21`,
+  `a_refusal_leaves_the_store_byte_identical_band_12..13`,
+  `an_unreadable_store_is_refused_as_itself_band_18..19`,
+  `same_seed_same_trace_hash_band_14..15`), `tests/store_read_failure.rs`
+  (`an_unreadable_store_is_refused_as_itself_and_not_as_a_drift`,
+  `the_fault_is_one_shot_and_the_step_after_it_replays`,
+  `a_compatible_resume_still_replays_after_no_fault`), and `tests/task_resume.rs`
+  (`a_pre_version_store_is_refused_naming_both_versions`,
+  `a_foreign_file_is_still_refused_as_not_a_store`), and
+  `tests/sim_store_faults.rs`
+  (`only_the_current_format_is_admitted_band_04..07`)
+
+- **INV-BOT-59** The durable run store's refusals reach the caller as
+  themselves. A store that cannot read its own records answers `Err`, never a
+  `false` that a caller would report as "these records were written under a
+  different definition", and never a rendered `Failed` string. `Records::agrees`
+  returns `Result<(), FlowError>` and propagates the store's error unchanged, so
+  the step's compatibility check cannot turn a read failure into a drift; a
+  resumed step that cannot be read is refused as `FlowError::Store` wrapping the
+  store's own `StoreError`, and the host's admission pre-flight refuses every
+  non-drift store error the same way. The store's own `From<StoreError>` keeps a
+  genuine drift as the flow's typed `FlowError::Incompatible` carrying its
+  `Drift` axis, so the one fault an operator must see is never indistinguishable
+  from a device that failed to answer. · why: INV-BOT-7, T15 (R1) · enforced by:
+  `tests/store_read_failure.rs`
+  (`an_unreadable_store_is_refused_as_itself_and_not_as_a_drift`,
+  `the_fault_is_one_shot_and_the_step_after_it_replays`,
+  `a_compatible_resume_still_replays_after_no_fault`) and
+  `tests/sim_replay_drift.rs`
+  (`an_unreadable_store_is_refused_as_itself_band_18..19`) and
+  `tests/sim_store_faults.rs`
+  (`read_fault_reaches_the_report_as_the_store_band_00..03`,
+  `same_seed_same_trace_hash_band_08..09`)
+
+- **INV-BOT-56** An owner epoch is a fact on the disk, not a constant each
+  process chooses for itself. `Broker::register` starts an environment at
+  generation 1 whatever the journal holds, so a process that adopts a journal
+  another worker wrote would mint warrants for a generation that worker had
+  already been replaced past — two processes internally consistent and jointly
+  wrong, which is the state in which every fence passes while fencing nothing.
+  `Broker::adopt` reads the generation the journal's own committed history was
+  written at and claims the one after it. Its three refusals are distinct and
+  none of them is a generation of 1: a journal that cannot be read, a journal
+  describing another environment, and a journal with no committed history to take
+  over. The advisory writer fence is a *separate* mechanism and neither
+  substitutes for the other: the fence stops a second writer, the epoch stops a
+  second claimer, and a process can hold a live descriptor on a journal it no
+  longer owns, because nothing revokes an open descriptor. · why: T16 ·
+  enforced by:
+  `tests/owner_epoch_takeover.rs`
+  (`an_old_worker_returning_after_a_takeover_cannot_settle_or_authorize`,
+  `a_warrant_from_the_previous_generation_is_superseded`,
+  `a_generation_the_broker_never_issued_is_not_a_supersession`,
+  `a_generation_and_a_tail_are_two_fences_and_both_answer`,
+  `an_acknowledged_position_reads_back_identically_after_a_reopen`,
+  `the_current_generation_may_still_settle_its_own_attempt`) and
+  `tests/sim_epoch_identity.rs`
+  (`seeded_takeover_orders_keep_the_generation_on_the_disk_band_04..07`,
+  `same_seed_same_trace_hash_band_08..09`)
+
+- **INV-BOT-116** A test's store directory is never a name two runs can share, and
+  no run leaves one behind. A directory a test builds under the system temp root
+  from a *fixed* name is a second ledger the test does not own: an earlier run on
+  the same host leaves records there, and the next run reopens them rather than
+  writing its own, so a format or budget refusal can be inherited from a world
+  nobody in this run created. Every such directory comes from the one
+  `shared::Scratch::new(tag)` guard — random hex in the name, `remove_dir_all` on
+  drop — held for the whole test, so a run cannot see another run's files and a
+  finished run leaves nothing to be inherited. The guard is the ephemerality rule
+  (INV-DEP-6) applied to the durable stores rather than to an in-memory value:
+  state that outlives a run belongs to a directory that dies with it. The store's
+  own format refusal stays exactly as strict, because the fix is isolation and not
+  a loosened `check_format_version` — a `\x01` store inside *this* run's own
+  directory is still `FormatVersion { found, expected }` (INV-BOT-55). · why: the
+  seven `tests/sim_repair.rs` arms that failed with
+  `FormatVersion { found: 1, expected: 2 }` on a branch that had never written a
+  `\x01` record · enforced by: `tests/sim_repair.rs`
+  (`the_step_that_reaches_is_the_step_that_blocks`,
+  `a_wide_need_set_costs_one_analysis`,
+  `a_ticket_never_names_another_tenants_run`,
+  `a_custom_capability_is_refused_at_every_width`,
+  `a_repaired_run_survives_a_reopened_host`,
+  `a_host_spent_on_one_run_still_repairs_the_next`,
+  `a_bounded_sweep_repairs_every_ticket_once`) and
+  `tests/task_resume.rs::a_pre_version_store_is_refused_naming_both_versions`
+
+- **INV-BOT-57** Each boundary of the durable ladder recovers its own answer, and
+  recovery is itself a window the crashing process can do damage in. A kill
+  after the intent ack and before the preparation recovers `Prepared` and
+  nothing uncertain — nothing was handed over, so refusing to retry it would
+  strand an effect that provably never left the process. A kill after the
+  outcome and before the verification recovers `Applied` and nothing uncertain:
+  the outcome is the fact and the verification is an attestation made afterwards,
+  so treating the missing attestation as an unknown would offer to dispatch the
+  effect twice. A kill *during* recovery leaves the file byte-identical, because
+  a replay that repairs a torn tail is writing and a reader that wrote would turn
+  an interrupted append — which was never anyone's answer — into a committed one.
+  The ladder makes the duplicate settlement unrepresentable rather than merely
+  discouraged. · why: T14 · enforced by:
+  `tests/durable_crash_observation.rs`
+  (`a_kill_after_the_intent_ack_and_before_the_dispatch_recovers_as_prepared`,
+  `a_kill_after_the_response_and_before_the_receipt_recovers_the_outcome`,
+  `a_kill_during_recovery_leaves_the_journal_exactly_as_it_was`,
+  and the pre-existing `a_real_kill_mid_append_leaves_no_duplicate_and_no_lost_receipt`)
+
+- **INV-BOT-58** Each identity field is refused by the check that is *about* it,
+  and the refusal says which. Seven deliveries — one correct and six differing
+  in exactly one field — are refused as six distinct typed variants, because
+  asserting "an error" would be satisfied by an earlier check that happens to
+  catch the evidence first. An `ActionId` is derived from the bot's name, its
+  position and its action's domain, **not** from the run, the flow revision or
+  the environment, so a key that gets one of those three wrong still names a
+  declared action and is refused one level later as `ActionNotDeclared`. None of
+  those four is `NoSuchWork`: that variant means "no held effect at this
+  address", and telling a caller that about work it *does* hold is the confusion
+  the variant exists to prevent. The arms that do reach the finer
+  classification are `EvidenceSuperseded` for a changed payload, which names
+  both bindings, and `EffectUnrecorded` for a generation the journal holds no
+  ladder for. A refused delivery moves no byte of a real `FileJournal`: the
+  ordering ladder is per key, so a distinct identity is legitimately at the foot
+  of its own, and what refuses is a rung that cannot follow what is committed for
+  that key. A checked counter's exhaustion answers `None` rather than wrapping
+  onto the first identity its sequence issued. · why: T12 · enforced by:
+  `tests/wrong_identity_evidence.rs`
+  (`every_wrong_identity_field_is_refused_and_the_correct_one_is_not`,
+  `a_duplicate_is_idempotent_and_a_contradiction_is_refused`,
+  `a_settlement_carrying_another_runs_identity_is_refused`,
+  `a_refused_settlement_leaves_a_real_file_journal_byte_identical`,
+  `a_checked_counter_exhaustion_never_aliases_an_issued_identity`,
+  `a_journal_position_carries_a_head_so_a_wrapped_sequence_is_detectable`) and
+  `tests/sim_epoch_identity.rs`
+  (`every_identity_field_is_refused_by_its_own_check_band_00..03`)
+
 ## lgwks_std
 
 - **INV-STD-SIM-2** A score and a refusal are different things. Raw cosine keeps

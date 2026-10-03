@@ -19,6 +19,7 @@ use lgwks_bot::effect::{
     ActionDigest, ActionId, AttemptId, EffectKey, EnvironmentEpoch, EnvironmentId, FlowRevision,
     RunId,
 };
+use lgwks_bot::journal::EffectJournal as _;
 
 /// The run every fixture key belongs to.
 pub const RUN: &str = "0102030405060708090a0b0c0d0e0f10";
@@ -90,6 +91,63 @@ pub fn record_measurement(line: &str) -> std::io::Result<()> {
         .append(true)
         .open(path)?;
     writeln!(file, "{line}")
+}
+
+/// Walk one attempt up its whole ladder, every rung acknowledged in order.
+///
+/// One function for every harness that walks a complete attempt, because the
+/// ladder is the journal's ordering rule and a copy that walks a *different*
+/// four rungs is not a shorter spelling of this one — it is a second claim about
+/// what an attempt looks like. `predicate` and `version` name the verification's
+/// predicate, so two callers verifying the same attempt with different predicates
+/// do not collide.
+pub fn ladder(
+    key: lgwks_bot::effect::EffectKey,
+    predicate: &str,
+    version: u64,
+) -> Result<Vec<lgwks_bot::journal::EffectEvent>, Box<dyn Error>> {
+    use lgwks_bot::effect::Id128;
+    use lgwks_bot::journal::{EffectEvent, EffectEvidence, Verification, VerificationResult};
+
+    Ok(vec![
+        EffectEvent::IntentAdmitted { key },
+        EffectEvent::DispatchPrepared { key },
+        EffectEvent::OutcomeObserved {
+            key,
+            evidence: EffectEvidence::Applied,
+        },
+        EffectEvent::Verified {
+            key,
+            verification: Verification::new(
+                Id128::from_hex(predicate)?,
+                version,
+                lgwks_std::hash::blake3(b"the durable ladder's own predicate"),
+                VerificationResult::Satisfied,
+            ),
+        },
+    ])
+}
+
+/// Append the first `rungs` of [`ladder`], each at the journal's own tail.
+///
+/// One function for every harness that walks an attempt, because the ladder is
+/// the journal's ordering rule and a copy that walks different rungs is not a
+/// shorter spelling of this one — it is a second claim about what an attempt
+/// looks like. A row that kills at the second rung walks the same first two
+/// rungs a complete walk would, which is what makes "the kill landed here" a
+/// statement about the ladder rather than about the fixture.
+pub fn walk_ladder(
+    journal: &mut lgwks_bot::journal::FileJournal,
+    key: lgwks_bot::effect::EffectKey,
+    predicate: &str,
+    version: u64,
+    rungs: usize,
+) -> Result<(), Box<dyn Error>> {
+    for event in ladder(key, predicate, version)?.into_iter().take(rungs) {
+        let tail = journal.tail();
+        journal.compare_and_append(tail, &event)?;
+    }
+    Ok(())
 }
 
 /// A fixture key for attempt `attempt`, under the shared identity.

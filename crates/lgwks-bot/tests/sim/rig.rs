@@ -219,15 +219,15 @@ pub const FLOW_HEX: &str = "000102030405060708090a0b0c0d0e0f10111213141516171819
 pub const DIGEST_HEX: &str = "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100";
 pub const ENV: &str = "2122232425262728292a2b2c2d2e2f30";
 
-/// A key for attempt `n` of [`RUN`], acting as `action`.
+/// The one `EffectKey::new` in the simulation layer, parameterised by the
+/// action and the fencing generation.
 ///
-/// Built from the constants above rather than from anything process-local, so a
-/// key is reproducible across machines and a trace hash means the same thing
-/// everywhere. The one `EffectKey::new` in the simulation layer: a second copy
-/// that drifted would make two families agree on an attempt number while
-/// writing different facts, which is precisely the false green the trace hash
-/// exists to catch.
-pub fn attempt_key_as(action: ActionId, n: u64) -> Result<EffectKey, Box<dyn Error>> {
+/// Both public constructors below are this function. A second copy that drifted
+/// would make two families agree on an attempt number while writing different
+/// facts under a different generation, which is precisely the false green the
+/// trace hash exists to catch — and the takeover family in particular needs two
+/// keys that differ in the generation and in nothing else.
+fn key_as(action: ActionId, epoch: u64, n: u64) -> Result<EffectKey, Box<dyn Error>> {
     Ok(EffectKey::new(
         RunId::from_hex(RUN)?,
         action,
@@ -235,13 +235,34 @@ pub fn attempt_key_as(action: ActionId, n: u64) -> Result<EffectKey, Box<dyn Err
         FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
         ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
         EnvironmentId::from_hex(ENV)?,
-        EnvironmentEpoch::from_decimal("1")?,
+        EnvironmentEpoch::from_decimal(&epoch.to_string())?,
     ))
 }
 
-/// A key for attempt `n` of [`RUN`] under the shared [`ACTION`].
+/// A key for attempt `n` of [`RUN`], acting as `action`, at generation one.
+///
+/// Built from the constants above rather than from anything process-local, so a
+/// key is reproducible across machines and a trace hash means the same thing
+/// everywhere.
+pub fn attempt_key_as(action: ActionId, n: u64) -> Result<EffectKey, Box<dyn Error>> {
+    key_as(action, 1, n)
+}
+
+/// A key for attempt `n` of [`RUN`] under the shared [`ACTION`], at generation
+/// one.
 pub fn attempt_key(n: u64) -> Result<EffectKey, Box<dyn Error>> {
     attempt_key_as(ActionId::from_hex(ACTION)?, n)
+}
+
+/// A key for attempt `n` of [`RUN`] under the shared [`ACTION`], fenced at
+/// `epoch`.
+///
+/// The generation is the one field a takeover moves, so a family that proves a
+/// stale warrant is refused and the current one is accepted needs both keys
+/// differing in that field and in nothing else — which is why the generation is
+/// a parameter here rather than a constant.
+pub fn attempt_key_at(epoch: u64, n: u64) -> Result<EffectKey, Box<dyn Error>> {
+    key_as(ActionId::from_hex(ACTION)?, epoch, n)
 }
 
 /// The real ladder for one attempt: admitted, then prepared.

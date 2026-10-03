@@ -1124,7 +1124,10 @@ mod tests {
         // batch — rather than a race for how many happen to be queued together.
         let store = RunStore::open_with_stalled_device(&path)?;
         let tenant = "flush-tenant";
-        let key = Scope::root(Tenant::new(tenant)?).enter("step")?.key();
+        let step_scope = Scope::root(Tenant::new(tenant)?).enter("step")?;
+        let key = step_scope.key();
+        let step_definition = crate::script::run_store::definition_of(&step_scope, "step");
+        let late_definition = crate::script::run_store::definition_of(&step_scope, "late");
 
         // One distinct record per member, built through the store's own staging
         // door so the record is exactly what `remember` would commit.
@@ -1133,7 +1136,15 @@ mod tests {
         for index in 0..MEMBERS {
             let run = RunId::from_hex(RUN_HEX[index])?;
             runs.push(run);
-            let record = RunRecords::stage(&store, tenant, run, key, "step", vec![PAYLOAD[index]]);
+            let record = RunRecords::stage(
+                &store,
+                tenant,
+                run,
+                key,
+                "step",
+                &step_definition,
+                vec![PAYLOAD[index]],
+            );
             outstanding.push(RunRecords::append_async(&store, record));
         }
 
@@ -1183,10 +1194,11 @@ mod tests {
         // refused with the same message rather than written, and the index still
         // holds nothing.
         for run in runs.iter().take(2) {
-            let message = RunRecords::append(&store, tenant, *run, key, "late", vec![9])
-                .err()
-                .map(|error| error.to_string())
-                .unwrap_or_default();
+            let message =
+                RunRecords::append(&store, tenant, *run, key, "late", &late_definition, vec![9])
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_default();
             assert!(
                 message.contains("previous append"),
                 "a later append must be refused as poisoned, not accepted: {message}"
