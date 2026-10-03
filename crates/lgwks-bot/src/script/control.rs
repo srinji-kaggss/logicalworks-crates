@@ -5,7 +5,7 @@ use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::rt::clock::Clock;
+use crate::rt::clock::{Clock, TimeSource};
 use crate::rt::time;
 use crate::rt::time::Deadline;
 
@@ -122,36 +122,37 @@ where
     if deadline.is_exhausted() {
         return Err(timed_out());
     }
-    // `Arc::clone` here rather than the caller's `timed_out` closure: the
-    // closure is borrowed by neither future, and passing the path keeps one
-    // error variant from being built in two places that can drift apart.
-    //
-    // The two refusal arms are boxed. A `select!` builds one future per branch
-    // and holds them all for the body's whole life, so an unboxed engine timer
-    // makes *every* `within` frame as large as the engine's timer state. That is
-    // paid once per nesting level — a flow that nests steps pays it once per
-    // level — and on a deeply nested tree the frames alone exhaust the caller's
-    // stack. Boxing moves the two arms to the heap; the frame that remains is
-    // the body's own future, which the caller sized.
-    let logical = Box::pin(settle_logical_bound(
-        &deadline,
-        Arc::clone(&at),
-        limit,
-        body,
-    ));
-    let watchdog = Box::pin(time::sleep(limit));
-    let stopped = Box::pin(scope.token().cancelled());
-    lgwks_deps::tokio::select! {
-        biased;
-        // Read the logical bound before the engine's timer, so an advance that
-        // has already spent the budget wins even if the timer arm is also ready.
-        finished = logical => finished,
-        // The engine's timer is the bound for a wall clock and nothing else; it
-        // is exactly the old `time::timeout`, so a scope nobody gave a clock to
-        // behaves as it always has.
-        () = watchdog => Err(timed_out()),
-        // A stop, from the scope or anything it descends from.
-        () = stopped => Err(FlowError::Cancelled { at: Arc::clone(&at) }),
+    // A wall clock is read by the engine timer below and needs nothing more, so
+    // its body is polled directly: no re-read loop, no allocation, exactly the
+    // composition `within` had before clocks existed. Only a caller-advanceable
+    // clock, whose movement the timer cannot see, pays for the logical re-read —
+    // boxed, so its extra state does not enlarge every frame of a nested tree.
+    let bounded = async {
+        if clock.source() == TimeSource::Wall {
+            body.await
+        } else {
+            Box::pin(settle_logical_bound(
+                &deadline,
+                Arc::clone(&at),
+                limit,
+                body,
+            ))
+            .await
+        }
+    };
+    // The engine timer is the real-time watchdog for either clock: a virtual
+    // clock nobody advances still cannot hold a stuck body past `limit` of real
+    // time.
+    match scope
+        .token()
+        .run_until_cancelled(time::timeout(limit, bounded))
+        .await
+    {
+        Some(Ok(result)) => result,
+        Some(Err(_elapsed)) => Err(timed_out()),
+        None => Err(FlowError::Cancelled {
+            at: Arc::clone(&at),
+        }),
     }
 }
 

@@ -335,8 +335,8 @@ fn the_live_listing_is_bounded_by_the_ceiling_and_says_it_truncated() -> Result<
             );
             assert_eq!(
                 live.state,
-                TaskState::Running { permit: index },
-                "each live entry names the permit it holds"
+                TaskState::Running { position: index },
+                "each live entry names its position in spawn order"
             );
             assert!(live.state.is_running(), "a gated body has not finished");
         }

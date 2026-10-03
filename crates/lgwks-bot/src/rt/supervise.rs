@@ -1029,8 +1029,8 @@ impl Supervisor {
     /// ```
     #[must_use]
     pub fn snapshot(&self) -> SupervisorSnapshot {
-        let live_limit = self.report_cap;
-        let mut live: Vec<LiveTask> = Vec::new();
+        let live_limit = self.max_in_flight;
+        let mut live: Vec<LiveTask> = Vec::with_capacity(self.identities.len().min(live_limit));
         let mut live_truncated: usize = 0;
         // Spawn order, from the supervisor's own identity map: the engine's join
         // order is arbitrary, and a listing that reordered itself between two
@@ -1041,7 +1041,7 @@ impl Supervisor {
             if index < live_limit {
                 live.push(LiveTask {
                     task,
-                    state: TaskState::Running { permit: index },
+                    state: TaskState::Running { position: index },
                 });
             } else {
                 live_truncated = live_truncated.saturating_add(1);
@@ -1733,35 +1733,22 @@ impl Supervisor {
 /// What one task a [`Supervisor`] owns is currently doing, as the owner reads
 /// it.
 ///
-/// A sum type rather than a status flag, because the states this supervisor can
-/// be in call for different responses: a task that is `Running` needs nothing, a
-/// `Blocked` one needs the reason, and a `Retained` report is authoritative
-/// evidence the caller has not read yet. A flag set that could express only
-/// "busy" would report the last one as idle.
+/// A sum type rather than a flag so a state the owner learns to tell apart can be
+/// added without changing what `Running` means. Today the owner distinguishes
+/// one: a placed task holds a permit until it is reaped, whether or not its body
+/// has returned, so capacity read from this listing is capacity the supervisor
+/// will actually grant. Terminal outcomes are not listed here; they are in the
+/// report stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TaskState {
-    /// Placed and holding a permit, not yet returned.
+    /// Placed and holding a permit, not yet reaped.
     Running {
-        /// Which admission permit of the ceiling the task holds.
+        /// The task's position among the live tasks, in spawn order.
         ///
-        /// Always some slot of the in-flight bound; a task that holds none has
-        /// not been placed, which is not a state this enum can express.
-        permit: usize,
-    },
-    /// The body returned and the outcome is waiting to be joined.
-    ///
-    /// Distinct from `Running` because the task's *work* is done and its permit
-    /// is not yet released: the bound is still charged until the reap that
-    /// follows. A caller watching capacity must see the difference, or it will
-    /// conclude a saturated supervisor has free slots it does not have.
-    Finished,
-    /// The terminal outcome is retained and readable through
-    /// [`Supervisor::next_report`].
-    Retained {
-        /// How many retained reports are queued ahead of this one, so a caller
-        /// reading the whole stream knows what it is skipping.
-        ahead: usize,
+        /// Not a permit number: permits are interchangeable and carry no
+        /// identity. Always below the in-flight ceiling.
+        position: usize,
     },
 }
 
@@ -1947,31 +1934,6 @@ pub struct LiveTask {
     pub task: TaskId,
     /// What the task is currently doing.
     pub state: TaskState,
-}
-
-impl Default for SupervisorSnapshot {
-    fn default() -> Self {
-        Self {
-            max_in_flight: 1,
-            stats: Stats {
-                spawned: 0,
-                completed: 0,
-                succeeded: 0,
-                failed: 0,
-                cancelled: 0,
-                aborted: 0,
-                panicked: 0,
-                refused: 0,
-                reports_dropped: 0,
-            },
-            live: Vec::new(),
-            live_truncated: 0,
-            cancelled: false,
-            reports_pending: 0,
-            #[cfg(all(unix, feature = "process"))]
-            pending_cleanups: 0,
-        }
-    }
 }
 
 impl Drop for Supervisor {

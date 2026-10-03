@@ -859,14 +859,12 @@ impl Host {
                 at: Arc::from(task.as_str()),
             }));
         }
-        // The run's whole deadline, measured on the host's clock. `started` is
-        // a real monotonic reading and is used only to subtract the time already
-        // spent before admission began; the bound itself is the host's declared
-        // timeline, so a caller-advanceable clock governs it and the admission
-        // wait cannot outlive it.
+        // The wait for a permit is bounded in real time, charged to the run's
+        // deadline. It is a wait on other runs releasing capacity — a real
+        // event no logical clock can hurry — so the host's declared clock
+        // governs the body's `within`, not this queue.
         let deadline = self.inner.limits.default_deadline();
-        let already = crate::rt::time::Deadline::after(&self.inner.clock, deadline).elapsed();
-        let remaining = deadline.saturating_sub(already.max(started.elapsed()));
+        let remaining = deadline.saturating_sub(started.elapsed());
         let waiting = self
             .inner
             .token

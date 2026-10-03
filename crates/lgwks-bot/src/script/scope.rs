@@ -7,7 +7,6 @@ use lgwks_std::hash::{Digest, Hasher};
 
 use crate::rt::clock::Clock;
 use crate::rt::sync::CancellationToken;
-use crate::rt::time::Deadline;
 
 use super::policy::Policy;
 use super::trail::Trail;
@@ -343,18 +342,6 @@ impl Scope {
     #[must_use]
     pub fn clock(&self) -> &Clock {
         &self.inner.clock
-    }
-
-    /// The budget remaining on `budget`, measured on this scope's clock.
-    ///
-    /// The shape a caller writes a precondition against. A deadline that cannot
-    /// be asked how much of it is left is a deadline nobody can reason about, and
-    /// with a caller-advanceable clock it is also the only way to know whether a
-    /// body has a real chance of finishing before its step times out.
-    #[must_use]
-    pub fn remaining_of(&self, budget: std::time::Duration) -> std::time::Duration {
-        let deadline = Deadline::after(&self.inner.clock, budget);
-        deadline.remaining()
     }
 
     /// Stop this scope and every step beneath it; inside an `each` body or a

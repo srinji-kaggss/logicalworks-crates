@@ -159,12 +159,11 @@ struct Inner {
 }
 
 impl Inner {
-    /// A wall clock's real monotonic origin.
+    /// The real monotonic instant real-time readings count from.
     ///
-    /// Unwrapping is correct because `placed` is set for a wall clock and absent
-    /// for a virtual one, and [`Clock::now`] only asks on the wall branch — the
-    /// two facts cannot disagree. Written as one place so a second reader of
-    /// `placed` cannot skip the reasoning.
+    /// A wall clock's construction instant. A virtual clock has none, so a
+    /// watchdog asked of it starts now — the moment it was asked for — which is
+    /// the only real origin a virtual clock can honestly offer.
     fn origin(&self) -> Instant {
         self.placed.unwrap_or_else(Instant::now)
     }
@@ -237,7 +236,8 @@ impl Clock {
     /// // A run that had spent four of its ten seconds restarts here.
     /// let clock = Clock::wall_at(Duration::from_secs(4));
     /// assert!(clock.now() >= Duration::from_secs(4));
-    /// assert_eq!(clock.snapshot().remaining_from(Duration::from_secs(10)), clock.now() - Duration::from_secs(4));
+    /// // At most six seconds remain, and real time keeps spending them.
+    /// assert!(clock.snapshot().remaining_from(Duration::from_secs(10)) <= Duration::from_secs(6));
     /// ```
     #[must_use]
     pub fn wall_at(elapsed: Duration) -> Self {
@@ -288,16 +288,18 @@ impl Clock {
     /// test owns every deadline exactly and a three-day outage costs three
     /// arithmetic operations.
     ///
-    /// A [`TimeSource::Wall`] clock reports **real** elapsed time, sampled from
-    /// `std::time::Instant` on every call. That is what makes a wall clock safe
-    /// to govern real deadlines with: the counter it also carries records where
-    /// the clock *was placed* on a restart, and reading one as the other is the
-    /// bug this module exists to prevent. See [`Clock::placed_at`] for the
-    /// counter that does mean the origin's magnitude.
+    /// A [`TimeSource::Wall`] clock reports where it was placed plus the
+    /// **real** time elapsed since, sampled from `std::time::Instant` on every
+    /// call. A fresh wall clock is placed at zero; one restored with
+    /// [`Clock::wall_at`] keeps the time its previous process had already spent,
+    /// so a restart does not hand a run its whole budget back. See
+    /// [`Clock::placed_at`] for the placement alone.
     #[must_use]
     pub fn now(&self) -> Duration {
         match self.inner.source {
-            TimeSource::Wall => self.inner.origin().elapsed(),
+            TimeSource::Wall => self
+                .placed_at()
+                .saturating_add(self.inner.origin().elapsed()),
             TimeSource::Virtual => Duration::from_nanos(self.inner.elapsed.load(Ordering::Relaxed)),
         }
     }
