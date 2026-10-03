@@ -171,7 +171,7 @@ explicitly under that crate.
   a typed `RequestError::Conflict` naming both digests. A host with no store
   refuses with `RequestError::NoStore`. Supported by `RequestKey`, `InputDigest`,
   `Submission`, `InFlight`, `RequestConflict` and `RequestError` (T30, T17;
-  INV-BOT-81, INV-BOT-82).
+  INV-BOT-100, INV-BOT-101).
 - `FlowError::InvalidRequestKey`: the typed refusal a malformed `RequestKey`
   names, alongside the tenant and task-name refusals.
 - `script::Readiness<T>`, a typed, generation-bound readiness fact and the wait

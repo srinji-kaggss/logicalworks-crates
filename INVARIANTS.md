@@ -744,7 +744,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `finished_steps_run_once`, `tenants_stay_isolated`, `same_seed_replays`),
   which sweeps every step boundary of every seeded run twice for an identical
   trace hash.
-- **INV-BOT-81** A request key is an identity, not a lock, and `Host::submit`
+- **INV-BOT-100** A request key is an identity, not a lock, and `Host::submit`
   makes the three outcomes distinct. The run identity is derived, not minted:
   it is a domain-separated hash of the host's tenant and the key, so the same
   request on another process or day derives the same run and its receipt is
@@ -768,7 +768,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_recorded_request_answers_over_a_changed_body`) and
   `tests/sim_request_key.rs` (`collisions_across_two_tenants`, `same_seed_replays`,
   `concurrent_submissions_across_tiers`).
-- **INV-BOT-82** A durable submission's receipt outlives the client that
+- **INV-BOT-101** A durable submission's receipt outlives the client that
   submitted it, and the in-flight state is reported as two separate facts. If a
   waiter is dropped while the body is in flight, the `@request` receipt and any
   completed step records are already on the disk and no `@terminal` record is;

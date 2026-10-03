@@ -37,7 +37,7 @@
 //! call, and the four verbs are non-`Send` by design; so a body whose caller
 //! went away stops where it was. What survives is exactly the durable record —
 //! which is the part that matters, because resuming the run is how the
-//! un-recorded step is settled (INV-BOT-81, INV-BOT-82).
+//! un-recorded step is settled (INV-BOT-100, INV-BOT-101).
 
 use std::fmt;
 use std::num::NonZeroU128;
