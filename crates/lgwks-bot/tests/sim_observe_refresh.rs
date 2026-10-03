@@ -17,16 +17,16 @@
 //! | `a_saturated_wave_stalls_every_chain_and_still_lets_the_next_tenant_commit` | every chain in a fully-wedged wave is reported, while the tenant beside it reports none and keeps committing |
 //! | `the_same_seed_replays_a_stalled_wave` | the stall families replay to the same trace hash, twice |
 //!
-//! # What is not here, and why
+//! # What the band families fix, and why
 //!
-//! The saturation tiers are not. `Bot::observe` returns a builder whose type
-//! follows its source, so a bot of *n* chains needs *n* written-out
-//! `observe`/`on` pairs — a compile-time constant, not something a test can
-//! express at runtime. The 100 / 1,000 / 10,000 tier sweep therefore lives in
-//! `observe_refresh.rs`, which writes them out, and this file covers the fault
-//! dimension a fixed chain count is the right shape for. The saturation family
-//! below pins the tier it *can* build and says so, rather than reporting a
-//! concurrency number nobody ran.
+//! The band families fix the chain count deliberately: their axis is *which*
+//! chain declares what fault over which window, and a chain-count draw would
+//! renumber every band for no added evidence. The 100 / 1,000 / 10,000 tiers
+//! are here, but not in the bands — the families below the `band_family!`
+//! declaration make the width itself a draw, building a bot from one source
+//! type every chain shares so the builder can be extended in a loop. The bands
+//! pin the fault dimension at a fixed width; the width families pin the width,
+//! up to the 10,000-chain tier, and each records what it reached.
 //!
 //! # What is real and what is seeded
 //!
