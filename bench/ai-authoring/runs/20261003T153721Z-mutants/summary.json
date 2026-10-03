@@ -1,0 +1,135 @@
+{
+  "generated_by": "bench/ai-authoring/run.py",
+  "lgwks_bot_sha": "6687d5ebf18e6dc85cf07e979631d1873a54d54f",
+  "protocol": {
+    "same_prompt_skeleton": true,
+    "same_sheet_budget": "each API sheet <= 250 lines",
+    "same_oracle": true,
+    "hidden_oracle": true,
+    "repair_budget": 4,
+    "cargo_serialized": "one cargo process at a time under an fcntl lock",
+    "closed_book": "each model call runs under sandbox-exec: home, /private/tmp and the work directory are unreadable except the CLI config and the trial scratch; no session, no skills",
+    "profiles": [
+      "first-time",
+      "expert-hurry",
+      "anxious",
+      "misuser",
+      "agent"
+    ],
+    "profile_text_is_fixed": "each profile is one fixed persona preamble prepended to the same prompt skeleton; the framing, the API sheet, the oracle, the repair budget and the sandbox are identical across profiles",
+    "oracle_measured_under_time_l": "oracle_wall_ms is the wall time of the cargo test invocation that runs the oracle, under /usr/bin/time -l; oracle_peak_rss_bytes is that process's maximum resident set size in bytes, or null on a host with no /usr/bin/time",
+    "cleanup_ok_is_the_drop_clause": "cleanup_ok is true only when the task's 'dropping the future leaves nothing live' oracle test passed; a crate that never compiled reports false rather than a cleanup result",
+    "skipped_cells": [
+      {
+        "task": "recovery",
+        "api": "old",
+        "why": "the old rt surface has no durable run store, no remember, no run identity and no resume, so it keeps no record of a completed unit to consult and cannot express 'finish the work without redoing a completed unit'"
+      }
+    ]
+  },
+  "groups": [
+    {
+      "model": "__mutant__",
+      "api": "new",
+      "task": "aggregate",
+      "profile": "",
+      "n": 1,
+      "compiled": 1,
+      "cleanup_ok_all": true,
+      "repairs_mean": 0,
+      "repairs_median": 0,
+      "oracle_pass_rate": 0.6666666666666666,
+      "oracle_per_trial": [
+        {
+          "trial": 0,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 4,
+          "oracle_total": 6,
+          "oracle": {
+            "empty_input_sums_to_zero": "pass",
+            "at_most_four_fetches_are_in_flight": "fail",
+            "a_failure_is_reported_by_id": "pass",
+            "no_fetch_starts_after_the_failure_is_observed": "pass",
+            "the_overall_deadline_is_honoured": "fail",
+            "dropping_the_future_leaves_no_fetch_live": "pass"
+          }
+        }
+      ],
+      "tokens_in_median": 0,
+      "tokens_out_median": 0,
+      "consumer_lines_median": 25,
+      "orchestration_sites_median": 0,
+      "oracle_wall_ms_median": 6484.209,
+      "oracle_peak_rss_bytes_median": null
+    },
+    {
+      "model": "__mutant__",
+      "api": "new",
+      "task": "pipeline",
+      "profile": "",
+      "n": 1,
+      "compiled": 1,
+      "cleanup_ok_all": false,
+      "repairs_mean": 0,
+      "repairs_median": 0,
+      "oracle_pass_rate": 0.8,
+      "oracle_per_trial": [
+        {
+          "trial": 0,
+          "compiled": true,
+          "cleanup_ok": false,
+          "oracle_pass_count": 4,
+          "oracle_total": 5,
+          "oracle": {
+            "success_publishes_the_combined_artifact": "pass",
+            "a_failed_fetch_a_stops_combine_and_publish": "pass",
+            "a_failed_fetch_b_stops_combine_and_publish": "pass",
+            "a_slow_stage_past_the_deadline_publishes_nothing": "pass",
+            "dropping_the_future_leaves_no_stage_live": "fail"
+          }
+        }
+      ],
+      "tokens_in_median": 0,
+      "tokens_out_median": 0,
+      "consumer_lines_median": 22,
+      "orchestration_sites_median": 9,
+      "oracle_wall_ms_median": 13058.792,
+      "oracle_peak_rss_bytes_median": null
+    },
+    {
+      "model": "__mutant__",
+      "api": "new",
+      "task": "recovery",
+      "profile": "",
+      "n": 1,
+      "compiled": 1,
+      "cleanup_ok_all": true,
+      "repairs_mean": 0,
+      "repairs_median": 0,
+      "oracle_pass_rate": 0.8,
+      "oracle_per_trial": [
+        {
+          "trial": 0,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 4,
+          "oracle_total": 5,
+          "oracle": {
+            "a_first_attempt_completes": "pass",
+            "a_resume_does_not_rerun_a_completed_unit": "fail",
+            "the_effect_is_applied_exactly_once": "pass",
+            "the_overall_deadline_is_honoured": "pass",
+            "dropping_the_future_leaves_no_unit_live": "pass"
+          }
+        }
+      ],
+      "tokens_in_median": 0,
+      "tokens_out_median": 0,
+      "consumer_lines_median": 17,
+      "orchestration_sites_median": 0,
+      "oracle_wall_ms_median": 12407.286,
+      "oracle_peak_rss_bytes_median": null
+    }
+  ]
+}
