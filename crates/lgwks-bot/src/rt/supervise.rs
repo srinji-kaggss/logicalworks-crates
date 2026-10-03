@@ -2736,21 +2736,22 @@ where
                 // The timer arm. Anchored on real elapsed time from now, which
                 // is the wall clock's own reading and therefore the same value
                 // the deadline above carries.
+                // `timeout` rather than a `select!` against a sleep: the macro
+                // is not part of every feature set this crate builds under, and
+                // the two settle alike — a body that finishes at the instant
+                // the budget runs out is counted, and the check at the top of
+                // the loop then reports the budget spent.
                 let remaining = deadline.saturating_sub(clock.now());
-                let spent = lgwks_deps::tokio::select! {
-                    biased;
-                    () = crate::rt::time::sleep(remaining) => true,
-                    observed = token.run_until_cancelled(body(iterations)) => {
-                        match observed {
-                            Some(()) => false,
-                            None => return Outcome::Cancelled { iterations },
-                        }
-                    }
-                };
-                if spent {
-                    return Outcome::Exhausted { iterations };
+                match crate::rt::time::timeout(
+                    remaining,
+                    token.run_until_cancelled(body(iterations)),
+                )
+                .await
+                {
+                    Err(_elapsed) => return Outcome::Exhausted { iterations },
+                    Ok(None) => return Outcome::Cancelled { iterations },
+                    Ok(Some(())) => iterations = iterations.saturating_add(1),
                 }
-                iterations = iterations.saturating_add(1);
                 continue;
             }
         } else {
@@ -2811,10 +2812,11 @@ where
         if clock.now() >= deadline {
             return Bounded::Spent;
         }
-        lgwks_deps::tokio::select! {
-            biased;
-            () = crate::rt::time::sleep(LOGICAL_POLL) => {}
-            _finished = &mut body => return Bounded::Finished,
+        if crate::rt::time::timeout(LOGICAL_POLL, &mut body)
+            .await
+            .is_ok()
+        {
+            return Bounded::Finished;
         }
         // The stop is checked on every pass rather than only when the bound is
         // met, so a cancelled loop under a virtual clock stops in a

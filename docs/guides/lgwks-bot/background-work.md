@@ -162,14 +162,14 @@ failure is `Indeterminate`.
 ## `repeat`: a bound on iterations
 
 `repeat(&token, budget, body)` is the only loop the module asks you to write, and
-it cannot be written without a `Budget` (`crates/lgwks-bot/src/rt/supervise.rs:2637`).
+it cannot be written without a `Budget` (`crates/lgwks-bot/src/rt/supervise.rs:2599`).
 The variants are `Iterations(NonZeroU64)`, `For(Duration)`, and `Ongoing`.
 
 Two details that decide how tight your bound really is:
 
 - `Budget::For` checks its deadline between iterations, so a body that blocks for
   longer than the budget overruns it by one iteration
-  (`crates/lgwks-bot/src/rt/supervise.rs:2650`). Cancellation is not subject to
+  (`crates/lgwks-bot/src/rt/supervise.rs:2612`). Cancellation is not subject to
   that slack, because it interrupts the body itself.
 - Every iteration races the token rather than checking it between iterations.
   A cancel drops a body that is still awaiting, and the loop reports
@@ -227,7 +227,7 @@ not how quickly the OS tears the group down.
 
 **Cancellation drops a future. That is not the same as stopping a thread.** The
 implementation races each iteration with `token.run_until_cancelled(body(...))`
-(`crates/lgwks-bot/src/rt/supervise.rs:2673`), which drops the body's future. A
+(`crates/lgwks-bot/src/rt/supervise.rs:2635`), which drops the body's future. A
 body that is awaiting returns promptly. What happens to work a body handed to
 another thread is not established by the inspected source: `spawn_blocking`
 spawns an OS thread and offers no abort, and its documented bound is a thread per
@@ -260,7 +260,7 @@ and `spawn_blocking` are for a build with no async runtime. There is a
 
 ## What the tests exercise
 
-`crates/lgwks-bot/src/rt/supervise.rs:2698` runs the module's own tests under the
+`crates/lgwks-bot/src/rt/supervise.rs:2660` runs the module's own tests under the
 ordinary workspace test run. They cover an iteration budget stopping at its
 limit, an `Ongoing` budget stopping at a cancel, cancellation interrupting a body
 that is still awaiting, `try_spawn` refusing at the bound rather than growing,

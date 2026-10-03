@@ -122,37 +122,38 @@ where
     if deadline.is_exhausted() {
         return Err(timed_out());
     }
-    // A wall clock is read by the engine timer below and needs nothing more, so
-    // its body is polled directly: no re-read loop, no allocation, exactly the
-    // composition `within` had before clocks existed. Only a caller-advanceable
-    // clock, whose movement the timer cannot see, pays for the logical re-read —
-    // boxed, so its extra state does not enlarge every frame of a nested tree.
-    let bounded = async {
-        if clock.source() == TimeSource::Wall {
-            body.await
-        } else {
-            Box::pin(settle_logical_bound(
-                &deadline,
-                Arc::clone(&at),
-                limit,
-                body,
-            ))
-            .await
-        }
-    };
-    // The engine timer is the real-time watchdog for either clock: a virtual
-    // clock nobody advances still cannot hold a stuck body past `limit` of real
-    // time.
-    match scope
-        .token()
-        .run_until_cancelled(time::timeout(limit, bounded))
-        .await
-    {
-        Some(Ok(result)) => result,
-        Some(Err(_elapsed)) => Err(timed_out()),
-        None => Err(FlowError::Cancelled {
-            at: Arc::clone(&at),
-        }),
+    // The two refusal arms and the body are boxed. A `select!` builds one future
+    // per branch and holds them all for the body's whole life, so an unboxed
+    // engine timer makes *every* `within` frame as large as the engine's timer
+    // state. That is paid once per nesting level, and on a deeply nested tree the
+    // frames alone exhaust the caller's stack. Boxing moves the arms to the heap
+    // and keeps one poll frame per level, which is what the deep-nest regression
+    // measures.
+    //
+    // A wall clock's bound is the engine timer itself, so `settle_logical_bound`
+    // awaits its body directly and arms no re-read timer: only a
+    // caller-advanceable clock, whose movement no timer can see, pays for the
+    // logical poll.
+    let logical = Box::pin(settle_logical_bound(
+        &deadline,
+        clock.source() == TimeSource::Wall,
+        Arc::clone(&at),
+        limit,
+        body,
+    ));
+    let watchdog = Box::pin(time::sleep(limit));
+    let stopped = Box::pin(scope.token().cancelled());
+    lgwks_deps::tokio::select! {
+        biased;
+        // Read the logical bound before the engine's timer, so an advance that
+        // has already spent the budget wins even if the timer arm is also ready.
+        finished = logical => finished,
+        // The engine's timer is the real-time watchdog for either clock: a
+        // virtual clock nobody advances still cannot hold a stuck body past
+        // `limit` of real time.
+        () = watchdog => Err(timed_out()),
+        // A stop, from the scope or anything it descends from.
+        () = stopped => Err(FlowError::Cancelled { at: Arc::clone(&at) }),
     }
 }
 
@@ -171,6 +172,7 @@ where
 /// completes during a poll gap is not delayed behind the next tick.
 async fn settle_logical_bound<T, Fut>(
     deadline: &Deadline<'_>,
+    wall: bool,
     at: Arc<str>,
     limit: Duration,
     body: Fut,
@@ -184,6 +186,12 @@ where
     /// enough that a test's expiry assertion does not sleep noticeably; large
     /// enough that a saturated run does not spend its time polling.
     const LOGICAL_POLL: Duration = Duration::from_millis(1);
+    // A wall clock is governed by the caller's engine timer, which already
+    // races this future: re-reading it here would only arm a second timer per
+    // step for the same answer.
+    if wall {
+        return body.await;
+    }
     let mut body = std::pin::pin!(body);
     // Every refusal this future raises reports `at`, the step path its caller
     // computed from the same `Scope`. Passing it down is what keeps one error
