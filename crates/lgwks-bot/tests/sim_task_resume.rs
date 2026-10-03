@@ -39,14 +39,19 @@ mod sim;
 #[path = "sim/bands.rs"]
 mod band_family;
 
+#[path = "support/resume.rs"]
+mod shared;
+
 use std::error::Error;
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use lgwks_bot::script::{FlowError, Scope, remember};
 use lgwks_bot::task::{Disposition, Host, RunStore, Task, task};
+
+use shared::Scratch;
 
 use sim::Band;
 use sim::Rng;
@@ -139,32 +144,6 @@ fn uninterrupted(steps: usize) -> Outcome {
     outcome
 }
 
-/// A scratch directory for one scenario, removed when it ends.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new(tag: &str, unique: u32) -> Result<Self, Box<dyn Error>> {
-        let path = std::env::temp_dir().join(format!("lgwks-sim-resume-{tag}-{unique}"));
-        if path.exists() {
-            std::fs::remove_dir_all(&path)?;
-        }
-        std::fs::create_dir_all(&path)?;
-        Ok(Self(path))
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for Scratch {
-    /// Remove the directory. A failure to remove is not a failure of the family:
-    /// every assertion has been made, and a leaked temp directory is a nuisance.
-    fn drop(&mut self) {
-        drop(std::fs::remove_dir_all(&self.0));
-    }
-}
-
 /// A host for `tenant` over `dir`, opened fresh every time.
 fn host(tenant: &str, dir: &Path) -> Result<Host, Box<dyn Error>> {
     Ok(Host::builder(tenant)?.run_store(dir)?.build()?)
@@ -175,7 +154,7 @@ fn crash_points_resume_to_the_same_output(band: Band) -> TestResult {
     let mut rng = Rng::new(band.first);
     for _ in band.seeds() {
         let steps = usize::try_from(rng.between(2, MAX_STEPS)).unwrap_or(2);
-        let scratch = Scratch::new("crash", rng.below(u32::MAX))?;
+        let scratch = Scratch::new("sim-crash")?;
         let store_dir = scratch.path().join("store");
         let expected = uninterrupted(steps);
 
@@ -249,7 +228,7 @@ fn finished_steps_run_once(band: Band) -> TestResult {
         let steps = usize::try_from(rng.between(2, MAX_STEPS)).unwrap_or(2);
         let crash_at =
             usize::try_from(rng.below(u32::try_from(steps).unwrap_or(1))).unwrap_or_default();
-        let scratch = Scratch::new("once", rng.below(u32::MAX))?;
+        let scratch = Scratch::new("sim-once")?;
         let store_dir = scratch.path().join("store");
         let host = host("sim", &store_dir)?;
 
@@ -310,7 +289,7 @@ fn tenants_stay_isolated(band: Band) -> TestResult {
     for _ in band.seeds() {
         let tenants = usize::try_from(rng.between(2, 65)).unwrap_or(2);
         let steps = usize::try_from(rng.between(1, 4)).unwrap_or(1);
-        let scratch = Scratch::new("tenants", rng.below(u32::MAX))?;
+        let scratch = Scratch::new("sim-tenants")?;
         let shared_path = scratch.path().join("shared.runstore");
         let expected = uninterrupted(steps);
 
@@ -397,10 +376,7 @@ fn tenants_stay_isolated(band: Band) -> TestResult {
 fn same_seed_replays(band: Band) -> TestResult {
     let body = |sim_run: &mut sim::Sim| -> TestResult {
         let steps = usize::try_from(sim_run.rng().between(2, MAX_STEPS)).unwrap_or(2);
-        let scratch = Scratch::new(
-            "replay",
-            u32::try_from(sim_run.seed & u64::from(u32::MAX)).unwrap_or(0),
-        )?;
+        let scratch = Scratch::new("sim-replay")?;
         let store_dir = scratch.path().join("store");
         let crash_at = usize::try_from(sim_run.rng().below(u32::try_from(steps).unwrap_or(1)))
             .unwrap_or_default();
