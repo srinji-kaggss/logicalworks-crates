@@ -1,0 +1,512 @@
+{
+  "generated_by": "bench/ai-authoring/run.py",
+  "lgwks_bot_sha": "fd258caae1f25f0a490da15ec2a3262a2da1e894",
+  "protocol": {
+    "same_prompt_skeleton": true,
+    "same_sheet_budget": "each API sheet <= 250 lines",
+    "same_oracle": true,
+    "hidden_oracle": true,
+    "repair_budget": 4,
+    "cargo_serialized": "one cargo process at a time under an fcntl lock",
+    "closed_book": "each model call runs under sandbox-exec: home, /private/tmp and the work directory are unreadable except the CLI config and the trial scratch; no session, no skills",
+    "profiles": [
+      "first-time",
+      "expert-hurry",
+      "anxious",
+      "misuser",
+      "agent"
+    ],
+    "profile_text_is_fixed": "each profile is one fixed persona preamble prepended to the same prompt skeleton; the framing, the API sheet, the oracle, the repair budget and the sandbox are identical across profiles",
+    "oracle_measured_under_time_l": "oracle_wall_ms is the wall time of the cargo test invocation that runs the oracle, under /usr/bin/time -l; oracle_peak_rss_bytes is that process's maximum resident set size in bytes, or null on a host with no /usr/bin/time",
+    "cleanup_ok_is_the_drop_clause": "cleanup_ok is true only when the task's 'dropping the future leaves nothing live' oracle test passed; a crate that never compiled reports false rather than a cleanup result",
+    "skipped_cells": [
+      {
+        "task": "recovery",
+        "api": "old",
+        "why": "the old rt surface has no durable run store, no remember, no run identity and no resume, so it keeps no record of a completed unit to consult and cannot express 'finish the work without redoing a completed unit'"
+      }
+    ]
+  },
+  "groups": [
+    {
+      "model": "deepseek/deepseek-v4.1-flash",
+      "api": "new",
+      "task": "recovery",
+      "profile": "agent",
+      "n": 2,
+      "compiled": 2,
+      "cleanup_ok_all": true,
+      "repairs_mean": 1,
+      "repairs_median": 1.0,
+      "oracle_pass_rate": 0.8,
+      "oracle_per_trial": [
+        {
+          "trial": 0,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 4,
+          "oracle_total": 5,
+          "oracle": {
+            "a_first_attempt_completes": "pass",
+            "a_resume_does_not_rerun_a_completed_unit": "fail",
+            "the_effect_is_applied_exactly_once": "pass",
+            "the_overall_deadline_is_honoured": "pass",
+            "dropping_the_future_leaves_no_unit_live": "pass"
+          }
+        },
+        {
+          "trial": 1,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 4,
+          "oracle_total": 5,
+          "oracle": {
+            "a_first_attempt_completes": "pass",
+            "a_resume_does_not_rerun_a_completed_unit": "fail",
+            "the_effect_is_applied_exactly_once": "pass",
+            "the_overall_deadline_is_honoured": "pass",
+            "dropping_the_future_leaves_no_unit_live": "pass"
+          }
+        }
+      ],
+      "tokens_in_median": 216384.5,
+      "tokens_out_median": 67492.0,
+      "consumer_lines_median": 119.5,
+      "orchestration_sites_median": 0.5,
+      "oracle_wall_ms_median": 2580.187,
+      "oracle_peak_rss_bytes_median": 211238912.0
+    },
+    {
+      "model": "deepseek/deepseek-v4.1-flash",
+      "api": "new",
+      "task": "recovery",
+      "profile": "anxious",
+      "n": 2,
+      "compiled": 2,
+      "cleanup_ok_all": true,
+      "repairs_mean": 4,
+      "repairs_median": 4.0,
+      "oracle_pass_rate": 0.8,
+      "oracle_per_trial": [
+        {
+          "trial": 0,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 4,
+          "oracle_total": 5,
+          "oracle": {
+            "a_first_attempt_completes": "pass",
+            "a_resume_does_not_rerun_a_completed_unit": "fail",
+            "the_effect_is_applied_exactly_once": "pass",
+            "the_overall_deadline_is_honoured": "pass",
+            "dropping_the_future_leaves_no_unit_live": "pass"
+          }
+        },
+        {
+          "trial": 1,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 4,
+          "oracle_total": 5,
+          "oracle": {
+            "a_first_attempt_completes": "pass",
+            "a_resume_does_not_rerun_a_completed_unit": "fail",
+            "the_effect_is_applied_exactly_once": "pass",
+            "the_overall_deadline_is_honoured": "pass",
+            "dropping_the_future_leaves_no_unit_live": "pass"
+          }
+        }
+      ],
+      "tokens_in_median": 351101.0,
+      "tokens_out_median": 132234.0,
+      "consumer_lines_median": 139.0,
+      "orchestration_sites_median": 3.5,
+      "oracle_wall_ms_median": 2757.582,
+      "oracle_peak_rss_bytes_median": 211378176.0
+    },
+    {
+      "model": "deepseek/deepseek-v4.1-flash",
+      "api": "new",
+      "task": "recovery",
+      "profile": "expert-hurry",
+      "n": 2,
+      "compiled": 2,
+      "cleanup_ok_all": true,
+      "repairs_mean": 1,
+      "repairs_median": 1.0,
+      "oracle_pass_rate": 0.9,
+      "oracle_per_trial": [
+        {
+          "trial": 0,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 4,
+          "oracle_total": 5,
+          "oracle": {
+            "a_first_attempt_completes": "pass",
+            "a_resume_does_not_rerun_a_completed_unit": "fail",
+            "the_effect_is_applied_exactly_once": "pass",
+            "the_overall_deadline_is_honoured": "pass",
+            "dropping_the_future_leaves_no_unit_live": "pass"
+          }
+        },
+        {
+          "trial": 1,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 5,
+          "oracle_total": 5,
+          "oracle": {
+            "a_first_attempt_completes": "pass",
+            "a_resume_does_not_rerun_a_completed_unit": "pass",
+            "the_effect_is_applied_exactly_once": "pass",
+            "the_overall_deadline_is_honoured": "pass",
+            "dropping_the_future_leaves_no_unit_live": "pass"
+          }
+        }
+      ],
+      "tokens_in_median": 144407.0,
+      "tokens_out_median": 52925.0,
+      "consumer_lines_median": 94.0,
+      "orchestration_sites_median": 4.5,
+      "oracle_wall_ms_median": 4743.4310000000005,
+      "oracle_peak_rss_bytes_median": 210108416.0
+    },
+    {
+      "model": "deepseek/deepseek-v4.1-flash",
+      "api": "new",
+      "task": "recovery",
+      "profile": "first-time",
+      "n": 2,
+      "compiled": 1,
+      "cleanup_ok_all": false,
+      "repairs_mean": 2.5,
+      "repairs_median": 2.5,
+      "oracle_pass_rate": 0.4,
+      "oracle_per_trial": [
+        {
+          "trial": 0,
+          "compiled": false,
+          "cleanup_ok": false,
+          "oracle_pass_count": 0,
+          "oracle_total": 5,
+          "oracle": {
+            "a_first_attempt_completes": "not_run",
+            "a_resume_does_not_rerun_a_completed_unit": "not_run",
+            "the_effect_is_applied_exactly_once": "not_run",
+            "the_overall_deadline_is_honoured": "not_run",
+            "dropping_the_future_leaves_no_unit_live": "not_run"
+          }
+        },
+        {
+          "trial": 1,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 4,
+          "oracle_total": 5,
+          "oracle": {
+            "a_first_attempt_completes": "pass",
+            "a_resume_does_not_rerun_a_completed_unit": "fail",
+            "the_effect_is_applied_exactly_once": "pass",
+            "the_overall_deadline_is_honoured": "pass",
+            "dropping_the_future_leaves_no_unit_live": "pass"
+          }
+        }
+      ],
+      "tokens_in_median": 300620.0,
+      "tokens_out_median": 112521.0,
+      "consumer_lines_median": 109.0,
+      "orchestration_sites_median": 2.5,
+      "oracle_wall_ms_median": 1481.5425,
+      "oracle_peak_rss_bytes_median": 216350720
+    },
+    {
+      "model": "deepseek/deepseek-v4.1-flash",
+      "api": "new",
+      "task": "recovery",
+      "profile": "misuser",
+      "n": 2,
+      "compiled": 2,
+      "cleanup_ok_all": true,
+      "repairs_mean": 1.5,
+      "repairs_median": 1.5,
+      "oracle_pass_rate": 0.9,
+      "oracle_per_trial": [
+        {
+          "trial": 0,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 5,
+          "oracle_total": 5,
+          "oracle": {
+            "a_first_attempt_completes": "pass",
+            "a_resume_does_not_rerun_a_completed_unit": "pass",
+            "the_effect_is_applied_exactly_once": "pass",
+            "the_overall_deadline_is_honoured": "pass",
+            "dropping_the_future_leaves_no_unit_live": "pass"
+          }
+        },
+        {
+          "trial": 1,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 4,
+          "oracle_total": 5,
+          "oracle": {
+            "a_first_attempt_completes": "pass",
+            "a_resume_does_not_rerun_a_completed_unit": "fail",
+            "the_effect_is_applied_exactly_once": "pass",
+            "the_overall_deadline_is_honoured": "pass",
+            "dropping_the_future_leaves_no_unit_live": "pass"
+          }
+        }
+      ],
+      "tokens_in_median": 241984.5,
+      "tokens_out_median": 71710.0,
+      "consumer_lines_median": 119.0,
+      "orchestration_sites_median": 2.0,
+      "oracle_wall_ms_median": 4738.6669999999995,
+      "oracle_peak_rss_bytes_median": 211681280.0
+    },
+    {
+      "model": "stealth/space-bunny-alpha",
+      "api": "new",
+      "task": "recovery",
+      "profile": "agent",
+      "n": 2,
+      "compiled": 2,
+      "cleanup_ok_all": true,
+      "repairs_mean": 2.5,
+      "repairs_median": 2.5,
+      "oracle_pass_rate": 0.8,
+      "oracle_per_trial": [
+        {
+          "trial": 0,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 4,
+          "oracle_total": 5,
+          "oracle": {
+            "a_first_attempt_completes": "pass",
+            "a_resume_does_not_rerun_a_completed_unit": "fail",
+            "the_effect_is_applied_exactly_once": "pass",
+            "the_overall_deadline_is_honoured": "pass",
+            "dropping_the_future_leaves_no_unit_live": "pass"
+          }
+        },
+        {
+          "trial": 1,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 4,
+          "oracle_total": 5,
+          "oracle": {
+            "a_first_attempt_completes": "pass",
+            "a_resume_does_not_rerun_a_completed_unit": "fail",
+            "the_effect_is_applied_exactly_once": "pass",
+            "the_overall_deadline_is_honoured": "pass",
+            "dropping_the_future_leaves_no_unit_live": "pass"
+          }
+        }
+      ],
+      "tokens_in_median": 78124.5,
+      "tokens_out_median": 26908.0,
+      "consumer_lines_median": 145.0,
+      "orchestration_sites_median": 11.0,
+      "oracle_wall_ms_median": 2760.7690000000002,
+      "oracle_peak_rss_bytes_median": 215695360.0
+    },
+    {
+      "model": "stealth/space-bunny-alpha",
+      "api": "new",
+      "task": "recovery",
+      "profile": "anxious",
+      "n": 2,
+      "compiled": 0,
+      "cleanup_ok_all": false,
+      "repairs_mean": 4,
+      "repairs_median": 4.0,
+      "oracle_pass_rate": 0.0,
+      "oracle_per_trial": [
+        {
+          "trial": 0,
+          "compiled": false,
+          "cleanup_ok": false,
+          "oracle_pass_count": 0,
+          "oracle_total": 5,
+          "oracle": {
+            "a_first_attempt_completes": "not_run",
+            "a_resume_does_not_rerun_a_completed_unit": "not_run",
+            "the_effect_is_applied_exactly_once": "not_run",
+            "the_overall_deadline_is_honoured": "not_run",
+            "dropping_the_future_leaves_no_unit_live": "not_run"
+          }
+        },
+        {
+          "trial": 1,
+          "compiled": false,
+          "cleanup_ok": false,
+          "oracle_pass_count": 0,
+          "oracle_total": 5,
+          "oracle": {
+            "a_first_attempt_completes": "not_run",
+            "a_resume_does_not_rerun_a_completed_unit": "not_run",
+            "the_effect_is_applied_exactly_once": "not_run",
+            "the_overall_deadline_is_honoured": "not_run",
+            "dropping_the_future_leaves_no_unit_live": "not_run"
+          }
+        }
+      ],
+      "tokens_in_median": 226751.5,
+      "tokens_out_median": 75272.5,
+      "consumer_lines_median": 199.0,
+      "orchestration_sites_median": 2.5,
+      "oracle_wall_ms_median": 0.0,
+      "oracle_peak_rss_bytes_median": null
+    },
+    {
+      "model": "stealth/space-bunny-alpha",
+      "api": "new",
+      "task": "recovery",
+      "profile": "expert-hurry",
+      "n": 2,
+      "compiled": 1,
+      "cleanup_ok_all": false,
+      "repairs_mean": 3.5,
+      "repairs_median": 3.5,
+      "oracle_pass_rate": 0.5,
+      "oracle_per_trial": [
+        {
+          "trial": 0,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 5,
+          "oracle_total": 5,
+          "oracle": {
+            "a_first_attempt_completes": "pass",
+            "a_resume_does_not_rerun_a_completed_unit": "pass",
+            "the_effect_is_applied_exactly_once": "pass",
+            "the_overall_deadline_is_honoured": "pass",
+            "dropping_the_future_leaves_no_unit_live": "pass"
+          }
+        },
+        {
+          "trial": 1,
+          "compiled": false,
+          "cleanup_ok": false,
+          "oracle_pass_count": 0,
+          "oracle_total": 5,
+          "oracle": {
+            "a_first_attempt_completes": "not_run",
+            "a_resume_does_not_rerun_a_completed_unit": "not_run",
+            "the_effect_is_applied_exactly_once": "not_run",
+            "the_overall_deadline_is_honoured": "not_run",
+            "dropping_the_future_leaves_no_unit_live": "not_run"
+          }
+        }
+      ],
+      "tokens_in_median": 109388.5,
+      "tokens_out_median": 17719.5,
+      "consumer_lines_median": 87.0,
+      "orchestration_sites_median": 0.5,
+      "oracle_wall_ms_median": 3214.8555,
+      "oracle_peak_rss_bytes_median": 208076800
+    },
+    {
+      "model": "stealth/space-bunny-alpha",
+      "api": "new",
+      "task": "recovery",
+      "profile": "first-time",
+      "n": 2,
+      "compiled": 2,
+      "cleanup_ok_all": true,
+      "repairs_mean": 2,
+      "repairs_median": 2.0,
+      "oracle_pass_rate": 0.9,
+      "oracle_per_trial": [
+        {
+          "trial": 0,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 5,
+          "oracle_total": 5,
+          "oracle": {
+            "a_first_attempt_completes": "pass",
+            "a_resume_does_not_rerun_a_completed_unit": "pass",
+            "the_effect_is_applied_exactly_once": "pass",
+            "the_overall_deadline_is_honoured": "pass",
+            "dropping_the_future_leaves_no_unit_live": "pass"
+          }
+        },
+        {
+          "trial": 1,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 4,
+          "oracle_total": 5,
+          "oracle": {
+            "a_first_attempt_completes": "pass",
+            "a_resume_does_not_rerun_a_completed_unit": "fail",
+            "the_effect_is_applied_exactly_once": "pass",
+            "the_overall_deadline_is_honoured": "pass",
+            "dropping_the_future_leaves_no_unit_live": "pass"
+          }
+        }
+      ],
+      "tokens_in_median": 160118.0,
+      "tokens_out_median": 32534.0,
+      "consumer_lines_median": 113.0,
+      "orchestration_sites_median": 2.0,
+      "oracle_wall_ms_median": 4537.008,
+      "oracle_peak_rss_bytes_median": 214917120.0
+    },
+    {
+      "model": "stealth/space-bunny-alpha",
+      "api": "new",
+      "task": "recovery",
+      "profile": "misuser",
+      "n": 2,
+      "compiled": 2,
+      "cleanup_ok_all": true,
+      "repairs_mean": 2.5,
+      "repairs_median": 2.5,
+      "oracle_pass_rate": 0.8,
+      "oracle_per_trial": [
+        {
+          "trial": 0,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 4,
+          "oracle_total": 5,
+          "oracle": {
+            "a_first_attempt_completes": "pass",
+            "a_resume_does_not_rerun_a_completed_unit": "fail",
+            "the_effect_is_applied_exactly_once": "pass",
+            "the_overall_deadline_is_honoured": "pass",
+            "dropping_the_future_leaves_no_unit_live": "pass"
+          }
+        },
+        {
+          "trial": 1,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 4,
+          "oracle_total": 5,
+          "oracle": {
+            "a_first_attempt_completes": "pass",
+            "a_resume_does_not_rerun_a_completed_unit": "fail",
+            "the_effect_is_applied_exactly_once": "pass",
+            "the_overall_deadline_is_honoured": "pass",
+            "dropping_the_future_leaves_no_unit_live": "pass"
+          }
+        }
+      ],
+      "tokens_in_median": 101672.0,
+      "tokens_out_median": 41011.5,
+      "consumer_lines_median": 142.0,
+      "orchestration_sites_median": 2.5,
+      "oracle_wall_ms_median": 2721.2105,
+      "oracle_peak_rss_bytes_median": 217038848.0
+    }
+  ]
+}

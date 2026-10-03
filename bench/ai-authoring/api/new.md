@@ -35,6 +35,22 @@ declared.
   `Refused`; `fn is_success(self) -> bool`.
 - `HostError` — `Bound { what, value, max }`, `InsideRuntime`, `Runtime { cause }`.
 
+## Durable runs: a store, a run identity, a resume
+
+- `HostBuilder::run_store(self, dir: impl AsRef<std::path::Path>) -> Result<HostBuilder, StoreError>`
+  — opens (or creates) a durable step-record store in `dir` and replays the
+  records already there. A host built without one keeps nothing across attempts.
+- `lgwks_bot::effect::RunId::from_hex(text: &str) -> Result<RunId, IdError>` —
+  32 lowercase hex characters, not all zero. The same text is the same run on
+  every attempt; `RunId` is `Copy`.
+- `Host::resume<I, O, F, Fut>(&self, run: RunId, task: &Task<F>, input: I) -> Report<O>`
+  — runs `task` under `run`: every step `run` already recorded replays its value
+  without running its body, and the steps it did not record run now.
+- `lgwks_bot::script::remember<T, Fut>(scope: &Scope, step: &str, body: impl FnOnce() -> Fut) -> Result<T, FlowError>`
+  — runs `body` once per run and records its value durably under the step's
+  path; a later attempt at the same path returns the recorded value. Integers
+  and `String` are recordable.
+
 ## Scoped orchestration (`lgwks_bot::script`)
 
 - `lgwks_bot::script::Tenant::new(name: &str) -> Result<Tenant, FlowError>`.

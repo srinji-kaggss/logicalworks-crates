@@ -248,13 +248,10 @@ The per-`(model, api, task, profile)` rows are in `results.jsonl`, and
 
 What the run shows, stated at the level the data supports:
 
-- **Recovery is not learnable from the sheet within the repair budget.** It is
-  2/20 full passes across both models and every profile, against 32/40 for the
-  other new-API cells. The failures are not near misses: the first compiler
-  error is a guessed name — `ai_task_support::recovery::Store`, `RunStore`, a
-  `.units()` method, `script::Store` — or a reply with no Rust block at all
-  (four trials). The new durable surface (`Host::submit`, `remember`, a run
-  store) is the part a fixed model cannot reconstruct from 250 lines.
+- **Recovery's 2/20 in this run was the harness, not the API.** It is
+  superseded by the section below: the sheet omitted the durable surface and
+  the prompt omitted the world's width, and once both were on the page and the
+  oracle stopped requiring one unit at a time, recovery reached 16/20.
 - **On aggregate and pipeline the new API matches the old for deepseek** (40/40
   vs 40/40 full passes) **and trails it for space-bunny** (12/20 vs 15/20).
 - **The profile axis did not separate the cells** at two trials each: no profile
@@ -264,6 +261,31 @@ What the run shows, stated at the level the data supports:
   aggregate/expert-hurry t1 and pipeline/agent t1). They are recorded as crashed
   trials (`trial_id: "crashed"`, with the timeout in `error`) and count as
   failures above.
+
+## Recovery, re-measured (#247)
+
+The 2/20 above measured three defects in this rig, found one per run and each
+fixed before the next. No model call was repeated to grade a fix that needed none.
+
+| run | what was wrong | full pass | compiled |
+|---|---|---|---|
+| `20261003T154213Z-models` | `api/new.md` had no `run_store`, `RunId::from_hex`, `Host::resume` or `remember`; the models guessed `Store`, `RunStore` | 2/20 | 6/20 |
+| `20261003T181420Z-models` | sheet fixed; the prompt never named `World::width()`, so solutions probed indices past the end and hit the deadline, and six deepseek sessions spent their turns searching for it | 0/20 | 10/20 |
+| `20261003T190050Z-models` | prompt fixed; the oracle asserted *exactly two* unit bodies at the interruption, which only a one-at-a-time solution meets — all 12 compiled failures were that one assertion | 4/20 | 16/20 |
+| `20261003T190050Z-models/regraded.jsonl` | the same 16 compiled solutions (each `lib.rs` byte-identical to its receipt) re-graded by `regrade.py` against the oracle that asserts *at least two* | **16/20** | 16/20 |
+
+The regrade is equivalent to a re-run because the oracle is hidden: a model's
+repairs only ever see compiler output, so the code a corrected oracle grades is
+the code the model would have written anyway. The four that never compiled stay
+failures. The controls were re-run on the corrected oracle
+(`20261003T193523Z-dry`, and the mutants): every reference passes every clause,
+and `mutant-recovery` — a fresh store per attempt, so the resume re-runs every
+unit — still fails `a_resume_does_not_rerun_a_completed_unit`, so the relaxed
+count did not stop the clause catching a solution that re-runs.
+
+`regrade.py` grades in place in the run's trial directories under the system
+temp root, so it reproduces only on the host that ran the trials; the verdicts
+it wrote are committed beside the run.
 
 ## Proof the plumbing works: references and mutants
 

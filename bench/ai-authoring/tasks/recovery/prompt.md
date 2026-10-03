@@ -23,9 +23,10 @@ pub async fn recover(
 
 `ai_task_support::recovery` is provided by the harness. Two of its types matter.
 
-`World` is `Clone + Send + Sync + 'static`, and its unit method is:
+`World` is `Clone + Send + Sync + 'static`. Its units are indexed `0..width`:
 
 ```rust
+pub const fn width(&self) -> u32   // how many units the world has
 pub async fn unit(&self, scope: &lgwks_bot::script::Scope, index: u32)
     -> Result<u64, ai_task_support::recovery::UnitError>
 ```

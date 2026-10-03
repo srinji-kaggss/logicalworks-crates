@@ -178,10 +178,15 @@ fn a_resume_does_not_rerun_a_completed_unit() -> Result<(), Box<dyn std::error::
     let interrupted = world.clone();
 
     interrupt_recover(interrupted, dir.clone(), 2);
+    // At least the two the interruption waited for. More is legitimate: a
+    // solution that fans the units out has several bodies in flight when the
+    // drop lands, and the contract never asks for one unit at a time. Each body
+    // counted here wrote its record (the storage owner finishes a write its
+    // waiter walked away from), so every one of them must replay below.
     let recorded: u32 = (0..WIDTH).map(|index| world.stats().runs(index)).sum();
-    assert_eq!(
-        recorded, 2,
-        "the interrupted attempt recorded exactly two unit bodies"
+    assert!(
+        recorded >= 2,
+        "the interrupted attempt recorded at least two unit bodies, recorded {recorded}"
     );
 
     // The run the interrupted attempt left behind, over the same directory.
