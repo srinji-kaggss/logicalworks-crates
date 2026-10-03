@@ -930,29 +930,6 @@ impl fmt::Display for Escaped<'_> {
     }
 }
 
-/// Render one terminal outcome inside a diagnostic.
-///
-/// The two payload-bearing variants carry untrusted text — a handoff target and
-/// a refusal reason can both come from the document — so both go through
-/// `Debug`, which is Rust's own escaping formatter and therefore refuses to
-/// emit a live control character. `Escaped` is not reusable here for the same
-/// reason the `Debug` sites above do not use it: the wrapper would have to be
-/// re-applied around each field separately, and one forgotten wrapper is a
-/// forged log line.
-fn write_terminal(formatter: &mut fmt::Formatter<'_>, terminal: &Terminal) -> fmt::Result {
-    // No wildcard arm: `Terminal` is `#[non_exhaustive]` for *downstream*
-    // consumers, and inside this crate the compiler knows the full set, so a
-    // new variant is a compile error here — which is the prompt wanted, since
-    // a diagnostic that cannot name an outcome should not be written by
-    // accident.
-    match *terminal {
-        Terminal::Completed => formatter.write_str("completed"),
-        Terminal::Referred { ref target } => write!(formatter, "referred to {target:?}"),
-        Terminal::HandedOff { ref target } => write!(formatter, "handed off to {target:?}"),
-        Terminal::Refused { ref reason } => write!(formatter, "refused because {reason:?}"),
-    }
-}
-
 /// Renders a node whose declared terminal contradicts its kind's own outcome.
 ///
 /// Rendered into a buffer and written once: inline, the arm was five fallible

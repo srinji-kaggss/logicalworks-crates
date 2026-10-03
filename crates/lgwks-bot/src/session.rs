@@ -3926,42 +3926,23 @@ impl Session {
     /// whose answer could not then be stored — which is the direction an audit
     /// record must err in, and the opposite of an accepted answer with no
     /// record of why.
-    pub fn answer(&mut self, utterance: &str) -> Result<(), BotError> {
-        lgwks_std::trace::warn!(
-            operation = "answer",
-            "operation refused its request; the typed error carries the facts"
-        );
-        if self.terminal.is_some() {
-            return Err(BotError::SessionTerminated);
-        }
-        let Some(node_id) = self.current.clone() else {
-            return Err(BotError::SessionNotAwaitingAnswer);
-        };
-        let Some(NodeKind::Ask {
-            var,
-            options,
-            routes,
-        }) = self.flow.node(&node_id).cloned()
-        else {
-            return Err(BotError::SessionNotAwaitingAnswer);
-        };
-        // The ingress ceiling, and it comes before the step is charged and
-        // before the utterance is copied anywhere: a refused line must neither
-        // consume budget nor leave a record that reads as part of the
-        // conversation. The check is one comparison against a bounded length,
-        // so refusing costs nothing that accepting would not have cost more of.
-        let utterance_limit = self.limits.get(ResourceAxis::Utterance);
-        if utterance.len() > utterance_limit {
-            return Err(BotError::UtteranceTooLarge {
-                bytes: utterance.len(),
-                limit: utterance_limit,
-            });
-        }
-        self.charge_step()?;
-        let question =
-            Question::new(&node_id, &options).with_domain(self.scope.answer_domain(&var));
-        let verdict = self.resolver.resolve(utterance, &question);
-        match verdict.resolution().clone() {
+    /// Applies one resolver verdict to the session.
+    ///
+    /// Every arm is its own refusal or its own transcript, and reading them side
+    /// by side is what makes the differences between them -- a narrowed re-ask,
+    /// a withdrawn binding, a degraded cause under its own role -- visible.
+    /// Inside `answer` they read as one statement.
+    fn apply_resolution(
+        &mut self,
+        resolution: Resolution,
+        node_id: &str,
+        var: &str,
+        options: &[String],
+        routes: &BTreeMap<String, NodeId>,
+        verdict: &Verdict,
+        utterance: &str,
+    ) -> Result<(), BotError> {
+        match resolution {
             Resolution::Resolved { index, .. } => self.accept_resolved(
                 &node_id, &var, index, &options, &routes, &verdict, utterance,
             ),
@@ -4017,6 +3998,85 @@ impl Session {
                 Ok(())
             }
         }
+    }
+    /// Submit one free-text answer. Unrecognized input is recorded, the same
+    /// ask remains current, and the prompt is recorded again.
+    ///
+    /// Every verdict — resolved, ambiguous, absent, or degraded — writes a
+    /// [`DecisionReceipt`], because a re-ask is a decision too and the one an
+    /// operator most needs to see afterwards.
+    ///
+    /// The receipt is written through the journal before the transition it
+    /// describes is applied, and a journal that refuses it aborts the answer
+    /// with [`BotError::ReceiptNotRecorded`] leaving the session exactly as it
+    /// was: not advanced, not terminated, the variable unwritten, the
+    /// transcript untouched, and no receipt held. Recording is part of
+    /// accepting an answer, not a report written beside it, so the one failure
+    /// this ordering leaves behind is a decision that was reached and recorded
+    /// whose answer could not then be stored — which is the direction an audit
+    /// record must err in, and the opposite of an accepted answer with no
+    /// record of why.
+    /// Submit one free-text answer. Unrecognized input is recorded, the same
+    /// ask remains current, and the prompt is recorded again.
+    ///
+    /// Every verdict — resolved, ambiguous, absent, or degraded — writes a
+    /// [`DecisionReceipt`], because a re-ask is a decision too and the one an
+    /// operator most needs to see afterwards.
+    ///
+    /// The receipt is written through the journal before the transition it
+    /// describes is applied, and a journal that refuses it aborts the answer
+    /// with [`BotError::ReceiptNotRecorded`] leaving the session exactly as it
+    /// was: not advanced, not terminated, the variable unwritten, the
+    /// transcript untouched, and no receipt held. Recording is part of
+    /// accepting an answer, not a report written beside it, so the one failure
+    /// this ordering leaves behind is a decision that was reached and recorded
+    /// whose answer could not then be stored — which is the direction an audit
+    /// record must err in, and the opposite of an accepted answer with no
+    /// record of why.
+    pub fn answer(&mut self, utterance: &str) -> Result<(), BotError> {
+        lgwks_std::trace::warn!(
+            operation = "answer",
+            "operation refused its request; the typed error carries the facts"
+        );
+        if self.terminal.is_some() {
+            return Err(BotError::SessionTerminated);
+        }
+        let Some(node_id) = self.current.clone() else {
+            return Err(BotError::SessionNotAwaitingAnswer);
+        };
+        let Some(NodeKind::Ask {
+            var,
+            options,
+            routes,
+        }) = self.flow.node(&node_id).cloned()
+        else {
+            return Err(BotError::SessionNotAwaitingAnswer);
+        };
+        // The ingress ceiling, and it comes before the step is charged and
+        // before the utterance is copied anywhere: a refused line must neither
+        // consume budget nor leave a record that reads as part of the
+        // conversation. The check is one comparison against a bounded length,
+        // so refusing costs nothing that accepting would not have cost more of.
+        let utterance_limit = self.limits.get(ResourceAxis::Utterance);
+        if utterance.len() > utterance_limit {
+            return Err(BotError::UtteranceTooLarge {
+                bytes: utterance.len(),
+                limit: utterance_limit,
+            });
+        }
+        self.charge_step()?;
+        let question =
+            Question::new(&node_id, &options).with_domain(self.scope.answer_domain(&var));
+        let verdict = self.resolver.resolve(utterance, &question);
+        self.apply_resolution(
+            verdict.resolution().clone(),
+            &node_id,
+            &var,
+            &options,
+            &routes,
+            &verdict,
+            utterance,
+        )
     }
 
     /// Build one receipt and write it through the journal, or refuse the

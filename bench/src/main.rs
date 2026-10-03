@@ -926,6 +926,113 @@ fn check_fairness(m: &Measurement) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Measures one scenario, checks it was fair, and writes both report forms.
+///
+/// The fairness gate runs before anything is written, so a scenario that did not
+/// do the same work in both engines never reaches either report. That is the
+/// whole reason this is one function: splitting the measure from the reporting
+/// would put a `writeln!` between the check and the numbers it protects.
+fn report_scenario(
+    scenario: &Scenario,
+    index: usize,
+    scratch: &std::path::Path,
+    human: &mut String,
+    json: &mut String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    lgwks_std::trace::warn!(
+        operation = "report_scenario",
+        "operation refused its request; the typed error carries the facts"
+    );
+    let m = measure(scenario, scratch, index)?;
+    check_fairness(&m)?;
+    let m = measure(scenario, scratch, index)?;
+
+    check_fairness(&m)?;
+
+    let mut ratios: Vec<f64> = m
+        .bot
+        .iter()
+        .zip(m.base.iter())
+        .map(|(b, r)| if *r > 0.0 { b / r } else { f64::NAN })
+        .collect();
+
+    let ticks = m.ticks_per_round as f64;
+    let mut bot_tps: Vec<f64> = m.bot.iter().map(|d| ticks / d).collect();
+    let mut base_tps: Vec<f64> = m.base.iter().map(|d| ticks / d).collect();
+
+    let ratio_median = stats::median(&mut ratios);
+    let (ci_lo, ci_hi) = stats::bootstrap_median_ci(&ratios, 10_000, 0.95, 0x5EED_1234);
+    let bot_median_tps = stats::median(&mut bot_tps);
+    let base_median_tps = stats::median(&mut base_tps);
+
+    writeln!(human, "scenario  {}", m.name)?;
+    writeln!(human, "  intent  {}", m.intent)?;
+    writeln!(
+        human,
+        "  workload  {} sources x {} entries, {} ticks/round x {} rounds",
+        scenario.sources, scenario.entries, m.ticks_per_round, scenario.rounds
+    )?;
+    writeln!(
+        human,
+        "  fairness  {} effects and {} condition evaluations, identical in both engines",
+        m.effects_bot, m.evals_bot
+    )?;
+    writeln!(
+        human,
+        "  bot       {:.0} ticks/s   ({:.1} ns/tick)",
+        bot_median_tps,
+        1e9 / bot_median_tps
+    )?;
+    writeln!(
+        human,
+        "  baseline  {:.0} ticks/s   ({:.1} ns/tick)",
+        base_median_tps,
+        1e9 / base_median_tps
+    )?;
+    writeln!(
+        human,
+        "  ratio     {:.2}x  bot / baseline   95% CI [{:.2}, {:.2}]  {}",
+        ratio_median,
+        ci_lo,
+        ci_hi,
+        if stats::distinguishes_parity(ci_lo, ci_hi) {
+            "(excludes parity)"
+        } else {
+            "(INCLUDES parity -- not a distinguishable difference)"
+        }
+    )?;
+    writeln!(
+        human,
+        "  build     {} chains admitted in {:.3} ms\n",
+        scenario.sources,
+        m.build_bot.as_secs_f64() * 1e3
+    )?;
+
+    writeln!(
+        json,
+        "  \"{}\": {{ \"sources\": {}, \"entries\": {}, \"ticks_per_round\": {}, \
+                 \"rounds\": {}, \"effects\": {}, \"evaluations\": {}, \
+                 \"bot_ticks_per_sec\": {:.1}, \"baseline_ticks_per_sec\": {:.1}, \
+                 \"ratio_median\": {:.4}, \"ratio_ci95\": [{:.4}, {:.4}], \
+                 \"build_ms\": {:.4} }},",
+        m.name,
+        scenario.sources,
+        scenario.entries,
+        m.ticks_per_round,
+        scenario.rounds,
+        m.effects_bot,
+        m.evals_bot,
+        bot_median_tps,
+        base_median_tps,
+        ratio_median,
+        ci_lo,
+        ci_hi,
+        m.build_bot.as_secs_f64() * 1e3
+    )?;
+
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     lgwks_std::trace::warn!(
         operation = "main",
@@ -955,90 +1062,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if run_timings {
         for (index, scenario) in SCENARIOS.iter().enumerate() {
-            let m = measure(scenario, &scratch, index)?;
-
-            check_fairness(&m)?;
-
-            let mut ratios: Vec<f64> = m
-                .bot
-                .iter()
-                .zip(m.base.iter())
-                .map(|(b, r)| if *r > 0.0 { b / r } else { f64::NAN })
-                .collect();
-
-            let ticks = m.ticks_per_round as f64;
-            let mut bot_tps: Vec<f64> = m.bot.iter().map(|d| ticks / d).collect();
-            let mut base_tps: Vec<f64> = m.base.iter().map(|d| ticks / d).collect();
-
-            let ratio_median = stats::median(&mut ratios);
-            let (ci_lo, ci_hi) = stats::bootstrap_median_ci(&ratios, 10_000, 0.95, 0x5EED_1234);
-            let bot_median_tps = stats::median(&mut bot_tps);
-            let base_median_tps = stats::median(&mut base_tps);
-
-            writeln!(human, "scenario  {}", m.name)?;
-            writeln!(human, "  intent  {}", m.intent)?;
-            writeln!(
-                human,
-                "  workload  {} sources x {} entries, {} ticks/round x {} rounds",
-                scenario.sources, scenario.entries, m.ticks_per_round, scenario.rounds
-            )?;
-            writeln!(
-                human,
-                "  fairness  {} effects and {} condition evaluations, identical in both engines",
-                m.effects_bot, m.evals_bot
-            )?;
-            writeln!(
-                human,
-                "  bot       {:.0} ticks/s   ({:.1} ns/tick)",
-                bot_median_tps,
-                1e9 / bot_median_tps
-            )?;
-            writeln!(
-                human,
-                "  baseline  {:.0} ticks/s   ({:.1} ns/tick)",
-                base_median_tps,
-                1e9 / base_median_tps
-            )?;
-            writeln!(
-                human,
-                "  ratio     {:.2}x  bot / baseline   95% CI [{:.2}, {:.2}]  {}",
-                ratio_median,
-                ci_lo,
-                ci_hi,
-                if stats::distinguishes_parity(ci_lo, ci_hi) {
-                    "(excludes parity)"
-                } else {
-                    "(INCLUDES parity -- not a distinguishable difference)"
-                }
-            )?;
-            writeln!(
-                human,
-                "  build     {} chains admitted in {:.3} ms\n",
-                scenario.sources,
-                m.build_bot.as_secs_f64() * 1e3
-            )?;
-
-            writeln!(
-                json,
-                "  \"{}\": {{ \"sources\": {}, \"entries\": {}, \"ticks_per_round\": {}, \
-                 \"rounds\": {}, \"effects\": {}, \"evaluations\": {}, \
-                 \"bot_ticks_per_sec\": {:.1}, \"baseline_ticks_per_sec\": {:.1}, \
-                 \"ratio_median\": {:.4}, \"ratio_ci95\": [{:.4}, {:.4}], \
-                 \"build_ms\": {:.4} }},",
-                m.name,
-                scenario.sources,
-                scenario.entries,
-                m.ticks_per_round,
-                scenario.rounds,
-                m.effects_bot,
-                m.evals_bot,
-                bot_median_tps,
-                base_median_tps,
-                ratio_median,
-                ci_lo,
-                ci_hi,
-                m.build_bot.as_secs_f64() * 1e3
-            )?;
+            report_scenario(scenario, index, &scratch, &mut human, &mut json)?;
         }
     }
 
