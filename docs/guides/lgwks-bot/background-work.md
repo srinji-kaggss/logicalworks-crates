@@ -9,7 +9,7 @@ for a blocking call. The units differ, and so do the guarantees.
 `rt::supervise::Supervisor` (feature `sync`) owns a set of background tasks and
 stops them when it goes away. `Supervisor::new(max_in_flight)` takes the ceiling,
 clamps it into `1..=Semaphore::MAX_PERMITS`, and offers no argument that produces
-an unbounded supervisor (`crates/lgwks-bot/src/rt/supervise.rs:887`).
+an unbounded supervisor (`crates/lgwks-bot/src/rt/supervise.rs:900`).
 `Supervisor::default()` is the constructor for the caller who has no opinion: it
 discovers the ceiling from `std::thread::available_parallelism`, so the safe
 default is the *first* thing that resolves rather than something to remember to
@@ -80,7 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `Supervisor::spawn_process(spec)` starts a child under the same in-flight
 ceiling as `spawn`, and returns a `TaskId` — not a `Child`
-(`crates/lgwks-bot/src/rt/supervise.rs:1235`). `rt::process::ProcessSpec` lets
+(`crates/lgwks-bot/src/rt/supervise.rs:1248`). `rt::process::ProcessSpec` lets
 you say what to run without exposing an executable engine handle.
 The task this places is the only owner the process has:
 
@@ -128,26 +128,68 @@ Three differences from a raw `Child`:
 
 `Supervisor::run_process(spec)` is `spawn_process` with the completion handed
 back: it awaits the child and returns a `ProcessRun`
-(`crates/lgwks-bot/src/rt/supervise.rs:1297`). It reuses the same process-group
+(`crates/lgwks-bot/src/rt/supervise.rs:1310`). It reuses the same process-group
 ownership, deadline and cleanup machinery, so a deadline stops the **group**,
 and the run reports the same `CleanupReceipt` a supervised task would.
 
 The report is data, and none of it is a verdict about the work:
 `ProcessRun::status` (with `exit_code` and `signal`), `stdout` and `stderr` as
 `CapturedStream`s, `deadline_fired`, and `cleanup`
-(`crates/lgwks-bot/src/rt/process.rs:352`). Exit zero is reported as exit zero;
+(`crates/lgwks-bot/src/rt/process.rs:408`). Exit zero is reported as exit zero;
 judging whether the command did what it was asked is the caller's job.
 
 A stream whose policy is `StdioPolicy::Capture(limit)`
-(`crates/lgwks-bot/src/rt/process.rs:45`) keeps its first `limit` bytes — the
+(`crates/lgwks-bot/src/rt/process.rs:51`) keeps its first `limit` bytes — the
 ceiling is a `NonZeroUsize`, so it cannot be unbounded — keeps draining the pipe
 so a child that writes past the ceiling never blocks, and reports the exact
 byte total with a `truncated` flag. The retained buffer is sized once to the
 ceiling, so the memory a capture can hold is bounded by the policy rather than
 by what the child wrote.
 
+## Reading a child's output as framed records
+
+A child whose output is a sequence of length-prefixed records is read with
+`CapturedStream::frames(ceiling)`, the door from a `ProcessRun`'s captured
+stdout to the crate's one frame grammar. It cannot fail — a byte slice never
+refuses a read — so the answer is the records plus a single `FrameRead` saying
+why the pass stopped.
+
+Four ways that ending goes, and they are different facts:
+
+- **`Frame`** — the prefix arrived and every byte it named followed.
+- **`TruncatedPrefix` / `TruncatedPayload`** — the *child* stopped writing
+  mid-record. Only for a capture that is **not** `truncated`.
+- **`MalformedPrefix`** — a complete prefix declared `0`, or a length past the
+  reader's `ceiling`. Both name no record this grammar writes.
+- **`CeilingReached`** — either the reader retained its whole `ceiling` of
+  payload bytes, or a legal record declared more than the room remaining. A
+  well-formed record with nowhere to go is a bound, not rot.
+
+The case worth stating plainly: **a `truncated` capture never reports a clean
+end.** Its retained bytes are a prefix *the capture* cut, so they are not the
+child's whole output however they happen to end — including when they end
+exactly on a record boundary, which is precisely what a naive reader reports as
+a complete stream. `frames()` therefore overrides the three endings that are
+*about where the bytes stop* — `EndOfStream`, `TruncatedPrefix`,
+`TruncatedPayload` — with `CeilingReached { ceiling: <the capture's retained
+capacity> }`, and `is_complete()` is `false` for each.
+
+The two it leaves alone are the two the cut cannot have reached. A
+`MalformedPrefix` was decided from a *whole* prefix the capture did retain, so
+it is rot in the child's output however much output followed it. And a
+`CeilingReached` the reader itself reached stopped the pass before the cut
+mattered, so it names the reader's ceiling. Swapping either for the capture's
+would be the fail-open direction: a caller looking for corruption gets a bound it
+never hit, and a caller looking for its own bound is told something larger stopped
+it. The two ceilings are separate facts: the reader's `ceiling` argument bounds
+the payload bytes one pass keeps, and the capture's own
+`StdioPolicy::Capture(limit)` bounds what was ever retained.
+
+`read_frames(&mut reader, ceiling)` remains the fallible form for a reader that
+can actually refuse. Prefer `frames()` when the bytes are already in hand.
+
 `run_process` returns typed errors that separate the two worlds a caller acts
-on differently (`crates/lgwks-bot/src/rt/process.rs:453`): `Refused` (the
+on differently (`crates/lgwks-bot/src/rt/process.rs:1030`): `Refused` (the
 supervisor was cancelled before the fork) and `NotStarted` (the platform
 refused the program) both establish that nothing ran; `AfterStart` establishes
 that the child did run and its outcome is unknown.
@@ -162,14 +204,14 @@ failure is `Indeterminate`.
 ## `repeat`: a bound on iterations
 
 `repeat(&token, budget, body)` is the only loop the module asks you to write, and
-it cannot be written without a `Budget` (`crates/lgwks-bot/src/rt/supervise.rs:2801`).
+it cannot be written without a `Budget` (`crates/lgwks-bot/src/rt/supervise.rs:57`).
 The variants are `Iterations(NonZeroU64)`, `For(Duration)`, and `Ongoing`.
 
 Two details that decide how tight your bound really is:
 
 - `Budget::For` checks its deadline between iterations, so a body that blocks for
   longer than the budget overruns it by one iteration
-  (`crates/lgwks-bot/src/rt/supervise.rs:2814`). Cancellation is not subject to
+  (`crates/lgwks-bot/src/rt/supervise.rs:164`). Cancellation is not subject to
   that slack, because it interrupts the body itself.
 - Every iteration races the token rather than checking it between iterations.
   A cancel drops a body that is still awaiting, and the loop reports
@@ -250,7 +292,7 @@ The grace is time and not a count of yields, which matters on a multi-threaded
 runtime: `yield_now` only reschedules the yielding task, so it cannot give a body
 parked on another worker the thread wakeup its return actually needs, and a
 counted grace reported cancelled work as aborted
-(`crates/lgwks-bot/src/rt/supervise.rs:834`). A body that returns is settled the
+(`crates/lgwks-bot/src/rt/supervise.rs:847`). A body that returns is settled the
 moment it does, so the grace is a ceiling on the wait and not a cost charged to
 every shutdown.
 
@@ -260,7 +302,7 @@ and `spawn_blocking` are for a build with no async runtime. There is a
 
 ## What the tests exercise
 
-`crates/lgwks-bot/src/rt/supervise.rs:2862` runs the module's own tests under the
+`crates/lgwks-bot/src/rt/supervise.rs:2875` runs the module's own tests under the
 ordinary workspace test run. They cover an iteration budget stopping at its
 limit, an `Ongoing` budget stopping at a cancel, cancellation interrupting a body
 that is still awaiting, `try_spawn` refusing at the bound rather than growing,
