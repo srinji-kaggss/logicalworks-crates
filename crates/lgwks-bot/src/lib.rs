@@ -214,6 +214,30 @@ pub mod journal;
 pub mod json;
 /// Language understanding: the tiered lexicon behind the resolver seam.
 pub mod language;
+/// Model output admitted as data: bounded decode, provenance, evidence-gated
+/// completion, bounded repair, tenant-scoped artifacts, and a context checkpoint
+/// (feature `script`).
+///
+/// The rule it implements (issue #87): an AI proposal is an **untrusted task
+/// input**. Validation, provenance, no-progress detection, bounded repair,
+/// tenant-scoped artifacts and serialized writes belong in the host's contract,
+/// not in a prompt. So nothing here calls a model — [`proposal::StubModel`] is a
+/// deterministic double and the bytes arrive as `&[u8]` from a caller that owns
+/// the transport — and nothing a payload says can install a tool, read a
+/// credential, widen a grant, or turn a truncated observation into a complete
+/// one. Each attempt is a typed [`proposal::Refusal`] carrying the
+/// [`proposal::Provenance`] of the bytes that made it.
+///
+/// It is not a fifth verb: the operations a proposal may name are the ones the
+/// host already registered in [`proposal::Surface`], and admitting one produces a
+/// [`proposal::Plan`] of names to perform through the existing verbs rather than
+/// a new way to perform anything.
+///
+/// It sits on `script` because the checkpoint round-trips through the run store
+/// ([`proposal::Checkpoint`] is [`Durable`](script::run_store::Durable)) and the
+/// artifact store is what a task's steps reach.
+#[cfg(feature = "script")]
+pub mod proposal;
 /// The `domain_id -> constructor` registry: what a spec's strings resolve to.
 ///
 /// Private, with curated re-exports beside `BotSpec` below, because the registry
