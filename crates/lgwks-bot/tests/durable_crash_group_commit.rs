@@ -28,7 +28,7 @@
 //! | Test | What it pins |
 //! |---|---|
 //! | `a_real_kill_mid_batch_holds_exactly_the_acknowledged_prefix` | the reopened store's records are exactly the acknowledged set — none lost, none invented |
-//! | `a_killed_run_with_no_acknowledgment_leaves_no_record` | a child killed before any run was acknowledged leaves a clean, empty, reopenable store |
+//! | `a_killed_run_with_no_acknowledgment_leaves_no_record` | a child killed before any run was acknowledged leaves a clean, reopenable store holding its header or that and one complete in-flight frame |
 //! | `the_group_commit_probe_child_is_killed_not_exited` | the observation is a kill: a probe that died on its own would make the row a courtesy |
 
 #![cfg(all(feature = "script", feature = "ephemeral"))]
@@ -277,9 +277,11 @@ fn kill_scenario(tag: &str, test_name: &str, runs: u32) -> Result<KillScenario, 
 
 /// A child killed before any run was acknowledged leaves a clean, reopenable store.
 ///
-/// The negative control for the row above. An empty store that reopens at all is
-/// the claim: bytes written without a covering flush may exist as a torn tail, and
-/// the store must trim that without refusing the open or inventing a record.
+/// The negative control for the row above. A store that reopens cleanly is the
+/// claim: bytes written without a covering flush may exist as a torn tail, and the
+/// store must trim that without refusing the open or inventing a record. No
+/// acknowledged record exists; the one record that may exist is the single
+/// in-flight frame the device took before the kill.
 #[test]
 fn a_killed_run_with_no_acknowledgment_leaves_no_record() -> TestResult {
     if dispatch_to_probe()? {
@@ -303,13 +305,46 @@ fn a_killed_run_with_no_acknowledgment_leaves_no_record() -> TestResult {
     );
     // The store directory may not exist at all: a child killed before it opened its
     // store leaves nothing, and "nothing" is a store this row can also accept.
+    //
+    // An empty marker does not mean an empty store. The child notes a run only after
+    // its append returned, so the kill can land after run 0's frame was flushed and
+    // before its id reached the marker — an unacknowledged record the device took,
+    // which a reopen replays (at-least-once, INV-BOT-130). The child is sequential, so
+    // that is at most one record: the store holds its header, or its header and
+    // exactly one complete frame. A retained torn tail, a second record or a refused
+    // open is still a failure, so the oracle stays an equality rather than a bound.
     let reopened = RunStore::open_in(&store, "probe")?;
-    assert_eq!(
-        reopened.committed_bytes(),
-        header_len(),
-        "a store whose child was killed before any acknowledgment holds only its header"
+    let (empty, one_record) = (header_len(), one_record_len()?);
+    assert!(
+        reopened.committed_bytes() == empty || reopened.committed_bytes() == one_record,
+        "a store whose child was killed before any acknowledgment holds its header \
+         ({empty} bytes) or that and one complete in-flight frame ({one_record} bytes), \
+         and this one holds {} bytes",
+        reopened.committed_bytes()
     );
     Ok(())
+}
+
+/// How many bytes a run store holds after exactly one probe run was recorded.
+///
+/// Measured by recording that run on a real store, for the reason [`header_len`]
+/// is: the row's claim is "one complete frame", not a length this file believes.
+///
+/// # Errors
+///
+/// Whatever the scratch directory, the host or the reopen reports, and a run that
+/// did not succeed.
+fn one_record_len() -> Result<u64, Box<dyn Error>> {
+    let scratch = Scratch::new("gc-one-record")?;
+    let store = scratch.path().join("store");
+    {
+        let host = Host::builder("probe")?.run_store(&store)?.build()?;
+        let report = lgwks_bot::rt::runtime::block_on(host.run(&one_step_task()?, 0));
+        if !report.disposition().is_success() {
+            return Err(format!("the reference run failed: {:?}", report.error()).into());
+        }
+    }
+    Ok(RunStore::open_in(&store, "probe")?.committed_bytes())
 }
 
 /// Wait until `reached` says the child has got far enough, then `SIGKILL` it.
