@@ -331,6 +331,37 @@ impl CapturedStream {
         self.bytes.capacity()
     }
 
+    /// Read the retained bytes as length-framed records, under `ceiling`.
+    ///
+    /// The door a caller reads its own child's output through, so the frame
+    /// grammar is reached from a [`ProcessRun`] without the caller re-plumbing
+    /// the captured bytes into a reader. Infallible by construction: a byte
+    /// slice never refuses a read, so there is no [`FrameReadError`] to report
+    /// and the one slice path below owns the whole reading.
+    ///
+    /// # What a truncated capture means for the ending
+    ///
+    /// A [`CapturedStream`] that reports [`CapturedStream::truncated`] holds a
+    /// **prefix the capture cut**, so its bytes are not the child's whole output
+    /// no matter how they happen to end. A pass over them therefore never reports
+    /// [`FrameRead::EndOfStream`] and never reports a child truncation as though
+    /// it were one: the ending is [`FrameRead::CeilingReached`] carrying the
+    /// capture's own retained capacity, and [`Frames::is_complete`] is `false`.
+    /// Otherwise the endings are the reader's own — the clean end, or the
+    /// truncation a child actually performed on its own last record.
+    ///
+    /// [`FrameReadError`]: crate::rt::process::FrameReadError
+    #[must_use]
+    pub fn frames(&self, ceiling: usize) -> Frames {
+        let mut pass = Frames::of_slice(self.bytes.as_slice(), ceiling);
+        if self.truncated {
+            pass.ended = FrameRead::CeilingReached {
+                ceiling: self.retained_capacity(),
+            };
+        }
+        pass
+    }
+
     /// Build one capture result. Crate-internal: the only producer is the
     /// supervisor's pipe drain.
     #[cfg(unix)]
@@ -504,17 +535,34 @@ pub enum FrameRead {
     },
     /// A whole prefix declared a payload length this reader refuses to accept.
     ///
-    /// A zero length, or one past the ceiling in force. A complete prefix
-    /// carrying such a length is rot or a hand rather than an interrupted
-    /// append, so it is refused rather than trimmed: the same rule
-    /// [`crate::journal`] applies to the frames its own stores read.
+    /// Exactly two lengths: **zero**, or **one past the ceiling in force**. Both
+    /// name no record this grammar writes, so a complete prefix carrying one is
+    /// rot or a hand rather than an interrupted append, and it is refused rather
+    /// than trimmed — the same rule [`crate::journal`] applies to the frames its
+    /// own stores read.
+    ///
+    /// A length that is legal in itself but larger than the room *remaining*
+    /// after earlier records is **not** this: it is a well-formed record with
+    /// nowhere to go, so it is [`Self::CeilingReached`]. Conflating the two would
+    /// call a child's legal record corrupt.
     MalformedPrefix {
         /// The payload length the prefix declared.
         declared: usize,
         /// The ceiling in force when the prefix was refused.
         ceiling: usize,
     },
-    /// The caller's ceiling was reached with the stream still speaking.
+    /// The caller's ceiling left no room for another record.
+    ///
+    /// Two ways in, and neither is a malformed byte stream: the pass retained
+    /// `ceiling` payload bytes in total, or a legal record declared more than the
+    /// room remaining. In the second case the child's prefix was well-formed and
+    /// the record simply did not fit, so calling it rot would report a child's
+    /// legal record as corruption.
+    ///
+    /// A [`CapturedStream::frames`] reading of a *truncated* capture also ends
+    /// here, carrying the capture's retained capacity rather than the caller's
+    /// ceiling: the bytes read are a prefix the capture cut, so nothing about
+    /// them can decide whether the child's stream ended.
     ///
     /// The one reading not about the bytes at all, and the reason a bounded
     /// reader is honest about having stopped early rather than claiming the
@@ -656,10 +704,14 @@ impl std::error::Error for FrameReadError {
 /// # Bounds
 ///
 /// The `ceiling` caps the payload bytes one pass retains, and it is charged
-/// **before** a payload is read, so a prefix declaring more than remains is
-/// [`FrameRead::MalformedPrefix`] rather than an allocation a hostile stream could
-/// ask for. Every payload buffer the pass holds is therefore at most `ceiling`
-/// bytes, and the retained records together at most `ceiling` bytes.
+/// **before** a payload is read. A prefix declaring a length past the ceiling is
+/// [`FrameRead::MalformedPrefix`] — it names no record this grammar writes — and
+/// a legal length that exceeds only the *room remaining* is
+/// [`FrameRead::CeilingReached`], a well-formed record with nowhere to go. Either
+/// way no payload byte is read, so a stream cannot ask for an allocation by
+/// claiming a large record. Every payload buffer the pass holds is therefore at
+/// most `ceiling` bytes, and the retained records together at most `ceiling`
+/// bytes.
 ///
 /// ```rust
 /// # use lgwks_bot::rt::process::{FrameRead, read_frames};
@@ -703,39 +755,59 @@ pub struct Frames {
 impl Frames {
     /// Read `stream` to its end, its first refusal, or `ceiling` payload bytes.
     ///
-    /// The one constructor, so a pass cannot exist half-built: every way of
-    /// obtaining a `Frames` runs the read to one of its three endings.
+    /// The one constructor that can refuse, so a pass over a real reader runs to
+    /// one of its three endings or reports the device's refusal; [`Self::of_slice`]
+    /// is the same pass over bytes already in hand and cannot refuse.
     ///
     /// # Errors
     ///
-    /// [`FrameReadError`] when `stream` refuses.
+    /// [`FrameReadError`] when `stream` refuses, carrying the whole records and
+    /// payload bytes retained before it did.
     pub fn read<R: std::io::Read>(stream: &mut R, ceiling: usize) -> Result<Self, FrameReadError> {
-        let mut records: Vec<FrameRead> = Vec::new();
-        let mut retained = 0_usize;
-        // One payload buffer for the whole pass, reused so a stream of small
-        // records does not allocate once per record. Only a payload already
-        // charged against the ceiling is read into it, so its capacity is
-        // bounded by the ceiling whatever the stream declares.
-        let mut payload: Vec<u8> = Vec::new();
-        let ended = loop {
-            match read_one(stream, ceiling, &mut retained, &mut records, &mut payload) {
-                Ok(Some(ended)) => break ended,
-                // A whole record: keep reading.
-                Ok(None) => {}
-                Err(error) => {
-                    return Err(FrameReadError {
-                        source: error,
-                        frames: records.len(),
-                        payload_bytes: retained,
-                    });
-                }
-            }
-        };
-        Ok(Self {
-            records,
-            ended,
-            retained_bytes: retained,
-        })
+        let pass = read_pass(stream, ceiling);
+        match pass {
+            Ok((records, ended, retained_bytes)) => Ok(Self {
+                records,
+                ended,
+                retained_bytes,
+            }),
+            Err(Failed {
+                source,
+                records,
+                retained_bytes,
+            }) => Err(FrameReadError {
+                source,
+                frames: records.len(),
+                payload_bytes: retained_bytes,
+            }),
+        }
+    }
+
+    /// The same pass over bytes already in hand, with the device's refusal
+    /// dropped because a slice cannot produce one.
+    ///
+    /// [`Self::read`] maps the impossible arm to an error carrying nothing,
+    /// which would report "the device refused" for a stream that never had one;
+    /// this path is the one that cannot lie about it. Both run [`read_pass`], so
+    /// there is one reading rule rather than one per source of bytes.
+    fn of_slice(bytes: &[u8], ceiling: usize) -> Self {
+        let mut stream = bytes;
+        match read_pass(&mut stream, ceiling) {
+            Ok((records, ended, retained_bytes)) => Self {
+                records,
+                ended,
+                retained_bytes,
+            },
+            // A slice's reads cannot fail, so the arm is unreachable by
+            // construction rather than by assumption. An empty complete reading
+            // keeps the claim harmless if it were ever reached: no record
+            // decoded, and nothing is claimed beyond that.
+            Err(_) => Self {
+                records: Vec::new(),
+                ended: FrameRead::EndOfStream,
+                retained_bytes: 0,
+            },
+        }
     }
 
     /// The whole records the pass read, in stream order.
@@ -779,6 +851,50 @@ impl Frames {
     }
 }
 
+/// What one bounded pass retained when the device refused mid-stream.
+///
+/// The records and payload bytes are carried out with the refusal rather than
+/// dropped, because "the reader failed" and "nothing had been read yet" are
+/// different facts and a caller retrying wants to know which it is.
+struct Failed {
+    /// The device's refusal.
+    source: io::Error,
+    /// Whole records retained before it.
+    records: Vec<FrameRead>,
+    /// Payload bytes retained before it.
+    retained_bytes: usize,
+}
+
+/// Read `stream` to its end, its first refusal, or `ceiling` payload bytes.
+///
+/// The one pass, shared by the fallible reader path and the infallible slice
+/// path, so "how a stream of records ends" has one definition rather than one per
+/// source of bytes. The ending travels out as the `Ok` payload rather than
+/// through an out-parameter, which is what keeps "the stream ended cleanly"
+/// distinct from "a record was refused".
+fn read_pass<R: std::io::Read>(
+    stream: &mut R,
+    ceiling: usize,
+) -> Result<(Vec<FrameRead>, FrameRead, usize), Failed> {
+    let mut records: Vec<FrameRead> = Vec::new();
+    let mut retained = 0_usize;
+    let ended = loop {
+        match read_one(stream, ceiling, &mut retained, &mut records) {
+            Ok(Some(ended)) => break ended,
+            // A whole record: keep reading.
+            Ok(None) => {}
+            Err(source) => {
+                return Err(Failed {
+                    source,
+                    records,
+                    retained_bytes: retained,
+                });
+            }
+        }
+    };
+    Ok((records, ended, retained))
+}
+
 /// Read one record from `stream`, charging the ceiling before the payload.
 ///
 /// `Ok(None)` is a whole record already pushed onto `records`; `Ok(Some(..))` is
@@ -790,7 +906,6 @@ fn read_one<R: std::io::Read>(
     ceiling: usize,
     retained: &mut usize,
     records: &mut Vec<FrameRead>,
-    payload: &mut Vec<u8>,
 ) -> Result<Option<FrameRead>, io::Error> {
     if *retained >= ceiling {
         return Ok(Some(FrameRead::CeilingReached { ceiling }));
@@ -814,29 +929,42 @@ fn read_one<R: std::io::Read>(
         _ => {}
     }
     let declared = declared_length(&prefix);
-    // The charge is decided by the prefix, before a byte of payload is read. A
-    // stream declaring more than remains is refused rather than believed, so the
-    // resize below cannot allocate past what the caller declared.
-    if !is_possible_length(declared, ceiling.saturating_sub(*retained)) {
+    // The charge is decided by the prefix, before a byte of payload is read, so
+    // the allocation below cannot exceed what the caller declared.
+    //
+    // Three lengths, three readings, and the split is the whole point:
+    //
+    // - `declared == 0 || declared > ceiling` names no record this reader would
+    //   ever write, so it is rot or a hand: [`FrameRead::MalformedPrefix`].
+    // - a legal `declared` that exceeds only the *remaining* room is not rot —
+    //   it is a well-formed record with nowhere to go, so it is
+    //   [`FrameRead::CeilingReached`] and the pass stops without reading it.
+    // - anything else fits, and is allocated at exactly `declared`.
+    if !is_possible_length(declared, ceiling) {
         return Ok(Some(FrameRead::MalformedPrefix { declared, ceiling }));
     }
-    payload.clear();
-    payload.resize(declared, 0);
-    let read = read_counted(stream, payload)?;
+    let remaining = ceiling.saturating_sub(*retained);
+    if declared > remaining {
+        return Ok(Some(FrameRead::CeilingReached { ceiling }));
+    }
+    // One exactly-sized buffer per record, allocated only after the charge above
+    // and then *moved* into the record: a record owns its bytes, so no payload is
+    // ever copied twice and there is no shared buffer to clear between records.
+    let mut payload: Vec<u8> = vec![0; declared];
+    let read = read_counted(stream, &mut payload)?;
     *retained = retained.saturating_add(declared);
     if read < declared {
         // Charged its declared length: that is the room this pass gave up on the
         // record's behalf, so the accounting describes what was reserved rather
-        // than only what arrived.
+        // than only what arrived. Truncating in place keeps the partial the same
+        // allocation rather than a second copy of the bytes that did arrive.
+        payload.truncate(read);
         return Ok(Some(FrameRead::TruncatedPayload {
             declared,
-            partial: payload[..read].to_vec(),
+            partial: payload,
         }));
     }
-    records.push(FrameRead::Frame {
-        declared,
-        payload: payload.clone(),
-    });
+    records.push(FrameRead::Frame { declared, payload });
     Ok(None)
 }
 

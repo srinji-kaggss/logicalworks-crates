@@ -24,6 +24,8 @@
 //! |---|---|
 //! | `sizes_stay_at_the_ceiling` | a seeded output size retains `min(size, ceiling)` and reports the exact total, on both streams |
 //! | `cuts_are_refused_never_decoded` | a seeded cut point inside a frame yields a typed truncation naming both lengths |
+//! | `capture_cuts_end_at_the_capture_ceiling` | a capture-cut prefix ends at the capture's ceiling, never as a child truncation or a clean end |
+//! | `room_without_a_record_is_the_ceiling` | a legal record larger than the room remaining is the ceiling; only `0` and `> ceiling` are rot |
 //! | `two_tenants_never_cross` | two tenants' captures are byte-distinct and neither sees the other's total |
 //! | `the_same_seed_replays` | the same seed produces the same trace hash, twice |
 
@@ -40,7 +42,7 @@ mod sim;
 use std::error::Error;
 use std::num::NonZeroUsize;
 
-use lgwks_bot::rt::process::{FrameRead, ProcessSpec, read_frames};
+use lgwks_bot::rt::process::{FrameRead, ProcessSpec};
 use lgwks_bot::rt::runtime::Builder;
 use lgwks_bot::rt::supervise::Supervisor;
 
@@ -164,8 +166,14 @@ fn cuts_are_refused_never_decoded(band: Band) -> TestResult {
         // and the shipped reader are checked against each other rather than the
         // test asserting whatever the reader happened to produce.
         let complete = cut == DECLARED;
-        let mut stream = outcome.stdout().bytes();
-        let frames = read_frames(&mut stream, ceiling)?;
+        // Read through the capture's own door, not a re-plumbed slice: the
+        // capture is untruncated here, so the ending is the reader's own.
+        assert!(
+            !outcome.stdout().truncated(),
+            "cut={cut}: the write must fit the {ceiling}-byte ceiling, or the ending would \
+             be the capture's rather than the child's"
+        );
+        let frames = outcome.stdout().frames(ceiling);
         let expected_frames = if complete { 2 } else { 1 };
         assert_eq!(
             frames.records().len(),
@@ -287,25 +295,37 @@ fn the_same_seed_replays(band: Band) -> TestResult {
 
         // The framing half of the receipt too, so a change in how a cut frame is
         // classified shows up here and not only in the family that cuts.
-        let framed = read_frames(&mut outcome.stdout().bytes().to_vec().as_slice(), ceiling);
-        match framed {
-            Ok(frames) => {
-                sim.trace.record_count("frames", frames.records().len());
-                sim.trace
-                    .record_u64("ended", u64::from(frames.ended().is_frame()));
-            }
-            Err(error) => {
-                sim.record("frame-error");
-                // The kind is the whole of what a retry decision turns on, and a
-                // `Debug` rendering of it would be a text comparison.
-                let kind = format!("{:?}", error.kind());
-                sim.trace.record(&format!("frame-error-kind-{kind}"));
-            }
-        }
+        let frames = outcome.stdout().frames(ceiling);
+        sim.trace.record_count("frames", frames.records().len());
+        // The ending's *class*, not a rendering of it: a text comparison would
+        // pass while the classification changed.
+        sim.trace
+            .record(&format!("ended-{}", ending_class(&frames)));
+        sim.trace
+            .record_u64("capture-truncated", u64::from(outcome.stdout().truncated()));
         sim.trace.record_count("ceiling", ceiling);
         sim.trace.record_u64("size", u64::from(size));
         Ok(())
     })
+}
+
+/// The class of a pass's ending, as the name the trace records.
+///
+/// A `Debug` rendering would put the payload of a partial record into the trace,
+/// so two runs that agreed on every assertion could still differ byte-for-byte
+/// in their receipts. The class is the fact a replay receipt should carry. The
+/// wildcard is [`FrameRead`]'s `#[non_exhaustive]` promise from the outside: a
+/// variant added later must be *named* here or the receipt silently loses it.
+fn ending_class(frames: &lgwks_bot::rt::process::Frames) -> &'static str {
+    match *frames.ended() {
+        FrameRead::Frame { .. } => "frame",
+        FrameRead::EndOfStream => "end-of-stream",
+        FrameRead::TruncatedPrefix { .. } => "truncated-prefix",
+        FrameRead::TruncatedPayload { .. } => "truncated-payload",
+        FrameRead::MalformedPrefix { .. } => "malformed-prefix",
+        FrameRead::CeilingReached { .. } => "ceiling-reached",
+        _ => "unknown",
+    }
 }
 
 /// A child flooding stdout is drained against a slow reader without exceeding its
@@ -353,6 +373,215 @@ fn a_seeded_flood_stays_bounded_on_one_worker(band: Band) -> TestResult {
         record_capture(sim, "flood", &outcome);
         sim.trace.record_count("ceiling", ceiling);
         sim.trace.record_u64("size", u64::from(size));
+        Ok(())
+    })
+}
+
+/// A framed read of a capture-cut prefix ends at the capture's ceiling, never at
+/// a truncation the child performed and never at a clean end.
+///
+/// The child writes whole length-prefixed records whose total is drawn past the
+/// capture ceiling, so the retained bytes are a prefix **the capture** cut. The
+/// cut point is swept across every position inside a record — prefix, payload and
+/// the exact boundary between two records — because the boundary is the case that
+/// would otherwise read as a complete stream: the retained bytes end exactly
+/// where a record does, and only the capture's own flag says the child wrote more.
+///
+/// Two tenants run the same shape with their own payloads, so a crossed pipe
+/// would show up as the wrong bytes rather than as a wrong count.
+fn capture_cuts_end_at_the_capture_ceiling(band: Band) -> TestResult {
+    sim::assert_replays(band, |sim| {
+        const PAYLOAD: usize = 16;
+        const FRAME: usize = 4 + PAYLOAD;
+        // Six frames = 120 bytes against a ceiling drawn from 8..60, so the
+        // capture always cuts and the cut lands somewhere inside the stream.
+        let ceiling = usize::try_from(sim.rng().between(8, 60))?;
+        let tenant: u32 = sim.rng().below(2);
+        let byte = u8::try_from(tenant).unwrap_or(0).wrapping_add(b'a');
+
+        let outcome = run(&framed_capture(byte, PAYLOAD, 6, ceiling)?)?;
+        assert!(
+            outcome.stdout().truncated(),
+            "a 6-frame {FRAME}-byte-per-frame write must overrun a {ceiling}-byte capture ceiling"
+        );
+        assert!(
+            outcome.stdout().retained_capacity() <= ceiling,
+            "the retained buffer must not grow past its own ceiling"
+        );
+
+        let frames = outcome.stdout().frames(ceiling);
+        assert_eq!(
+            frames.ended(),
+            &FrameRead::CeilingReached {
+                ceiling: outcome.stdout().retained_capacity()
+            },
+            "a capture-cut prefix ends at the capture's own ceiling, whatever its bytes \
+             happen to end on: tenant={tenant} ceiling={ceiling}"
+        );
+        assert_eq!(
+            ending_class(&frames),
+            "ceiling-reached",
+            "the ending's class is what a caller branches on, and a cut prefix is the ceiling"
+        );
+        assert!(
+            !frames.is_complete(),
+            "tenant={tenant} ceiling={ceiling}: a reading of a capture-cut prefix is not a \
+             complete reading of the child's output"
+        );
+        assert!(
+            !frames.ended().is_truncated(),
+            "the capture cut the bytes; the child did not truncate a record"
+        );
+        // Only whole records are records, and only the frames that fit entirely
+        // inside the retained prefix are among them. The model counts them from
+        // the bytes rather than from the reader, so the two are checked against
+        // each other.
+        let retained = outcome.stdout().bytes().len();
+        let expected = whole_frames(retained, FRAME);
+        assert_eq!(
+            frames.records().len(),
+            expected,
+            "tenant={tenant} ceiling={ceiling}: {retained} retained bytes hold {expected} \
+             whole frames of {FRAME} bytes, got {:?}",
+            frames.records()
+        );
+        for (index, record) in frames.records().iter().enumerate() {
+            assert_eq!(
+                record.payload(),
+                Some(
+                    std::iter::repeat_n(byte, PAYLOAD)
+                        .collect::<Vec<_>>()
+                        .as_slice()
+                ),
+                "tenant={tenant}: record {index} must decode to this tenant's own payload"
+            );
+        }
+        sim.record("capture-cut");
+        sim.trace.record_u64("tenant", u64::from(tenant));
+        sim.trace.record_count("ceiling", ceiling);
+        sim.trace.record_count("retained", retained);
+        sim.trace.record_count("frames", frames.records().len());
+        sim.record(ending_class(&frames));
+        Ok(())
+    })
+}
+
+/// A legal record with no room left is the ceiling; only `0` and a length past the
+/// ceiling are rot.
+///
+/// Swept across the boundary a real stream lands on: the ceiling is drawn and the
+/// first record takes a seeded share of it, so the second record is sometimes
+/// legal-and-fitting, sometimes legal-and-too-large, and the ending must be a
+/// whole frame, the ceiling, or rot accordingly — never rot for the middle case.
+fn room_without_a_record_is_the_ceiling(band: Band) -> TestResult {
+    sim::assert_replays(band, |sim| {
+        const CEILING: usize = 64 * 1024;
+        // The *capture* ceiling is deliberately larger than the reader's. The two
+        // are different bounds, and conflating them would make this family
+        // observe the capture's cut instead of the reader's room: with a capture
+        // at 64 KiB, a second record too large for the remaining room also
+        // overran the capture, and the ending would be the capture's ceiling by
+        // the rule `capture_cuts_end_at_the_capture_ceiling` pins. A capture that
+        // always holds the whole stream leaves the reader's ceiling the only one
+        // in play, which is what this row is about.
+        const CAPTURE: usize = 128 * 1024;
+        let first = usize::try_from(sim.rng().between(1024, 40 * 1024))?;
+        // The second record is drawn against the room the first one leaves, so
+        // both the fitting and the too-large cases are swept by construction.
+        let room = CEILING.saturating_sub(first);
+        let second = usize::try_from(sim.rng().between(1024, 48 * 1024))?;
+
+        // One prefix per record, in stream order. They are literals because the four
+        // bytes each names are the thing under test; the payloads come from
+        // `head`, because two 40 KiB records spelled as octal escapes would be a
+        // half-megabyte single argument, past what an `execve` accepts, and the
+        // child would fail to start rather than exercise the reader.
+        let prefix_of = |length: usize| -> String {
+            u32::try_from(length)
+                .unwrap_or(0)
+                .to_be_bytes()
+                .iter()
+                .map(|value| format!("\\{value:03o}"))
+                .collect()
+        };
+        let script = format!(
+            "printf '{first_prefix}'; head -c {first} /dev/zero | tr '\\0' '9'; \
+             printf '{second_prefix}'; head -c {second} /dev/zero | tr '\\0' '9'",
+            first_prefix = prefix_of(first),
+            second_prefix = prefix_of(second),
+        );
+        let outcome = run(&captured(&script, CAPTURE)?)?;
+        assert!(
+            !outcome.stdout().truncated(),
+            "both records must fit a {CAPTURE}-byte capture, or the ending would be the \
+             capture's rather than the reader's"
+        );
+        // The child must have written exactly the two records the seed asked for.
+        // A `head` or `tr` that delivered fewer bytes would read as a truncation
+        // and be reported as one, so the count is pinned before the framing is.
+        assert_eq!(
+            outcome.stdout().total_bytes(),
+            u64::try_from(first.saturating_add(second).saturating_add(8)).unwrap_or(u64::MAX),
+            "first={first} second={second}: the child wrote exactly two length-prefixed records"
+        );
+
+        let frames = outcome.stdout().frames(CEILING);
+        let fits = second <= room;
+        assert_eq!(
+            frames.records().len(),
+            if fits { 2 } else { 1 },
+            "first={first} second={second} room={room}: {fits} decides whether the second \
+             record is decoded at all"
+        );
+        assert_eq!(
+            frames.ended(),
+            if fits {
+                &FrameRead::EndOfStream
+            } else {
+                &FrameRead::CeilingReached { ceiling: CEILING }
+            },
+            "first={first} second={second} room={room}: a legal record larger than the room \
+             remaining is the ceiling, never malformed"
+        );
+        assert_eq!(
+            frames.retained_bytes(),
+            if fits {
+                first.saturating_add(second)
+            } else {
+                first
+            },
+            "a record stopped by the ceiling is never charged: its payload was never read"
+        );
+        assert!(
+            !matches!(frames.ended(), FrameRead::MalformedPrefix { .. }),
+            "a well-formed record must never be reported as rot: first={first} second={second}"
+        );
+
+        // The two lengths no writer of this grammar produces, swept as a pair:
+        // zero, and one past the ceiling. A reader that folded either into the
+        // ceiling would accept a record the frame grammar refuses.
+        for declared in [0_usize, CEILING + 1] {
+            let mut rot: &[u8] = &u32::try_from(declared).unwrap_or(0).to_be_bytes();
+            let refused = lgwks_bot::rt::process::read_frames(&mut rot, CEILING)?;
+            assert_eq!(
+                refused.ended(),
+                &FrameRead::MalformedPrefix {
+                    declared,
+                    ceiling: CEILING
+                },
+                "declared={declared} names no record this grammar writes, so it is rot"
+            );
+            assert_eq!(
+                refused.retained_bytes(),
+                0,
+                "declared={declared}: a refused prefix is never charged"
+            );
+        }
+        sim.record("room");
+        sim.trace.record_count("first", first);
+        sim.trace.record_count("second", second);
+        sim.trace.record_count("room", room);
+        sim.record(ending_class(&frames));
         Ok(())
     })
 }
@@ -416,4 +645,164 @@ fn a_seeded_flood_stays_bounded_on_one_worker_band_00() -> TestResult {
 #[test]
 fn a_seeded_flood_stays_bounded_on_one_worker_band_01() -> TestResult {
     a_seeded_flood_stays_bounded_on_one_worker(Band::new(64, 8))
+}
+
+/// A seeded sweep of `capture_cuts_end_at_the_capture_ceiling` over seeds 72..80.
+#[test]
+fn capture_cuts_end_at_the_capture_ceiling_band_00() -> TestResult {
+    capture_cuts_end_at_the_capture_ceiling(Band::new(72, 8))
+}
+
+/// A seeded sweep of `capture_cuts_end_at_the_capture_ceiling` over seeds 80..88.
+#[test]
+fn capture_cuts_end_at_the_capture_ceiling_band_01() -> TestResult {
+    capture_cuts_end_at_the_capture_ceiling(Band::new(80, 8))
+}
+
+/// A seeded sweep of `room_without_a_record_is_the_ceiling` over seeds 88..96.
+#[test]
+fn room_without_a_record_is_the_ceiling_band_00() -> TestResult {
+    room_without_a_record_is_the_ceiling(Band::new(88, 8))
+}
+
+/// A seeded sweep of `room_without_a_record_is_the_ceiling` over seeds 96..104.
+#[test]
+fn room_without_a_record_is_the_ceiling_band_01() -> TestResult {
+    room_without_a_record_is_the_ceiling(Band::new(96, 8))
+}
+
+/// A sweep of `capture_cuts_end_at_the_capture_ceiling` at 100, 1 000 and 10 000
+/// concurrent captures, and the named replay receipt over the tier sweep.
+///
+/// Each tier drives `min(requested, CAPTURE_CEILING)` **real** children at once,
+/// each with its own supervisor and its own capture. The requested, reached and
+/// ceiling levels are all reported (the INV-BOT-16 rule), so a tier this host
+/// cannot reach says so rather than passing quietly: ten thousand real `sh`
+/// children is a fork storm, and the honest claim is the tier that was reached.
+#[test]
+fn capture_cuts_saturate_at_the_declared_tiers() -> TestResult {
+    const PAYLOAD: usize = 16;
+    const RECORDS: usize = 6;
+    const FRAME: usize = 4 + PAYLOAD;
+    const CEILING: usize = 32;
+    // The tier this host is asked to drive. Every child is a real process on a
+    // real pipe, so the ceiling is what the OS will bear rather than an arbitrary
+    // number; a reader that shared state across captures would fail here at any
+    // tier, which is what makes the reached level sufficient evidence.
+    const CAPTURE_CEILING: usize = 256;
+    let expected_frames = whole_frames(CEILING, FRAME);
+
+    for requested in [100_usize, 1_000, 10_000] {
+        let level = requested.min(CAPTURE_CEILING);
+        let specs: Vec<ProcessSpec> = (0..level)
+            .map(|index| framed_capture(tenant_byte(index), PAYLOAD, RECORDS, CEILING))
+            .collect::<Result<Vec<_>, _>>()?;
+        let runtime = lgwks_bot::Runtime::new()?;
+        // Each child gets its own `Supervisor::new(1)` *inside its own async
+        // block*, because `run_process` takes `&mut self`: a future that
+        // borrowed a supervisor from an enclosing scope could not be stored in a
+        // `Vec` and joined, and one supervisor shared across children would
+        // serialise them — the opposite of the tier under test.
+        let observations = runtime.block_on(async {
+            let runs: Vec<_> = specs
+                .iter()
+                .map(|spec| async move {
+                    let mut supervisor = Supervisor::new(1);
+                    supervisor.run_process(spec).await
+                })
+                .collect();
+            lgwks_std::task::join_all(runs).await
+        });
+
+        assert_eq!(
+            observations.len(),
+            level,
+            "requested={requested} reached={level} ceiling={CAPTURE_CEILING}: every concurrent \
+             run reported, so the tier really ran"
+        );
+        for (index, outcome) in observations.into_iter().enumerate() {
+            let outcome = outcome?;
+            let read = outcome.stdout().frames(CEILING);
+            assert_eq!(
+                read.ended(),
+                &FrameRead::CeilingReached {
+                    ceiling: outcome.stdout().retained_capacity()
+                },
+                "requested={requested} reached={level} child {index}: a capture-cut prefix ends \
+                 at the capture's ceiling"
+            );
+            assert_eq!(
+                read.records().len(),
+                expected_frames,
+                "requested={requested} child {index}: only the {expected_frames} whole frames \
+                 inside a {CEILING}-byte capture are records"
+            );
+            let byte = tenant_byte(index);
+            for (record, payload) in read
+                .records()
+                .iter()
+                .filter_map(FrameRead::payload)
+                .enumerate()
+            {
+                assert_eq!(
+                    payload,
+                    std::iter::repeat_n(byte, PAYLOAD)
+                        .collect::<Vec<_>>()
+                        .as_slice(),
+                    "requested={requested} child {index}: record {record} must be this child's \
+                     own payload byte, never another child's"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The one payload byte a tenant's records carry, from its index.
+///
+/// 26 tenants rather than unbounded indices, so a tier of 10,000 children shares
+/// payload bytes between runs: the assertion is about *which* capture a record
+/// came from, not about every child having a distinct byte, and a crossed pipe
+/// would still show as a byte this child never wrote.
+fn tenant_byte(index: usize) -> u8 {
+    u8::try_from(index % 26).unwrap_or(0).wrapping_add(b'a')
+}
+
+/// How many whole `frame`-byte frames fit in `retained` bytes.
+///
+/// A counted subtraction rather than a division: the workspace forbids
+/// `clippy::integer_division`, and a loop over a frame count bounded by a
+/// capture ceiling is not a cost worth a suppressed lint.
+fn whole_frames(retained: usize, frame: usize) -> usize {
+    let mut left = retained;
+    let mut whole = 0_usize;
+    while left >= frame {
+        left = left.saturating_sub(frame);
+        whole = whole.saturating_add(1);
+    }
+    whole
+}
+
+/// A shell spec writing `records` whole framed payloads of `byte`, with a capture
+/// of `ceiling` bytes.
+///
+/// Shared by the seeded family and the saturation tiers so one framing shape has
+/// one spelling: a shape written twice is a shape whose two spellings can drift.
+fn framed_capture(
+    byte: u8,
+    payload: usize,
+    records: usize,
+    ceiling: usize,
+) -> Result<ProcessSpec, Box<dyn Error>> {
+    let body: Vec<u8> = std::iter::repeat_n(byte, payload).collect();
+    let mut writer: Vec<u8> = Vec::new();
+    for _ in 0..records {
+        writer.extend_from_slice(&u32::try_from(payload).unwrap_or(0).to_be_bytes());
+        writer.extend_from_slice(&body);
+    }
+    let literal = writer
+        .iter()
+        .map(|value| format!("\\{value:03o}"))
+        .collect::<String>();
+    captured(&format!("printf '{literal}'"), ceiling)
 }

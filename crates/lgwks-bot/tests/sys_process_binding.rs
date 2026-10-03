@@ -277,6 +277,10 @@ fn a_flooding_child_is_drained_while_it_runs_not_after_it_exits() -> TestResult 
 /// The child emits one whole length-prefixed record and then a second whose
 /// payload stops half-way. A reader that trusted the prefix would report the
 /// short payload as the record; this one refuses it, and says how much arrived.
+///
+/// Read through `ProcessRun::stdout().frames(..)`, the door a caller reads its
+/// own child's output through, rather than over a hand-plumbed slice — so what is
+/// under test is the path a real caller takes.
 #[test]
 fn a_framed_record_cut_off_mid_frame_is_a_typed_refusal() -> TestResult {
     // `[0,0,0,4]` then `done`, then `[0,0,0,8]` and only `part`.
@@ -291,9 +295,13 @@ fn a_framed_record_cut_off_mid_frame_is_a_typed_refusal() -> TestResult {
         Some(0),
         "the child completed its own work; the framing is what is under test"
     );
+    assert!(
+        !run.stdout().truncated(),
+        "a {}-byte write under a 4096-byte ceiling must retain the whole stream",
+        run.stdout().total_bytes()
+    );
 
-    let mut stream = run.stdout().bytes();
-    let frames = read_frames(&mut stream, 4096)?;
+    let frames = run.stdout().frames(4096);
     assert_eq!(
         frames.records().len(),
         1,
@@ -333,8 +341,9 @@ fn a_framed_record_cut_off_mid_frame_is_a_typed_refusal() -> TestResult {
 /// about the bytes rather than about the reader.
 ///
 /// The control the truncation test needs: without a positive case, "always
-/// refuse" would satisfy it. Here every record arrives and the pass reports the
-/// clean end, the whole count, and no truncation.
+/// refuse" would satisfy it. Here every record arrives, the capture held the
+/// whole output, and the pass reports the clean end, the whole count, and no
+/// truncation.
 #[test]
 fn a_framed_stream_that_ends_cleanly_is_complete() -> TestResult {
     let script = "printf '\\000\\000\\000\\004done\\000\\000\\000\\002ok'";
@@ -344,8 +353,7 @@ fn a_framed_stream_that_ends_cleanly_is_complete() -> TestResult {
         supervisor.run_process(&captured_shell(script, 4096)).await
     })?;
 
-    let mut stream = run.stdout().bytes();
-    let frames = read_frames(&mut stream, 4096)?;
+    let frames = run.stdout().frames(4096);
     assert_eq!(
         frames.ended(),
         &FrameRead::EndOfStream,
@@ -371,6 +379,185 @@ fn a_framed_stream_that_ends_cleanly_is_complete() -> TestResult {
     Ok(())
 }
 
+/// D2: the capture's own cut is reported as the ceiling, never as the child's
+/// truncation and never as a clean end.
+///
+/// The child writes three whole records and the capture ceiling holds only enough
+/// for the first, so the retained bytes are a prefix **the capture** cut. A
+/// framed read of them cannot see the child's whole output however those bytes
+/// happen to end — here they end exactly on a record boundary, which is the case
+/// that would otherwise read as a complete stream. The ending must therefore be
+/// `CeilingReached` carrying the capture's retained capacity, and the pass must
+/// not claim completeness.
+#[test]
+fn a_capture_ceiling_ends_the_framed_read_rather_than_the_child() -> TestResult {
+    // Three whole two-byte records: 4 + 3 + 3 = 10 bytes, and a capture of 8
+    // stops inside the second record's prefix. The two complete records before
+    // the cut are decoded; the third never arrived within the ceiling.
+    const CAPTURE: usize = 8;
+    let script = "printf '\\000\\000\\000\\002ok\\000\\000\\000\\002ok\\000\\000\\000\\002ok'";
+    let runtime = lgwks_bot::Runtime::new()?;
+    let run = runtime.block_on(async {
+        let mut supervisor = Supervisor::new(1);
+        supervisor
+            .run_process(&captured_shell(script, CAPTURE))
+            .await
+    })?;
+    assert!(
+        run.stdout().truncated(),
+        "the child wrote more than the {CAPTURE}-byte ceiling, so the capture cut it"
+    );
+
+    let frames = run.stdout().frames(CAPTURE);
+    assert_eq!(
+        frames.ended(),
+        &FrameRead::CeilingReached {
+            ceiling: run.stdout().retained_capacity(),
+        },
+        "the retained bytes are a prefix the capture cut, so the ending is the capture's \
+         ceiling and never a child truncation"
+    );
+    assert_ne!(
+        frames.ended(),
+        &FrameRead::EndOfStream,
+        "a pass over a truncated capture must never claim a clean end"
+    );
+    assert!(
+        !frames.is_complete(),
+        "a reading of a capture-cut prefix is not a complete reading of the child"
+    );
+    assert!(
+        !frames.ended().is_truncated(),
+        "the capture cut the bytes; the child did not truncate a record"
+    );
+    let whole = frames
+        .records()
+        .iter()
+        .filter(|record| record.is_frame())
+        .count();
+    assert_eq!(
+        whole,
+        1,
+        "only whole frames are records, even when the capture cut between them: {:?}",
+        frames.records()
+    );
+    assert!(
+        frames
+            .records()
+            .iter()
+            .all(|record| record.payload().is_some()),
+        "every retained record is a whole one, so every one has its payload"
+    );
+    Ok(())
+}
+
+/// The control for the case above: a capture that retained the child's whole
+/// output reports the child's own truncation, not the capture's ceiling.
+///
+/// The two tests differ in one fact only — whether the capture was truncated —
+/// and the readings must differ accordingly. Without this, an implementation that
+/// always answered `CeilingReached` would satisfy the test above.
+#[test]
+fn an_untruncated_capture_reports_the_child_own_truncation() -> TestResult {
+    let script = "printf '\\000\\000\\000\\004done\\000\\000\\000\\010part'";
+    let runtime = lgwks_bot::Runtime::new()?;
+    let run = runtime.block_on(async {
+        let mut supervisor = Supervisor::new(1);
+        supervisor.run_process(&captured_shell(script, 4096)).await
+    })?;
+    assert!(
+        !run.stdout().truncated(),
+        "the whole 16-byte write fits a 4096-byte ceiling, so the capture did not cut it"
+    );
+
+    let frames = run.stdout().frames(4096);
+    assert_eq!(
+        frames.ended(),
+        &FrameRead::TruncatedPayload {
+            declared: 8,
+            partial: b"part".to_vec(),
+        },
+        "with the whole stream retained, the ending is the truncation the child performed"
+    );
+    assert_ne!(
+        frames.ended(),
+        &FrameRead::CeilingReached {
+            ceiling: run.stdout().retained_capacity()
+        },
+        "an untruncated capture must not report the capture's ceiling"
+    );
+    Ok(())
+}
+
+/// D3: a legal record that does not fit the remaining room is the ceiling, not
+/// rot, while a length past the ceiling in force is still refused.
+///
+/// Both halves in one test because they are the same decision seen from two
+/// sides: a well-formed 40 KiB record is a record, and only once 40 of the 64 KiB
+/// are spent does the second one have nowhere to go. Reading that as
+/// `MalformedPrefix` would report a child's legal record as corruption.
+#[test]
+fn a_legal_record_without_room_is_the_ceiling_and_rot_is_still_refused() -> TestResult {
+    const CEILING: usize = 64 * 1024;
+    const RECORD: usize = 40 * 1024;
+    // Two valid records of 40 KiB each: the first fits, the second has 24 KiB of
+    // room left and declares 40, so it is a well-formed record with nowhere to go.
+    let mut bytes: Vec<u8> = Vec::new();
+    for _ in 0..2 {
+        bytes.extend_from_slice(&u32::try_from(RECORD).unwrap_or(0).to_be_bytes());
+        bytes.extend(std::iter::repeat_n(7_u8, RECORD));
+    }
+    let mut stream: &[u8] = &bytes;
+    let frames = read_frames(&mut stream, CEILING)?;
+    assert_eq!(
+        frames.records().len(),
+        1,
+        "the first whole record is decoded; the second is refused before its payload"
+    );
+    assert_eq!(
+        frames.records()[0].payload().map(<[u8]>::len),
+        Some(RECORD),
+        "the decoded record is exactly the length its prefix declared"
+    );
+    assert_eq!(
+        frames.ended(),
+        &FrameRead::CeilingReached { ceiling: CEILING },
+        "a legal record larger than the room remaining is the ceiling, not malformed"
+    );
+    assert_eq!(
+        frames.retained_bytes(),
+        RECORD,
+        "a record stopped by the ceiling is never charged: its payload was never read"
+    );
+
+    // The two lengths that name no record this grammar writes: zero, and one past
+    // the ceiling in force.
+    for (declared, why) in [
+        (0_usize, "a zero-length record is never written"),
+        (
+            CEILING + 1,
+            "a length past the ceiling names no record this reader writes",
+        ),
+    ] {
+        let mut rot: &[u8] = &u32::try_from(declared).unwrap_or(0).to_be_bytes();
+        let refused = read_frames(&mut rot, CEILING)?;
+        assert_eq!(
+            refused.ended(),
+            &FrameRead::MalformedPrefix {
+                declared,
+                ceiling: CEILING
+            },
+            "{why}, so it is refused before a payload byte is read"
+        );
+        assert_eq!(
+            refused.retained_bytes(),
+            0,
+            "{why}: a refused prefix is never charged"
+        );
+    }
+    Ok(())
+}
+
 /// A prefix declaring a length past the reader's ceiling is refused, and never
 /// allocated for.
 ///
@@ -388,7 +575,7 @@ fn a_prefix_past_the_ceiling_is_refused_before_it_is_allocated() -> TestResult {
             declared: 8,
             ceiling: 4,
         },
-        "a complete prefix naming more than remains is refused, with both numbers"
+        "a complete prefix naming more than the ceiling is refused, with both numbers"
     );
     assert_eq!(
         frames.retained_bytes(),
