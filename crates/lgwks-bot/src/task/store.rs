@@ -166,7 +166,11 @@ impl StoreError {
     /// module wraps the same fact — the device said no — and a literal per call
     /// site would be seven chances to name a different variant for the same
     /// event.
-    fn storage(cause: std::io::Error) -> Self {
+    ///
+    /// `pub(crate)` because the repair ledger beside this store reports device
+    /// refusals in the same vocabulary: one error type for both file-backed
+    /// stores means a caller handling a device refusal handles it once.
+    pub(crate) fn storage(cause: std::io::Error) -> Self {
         Self::Storage { cause }
     }
 }
