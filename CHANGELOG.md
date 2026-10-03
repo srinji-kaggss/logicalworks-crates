@@ -160,6 +160,29 @@ explicitly under that crate.
 
 ### lgwks_bot Added
 
+- Fourteen seeded simulation families, one per refusal arm of the review
+  subject, coverage and partial-submission path (#231, INV-BOT-96). No
+  production behaviour changed: `subject_coverage_and_partial_faults` asserted
+  that every fault reaches *some* correct outcome variant, which is satisfied by
+  a world in which the right arm is reached for the wrong reason, so each arm
+  now asks a different question of the same seeded worlds — a coverage refusal
+  reaches the receiver with zero creates; the file-count and byte ceilings are
+  refused on separate axes, each naming its own bound, with the byte family's
+  draws asserted to stay under the file ceiling so a refusal for the wrong bound
+  cannot pass as evidence for it; a renamed repository is refused naming both the
+  requested and canonical repository; a `build.rs` in the changed-file inventory
+  is never executed, proven by a marker file named in the child's own environment
+  and referenced by the patch text; a lost response onto a draft is `Pending`
+  and a partial submission reports both the applied and intended counts, neither
+  issuing a second create; a create whose read-back lost permission is
+  `Unverified` with the applied review id retained and inside the receiver's own
+  id range; the permission and transport arms are disjoint, naming an HTTP status
+  and a credential versus a child's exit and no status, and are `Unverified` and
+  `Unknown` through the journey; a publication is pinned to the commit that was
+  read; two tenants' coverage verdicts stay isolated; and concurrent runs on one
+  pull request conserve their creates and their read-backs. The test file's share
+  of the repository's deterministic-simulation evidence is restored, which the
+  `simulation-evidence` gate requires at one half of all tests.
 - `domain::gh::read_diff`, a bounded changed-file inventory for the PR-review
   subject (#87 step 6, T31): `Gh::read_diff` reads a pull request's changed
   files as **data** and bounds them on two separate axes — at most
