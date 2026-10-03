@@ -382,9 +382,14 @@ fn bounded_jaccard_refuses_before_the_quadratic_scan() {
 #[test]
 fn budget_refusal_precedes_amplification_and_is_measurable() {
     // A large set is refused by length alone; the quadratic scan is never
-    // entered. Each size is repeated enough times that the timer resolves the
-    // difference, and the assertion is on the growth ratio rather than on a
-    // single sub-microsecond reading.
+    // entered. The assertion is on the growth ratio of a whole timed loop, not
+    // of a per-call figure: a refusal costs about a nanosecond, so a per-call
+    // reading floored to integer nanoseconds is 1 or 3 by timer noise alone
+    // (CI saw "1ns -> 3ns" on an unchanged path). Each size takes the fastest of
+    // `TRIALS` loops of `REPEATS` calls, so one preemption cannot be read as
+    // growth, and every loop runs long enough for the timer to resolve it.
+    const REPEATS: u64 = 200_000;
+    const TRIALS: usize = 5;
     let scorer = BoundedJaccard::<u32>::new(16);
     let mut previous = 0_u128;
     for size in [2_000_usize, 4_000, 8_000] {
@@ -399,41 +404,38 @@ fn budget_refusal_precedes_amplification_and_is_measurable() {
             }),
             "an over-budget set of {size} is refused with its limit"
         );
-        let repeats = 2_000_u128;
-        let start = std::time::Instant::now();
-        let mut refusals_seen = 0_u64;
-        for _ in 0..repeats {
-            // The verdict is consumed rather than discarded: `let _ =` is
-            // forbidden by `clippy::let_underscore_must_use`. This measures the
-            // refusal path, not the answer; the answer was asserted above.
-            if let Err(reason) = CheckedSimilarity::try_score(&scorer, &big, &big) {
-                refusals_seen = refusals_seen.saturating_add(u64::from(matches!(
-                    reason,
-                    EvidenceError::CollectionTooLong { .. }
-                )));
+        let mut fastest = u128::MAX;
+        for _ in 0..TRIALS {
+            let start = std::time::Instant::now();
+            let mut refusals_seen = 0_u64;
+            for _ in 0..REPEATS {
+                // The verdict is consumed rather than discarded: `let _ =` is
+                // forbidden by `clippy::let_underscore_must_use`. This measures
+                // the refusal path, not the answer; the answer was asserted
+                // above. `black_box` keeps the input opaque so the loop is not
+                // folded into one call.
+                let input = std::hint::black_box(big.as_slice());
+                if let Err(reason) = CheckedSimilarity::try_score(&scorer, input, input) {
+                    refusals_seen = refusals_seen.saturating_add(u64::from(matches!(
+                        reason,
+                        EvidenceError::CollectionTooLong { .. }
+                    )));
+                }
             }
+            assert_eq!(
+                refusals_seen, REPEATS,
+                "every timed call refused with the budget error"
+            );
+            fastest = fastest.min(start.elapsed().as_nanos());
         }
-        assert_eq!(
-            refusals_seen,
-            u64::try_from(repeats).unwrap_or(u64::MAX),
-            "every timed call refused with the budget error"
-        );
-        // Integer nanoseconds per call, compared as integers. `as` and bare
-        // integer division are forbidden here, and `checked_div` on a non-zero
-        // divisor is the exact comparison anyway.
-        let per_call_nanos = start
-            .elapsed()
-            .as_nanos()
-            .checked_div(repeats)
-            .unwrap_or(u128::MAX);
         if previous > 0 {
             assert!(
-                per_call_nanos < previous.saturating_mul(3),
+                fastest < previous.saturating_mul(3),
                 "S4: doubling the input must not quadruple the refusal work: \
-                 {previous}ns -> {per_call_nanos}ns"
+                 {previous}ns -> {fastest}ns for {REPEATS} refusals"
             );
         }
-        previous = per_call_nanos;
+        previous = fastest;
     }
 }
 

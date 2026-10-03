@@ -8,7 +8,76 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### lgwks_bot Added
+
+- `rt::process::CapturedStream::frames(ceiling)`, the door a caller reads its own
+  child's output through: infallible, and the reason a `ProcessRun`'s captured
+  stdout can be read as frames without the caller re-plumbing the bytes into a
+  reader. It is `pub` because callers outside the crate read their child's
+  output through it, and it is the path the T05 tests exercise rather than a
+  hand-plumbed slice.
+- `rt::process::read_frames`, a bounded reader for the length-framed records a
+  supervised child's output carries. It reuses the crate's existing frame
+  grammar (`journal::frame`) rather than restating it, so a torn tail has one
+  meaning across the file stores and a subprocess's streams. A record is
+  `FrameRead::Frame` only when its prefix named the bytes that followed; the two
+  truncations, a malformed prefix and the caller's ceiling are refusals that
+  carry no payload, and `FrameRead::payload()` returns `None` for every one of
+  them. The payload ceiling is charged from the prefix before a payload is read,
+  so a stream cannot request an allocation by claiming a large record. Accepting
+  rows T03, T05, T21 and T22. No existing item changed.
+- `rt::process::DEFAULT_FRAME_CEILING`, the one retained-byte ceiling a caller
+  needs in order to read a child's framed output without inventing a bound.
+- `domain::sys::Process::frame_stdout(ceiling)` and
+  `ProcessState::stdout_frames()`, which wire the frame reader above into the
+  sys domain's real verb path: a `Process` built with `frame_stdout` reports each
+  run's stdout as a framed reading on the `ProcessState` its `Observe`, `Execute`
+  and `Query` calls return, byte-exact where the lossy `stdout()` is not, and a
+  domain built without it reports `None` and an unchanged `stdout()`.
+  `CapturedStream::frames`/`read_frames` (INV-BOT-110/114) previously had no
+  production caller; the domain's verbs are now that caller (INV-BOT-115).
+
 ### lgwks_bot Fixed
+
+- `rt::process`: a capture's own cut is no longer reported as the child's
+  truncation. When `CapturedStream::truncated()` is true the retained bytes are a
+  prefix **the capture** cut, so a framed read of them could end in
+  `TruncatedPrefix`/`TruncatedPayload` — or, worse, read as a clean
+  `EndOfStream` when the cut landed on a record boundary — and a caller would
+  take a capture's bound for the child's own failure to write.
+  `CapturedStream::frames` now overrides exactly those three endings with
+  `FrameRead::CeilingReached { ceiling: <the capture's retained capacity> }` and
+  `is_complete()` is `false`. An untruncated capture still reports the child's own
+  truncation, and a reader's ceiling reached over an untruncated capture still
+  reports the reader's; the two ceilings are separate facts and are no longer
+  conflated.
+- `rt::process`: the capture-ceiling override above no longer overwrites the two
+  endings it had no business touching. A `MalformedPrefix` was decided from a
+  whole prefix the capture *did* retain — declared `0`, or past the reader's
+  ceiling — so it is rot in the child's output and stands. A `CeilingReached`
+  the *reader* reached stopped the pass before the cut mattered, so it keeps the
+  reader's ceiling. Replacing either was fail-open: a caller looking for
+  corruption was handed a bound it never hit, and a caller looking for its own
+  bound was told something larger stopped it.
+- `rt::process`: `Frames::of_slice`'s unreachable `Err` arm fails closed. It
+  returned an empty `EndOfStream` — a *complete* reading, from a pass that
+  stopped without one. It now keeps the whole records and retained payload bytes
+  the pass had read and ends in `CeilingReached { ceiling: retained_bytes }`,
+  which is not complete. The arm is unreachable by construction (a byte slice's
+  reads cannot fail), so no test exercises it.
+- `rt::process`: `FrameRead::MalformedPrefix` no longer claims a legal record is
+  rot. A declared length of `0` or past the ceiling still names no record this
+  grammar writes and is still refused, but a legal declared length that merely
+  exceeds the room remaining after earlier records is now
+  `FrameRead::CeilingReached` — a well-formed record with nowhere to go is a
+  bound, not corruption. The charge is still made before a payload byte is read,
+  so no allocation past the ceiling is possible.
+- `rt::process`: a record's payload is read into its own exactly-sized `Vec`,
+  allocated only after the ceiling charge and then moved into the record. The
+  shared "reused" buffer this replaces allocated and copied every payload a
+  second time, so every byte was copied twice and the reuse comment was untrue;
+  on truncation the partial is that same `Vec` truncated in place rather than a
+  second copy.
 
 - A host-side stop is no longer recorded as a request's outcome. `Host::submit`
   wrote a `@terminal` record for every disposition that was not a success, so
@@ -52,6 +121,18 @@ explicitly under that crate.
 - **Breaking:** `Host::repair` now requires `O: lgwks_bot::script::Durable`, for
   the reason `Host::resume` does. **Migration:** as for `Host::resume`.
 
+### lgwks_bot Changed
+
+- `rt::supervise::CleanupReceipt`'s documentation now states what
+  `CleanupConfirmed` does and does not claim. It claims that every process still
+  *in the supervised group* when the group was last observed is gone — an
+  observation of `killpg(group, 0)`. It does not claim that no process the
+  supervisor started is still running: a descendant that called `setsid` has
+  left the group by construction, so its survival is not a counterexample.
+  Nothing about the type or its variants changed; a caller needing the stronger
+  guarantee needs a kernel job object or a cgroup, which this crate does not
+  have. Accepting row T21.
+
 ### lgwks_std Breaking
 
 - `similarity`: the `Similarity` implementation for `Cosine` now returns the
@@ -70,6 +151,17 @@ explicitly under that crate.
 
 ### Fixed
 
+- `lgwks_bot`: `tests/sim_review_path.rs::saturation_r32` shards each
+  saturation tier across receivers of at most 100 runs, so the fixture's
+  read-back stays linear. The merged receiver `cat`'d its whole
+  `reviews.jsonl` on every read, so 1,000 and 10,000 runs piped ~10 GB and
+  pushed most runs past the capture ceiling and the review ceiling, ending them
+  `Unknown` while the family's three inequalities still passed — the big tiers
+  were timing a degenerate world. Every run now reaches a verified
+  `Published`, and creates are asserted `==` runs per receiver and in total
+  rather than `<=`. The tiers, the single `Host`, the `join_all_bounded`
+  pipeline and its `min(N, 64)` bound are unchanged; measured
+  143.202s → see INV-BOT-97 (#151 review finding).
 - `tests/http_alloc.rs` joins every single-shot server thread (warm-up, exact and
   cut) before the next measurement is armed, so a detached server can no longer
   free its `reply` inside a later window and net the eager peak to zero; the
