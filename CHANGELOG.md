@@ -122,21 +122,22 @@ explicitly under that crate.
   unchanged. INV-BOT-51.
 - Measurements for the durable step (#87 step 5).
   `examples/resume_cost.rs` compares three mechanisms at one payload size: a
-  plain step (p50=1us), a `remember` through the store (p50=6173us, p95=14729us,
-  p99=21461us) and one `FileJournal` append (p50=6543us, p95=15457us,
-  p99=25183us) — so a durable step is not paying twice for one mechanism.
+  plain step (p50=1us), a `remember` through the store (p50=17984us, p95=33189us,
+  p99=44988us) and one `FileJournal` append (p50=15977us, p95=29949us,
+  p99=39949us) — so a durable step is not paying twice for one mechanism.
   `tests/task_resume.rs::concurrent_runs_across_tiers` runs 100, 1000 and 10000
   runs over one store with two tenants alternating and re-reads every record
-  from a reopened store: 100 → p50=5953us p95=11510us p99=17148us in 687ms;
-  1000 → p50=6368us p95=14997us p99=24184us in 7.64s; 10000 → p50=6624us
-  p95=18063us p99=31314us in 86.30s, with no record lost, none duplicated and
+  from a reopened store: 100 → p50=3019us p95=3977us p99=4138us in 316.11ms;
+  1000 → p50=3005us p95=4001us p99=4136us in 3.13s; 10000 → p50=3017us
+  p95=4144us p99=5312us in 32.74s, with no record lost, none duplicated and
   none attributed to the wrong tenant. Both measurements are opt-in through an
   environment variable and report that they did not run rather than a bound
   nobody checked. `tests/resume_liveness.rs` measures the liveness claim
   directly: with the device parked and an independent OS thread releasing it,
-  an unrelated ready task turned 46,835,531 times while one flush was parked,
+  an unrelated ready task turned 1,917 times while one flush was parked,
   where a blocking implementation reaches one poll and then sits inside the
-  fsync. INV-BOT-52, INV-BOT-53.
+  fsync. The count is reported rather than merely asserted, so a reader can see
+  whether the durable wait is a wait or a near-total stall. INV-BOT-52, INV-BOT-53.
 
 - Three defects found while merging `bot/hardening-122` (#87 step 5).
   `a_killed_process_resumes_without_rerunning_finished_steps` failed roughly

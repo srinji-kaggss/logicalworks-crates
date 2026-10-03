@@ -489,7 +489,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_parked_store_still_serves_its_own_records_only`,
   `the_parked_device_probe_measures_turns`), whose watchdog is an independent OS
   thread and whose assertion is on the unrelated task's poll count — measured at
-  46,835,531 turns against a parked flush, where a blocking implementation reaches
+  1,917 turns against a parked flush, where a blocking implementation reaches
   one
 - **INV-BOT-51** The effect journal's frames and the run store's frames are one
   grammar, in `journal::frame`: the length prefix, the 32-byte stored head, the
@@ -506,8 +506,8 @@ Each of these was a shipped defect. Treat the list as the spec.
 - **INV-BOT-52** A durable step's cost is a stated number, not an adjective. The
   run store's per-step cost is measured against the two things it could be: a
   plain un-recorded step, and the effect journal's append at the same payload
-  size. Measured here: plain p50=1us, `remember` p50=6173us / p95=14729us /
-  p99=21461us, `FileJournal` p50=6543us / p95=15457us / p99=25183us — so a
+  size. Measured here: plain p50=1us, `remember` p50=17984us / p95=33189us /
+  p99=44988us, `FileJournal` p50=15977us / p95=29949us / p99=39949us — so a
   durable step is not paying twice for one mechanism. A measurement that did not
   run says it did not run, never a bound nobody checked. · why: #87 step 5
   (frontier) · enforced by: `crates/lgwks-bot/examples/resume_cost.rs`, three
@@ -515,8 +515,8 @@ Each of these was a shipped defect. Treat the list as the spec.
 - **INV-BOT-53** The store holds every record at every concurrency tier it claims,
   with two tenants interleaved, and the counts are read back from a reopened
   store rather than from the handle that wrote them. Measured here: 100 runs →
-  p50=5953us p95=11510us p99=17148us in 687ms; 1000 → p50=6368us p95=14997us
-  p99=24184us in 7.64s; 10000 → p50=6624us p95=18063us p99=31314us in 86.30s,
+  p50=3019us p95=3977us p99=4138us in 316.11ms; 1000 → p50=3005us p95=4001us
+  p99=4136us in 3.13s; 10000 → p50=3017us p95=4144us p99=5312us in 32.74s,
   with no record lost, none duplicated and none attributed to the wrong tenant.
   Under contention the ordered step stays ordered: many appends through one owner
   thread lose nothing, a repeated submission commits one frame, and a replayed

@@ -32,6 +32,9 @@
 
 #![cfg(all(feature = "script", feature = "ephemeral"))]
 
+#[path = "support/journal.rs"]
+mod measure;
+
 #[path = "support/resume.rs"]
 mod shared;
 
@@ -77,6 +80,10 @@ fn a_parked_record_device_lets_the_runtime_turn() -> TestResult {
     drop(step);
 
     let observed = parked.observed()?;
+    // Reported, not only asserted: the number behind this family's claim is what
+    // a reader needs, and an assertion that only says "at least 64" hides whether
+    // the durable wait is a wait or a near-total stall.
+    measure::record_measurement(&format!("resume-liveness turns_while_parked={observed}"))?;
     assert!(
         observed >= PROGRESS_TURNS,
         "the unrelated task ticked {observed} times while a parked flush was \

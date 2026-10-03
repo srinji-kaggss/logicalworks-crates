@@ -749,13 +749,15 @@ fn the_store_is_opened_at_installation_not_at_the_first_step() -> TestResult {
 /// ```
 ///
 /// Measured on the machine that recorded it, over all three tiers including the
-/// ten-thousand-run one: tier 100 p50=6269us p95=13588us p99=21281us in 727ms;
-/// tier 1000 p50=6776us p95=17941us p99=25719us in 8.33s; tier 10000
-/// p50=6870us p95=16682us p99=26454us in 84.42s, with a peak resident set of
-/// 559,415,296 bytes for the whole process. The set is bounded by the store's
+/// ten-thousand-run one: tier 100 p50=3019us p95=3977us p99=4138us in 316.11ms;
+/// tier 1000 p50=3005us p95=4001us p99=4136us in 3.13s; tier 10000
+/// p50=3017us p95=4144us p99=5312us in 32.74s, with a peak resident set of
+/// 727,384,064 bytes for the whole process. The set is bounded by the store's
 /// record ceiling rather than by the run count: a design that retained every
 /// run's body would exceed it long before ten thousand, and one that grew
-/// without bound would not have reached a flat p99 across the tiers.
+/// without bound would not have reached a near-flat p99 across the tiers — p99
+/// moves from 4138us at a hundred runs to 5312us at ten thousand, a factor of
+/// 1.3 across a hundredfold more work.
 ///
 /// Peak RSS is reported by the harness only where `/proc/self/status` exists,
 /// which is not macOS; the number above was taken with `/usr/bin/time -l` around
