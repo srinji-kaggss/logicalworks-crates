@@ -91,14 +91,14 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::cap::{Cap, Deficit, Demand, uncovered};
+use crate::cap::{Cap, Deficit, Demand, Shortage, uncovered};
 use crate::effect::RunId;
 use crate::gate::GrantSet;
 use crate::rt::clock::Clock;
 use crate::rt::runtime::{Handle, Runtime};
 use crate::rt::sync::{CancellationToken, OwnedSemaphorePermit, Semaphore};
 use crate::rt::task_local;
-use crate::script::run_store::Records;
+use crate::script::run_store::{Authority as RecordsAuthority, AuthorityCheck, Records};
 use crate::script::trail::Trail;
 use crate::script::{DEFAULT_TRAIL_STEPS, FlowError, MAX_IN_FLIGHT, Scope, Tenant, within};
 
@@ -292,12 +292,14 @@ pub struct Task<F> {
     name: TaskName,
     /// The author's body.
     body: F,
-    /// The capabilities this task needs to run at all.
+    /// A task needs nothing by default: a body that reaches nothing declares nothing.
     ///
-    /// Empty for a task that reaches nothing, which is every task that only
-    /// reads and computes. A task that publishes or mutates names what it needs
-    /// here rather than discovering it inside its body, so the whole shortfall is
-    /// known at admission and a blocked run reports all of it at once.
+    /// A step that does reach something asks for it at the step that reaches,
+    /// through [`Scope::require`](crate::script::Scope::require). That is the step
+    /// that knows what the step is about to do, and it is where a repair is
+    /// relevant — a run that has already analyzed something and then finds the
+    /// publication blocked is the case a repair exists for, and a whole-task
+    /// declaration would have refused it before the analysis ran.
     needs: Vec<Cap>,
 }
 
@@ -308,24 +310,24 @@ impl<F> Task<F> {
         self.name.as_str()
     }
 
-    /// The capabilities this task needs, in declaration order.
+    /// The capabilities this task declares at its own admission boundary.
     ///
-    /// The complete declared requirement list, checked as one pass at admission:
-    /// every unmet capability is reported together rather than one refusal at a
-    /// time, so the repair is written once against the whole shortfall.
+    /// Empty for every task that reaches nothing, which is the default and the
+    /// honest answer: a task that reaches something declares it at the step that
+    /// reaches rather than here, so the whole shortfall is reported where it is
+    /// discovered — after the work already done, and no earlier.
     #[must_use]
     pub fn needs(&self) -> &[Cap] {
         &self.needs
     }
 
-    /// Declare the capabilities this task needs.
+    /// Declare capabilities this task needs before its body runs at all.
     ///
-    /// Additive and consuming, so a declaration composes into a task without a
-    /// second type: the same body, the same future type, and now a requirement
-    /// list the host checks before the body runs. The check happens at the
-    /// admission boundary, so a task that is short of authority polls nothing,
-    /// executes nothing, and reports the whole shortfall with a repair ticket
-    /// naming exactly it.
+    /// The blunt form of [`Scope::require`](crate::script::Scope::require): the
+    /// whole task is refused at admission if any of `caps` is uncovered, so
+    /// nothing runs and nothing is recorded. Use it for a task that reaches
+    /// something in its very first step; use `require` in the body when the reach
+    /// happens later, so the work before it survives to be replayed.
     #[must_use]
     pub fn requiring(mut self, caps: &[Cap]) -> Self {
         self.needs = caps.to_vec();
@@ -1196,13 +1198,16 @@ impl Host {
         }
 
         // The authority check, at the admission boundary and as one complete pass.
-        // A task that declared no needs is admitted whatever the host grants; a
-        // task that declared some is admitted only if every one is covered by the
-        // host's *base* grant **or** by this run's repair delta. So the base is
-        // never replaced by the delta — a repair adds authority for one run, and
-        // every capability the host already had still holds — and a delta that
-        // slipped past every other check still could not admit a need the host's
-        // own grant does not carry, because the check reads both sides.
+        // Only the task's own declaration is checked here, and it is the blunt
+        // form: a task that reaches in its *first* step declares it with
+        // [`Task::requiring`] and is refused before its body, so nothing runs and
+        // nothing is recorded. A task that reaches later declares nothing here and
+        // asks at the step that reaches, through [`Scope::require`], so the work
+        // before the block survives to be replayed by a repair.
+        //
+        // The base grant and this run's repair delta are checked *together* and
+        // never one replacing the other: a repair adds authority for one run, and
+        // every capability the host already had still holds.
         let covers = |cap: &Cap| self.inner.grants.grants(cap) || grant_delta.grants(cap);
         let shortfall = Deficit::from_shortages(uncovered(
             task.needs(),
@@ -1210,12 +1215,11 @@ impl Host {
             Some(&Demand::new(task_name.as_str())),
         ));
         if let Some(deficit) = shortfall {
-            // A blocked run is blocked before admission and before the body, so it
-            // polls nothing and executes nothing — and its report names *every*
-            // unmet need plus, when this host has a ledger, the repair ticket that
-            // closes exactly those. Both are derived from the one `deficit`, so
-            // they cannot disagree about what the run was missing.
-            return self.blocked(started, task_name, run, deficit, repair.is_some());
+            // Blocked before admission and before the body: nothing was polled and
+            // nothing executed, and the report names *every* unmet need plus the
+            // repair ticket that closes exactly those. Both come from this one
+            // `deficit`, so they cannot disagree about what the run was missing.
+            return self.blocked(started, task_name, run, deficit);
         }
 
         // Admission first, so a run that never starts is never counted as one
@@ -1339,20 +1343,60 @@ impl Host {
         // same host inherits both. With no store the scope is entered with no
         // run at all, which is what makes "no durability" the default rather
         // than a claim.
-        // One composition whether or not a store is installed: two alternative
+        // One composition for all three task-local scopes rather than one per
+        // combination of "has a store" and "has a repair": two alternative
         // nestings in one future carry both in its frame, which is what pushed a
-        // two-review test past a 2 MiB thread stack. Boxed, so a run nested in
-        // another run's body costs the parent a pointer rather than its frame.
-        let outcome = Box::pin(crate::script::run_store::within(
-            self.records(run),
-            HELD_PERMITS.scope(charged, within(&scope, BODY_STEP, deadline, body)),
+        // two-review test past a 2 MiB thread stack, and a third would have
+        // widened the same frame again. Boxed, so a run nested in another run's
+        // body costs the parent a pointer rather than its frame.
+        let outcome = Box::pin(crate::script::run_store::with_authority(
+            Some(self.authority(grant_delta)),
+            crate::script::run_store::within(
+                self.records(run),
+                HELD_PERMITS.scope(charged, within(&scope, BODY_STEP, deadline, body)),
+            ),
         ))
         .await;
 
         let snapshot = trail.snapshot();
-        let (disposition, output, error) = match outcome {
-            Ok(value) => (Disposition::Succeeded, Some(value), None),
-            Err(error) => (disposition_of(&error), None, Some(error.located(&scope))),
+        let (disposition, output, error, needs) = match outcome {
+            Ok(value) => (Disposition::Succeeded, Some(value), None, None),
+            // A step that reached for authority it does not have blocks the run,
+            // and its own shortfall rides out with it: the report's needs and the
+            // repair ticket are both built from this one value, so they cannot
+            // disagree about what the run was missing. Every other failure is an
+            // ordinary located error.
+            Err(error) => {
+                let located = error.located(&scope);
+                let deficit = located.deficit().cloned();
+                match deficit {
+                    Some(deficit) => (Disposition::Blocked, None, Some(located), Some(deficit)),
+                    None => (disposition_of(&located), None, Some(located), None),
+                }
+            }
+        };
+        // A blocked run mints its repair ticket from the same shortfall the report
+        // carries, and only when the host holds a ledger to decide a later repair
+        // against. A blocked run *inside* a repair mints none: a repair that could
+        // not close the shortfall hands back the run it was given rather than a
+        // fresh ticket for the same block, which would be a way to retry a denied
+        // repair by asking again.
+        let repair = match (
+            needs.as_ref(),
+            run,
+            self.inner.ledger.as_ref(),
+            repair.is_some(),
+        ) {
+            (Some(deficit), Some(run), Some(ledger), false) => {
+                let epoch = ledger.control(run).map_or(0, |control| control.epoch());
+                Some(RepairTicket::of_deficit(
+                    run,
+                    self.inner.tenant.as_str(),
+                    epoch,
+                    deficit,
+                ))
+            }
+            _ => None,
         };
         self.report(Terminal {
             started,
@@ -1362,8 +1406,8 @@ impl Host {
             error,
             trail: TrailSnapshot::Taken(snapshot),
             run,
-            needs: None,
-            repair: None,
+            needs,
+            repair,
         })
     }
 
@@ -1398,7 +1442,6 @@ impl Host {
         task: TaskName,
         run: Option<RunId>,
         deficit: Deficit,
-        repaired: bool,
     ) -> Report<O> {
         let at = Arc::from(task.as_str());
         // A ticket is minted only for a run whose epoch the ledger knows and for a
@@ -1406,8 +1449,8 @@ impl Host {
         // close the shortfall hands back the run it was given rather than minting a
         // fresh ticket for the same block, which would be a way to retry a denied
         // repair by asking again.
-        let repair = match (run, self.inner.ledger.as_ref(), repaired) {
-            (Some(run), Some(_ledger), false) => {
+        let repair = match (run, self.inner.ledger.as_ref()) {
+            (Some(run), Some(_ledger)) => {
                 let epoch = self
                     .inner
                     .ledger
@@ -1476,6 +1519,22 @@ impl Host {
     #[cfg(not(feature = "ephemeral"))]
     fn mint_run(&self) -> Option<RunId> {
         None
+    }
+
+    /// The authority this run's steps consult: the host's grant plus the delta of
+    /// any repair this run carries.
+    ///
+    /// Always installed, including for a host that grants nothing. A step outside
+    /// any host has *no* authority and so requires nothing; a step under a host
+    /// that grants nothing has an authority covering nothing and is refused for
+    /// whatever it asked about. That distinction — nobody checked versus checked
+    /// and refused — is the whole reason this is installed unconditionally rather
+    /// than left absent when the grant set is empty.
+    fn authority(&self, grant_delta: &GrantSet) -> RecordsAuthority {
+        RecordsAuthority(Arc::new(RunAuthority {
+            base: self.inner.grants.clone(),
+            delta: grant_delta.clone(),
+        }))
     }
 
     /// The erased record store for this run, when there is one.
@@ -1905,9 +1964,45 @@ enum TrailSnapshot {
     Empty,
 }
 
-/// What an admitted run holds for the length of its body.
+// ── Authority ───────────────────────────────────────────────────────────────
+
+/// The authority a run's steps consult, erased for the task-local it rides in.
 ///
-/// `Held` owns the budget permit and releases it on drop; `Charged` holds
+/// A handle rather than the concrete type for the same reason [`Records`] is: it
+/// is installed as a `dyn` behind a task-local, and the script module must not
+/// depend on [`Host`](self::Host).
+/// One run's authority: the host's base grant plus this run's repair delta.
+///
+/// The two are kept apart rather than merged, because merging loses the question
+/// the repair door asks. A repair *adds* authority for one run and never widens
+/// the host's, so a step's coverage is "either", and a reader of this type can see
+/// which half answered.
+struct RunAuthority {
+    /// What the host admits every run against.
+    base: GrantSet,
+    /// What this run's repair authorized, limited to its ticket's needs.
+    delta: GrantSet,
+}
+
+impl AuthorityCheck for RunAuthority {
+    /// Every capability in `required` this run's authority does not cover.
+    ///
+    /// Checked against the base and the delta together, and named once each: a
+    /// capability the base already covers is not reported as short however many
+    /// times the delta repeats it, so the shortfall is what the run genuinely
+    /// lacks rather than what its repair happened to mention.
+    fn uncovered(&self, required: &[Cap]) -> Vec<Shortage> {
+        uncovered(
+            required,
+            |cap| self.base.grants(cap) || self.delta.grants(cap),
+            None,
+        )
+    }
+}
+
+/// What a run holds for the length of its body.
+///
+/// `Held` owns budget permit and releases it on drop; `Charged` holds
 /// nothing, because a nested run shares its ancestor's permit. Both are dropped
 /// on every exit path, so a suspended run the caller abandons returns its permit
 /// and its in-flight count with it.
