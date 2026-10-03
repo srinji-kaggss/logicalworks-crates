@@ -1193,6 +1193,32 @@ Each of these was a shipped defect. Treat the list as the spec.
   `subject_saturation_conserves_creates`,
   `two_tenants_coverage_stays_isolated`,
   `a_publication_is_pinned_to_the_read_commit`)
+- **INV-BOT-97** A scale measurement is not evidence when the world it ran
+  against went degenerate. The saturation tiers drive 100, 1,000 and 10,000
+  runs of the real journey, and every one of them must reach a *verified*
+  `Published` outcome: with no fault configured and a history inside both the
+  capture ceiling and `domain::gh::MAX_REVIEWS_PER_PULL`, an `Unknown` is a
+  failure of the measurement, not a tolerated outcome. Creates are therefore
+  exactly one per run per receiver — `==`, never the `<=` a duplicate-post
+  defect satisfies as readily as a correct run — and read-backs are at least
+  creates per receiver as well as in total. The fixture is what does not
+  survive scale, so the tier is sharded across receivers of at most 100 runs:
+  every read-back `cat`s its receiver's whole `reviews.jsonl`, so one receiver
+  holding the whole tier pipes a quadratic answer, and past ~590 reviews that
+  answer exceeds `CAPTURE` and past 1,000 it is refused with `ReviewCeiling` —
+  which ends each run `Unknown` while every inequality the family asserted
+  still holds. The shard keeps the concurrency under test unchanged — one
+  `Host`, one `join_all_bounded` pipeline at `in_flight = min(N, 64)`, and the
+  inputs ordered receiver-major so the bound is reached on a *single* pull
+  request. A tier that could not reach its own run count, or a receiver whose
+  share is cancelled out by a healthy one in the totals, is a measurement that
+  proved nothing; the per-receiver assertions exist to make that visible
+  instead of arithmetic. · why: #151 review finding on
+  `tests/sim_review_path.rs::saturation_r32` (a >300 s family that also timed a
+  degenerate world) · enforced by: `tests/sim_review_path.rs`
+  (`saturation_r32`, which asserts per receiver and in total, and
+  `same_seed_same_trace_hash_r32` for the replay the tier still owes)
+
 - **INV-BOT-90** Model output is an untrusted *task input*, and crossing into the
   host is a typed refusal rather than an instruction. A payload is decoded by a
   hand-written bounded decoder against a `Surface` of the operations the host

@@ -109,6 +109,17 @@ explicitly under that crate.
 
 ### Fixed
 
+- `lgwks_bot`: `tests/sim_review_path.rs::saturation_r32` shards each
+  saturation tier across receivers of at most 100 runs, so the fixture's
+  read-back stays linear. The merged receiver `cat`'d its whole
+  `reviews.jsonl` on every read, so 1,000 and 10,000 runs piped ~10 GB and
+  pushed most runs past the capture ceiling and the review ceiling, ending them
+  `Unknown` while the family's three inequalities still passed — the big tiers
+  were timing a degenerate world. Every run now reaches a verified
+  `Published`, and creates are asserted `==` runs per receiver and in total
+  rather than `<=`. The tiers, the single `Host`, the `join_all_bounded`
+  pipeline and its `min(N, 64)` bound are unchanged; measured
+  143.202s → see INV-BOT-97 (#151 review finding).
 - `tests/http_alloc.rs` joins every single-shot server thread (warm-up, exact and
   cut) before the next measurement is armed, so a detached server can no longer
   free its `reply` inside a later window and net the eager peak to zero; the

@@ -374,8 +374,18 @@ if [ "$method" = "POST" ]; then
       comments=0
       if [ "$create" = "partial" ]; then field applied_comments; comments=$val; fi
       printf '%s\n' "$payload" > "$dir/applied-$id.json"
-      if [ -f "$dir/reviews.jsonl" ]; then printf ',' >> "$dir/reviews.jsonl"; fi
-      printf '{"id":%s,"commit_id":"%s","state":"%s","body":"%s","comment_count":%s}' \
+      # The separator goes into `reviews.jsonl` as **one** `>>` append, always, in
+      # front of the record. `>>` opens `O_APPEND`, and two writes by
+      # descriptors on a regular file cannot interleave, so one append is atomic
+      # against every other append however many creates race.
+      #
+      # Two earlier spellings were not safe, and both produced a read-back a
+      # concurrent receiver could not answer: writing the separator separately,
+      # which the kernel interleaved into `[,,{...}]`, and probing for the file
+      # to decide whether a separator was owed, which two creates could both
+      # read as absent into `{...}{...}`. There is no first record to make bare
+      # here, so there is nothing to probe.
+      printf ',{"id":%s,"commit_id":"%s","state":"%s","body":"%s","comment_count":%s}' \
         "$id" "$commit" "$state" "$body" "${comments:-0}" >> "$dir/reviews.jsonl"
       if [ "$create" = "accept" ]; then
         printf '{"id":%s,"commit_id":"%s","state":"%s","body":"%s","comment_count":%s}\n' \
@@ -433,13 +443,27 @@ if [ "$is_reviews" -eq 1 ]; then
         exit 0
         ;;
     esac
-    # The list is the receiver's own store, copied verbatim. `sh` is not asked to
-    # parse JSON on the way out: each accepted create appended its rendered
-    # record to `reviews.jsonl`, so a scenario that posted one review reads back
-    # exactly that review and a receiver with many reviews does not pay a
-    # `sed` per stored review on every read.
+    # The list is the receiver's own store, read back as a document. `sh` is not
+    # asked to parse JSON on the way out: each accepted create appended its
+    # rendered record to `reviews.jsonl`, so a scenario that posted one review
+    # reads back exactly that review and a receiver with many reviews does not
+    # pay a `sed` per stored review on every read.
+    #
+    # The store is `{...},{...}` — a record per create with a *leading*
+    # separator, which is what one atomic append can carry. Two earlier
+    # spellings were not safe and both produced a read-back a concurrent
+    # receiver could not answer: a separator written by its own append, which
+    # the kernel interleaved into `[,,{...}]`, and a separator decided by an
+    # existence probe, which two creates could both read as absent.
+    #
+    # So the store's leading separator is dropped on the way out: `tail -c +2`
+    # is one fork and a byte copy, against `cut`'s one fork and a *line* copy,
+    # and a trailing-separator store cannot be trimmed that way at all — a
+    # reversal reads the bytes a third time. An absent or empty store yields an
+    # empty string, so `[` is still followed by `]` and a pull request with no
+    # reviews reads back as `[]`.
     printf '['
-    if [ -f "$dir/reviews.jsonl" ]; then cat "$dir/reviews.jsonl"; fi
+    if [ -s "$dir/reviews.jsonl" ]; then tail -c +2 "$dir/reviews.jsonl"; fi
     # Filler reviews, for the review-ceiling probe. They are real records on
     # another commit: what matters is that the adapter would have had to read
     # them to call the list complete, so returning only the prefix would be a
@@ -447,7 +471,7 @@ if [ "$is_reviews" -eq 1 ]; then
     field filler_reviews; filler=$val
     i=0
     while [ -n "${filler:-}" ] && [ "$i" -lt "$filler" ] 2>/dev/null; do
-      if [ "$i" -eq 0 ] && [ ! -f "$dir/reviews.jsonl" ]; then
+      if [ "$i" -eq 0 ] && [ ! -s "$dir/reviews.jsonl" ]; then
         :
       else
         printf ','
