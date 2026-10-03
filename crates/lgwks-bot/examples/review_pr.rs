@@ -13,7 +13,7 @@
 //! gh --version
 //!
 //! # run the journey against a pull request
-//! cargo run -p lgwks_bot --features process --example review_pr -- \
+//! cargo run -p lgwks_bot --features process,ephemeral --example review_pr -- \
 //!     acme/widgets 7 "COMMENT" "the diff is correct; one nit at line 42"
 //!
 //! # draft only: the same run with LGWKS_REVIEW_PUBLISH unset publishes nothing
@@ -142,7 +142,7 @@ async fn run_review(scope: Scope, job: Job) -> Result<ReviewOutcome, lgwks_bot::
             .snapshot(job.request.pull())
             .await
             .map_err(lgwks_bot::script::FlowError::from)?;
-        let drafted = analyse(&snapshot, &scope)?;
+        let drafted = analyse(&snapshot, job.request.pull(), job.request.body())?;
         writeln!(
             std::io::stdout(),
             "draft only: reviewed {} at {}, not published",
@@ -153,26 +153,31 @@ async fn run_review(scope: Scope, job: Job) -> Result<ReviewOutcome, lgwks_bot::
             reason: String::from("this profile is draft-only; no publication right was granted"),
         });
     }
-    lgwks_bot::review::review_pr(scope, job.gh, job.request, |snapshot, _scope| {
-        analyse(snapshot, _scope)
+    let pull = job.request.pull().clone();
+    let draft = job.request.body().to_owned();
+    lgwks_bot::review::review_pr(scope, job.gh, job.request, move |snapshot, _scope| {
+        analyse(snapshot, &pull, &draft)
     })
     .await
 }
 
 /// The analysis stage: turn a pinned snapshot into the body to publish.
 ///
-/// A caller replaces this. It is handed the pinned snapshot and the scope it
-/// runs in, and it produces a body or a typed failure. It performs no
-/// publication and holds no credential.
+/// A caller replaces this. It is handed the pinned snapshot, the pull request
+/// it was read from and the operator's text, and it produces a body or a typed
+/// failure. It performs no publication and holds no credential. The body names
+/// the repository and commit the snapshot pinned, so a published review says
+/// which code it is about.
 fn analyse(
     snapshot: &lgwks_bot::domain::gh::PrSnapshot,
-    _scope: &Scope,
+    pull: &PullRequest,
+    draft: &str,
 ) -> Result<String, ScriptFailure> {
     let head = CommitId::new(snapshot.head_sha())
         .map_err(|source| ScriptFailure::new(format!("the head is not a commit: {source}")))?;
     Ok(format!(
-        "Reviewed acme/widgets#{} at {head}.\\n\\nThis body came from the example's \\
-         analysis stage; replace `analyse` with a real reviewer.",
+        "{draft}\n\nReviewed {}#{} at {head}.",
+        pull.repository(),
         snapshot.number()
     ))
 }
