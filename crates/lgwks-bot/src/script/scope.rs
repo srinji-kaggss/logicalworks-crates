@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use lgwks_std::hash::{Digest, Hasher};
 
+use crate::effect::RunId;
 use crate::rt::clock::Clock;
 use crate::rt::sync::CancellationToken;
 
@@ -137,6 +138,8 @@ struct ScopeInner {
     /// step cannot quietly measure its deadline against a different timeline
     /// from the one its parent was admitted under.
     clock: Clock,
+    /// The run this scope's records are keyed by, when a host minted one.
+    run: Option<RunId>,
 }
 
 impl Scope {
@@ -200,6 +203,25 @@ impl Scope {
         trail: Arc<Trail>,
         clock: Clock,
     ) -> Self {
+        Self::rooted(tenant, token, trail, clock, None)
+    }
+
+    /// A root scope measured on `clock` whose durable steps are keyed by `run`.
+    ///
+    /// The form a resumable run uses: a host that installed a store mints or is
+    /// handed a run id and passes it here, so every step descended from this root
+    /// records against the same run without threading it by hand. `None` is the
+    /// local form, and a step under it is never durable. The clock and the run
+    /// are set together because they are both the host's: a resumed run whose
+    /// steps were keyed to the host but timed on a fresh clock would measure its
+    /// deadlines on a timeline nothing else in the run shares.
+    pub(crate) fn rooted(
+        tenant: Tenant,
+        token: CancellationToken,
+        trail: Arc<Trail>,
+        clock: Clock,
+        run: Option<RunId>,
+    ) -> Self {
         Self {
             inner: Arc::new(ScopeInner {
                 tenant,
@@ -209,6 +231,7 @@ impl Scope {
                 policy: Arc::new(Policy::for_this_machine()),
                 trail,
                 clock,
+                run,
             }),
         }
     }
@@ -282,6 +305,7 @@ impl Scope {
                 policy: Arc::clone(&self.inner.policy),
                 trail: Arc::clone(&self.inner.trail),
                 clock: self.inner.clock.clone(),
+                run: self.inner.run,
             }),
         })
     }
@@ -292,7 +316,7 @@ impl Scope {
     }
 
     /// This scope's path, shared rather than copied, for error locations.
-    pub(super) fn shared_path(&self) -> &Arc<str> {
+    pub(crate) fn shared_path(&self) -> &Arc<str> {
         &self.inner.path
     }
 
@@ -309,6 +333,18 @@ impl Scope {
     #[must_use]
     pub fn tenant(&self) -> &Tenant {
         &self.inner.tenant
+    }
+
+    /// The run this scope's durable records are keyed by, when a host minted
+    /// one.
+    ///
+    /// `None` for every scope built by hand — [`Scope::root`] and
+    /// [`Scope::with_token`] — and for a run whose host has no store installed:
+    /// neither is ever durable, and a caller can read that here rather than
+    /// inferring it from a missing record.
+    #[must_use]
+    pub fn run(&self) -> Option<RunId> {
+        self.inner.run
     }
 
     /// The steps from the root to here, joined by `/`.

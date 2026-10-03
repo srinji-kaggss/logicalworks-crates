@@ -1,0 +1,128 @@
+id: pr-review-publication
+actor: agent-or-human-dev
+job: Review a pull request from one pinned head, publish that review, and be
+  certain afterwards whether the published review is about the code that was
+  read — without ever posting the same review twice and without silently
+  reviewing a head that moved under the task.
+prior_knowledge:
+  - Knows the repository and the pull request; has not read the adapter code.
+  - Assumes a successful `gh api` call means the review is published, and that
+    re-running the command publishes a second review. Both are wrong: an
+    accepted write whose response was lost is exactly the case this journey
+    exists for.
+start:
+  installation: lgwks-bot built with the `process` feature; a `gh` executable on
+    PATH; a pull request to review.
+  state: a head commit that has not been read, an unreviewed pull request, and
+    no record of any publication attempt.
+success:
+  visible_outcome: one published review, whose subject is the commit that was
+    actually read and whose body was read back independently before the task
+    reported success. A head that moved is a typed refusal naming both shas. A
+    lost response is reconciled by reading back, never by re-posting.
+states:
+  - name: published-verified
+    expectation: the review exists at the reviewed sha, the read-back matched
+      the intended payload, and the report says published and verified as two
+      separate facts.
+  - name: published-response-lost
+    expectation: the write may have landed; the task reads back, finds the
+      review it intended, and reports it published exactly once. It never
+      issues a second create.
+  - name: unreconciled-unknown
+    expectation: the read-back cannot establish whether the review landed, so
+      the outcome is Unknown with the attempted identity attached, and no second
+      create is issued.
+  - name: subject-moved
+    expectation: the head is no longer the pinned sha; the task refuses with a
+      typed target-moved error naming reviewed and current, and publishes
+      nothing.
+  - name: location-invalid
+    expectation: a finding whose path, side or range is not in the pinned diff
+      is a typed location failure, not a fabricated inline anchor.
+invariants:
+  - The published review's subject is the commit that was read, never a commit
+    the endpoint selected.
+  - An effect that may have happened is reconciled by observation, never
+    repeated. A retry is only safe where the receiver deduplicates.
+  - The task body owns no pid, no reap loop, no retry queue and no second
+    process runner; it describes work and the host executes it.
+  - A child's own output is evidence, not proof: exit zero is an exit code, and
+    the postcondition is checked by a separate read.
+trust_boundaries:
+  - "`gh` is a third-party program on the caller's PATH. It is the adapter's
+    only handle on GitHub, its stdout is untrusted text, and its arguments come
+    from the adapter rather than from a shell."
+  - "The task body is trusted code; the pull request's contents are not. A
+    finding may only be published after its location is validated against the
+    pinned diff."
+recovery_contracts:
+  - A lost response is reconciled by reading back for the attempted identity;
+    the repair is one read, and it never widens into a second publication.
+  - A head change is reported as reviewed A / current B. Re-analysing at B is a
+    separate recorded decision, never an automatic re-subject.
+  - A missing publication capability keeps the finished draft and asks for that
+    one repair.
+agent_contracts:
+  - review_pr reports Published { review_id, verified } only after an
+    independent read-back matched subject and body.
+  - review_pr reports TargetMoved { reviewed, current } and publishes nothing.
+  - review_pr reports Unknown { requested_id } rather than republishing.
+  - The gh binding never runs a command through a shell, never reports a
+    success it did not observe, and retains at most its declared capture
+    ceiling while still counting every byte the child wrote.
+probes:
+  - id: publish-at-the-reviewed-sha
+    action: Point the adapter at a fake `gh` that records argv; run the task;
+    assert the create carried commit_id equal to the pinned head sha and the
+    read-back was a separate invocation.
+  - id: lost-response-is-reconciled-not-repeated
+    action: Make the fake `gh` apply the review and then exit non-zero without
+    answering; assert the task reads back, finds it, reports published once, and
+    that argv recorded exactly one create.
+  - id: a-head-change-is-a-refusal
+    action: Make the head read return a different sha after the snapshot; assert
+    the disposition is Failed with TargetMoved naming both shas and that no
+    create was issued.
+  - id: unreconcilable-loss-stays-unknown
+    action: Make the fake `gh` fail the write and make the read-back return no
+    matching review; assert the outcome is Unknown and argv still records no
+    second create.
+  - id: a-non-zero-exit-is-not-a-published-review
+    action: Make the fake `gh` exit non-zero on the create; assert the task
+    does not report published.
+  - id: two-identities-on-one-repo-stay-isolated
+    action: Run two reviews concurrently for the same repository with distinct
+    review identities; assert each task's create carries only its own payload
+    and neither observes the other's review.
+  - id: the-adapter-refuses-without-the-capability
+    action: Issue an `Auth` that does not cover `bot.sys`; assert the call is
+    denied before any process is started.
+  - id: a-chatty-gh-is-truncated-not-retained
+    action: Make the fake `gh` write past the capture ceiling; assert the
+    retained bytes stop at the ceiling, the exact total is reported, and the
+    adapter still parses the payload it was promised.
+  - id: a-hanging-gh-is-stopped-as-a-whole-group
+    action: Make the fake `gh` spawn a grandchild and sleep; assert the
+    deadline stops the group, reports deadline_fired, and reports no exit code.
+  - id: a-review-list-past-the-ceiling-is-refused-not-truncated
+    action: Make the scripted gh return more reviews than the declared ceiling;
+    assert the read is a typed `ReviewCeiling` refusal naming the endpoint, the
+    count and the ceiling, never a shortened list — and that a run whose
+    publication really landed still reports Unknown rather than Published, since
+    the effect is real and only its verification is unavailable.
+  - id: an-answer-that-is-not-the-review-history-is-refused
+    action: Make the review read answer with text that is not JSON, with a JSON
+    list that lost its closing bracket, and with an answer larger than the
+    capture ceiling; assert each is refused and none verifies a publication.
+  - id: saturation-100-1000-10000
+    action: Run 100, 1,000 and 10,000 concurrent reviews on one pull request;
+    assert the receiver holds no more creates than there were runs, no fewer than
+    the runs that reported a publication, and at least one read-back per create.
+  - id: same-seed-same-trace-through-the-real-path
+    action: Drive each seeded fault family twice through the real path; assert
+    identical trace hashes and identical argv, with the staged payload's random
+    name normalized out and nothing else.
+  - id: same-seed-same-trace
+    action: Drive the seeded fault families twice; assert identical trace
+    hashes and identical argv.

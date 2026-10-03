@@ -32,10 +32,14 @@
 // that compiled to nothing would read as a test that passed.
 #![cfg(all(unix, feature = "rt"))]
 
-mod common;
+/// The kill-harness fixtures this file shares with the journal crash and
+/// fence families: one scratch allocator, one cleanup guard, one probe guard
+/// and one key constructor, so this observation cannot drift into a different
+/// kill discipline from theirs.
+#[path = "support/journal.rs"]
+mod shared;
 
-use common::ProbeGuard;
-use common::key;
+use shared::{ProbeGuard, TempGuard, key_for as key, pause, scratch_dir};
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -71,33 +75,14 @@ const PROBE_ROW: &str = "LGWKS_CLOCK_KILL_ROW";
 /// A unique scratch directory for one test, and a guard that removes it when
 /// the test ends however it ends.
 ///
-/// Both live in [`tests/common`], beside the identical pair the journal
-/// crash-observation harness uses: a scratch directory the OS reuses ids for is
-/// litter a failed run leaves behind, and a name two runs can collide on is a
-/// test that fails only when the machine is busy.
-fn scratch_and_guard(
-    name: &str,
-) -> Result<(PathBuf, common::TempGuard), Box<dyn std::error::Error>> {
-    common::scratch(name).map(|dir| {
-        let guard = common::TempGuard(dir.clone());
-        (dir, guard)
-    })
-}
-
-/// A plain-process pause for the harness branches that have no executor.
-///
-/// The workspace bans `std::thread::sleep` because blocking an executor thread
-/// stalls every task on it. Neither branch here has an executor: the child
-/// runs one sync body and parks while the parent decides when it dies, and the
-/// parent polls for a marker. That wait is the observation's subject, not its
-/// scaffolding.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the kill harness is a plain process with no async runtime and no reactor to \
-              stall; the parked child and the marker poll are the observation's shape"
-)]
-fn pause(millis: u64) {
-    std::thread::sleep(Duration::from_millis(millis));
+/// Both come from `support/journal.rs`, the pair the journal crash-observation
+/// harness uses: a scratch directory the OS reuses ids for is litter a failed
+/// run leaves behind, and a name two runs can collide on is a test that fails
+/// only when the machine is busy.
+fn scratch_and_guard(name: &str) -> Result<(PathBuf, TempGuard), Box<dyn std::error::Error>> {
+    let dir = scratch_dir(name)?;
+    let guard = TempGuard(dir.clone());
+    Ok((dir, guard))
 }
 
 /// The key the child's step is journalled under.
@@ -231,7 +216,7 @@ fn nanos_of(elapsed: Duration) -> Result<u64, Box<dyn std::error::Error>> {
 struct Fixture {
     journal: PathBuf,
     marker: PathBuf,
-    _dir: common::TempGuard,
+    _dir: TempGuard,
 }
 
 impl Fixture {
