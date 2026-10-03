@@ -152,6 +152,15 @@ explicitly under that crate.
   free its `reply` inside a later window and net the eager peak to zero; the
   servers carry bounded read/write timeouts so the join cannot block. No
   assertion, ceiling or bound changed; the probe is deterministic across 30 runs.
+- `lgwks_bot`: the storage owner's awaited answer could be written and never
+  woken. `Awaiting::poll` read the answer slot and only then registered its
+  waker, while the owner writes the slot and only then takes the waker to fire
+  it, so a publish landing between the poll's read and its registration found no
+  waker and left the awaiting task parked for ever. GitHub CI showed it as
+  `tests/sim_repair.rs::saturation_applies_each_ticket_once_band_09` (PR #239)
+  and `band_03` (PR #241) parked past 600 s, with the job cancelled at its
+  15-minute timeout, and the poll now registers its waker before it reads the
+  slot so whichever side moves second observes the other (INV-BOT-140).
 
 ### lgwks_std Added
 
