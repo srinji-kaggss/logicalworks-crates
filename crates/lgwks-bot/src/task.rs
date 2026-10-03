@@ -791,6 +791,28 @@ mod tests {
     /// it was checking had moved.
     type TestResult = Result<(), String>;
 
+    /// A run identity built from a literal, not from the entropy source.
+    ///
+    /// [`RunId::mint`] is behind the `ephemeral` feature and `ephemeral` is not a
+    /// default feature, so a unit test that minted one compiled under
+    /// `--all-features` and failed the workspace-default build — which is the
+    /// build `cargo nextest list --workspace` performs, and therefore a test that
+    /// could not be run at all on the configuration CI measures coverage over. What
+    /// these tests need is *a* run id and *two* distinct ones; none of them
+    /// asserts anything about how a run id is minted, which is
+    /// `effect::RunId::mint`'s own contract and is exercised where that feature is
+    /// on. Parsing a fixed literal is therefore the honest fixture: it needs no
+    /// feature and no randomness, so the same two identities are the same two
+    /// identities on every run of the suite.
+    fn run_id(nibble: char) -> Result<RunId, String> {
+        // A 32-character lowercase hex literal, which is the one spelling
+        // `RunId::from_hex` accepts, and one distinct nibble per call so two
+        // draws cannot collide and quietly make a "distinct identities" assertion
+        // pass on a single value.
+        let literal = format!("{nibble}{}", "0".repeat(31));
+        RunId::from_hex(&literal).map_err(|error| error.to_string())
+    }
+
     /// Every plan arm reports the run it adopts, and only the resume arms report one.
     ///
     /// The property the drift check's placement rests on: a fresh plan has no run
@@ -800,7 +822,7 @@ mod tests {
     fn only_the_resume_arms_adopt_a_run() -> TestResult {
         let host = host()?;
         let task = TaskName::new("probe").map_err(|error| error.to_string())?;
-        let run = RunId::mint().map_err(|error| error.to_string())?;
+        let run = run_id('1')?;
         let identity = host.definition_for(task.as_str(), None);
         assert!(Plan::Fresh.run().is_none(), "a fresh plan adopts nothing");
         assert!(
@@ -829,8 +851,8 @@ mod tests {
     #[test]
     fn a_derived_identity_is_stable_per_run_and_distinct_across_runs() -> TestResult {
         let host = host()?;
-        let first = RunId::mint().map_err(|error| error.to_string())?;
-        let second = RunId::mint().map_err(|error| error.to_string())?;
+        let first = run_id('1')?;
+        let second = run_id('2')?;
         assert_eq!(
             host.definition_for("probe", Some(&first)).digest(),
             host.definition_for("probe", Some(&first)).digest(),
