@@ -24,6 +24,7 @@
 //! | `retry up to 3 times, waiting 100ms:` | [`retry`] | retry storms; retrying a permanent failure; a new identity per attempt |
 //! | `together:` | `try_join!` | sequential awaits that should overlap; a failed branch that keeps running |
 //! | `step name:` | [`Scope::enter`] | anonymous work with no stable key or error location |
+//! | `await ready(&db, 30s)` | [`Readiness`] | a readiness guessed by sleeping; a poll loop; a stale instance releasing dependants |
 //!
 //! Every flow takes a [`Scope`] first. The scope carries the [`Tenant`], the
 //! path of steps that led here, and the cancellation token, so identity,
@@ -65,6 +66,7 @@ mod each;
 mod error;
 mod map;
 mod policy;
+mod ready;
 pub(crate) mod run_store;
 pub(crate) mod scope;
 pub(crate) mod trail;
@@ -81,6 +83,10 @@ pub use control::{at_most, attempts, retry, within, within_on};
 pub use each::each;
 pub use error::{FlowError, OptionExt, ResultExt};
 pub use map::{Architecture, FlowShape, StepKind, StepShape};
+pub use ready::{
+    FailAfterReady, Generation, MAX_DEPENDANTS, MAX_NAME_BYTES, Readiness, ReadinessError, Ready,
+    ReadyOutcome,
+};
 pub use rt_clock::Clock;
 pub use run_store::{Appended, Durable, remember};
 pub use scope::{Scope, StepKey, Tenant};
