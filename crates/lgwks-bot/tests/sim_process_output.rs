@@ -26,6 +26,7 @@
 //! | `cuts_are_refused_never_decoded` | a seeded cut point inside a frame yields a typed truncation naming both lengths |
 //! | `capture_cuts_end_at_the_capture_ceiling` | a capture-cut prefix ends at the capture's ceiling, never as a child truncation or a clean end |
 //! | `room_without_a_record_is_the_ceiling` | a legal record larger than the room remaining is the ceiling; only `0` and `> ceiling` are rot |
+//! | `rot_before_the_capture_cut_is_the_ending` | a rot prefix the capture retained whole is the ending; only a cut that reached it is the capture's ceiling |
 //! | `two_tenants_never_cross` | two tenants' captures are byte-distinct and neither sees the other's total |
 //! | `the_same_seed_replays` | the same seed produces the same trace hash, twice |
 
@@ -393,9 +394,13 @@ fn capture_cuts_end_at_the_capture_ceiling(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
         const PAYLOAD: usize = 16;
         const FRAME: usize = 4 + PAYLOAD;
-        // Six frames = 120 bytes against a ceiling drawn from 8..60, so the
-        // capture always cuts and the cut lands somewhere inside the stream.
-        let ceiling = usize::try_from(sim.rng().between(8, 60))?;
+        // Six frames = 120 bytes against a ceiling drawn from 20..60, so the
+        // capture always cuts and the cut lands somewhere inside the stream. The
+        // ceiling is drawn above the payload deliberately: a ceiling *below* it
+        // would make the very first prefix declare a length past the reader's
+        // ceiling, which is `MalformedPrefix` — a different fact about the same
+        // bytes, and one this family is not about.
+        let ceiling = usize::try_from(sim.rng().between(20, 60))?;
         let tenant: u32 = sim.rng().below(2);
         let byte = u8::try_from(tenant).unwrap_or(0).wrapping_add(b'a');
 
@@ -671,6 +676,20 @@ fn room_without_a_record_is_the_ceiling_band_01() -> TestResult {
     room_without_a_record_is_the_ceiling(Band::new(96, 8))
 }
 
+/// A seeded sweep of `rot_before_the_capture_cut_is_the_ending` over seeds
+/// 104..112.
+#[test]
+fn rot_before_the_capture_cut_is_the_ending_band_00() -> TestResult {
+    rot_before_the_capture_cut_is_the_ending(Band::new(104, 8))
+}
+
+/// A seeded sweep of `rot_before_the_capture_cut_is_the_ending` over seeds
+/// 112..120.
+#[test]
+fn rot_before_the_capture_cut_is_the_ending_band_01() -> TestResult {
+    rot_before_the_capture_cut_is_the_ending(Band::new(112, 8))
+}
+
 /// A sweep of `capture_cuts_end_at_the_capture_ceiling` at 100, 1 000 and 10 000
 /// concurrent captures, and the named replay receipt over the tier sweep.
 ///
@@ -756,6 +775,127 @@ fn capture_cuts_saturate_at_the_declared_tiers() -> TestResult {
         }
     }
     Ok(())
+}
+
+/// Rot before the capture cut is the ending; the capture's ceiling only ends what
+/// the cut itself reached.
+///
+/// Two tenants run the same shape with their own rot, so a crossed pipe shows up
+/// as the wrong bytes rather than a wrong count. Per tenant the stream is: `pad`
+/// whole records, then one **rot** record whose prefix declares a length no writer
+/// of this grammar produces, then `tail` more whole records, so the capture cuts
+/// somewhere in the stream. The seed picks whether the rot prefix itself was
+/// retained whole, and the ending follows from that and from nothing else: the
+/// child's rot when the capture kept all four of its bytes, otherwise the
+/// capture's own ceiling.
+///
+/// The rot is drawn from the two lengths the grammar refuses — `0`, and one past
+/// the reader's ceiling — because a *legal* record larger than the room remaining
+/// is `room_without_a_record_is_the_ceiling`'s case and would make this family's
+/// ending indistinguishable from a bound.
+///
+/// The cut and the reader's ceiling are the *same* number here, deliberately:
+/// they are drawn together so the one thing this family separates — the rot the
+/// capture retained from the bound it stopped at — is not confused by which of the
+/// two happened to be smaller.
+fn rot_before_the_capture_cut_is_the_ending(band: Band) -> TestResult {
+    sim::assert_replays(band, |sim| {
+        const PAYLOAD: usize = 8;
+        const FRAME: usize = 4 + PAYLOAD;
+        let pad = usize::try_from(sim.rng().below(3))?;
+        let tenant: u32 = sim.rng().below(2);
+        let byte = u8::try_from(tenant).unwrap_or(0).wrapping_add(b'a');
+        // Drawn *after* `pad` so that drawing it does not renumber the seeds, and
+        // above both the rot's position and one whole record — so whether the rot
+        // was retained whole is a real draw across the sweep rather than an
+        // artefact of a bound smaller than the prefix.
+        let ceiling = usize::try_from(sim.rng().between(24, 48))?;
+        // Enough records after the rot that the cut lands past it whenever it
+        // lands past it at all.
+        let tail = usize::try_from(sim.rng().between(1, 4))?;
+        let rot_at = pad.saturating_mul(FRAME).saturating_add(4);
+        let declared = if sim.rng().chance(500) {
+            0
+        } else {
+            ceiling.saturating_add(1)
+        };
+
+        let mut writer: Vec<u8> = Vec::new();
+        let push_record = |writer: &mut Vec<u8>, declared: usize| {
+            writer.extend_from_slice(&u32::try_from(declared).unwrap_or(0).to_be_bytes());
+            writer.extend(std::iter::repeat_n(byte, declared));
+        };
+        for _ in 0..pad {
+            push_record(&mut writer, PAYLOAD);
+        }
+        push_record(&mut writer, declared);
+        for _ in 0..tail {
+            push_record(&mut writer, PAYLOAD);
+        }
+        let literal = writer
+            .iter()
+            .map(|value| format!("\\{value:03o}"))
+            .collect::<String>();
+        let outcome = run(&captured(&format!("printf '{literal}'"), ceiling)?)?;
+        let retained = outcome.stdout().bytes().len();
+        let capture_cut = outcome.stdout().truncated();
+
+        // The model: the rot prefix is whole exactly when the capture retained all
+        // four of its bytes. When it was, the pass stopped on it — the capture's
+        // cut, if there was one, lies after it and cannot change that. When it was
+        // not, the cut came first and the pass ran out of retained bytes instead.
+        let rot_whole = retained >= rot_at;
+        let frames = outcome.stdout().frames(ceiling);
+        if rot_whole {
+            assert_eq!(
+                frames.ended(),
+                &FrameRead::MalformedPrefix { declared, ceiling },
+                "tenant={tenant} ceiling={ceiling} retained={retained}: the rot prefix at byte \
+                 {rot_at} was read whole, so it is the child's own rot and the capture's cut \
+                 after it does not replace it"
+            );
+            assert_eq!(
+                frames.records().len(),
+                pad,
+                "tenant={tenant}: the {pad} records before the rot are whole, and the rot is \
+                 never one of them"
+            );
+        } else {
+            assert!(
+                capture_cut,
+                "tenant={tenant} ceiling={ceiling} retained={retained}: the model says the cut \
+                 reached the pass rather than the rot, so the capture must have cut"
+            );
+            assert_eq!(
+                frames.ended(),
+                &FrameRead::CeilingReached {
+                    ceiling: outcome.stdout().retained_capacity()
+                },
+                "tenant={tenant} ceiling={ceiling} retained={retained}: the cut fell short of \
+                 the rot prefix, so the ending is the capture's own ceiling"
+            );
+        }
+        assert!(
+            !frames.is_complete(),
+            "tenant={tenant} ceiling={ceiling}: the pass stopped short of the end whatever it \
+             stopped on"
+        );
+        assert!(
+            !frames.ended().payload().is_some(),
+            "an ending the pass stopped on carries no payload"
+        );
+        sim.record("rot");
+        sim.trace.record_u64("tenant", u64::from(tenant));
+        sim.trace.record_count("ceiling", ceiling);
+        sim.trace.record_count("retained", retained);
+        sim.trace.record_count("pad", pad);
+        sim.trace.record_count("tail", tail);
+        sim.trace.record_count("rot-at", rot_at);
+        sim.trace.record_count("declared", declared);
+        sim.trace.record_u64("capture-cut", u64::from(capture_cut));
+        sim.record(ending_class(&frames));
+        Ok(())
+    })
 }
 
 /// The one payload byte a tenant's records carry, from its index.
