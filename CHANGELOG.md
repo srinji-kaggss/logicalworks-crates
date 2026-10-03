@@ -37,12 +37,26 @@ explicitly under that crate.
   `TruncatedPrefix`/`TruncatedPayload` — or, worse, read as a clean
   `EndOfStream` when the cut landed on a record boundary — and a caller would
   take a capture's bound for the child's own failure to write.
-  `CapturedStream::frames` now ends in
+  `CapturedStream::frames` now overrides exactly those three endings with
   `FrameRead::CeilingReached { ceiling: <the capture's retained capacity> }` and
   `is_complete()` is `false`. An untruncated capture still reports the child's own
   truncation, and a reader's ceiling reached over an untruncated capture still
   reports the reader's; the two ceilings are separate facts and are no longer
   conflated.
+- `rt::process`: the capture-ceiling override above no longer overwrites the two
+  endings it had no business touching. A `MalformedPrefix` was decided from a
+  whole prefix the capture *did* retain — declared `0`, or past the reader's
+  ceiling — so it is rot in the child's output and stands. A `CeilingReached`
+  the *reader* reached stopped the pass before the cut mattered, so it keeps the
+  reader's ceiling. Replacing either was fail-open: a caller looking for
+  corruption was handed a bound it never hit, and a caller looking for its own
+  bound was told something larger stopped it.
+- `rt::process`: `Frames::of_slice`'s unreachable `Err` arm fails closed. It
+  returned an empty `EndOfStream` — a *complete* reading, from a pass that
+  stopped without one. It now keeps the whole records and retained payload bytes
+  the pass had read and ends in `CeilingReached { ceiling: retained_bytes }`,
+  which is not complete. The arm is unreachable by construction (a byte slice's
+  reads cannot fail), so no test exercises it.
 - `rt::process`: `FrameRead::MalformedPrefix` no longer claims a legal record is
   rot. A declared length of `0` or past the ceiling still names no record this
   grammar writes and is still refused, but a legal declared length that merely

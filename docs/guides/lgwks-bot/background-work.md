@@ -135,7 +135,7 @@ and the run reports the same `CleanupReceipt` a supervised task would.
 The report is data, and none of it is a verdict about the work:
 `ProcessRun::status` (with `exit_code` and `signal`), `stdout` and `stderr` as
 `CapturedStream`s, `deadline_fired`, and `cleanup`
-(`crates/lgwks-bot/src/rt/process.rs:389`). Exit zero is reported as exit zero;
+(`crates/lgwks-bot/src/rt/process.rs:408`). Exit zero is reported as exit zero;
 judging whether the command did what it was asked is the caller's job.
 
 A stream whose policy is `StdioPolicy::Capture(limit)`
@@ -169,18 +169,27 @@ The case worth stating plainly: **a `truncated` capture never reports a clean
 end.** Its retained bytes are a prefix *the capture* cut, so they are not the
 child's whole output however they happen to end — including when they end
 exactly on a record boundary, which is precisely what a naive reader reports as
-a complete stream. `frames()` ends in
-`CeilingReached { ceiling: <the capture's retained capacity> }` and
-`is_complete()` is `false`, whatever the reader's own classification of the
-prefix was. The two ceilings are separate facts: the reader's `ceiling`
-argument bounds the payload bytes one pass keeps, and the capture's own
+a complete stream. `frames()` therefore overrides the three endings that are
+*about where the bytes stop* — `EndOfStream`, `TruncatedPrefix`,
+`TruncatedPayload` — with `CeilingReached { ceiling: <the capture's retained
+capacity> }`, and `is_complete()` is `false` for each.
+
+The two it leaves alone are the two the cut cannot have reached. A
+`MalformedPrefix` was decided from a *whole* prefix the capture did retain, so
+it is rot in the child's output however much output followed it. And a
+`CeilingReached` the reader itself reached stopped the pass before the cut
+mattered, so it names the reader's ceiling. Swapping either for the capture's
+would be the fail-open direction: a caller looking for corruption gets a bound it
+never hit, and a caller looking for its own bound is told something larger stopped
+it. The two ceilings are separate facts: the reader's `ceiling` argument bounds
+the payload bytes one pass keeps, and the capture's own
 `StdioPolicy::Capture(limit)` bounds what was ever retained.
 
 `read_frames(&mut reader, ceiling)` remains the fallible form for a reader that
 can actually refuse. Prefer `frames()` when the bytes are already in hand.
 
 `run_process` returns typed errors that separate the two worlds a caller acts
-on differently (`crates/lgwks-bot/src/rt/process.rs:996`): `Refused` (the
+on differently (`crates/lgwks-bot/src/rt/process.rs:1030`): `Refused` (the
 supervisor was cancelled before the fork) and `NotStarted` (the platform
 refused the program) both establish that nothing ran; `AfterStart` establishes
 that the child did run and its outcome is unknown.

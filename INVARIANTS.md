@@ -269,25 +269,38 @@ Each of these was a shipped defect. Treat the list as the spec.
   `room_without_a_record_is_the_ceiling_band_00`,
   `room_without_a_record_is_the_ceiling_band_01`)
 - **INV-BOT-114** A capture's own cut is reported as the capture's ceiling, never
-  as the child's truncation and never as a clean end. When
-  `CapturedStream::truncated()` is true the retained bytes are a prefix **the
-  capture** cut, so they are not the child's whole output however they happen to
-  end — including the case where they end exactly on a record boundary, which is
-  the case a naive reader reports as a complete stream. A framed read through
-  `CapturedStream::frames` therefore ends in
-  `FrameRead::CeilingReached { ceiling: <the capture's retained capacity> }` and
-  `is_complete()` is `false`, whatever the reader's own classification of the
-  prefix was. The two ceilings are separate facts and are never conflated: an
-  untruncated capture reports the child's own truncation, and a reader ceiling
-  reached over an untruncated capture reports the reader's. · why: #87 acceptance
-  row T05 (LC-02/11), the capture-ceiling/confusable-child-truncation defect ·
-  enforced by: `tests/sys_process_binding.rs`
+  as the child's truncation and never as a clean end — but only for the endings
+  the cut could have decided. When `CapturedStream::truncated()` is true the
+  retained bytes are a prefix **the capture** cut, so they are not the child's
+  whole output however they happen to end — including the case where they end
+  exactly on a record boundary, which is the case a naive reader reports as a
+  complete stream. A framed read through `CapturedStream::frames` therefore
+  overrides exactly `EndOfStream`, `TruncatedPrefix` and `TruncatedPayload` with
+  `FrameRead::CeilingReached { ceiling: <the capture's retained capacity> }`, and
+  `is_complete()` is `false` for each. The two endings it does **not** override
+  are the two the cut cannot have reached: a `MalformedPrefix` was decided from a
+  whole prefix the capture did retain (declared `0`, or a length past the
+  reader's ceiling), so it is rot in the child's output and stands; and a
+  `CeilingReached` the *reader* reached stopped the pass before the cut mattered,
+  so it names the reader's ceiling and stands. Replacing either would be
+  fail-open in the same direction: a caller looking for corruption would be handed
+  a bound it never hit, and a caller looking for its own bound would be told
+  something larger stopped it. The two ceilings are separate facts and are never
+  conflated: an untruncated capture reports the child's own truncation, and a
+  reader ceiling reached over an untruncated capture reports the reader's. · why:
+  #87 acceptance row T05 (LC-02/11), the capture-ceiling/confusable-child-truncation
+  defect and the fail-open override the reviewer found in it · enforced by:
+  `tests/sys_process_binding.rs`
   (`a_capture_ceiling_ends_the_framed_read_rather_than_the_child`,
-  `an_untruncated_capture_reports_the_child_own_truncation`) and
+  `an_untruncated_capture_reports_the_child_own_truncation`,
+  `a_rot_prefix_before_the_capture_cut_stays_refused`,
+  `a_reader_ceiling_over_a_truncated_capture_is_the_readers_own`) and
   `tests/sim_process_output.rs`
   (`capture_cuts_end_at_the_capture_ceiling_band_00`,
   `capture_cuts_end_at_the_capture_ceiling_band_01`,
-  `capture_cuts_saturate_at_the_declared_tiers`)
+  `capture_cuts_saturate_at_the_declared_tiers`,
+  `rot_before_the_capture_cut_is_the_ending_band_00`,
+  `rot_before_the_capture_cut_is_the_ending_band_01`)
 - **INV-BOT-111** A captured stream's four facts — the retained head at the
   ceiling, the retained capacity, the exact total and the truncation flag — are
   reported from one drain that keeps reading past its ceiling, so a flooding child
