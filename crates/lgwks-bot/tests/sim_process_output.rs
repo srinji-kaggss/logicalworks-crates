@@ -28,6 +28,8 @@
 //! | `room_without_a_record_is_the_ceiling` | a legal record larger than the room remaining is the ceiling; only `0` and `> ceiling` are rot |
 //! | `rot_before_the_capture_cut_is_the_ending` | a rot prefix the capture retained whole is the ending; only a cut that reached it is the capture's ceiling |
 //! | `two_tenants_never_cross` | two tenants' captures are byte-distinct and neither sees the other's total |
+//! | `verb_framed_reads_agree_with_the_model` | a seeded stream read back through `sys::Process`'s `Execute` verb matches a model of the framed reading |
+//! | `verb_two_tenants_never_cross` | two `Process` values on one host never see each other's framed payloads |
 //! | `the_same_seed_replays` | the same seed produces the same trace hash, twice |
 
 #![cfg(all(
@@ -43,9 +45,11 @@ mod sim;
 use std::error::Error;
 use std::num::NonZeroUsize;
 
-use lgwks_bot::rt::process::{FrameRead, ProcessSpec};
+use lgwks_bot::domain::sys::{Process, ProcessState};
+use lgwks_bot::rt::process::{DEFAULT_FRAME_CEILING, FrameRead, ProcessSpec};
 use lgwks_bot::rt::runtime::Builder;
 use lgwks_bot::rt::supervise::Supervisor;
+use lgwks_bot::{Auth, Cap, Execute, GrantSet};
 
 use sim::Band;
 
@@ -945,4 +949,166 @@ fn framed_capture(
         .map(|value| format!("\\{value:03o}"))
         .collect::<String>();
     captured(&format!("printf '{literal}'"), ceiling)
+}
+
+// ── The sys domain's verbs: the production door to the frame grammar ────────
+
+/// The `Auth` a `sys::Process` verb call needs.
+fn sys_auth() -> Result<Auth, Box<dyn Error>> {
+    Ok(GrantSet::empty().grant(Cap::sys()).issue(&[Cap::sys()])?)
+}
+
+/// A `Process` for `spec` whose verbs report a framed stdout reading.
+fn process_with_frames(spec: ProcessSpec) -> Result<Process, Box<dyn Error>> {
+    let ceiling =
+        NonZeroUsize::new(DEFAULT_FRAME_CEILING).ok_or("a frame ceiling of at least one")?;
+    Ok(Process::from_spec(spec).frame_stdout(ceiling))
+}
+
+/// Run `process` once through the `Execute` verb on a fresh runtime.
+fn execute(process: &Process) -> Result<ProcessState, Box<dyn Error>> {
+    let auth = sys_auth()?;
+    let runtime = lgwks_bot::Runtime::new()?;
+    Ok(runtime.block_on(process.execute_action((auth, &())))?)
+}
+
+/// A seeded framed stream read back through the verb a caller calls.
+///
+/// The capability this pins is a caller's: a `Process` built with
+/// `frame_stdout` reports the child's stdout as framed records on the state its
+/// verb returns, so `CapturedStream::frames` runs on the real run path rather
+/// than only inside a test. The seed draws the payload size, the record count
+/// and the payload byte; the assertion checks the reading against a model built
+/// from those draws, so the shipped reader and the model are compared rather
+/// than the test asserting whatever the reader produced.
+fn verb_framed_reads_agree_with_the_model(band: Band) -> TestResult {
+    sim::assert_replays(band, |sim| {
+        let payload = usize::try_from(sim.rng().between(1, 32))?;
+        let records = usize::try_from(sim.rng().between(1, 8))?;
+        let byte = u8::try_from(sim.rng().below(26))
+            .unwrap_or(0)
+            .wrapping_add(b'a');
+        // A capture ceiling generous enough that the child's whole output is
+        // retained, so the framed ending is the child's own and not the
+        // capture's cut.
+        let process = process_with_frames(framed_capture(byte, payload, records, 4096)?)?;
+        let state = execute(&process)?;
+        assert_eq!(state.exit_code, Some(0), "the child ran to a zero exit");
+        assert!(
+            !state.stdout_truncated,
+            "the whole framed stream fits the capture ceiling"
+        );
+        let frames = state
+            .stdout_frames()
+            .ok_or("a domain built with frame_stdout must report frames")?;
+        assert_eq!(
+            frames.records().len(),
+            records,
+            "the verb must report exactly the {records} whole records the child wrote"
+        );
+        let expected: Vec<u8> = std::iter::repeat_n(byte, payload).collect();
+        for (index, record) in frames.records().iter().enumerate() {
+            assert_eq!(
+                record.payload(),
+                Some(expected.as_slice()),
+                "record {index} must decode to this tenant's own payload byte"
+            );
+        }
+        assert_eq!(
+            frames.ended(),
+            &FrameRead::EndOfStream,
+            "a stream that ended between records is a complete read"
+        );
+        assert!(frames.is_complete(), "every record was decoded whole");
+        sim.record("verb-framed");
+        sim.trace.record_count("payload", payload);
+        sim.trace.record_count("records", records);
+        sim.trace.record_count("frames", frames.records().len());
+        Ok(())
+    })
+}
+
+/// Two tenants' framed readings on one host never cross.
+///
+/// Two `Process` values run their own children on one runtime, each built with
+/// its own payload byte. A crossed capture or a shared reader would show up as
+/// the wrong bytes rather than only as a wrong count, so the reading is checked
+/// against each tenant's own byte.
+fn verb_two_tenants_never_cross(band: Band) -> TestResult {
+    sim::assert_replays(band, |sim| {
+        let payload = usize::try_from(sim.rng().between(1, 16))?;
+        let records = usize::try_from(sim.rng().between(1, 5))?;
+        let runtime = lgwks_bot::Runtime::new()?;
+        let auth = sys_auth()?;
+        let first = process_with_frames(framed_capture(b'a', payload, records, 4096)?)?;
+        let second = process_with_frames(framed_capture(b'b', payload, records, 4096)?)?;
+        let (first_state, second_state) = runtime.block_on(async {
+            let first_state = first.execute_action((auth.clone(), &())).await?;
+            let second_state = second.execute_action((auth, &())).await?;
+            Ok::<_, lgwks_bot::BotError>((first_state, second_state))
+        })?;
+
+        for (label, state, byte) in [
+            ("first", &first_state, b'a'),
+            ("second", &second_state, b'b'),
+        ] {
+            assert_eq!(
+                state.exit_code,
+                Some(0),
+                "{label} tenant ran to a zero exit"
+            );
+            let frames = state
+                .stdout_frames()
+                .ok_or("a domain built with frame_stdout must report frames")?;
+            assert_eq!(
+                frames.records().len(),
+                records,
+                "{label} tenant: exactly its own {records} records"
+            );
+            let expected: Vec<u8> = std::iter::repeat_n(byte, payload).collect();
+            for record in frames.records() {
+                assert_eq!(
+                    record.payload(),
+                    Some(expected.as_slice()),
+                    "{label} tenant must never see the other tenant's payload"
+                );
+            }
+        }
+        assert_eq!(
+            first_state.stdout_total_bytes, second_state.stdout_total_bytes,
+            "both tenants wrote the same shape, so isolation is about content not count"
+        );
+        sim.record("verb-tenants");
+        sim.trace.record_count("payload", payload);
+        sim.trace.record_count("records", records);
+        sim.trace
+            .record_u64("first-total", first_state.stdout_total_bytes);
+        sim.trace
+            .record_u64("second-total", second_state.stdout_total_bytes);
+        Ok(())
+    })
+}
+
+/// A seeded sweep of the verb's framed reading over seeds 120..128.
+#[test]
+fn verb_framed_reads_agree_with_the_model_band_00() -> TestResult {
+    verb_framed_reads_agree_with_the_model(Band::new(120, 8))
+}
+
+/// A seeded sweep of the verb's framed reading over seeds 128..136.
+#[test]
+fn verb_framed_reads_agree_with_the_model_band_01() -> TestResult {
+    verb_framed_reads_agree_with_the_model(Band::new(128, 8))
+}
+
+/// A seeded sweep of two tenants' verb readings over seeds 136..144.
+#[test]
+fn verb_two_tenants_never_cross_band_00() -> TestResult {
+    verb_two_tenants_never_cross(Band::new(136, 8))
+}
+
+/// A seeded sweep of two tenants' verb readings over seeds 144..152.
+#[test]
+fn verb_two_tenants_never_cross_band_01() -> TestResult {
+    verb_two_tenants_never_cross(Band::new(144, 8))
 }
