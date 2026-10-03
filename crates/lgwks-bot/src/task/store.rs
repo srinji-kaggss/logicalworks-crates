@@ -471,6 +471,30 @@ impl RunStore {
             .map_or(0, |held| held.steps.len())
     }
 
+    /// The archived bytes committed for `key` under `run`, or `None` when there
+    /// are none.
+    ///
+    /// The reader's door onto a durable step's value, and the other half of
+    /// [`RunStore::record_count`]: a resumed run needs to read back *what* a
+    /// previous instance recorded, not merely *that* it recorded something, and
+    /// without this the only way to see a record's contents would be to re-run the
+    /// step that wrote it.
+    ///
+    /// `Err` is a read failure — a run another tenant owns — never a miss, so a
+    /// caller never reads a refusal as absence (INV-BOT-7).
+    ///
+    /// # Errors
+    ///
+    /// [`FlowError`] when `run` belongs to a tenant other than `tenant`.
+    pub fn lookup(
+        &self,
+        tenant: &str,
+        run: RunId,
+        key: StepKey,
+    ) -> Result<Option<Vec<u8>>, FlowError> {
+        Ok(RunRecords::lookup(self, tenant, run, key)?.map(|stored| stored.into_bytes()))
+    }
+
     /// The bytes this store has committed, header included.
     #[must_use]
     pub fn committed_bytes(&self) -> u64 {
