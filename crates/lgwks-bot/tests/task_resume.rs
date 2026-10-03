@@ -214,11 +214,19 @@ fn a_recorded_step_returns_without_polling_its_future() -> TestResult {
 
 /// A process killed mid-run resumes without re-running what it finished.
 ///
-/// The child records `alpha` and `beta`, publishes its run id, then parks inside
-/// `gamma`. The parent kills it with a real `SIGKILL` and resumes under that run
-/// id. `alpha` and `beta` must each still be at one — their records were
-/// `sync_all`-ed before their markers — `gamma` must be at two (it ran once in
-/// the child without a record, and once here), and the output must be 10.
+/// The child records `alpha`, publishes its run id, records `beta`, then parks
+/// inside `gamma`. The parent kills it with a real `SIGKILL` and resumes under
+/// that run id. `alpha` and `beta` must each still be at one — their markers are
+/// written only after their records were `sync_all`-ed — `gamma` must be at two
+/// (it ran once in the child without a record, and once here), and the output
+/// must be 10.
+///
+/// The two kinds of marker are the point. `alpha` and `beta` are published
+/// *after* their `remember` returns, so seeing one means the record is already
+/// on the disk; `gamma`'s is published *inside* its body, so seeing one means
+/// only that the step started. A test that used one kind for both would be
+/// asserting that a step re-runs after a kill, and could only pass by racing
+/// the kill to land inside the window between the marker and the append.
 #[test]
 fn a_killed_process_resumes_without_rerunning_finished_steps() -> TestResult {
     let scratch = Scratch::new("kill")?;
@@ -291,24 +299,28 @@ fn child_body() -> TestResult {
     let body = task("three", move |scope: Scope, dir: PathBuf| {
         let run_file = Arc::clone(&run_file_in);
         async move {
-            remember(&scope, "alpha", || async {
-                record_run(&dir, "alpha")?;
-                Ok::<_, FlowError>(2u32)
-            })
-            .await?;
+            // Alpha's and beta's markers are written *after* their `remember`
+            // returns, not inside their bodies. The parent waits on them and then
+            // kills, so a marker written inside the body would be the parent's
+            // evidence that the body started, which is not the same claim: the
+            // kill could land between the marker and the append, and the resume
+            // would then re-run a step whose record the test had already said was
+            // durable. Publishing after the await makes these markers mean what
+            // the parent needs them to mean — the record is on the disk.
+            remember(&scope, "alpha", || async { Ok::<_, FlowError>(2u32) }).await?;
+            record_run(&dir, "alpha")?;
             // The run id is published only after `alpha`'s record was acknowledged,
             // so the parent's wait for it is a wait for durable evidence.
             let run = scope
                 .run()
                 .ok_or_else(|| FlowError::failed("a stored run must carry a run id"))?;
             std::fs::write(run_file.as_path(), run.id().to_hex()).map_err(FlowError::failed)?;
-            remember(&scope, "beta", || async {
-                record_run(&dir, "beta")?;
-                Ok::<_, FlowError>(3u32)
-            })
-            .await?;
+            remember(&scope, "beta", || async { Ok::<_, FlowError>(3u32) }).await?;
+            record_run(&dir, "beta")?;
             // Park here: this step's body starts, its record never lands, and the
-            // parent kills the process while it is outstanding.
+            // parent kills the process while it is outstanding. Its marker is
+            // inside the body and deliberately proves nothing about durability:
+            // that is what distinguishes it from the two steps above.
             remember(&scope, "gamma", || async {
                 record_run(&dir, "gamma")?;
                 for _ in 0..600 {
@@ -367,18 +379,29 @@ fn wait_for_run(path: &Path, within: Duration) -> Result<RunId, Box<dyn Error>> 
     }
 }
 
-/// Wait for a marker file to exist.
+/// Wait for a marker file to carry its count.
 fn wait_for_marker(path: &Path, within: Duration) -> TestResult {
     let deadline = std::time::Instant::now()
         .checked_add(within)
         .ok_or("an unrepresentable deadline")?;
-    while !path.exists() {
+    // Wait for *content*, not for the file to exist. `std::fs::write` creates the
+    // file before the bytes are in it, so `path.exists()` becomes true while the
+    // marker is still empty — and `ran` parses an empty file as zero. A parent
+    // that killed on existence alone would read "the step ran zero times" and
+    // report a step that demonstrably ran. The child is parked for a minute
+    // after this marker, so waiting for the count it wrote costs nothing.
+    loop {
+        match std::fs::read_to_string(path) {
+            Ok(text) if !text.trim().is_empty() => return Ok(()),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
         if std::time::Instant::now() >= deadline {
             return Err(format!("the child never wrote {}", path.display()).into());
         }
         pause(20);
     }
-    Ok(())
 }
 
 /// Two tenants over one shared store file: the owner resumes, the other is refused.
