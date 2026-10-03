@@ -27,69 +27,25 @@
 //! a real store), #107 T21/T22 (needs a real descendant tree), #108 (needs a
 //! real frame). They are named so they cannot quietly count as done.
 
-use std::process::Child;
 use std::time::Duration;
 
-/// Owns the probe child and kills it, reaping it, however the test ends.
-///
-/// A test that returns early, or panics, between the spawn and the kill must
-/// not leave a live child behind: the guard's drop is the backstop the
-/// harness itself can forget. `take` hands the child to the kill harness,
-/// which then owns the kill and the reap, so the guard drops empty and no
-/// path kills twice.
-struct ProbeGuard(Option<Child>);
+mod common;
 
-impl ProbeGuard {
-    /// Hand the child to the kill harness.
-    fn take(&mut self) -> Option<Child> {
-        self.0.take()
-    }
-}
+use common::ProbeGuard;
 
-impl Drop for ProbeGuard {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
-            drop(child.kill());
-            drop(child.wait());
-        }
-    }
-}
-
-use lgwks_bot::effect::{
-    ActionDigest, ActionId, AttemptId, EffectKey, EnvironmentEpoch, EnvironmentId, FlowRevision,
-    Id128, RunId,
-};
+use lgwks_bot::effect::{EffectKey, Id128};
 use lgwks_bot::journal::{
     AttemptStatus, DurabilityPromise, EffectEvent, EffectEvidence, EffectJournal, FileJournal,
     JournalError, Verification, VerificationResult,
 };
 
-const RUN: &str = "0102030405060708090a0b0c0d0e0f10";
-const ACTION: &str = "1112131415161718191a1b1c1d1e1f20";
-const ENV: &str = "2122232425262728292a2b2c2d2e2f30";
-const FLOW_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+use common::key;
+
 const DIGEST_A: &str = "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeffe0e1e2e3e4e5e6e7e8e9eaebecedeeef";
 const DIGEST_B: &str = "efeeedecebeae9e8e7e6e5e4e3e2e1e0dfdedddcdbdad9d8d7d6d5d4d3d2d1d0";
 const PREDICATE: &str = "4142434445464748494a4b4c4d4e4f50";
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
-
-/// Removes a test's scratch directory when the test ends, however it ends.
-///
-/// The guard is best effort: a scratch directory the system refuses to remove
-/// is litter, not a failed observation, so the error is dropped rather than
-/// allowed to mask the test's own verdict.
-struct TempGuard(std::path::PathBuf);
-
-impl Drop for TempGuard {
-    fn drop(&mut self) {
-        if self.0.is_dir() {
-            drop(std::fs::remove_dir_all(&self.0));
-        } else {
-            drop(std::fs::remove_file(&self.0));
-        }
-    }
-}
 
 /// One ladder rung, counted from one, in the order the journal enforces.
 const RUNG_PREPARED: usize = 2;
@@ -103,37 +59,14 @@ const PROBE_JOURNAL: &str = "LGWKS_PROBE_JOURNAL";
 const PROBE_EVENTS: &str = "LGWKS_PROBE_EVENTS";
 const PROBE_MARKER: &str = "LGWKS_PROBE_MARKER";
 
-/// A key for one attempt at the shared intent, under `digest`.
-fn key(attempt: &str, digest: &str) -> Result<EffectKey, Box<dyn std::error::Error>> {
-    Ok(EffectKey::new(
-        RunId::from_hex(RUN)?,
-        ActionId::from_hex(ACTION)?,
-        AttemptId::from_decimal(attempt)?,
-        FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-        ActionDigest::from_tagged("blake3_256", digest)?,
-        EnvironmentId::from_hex(ENV)?,
-        EnvironmentEpoch::from_decimal("1")?,
-    ))
-}
-
-/// A counter that gives concurrent test runs distinct scratch names.
-///
-/// Nanos plus a counter, not a process id: the OS reuses both pids and
-/// threads, and a reused id must never make two runs share a journal.
-static SCRATCH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// A unique scratch directory for one test.
-fn scratch(name: &str) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    use std::sync::atomic::Ordering;
-    let dir = std::env::temp_dir().join(format!(
-        "lgwks-obs-{name}-{}-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_nanos(),
-        SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
+/// A unique scratch directory for one test, and a guard that removes it.
+fn scratch(
+    name: &str,
+) -> Result<(std::path::PathBuf, common::TempGuard), Box<dyn std::error::Error>> {
+    common::scratch(name).map(|dir| {
+        let guard = common::TempGuard(dir.clone());
+        (dir, guard)
+    })
 }
 
 /// Append the first `rungs` events of the standard ladder for `key`, each
@@ -248,10 +181,11 @@ fn probe_body() -> TestResult {
 /// rungs and then park.
 fn spawn_probe(
     test_name: &str,
-    journal_path: &std::path::Path,
+    row: &Row,
     marker_path: &std::path::Path,
     events: usize,
 ) -> Result<ProbeGuard, Box<dyn std::error::Error>> {
+    let journal_path = &row.journal;
     let executable = std::env::current_exe()?;
     Ok(ProbeGuard(Some(
         std::process::Command::new(executable)
@@ -267,68 +201,115 @@ fn spawn_probe(
 /// Wait until the probe's marker exists — its proof that every append was
 /// acknowledged — then kill the child with a real `SIGKILL` and reap it.
 ///
-/// `Child::kill` sends `SIGKILL` on Unix: no cleanup, no destructors, no
-/// flushing. Everything the child wrote that is not on the disk is gone, and
-/// everything that claimed to be durable had better be there.
+/// The kill itself is [`ProbeGuard::kill_after_marker`], shared with the clock
+/// kill harness: two copies of this loop would drift, and the copy that drifts
+/// is the one deciding whether a durable observation saw a real kill.
 fn kill_after_marker(
     mut guard: ProbeGuard,
     marker: &std::path::Path,
+    test_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(mut child) = guard.take() else {
-        return Err("the probe child was already gone before the kill".into());
-    };
-    for _ in 0..2_000 {
-        if marker.exists() {
-            child.kill()?;
-            let status = child.wait()?;
-            // The kill, not an earlier failure, must be what ended the
-            // child: a probe that died on its own after writing the marker
-            // would make this observation a courtesy, not a kill.
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::ExitStatusExt as _;
-                assert_eq!(
-                    status.signal(),
-                    Some(9),
-                    "the probe must have been killed, not exited: {status}"
-                );
-            }
-            return Ok(());
-        }
-        if let Some(status) = child.try_wait()? {
-            return Err(
-                format!("the probe child exited on its own before the kill: {status}").into(),
-            );
-        }
-        pause(5);
-    }
-    child.kill()?;
-    child.wait()?;
-    Err("the probe child never reached its marker; the observation has no kill to test".into())
+    guard.kill_after_marker(marker, test_name)
 }
 
 // ── Row #106: the settlement survives the kill ──────────────────────────────
 
-#[test]
-fn a_settlement_recorded_before_a_real_kill_is_the_recovered_answer() -> TestResult {
+/// Run the child's work and return when *this* process is the child.
+///
+/// A probe child re-runs its own test binary: the parent asks this test to do
+/// its work, and the child must instead append its ladder and park to be
+/// killed. The child's failure is its outcome, so a child that fails before
+/// the kill ends the test loudly rather than parking for a kill that would
+/// turn that failure into a plausible-looking observation.
+fn run_or_return_as_child() -> TestResult {
     if std::env::var_os(PROBE_ENV).is_some() {
         return probe_body();
     }
-    let dir = scratch("settlement")?;
-    let _guard = TempGuard(dir.clone());
-    let journal_path = dir.join("journal.log");
-    let marker = dir.join("marker");
+    Ok(())
+}
 
-    let child = spawn_probe(
+/// One row's scratch directory, journal and marker, plus the guard that removes
+/// the directory however the test ends.
+///
+/// Every row in this file opens a journal, waits on a marker and spawns the
+/// probe; naming those three things per row is the same lines written once per
+/// row, and the places where they could disagree about which file is which.
+struct Row {
+    journal: std::path::PathBuf,
+    marker: std::path::PathBuf,
+    _dir: common::TempGuard,
+}
+
+impl Row {
+    /// Spawn this row's probe, wait for its marker, and `SIGKILL` it.
+    ///
+    /// The whole observation in one call, because the three pieces are a
+    /// matched set: spawning a probe against another row's journal, or polling
+    /// a marker the child never writes, both fail as a *timeout* rather than as
+    /// the mismatch they are.
+    fn kill_probe(
+        &self,
+        test_name: &str,
+        marker: &std::path::Path,
+        rungs: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let child = spawn_probe(test_name, self, marker, rungs)?;
+        kill_after_marker(child, marker, test_name)
+    }
+
+    /// This row's directory — unless this process *is* the probe child, which
+    /// must run the child's work instead. The check lives here so every row
+    /// inherits it: a row that forgot the branch would park as a parent and
+    /// hang the harness rather than fail loudly.
+    fn for_test(scratch: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        run_or_return_as_child()?;
+        Self::new(scratch)
+    }
+
+    /// The whole observation for a row whose kill *is* the subject: build the
+    /// row, spawn its probe against this row's own journal and marker, wait for
+    /// the acknowledgment marker, and `SIGKILL` the child.
+    ///
+    /// Each row's preamble was three statements whose only variation was its own
+    /// name, and written per row they are the place where a row silently stops
+    /// being an observation: paired with the wrong journal, or with the kill
+    /// dropped, the row still compiles and still passes. One call, given the
+    /// rung it wants, cannot drift that way. The marker is the row's own — the
+    /// pair a spawn/poll split would get wrong — and is returned for the one row
+    /// whose subject *is* an external artifact under a different name.
+    fn observe(
+        test_name: &str,
+        scratch: &str,
+        rungs: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let row = Self::for_test(scratch)?;
+        row.kill_probe(test_name, &row.marker.clone(), rungs)?;
+        Ok(row)
+    }
+
+    /// This row's directory and nothing else: for the rows that open their
+    /// journal in-process and have no probe to kill.
+    fn new(name: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let (dir, guard) = scratch(name)?;
+        Ok(Self {
+            journal: dir.join("journal.log"),
+            marker: dir.join("marker"),
+            _dir: guard,
+        })
+    }
+}
+
+#[test]
+fn a_settlement_recorded_before_a_real_kill_is_the_recovered_answer() -> TestResult {
+    let row = Row::observe(
         "a_settlement_recorded_before_a_real_kill_is_the_recovered_answer",
-        &journal_path,
-        &marker,
+        "settlement",
         RUNG_APPLIED,
     )?;
-    kill_after_marker(child, &marker)?;
+    let journal_path = &row.journal;
 
     // The restart: a fresh controller opens what is on the disk.
-    let mut journal = FileJournal::open(&journal_path)?;
+    let mut journal = FileJournal::open(journal_path)?;
     let recovered = journal.recover();
     let settled = key("1", DIGEST_A)?;
     assert_eq!(
@@ -367,23 +348,14 @@ fn a_settlement_recorded_before_a_real_kill_is_the_recovered_answer() -> TestRes
 
 #[test]
 fn a_kill_between_prepare_and_outcome_recovers_a_barrier_not_an_answer() -> TestResult {
-    if std::env::var_os(PROBE_ENV).is_some() {
-        return probe_body();
-    }
-    let dir = scratch("barrier")?;
-    let _guard = TempGuard(dir.clone());
-    let journal_path = dir.join("journal.log");
-    let marker = dir.join("marker");
-
-    let child = spawn_probe(
+    let row = Row::observe(
         "a_kill_between_prepare_and_outcome_recovers_a_barrier_not_an_answer",
-        &journal_path,
-        &marker,
+        "barrier",
         RUNG_PREPARED,
     )?;
-    kill_after_marker(child, &marker)?;
+    let journal_path = &row.journal;
 
-    let journal = FileJournal::open(&journal_path)?;
+    let journal = FileJournal::open(journal_path)?;
     let this_key = key("1", DIGEST_A)?;
     let recovered = journal.recover();
     assert_eq!(
@@ -422,27 +394,18 @@ fn a_kill_between_prepare_and_outcome_recovers_a_barrier_not_an_answer() -> Test
 
 #[test]
 fn a_restart_with_a_new_digest_cannot_fold_into_a_completed_attempt() -> TestResult {
-    if std::env::var_os(PROBE_ENV).is_some() {
-        return probe_body();
-    }
-    let dir = scratch("identity")?;
-    let _guard = TempGuard(dir.clone());
-    let journal_path = dir.join("journal.log");
-    let marker = dir.join("marker");
-
-    let child = spawn_probe(
+    let row = Row::observe(
         "a_restart_with_a_new_digest_cannot_fold_into_a_completed_attempt",
-        &journal_path,
-        &marker,
+        "digest",
         RUNG_APPLIED,
     )?;
-    kill_after_marker(child, &marker)?;
+    let journal_path = &row.journal;
 
     // The restart re-admits the same logical action under a changed input:
     // attempt `"2"`, digest `B`. The binding is to the digest, so this is a
     // different attempt with its own fresh ladder, not a continuation of the
     // one the disk says already applied.
-    let mut journal = FileJournal::open(&journal_path)?;
+    let mut journal = FileJournal::open(journal_path)?;
     let first = key("1", DIGEST_A)?;
     let rebound = key("2", DIGEST_B)?;
     assert_ne!(first, rebound);
@@ -462,28 +425,28 @@ fn a_restart_with_a_new_digest_cannot_fold_into_a_completed_attempt() -> TestRes
 
 #[test]
 fn an_external_marker_appears_only_after_the_durable_ack() -> TestResult {
-    if std::env::var_os(PROBE_ENV).is_some() {
-        return probe_body();
-    }
-    let dir = scratch("handoff")?;
-    let _guard = TempGuard(dir.clone());
-    let journal_path = dir.join("journal.log");
-    // For this row the marker is not scaffolding: it is the external effect
-    // the row is about — an artifact on the disk, outside the dying process.
-    // The child writes it only after its appends were acknowledged by a
-    // journal that promises to survive the kill, so its existence plus the
-    // kill is the observation.
-    let marker = dir.join("external-effect");
+    let row = Row::for_test("an_external_marker_appears_only_after_the_durable_ack")?;
+    let journal_path = &row.journal;
+    // For this row the marker is not scaffolding: it is the external effect the
+    // row is about — an artifact on the disk, outside the dying process. The
+    // child writes it only after its appends were acknowledged by a journal
+    // that promises to survive the kill, so its existence plus the kill is the
+    // observation.
+    let marker = row.marker.with_file_name("external-effect");
 
     let child = spawn_probe(
         "an_external_marker_appears_only_after_the_durable_ack",
-        &journal_path,
+        &row,
         &marker,
         RUNG_PREPARED,
     )?;
-    kill_after_marker(child, &marker)?;
+    kill_after_marker(
+        child,
+        &marker,
+        "an_external_marker_appears_only_after_the_durable_ack",
+    )?;
 
-    let journal = FileJournal::open(&journal_path)?;
+    let journal = FileJournal::open(journal_path)?;
     let granted = journal.admit_external_handoff()?;
     assert!(
         granted.survives_process_crash(),
@@ -512,24 +475,23 @@ fn an_external_marker_appears_only_after_the_durable_ack() -> TestResult {
 
 #[test]
 fn a_settlement_followed_by_a_failed_recording_append_is_still_the_settlement() -> TestResult {
-    let dir = scratch("recording")?;
-    let _guard = TempGuard(dir.clone());
-    let journal_path = dir.join("journal.log");
+    let row = Row::new("recording")?;
+    let journal_path = &row.journal;
 
     // The writer's handle is scoped: the fence is exclusive, so the reopen
     // below must not race a live first handle.
     let this_key = key("1", DIGEST_A)?;
     {
-        let mut journal = FileJournal::open(&journal_path)?;
+        let mut journal = FileJournal::open(journal_path)?;
         walk_ladder(&mut journal, this_key, RUNG_APPLIED)?;
 
         // The recording failure: the next append dies mid-write. On a real
         // store that is a torn final frame — bytes after the last
         // acknowledged record.
-        tear_tail(&journal_path, &[0x00, 0x00, 0x00])?;
+        tear_tail(journal_path, &[0x00, 0x00, 0x00])?;
     }
 
-    let reopened = FileJournal::open(&journal_path)?;
+    let reopened = FileJournal::open(journal_path)?;
     assert!(
         reopened.torn_tail_repaired(),
         "the interrupted append was never acknowledged; opening repairs it"
@@ -548,25 +510,24 @@ fn a_settlement_followed_by_a_failed_recording_append_is_still_the_settlement() 
 
 #[test]
 fn a_torn_final_frame_is_repaired_and_never_replayed() -> TestResult {
-    let dir = scratch("torn")?;
-    let _guard = TempGuard(dir.clone());
-    let journal_path = dir.join("journal.log");
+    let row = Row::new("torn")?;
+    let journal_path = &row.journal;
 
     // The writer's handle is scoped: the fence is exclusive, so the reopen
     // below must not race a live first handle.
     let this_key = key("1", DIGEST_A)?;
     let acked_len;
     {
-        let mut journal = FileJournal::open(&journal_path)?;
+        let mut journal = FileJournal::open(journal_path)?;
         walk_ladder(&mut journal, this_key, RUNG_PREPARED)?;
-        acked_len = std::fs::metadata(&journal_path)?.len();
+        acked_len = std::fs::metadata(journal_path)?.len();
 
         // A kill mid-append leaves a partial frame. Both shapes a torn write
         // produces: a truncated frame body, and a truncated length prefix.
-        tear_tail(&journal_path, &[0x00, 0x00, 0x01, 0x9f, 0xde, 0xad])?;
+        tear_tail(journal_path, &[0x00, 0x00, 0x01, 0x9f, 0xde, 0xad])?;
     }
 
-    let mut reopened = FileJournal::open(&journal_path)?;
+    let mut reopened = FileJournal::open(journal_path)?;
     assert!(reopened.torn_tail_repaired());
     assert_eq!(reopened.committed()?.len(), RUNG_PREPARED);
     assert_eq!(
@@ -575,7 +536,7 @@ fn a_torn_final_frame_is_repaired_and_never_replayed() -> TestResult {
         "the torn frame was never acknowledged, so it is not an answer"
     );
     assert_eq!(
-        std::fs::metadata(&journal_path)?.len(),
+        std::fs::metadata(journal_path)?.len(),
         acked_len,
         "the repair truncates back to the acknowledged prefix"
     );
@@ -601,21 +562,20 @@ fn a_torn_final_frame_is_repaired_and_never_replayed() -> TestResult {
 
 #[test]
 fn a_tampered_committed_frame_is_refused_rather_than_trimmed() -> TestResult {
-    let dir = scratch("tamper")?;
-    let _guard = TempGuard(dir.clone());
-    let journal_path = dir.join("journal.log");
+    let row = Row::new("tamper")?;
+    let journal_path = &row.journal;
 
     // The writer's handle is scoped: the fence is exclusive, so the refused
     // reopen below must not race a live first handle.
     {
-        let mut journal = FileJournal::open(&journal_path)?;
+        let mut journal = FileJournal::open(journal_path)?;
         let this_key = key("1", DIGEST_A)?;
         walk_ladder(&mut journal, this_key, RUNG_APPLIED)?;
 
         // Flip one payload byte inside the last frame. This is not an
         // interrupted append; it is committed bytes that no longer mean what
         // the chain says.
-        let mut bytes = std::fs::read(&journal_path)?;
+        let mut bytes = std::fs::read(journal_path)?;
         let first_len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         assert!(
             first_len > 16,
@@ -623,10 +583,10 @@ fn a_tampered_committed_frame_is_refused_rather_than_trimmed() -> TestResult {
         );
         let last = bytes.len() - 1;
         bytes[last] ^= 0x01;
-        std::fs::write(&journal_path, &bytes)?;
+        std::fs::write(journal_path, &bytes)?;
     }
 
-    match FileJournal::open(&journal_path) {
+    match FileJournal::open(journal_path) {
         Err(JournalError::Corrupt(corruption)) => {
             // Three committed frames; the lying one is the third, named from
             // zero.
@@ -642,11 +602,10 @@ fn a_tampered_committed_frame_is_refused_rather_than_trimmed() -> TestResult {
 
 #[test]
 fn the_file_journal_recovers_exactly_what_the_memory_journal_recovers() -> TestResult {
-    let dir = scratch("parity")?;
-    let _guard = TempGuard(dir.clone());
-    let journal_path = dir.join("journal.log");
+    let row = Row::new("parity")?;
+    let journal_path = &row.journal;
 
-    let mut file_journal = FileJournal::open(&journal_path)?;
+    let mut file_journal = FileJournal::open(journal_path)?;
     let this_key = key("1", DIGEST_A)?;
     walk_ladder(&mut file_journal, this_key, RUNG_VERIFIED)?;
 
