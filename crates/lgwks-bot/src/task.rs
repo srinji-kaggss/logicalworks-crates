@@ -230,6 +230,59 @@ impl Disposition {
     }
 }
 
+/// The terminal record a submission of a request running under `report` writes,
+/// or `None` when the run's disposition is the host declining to finish it.
+///
+/// Three of the five dispositions are **the request's own verdict**, and they
+/// are the three the *declared task* produces: `Succeeded` because the body
+/// returned, `Failed` because the body refused, and `DeadlineExceeded` because
+/// the run's deadline is part of the task the client declared — the same
+/// declaration that fixed the key also fixed the budget, so the budget running
+/// out answers the request rather than interrupting it.
+///
+/// The other two are the **host declining to finish it**: `Cancelled` is a stop
+/// that arrived after admission (the host's own token, or a scope the body
+/// cancelled) and `Refused` is a refusal before admission (the host was already
+/// stopping, or could not admit). Neither is evidence about the request, so
+/// neither is recorded as its outcome. A key whose terminal record says
+/// `Cancelled` is a key no later submission can ever complete: the key *is* the
+/// request's identity and the body runs at most once under it, so recording the
+/// host's stop there turns one restart into a permanently poisoned request. What
+/// survives instead is the receipt and the durable step records, which is
+/// exactly what a resume needs (INV-BOT-100, INV-BOT-101).
+///
+/// The match is exhaustive, so a `Disposition` added later breaks this build
+/// until its relationship to a request key is decided by hand.
+///
+/// Enforced by `tests/request_key.rs`
+/// (`a_host_stop_mid_run_leaves_the_request_resumable`,
+/// `a_refusal_before_admission_is_not_recorded_as_the_outcome`,
+/// `a_failed_run_is_the_requests_recorded_outcome`) and
+/// `tests/sim_request_key.rs` (`host_stops_never_poison_a_key_band_00..03`).
+///
+/// # Errors
+///
+/// [`RequestError`] when a success's output cannot be archived or a record
+/// cannot be encoded.
+fn terminal_for<O: Durable>(report: &Report<O>) -> Result<Option<TerminalRecord>, RequestError> {
+    Ok(match report.disposition() {
+        Disposition::Succeeded => {
+            let output = report
+                .output()
+                .ok_or(RequestError::Record(FlowError::failed(
+                    "a successful run reported no output to record",
+                )))?;
+            Some(TerminalRecord::succeeded(output)?)
+        }
+        Disposition::Failed | Disposition::DeadlineExceeded => Some(TerminalRecord::stopped(
+            report.disposition(),
+            report.error().map_or("", FlowError::at),
+            report.error().map_or_else(String::new, ToString::to_string),
+        )),
+        Disposition::Cancelled | Disposition::Refused => None,
+    })
+}
+
 impl fmt::Display for Disposition {
     /// The [`Disposition::label`].
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -864,17 +917,39 @@ impl Host {
     /// same key and finished steps replay. A host with no store refuses, because
     /// a run id with nothing keyed by it would claim a resume that cannot happen.
     ///
+    /// This is also the door that **settles** a request a
+    /// [`Host::submit`](Self::submit) left incomplete. A request with a receipt
+    /// and no terminal record — because a client dropped its waiter, or because
+    /// a host stop was correctly *not* recorded as the request's outcome — is
+    /// completed here, and the same rule as the submission's own applies: a
+    /// disposition that is the request's own verdict is recorded under
+    /// `@terminal`, and a host stop is not. Without this, a request whose run
+    /// was interrupted could never reach a recorded terminal, because
+    /// `submit` reports an incomplete request rather than re-running it.
+    ///
     /// # Errors
     ///
     /// None returned: a refusal is a [`Disposition::Refused`] report with no
     /// step run, given when this host has no store, when the run belongs to
-    /// another tenant, and when a store host cannot mint a run identity.
+    /// another tenant, and when a store host cannot mint a run identity. A store
+    /// that refuses the terminal record of a request is a [`Disposition::Failed`]
+    /// report: the request's outcome is not recorded, and saying so is better
+    /// than returning a success the store never accepted.
+    ///
+    /// `O: Durable` for the same reason [`Host::submit`] requires it, and only
+    /// [`Host::run`] — which mints an identity and writes no request record —
+    /// does not: a resumed run may be settling a request, and a recorded verdict
+    /// is made of an archived output.
     pub async fn resume<I, O, F, Fut>(&self, run: RunId, task: &Task<F>, input: I) -> Report<O>
     where
+        O: Durable,
         F: Fn(Scope, I) -> Fut,
         Fut: Future<Output = Result<O, FlowError>>,
     {
-        self.execute(task, input, Some(run)).await
+        let started = Instant::now();
+        let report = self.execute(task, input, Some(run)).await;
+        self.settle_request(run, task.name_owned(), started, report)
+            .await
     }
 
     /// Resume from a [`Ticket`].
@@ -933,6 +1008,34 @@ impl Host {
     /// A *different* input under the same key is [`RequestError::Conflict`],
     /// carrying both digests. Distinct keys derive distinct runs and are never
     /// collapsed.
+    ///
+    /// # Which outcomes are recorded as the request's own
+    ///
+    /// A terminal outcome is recorded under `@terminal` for exactly the
+    /// dispositions that are **the request's verdict**: [`Disposition::Succeeded`],
+    /// [`Disposition::Failed`] and [`Disposition::DeadlineExceeded`] — the three
+    /// the declared task produces, the deadline included because the same
+    /// declaration that fixed the key fixed the run's budget.
+    ///
+    /// [`Disposition::Cancelled`] (the host's stop arrived after admission) and
+    /// [`Disposition::Refused`] (the host declined before admission) are **not**
+    /// recorded. They are this host declining to finish the request, not the
+    /// request failing, and a key whose terminal record says either is a key no
+    /// later submission can ever complete — the key *is* the request's identity,
+    /// so its body runs at most once and a stop recorded as the verdict ends it
+    /// for good. This call still returns [`Submission::Executed`] with the stop in
+    /// the report, so the caller learns that the run was interrupted; what it
+    /// does not do is turn a restart into a request that can never succeed. The
+    /// receipt and every durable step record survive, which is what makes a later
+    /// submission [`Submission::InFlight`] and a [`Host::resume`] under that run
+    /// able to settle it with each finished step not re-run.
+    ///
+    /// Enforced by `tests/request_key.rs`
+    /// (`a_host_stop_mid_run_leaves_the_request_resumable`,
+    /// `a_refusal_before_admission_is_not_recorded_as_the_outcome`,
+    /// `a_failed_run_is_the_requests_recorded_outcome`) and
+    /// `tests/sim_request_key.rs` (`host_stops_never_poison_a_key_band_00..03`,
+    /// `same_seed_replays_host_stops_band_00..03`).
     ///
     /// # Store required
     ///
@@ -1024,28 +1127,20 @@ impl Host {
         // The body runs under the derived run, so its durable steps replay on a
         // reattach exactly as a resume's do.
         let report = self.execute(task, input, Some(run)).await;
-        let terminal = match (report.disposition().is_success(), report.output()) {
-            (true, Some(output)) => TerminalRecord::succeeded(output)?,
-            _ => {
-                let disposition = report.disposition();
-                let at = report.error().map(|error| error.at().to_owned());
-                let reason = report.error().map(ToString::to_string);
-                TerminalRecord::stopped(
-                    disposition,
-                    at.as_deref().unwrap_or(""),
-                    reason.unwrap_or_default(),
+        // `None` for a disposition that is the host declining to finish the run,
+        // and a receipt with no terminal record is precisely what a later
+        // submission of the same key needs in order to be able to run it.
+        if let Some(terminal) = terminal_for(&report)? {
+            records
+                .record(
+                    tenant,
+                    run,
+                    reserved_step_key(tenant, TERMINAL_STEP),
+                    TERMINAL_STEP,
+                    terminal.encode()?,
                 )
-            }
-        };
-        records
-            .record(
-                tenant,
-                run,
-                reserved_step_key(tenant, TERMINAL_STEP),
-                TERMINAL_STEP,
-                terminal.encode()?,
-            )
-            .await?;
+                .await?;
+        }
         Ok(Submission::Executed(report))
     }
 
@@ -1101,6 +1196,161 @@ impl Host {
             task.name().to_owned(),
             store.record_count(run),
         )))
+    }
+
+    /// Settle a request a resume just completed, if `run` is one.
+    ///
+    /// The counterpart to [`Host::submit`]'s recording: `submit` records a
+    /// terminal outcome for the run it just drove, and this records it for a run
+    /// a resume drove, so a request interrupted by a host stop (or by a client
+    /// that walked away) can reach a recorded verdict at all. Without it the key
+    /// would report `InFlight` forever, which is the same permanent outcome the
+    /// stop caused in the first place.
+    ///
+    /// A run that is **not** a request is left alone: the receipt is what makes
+    /// a run a request, and an ordinary `Host::resume` of a caller-minted run id
+    /// gains no reserved record from having been resumed. A run whose receipt
+    /// already holds a terminal record is left alone too, so a second resume
+    /// cannot overwrite a verdict already recorded.
+    ///
+    /// The report is returned unchanged, except that a store that refuses the
+    /// record turns the run into a located failure. Recording an outcome and
+    /// reporting success are one fact; a host that could not record the verdict
+    /// must not hand back the value as though it had.
+    ///
+    /// A store refusal here is reported as a disposition rather than returned as
+    /// an error because the door is [`Host::resume`], whose signature answers a
+    /// `Report` for every outcome — including admission refusals, which are
+    /// already reported rather than returned.
+    async fn settle_request<O>(
+        &self,
+        run: RunId,
+        task: TaskName,
+        started: Instant,
+        report: Report<O>,
+    ) -> Report<O>
+    where
+        O: Durable,
+    {
+        // A host stop records nothing, so there is nothing here to settle, and
+        // the report that says the host declined is the answer the caller needs.
+        // A store that cannot be *read* while checking an outcome nobody is
+        // going to write must not turn a `Refused` into a `Failed` — which is
+        // also what keeps a resume of another tenant's run `Refused`: reading its
+        // records is refused by the store itself, and that refusal is about the
+        // caller, not about the request.
+        if matches!(
+            report.disposition(),
+            Disposition::Refused | Disposition::Cancelled
+        ) {
+            return report;
+        }
+        let Some(records) = self.records(Some(run)) else {
+            return report;
+        };
+        let tenant = self.inner.tenant.as_str();
+        match self.unsettled(&records, tenant, run).await {
+            // Either this run is not a request, or its verdict is already
+            // recorded: nothing here has an opinion about either.
+            Ok(false) => report,
+            Err(error) => self.report(Self::unrecorded(task, started, run, error)),
+            Ok(true) => {
+                self.settle(records, tenant, run, task, started, report)
+                    .await
+            }
+        }
+    }
+
+    /// Whether `run` is a request whose recorded outcome is still missing.
+    ///
+    /// A store read failure is `Err` rather than a `false` (INV-BOT-7): absence of
+    /// evidence and a failed read are different facts, and answering "nothing to
+    /// settle" to a failed read would skip the record the caller came for.
+    async fn unsettled(
+        &self,
+        records: &Records,
+        tenant: &str,
+        run: RunId,
+    ) -> Result<bool, FlowError> {
+        // Not a request: an ordinary resume of a caller-minted run id writes no
+        // reserved record, because the receipt is what makes a run a request.
+        if records
+            .lookup(tenant, run, reserved_step_key(tenant, BINDING_STEP))?
+            .is_none()
+        {
+            return Ok(false);
+        }
+        // Already settled. A resume that repeats must not overwrite a verdict a
+        // client may already have reattached to.
+        Ok(records
+            .lookup(tenant, run, reserved_step_key(tenant, TERMINAL_STEP))?
+            .is_none())
+    }
+
+    /// Write the verdict `report` states for an unsettled request.
+    ///
+    /// `O: Durable` is required here rather than on [`Host::resume`] because it
+    /// is required only to *archive a success*: a resume whose output is not
+    /// archivable has no recorded verdict to write even when the run is a
+    /// request, and saying that is this run's own answer. A stopped or failed
+    /// resume records nothing at all and never reaches the archive, so the bound
+    /// costs a caller nothing unless it actually submits a success.
+    async fn settle<O>(
+        &self,
+        records: Records,
+        tenant: &str,
+        run: RunId,
+        task: TaskName,
+        started: Instant,
+        report: Report<O>,
+    ) -> Report<O>
+    where
+        O: Durable,
+    {
+        let Some(terminal) = terminal_for(&report).ok().flatten() else {
+            // A host stop, which is not the request's verdict.
+            return report;
+        };
+        let bytes = match terminal.encode() {
+            Ok(bytes) => bytes,
+            Err(error) => return self.report(Self::unrecorded(task, started, run, error)),
+        };
+        let stored = records
+            .record(
+                tenant,
+                run,
+                reserved_step_key(tenant, TERMINAL_STEP),
+                TERMINAL_STEP,
+                bytes,
+            )
+            .await;
+        match stored {
+            Ok(()) => report,
+            Err(error) => self.report(Self::unrecorded(task, started, run, error)),
+        }
+    }
+
+    /// A run whose outcome the store refused to record, located at its task.
+    fn unrecorded<O>(
+        task: TaskName,
+        started: Instant,
+        run: RunId,
+        cause: FlowError,
+    ) -> Terminal<O> {
+        let at = Arc::from(task.as_str());
+        let error = FlowError::Failed {
+            at,
+            reason: format!("the request's outcome was not recorded: {cause}"),
+        };
+        Terminal {
+            started,
+            task,
+            disposition: disposition_of(&error),
+            output: None,
+            error: Some(error),
+            trail: TrailSnapshot::Empty,
+            run: Some(run),
+        }
     }
 
     /// The one body of a run, shared by [`Host::run`] and [`Host::resume`].

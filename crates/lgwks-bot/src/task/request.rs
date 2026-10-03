@@ -30,6 +30,28 @@
 //! record — and therefore what it takes to resume without repeating an effect —
 //! is never the client's to hold.
 //!
+//! # Which outcomes are the request's own
+//!
+//! A request ends when *the request* ends: its body returned, its body refused,
+//! or its declared deadline ran out. Those three are recorded under `@terminal`
+//! and a later submission of the same key and input reattaches to them. The
+//! host's own stops — [`Disposition::Cancelled`] after admission and
+//! [`Disposition::Refused`] before it — are recorded under **no** terminal path,
+//! because a key whose terminal record names a host stop is a key nothing can
+//! ever finish: the key *is* the request's identity, its body runs at most once,
+//! and the one fact that made the request resumable (that no terminal record
+//! exists) is the very fact a stop recorded as the verdict destroys. So a stop
+//! returns [`Submission::Executed`] for the call that saw it, leaves the
+//! receipt, and leaves the request completable by the next submission or by a
+//! [`Host::resume`](crate::task::Host::resume) under the run it named.
+//!
+//! Enforced by `tests/request_key.rs`
+//! (`a_host_stop_mid_run_leaves_the_request_resumable`,
+//! `a_refusal_before_admission_is_not_recorded_as_the_outcome`,
+//! `a_failed_run_is_the_requests_recorded_outcome`) and
+//! `tests/sim_request_key.rs` (`host_stops_never_poison_a_key_band_00..03`,
+//! `same_seed_replays_host_stops_band_00..03`).
+//!
 //! # Boundary
 //!
 //! A dropped waiter is not drained in the background. The crate deliberately
@@ -174,9 +196,11 @@ pub enum Submission<O> {
     /// key and the same input; this is the recorded report, returned without
     /// re-running the body.
     Reattached(Report<O>),
-    /// A previous client submitted this key and went away before the run
-    /// reached a recorded outcome, so an effect may be live. The uncertainty and
-    /// the handle to settle it are reported separately; see [`InFlight`].
+    /// The request has not reached a recorded terminal outcome under this key,
+    /// so the recorded evidence is incomplete and an effect may be live: either a
+    /// previous client submitted the key and went away before the run finished,
+    /// or a host stopped the run and recorded no verdict of its own. This is the
+    /// uncertainty and the handle to settle it, kept apart; see [`InFlight`].
     InFlight(InFlight),
 }
 
@@ -210,6 +234,11 @@ impl<O> Submission<O> {
 /// record says otherwise, and the **cleanup handle** is [`InFlight::run`], the
 /// run to settle by resuming it. The host owns the terminal record — it is the
 /// store's — so the cleanup is not the client's to perform, only to trigger.
+///
+/// A host that *stopped* the run leaves exactly this state, because a stop is
+/// not the request's verdict and is never recorded as one; so this arm reports
+/// an interrupted run and an abandoned client identically, which is the
+/// truth about the durable record both leave behind.
 #[derive(Debug, Clone)]
 pub struct InFlight {
     /// The run the request derived, and what a resume settles.
