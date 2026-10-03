@@ -438,6 +438,8 @@ const DISPOSITION_CANCELLED: u8 = 2;
 const DISPOSITION_DEADLINE: u8 = 3;
 /// See [`DISPOSITION_SUCCEEDED`].
 const DISPOSITION_REFUSED: u8 = 4;
+/// See [`DISPOSITION_SUCCEEDED`].
+const DISPOSITION_BLOCKED: u8 = 5;
 
 /// The code stored for `disposition`.
 fn disposition_code(disposition: Disposition) -> u8 {
@@ -447,6 +449,11 @@ fn disposition_code(disposition: Disposition) -> u8 {
         Disposition::Cancelled => DISPOSITION_CANCELLED,
         Disposition::DeadlineExceeded => DISPOSITION_DEADLINE,
         Disposition::Refused => DISPOSITION_REFUSED,
+        // A blocked run is never recorded (INV-BOT-102: it is not the request's
+        // verdict, and an authorized repair can still move it), so it has no
+        // stored code. The arm is here rather than a wildcard so a disposition
+        // added later still breaks this build.
+        Disposition::Blocked => DISPOSITION_BLOCKED,
     }
 }
 
@@ -458,6 +465,7 @@ fn disposition_from_code(code: u8) -> Option<Disposition> {
         DISPOSITION_CANCELLED => Some(Disposition::Cancelled),
         DISPOSITION_DEADLINE => Some(Disposition::DeadlineExceeded),
         DISPOSITION_REFUSED => Some(Disposition::Refused),
+        DISPOSITION_BLOCKED => Some(Disposition::Blocked),
         _ => None,
     }
 }
