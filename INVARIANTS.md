@@ -307,7 +307,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `lgwks_std::fs::capability::tests::a_non_utf8_name_is_counted_not_returned`
 
   Known limit, stated rather than left to be discovered:
-  `fs::capability::Dir::entry_names` is Linux-only. `getdents64` is the only
+  `fs::capability::Dir::entry_names` is Linux-only. The raw `getdents64` syscall is the only
   syscall that lists a descriptor, the BSDs expose no equivalent, and calling
   `readdir(3)` would need `unsafe` under `unsafe_code = forbid`. It reports
   `Unsupported` elsewhere. Every other `Dir` operation is `*at(2)` and portable.
@@ -501,7 +501,8 @@ Each of these was a shipped defect. Treat the list as the spec.
   unchanged by the extraction. · why: #87 step 5 (duplicated estate capability)
   · enforced by: `journal::frame::tests` (six properties, including the three
   prefix endings and the frame round trip), `journal::file::tests` unchanged and
-  green, and the `sim_journal` binaries
+  green, and the `tests/sim_journal.rs` and `tests/sim_journal_liveness.rs`
+  binaries
 - **INV-BOT-52** A durable step's cost is a stated number, not an adjective. The
   run store's per-step cost is measured against the two things it could be: a
   plain un-recorded step, and the effect journal's append at the same payload

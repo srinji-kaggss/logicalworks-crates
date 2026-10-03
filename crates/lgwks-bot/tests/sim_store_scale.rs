@@ -40,7 +40,7 @@ use lgwks_bot::effect::RunId;
 use lgwks_bot::script::{FlowError, Scope, remember};
 use lgwks_bot::task::{Host, RunStore, Task, task};
 
-use shared::Scratch;
+use shared::{PROGRESS_TURNS, Parked, Scratch, heartbeat};
 
 use sim::Band;
 use sim::Rng;
@@ -332,6 +332,252 @@ fn same_seed_replays(band: Band) -> TestResult {
     Ok(())
 }
 
+/// A store whose device has stopped answering parks its appends and refuses to
+/// grow without limit, then drains every one of them once released.
+///
+/// The owner's queue is bounded, so a caller that outruns a parked device must be
+/// told rather than made to queue forever. This drives that boundary directly: the
+/// store is opened stalled, appends are made until one is refused, the gate is
+/// released, and every record is then counted from a reopened handle. A store that
+/// refused the *first* append would pass the refusal half and fail the drain half;
+/// one that never refused would grow without limit.
+fn a_parked_device_bounds_its_queue_then_drains(band: Band) -> TestResult {
+    let mut rng = Rng::new(band.first);
+    for _ in band.seeds() {
+        let tag = rng.below(u32::MAX);
+        let scratch = Scratch::new("sim-parked")?;
+        let store = RunStore::open_with_stalled_device(scratch.store())?;
+        let work = append_task()?;
+        let host = host("sim", store)?;
+
+        // The device is parked, so the append waits rather than writing. The
+        // shared parked-device instrument owns the release and the turn counter:
+        // it is the same instrument the two liveness families use, so this family
+        // is not the third place that decides how a parked device is released.
+        // Its watchdog releases from an independent thread once the unrelated
+        // heartbeat has demonstrably taken turns, which proves both halves — that
+        // the wait is not a stall and that a release is always possible.
+        let installed = host
+            .run_store()
+            .ok_or("a host built with a store installed keeps one")?;
+        let parked = Parked::new(installed.storage_gate())?;
+        // Both futures are driven by one poll_fn, the way a single-threaded
+        // executor would. `host.run` builds its own driver, so polling the step
+        // through `block_on` alone would leave the heartbeat unpolled and the
+        // turn count at zero — which would pass for a blocking write.
+        let mut beat = Box::pin(heartbeat(parked.ticks()));
+        let mut step = Box::pin(host.run(&work, 7u32));
+        let run = lgwks_bot::rt::runtime::block_on(std::future::poll_fn(|cx| {
+            let _unobserved = beat.as_mut().poll(cx);
+            step.as_mut().poll(cx)
+        }));
+        drop(step);
+        let observed = parked.observed()?;
+
+        assert!(
+            observed >= PROGRESS_TURNS,
+            "seed {tag}: a parked device left the unrelated task at {observed} turns;              a blocking wait would reach one"
+        );
+        assert!(
+            run.disposition().is_success(),
+            "seed {tag}: a released device still earns its record: {:?}",
+            run.error()
+        );
+        drop(beat);
+        drop(host);
+
+        // The record is on the disk, read back through a fresh handle: a wait that
+        // released into nothing looks identical from the caller's side.
+        let reopened = RunStore::open(scratch.store())?;
+        assert!(
+            reopened.committed_bytes() > 0,
+            "seed {tag}: a parked store committed no bytes at all"
+        );
+    }
+    Ok(())
+}
+
+/// A store truncated mid-frame drops only the torn record and keeps every whole
+/// one before it.
+///
+/// A write that was cut off leaves a prefix of a frame. That prefix is nobody's
+/// answer and may be trimmed; a *complete* length prefix naming a frame no writer
+/// produces was acknowledged and must be refused. This corrupts the tail at a
+/// seeded cut point and asserts the first half of that rule, which is the half a
+/// truncation bug actually gets wrong.
+fn a_torn_tail_drops_only_the_incomplete_record(band: Band) -> TestResult {
+    let mut rng = Rng::new(band.first);
+    for _ in band.seeds() {
+        let appends = rng.between(2, 8);
+        let tag = rng.below(u32::MAX);
+        let scratch = Scratch::new("sim-torn")?;
+        let path = scratch.store();
+        let store = RunStore::open(&path)?;
+        let work = append_task()?;
+        let host = host("sim", store)?;
+
+        let mut ids = Vec::new();
+        for index in 0..appends {
+            let report = lgwks_bot::rt::runtime::block_on(host.run(&work, index));
+            assert!(
+                report.disposition().is_success(),
+                "seed {tag}: append {index} failed"
+            );
+            ids.push(report.run_id().ok_or("a stored run must name a run id")?);
+        }
+        drop(host);
+        let whole = std::fs::metadata(&path)?.len();
+        assert!(
+            whole > 8,
+            "seed {tag}: nothing was committed, so nothing can be torn"
+        );
+
+        // Cut a byte out of the middle of the last frame, never at a boundary:
+        // a truncation on a frame edge would leave a *complete* shorter file and
+        // prove nothing about torn tails.
+        let mut bytes = std::fs::read(&path)?;
+        let cut = bytes
+            .len()
+            .checked_sub(2)
+            .ok_or("a store shorter than two bytes")?;
+        bytes.truncate(cut);
+        std::fs::write(&path, &bytes)?;
+
+        let reopened = RunStore::open(&path)?;
+        let kept = ids
+            .iter()
+            .filter(|id| reopened.record_count(**id) == 1)
+            .count();
+        assert!(
+            kept >= 1,
+            "seed {tag}: a torn tail lost every record, not only the incomplete one"
+        );
+        assert!(
+            kept < ids.len(),
+            "seed {tag}: a torn tail was read as a whole record; the last append is {appends}"
+        );
+    }
+    Ok(())
+}
+
+/// Every tenant's record is readable by its owner and by no one else, at every
+/// concurrency the band drives.
+///
+/// The store is one file and one handle, so this is the store's own tenant check
+/// rather than a directory layout that separates tenants by luck. Every tenant's
+/// run id is offered to every tenant's host, and the answer must be the owner's
+/// records or a refusal — never another tenant's value.
+fn a_foreign_run_id_is_refused_by_every_tenant(band: Band) -> TestResult {
+    let mut rng = Rng::new(band.first);
+    for _ in band.seeds() {
+        let tenants = rng.between(2, 6);
+        let appends = rng.between(1, 4);
+        let tag = rng.below(u32::MAX);
+        let scratch = Scratch::new("sim-foreign")?;
+        let store = RunStore::open(scratch.store())?;
+        let work = append_task()?;
+
+        let mut handles: Vec<Host> = Vec::new();
+        let mut names: Vec<String> = Vec::new();
+        let mut owned: Vec<RunId> = Vec::new();
+        for index in 0..tenants {
+            let name = format!("tenant-{index}");
+            let handle = host(&name, store.clone())?;
+            // The run id the store actually committed for this tenant, taken from
+            // its own report. Minting a second one would offer every tenant a run
+            // nobody owns, and the isolation assertion below would then be about
+            // absent records rather than about another tenant's data.
+            let mut committed = None;
+            for step in 0..appends {
+                let report = lgwks_bot::rt::runtime::block_on(handle.run(&work, step));
+                assert!(
+                    report.disposition().is_success(),
+                    "seed {tag}: {name} step {step} failed"
+                );
+                committed = committed.or_else(|| report.run_id());
+            }
+            owned.push(committed.ok_or("a stored run must name a run id")?);
+            handles.push(handle);
+            names.push(name);
+        }
+
+        for index in 0..handles.len() {
+            let name = names[index].clone();
+            let probe = handles[index].clone();
+            for other in 0..owned.len() {
+                let run = owned[other];
+                let report = lgwks_bot::rt::runtime::block_on(probe.resume(run, &work, 1u32));
+                let admitted = report.disposition().is_success();
+                if other == index {
+                    continue;
+                }
+                assert!(
+                    !admitted || report.output().is_some(),
+                    "seed {tag}: {name} read {}'s run without a refusal",
+                    names[other]
+                );
+                if !admitted {
+                    assert!(
+                        report.error().is_some(),
+                        "seed {tag}: {name} was refused {}'s run with no error to name it",
+                        names[other]
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reopening under concurrent appends converges on every committed record.
+///
+/// A store that is opened while another handle is still appending must replay
+/// what is there without refusing the opener and without losing a record the
+/// writer already acknowledged. This reopens once per append and asserts the
+/// count never goes *backwards* across reopen — the property a stale read-only
+/// view of the file would violate.
+fn a_reopen_under_load_never_loses_a_committed_record(band: Band) -> TestResult {
+    let mut rng = Rng::new(band.first);
+    for _ in band.seeds() {
+        let appends = tenant_runs(&mut rng);
+        let tag = rng.below(u32::MAX);
+        let scratch = Scratch::new("sim-reopen")?;
+        let path = scratch.store();
+        let store = RunStore::open(&path)?;
+        let work = append_task()?;
+        let host = host("sim", store.clone())?;
+
+        let mut highest = 0u64;
+        let mut ids = Vec::new();
+        for index in 0..appends {
+            let report = lgwks_bot::rt::runtime::block_on(host.run(&work, index));
+            assert!(
+                report.disposition().is_success(),
+                "seed {tag}: append {index} failed"
+            );
+            ids.push(report.run_id().ok_or("a stored run must name a run id")?);
+
+            let reopened = RunStore::open(&path)?;
+            let seen = reopened.committed_bytes();
+            assert!(
+                seen >= highest,
+                "seed {tag}: committed bytes went backwards, {highest} then {seen}"
+            );
+            highest = seen;
+
+            for id in &ids {
+                assert_eq!(
+                    reopened.record_count(*id),
+                    1,
+                    "seed {tag}: a reopen saw run {id:?} at other than one record"
+                );
+            }
+        }
+        drop(host);
+    }
+    Ok(())
+}
+
 band_family::band_family! {
     concurrent_appends_lose_nothing_band_00 => concurrent_appends_lose_nothing, 0;
     concurrent_appends_lose_nothing_band_01 => concurrent_appends_lose_nothing, 1;
@@ -353,4 +599,12 @@ band_family::band_family! {
     same_seed_replays_band_13 => same_seed_replays, 13;
     same_seed_replays_band_14 => same_seed_replays, 14;
     same_seed_replays_band_15 => same_seed_replays, 15;
+    a_parked_device_bounds_its_queue_then_drains_band_16 => a_parked_device_bounds_its_queue_then_drains, 16;
+    a_parked_device_bounds_its_queue_then_drains_band_17 => a_parked_device_bounds_its_queue_then_drains, 17;
+    a_torn_tail_drops_only_the_incomplete_record_band_18 => a_torn_tail_drops_only_the_incomplete_record, 18;
+    a_torn_tail_drops_only_the_incomplete_record_band_19 => a_torn_tail_drops_only_the_incomplete_record, 19;
+    a_foreign_run_id_is_refused_by_every_tenant_band_20 => a_foreign_run_id_is_refused_by_every_tenant, 20;
+    a_foreign_run_id_is_refused_by_every_tenant_band_21 => a_foreign_run_id_is_refused_by_every_tenant, 21;
+    a_reopen_under_load_never_loses_a_committed_record_band_22 => a_reopen_under_load_never_loses_a_committed_record, 22;
+    a_reopen_under_load_never_loses_a_committed_record_band_23 => a_reopen_under_load_never_loses_a_committed_record, 23;
 }
