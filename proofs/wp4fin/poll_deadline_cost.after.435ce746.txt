@@ -1,0 +1,31 @@
+   Compiling lgwks_bot v0.8.0 (/Users/srinji/lwc-wt/wp4/crates/lgwks-bot)
+warning: linker stderr: ld64.lld: /Users/srinji/lwc-wt/wp4/target/release/examples/rustcSNNzEB/libblake3-06f0dfb96acfd4e6.rlib(a1edd97dd51cd48d-blake3_neon.o) has version 27.0.0, which is newer than target minimum of 11.0.0
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `lgwks_bot` (example "poll_deadline_cost") generated 1 warning
+    Finished `release` profile [optimized] target(s) in 5.83s
+     Running `target/release/examples/poll_deadline_cost`
+poll deadline cost; 200 ticks per configuration; a tier that is never reached is honest data, not a claim
+------------------------------------------------------------------------
+always-ready sources, 200 ticks per tier
+     1 chains: p50=1us p95=3us p99=5us
+  watchdogs: 0 over 200 ticks, ten thousandths per tick: 0
+    32 chains: p50=9us p95=9us p99=12us
+  watchdogs: 0 over 200 ticks, ten thousandths per tick: 0
+  1000 chains: p50=158us p95=191us p99=218us
+  watchdogs: 0 over 200 ticks, ten thousandths per tick: 0
+ 10000 chains: p50=1082us p95=1120us p99=1156us
+  watchdogs: 0 over 200 ticks, ten thousandths per tick: 0
+scratch: /var/folders/_x/pjjf0dh11vq8_4_pz9kxphk80000gn/T/lgwks-poll-cost-c910ba9240e63930
+------------------------------------------------------------------------
+one wedged source among 1,000, budget 100ms
+1000 chains, none wedged: p50=112us p95=115us p99=127us
+  watchdogs: 0 over 200 ticks, ten thousandths per tick: 0
+1000 chains, one wedged: p50=104724us p95=110578us p99=110632us
+  stalled reports: 200 over 200 ticks; watchdogs: 200
+scratch: /var/folders/_x/pjjf0dh11vq8_4_pz9kxphk80000gn/T/lgwks-poll-cost-c910ba9240e63930
+
+real	0m27.507s
+user	0m0.538s
+sys	0m0.125s

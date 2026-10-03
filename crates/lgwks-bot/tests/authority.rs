@@ -40,12 +40,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use lgwks_bot::broker::Broker;
-use lgwks_bot::effect::{EnvironmentId, FlowRevision, RunId};
-use lgwks_bot::journal::MemoryJournal;
-use lgwks_bot::spec::{EffectIdentity, EffectScope};
+use lgwks_bot::spec::EffectScope;
 use lgwks_bot::verb::{Execute, Observe};
 use lgwks_bot::{Auth, Bot, BotError, Cap, EffectLifetime, GrantSet};
+
+#[path = "support/effects.rs"]
+mod effects;
 
 /// What a test here reports when its precondition did not hold.
 ///
@@ -147,21 +147,7 @@ impl Execute for Count {
 /// `BrokerError` as well as `BotError`, and none of the three converts into
 /// another; the tests below report through `Box<dyn Error>` for the same reason.
 fn test_effects() -> ScopeResult<EffectScope> {
-    let environment = EnvironmentId::from_hex("2122232425262728292a2b2c2d2e2f30")?;
-    let mut broker = Broker::new();
-    broker.register(environment)?;
-    Ok(EffectScope::new(
-        EffectIdentity::new(
-            RunId::from_hex("0102030405060708090a0b0c0d0e0f10")?,
-            environment,
-            FlowRevision::from_tagged(
-                "blake3_256",
-                "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-            )?,
-        ),
-        broker,
-        Box::new(MemoryJournal::new()),
-    ))
+    effects::memory_scope()
 }
 
 #[test]

@@ -55,9 +55,26 @@ explicitly under that crate.
   uninformative. Published before the schedule step runs, so a tick that failed
   still reports what its sources had already declared. Every field is private
   behind an accessor. **Migration:** none; reading it is optional.
+- `TickReport::watchdogs` (INV-BOT-124). The deadline watchdog threads the tick
+  actually started, beside `stalled`: zero for the ordinary tick where every
+  source answered on its first poll, and one per observation wave that had a
+  source still pending. **Migration:** none; it is an accessor.
 
 ### lgwks_bot Fixed
 
+- The per-poll deadline no longer spawns and joins one OS thread per source
+  poll, per tick (INV-BOT-124). The watchdog is now one per observation wave
+  (`MAX_IN_FLIGHT_POLLS` chains) and starts lazily, only when the first poll in
+  the wave returns `Pending`; an ordinary wave whose every source answers on its
+  first poll starts no thread at all. The reaper is joined on every path and its
+  spawn is serialized, so a poll can never park against a thread that never
+  started. Measured release, 200 ticks per configuration
+  (`examples/poll_deadline_cost.rs`): ordinary-tick p50/p95/p99 in µs, AFTER
+  1/32/1,000/10,000 chains = 1/3/5, 9/9/12, 158/191/218, 1082/1120/1156 with 0
+  watchdogs at every tier, against BEFORE (`bad47c6d`) 30/37/48, 611/959/1047,
+  19171/19421/19512, 160646/191745/193909; 1,000 chains with one wedged source
+  under a 100 ms budget costs p50 104.7 ms (about one deadline, not one per
+  chain) with one watchdog per tick, against 127.9 ms before.
 - An intermediate observation overtaken before any entry acted on it is now
   reported rather than vanishing between "fired" and "retired" (INV-BOT-121).
   Which chain's committed value had been admitted into a generation was a

@@ -905,6 +905,32 @@ Each of these was a shipped defect. Treat the list as the spec.
   (`a_wedged_source_is_reported_and_costs_its_neighbours_nothing`,
   `a_saturated_wave_stalls_every_chain_and_still_lets_the_next_tenant_commit`,
   `the_same_seed_replays_a_stalled_wave`)
+- **INV-BOT-124** The per-poll deadline's watchdog is one per observation wave
+  and is started lazily. `MAX_IN_FLIGHT_POLLS` chains form one wave under one
+  `poll_deadline`, so a wave has one deadline to watch and exactly one
+  `lgwks-poll-deadline` thread to watch it with; that thread starts only when the
+  first poll in the wave returns `Pending`, so a wave whose every source answers
+  on its first poll — the ordinary tick — starts no thread at all and
+  `TickReport::watchdogs()` is zero. The spawn is serialized on the reaper's own
+  lock, so a poll can never park against a thread that was never started; a
+  refused spawn stalls only the poll that asked and leaves every already-resolved
+  sibling with its answer; and the reaper is joined on every path, so a resolved
+  wave leaves no thread parked and an expired wave is reaped before its stalls
+  are acted on. The per-chain `PollStalled` report is unchanged. Measured here
+  (`examples/poll_deadline_cost.rs`, release, 200 ticks per configuration) —
+  AFTER (this change): ordinary tick p50/p95/p99 in µs — 1 chain 1/3/5, 32
+  chains 9/9/12, 1,000 chains 158/191/218, 10,000 chains 1082/1120/1156, every
+  tier 0 watchdogs; 1,000 chains with one wedged source under a 100 ms budget
+  104724/110578/110632, about one deadline rather than one per chain, with one
+  watchdog per tick. BEFORE (`bad47c6d`, same harness with the `watchdogs()`
+  report removed): 30/37/48, 611/959/1047, 19171/19421/19512,
+  160646/191745/193909; the wedged run 127945/137216/140410. A 1,000-chain tick
+  therefore paid ~19 ms of thread churn per ordinary tick before and ~0.16 ms
+  after. · why: #87 step 3 (T06, LC-03) · enforced by:
+  `tests/observe_refresh.rs`
+  (`a_wave_spends_one_watchdog_and_a_mass_of_waves_spends_one_each`) and
+  `tests/sim_observe_refresh.rs`, whose `band_family!` declaration runs
+  (`a_wave_spends_one_watchdog_and_a_fast_wave_spends_none`).
 
 ## Open questions for the Director
 

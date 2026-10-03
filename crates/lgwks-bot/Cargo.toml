@@ -170,3 +170,8 @@ required-features = ["inspect", "script"]
 name = "measure_overhead"
 path = "examples/measure_overhead.rs"
 required-features = ["script", "rt", "time", "sync", "process"]
+
+[[example]]
+name = "poll_deadline_cost"
+path = "examples/poll_deadline_cost.rs"
+required-features = ["rt", "ephemeral"]
