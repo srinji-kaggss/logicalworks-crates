@@ -1112,3 +1112,67 @@ fn verb_two_tenants_never_cross_band_00() -> TestResult {
 fn verb_two_tenants_never_cross_band_01() -> TestResult {
     verb_two_tenants_never_cross(Band::new(144, 8))
 }
+
+/// The verb path holds at the declared concurrency tiers.
+///
+/// Each tier drives `min(requested, TIER_CEILING)` concurrent `Process` values,
+/// each running its own framed child through `execute_action`. The requested,
+/// reached and ceiling levels are all reported (the INV-BOT-16 rule), so a tier
+/// this host cannot reach says so rather than passing quietly: ten thousand real
+/// `sh` children is a fork storm, and the honest claim is the tier reached.
+#[test]
+fn verb_framed_reads_saturate_at_the_declared_tiers() -> TestResult {
+    const PAYLOAD: usize = 8;
+    const RECORDS: usize = 4;
+    // The tier this host is asked to drive. Every child is a real process on a
+    // real pipe, so the ceiling is what the OS will bear rather than an
+    // arbitrary number; a reader that shared state across the verb calls would
+    // fail here at any tier, which is what makes the reached level sufficient.
+    const TIER_CEILING: usize = 256;
+
+    for requested in [100_usize, 1_000, 10_000] {
+        let level = requested.min(TIER_CEILING);
+        let runtime = lgwks_bot::Runtime::new()?;
+        let auth = sys_auth()?;
+        let processes: Vec<Process> = (0..level)
+            .map(|index| -> Result<Process, Box<dyn Error>> {
+                process_with_frames(framed_capture(tenant_byte(index), PAYLOAD, RECORDS, 4096)?)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let observations = runtime.block_on(async {
+            let runs: Vec<_> = processes
+                .iter()
+                .map(|process| process.execute_action((auth.clone(), &())))
+                .collect();
+            lgwks_std::task::join_all(runs).await
+        });
+
+        assert_eq!(
+            observations.len(),
+            level,
+            "requested={requested} reached={level} ceiling={TIER_CEILING}: every concurrent verb \
+             call reported, so the tier really ran"
+        );
+        for (index, outcome) in observations.into_iter().enumerate() {
+            let state = outcome?;
+            let frames = state
+                .stdout_frames()
+                .ok_or("a domain built with frame_stdout must report frames")?;
+            assert_eq!(
+                frames.records().len(),
+                RECORDS,
+                "requested={requested} child {index}: each call keeps its own {RECORDS} records"
+            );
+            let expected: Vec<u8> = std::iter::repeat_n(tenant_byte(index), PAYLOAD).collect();
+            for record in frames.records() {
+                assert_eq!(
+                    record.payload(),
+                    Some(expected.as_slice()),
+                    "requested={requested} child {index}: record must be this call's own payload, \
+                     never another's"
+                );
+            }
+        }
+    }
+    Ok(())
+}
