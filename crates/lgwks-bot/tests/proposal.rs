@@ -29,6 +29,7 @@
 #[path = "support/proposal.rs"]
 mod support;
 
+#[cfg(feature = "ephemeral")]
 use std::error::Error;
 
 use lgwks_bot::cap::Cap;
@@ -37,8 +38,12 @@ use lgwks_bot::proposal::{
     Decoder, EffectNoteKind, Intervention, LedgerLimits, PlanBudget, PlanLimits, Provenance,
     Refusal, RepairLedger, Source, StubModel, WriteOutcome, payload_digest,
 };
-use lgwks_bot::script::{FlowError, Scope, remember};
-use lgwks_bot::task::{Host, task};
+use lgwks_bot::script::FlowError;
+#[cfg(feature = "ephemeral")]
+use lgwks_bot::script::{Scope, remember};
+use lgwks_bot::task::Host;
+#[cfg(feature = "ephemeral")]
+use lgwks_bot::task::task;
 
 use support::{
     OTHER_TENANT, PING, READ, TENANT, TestResult, credential, decoder, escaping_path, injection,
@@ -327,6 +332,9 @@ fn a_refusal_is_attributable_to_its_exact_bytes() -> TestResult {
 
 /// A context reset — a brand new task instance resuming the same run — recovers
 /// completed work, user corrections, `Unknown` effects and evidence references.
+// A host with a run store mints its run identity from `lgwks_std::random`, which
+// the `ephemeral` feature provides; without it every such run is refused.
+#[cfg(feature = "ephemeral")]
 #[test]
 fn a_context_reset_preserves_completed_work_corrections_unknowns_and_evidence() -> TestResult {
     // Random bytes name the directory, never the process id: the OS reuses a pid,
@@ -427,13 +435,16 @@ fn a_context_reset_preserves_completed_work_corrections_unknowns_and_evidence() 
 /// The body is a named `fn` coerced to a pointer, which is what lets the same
 /// `Task` type be built twice: a closure would give each call its own anonymous
 /// type, and the two instances would not be the same task.
+#[cfg(feature = "ephemeral")]
 type CheckpointBody = fn(Scope, ()) -> lgwks_bot::BoxFuture<'static, Result<Checkpoint, FlowError>>;
 
 /// The task type both instances are built at.
+#[cfg(feature = "ephemeral")]
 type CheckpointTask = lgwks_bot::task::Task<CheckpointBody>;
 
 /// The task whose whole body is a durable checkpoint, so the run store is what
 /// carries it across the reset.
+#[cfg(feature = "ephemeral")]
 fn checkpoint_task() -> Result<CheckpointTask, Box<dyn Error>> {
     // The coercion is written at the call rather than left to inference: `task`
     // is generic over its body, and without this the `?` resolves against the
@@ -448,6 +459,7 @@ fn checkpoint_task() -> Result<CheckpointTask, Box<dyn Error>> {
 /// It takes `scope` by value and moves it into the future, so the future owns
 /// what it borrows and the returned boxed future is `'static` — which is what a
 /// task body needs, since the run drives it after the body has returned.
+#[cfg(feature = "ephemeral")]
 fn checkpoint_body(
     scope: Scope,
     (): (),
@@ -480,6 +492,9 @@ async fn build_checkpoint() -> Result<Checkpoint, FlowError> {
 
 /// The first instance: builds the checkpoint through a real host, with a real
 /// store, over the real `remember` path.
+// A host with a run store mints its run identity from `lgwks_std::random`, which
+// the `ephemeral` feature provides; without it every such run is refused.
+#[cfg(feature = "ephemeral")]
 async fn first_instance(
     scratch: &std::path::Path,
 ) -> Result<lgwks_bot::task::Report<Checkpoint>, Box<dyn Error>> {
@@ -1455,6 +1470,9 @@ fn a_plan_budget_bounds_repair_across_runs() -> TestResult {
 /// The real context reset: a different `Host`, a different task process's worth of
 /// state, the same run id. The record is read back from the *reopened* store, not
 /// from the handle that wrote it.
+// A host with a run store mints its run identity from `lgwks_std::random`, which
+// the `ephemeral` feature provides; without it every such run is refused.
+#[cfg(feature = "ephemeral")]
 #[test]
 fn a_resumed_run_reads_back_the_refusal_the_first_run_recorded() -> TestResult {
     let scratch = support::scratch("t27-admit")?;
@@ -1530,6 +1548,7 @@ fn a_resumed_run_reads_back_the_refusal_the_first_run_recorded() -> TestResult {
 /// The step key is reconstructed from the same scope path the refusing step
 /// entered — `<task>/plan/refusal` — rather than the test knowing its own key: the
 /// reader is a caller, and a caller reconstructs the path it can name.
+#[cfg(feature = "ephemeral")]
 fn read_one_refusal(
     store: &lgwks_bot::task::RunStore,
     tenant: &str,
