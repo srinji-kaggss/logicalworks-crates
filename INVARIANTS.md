@@ -263,8 +263,63 @@ Each of these was a shipped defect. Treat the list as the spec.
   `tests/repair.rs` (`the_root_budget_stays_charged_across_repair_and_resume`) and
   `tests/sim_repair.rs` (`seeded_orders_reach_the_same_state_band_*`,
   `tenants_keep_their_own_tickets_and_budgets_band_*`,
-  `saturation_applies_each_ticket_once_band_*`, and the opt-in
+  `saturation_applies_each_ticket_once_band_*`,
+  `every_repair_charges_the_root_budget_once`,
+  `a_spent_budget_refuses_every_later_attempt`,
+  `a_host_spent_on_one_run_still_repairs_the_next`,
+  `a_bounded_sweep_repairs_every_ticket_once`, and the opt-in
   `the_declared_repair_tiers_are_measured`)
+- **INV-BOT-36** A refusal is one arm, not one shape, and the repair door is
+  orderable: which arm a decision hits, what it charges and what it leaves behind
+  are each observable rather than inferred from the run's final counters. A grant
+  that is both short and wide reports the missing half first, so the half a caller
+  must fix is the half they are told; the over-wide arm then names every capability
+  the ticket never asked for — shipped or custom — at every need width, because the
+  check walks the grant rather than a list of candidates. A ticket naming another
+  tenant's run is refused by the ticket's own tenant check, before admission and
+  before the ledger, so the asking tenant's ledger never gains an entry for a run it
+  does not own. Each arm leaves the ledger **byte-identical**, which is a claim
+  about the file and is measured on the file rather than on a handle agreeing with
+  itself. A refused repair and a refused attempt are both exactly nothing: no
+  budget, no epoch, no step, and the counters the ceiling was measured against never
+  move afterwards. · why: #87 step 3 (T24) — the arms were stated by the type but
+  exercised only through the order family, which reads an endpoint and could not
+  say which arm produced it · enforced by: `tests/sim_repair.rs`
+  (`a_mixed_decision_order_pins_each_arm`, `a_custom_capability_is_refused_at_every_width`,
+  `a_ticket_never_names_another_tenants_run`) and `tests/repair.rs`
+  (`an_over_wide_grant_is_refused_rather_than_narrowed`,
+  `a_custom_capability_outside_the_ticket_is_refused`,
+  `a_denied_repair_costs_nothing`)
+- **INV-BOT-37** A run's durable state is read back from the file, not from a
+  handle. The repair's replay rests on bytes a *second* host opened: the recorded
+  analysis is not re-polled and the publication runs once, on the run that asked
+  for it, with the first host dropped entirely before the second is built. The
+  ledger's counters replay to exactly what the live write left — tenant, attempts,
+  spend, epoch and applied-ticket count, for every run on the chain — so which
+  handle a caller read cannot decide what a run holds. A budget refusal drops the
+  step store's handle with the refused append outstanding (INV-BOT-50), so recovery
+  from a spent budget is *through a reopen* and is claimed only in that form; the
+  other runs sharing the host keep their own budgets and still close. · why: #87
+  step 3 (T23, T13) — a replay served from a live handle would pass every assertion
+  about poll counts while proving nothing about the store · enforced by:
+  `tests/sim_repair.rs` (`a_repaired_run_survives_a_reopened_host`,
+  `a_reopen_reads_back_the_charged_budget`,
+  `a_host_spent_on_one_run_still_repairs_the_next`) and
+  `tests/repair.rs::a_blocked_run_leaves_its_finished_analysis_recorded`
+- **INV-BOT-38** A first-step reach is refused at the admission boundary with the
+  whole shortfall in one pass, and costs nothing to name. A task that reaches in
+  its first step declares its need with `Task::requiring` and is `Blocked` before
+  its body: no step polled, no permit taken, no record written and no root attempt
+  charged — so the report's `needs` and the ticket's needs are the *whole* of what a
+  repair would grant, and there is no replay to buy. The complementary journey,
+  which reaches after its analysis, still costs exactly one analysis at every need
+  width, and the ticket names that run's shortfall in the order the reach named it.
+  · why: #87 step 3 (T23) — the blunt form had no end-to-end evidence at all, and
+  the one-need case is the only width where the ticket's grant is exactly the run's
+  authority · enforced by: `tests/sim_repair.rs`
+  (`the_step_that_reaches_is_the_step_that_blocks`, `a_wide_need_set_costs_one_analysis`)
+  and `tests/repair.rs` (`a_run_short_of_authority_is_blocked_naming_every_need`,
+  `the_journey_declares_no_admission_boundary_needs`)
 
 - **INV-BOT-1** Journal before acknowledge: a live settlement is journaled before it is
   acknowledged. · why: cef8059b (#112)
