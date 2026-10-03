@@ -1214,8 +1214,9 @@ impl Host {
     /// # Example
     ///
     /// ```
-    /// use lgwks_bot::effect::{Hasher, InputIdentity};
+    /// use lgwks_bot::effect::InputIdentity;
     /// use lgwks_bot::task::Host;
+    /// use lgwks_std::hash::Hasher;
     ///
     /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
     /// let host = Host::builder("acme")?.build()?;
