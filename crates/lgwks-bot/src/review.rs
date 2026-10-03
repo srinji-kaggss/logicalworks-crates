@@ -40,7 +40,9 @@
 
 use std::time::Duration;
 
-use crate::domain::gh::{CommitId, Gh, PrSnapshot, PullRequest, ReviewPayload, ReviewRecord};
+use crate::domain::gh::{
+    CommitId, Gh, GhError, PrSnapshot, PullRequest, ReviewComment, ReviewPayload, ReviewRecord,
+};
 use crate::script::{FlowError, Scope, within};
 
 // ── The request ─────────────────────────────────────────────────────────────
@@ -66,6 +68,14 @@ pub struct ReviewRequest {
     /// Read through [`ReviewRequest::event`]. The review policy belongs to the
     /// request, not to a value the caller remembers separately.
     event: String,
+    /// The inline comments to publish, in order.
+    ///
+    /// Each is a distinct remote operation from the top-level body (PR-08), so
+    /// they travel as a `comments` array. A review whose body landed and whose
+    /// comments were accepted only in part is a *partial* submission the
+    /// reconciliation reports rather than a match. Empty by default, so a
+    /// request that declares none behaves exactly as before.
+    comments: Vec<ReviewComment>,
     /// An application marker used only to *locate* a candidate review during
     /// reconciliation.
     ///
@@ -94,12 +104,25 @@ impl ReviewRequest {
             pull,
             body: body.into(),
             event: event.into(),
+            comments: Vec::new(),
             // Empty means "derive it": [`review_pr`] uses the run's step key,
             // which is distinct per tenant and step path and stable across a
             // re-run of the same step — an idempotency key, not a nonce.
             marker: String::new(),
             step_deadline: Duration::from_secs(120),
         }
+    }
+
+    /// Publish these inline comments with the review.
+    ///
+    /// A comment is a distinct remote operation from the top-level body, so a
+    /// review whose comments were accepted only in part is a partial submission
+    /// the journey reports as its own state rather than folding into a verified
+    /// publication.
+    #[must_use]
+    pub fn with_comments(mut self, comments: Vec<ReviewComment>) -> Self {
+        self.comments = comments;
+        self
     }
 
     /// Carry `marker` in the published body instead of the run's step key.
@@ -136,6 +159,12 @@ impl ReviewRequest {
     #[must_use]
     pub fn event(&self) -> &str {
         &self.event
+    }
+
+    /// The inline comments the request will publish.
+    #[must_use]
+    pub fn comments(&self) -> &[ReviewComment] {
+        &self.comments
     }
 
     /// The reconciliation marker.
@@ -209,6 +238,63 @@ pub enum ReviewOutcome {
         /// What was refused, in the adapter's own words.
         reason: String,
     },
+    /// The subject was pinned, but its coverage could not be completed, so
+    /// nothing was published.
+    ///
+    /// An unavailable or over-ceiling diff is a *coverage* decision, never a
+    /// clean review: the code that was read is only part of what the pull
+    /// request changes, and a review reported against a partial diff would
+    /// claim a scope nobody read. This is a state a caller can act on — the
+    /// subject is known, nothing was published — not a run failure.
+    Incomplete {
+        /// The commit the run read before the coverage failed.
+        commit_id: CommitId,
+        /// Why the coverage is incomplete, in the adapter's own words.
+        reason: String,
+    },
+    /// A create landed as an **unsubmitted draft**: the receiver holds a review
+    /// in `PENDING` about the reviewed commit, and no review was submitted.
+    ///
+    /// Distinct from [`ReviewOutcome::Published`] (nothing was submitted) and
+    /// from [`ReviewOutcome::Unknown`] (the review's existence *is* established,
+    /// but it is a draft). No second create is issued.
+    Pending {
+        /// The id of the pending review the read-back found.
+        review_id: u64,
+        /// The commit the pending review is about.
+        commit_id: CommitId,
+    },
+    /// A submitted review landed with only part of its inline comments.
+    ///
+    /// The top-level review is real and submitted about the reviewed commit, but
+    /// fewer comments landed than were intended. Reported with both counts so a
+    /// caller can target only what remains, rather than re-posting the whole
+    /// review — which is the duplicate this module exists to prevent.
+    Partial {
+        /// The id of the partially submitted review.
+        review_id: u64,
+        /// The commit the review is about.
+        commit_id: CommitId,
+        /// How many inline comments landed.
+        applied: usize,
+        /// How many the run intended.
+        intended: usize,
+    },
+    /// A create returned an id — the effect is applied — but an independent
+    /// read-back could not verify it, typically because read permission was
+    /// lost.
+    ///
+    /// The applied-effect evidence (the review id) is **retained**: a caller
+    /// knows a review exists and which one, and can reconcile it once access is
+    /// restored. No second create is issued.
+    Unverified {
+        /// The id the create returned.
+        review_id: u64,
+        /// The commit the review is about.
+        commit_id: CommitId,
+        /// Why the verification could not be completed, in the adapter's words.
+        reason: String,
+    },
 }
 
 impl ReviewOutcome {
@@ -222,8 +308,14 @@ impl ReviewOutcome {
     #[must_use]
     pub const fn review_id(&self) -> Option<u64> {
         match *self {
-            Self::Published { review_id, .. } => Some(review_id),
-            Self::Unknown { .. } | Self::TargetMoved { .. } | Self::Refused { .. } => None,
+            Self::Published { review_id, .. }
+            | Self::Pending { review_id, .. }
+            | Self::Partial { review_id, .. }
+            | Self::Unverified { review_id, .. } => Some(review_id),
+            Self::Unknown { .. }
+            | Self::TargetMoved { .. }
+            | Self::Refused { .. }
+            | Self::Incomplete { .. } => None,
         }
     }
 
@@ -231,9 +323,12 @@ impl ReviewOutcome {
     #[must_use]
     pub fn commit_id(&self) -> Option<&CommitId> {
         match *self {
-            Self::Published { ref commit_id, .. } | Self::Unknown { ref commit_id, .. } => {
-                Some(commit_id)
-            }
+            Self::Published { ref commit_id, .. }
+            | Self::Unknown { ref commit_id, .. }
+            | Self::Incomplete { ref commit_id, .. }
+            | Self::Pending { ref commit_id, .. }
+            | Self::Partial { ref commit_id, .. }
+            | Self::Unverified { ref commit_id, .. } => Some(commit_id),
             Self::TargetMoved { ref reviewed, .. } => Some(reviewed),
             Self::Refused { .. } => None,
         }
@@ -249,6 +344,30 @@ impl ReviewOutcome {
         matches!(self, Self::Unknown { .. })
     }
 
+    /// Whether an applied effect's verification could not be completed.
+    #[must_use]
+    pub const fn is_unverified(&self) -> bool {
+        matches!(self, Self::Unverified { .. })
+    }
+
+    /// Whether the create landed as an unsubmitted draft.
+    #[must_use]
+    pub const fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending { .. })
+    }
+
+    /// Whether a submitted review landed with only part of its comments.
+    #[must_use]
+    pub const fn is_partial(&self) -> bool {
+        matches!(self, Self::Partial { .. })
+    }
+
+    /// Whether the subject's coverage could not be completed.
+    #[must_use]
+    pub const fn is_incomplete(&self) -> bool {
+        matches!(self, Self::Incomplete { .. })
+    }
+
     /// Why the publication outcome could not be established, when it was not.
     ///
     /// `None` for every other variant. Present because an `Unknown` is a
@@ -261,7 +380,13 @@ impl ReviewOutcome {
     pub fn unknown_reason(&self) -> Option<&str> {
         match *self {
             Self::Unknown { ref reason, .. } => Some(reason),
-            Self::Published { .. } | Self::TargetMoved { .. } | Self::Refused { .. } => None,
+            Self::Published { .. }
+            | Self::TargetMoved { .. }
+            | Self::Refused { .. }
+            | Self::Incomplete { .. }
+            | Self::Pending { .. }
+            | Self::Partial { .. }
+            | Self::Unverified { .. } => None,
         }
     }
 }
@@ -294,7 +419,7 @@ impl ReviewOutcome {
 pub async fn review_pr(
     scope: Scope,
     gh: Gh,
-    request: ReviewRequest,
+    mut request: ReviewRequest,
     script: impl Fn(&PrSnapshot, &Scope) -> ReviewScript,
 ) -> Result<ReviewOutcome, FlowError> {
     let deadline = request.step_deadline;
@@ -306,18 +431,78 @@ pub async fn review_pr(
     } else {
         request.marker.clone()
     };
+    // The comments are moved into the payload rather than copied: the request
+    // is the only owner up to here, and the payload is where they are published
+    // from.
+    let comments = std::mem::take(&mut request.comments);
 
-    // 1. Pin the subject. Every later comparison is against this read.
-    let snapshot = within(&scope, "snapshot", deadline, async {
-        gh.snapshot(&request.pull).await.map_err(FlowError::from)
+    // 1. Pin the subject. Every later comparison is against this read. A
+    //    renamed repository answers with a move object rather than a pull
+    //    request; that is a refusal of the *subject identity*, never a silent
+    //    re-point to the canonical name.
+    let snapshot = match within(&scope, "snapshot", deadline, async {
+        match gh.snapshot(&request.pull).await {
+            Ok(snapshot) => Ok(SnapshotStep::Pinned(snapshot)),
+            Err(GhError::MovedRepository {
+                requested,
+                canonical,
+            }) => Ok(SnapshotStep::Moved {
+                requested,
+                canonical,
+            }),
+            Err(other) => Err(FlowError::from(other)),
+        }
     })
-    .await?;
+    .await?
+    {
+        SnapshotStep::Pinned(snapshot) => snapshot,
+        SnapshotStep::Moved {
+            requested,
+            canonical,
+        } => {
+            return Ok(ReviewOutcome::Refused {
+                reason: format!(
+                    "the repository {requested} moved to {canonical}; the subject identity is \
+                     not re-pointed, so nothing was reviewed or published under the canonical \
+                     name"
+                ),
+            });
+        }
+    };
 
     let reviewed = CommitId::new(snapshot.head_sha().to_owned()).map_err(|source| {
         FlowError::failed(format!(
             "the pull request's head is not a commit id: {source}"
         ))
     })?;
+
+    // 1b. Bind the changed-file inventory to the pinned pair. An unavailable or
+    //     over-ceiling diff is an *incomplete coverage*: nothing may be
+    //     published, because a review against a partial diff would claim a
+    //     scope nobody read. The inventory is the subject's data — no file in
+    //     it is compiled, imported, built, shelled or loaded.
+    let diff = match within(&scope, "diff", deadline, async {
+        match gh.read_diff(&request.pull).await {
+            Ok(diff) => Ok(DiffStep::Read(diff)),
+            Err(error) if error.is_coverage_incomplete() => {
+                Ok(DiffStep::Incomplete(error.to_string()))
+            }
+            Err(other) => Err(FlowError::from(other)),
+        }
+    })
+    .await?
+    {
+        DiffStep::Read(diff) => diff,
+        DiffStep::Incomplete(reason) => {
+            return Ok(ReviewOutcome::Incomplete {
+                commit_id: reviewed,
+                reason,
+            });
+        }
+    };
+    // The inventory is bound to the pinned subject; the read is the coverage
+    // gate. Its bytes are data, never a program, and the run keeps none of them.
+    drop(diff);
 
     // 2. Run the caller's analysis over the pinned snapshot. A script that
     // fails here has published nothing, which is the point of running it
@@ -330,7 +515,8 @@ pub async fn review_pr(
     // The marker travels in the body so a read-back can *locate* this review.
     // It is a locator: [`ReviewRecord::matches`](crate::domain::gh::ReviewRecord::matches) decides.
     let payload = ReviewPayload::new(&reviewed, &request.event, body, marker)
-        .map_err(|source| FlowError::failed(source.to_string()))?;
+        .map_err(|source| FlowError::failed(source.to_string()))?
+        .with_comments(comments);
 
     // 3. The head must still be what was read. A refusal here publishes
     // nothing and names both shas, so the caller can decide whether to
@@ -376,36 +562,89 @@ pub async fn review_pr(
 
     // 5. Verify, whether or not the create answered. A lost response is
     //    reconciled by this same read — never by a second create.
-    let reviews = within(&scope, "verify", deadline, async {
-        gh.read_reviews(&request.pull)
-            .await
-            .map_err(FlowError::from)
+    //
+    //    A read that fails for any reason is *not* a run failure: the write may
+    //    have landed, and reporting a failure would throw away the one fact the
+    //    caller needs. The read's failure is classified instead — a *permission*
+    //    loss is its own state (an applied effect whose verification is
+    //    blocked), and every other refusal leaves the effect unknown.
+    let verified = within(&scope, "verify", deadline, async {
+        match gh.read_reviews(&request.pull).await {
+            Ok(records) => Ok(VerifyStep::Read(records)),
+            Err(GhError::Unauthorized { status, reason, .. }) => {
+                Ok(VerifyStep::Denied { status, reason })
+            }
+            Err(other) => Ok(VerifyStep::Unreadable(other.to_string())),
+        }
     })
-    .await;
+    .await?;
 
-    let reviews = match reviews {
-        Ok(records) => records,
-        // The write may have landed and the read could not confirm it. This is
-        // exactly the state that must not be reported as a failure and must
-        // not be retried blindly.
-        Err(error) => {
+    let reviews = match verified {
+        VerifyStep::Read(records) => records,
+        // The write may have landed and the read lost the permission to see it.
+        // When the create returned an id, the effect is *applied*, so the
+        // applied-effect evidence is retained rather than discarded: a caller
+        // knows a review exists and which one, and can reconcile it once access
+        // is restored. Otherwise the effect is unknown. Neither is a failure,
+        // and neither is retried blindly.
+        VerifyStep::Denied { status, reason } => {
+            return Ok(match created_id {
+                Some(review_id) => ReviewOutcome::Unverified {
+                    review_id,
+                    commit_id: reviewed,
+                    reason: format!(
+                        "the review was created but the read-back lost permission (HTTP \
+                         {status}): {reason}; the applied review id is retained and no second \
+                         review was created"
+                    ),
+                },
+                None => ReviewOutcome::Unknown {
+                    commit_id: reviewed,
+                    reason: format!(
+                        "the publication outcome could not be established, because the read \
+                         lost permission (HTTP {status}): {reason}; no second review was created"
+                    ),
+                },
+            });
+        }
+        // Any other unreadable answer leaves the effect unobserved. It is never
+        // reported as a failure and never resolved by a second create.
+        VerifyStep::Unreadable(reason) => {
             return Ok(ReviewOutcome::Unknown {
                 commit_id: reviewed,
                 reason: format!(
-                    "the publication outcome could not be established: {error}; \
+                    "the publication outcome could not be established: {reason}; \
                      no second review was created"
                 ),
             });
         }
     };
 
-    match find_verified(&reviews, &payload, created_id) {
-        Some(id) => Ok(ReviewOutcome::Published {
+    match reconcile(&reviews, &payload, created_id) {
+        Reconcile::Verified(id) => Ok(ReviewOutcome::Published {
             review_id: id,
             commit_id: reviewed,
             verified: true,
         }),
-        None if created_id.is_some() => {
+        // A draft that landed is a distinct state, not a publication: it was
+        // never submitted, and it is not "no effect" either.
+        Reconcile::Pending(id) => Ok(ReviewOutcome::Pending {
+            review_id: id,
+            commit_id: reviewed,
+        }),
+        // A review whose comments landed only in part is reported with both
+        // counts, so recovery targets only what remains rather than re-posting.
+        Reconcile::Partial {
+            id,
+            applied,
+            intended,
+        } => Ok(ReviewOutcome::Partial {
+            review_id: id,
+            commit_id: reviewed,
+            applied,
+            intended,
+        }),
+        Reconcile::None if created_id.is_some() => {
             // The create returned an id, and the read-back either did not
             // return it or returned it saying something else. Either is a
             // contradiction, not a success: it is reported, never "fixed" by
@@ -417,7 +656,7 @@ pub async fn review_pr(
                 reviewed
             )))
         }
-        None => Ok(ReviewOutcome::Unknown {
+        Reconcile::None => Ok(ReviewOutcome::Unknown {
             commit_id: reviewed,
             reason: String::from(
                 "the publication response was lost and the read-back found no matching review; \
@@ -425,6 +664,137 @@ pub async fn review_pr(
             ),
         }),
     }
+}
+
+/// The outcome of the snapshot step, before the journey decides what to do.
+///
+/// A moved repository is a *decision* the journey reports, not a run failure, so
+/// it is carried as a value rather than as a [`FlowError`] whose variant would
+/// have to be recovered from a rendered string.
+#[cfg(feature = "process")]
+enum SnapshotStep {
+    /// The pull request's head and base were read.
+    Pinned(PrSnapshot),
+    /// The repository moved; the canonical name is named, never followed.
+    Moved {
+        /// The repository the caller named.
+        requested: String,
+        /// The canonical repository the answer named.
+        canonical: String,
+    },
+}
+
+/// The outcome of the diff step, before the journey decides what to do.
+#[cfg(feature = "process")]
+enum DiffStep {
+    /// The changed-file inventory was read within its declared bounds.
+    Read(crate::domain::gh::PullDiff),
+    /// The coverage could not be completed; the reason is the adapter's.
+    Incomplete(String),
+}
+
+/// The outcome of the verification read, before the journey decides what to do.
+///
+/// A read failure is classified rather than propagated: a permission loss is
+/// the *applied-effect-blocks-on-read* state T34 names, while every other
+/// refusal leaves the effect unknown. Neither is a run failure — the write may
+/// have landed, and a failure report would throw away the one fact the caller
+/// needs.
+#[cfg(feature = "process")]
+enum VerifyStep {
+    /// The review list was read.
+    Read(Vec<ReviewRecord>),
+    /// The read lost permission; the status and the adapter's reason.
+    Denied {
+        /// The HTTP status the client named.
+        status: u16,
+        /// The retained stderr.
+        reason: String,
+    },
+    /// The read failed for any other reason.
+    Unreadable(String),
+}
+
+/// What the reconciliation read established about this run's publication.
+#[cfg(feature = "process")]
+enum Reconcile {
+    /// The exact intended review was observed, submitted and whole.
+    Verified(u64),
+    /// A review about the subject landed as an unsubmitted draft.
+    Pending(u64),
+    /// A submitted review landed with fewer inline comments than intended.
+    Partial {
+        /// The review id.
+        id: u64,
+        /// Comments that landed.
+        applied: usize,
+        /// Comments the run intended.
+        intended: usize,
+    },
+    /// Nothing about this publication was established.
+    None,
+}
+
+/// Find what `payload` describes among `reviews`, preferring an id a create
+/// returned.
+///
+/// The comparison is the verification: same subject commit, same body, same
+/// state, and the intended inline comments all landed. The application marker is
+/// deliberately absent — a matching marker locates a candidate, and treating it
+/// as proof is the error PR-07 names. A review that landed as an unsubmitted
+/// draft, or submitted with only some comments, is recognised as its own state
+/// rather than reported as a match or as nothing.
+#[cfg(feature = "process")]
+fn reconcile(
+    reviews: &[ReviewRecord],
+    payload: &ReviewPayload,
+    created_id: Option<u64>,
+) -> Reconcile {
+    // A create that returned an id is matched against that exact record first:
+    // if GitHub says this id exists and it says the wrong thing, the read-back
+    // contradicts the write and no other record is substituted for it.
+    if let Some(id) = created_id {
+        let Some(record) = reviews.iter().find(|record| record.id() == id) else {
+            return Reconcile::None;
+        };
+        if record.matches(payload) {
+            return Reconcile::Verified(id);
+        }
+        if record.is_pending() && record.matches_subject_body(payload) {
+            return Reconcile::Pending(id);
+        }
+        if record.matches_except_comments(payload) {
+            return Reconcile::Partial {
+                id,
+                applied: record.applied_comments(),
+                intended: payload.comments().len(),
+            };
+        }
+        return Reconcile::None;
+    }
+    // Otherwise: the lost-response path. Find any review that is about this
+    // commit, says this body, and is in this state. A review of another commit
+    // or another body is not this publication, however similar its marker.
+    if let Some(record) = reviews.iter().find(|record| record.matches(payload)) {
+        return Reconcile::Verified(record.id());
+    }
+    if let Some(record) = reviews
+        .iter()
+        .find(|record| record.is_pending() && record.matches_subject_body(payload))
+    {
+        return Reconcile::Pending(record.id());
+    }
+    if let Some(record) = reviews
+        .iter()
+        .find(|record| record.matches_except_comments(payload))
+    {
+        return Reconcile::Partial {
+            id: record.id(),
+            applied: record.applied_comments(),
+            intended: payload.comments().len(),
+        };
+    }
+    Reconcile::None
 }
 
 /// Whether a failed publish step leaves the review's existence unknown.
@@ -463,34 +833,6 @@ fn may_have_landed(error: &FlowError) -> bool {
         // nothing was sent, so a retry is a retry rather than a duplicate.
         _ => false,
     }
-}
-
-/// Find the review `payload` describes, preferring the id a create returned.
-///
-/// The comparison is the verification: same subject commit, same body, same
-/// state. The application marker is deliberately absent — a matching marker
-/// locates a candidate, and treating it as proof is the error PR-07 names.
-#[cfg(feature = "process")]
-fn find_verified(
-    reviews: &[ReviewRecord],
-    payload: &ReviewPayload,
-    created_id: Option<u64>,
-) -> Option<u64> {
-    // A create that returned an id is matched against that exact record first:
-    // if GitHub says this id exists and it says the wrong thing, the read-back
-    // contradicts the write and no other record is substituted for it.
-    if let Some(id) = created_id
-        && let Some(record) = reviews.iter().find(|record| record.id() == id)
-    {
-        return record.matches(payload).then_some(id);
-    }
-    // Otherwise: the lost-response path. Find any review that is about this
-    // commit, says this body, and is in this state. A review of another commit
-    // or another body is not this publication, however similar its marker.
-    reviews
-        .iter()
-        .find(|record| record.matches(payload))
-        .map(ReviewRecord::id)
 }
 
 // ── The script type ─────────────────────────────────────────────────────────

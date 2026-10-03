@@ -439,12 +439,31 @@ where
     where
         F: FnOnce(&mut File, &mut S) -> Result<A, std::io::Error> + Send + 'static,
     {
+        let awaiting = self.enqueue_awaiting(job);
+        Box::pin(awaiting)
+    }
+
+    /// [`StorageOwner::submit_async`] without the type erasure, for a caller whose
+    /// own future must be `Send`.
+    ///
+    /// The erased form boxes into [`crate::BoxFuture`], which is deliberately not
+    /// `Send`: a durable step awaits it from inside a task body, and a body is
+    /// `Send` exactly when its author made it so. A caller on the *host's* own
+    /// path has no such choice — its future must be `Send` whatever the author's
+    /// body is, because the host may drive it on a multi-threaded runtime. The
+    /// concrete [`Awaiting`] is `Send` whenever `A` is, so returning it unboxed is
+    /// what keeps the host's path `Send` without weakening the erasure a step
+    /// body wants.
+    pub(crate) fn enqueue_awaiting<F>(&self, job: F) -> Awaiting<A>
+    where
+        F: FnOnce(&mut File, &mut S) -> Result<A, std::io::Error> + Send + 'static,
+    {
         let reply = Arc::new(Answer::new());
         let outcome = self.enqueue(Box::new(job), Arc::clone(&reply));
-        Box::pin(Awaiting {
+        Awaiting {
             enqueued: Some(outcome),
             reply,
-        })
+        }
     }
 
     /// Hand one request to the owner, or report that this handle may not append.
@@ -474,7 +493,7 @@ where
 /// then park — which is exactly the shape that would need a second await to notice
 /// the answer. Here each poll reads the slot, so a missed wake costs a re-poll
 /// rather than a hang.
-struct Awaiting<A> {
+pub(crate) struct Awaiting<A> {
     /// Whether the request reached the owner at all. An error here is the queue's,
     /// and there is nothing to wait for. Taken on the first poll only.
     enqueued: Option<Result<(), SubmitError>>,
