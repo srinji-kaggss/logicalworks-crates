@@ -10,6 +10,12 @@ explicitly under that crate.
 
 ### lgwks_bot Added
 
+- `rt::process::CapturedStream::frames(ceiling)`, the door a caller reads its own
+  child's output through: infallible, and the reason a `ProcessRun`'s captured
+  stdout can be read as frames without the caller re-plumbing the bytes into a
+  reader. It is `pub` because callers outside the crate read their child's
+  output through it, and it is the path the T05 tests exercise rather than a
+  hand-plumbed slice.
 - `rt::process::read_frames`, a bounded reader for the length-framed records a
   supervised child's output carries. It reuses the crate's existing frame
   grammar (`journal::frame`) rather than restating it, so a torn tail has one
@@ -22,6 +28,34 @@ explicitly under that crate.
   rows T03, T05, T21 and T22. No existing item changed.
 - `rt::process::DEFAULT_FRAME_CEILING`, the one retained-byte ceiling a caller
   needs in order to read a child's framed output without inventing a bound.
+
+### lgwks_bot Fixed
+
+- `rt::process`: a capture's own cut is no longer reported as the child's
+  truncation. When `CapturedStream::truncated()` is true the retained bytes are a
+  prefix **the capture** cut, so a framed read of them could end in
+  `TruncatedPrefix`/`TruncatedPayload` — or, worse, read as a clean
+  `EndOfStream` when the cut landed on a record boundary — and a caller would
+  take a capture's bound for the child's own failure to write.
+  `CapturedStream::frames` now ends in
+  `FrameRead::CeilingReached { ceiling: <the capture's retained capacity> }` and
+  `is_complete()` is `false`. An untruncated capture still reports the child's own
+  truncation, and a reader's ceiling reached over an untruncated capture still
+  reports the reader's; the two ceilings are separate facts and are no longer
+  conflated.
+- `rt::process`: `FrameRead::MalformedPrefix` no longer claims a legal record is
+  rot. A declared length of `0` or past the ceiling still names no record this
+  grammar writes and is still refused, but a legal declared length that merely
+  exceeds the room remaining after earlier records is now
+  `FrameRead::CeilingReached` — a well-formed record with nowhere to go is a
+  bound, not corruption. The charge is still made before a payload byte is read,
+  so no allocation past the ceiling is possible.
+- `rt::process`: a record's payload is read into its own exactly-sized `Vec`,
+  allocated only after the ceiling charge and then moved into the record. The
+  shared "reused" buffer this replaces allocated and copied every payload a
+  second time, so every byte was copied twice and the reuse comment was untrue;
+  on truncation the partial is that same `Vec` truncated in place rather than a
+  second copy.
 
 ### lgwks_bot Changed
 

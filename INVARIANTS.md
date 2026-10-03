@@ -246,15 +246,48 @@ Each of these was a shipped defect. Treat the list as the spec.
   record is `FrameRead::Frame` only when its prefix named the bytes that
   followed; the two truncations, a malformed prefix and the caller's ceiling are
   refusals that carry no payload, and `payload()` returns `None` for every one of
-  them, so there is no path from a truncated output to bytes a caller decodes. The
-  payload ceiling is charged from the prefix *before* a payload is read, so a
-  stream cannot ask for an allocation by claiming a large record. · why: #87
-  acceptance row T05 (LC-02/11) · enforced by: `tests/sys_process_binding.rs`
+  them, so there is no path from a truncated output to bytes a caller decodes.
+  The payload ceiling is charged from the prefix *before* a payload is read, so a
+  stream cannot ask for an allocation by claiming a large record. **Malformed is
+  not "too big for what is left":** `MalformedPrefix` is exactly the two lengths
+  no writer of this grammar produces — `declared == 0`, or `declared > ceiling`
+  — and a *legal* declared length that merely exceeds the room remaining after
+  earlier records is `CeilingReached`, because a well-formed record with nowhere
+  to go is a bound, not rot. Each payload is read into its own exactly-sized
+  `Vec`, allocated only after the charge and then moved into the record, so no
+  byte is copied twice and a truncated partial is that same `Vec` truncated in
+  place. A caller reads its child's output through
+  `CapturedStream::frames(ceiling)`, the one door from a `ProcessRun` to the
+  grammar. · why: #87 acceptance row T05 (LC-02/11) · enforced by:
+  `tests/sys_process_binding.rs`
   (`a_framed_record_cut_off_mid_frame_is_a_typed_refusal`,
   `a_framed_stream_that_ends_cleanly_is_complete`,
+  `a_legal_record_without_room_is_the_ceiling_and_rot_is_still_refused`,
   `a_prefix_past_the_ceiling_is_refused_before_it_is_allocated`) and
   `tests/sim_process_output.rs` (`cuts_are_refused_never_decoded_band_00`,
-  `cuts_are_refused_never_decoded_band_01`)
+  `cuts_are_refused_never_decoded_band_01`,
+  `room_without_a_record_is_the_ceiling_band_00`,
+  `room_without_a_record_is_the_ceiling_band_01`)
+- **INV-BOT-114** A capture's own cut is reported as the capture's ceiling, never
+  as the child's truncation and never as a clean end. When
+  `CapturedStream::truncated()` is true the retained bytes are a prefix **the
+  capture** cut, so they are not the child's whole output however they happen to
+  end — including the case where they end exactly on a record boundary, which is
+  the case a naive reader reports as a complete stream. A framed read through
+  `CapturedStream::frames` therefore ends in
+  `FrameRead::CeilingReached { ceiling: <the capture's retained capacity> }` and
+  `is_complete()` is `false`, whatever the reader's own classification of the
+  prefix was. The two ceilings are separate facts and are never conflated: an
+  untruncated capture reports the child's own truncation, and a reader ceiling
+  reached over an untruncated capture reports the reader's. · why: #87 acceptance
+  row T05 (LC-02/11), the capture-ceiling/confusable-child-truncation defect ·
+  enforced by: `tests/sys_process_binding.rs`
+  (`a_capture_ceiling_ends_the_framed_read_rather_than_the_child`,
+  `an_untruncated_capture_reports_the_child_own_truncation`) and
+  `tests/sim_process_output.rs`
+  (`capture_cuts_end_at_the_capture_ceiling_band_00`,
+  `capture_cuts_end_at_the_capture_ceiling_band_01`,
+  `capture_cuts_saturate_at_the_declared_tiers`)
 - **INV-BOT-111** A captured stream's four facts — the retained head at the
   ceiling, the retained capacity, the exact total and the truncation flag — are
   reported from one drain that keeps reading past its ceiling, so a flooding child
