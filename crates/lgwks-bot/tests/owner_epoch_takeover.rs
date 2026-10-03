@@ -16,11 +16,11 @@
 //!   refused, the holder dies, the kernel hands it back, and the new owner
 //!   replays the dead worker's acknowledged appends exactly once.
 //! - The **owner epoch** ([`Broker::replace`]) stops a second *claimer* from
-//!   acting on a receipt minted before it. A process can hold an open descriptor
-//!   for a journal it no longer owns — the kernel does not revoke one — so the old
-//!   worker here is deliberately represented the way a returning worker actually
-//!   is: **released**, not killed, with its stale warrant still in hand and its
-//!   own view of the file still open.
+//!   acting on a receipt minted before it. A process can hold an open
+//!   descriptor for a journal it no longer owns — nothing revokes an open
+//!   descriptor — so the old worker here is deliberately represented the way
+//!   a returning worker actually is: **released**, not killed, with its stale
+//!   warrant still in hand and its own view of the file still open.
 //!
 //! What the release makes possible is exactly the hazard. The released worker
 //! still holds a `FileJournal` over the same path, so its appends race the
@@ -133,7 +133,8 @@ fn old_worker_body() -> TestResult {
 
     // The worker's own handle, opened under generation 1 and kept open for the
     // whole of its life. This is the shape the row is about: a descriptor on the
-    // journal file survives the takeover, because the kernel does not revoke one.
+    // journal file survives the takeover, because nothing revokes an open
+    // descriptor.
     let mut journal = FileJournal::open(&orders.journal)?;
     let authority = broker.authorize(key)?;
 

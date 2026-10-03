@@ -568,7 +568,8 @@ Each of these was a shipped defect. Treat the list as the spec.
   over. The advisory writer fence is a *separate* mechanism and neither
   substitutes for the other: the fence stops a second writer, the epoch stops a
   second claimer, and a process can hold a live descriptor on a journal it no
-  longer owns because the kernel does not revoke one. · why: T16 · enforced by:
+  longer owns, because nothing revokes an open descriptor. · why: T16 ·
+  enforced by:
   `tests/owner_epoch_takeover.rs`
   (`an_old_worker_returning_after_a_takeover_cannot_settle_or_authorize`,
   `a_warrant_from_the_previous_generation_is_superseded`,
