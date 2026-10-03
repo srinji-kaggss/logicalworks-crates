@@ -92,6 +92,16 @@ impl Repository {
         if owner.is_empty() || name.is_empty() {
             return Err(invalid("both `owner` and `repo` must be non-empty"));
         }
+        // `.` and `..` are path segments, not names: `../..` would turn
+        // `repos/{owner}/{repo}/pulls` into a request for another endpoint.
+        if [owner, name]
+            .iter()
+            .any(|segment| matches!(*segment, "." | ".."))
+        {
+            return Err(invalid(
+                "`.` and `..` are path segments, not repository names",
+            ));
+        }
         let allowed = |segment: &str| {
             segment
                 .bytes()
@@ -262,13 +272,17 @@ impl ReviewRecord {
     /// The subject, the body and the state are all compared, because a
     /// read-back that matched only the subject would accept a review of the
     /// right commit saying something else — which is not verification of this
-    /// publication. The marker is deliberately **not** compared: it locates a
-    /// candidate, and treating it as proof is exactly the mistake PR-07 names.
+    /// publication. The state compared is the one GitHub *reports*
+    /// ([`ReviewPayload::state`]): a review created with `COMMENT` reads back as
+    /// `COMMENTED`, and comparing the request's spelling would verify nothing
+    /// against the real API. The marker is never compared on its own: it
+    /// travels inside the body, so it is checked only as part of the whole body,
+    /// and a matching marker with a different body is a different review.
     #[must_use]
     pub fn matches(&self, intended: &ReviewPayload) -> bool {
         self.commit_id.as_deref() == Some(intended.commit_id.as_str())
             && self.body.as_deref() == Some(intended.body.as_str())
-            && self.state.eq_ignore_ascii_case(intended.event.as_str())
+            && self.state == intended.state()
     }
 }
 
@@ -294,19 +308,56 @@ impl ReviewAuthor {
 ///
 /// `#[non_exhaustive]`: GitHub adds fields to this object, and a consumer that
 /// destructured it literally would break on each addition.
+///
+/// Decoded from the object GitHub's REST API returns for
+/// `repos/{owner}/{repo}/pulls/{number}`, where the commits are nested as
+/// `head.sha` and `base.sha`. A missing commit decodes to an empty sha, which
+/// [`Gh::snapshot`] refuses rather than reviewing nothing.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(crate = "lgwks_std::json::serde")]
+#[serde(crate = "lgwks_std::json::serde", from = "PullWire")]
 #[non_exhaustive]
 pub struct PrSnapshot {
     /// The pull request number.
-    #[serde(default)]
     number: u64,
     /// The head commit's sha at the moment of the read.
-    #[serde(default)]
     head_sha: String,
     /// The base commit's sha at the moment of the read.
-    #[serde(default)]
     base_sha: String,
+}
+
+/// The pull-request object as GitHub sends it, reduced to what a snapshot reads.
+#[derive(Deserialize)]
+#[serde(crate = "lgwks_std::json::serde")]
+struct PullWire {
+    /// The pull request number.
+    #[serde(default)]
+    number: u64,
+    /// `head`, whose `sha` is the commit a review is pinned to.
+    #[serde(default)]
+    head: RefWire,
+    /// `base`, whose `sha` is the commit the head is compared against.
+    #[serde(default)]
+    base: RefWire,
+}
+
+/// One `head` or `base` reference in a pull-request object.
+#[derive(Default, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde")]
+struct RefWire {
+    /// The commit the reference points at.
+    #[serde(default)]
+    sha: String,
+}
+
+impl From<PullWire> for PrSnapshot {
+    /// Lift the nested commits into the snapshot's flat fields.
+    fn from(wire: PullWire) -> Self {
+        Self {
+            number: wire.number,
+            head_sha: wire.head.sha,
+            base_sha: wire.base.sha,
+        }
+    }
 }
 
 impl PrSnapshot {
@@ -380,12 +431,17 @@ pub struct ReviewPayload {
     commit_id: String,
     /// The review event: `COMMENT`, `APPROVE` or `REQUEST_CHANGES`.
     event: String,
-    /// The top-level body.
+    /// The top-level body, with the marker trailer when there is a marker.
     body: String,
     /// An application marker that helps a read-back locate a candidate review.
     ///
-    /// A locator, never a proof: [`ReviewRecord::matches`] verifies subject,
-    /// body and state before a publication is reported.
+    /// GitHub's create-review request has no field for it, so it is not sent
+    /// as one: [`ReviewPayload::new`] appends it to the body as an HTML comment
+    /// (invisible when GitHub renders the review), which is the only place a
+    /// read-back can find it again. A locator, never a proof on its own:
+    /// [`ReviewRecord::matches`] verifies subject, the whole body and state
+    /// before a publication is reported.
+    #[serde(skip)]
     marker: String,
 }
 
@@ -402,10 +458,26 @@ impl ReviewPayload {
         &self.event
     }
 
-    /// The top-level body.
+    /// The top-level body exactly as it is sent, marker trailer included.
     #[must_use]
     pub fn body(&self) -> &str {
         &self.body
+    }
+
+    /// The review state GitHub reports for a review created with this event.
+    ///
+    /// The create request and the read-back spell the same fact differently:
+    /// `COMMENT` reads back as `COMMENTED`, `APPROVE` as `APPROVED`, and
+    /// `REQUEST_CHANGES` as `CHANGES_REQUESTED`. A verifier comparing the
+    /// request's spelling against the read-back would never match.
+    #[must_use]
+    pub fn state(&self) -> &'static str {
+        match self.event.as_str() {
+            "APPROVE" => "APPROVED",
+            "REQUEST_CHANGES" => "CHANGES_REQUESTED",
+            // `new` admits only the three `EVENTS`, so this is `COMMENT`.
+            _ => "COMMENTED",
+        }
     }
 
     /// The application marker.
@@ -419,12 +491,22 @@ impl ReviewPayload {
     /// The review events GitHub accepts.
     pub const EVENTS: [&'static str; 3] = ["COMMENT", "APPROVE", "REQUEST_CHANGES"];
 
+    /// The most bytes a marker may hold.
+    pub const MAX_MARKER_BYTES: usize = 256;
+
     /// Build a payload bound to `subject`.
+    ///
+    /// A non-empty `marker` is appended to `body` as
+    /// `<!-- lgwks-review:{marker} -->` after a blank line, so the review a
+    /// read-back returns carries it and [`ReviewPayload::body`] is exactly what
+    /// GitHub will hold.
     ///
     /// # Errors
     ///
     /// [`GhError::Event`] naming the events that are accepted, when `event` is
-    /// not one of them.
+    /// not one of them, and [`GhError::Marker`] when `marker` could close or
+    /// break out of the HTML comment that carries it, or is longer than
+    /// [`ReviewPayload::MAX_MARKER_BYTES`].
     pub fn new(
         subject: &CommitId,
         event: impl Into<String>,
@@ -435,11 +517,31 @@ impl ReviewPayload {
         if !Self::EVENTS.contains(&event.as_str()) {
             return Err(GhError::Event { event });
         }
+        let marker = marker.into();
+        let invalid = |reason: &'static str| GhError::Marker {
+            marker: marker.clone(),
+            reason,
+        };
+        if marker.len() > Self::MAX_MARKER_BYTES {
+            return Err(invalid("a marker is at most 256 bytes"));
+        }
+        if marker.contains("--") || marker.contains(['<', '>']) || marker.contains(char::is_control)
+        {
+            return Err(invalid(
+                "a marker travels inside an HTML comment, so it may not hold `--`, `<`, `>` or a control character",
+            ));
+        }
+        let mut body = body.into();
+        if !marker.is_empty() {
+            body.push_str("\n\n<!-- lgwks-review:");
+            body.push_str(&marker);
+            body.push_str(" -->");
+        }
         Ok(Self {
             commit_id: subject.as_str().to_owned(),
             event,
-            body: body.into(),
-            marker: marker.into(),
+            body,
+            marker,
         })
     }
 }
@@ -996,18 +1098,20 @@ fn outcome_of(run: &ProcessRun) -> GhOutcome {
 /// and the `create_new` below is what turns a cross-process collision into a
 /// refusal rather than an overwrite. That is a stated limit, not an identity.
 #[cfg(feature = "process")]
-fn unique_tag() -> String {
+fn unique_tag() -> Option<String> {
     #[cfg(feature = "ephemeral")]
     {
-        let bytes = lgwks_std::random::bytes::<8>().unwrap_or([0; 8]);
-        bytes.iter().fold(String::new(), |mut text, byte| {
+        // An entropy failure is no tag at all, never a fixed fallback: a
+        // constant name is the collision the tag exists to prevent.
+        let bytes = lgwks_std::random::bytes::<8>().ok()?;
+        Some(bytes.iter().fold(String::new(), |mut text, byte| {
             use std::fmt::Write as _;
             // A `write!` into a `String` is infallible; the result is bound
             // rather than discarded so nothing in this crate can ignore a
             // formatting failure by accident.
             let _written = write!(text, "{byte:02x}");
             text
-        })
+        }))
     }
     // Without the `ephemeral` feature this crate may not assume an entropy
     // source (INV-DEP-6), so there is no tag to give. Rather than fall back to
@@ -1017,7 +1121,7 @@ fn unique_tag() -> String {
     // it cannot guarantee. A `Refused` is the honest answer here.
     #[cfg(not(feature = "ephemeral"))]
     {
-        String::new()
+        None
     }
 }
 
@@ -1027,30 +1131,22 @@ fn unique_tag() -> String {
 /// has exactly one sanctioned runner. A staged file is a resource with a known
 /// lifetime and an owner, which is the shape the estate's rules already
 /// require; a private spawner would be neither.
+///
+/// The path is held as UTF-8 text because it becomes a command-line argument;
+/// [`stage_input`] refuses a temporary directory that is not UTF-8 rather than
+/// lossily converting it into a name for a different file.
 #[cfg(feature = "process")]
-struct StagedInput(std::path::PathBuf);
+struct StagedInput(String);
 
 #[cfg(feature = "process")]
 impl StagedInput {
-    /// The path the child is told to read.
-    fn path(&self) -> &std::path::Path {
-        &self.0
-    }
-
     /// The path as an argument, which is a `String` the `ProcessSpec` takes.
     ///
     /// Returned by reference so the argument vector is built once and the
     /// staged file stays owned by exactly one value — the one whose `Drop`
     /// removes it.
     fn path_str(&self) -> &str {
-        // A temp path on every supported platform is built from UTF-8
-        // components: `std::env::temp_dir` is documented to return a path, and
-        // this adapter refuses a repository, a commit and an event as typed
-        // values precisely so that nothing unvalidated reaches the command
-        // line. A non-UTF-8 temporary directory is the one input that is not
-        // ours, so it is refused rather than lossily converted into a path that
-        // names a different file than the one that was written.
-        self.path().to_str().unwrap_or_default()
+        &self.0
     }
 }
 
@@ -1067,7 +1163,7 @@ impl Drop for StagedInput {
             && cause.kind() != std::io::ErrorKind::NotFound
         {
             lgwks_std::trace::warn!(
-                path = %self.0.display(),
+                path = %self.0,
                 error = %cause,
                 "the staged review payload could not be removed"
             );
@@ -1087,11 +1183,24 @@ fn stage_input(input: &[u8]) -> Result<StagedInput, GhError> {
     let mut path = std::env::temp_dir();
     // `create_new` below is what makes a collision a refusal rather than an
     // overwrite, so the name is the only thing that has to differ.
-    let tag = unique_tag();
-    if tag.is_empty() {
-        return Err(GhError::NoRunner);
-    }
+    let Some(tag) = unique_tag() else {
+        return Err(GhError::Staging {
+            path: path.display().to_string(),
+            source: String::from(
+                "no entropy source to name the staged payload uniquely; a build without the \
+                 `ephemeral` feature refuses to publish rather than reuse a name",
+            ),
+        });
+    };
     path.push(format!("lgwks-gh-payload-{tag}.json"));
+    let Some(text) = path.to_str().map(str::to_owned) else {
+        return Err(GhError::Staging {
+            path: path.display().to_string(),
+            source: String::from(
+                "the temporary directory is not UTF-8, so it cannot be an argument",
+            ),
+        });
+    };
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -1111,7 +1220,7 @@ fn stage_input(input: &[u8]) -> Result<StagedInput, GhError> {
         path: path.display().to_string(),
         source: source.to_string(),
     })?;
-    Ok(StagedInput(path))
+    Ok(StagedInput(text))
 }
 
 // ── Errors ──────────────────────────────────────────────────────────────────
@@ -1143,6 +1252,13 @@ pub enum GhError {
     Event {
         /// The event as given.
         event: String,
+    },
+    /// The reconciliation marker cannot be carried in a review body.
+    Marker {
+        /// The marker as given.
+        marker: String,
+        /// What is wrong with it.
+        reason: &'static str,
     },
     /// The client could not be run, or ran and could not be settled.
     #[cfg(feature = "process")]
@@ -1259,6 +1375,9 @@ impl std::fmt::Display for GhError {
                 "{event:?}: not a review event; expected one of {}",
                 ReviewPayload::EVENTS.join(", ")
             ),
+            Self::Marker { ref marker, reason } => {
+                write!(formatter, "{marker:?}: not a review marker: {reason}")
+            }
             #[cfg(feature = "process")]
             Self::Process(ref source) => {
                 write!(formatter, "the GitHub client could not run: {source}")
@@ -1335,6 +1454,7 @@ impl std::error::Error for GhError {
             | Self::Repository { .. }
             | Self::CommitId { .. }
             | Self::Event { .. }
+            | Self::Marker { .. }
             | Self::Transport { .. }
             | Self::Deadline { .. }
             | Self::Response { .. }
@@ -1365,6 +1485,25 @@ impl From<GhError> for crate::script::FlowError {
             GhError::Process(crate::rt::process::ProcessRunError::AfterStart { .. }) => {
                 crate::error::DispatchCertainty::Unsettled
             }
+            // Refused before any child existed: an invalid subject, payload or
+            // marker, a payload that could not be staged, a build with no
+            // runner, or a client the platform would not start. Nothing can
+            // have reached GitHub, so this is `Refused` — the one certainty a
+            // publisher may act on without reading back first.
+            #[cfg(feature = "process")]
+            GhError::Process(
+                crate::rt::process::ProcessRunError::Refused
+                | crate::rt::process::ProcessRunError::NotStarted { .. },
+            ) => crate::error::DispatchCertainty::Refused,
+            GhError::Repository { .. }
+            | GhError::CommitId { .. }
+            | GhError::Event { .. }
+            | GhError::Marker { .. }
+            | GhError::NoRunner
+            | GhError::PayloadNotSent { .. }
+            | GhError::Staging { .. } => crate::error::DispatchCertainty::Refused,
+            // The client ran: whatever it was asked to do may have happened
+            // and its answer been lost or misread.
             _ => crate::error::DispatchCertainty::NotDelivered,
         };
         let cause = match certainty {

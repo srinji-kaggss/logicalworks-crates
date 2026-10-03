@@ -33,7 +33,7 @@ use std::hash::{Hash, Hasher};
 /// What a simulation reports when a precondition did not hold.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-use lgwks_bot::domain::gh::{CommitId, Gh, Repository, ReviewPayload, ReviewRecord};
+use lgwks_bot::domain::gh::{CommitId, Gh, GhError, Repository, ReviewPayload, ReviewRecord};
 use lgwks_bot::review::ReviewOutcome;
 
 /// One simulated fault, chosen by the seed.
@@ -151,7 +151,7 @@ impl Receiver {
         self.reviews.push(ReviewRecord::new(
             id,
             commit,
-            payload.event(),
+            payload.state(),
             payload.body(),
         ));
         id
@@ -555,59 +555,297 @@ fn argument_vectors_r64() -> TestResult {
     Ok(())
 }
 
-/// The publish-failure classification, over every certainty a call can report.
+/// The publish-failure classification, driven through the real mapping.
 ///
-/// `may_have_landed` is the decision that decides whether a run reconciles or
-/// reports a clean failure, and it is the difference between a duplicate
-/// publication and none. It is private, so the observable is the outcome it
-/// produces, checked across the whole certainty space.
+/// A publish step that fails reports a [`GhError`], and the task decides from
+/// the certainty `FlowError::from` gives it whether to reconcile (read back) or
+/// report a clean failure. A failure raised before any child existed must be
+/// `Refused` — otherwise a staging error or an invalid marker is reported as an
+/// effect that "may or may not exist" — and every failure after the client ran
+/// must not be, or a lost response is never read back. Each seed builds one
+/// error with seeded content and checks the certainty the crate really maps it
+/// to.
 #[test]
 fn certainty_classification_r64() -> TestResult {
     use lgwks_bot::error::{BotError, DispatchCertainty};
 
-    // Certainties that prove nothing was written, and ones that do not.
-    let certainties = [
-        (DispatchCertainty::Refused, false),
-        (DispatchCertainty::NotDelivered, true),
-        (DispatchCertainty::Unsettled, true),
-        (DispatchCertainty::Occurred, true),
-    ];
     let mut hashes = Vec::new();
-    for (index, (certainty, may_have_landed)) in certainties.iter().copied().enumerate() {
-        let bot = BotError::DomainError {
-            domain: String::from("gh"),
-            certainty,
-            cause: String::from("classified"),
+    let mut seen_refused = 0_u32;
+    let mut seen_after_start = 0_u32;
+    for index in 0..64u64 {
+        let text = format!("seed-{index:x}-{}", text_hash(&index.to_string()));
+        let (error, sent_nothing) = match index % 9 {
+            0 => (GhError::NoRunner, true),
+            1 => (
+                GhError::Staging {
+                    path: text.clone(),
+                    source: String::from("no entropy"),
+                },
+                true,
+            ),
+            2 => (
+                GhError::PayloadNotSent {
+                    reason: text.clone(),
+                },
+                true,
+            ),
+            3 => (
+                GhError::Event {
+                    event: text.clone(),
+                },
+                true,
+            ),
+            4 => (
+                GhError::Marker {
+                    marker: text.clone(),
+                    reason: "closes the comment",
+                },
+                true,
+            ),
+            5 => (
+                GhError::Transport {
+                    what: text.clone(),
+                    exit_code: i32::try_from(index).ok(),
+                    stderr: String::from("connection reset by peer"),
+                },
+                false,
+            ),
+            6 => (GhError::Deadline { what: text.clone() }, false),
+            7 => (
+                GhError::MalformedResponse {
+                    path: String::from("stdout"),
+                    source: text.clone(),
+                },
+                false,
+            ),
+            _ => (
+                GhError::Response {
+                    path: text.clone(),
+                    reason: String::from("the created review has no id"),
+                },
+                false,
+            ),
         };
-        let error = lgwks_bot::script::FlowError::from(bot);
-        hashes.push(text_hash(&format!("{certainty:?}")));
+        let shown = error.to_string();
+        let certainty = match lgwks_bot::script::FlowError::from(error) {
+            lgwks_bot::script::FlowError::Bot { ref source, .. } => match **source {
+                BotError::DomainError { certainty, .. } => certainty,
+                BotError::EffectIndeterminate { .. } => DispatchCertainty::Unsettled,
+                ref other => return Err(format!("{shown}: unexpected bot error {other}").into()),
+            },
+            other => return Err(format!("{shown}: not a bot error: {other}").into()),
+        };
+        hashes.push(text_hash(&format!("{index}:{certainty:?}")));
+        if sent_nothing {
+            seen_refused = seen_refused.saturating_add(1);
+            assert_eq!(
+                certainty,
+                DispatchCertainty::Refused,
+                "seed {index}: {shown} happened before any child existed, so nothing \
+                 reached GitHub and the run must not reconcile it as unknown"
+            );
+        } else {
+            seen_after_start = seen_after_start.saturating_add(1);
+            assert_ne!(
+                certainty,
+                DispatchCertainty::Refused,
+                "seed {index}: {shown} happened after the client ran, so the effect \
+                 is unobserved and the run must read back"
+            );
+        }
+    }
+    assert!(
+        seen_refused > 0 && seen_after_start > 0,
+        "both halves are drawn"
+    );
+    let mut replay = Vec::new();
+    for (index, hash) in hashes.iter().enumerate() {
+        replay.push(text_hash(&format!("{index}:{hash}")));
+    }
+    assert_eq!(replay.len(), 64, "every seed left one trace entry");
+    Ok(())
+}
 
-        // The observable: a run whose publish failed this way is reconciled
-        // when the certainty leaves the effect unobserved, and only then.
-        let reconciled = may_have_landed;
+/// One seeded lowercase hex commit id.
+fn seeded_sha(index: u64, salt: u64) -> String {
+    use std::fmt::Write as _;
+
+    let mut text = String::with_capacity(40);
+    let mut state = index.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ salt;
+    while text.len() < 40 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        // `write!` into a `String` cannot fail; the result is bound so nothing
+        // here discards an error by accident.
+        let _written = write!(text, "{state:016x}");
+    }
+    text.truncate(40);
+    text
+}
+
+/// GitHub's pull-request object, decoded as the adapter decodes it.
+///
+/// The real API nests the pinned commits as `head.sha` and `base.sha` among
+/// many other fields; a decoder that read flat `head_sha` fields pins nothing
+/// on every real pull request. Each seed draws its own commits, number and
+/// field order, and a flat-shaped answer must pin nothing.
+#[test]
+fn pull_object_contract_r64() -> TestResult {
+    for index in 0..64u64 {
+        let head = seeded_sha(index, 1);
+        let base = seeded_sha(index, 2);
+        let number = index.saturating_add(1);
+        let head_object = format!("\"head\":{{\"ref\":\"topic-{index}\",\"sha\":\"{head}\"}}");
+        let base_object = format!("\"base\":{{\"ref\":\"main\",\"sha\":\"{base}\"}}");
+        let fields = [
+            format!("\"number\":{number}"),
+            String::from("\"state\":\"open\""),
+            head_object,
+            base_object,
+            format!("\"title\":\"change {index}\""),
+        ];
+        let rotate = pick(index, fields.len());
+        let ordered: Vec<&str> = fields[rotate..]
+            .iter()
+            .chain(fields[..rotate].iter())
+            .map(String::as_str)
+            .collect();
+        let answer = format!("{{{}}}", ordered.join(","));
+        let snapshot = lgwks_std::json::from_str::<lgwks_bot::domain::gh::PrSnapshot>(&answer)?;
+        assert_eq!(snapshot.number(), number, "seed {index}: {answer}");
         assert_eq!(
-            reconciled,
-            certainty != DispatchCertainty::Refused,
-            "{certainty:?} must {} be reconciled",
-            if reconciled { "" } else { "not" }
+            snapshot.head_sha(),
+            head,
+            "seed {index}: the head is `head.sha`"
         );
-        // The retry vocabulary agrees with the reconciliation decision in the
-        // direction that matters: nothing a run would reconcile is something
-        // the retry policy would blindly repeat. `Unsettled` is
-        // `RequiresEvidence`, not `Safe`, which is the estate already refusing
-        // the duplicate this classifier exists to prevent.
-        assert!(
-            !error.is_retryable() || certainty != DispatchCertainty::Unsettled,
-            "{certainty:?}: an unsettled effect must never be a safe retry, or a \
-             retrying caller would duplicate the publication: {error}"
+        assert_eq!(
+            snapshot.base_sha(),
+            base,
+            "seed {index}: the base is `base.sha`"
         );
-        assert!(index < certainties.len(), "every certainty is classified");
+
+        let flat =
+            format!("{{\"number\":{number},\"head_sha\":\"{head}\",\"base_sha\":\"{base}\"}}");
+        let not_github = lgwks_std::json::from_str::<lgwks_bot::domain::gh::PrSnapshot>(&flat)?;
         assert!(
-            reconciled == may_have_landed,
-            "the classification table and the assertion agree: {index}"
+            not_github.head_sha().is_empty() && not_github.base_sha().is_empty(),
+            "seed {index}: a flat answer is not GitHub's shape and pins nothing"
         );
     }
     Ok(())
+}
+
+/// A review verifies in the state GitHub reports, with its marker inside the
+/// body, and never under the request's spelling or another marker.
+#[test]
+fn review_state_and_marker_r64() -> TestResult {
+    let reported = [
+        ("COMMENT", "COMMENTED"),
+        ("APPROVE", "APPROVED"),
+        ("REQUEST_CHANGES", "CHANGES_REQUESTED"),
+    ];
+    for index in 0..64u64 {
+        let subject = CommitId::new(seeded_sha(index, 3))?;
+        let (event, state) = reported[pick(index, reported.len())];
+        let body = format!("finding {index}: {}", text_hash(&index.to_string()));
+        let marker = if index % 4 == 0 {
+            String::new()
+        } else {
+            format!("tenant-{}/run-{index}", index % 5)
+        };
+        let payload = ReviewPayload::new(&subject, event, body.as_str(), marker.as_str())?;
+        assert_eq!(payload.state(), state, "seed {index}: {event}");
+        if marker.is_empty() {
+            assert_eq!(payload.body(), body, "seed {index}: no marker, no trailer");
+        } else {
+            assert_eq!(
+                payload.body(),
+                format!("{body}\n\n<!-- lgwks-review:{marker} -->"),
+                "seed {index}: the marker travels at the end of the body"
+            );
+        }
+        let wire = lgwks_std::json::to_string(&payload)?;
+        assert!(
+            !wire.contains("\"marker\""),
+            "seed {index}: GitHub's create request has no `marker` field: {wire}"
+        );
+
+        let read_back = ReviewRecord::new(9, subject.as_str(), state, payload.body());
+        assert!(
+            read_back.matches(&payload),
+            "seed {index}: {event} reads back as {state}"
+        );
+        let echoed = ReviewRecord::new(9, subject.as_str(), event, payload.body());
+        assert!(
+            !echoed.matches(&payload),
+            "seed {index}: `{event}` is the request's spelling, not a state GitHub reports"
+        );
+        let other = ReviewPayload::new(&subject, event, body.as_str(), format!("other-{index}"))?;
+        assert!(
+            !read_back.matches(&other),
+            "seed {index}: identical text under another marker is another publication"
+        );
+    }
+    Ok(())
+}
+
+/// A marker that could close or break out of the comment that carries it is
+/// refused, wherever in the marker the hostile token is placed.
+#[test]
+fn marker_escape_r64() -> TestResult {
+    let subject = CommitId::new(seeded_sha(7, 4))?;
+    let hostile = ["--", "-->", "<", ">", "\n", "\r", "\u{0}", "\t"];
+    for index in 0..64u64 {
+        let token = hostile[pick(index, hostile.len())];
+        let prefix = "p".repeat(pick(index, 9));
+        let suffix = "s".repeat(pick(index.wrapping_mul(3), 7));
+        let marker = format!("{prefix}{token}{suffix}");
+        assert!(
+            matches!(
+                ReviewPayload::new(&subject, "COMMENT", "body", marker.as_str()),
+                Err(GhError::Marker { .. })
+            ),
+            "seed {index}: {marker:?} could break out of the comment"
+        );
+        let length = 250_usize.saturating_add(pick(index, 13));
+        let long = "m".repeat(length);
+        let accepted = ReviewPayload::new(&subject, "COMMENT", "body", long.as_str()).is_ok();
+        assert_eq!(
+            accepted,
+            length <= ReviewPayload::MAX_MARKER_BYTES,
+            "seed {index}: a {length}-byte marker against the declared ceiling"
+        );
+    }
+    Ok(())
+}
+
+/// `.` and `..` are path segments, not repository names: `../..` would turn
+/// `repos/{owner}/{repo}/pulls` into a request for another endpoint.
+#[test]
+fn repository_segments_r64() {
+    let dots = [".", ".."];
+    for index in 0..64u64 {
+        let name = format!("repo-{index}");
+        let dot = dots[pick(index, dots.len())];
+        let spec = if index % 2 == 0 {
+            format!("{dot}/{name}")
+        } else {
+            format!("{name}/{dot}")
+        };
+        assert!(
+            matches!(
+                Repository::new(spec.as_str()),
+                Err(GhError::Repository { .. })
+            ),
+            "seed {index}: {spec:?} is a path segment, not a repository"
+        );
+        let dotted = format!("acme/{name}.{dot}x");
+        assert!(
+            Repository::new(dotted.as_str()).is_ok(),
+            "seed {index}: {dotted:?} merely contains dots and is a name"
+        );
+    }
 }
 
 /// The position `index` selects in a table of `width` entries.

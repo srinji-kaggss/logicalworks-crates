@@ -306,9 +306,16 @@ if [ "$method" = "POST" ]; then
       printf 'x' >> "$dir/creates"
       seen=$(wc -c < "$dir/creates" | tr -d ' ')
       id=$(( $(field next_review_id) + seen - 1 ))
+      # GitHub reports the state a review is *in*, not the event that created
+      # it: `COMMENT` reads back as `COMMENTED`, and so on. A fake that echoed
+      # the event would let a verifier pass here that never matches GitHub.
       state=$(field created_state)
       event=$(printf '%s' "$payload" | sed -n 's/.*"event":"\([A-Z_]*\)".*/\1/p')
-      if [ -n "$event" ]; then state="$event"; fi
+      case "$event" in
+        COMMENT) state=COMMENTED ;;
+        APPROVE) state=APPROVED ;;
+        REQUEST_CHANGES) state=CHANGES_REQUESTED ;;
+      esac
       # The record is rendered from the *payload the adapter sent*, not from the
       # scenario's defaults. That is what makes the read-back a real
       # observation: a receiver that answered from its own configuration would
@@ -386,7 +393,7 @@ if [ "$is_reviews" -eq 1 ]; then
       else
         printf ','
       fi
-      printf '{"id":%s,"commit_id":"%s","state":"COMMENT","body":"history"}' \
+      printf '{"id":%s,"commit_id":"%s","state":"COMMENTED","body":"history"}' \
         "$((7000 + i))" "ccccccccccccccccccccccccccccccccccccccc"
       i=$((i + 1))
     done
@@ -408,7 +415,8 @@ else
   head=$(field head_sha)
   moved=$(field head_after_first)
   if [ -n "${moved:-}" ] && [ "$read_count" -gt 1 ]; then head="$moved"; fi
-  printf '{"number":7,"head_sha":"%s","base_sha":"%s"}\n' \
+  # GitHub's shape: the commits are nested under `head` and `base`.
+  printf '{"number":7,"head":{"ref":"feature","sha":"%s"},"base":{"ref":"main","sha":"%s"}}\n' \
     "$head" "$(field base_sha)"
 fi
 exit 0
@@ -465,7 +473,7 @@ impl Scenario {
             head_after_first: None,
             create: "accept",
             created_body: String::new(),
-            created_state: "COMMENT",
+            created_state: "COMMENTED",
             fail_reads: 0,
             hang_seconds: 0,
             flood_bytes: 0,

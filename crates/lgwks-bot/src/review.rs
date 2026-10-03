@@ -83,7 +83,7 @@ pub struct ReviewRequest {
     /// A deadline, not a cancellation: an abandoned step drops its future, so
     /// the child process it was driving is stopped by its own adapter deadline
     /// rather than left running.
-    pub step_deadline: Duration,
+    step_deadline: Duration,
 }
 
 impl ReviewRequest {
@@ -94,17 +94,19 @@ impl ReviewRequest {
             pull,
             body: body.into(),
             event: event.into(),
-            // Derived from the step key at run time by [`review_pr`]; an empty
-            // marker here is never sent, because the body is built there.
+            // Empty means "derive it": [`review_pr`] uses the run's step key,
+            // which is distinct per tenant and step path and stable across a
+            // re-run of the same step — an idempotency key, not a nonce.
             marker: String::new(),
             step_deadline: Duration::from_secs(120),
         }
     }
 
-    /// Locate candidate reviews with `marker` during reconciliation.
+    /// Carry `marker` in the published body instead of the run's step key.
     ///
-    /// The marker only narrows the search. Verification still compares the
-    /// subject commit, the body and the state.
+    /// The marker travels inside the body, so verification — which compares
+    /// the subject commit, the whole body and the state — distinguishes two
+    /// requests whose text is identical but whose markers differ.
     #[must_use]
     pub fn with_marker(mut self, marker: impl Into<String>) -> Self {
         self.marker = marker.into();
@@ -296,6 +298,14 @@ pub async fn review_pr(
     script: impl Fn(&PrSnapshot, &Scope) -> ReviewScript,
 ) -> Result<ReviewOutcome, FlowError> {
     let deadline = request.step_deadline;
+    // An explicit marker wins; otherwise the run's step key, so two tenants
+    // publishing the same text on one pull request can never adopt each
+    // other's review during reconciliation.
+    let marker = if request.marker.is_empty() {
+        scope.key().to_string()
+    } else {
+        request.marker.clone()
+    };
 
     // 1. Pin the subject. Every later comparison is against this read.
     let snapshot = within(&scope, "snapshot", deadline, async {
@@ -319,7 +329,7 @@ pub async fn review_pr(
 
     // The marker travels in the body so a read-back can *locate* this review.
     // It is a locator: [`ReviewRecord::matches`](crate::domain::gh::ReviewRecord::matches) decides.
-    let payload = ReviewPayload::new(&reviewed, &request.event, body, &request.marker)
+    let payload = ReviewPayload::new(&reviewed, &request.event, body, marker)
         .map_err(|source| FlowError::failed(source.to_string()))?;
 
     // 3. The head must still be what was read. A refusal here publishes
@@ -396,12 +406,13 @@ pub async fn review_pr(
             verified: true,
         }),
         None if created_id.is_some() => {
-            // The create returned an id, and the read-back did not find it. A
-            // successful create whose review cannot be found is a contradiction,
-            // not a success: it is reported, never "fixed" by re-posting.
+            // The create returned an id, and the read-back either did not
+            // return it or returned it saying something else. Either is a
+            // contradiction, not a success: it is reported, never "fixed" by
+            // re-posting.
             Err(FlowError::failed(format!(
-                "GitHub accepted review {} at {} but the read-back did not return it; \
-                 no second review was created",
+                "GitHub accepted review {} at {} but the read-back did not return it as \
+                 published; no second review was created",
                 created_id.unwrap_or_default(),
                 reviewed
             )))
