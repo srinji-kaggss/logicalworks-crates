@@ -1014,25 +1014,14 @@ impl Host {
         // same host inherits both. With no store the scope is entered with no
         // run at all, which is what makes "no durability" the default rather
         // than a claim.
-        let run_body = self.records(run);
-        let body_scope = scope.clone();
-        let outcome = Box::pin(async move {
-            let scope = body_scope;
-            match run_body {
-                Some(records) => {
-                    crate::script::run_store::within(
-                        records,
-                        HELD_PERMITS.scope(charged, within(&scope, BODY_STEP, deadline, body)),
-                    )
-                    .await
-                }
-                None => {
-                    HELD_PERMITS
-                        .scope(charged, within(&scope, BODY_STEP, deadline, body))
-                        .await
-                }
-            }
-        })
+        // One composition whether or not a store is installed: two alternative
+        // nestings in one future carry both in its frame, which is what pushed a
+        // two-review test past a 2 MiB thread stack. Boxed, so a run nested in
+        // another run's body costs the parent a pointer rather than its frame.
+        let outcome = Box::pin(crate::script::run_store::within(
+            self.records(run),
+            HELD_PERMITS.scope(charged, within(&scope, BODY_STEP, deadline, body)),
+        ))
         .await;
 
         let snapshot = trail.snapshot();

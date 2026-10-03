@@ -358,13 +358,14 @@ impl std::fmt::Debug for Records {
     }
 }
 
-/// Install `records` for the futures polled inside `body`.
+/// Install `records` for the futures polled inside `body`; `None` installs the
+/// absence a storeless run reports, through the same one composition.
 ///
 /// Crate-private: the host is the supported way to make a run durable (DX-10),
 /// and a caller who installed their own store would be reaching past the one
 /// path that also mints the run id the record is keyed by.
-pub(crate) async fn within<R>(records: Records, body: impl Future<Output = R>) -> R {
-    RECORDS.scope(Some(records), body).await
+pub(crate) async fn within<R>(records: Option<Records>, body: impl Future<Output = R>) -> R {
+    RECORDS.scope(records, body).await
 }
 
 /// The store installed for the current future, if any.
