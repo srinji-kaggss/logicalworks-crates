@@ -183,7 +183,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   release capacity and emit an attributed terminal receipt. · why: #143 R10
   ownerless-cleanup finding · enforced by: `rt::supervise::tests` and
   `tests/rt_process.rs`
-- **INV-BOT-81** A length-framed record a child's output carries is read through
+- **INV-BOT-110** A length-framed record a child's output carries is read through
   the crate's one frame grammar (`journal::frame`, INV-BOT-51), so "what a torn
   tail is" has one answer across the file stores and a subprocess's streams. A
   record is `FrameRead::Frame` only when its prefix named the bytes that
@@ -198,7 +198,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_prefix_past_the_ceiling_is_refused_before_it_is_allocated`) and
   `tests/sim_process_output.rs` (`cuts_are_refused_never_decoded_band_00`,
   `cuts_are_refused_never_decoded_band_01`)
-- **INV-BOT-82** A captured stream's four facts — the retained head at the
+- **INV-BOT-111** A captured stream's four facts — the retained head at the
   ceiling, the retained capacity, the exact total and the truncation flag — are
   reported from one drain that keeps reading past its ceiling, so a flooding child
   against a slow reader is bounded by its declared ceiling rather than by a pipe
@@ -211,7 +211,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_flooding_child_is_drained_while_it_runs_not_after_it_exits`) and
   `tests/sim_process_output.rs` (`a_seeded_flood_stays_bounded_on_one_worker_band_00`,
   `a_seeded_flood_stays_bounded_on_one_worker_band_01`)
-- **INV-BOT-83** `CleanupReceipt::CleanupConfirmed` claims that every process
+- **INV-BOT-112** `CleanupReceipt::CleanupConfirmed` claims that every process
   still in the supervised group when the group was last observed is gone — an
   observation of `killpg(group, 0)`. It does **not** claim that no process the
   supervisor started is still running: a descendant that called `setsid` has left
@@ -222,7 +222,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   (LC-10), observed against a real `setsid` escape · enforced by:
   `tests/process_escape.rs` (`a_session_escape_is_not_reported_as_complete_tree_cleanup`,
   `cleanup_never_signals_a_process_outside_the_supervisors_group`)
-- **INV-BOT-84** A callback that never reaches an await point is observable only
+- **INV-BOT-113** A callback that never reaches an await point is observable only
   from outside the process that runs it, and the observation is **detection, not
   preemption**. A thread watchdog shares the fate of the executor it watches, so
   the row's oracle is a separately timed child process that the parent kills with
