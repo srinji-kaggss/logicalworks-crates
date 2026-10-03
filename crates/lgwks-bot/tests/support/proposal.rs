@@ -23,8 +23,10 @@ use std::error::Error;
 
 use lgwks_bot::cap::Cap;
 use lgwks_bot::proposal::{
-    ArtifactStore, Decoder, PlanLimits, Provenance, Source, Surface, WriteOutcome,
+    ArtifactStore, Decoder, LedgerLimits, PlanBudget, PlanLimits, Provenance, Source, Surface,
+    WriteOutcome,
 };
+use lgwks_bot::script::{Gate, Scope};
 
 /// A test's result: an error fails it with the error's text.
 pub type TestResult = Result<(), Box<dyn Error>>;
@@ -187,4 +189,127 @@ pub fn store(
     bytes: &[u8],
 ) -> Result<WriteOutcome, Box<dyn Error>> {
     Ok(artifacts.write(tenant, bytes)?)
+}
+
+// ── The wired path: a task body admitting untrusted output ───────────────────
+
+/// The admission ceiling every gate here is opened with.
+///
+/// Declared rather than defaulted inside [`lgwks_bot::script::admit`] because a
+/// repair ceiling a caller cannot read is a repair loop they cannot see coming,
+/// and a falsifier that drew it from the seed could not say what it drew.
+pub const ADMISSIONS: u32 = 8;
+
+/// The repetition ceiling every gate here is opened with.
+///
+/// Three, so T29's falsifier drives three tolerated refusals and then the finite
+/// intervention on the fourth, with the budget above it never the binding
+/// constraint — otherwise the two ceilings could not be told apart.
+pub const REPEAT: u32 = 3;
+
+/// A gate over the shared surface, for a run admitting untrusted model output.
+///
+/// # Errors
+///
+/// [`lgwks_bot::proposal::SurfaceError`] when the surface does not build.
+pub fn gate(tenant: &str) -> Result<Gate, Box<dyn Error>> {
+    Ok(Gate::new(
+        tenant,
+        surface()?,
+        decoder(),
+        PlanBudget::new(ADMISSIONS),
+        LedgerLimits::new(REPEAT, 8),
+    ))
+}
+
+/// A gate over the surface that holds nothing, so every capful operation is
+/// refused by name rather than by an accident of the grant set.
+///
+/// # Errors
+///
+/// [`lgwks_bot::proposal::SurfaceError`] when the surface does not build.
+pub fn poor_gate(tenant: &str) -> Result<Gate, Box<dyn Error>> {
+    Ok(Gate::new(
+        tenant,
+        poor_surface()?,
+        decoder(),
+        PlanBudget::new(ADMISSIONS),
+        LedgerLimits::new(REPEAT, 8),
+    ))
+}
+
+/// A fresh scratch directory for a run store, named by random bytes.
+///
+/// Random bytes and never the process id: the OS reuses a pid, so two runs in two
+/// processes would share a scratch directory and one would delete the other's
+/// store mid-run. `lgwks_std::random` is the estate's one distinguishable source.
+/// The randomness names the *directory* and never enters an assertion, so the
+/// tests' observations are unchanged by it.
+///
+/// # Errors
+///
+/// [`lgwks_std::random`]'s error when the entropy source is unavailable, or an
+/// I/O error creating the directory.
+pub fn scratch(tag: &str) -> Result<std::path::PathBuf, Box<dyn Error>> {
+    let unique = lgwks_std::random::bytes::<8>()?;
+    let suffix = unique
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let path = std::env::temp_dir().join(format!("lgwks-proposal-{tag}-{suffix}"));
+    if path.exists() {
+        std::fs::remove_dir_all(&path)?;
+    }
+    std::fs::create_dir_all(&path)?;
+    Ok(path)
+}
+
+/// Drive one future to completion on the crate's own runtime.
+///
+/// One spelling for both targets, because the two have to drive a `Host::run` the
+/// same way: a target that drove it differently could compare two runs that were
+/// never actually equivalent.
+pub fn drive<T>(future: impl std::future::Future<Output = T>) -> T {
+    lgwks_bot::block_on(future)
+}
+
+/// A task body that admits `payload` through a gate and reports what happened.
+///
+/// A named `fn` rather than a closure so the same `Task` type can be built twice —
+/// which is what a resume needs: a context reset is a *new* instance resuming the
+/// *same* run id, and a closure would give each instance its own anonymous type.
+///
+/// It takes `scope` by value and moves it into the future, so the future owns what
+/// it borrows and is `'static`, which is what a task body needs since the host
+/// drives it after the body has returned.
+pub fn admitting_body(
+    scope: Scope,
+    (gate, payload): (Gate, Vec<u8>),
+) -> lgwks_bot::BoxFuture<'static, Result<String, lgwks_bot::script::FlowError>> {
+    Box::pin(async move {
+        let plan = lgwks_bot::script::admit(&scope, "plan", &gate, &payload, Source::Model).await?;
+        Ok(plan.to_string())
+    })
+}
+
+/// What [`admitting_body`] returns, named so the coercion at
+/// [`admitting_task`] reads as a signature rather than a type expression.
+pub type AdmittingFuture =
+    lgwks_bot::BoxFuture<'static, Result<String, lgwks_bot::script::FlowError>>;
+
+/// The `Task` type [`admitting_body`] is built into.
+pub type AdmittingTask = lgwks_bot::task::Task<fn(Scope, (Gate, Vec<u8>)) -> AdmittingFuture>;
+
+/// The task that admits one payload through one gate.
+///
+/// The coercion is written at the call rather than left to inference: `task` is
+/// generic over its body, and without it the `?` would resolve against the `fn`
+/// *item* type and the annotation on the binding would never apply.
+///
+/// # Errors
+///
+/// [`lgwks_bot::script::FlowError`] when the logical name does not validate.
+pub fn admitting_task() -> Result<AdmittingTask, Box<dyn Error>> {
+    let body: fn(Scope, (Gate, Vec<u8>)) -> AdmittingFuture = admitting_body;
+    Ok(lgwks_bot::task::task("admit", body)?)
 }

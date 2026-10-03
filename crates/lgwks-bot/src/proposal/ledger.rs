@@ -110,6 +110,8 @@ impl Intervention {
     }
 }
 
+impl std::error::Error for Intervention {}
+
 impl fmt::Display for Intervention {
     /// The arm and the facts it names.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
