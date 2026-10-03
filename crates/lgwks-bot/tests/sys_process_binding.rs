@@ -33,7 +33,9 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use lgwks_bot::domain::sys::{DEFAULT_CAPTURE_LIMIT, DEFAULT_DEADLINE, Process};
-use lgwks_bot::rt::process::{FrameRead, ProcessRunError, ProcessSpec, StdioPolicy, read_frames};
+use lgwks_bot::rt::process::{
+    FrameRead, ProcessRun, ProcessRunError, ProcessSpec, StdioPolicy, read_frames,
+};
 use lgwks_bot::rt::runtime::Builder;
 use lgwks_bot::rt::supervise::{CleanupReceipt, Supervisor};
 use lgwks_bot::rt::time::sleep;
@@ -76,10 +78,7 @@ const SMALL_CAPTURE: usize = 8;
 
 /// Run `script` once on a one-slot supervisor, capturing at most `capture` bytes
 /// of each stream.
-fn run_captured(
-    script: &str,
-    capture: usize,
-) -> Result<lgwks_bot::rt::process::ProcessRun, Box<dyn std::error::Error>> {
+fn run_captured(script: &str, capture: usize) -> Result<ProcessRun, Box<dyn std::error::Error>> {
     let runtime = lgwks_bot::Runtime::new()?;
     Ok(runtime.block_on(async {
         let mut supervisor = Supervisor::new(1);

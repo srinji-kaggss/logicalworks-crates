@@ -8,6 +8,55 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### lgwks_bot Breaking
+
+- `task::StoreError`: a new `FormatVersion { found, expected }` variant, and the
+  run store's file format version moves from `\x01` to `\x02` (T15). **Migration:**
+  opening a `\x01` run store is refused with `StoreError::FormatVersion { found:
+  1, expected: 2 }`, which names both versions, instead of the generic
+  `StoreError::NotAStore` it previously produced. The refusal is typed rather
+  than generic on purpose: `NotAStore` asserts the bytes were never this store's,
+  and a `\x01` store was written by an earlier version of this very crate, so
+  that message would tell an operator their own data was never theirs — the one
+  conclusion a refusal must never produce, because it is what makes someone
+  delete a file a system still relies on. There is no migration, deliberately:
+  the two available readings are to invent a `DefinitionIdentity` those records
+  never carried, which would make every pre-version resume look exactly
+  compatible, or to discard acknowledged evidence. The format has never shipped a
+  version that could lose a record, so there is nothing to convert. A deployment
+  that needs its records keeps its own copy and re-runs. A file whose magic does
+  not match is still `NotAStore`, and the two refusals are asserted apart by
+  `tests/task_resume.rs::a_pre_version_store_is_refused_naming_both_versions` and
+  `::a_foreign_file_is_still_refused_as_not_a_store`.
+
+### lgwks_bot Fixed
+
+- `tests/sim_repair.rs`: seven repair arms no longer reopen a store an earlier run
+  on the same host left behind. The tests built their store directory under the
+  system temp root from a *fixed* name (`lgwks-first-step`,
+  `lgwks-reopened-repair`, `lgwks-repair-recovery`,
+  `lgwks-cross-tenant-ticket`, and the `-{reach}`/`-{tier}` families), so the
+  directory was a ledger the test did not own: a run that predated the `\x02`
+  format left records there, and every later run refused to open them with
+  `StoreError::FormatVersion { found: 1, expected: 2 }` — a refusal that named a
+  version this branch has never written. Each now takes its directory from the
+  `shared::Scratch` guard already shared with `tests/repair.rs` (random hex in the
+  name, removed when the guard drops), held for the whole test, so no run can see
+  another run's files and none leaves one behind (INV-BOT-116). This is a test
+  isolation and ephemerality fix, not a format change: `check_format_version` is
+  untouched, and a `\x01` store written inside a run's *own* scratch directory is
+  still refused by `tests/task_resume.rs::a_pre_version_store_is_refused_naming_both_versions`.
+- Merge resolution against `#240` (group commit): the run store's ordered append
+  keeps **both** sides' guarantees rather than either one wholesale. The two-phase
+  stage is main's — every queued request's checks, fence, framing and `write_all`
+  run in submission order, one `sync_all` covers the batch, and only then are the
+  answers published and the records folded — and the record/index fold additionally
+  carries this branch's `DefinitionIdentity`, so a run's records still name the
+  definition they were written under and `check_format_version`/`FlowError::Store`
+  are unchanged. `Awaiting::poll` keeps main's ordering exactly: register the waker
+  *before* reading the slot, or a publish landing between the two is a lost wakeup
+  (INV-BOT-140). Both `journal::owner` tests from `#240` are kept.
+
 ### lgwks_bot Added
 
 - `EcsBuilder::with_poll_deadline`, `DEFAULT_POLL_DEADLINE` and
@@ -72,6 +121,37 @@ explicitly under that crate.
   reported against the right chain; a mass of 100/1,000/10,000 held chains never
   starves an independent chain; and two tenants never cross attribution. No
   production code changed.
+- `task::DefinitionIdentity` and `task::Drift`: a recorded step value is only
+  replayable under the definition that produced it. Every run-store record now
+  carries the task name, a declared definition revision, the input digest, a
+  declared durable-value schema id and the count of durable steps (T15).
+  **Migration:** the run store's file format version moves from `\x01` to
+  `\x02` and a `\x01` store is refused at open as a `FormatVersion` naming both
+  versions rather than migrated — reading one as the unversioned identity would
+  make every pre-version resume look compatible rather than unprovable. See the
+  **lgwks_bot Breaking** section above for the migration note and the refusal's
+  shape.
+- `Host::run_under`, `Host::resume_under`, `Host::definition` and
+  `HostBuilder::durable_codec`: the doors that carry a declared definition
+  identity. `resume_under` returns a `Disposition::Refused` report carrying
+  `FlowError::Incompatible` — naming the axis that disagrees — before admission,
+  so no step body is polled and no record is written. Only a *declared* identity
+  is compared; a run that declares none gets an identity derived from its tenant,
+  task name and run id, so every durable step that already worked still records
+  something stable and still resumes. The declaration is an addition, never a
+  precondition.
+- `Broker::adopt`: takes ownership of an environment at the generation a journal
+  already on the disk was written at, and moves past it (T16). `Broker::register`
+  starts at generation 1 whatever the journal holds, so a process adopting
+  another worker's journal would mint warrants for a generation that worker had
+  been replaced past — internally consistent and jointly wrong. The new refusals
+  are `BrokerError::{Journal, ForeignEnvironment, NothingToAdopt}`.
+- `script::FlowError::Store`: a typed arm carrying the run store's own
+  `StoreError`. A store that cannot read its own records now reaches the caller
+  as itself rather than as a `Failed` reason string, so a device refusal is
+  distinguishable from a definition drift by the variant alone (INV-BOT-7,
+  INV-BOT-59). `FlowError` is `#[non_exhaustive]`, so this is an additive minor
+  change.
 - `rt::process::CapturedStream::frames(ceiling)`, the door a caller reads its own
   child's output through: infallible, and the reason a `ProcessRun`'s captured
   stdout can be read as frames without the caller re-plumbing the bytes into a
@@ -99,6 +179,23 @@ explicitly under that crate.
   `CapturedStream::frames`/`read_frames` (INV-BOT-110/114) previously had no
   production caller; the domain's verbs are now that caller (INV-BOT-115).
 
+### lgwks_bot Tests
+
+- `tests/sim_store_faults.rs` and `tests/sim_epoch_identity.rs`: seeded
+  deterministic families for this branch's T15/T16/T12 claims, each a
+  source-visible `#[test]` driving the real path through the `sim::assert_replays`
+  band pattern. The read-fault family arms `RunStore::fail_next_index_read` at
+  drawn store shapes and replays and asserts the refusal reaches the report as
+  `FlowError::Store` carrying the store's own `StoreError::Storage` while a
+  reopen recovers (INV-BOT-59); the version family re-stamps a real store with a
+  drawn version byte and asserts only `\x02` is admitted (INV-BOT-55); the
+  takeover family sweeps open/takeover/append orders and asserts adoption claims
+  the generation after the journal's own history (INV-BOT-56); and the identity
+  family draws one of the seven fields per seed and asserts each is refused by
+  the check that is about it (INV-BOT-58). Two tenants are swept in the store
+  family; the concurrency rows stay with the pre-existing families
+  (`sim_store_scale.rs`, `sim_task_resume.rs`).
+
 ### lgwks_bot Fixed
 
 - The per-poll deadline no longer spawns and joins one OS thread per source
@@ -121,6 +218,31 @@ explicitly under that crate.
   every chain's first commit was reported as a skip. It is three states now, and
   admission is marked where a generation *takes* the value rather than where the
   transition is handed back, which for an entry awaiting evidence is never.
+- The T15 drift check compared a run's records against themselves: `Host::execute`
+  read the identity it was going to *check* from the same lookup its steps use to
+  find their records, so every definition drift passed and every drifted resume
+  succeeded. It now compares the identity the caller declared against the one
+  recorded. The unit tests around `DefinitionIdentity` did not catch this — they
+  tested the identity type, not the check's placement — and
+  `tests/sim_replay_drift.rs` did, which is why the row now has a seeded sweep.
+- A run store read failure is an error, never a disagreement (INV-BOT-7,
+  INV-BOT-59). The step's compatibility check returned `false` on a store that
+  could not read its own index, and that `false` was rendered as "recorded under
+  a different definition" — a specific, actionable claim about a definition made
+  by a device that established nothing. `Records::agrees` now returns the store's
+  own typed error unchanged, the durable step refuses as `FlowError::Store`
+  carrying the store's `StoreError`, and the host's admission pre-flight refuses
+  every non-drift store error the same way instead of admitting the run and
+  letting the step discover it. Asserted by `tests/store_read_failure.rs` and the
+  `an_unreadable_store_is_refused_as_itself` family of
+  `tests/sim_replay_drift.rs`.
+- The drift refusal now carries the exact typed `Drift` (R2): `FlowError::Incompatible`
+  names for each axis the two revisions, input digests, durable-step counts or
+  schema ids that disagreed, so a caller learns which axis moved and against what
+  rather than having to parse a rendered sentence. Asserted by the
+  `every_axis_is_refused_with_its_exact_drift` family of
+  `tests/sim_replay_drift.rs`, which destructures the `Drift` for all four axes
+  on a real `Host::resume_under` over a reopened file store.
 - `rt::process`: a capture's own cut is no longer reported as the child's
   truncation. When `CapturedStream::truncated()` is true the retained bytes are a
   prefix **the capture** cut, so a framed read of them could end in

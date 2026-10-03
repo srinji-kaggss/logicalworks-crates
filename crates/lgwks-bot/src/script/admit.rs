@@ -42,7 +42,7 @@ use crate::proposal::{
     Refusal, RepairLedger, Source, Surface, payload_digest,
 };
 
-use super::run_store::remember_at;
+use super::run_store::{remember_at, step_definition};
 use super::{FlowError, Scope};
 
 /// The run-scoped state one run's admissions share.
@@ -328,10 +328,11 @@ async fn record_refusal(
     let record = refusal_record(scope.path(), refusal, payload, source);
     let run = scope.run();
     let child = scope.enter(REFUSAL_SUB_STEP)?;
+    let definition = step_definition(scope, REFUSAL_SUB_STEP);
     // `remember_at` archives the record under the child's step key, durably, and
     // locates any store refusal at the child — which is the step the write belongs
     // to, so a ceiling the store refused names where it was refused.
-    remember_at(&child, run, move || async move { Ok(record) })
+    remember_at(&child, run, &definition, move || async move { Ok(record) })
         .await
         .map(|_| ())
 }

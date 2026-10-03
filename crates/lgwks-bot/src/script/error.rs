@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::{BotError, RetryClass};
+use crate::task::StoreError;
 
 use super::Scope;
 
@@ -158,6 +159,37 @@ pub enum FlowError {
         /// The largest value accepted.
         max: u64,
     },
+    /// A resumed run's records were written under a different definition, input,
+    /// step count or value schema, so none of them is this build's own work.
+    ///
+    /// Typed rather than a `Failed` string because the caller has to choose: a
+    /// changed definition wants a new run, a changed input wants a decision, a
+    /// changed schema wants a migration. Raised before any step body is polled
+    /// and before any record is written, so a refusal costs nothing and replays
+    /// nothing — and, because it is permanent, an enclosing `retry` will not
+    /// spend attempts asking the same store the same question.
+    Incompatible {
+        /// Where the run would have resumed.
+        at: Arc<str>,
+        /// Which axis disagreed, and what each side holds.
+        drift: crate::task::Drift,
+    },
+    /// The durable run store refused to read or write a step's record.
+    ///
+    /// Carried as the store's own typed error rather than as a rendering of it,
+    /// because the caller's repair depends on *which* refusal it was: an
+    /// unreadable device, a declared ceiling, a foreign tenant and a drift are
+    /// four different actions, and a `Failed` string leaves the caller parsing
+    /// prose to tell them apart. This is the run store's half of INV-BOT-7 —
+    /// a read failure is an error, never absence, and never another error's
+    /// answer — so an unreadable store reaches the caller as itself and is
+    /// never reported as a definition drift.
+    Store {
+        /// Where it happened.
+        at: Arc<str>,
+        /// The store's own refusal.
+        source: Box<StoreError>,
+    },
 }
 
 impl FlowError {
@@ -166,6 +198,18 @@ impl FlowError {
         Self::Failed {
             at: Arc::from(""),
             reason: reason.to_string(),
+        }
+    }
+
+    /// A refusal to resume a run under a definition its records do not match.
+    ///
+    /// Permanent by construction: the records are what they are, so repeating the
+    /// resume asks the same store the same question and gets the same answer.
+    #[must_use]
+    pub fn incompatible(at: &str, drift: crate::task::Drift) -> Self {
+        Self::Incompatible {
+            at: Arc::from(at),
+            drift,
         }
     }
 
@@ -200,7 +244,9 @@ impl FlowError {
             | Self::InvalidTenant { .. }
             | Self::InvalidName { .. }
             | Self::InvalidRequestKey { .. }
-            | Self::InvalidBound { .. } => false,
+            | Self::InvalidBound { .. }
+            | Self::Incompatible { .. }
+            | Self::Store { .. } => false,
         }
     }
 
@@ -225,10 +271,11 @@ impl FlowError {
             | Self::Refused { ref at, .. }
             | Self::Intervention { ref at, .. }
             | Self::TooDeep { ref at, .. } => at,
-            Self::InvalidTenant { .. }
-            | Self::InvalidName { .. }
-            | Self::InvalidRequestKey { .. }
-            | Self::InvalidBound { .. } => "",
+            Self::Incompatible { ref at, .. } => at,
+            Self::Store { ref at, .. } => at,
+            // Every other variant is unlocated: it is raised before a step exists
+            // to name, so there is no path to report.
+            _ => "",
         }
     }
 
@@ -270,11 +317,15 @@ impl FlowError {
             | Self::Blocked { ref mut at, .. }
             | Self::Refused { ref mut at, .. }
             | Self::Intervention { ref mut at, .. }
-            | Self::TooDeep { ref mut at, .. } => {
+            | Self::TooDeep { ref mut at, .. }
+            | Self::Incompatible { ref mut at, .. }
+            | Self::Store { ref mut at, .. } => {
                 if at.is_empty() {
                     *at = Arc::clone(path);
                 }
             }
+            // Every other variant carries no location: it is raised before a step
+            // exists to name, so there is nothing to fill in.
             Self::InvalidTenant { .. }
             | Self::InvalidName { .. }
             | Self::InvalidRequestKey { .. }
@@ -340,6 +391,13 @@ impl fmt::Display for FlowError {
             Self::InvalidBound { what, value, max } => {
                 write!(formatter, "{what}: {value} is outside 1..={max}")
             }
+            Self::Incompatible { ref at, ref drift } => write!(
+                formatter,
+                "{at}: refusing to resume under a different definition: {drift}"
+            ),
+            Self::Store { ref at, ref source } => {
+                write!(formatter, "{at}: the run store refused: {source}")
+            }
         }
     }
 }
@@ -352,6 +410,7 @@ impl std::error::Error for FlowError {
             Self::Intervention {
                 ref intervention, ..
             } => Some(&**intervention),
+            Self::Store { ref source, .. } => Some(&**source),
             Self::Exhausted { ref last, .. } | Self::Throttled { ref last, .. } => Some(&**last),
             Self::Cancelled { .. }
             | Self::TimedOut { .. }
@@ -361,6 +420,7 @@ impl std::error::Error for FlowError {
             | Self::TooDeep { .. }
             | Self::InvalidTenant { .. }
             | Self::InvalidName { .. }
+            | Self::Incompatible { .. }
             | Self::InvalidRequestKey { .. }
             | Self::InvalidBound { .. } => None,
         }
