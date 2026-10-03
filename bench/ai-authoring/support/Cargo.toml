@@ -1,0 +1,16 @@
+# The harness-owned instrumented world the AI-authoring trial solutions call.
+#
+# It is a member of `bench/ai-authoring`'s own workspace root, never of the
+# estate workspace, so `lgwks-deps check .` (which discovers packages through
+# Cargo's `workspace_members`) never sees it. Same arrangement as `bench/async`.
+[package]
+name = "ai_task_support"
+description = "Harness-owned instrumented world for the fixed-model AI-authoring benchmark. Not part of the workspace; not published."
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# The async timer the instrumented world sleeps on. `time` implies `rt`; both
+# are named so the intent is readable. Never `std::thread::sleep`.
+lgwks_bot = { path = "../../../crates/lgwks-bot", default-features = false, features = ["rt", "time"] }

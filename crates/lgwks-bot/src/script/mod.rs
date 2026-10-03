@@ -24,6 +24,19 @@
 //! | `retry up to 3 times, waiting 100ms:` | [`retry`] | retry storms; retrying a permanent failure; a new identity per attempt |
 //! | `together:` | `try_join!` | sequential awaits that should overlap; a failed branch that keeps running |
 //! | `step name:` | [`Scope::enter`] | anonymous work with no stable key or error location |
+//! | `await ready(&db, 30s)` | [`Readiness`] | a readiness guessed by sleeping; a poll loop; a stale instance releasing dependants |
+//! | `admit the model's plan:` | [`admit`] | an untrusted payload becoming an instruction; a refusal with no location, no provenance or no ceiling |
+//!
+//! [`admit`] is the one way a task body crosses untrusted model or tool output
+//! into a run. It enters its step, charges one run-scoped [`Gate`] — a decoder, a
+//! surface, an admission budget and a repair ledger — turns a
+//! [`proposal::Refusal`](crate::proposal::Refusal) or a
+//! [`proposal::Intervention`](crate::proposal::Intervention) into its own
+//! [`FlowError`] arm carrying the [`Provenance`](crate::proposal::Provenance)
+//! of the exact bytes, and records the refusal through the run store so a run
+//! resumed on a fresh host reads back what this run refused. It admits a
+//! [`Plan`](crate::proposal::Plan) of operation *names*; it performs nothing and
+//! is not a fifth verb.
 //!
 //! Every flow takes a [`Scope`] first. The scope carries the [`Tenant`], the
 //! path of steps that led here, and the cancellation token, so identity,
@@ -54,17 +67,23 @@
 //! [`each`]: crate::script::each
 //! [`within`]: crate::script::within
 //! [`retry`]: crate::script::retry
+//! [`admit`]: crate::script::admit
+//! [`Gate`]: crate::script::Gate
+//! [`FlowError`]: crate::script::FlowError
 //! [`Scope`]: crate::script::Scope
 //! [`Scope::enter`]: crate::script::Scope::enter
 //! [`Tenant`]: crate::script::Tenant
 //! [`StepKey`]: crate::script::StepKey
 //! [`Architecture`]: crate::script::Architecture
+//! [`Readiness`]: crate::script::Readiness
 
+mod admit;
 mod control;
 mod each;
 mod error;
 mod map;
 mod policy;
+mod ready;
 pub(crate) mod run_store;
 pub(crate) mod scope;
 pub(crate) mod trail;
@@ -77,10 +96,18 @@ use std::time::Duration;
 // underlying module stays the single definition.
 use crate::rt::clock as rt_clock;
 
+pub use admit::{
+    Gate, RefusalRecord, admit, intervention_of, provenance_of, read_refusal, refusal_of,
+    refusal_record,
+};
 pub use control::{at_most, attempts, retry, within, within_on};
 pub use each::each;
 pub use error::{FlowError, OptionExt, ResultExt};
 pub use map::{Architecture, FlowShape, StepKind, StepShape};
+pub use ready::{
+    FailAfterReady, Generation, MAX_DEPENDANTS, MAX_NAME_BYTES, Readiness, ReadinessError, Ready,
+    ReadyOutcome,
+};
 pub use rt_clock::Clock;
 pub use run_store::{Appended, Durable, remember};
 pub use scope::{Scope, StepKey, Tenant};

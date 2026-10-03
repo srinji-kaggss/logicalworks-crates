@@ -405,7 +405,12 @@ fn a_deadline_kill_is_reported_as_a_deadline_and_reaps_the_group() -> TestResult
     let pid_file = dir.join("shell.pid");
     let script = format!("echo $$ > {}; sleep 60", pid_file.display());
     let mut spec = shell(&script);
-    spec.deadline(Duration::from_millis(200));
+    // The deadline is the input under test, and any value short of the 60 s
+    // sleep tests the same property. It must also outlast the shell's first
+    // command, because the group the test checks is named by the pid that
+    // command writes: at 200 ms a loaded host killed the shell before it ran
+    // (`the shell never recorded its pid`, under seven concurrent builds).
+    spec.deadline(Duration::from_secs(2));
     let runtime = lgwks_bot::Runtime::new()?;
     let (deadline_fired, cleanup, leader) = runtime.block_on(async {
         let mut supervisor = Supervisor::new(1);

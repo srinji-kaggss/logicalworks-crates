@@ -220,7 +220,14 @@ const FAKE_GH_SOURCE: &str = r#"#!/bin/sh
 # behaviour file. Never touches the network.
 set -u
 
-dir=$(dirname "$0")
+# Every fork below is paid once per call, and a saturation family makes tens of
+# thousands of calls, so the bookkeeping avoids command substitution wherever a
+# parameter expansion answers the same question. `$0` is the path `execvp`
+# resolved, so stripping its last component is what `dirname` printed.
+case "$0" in
+  */*) dir=${0%/*} ;;
+  *) dir=. ;;
+esac
 log="$dir/argv.log"
 behaviour="$dir/behaviour.json"
 
@@ -228,9 +235,11 @@ behaviour="$dir/behaviour.json"
 # the calls that *started* is the measurement the duplicate-post tests need.
 # The whole line is assembled in memory and written with one append, so two
 # concurrent runs of the fake cannot interleave halves of a line.
+tab=$(printf '\tx')
+tab=${tab%x}
 line=""
 for arg in "$@"; do
-  line="$line$arg$(printf '\t')"
+  line="$line$arg$tab"
 done
 printf '%s\n' "$line" >> "$log"
 
@@ -248,20 +257,20 @@ flatten() {
 }
 BEHAVIOUR=$(flatten)
 
-# One scalar field out of the behaviour file. A quoted string keeps its
-# spaces, because the shell splits on them otherwise.
+# One scalar field out of the behaviour file, left in `$val`. A quoted string
+# keeps its spaces, because the shell splits on them otherwise.
 #
 # Read once per invocation rather than per lookup: a key present under neither
 # shape yields the empty string, which is exactly what the callers treat as
-# "unspecified".
+# "unspecified". The answer is a variable rather than printed output, because
+# capturing printed output forks a subshell per lookup and this runs every call.
 field() {
+  val=""
   rest=${BEHAVIOUR#*"$1="}
   if [ "$rest" = "$BEHAVIOUR" ]; then
-    printf ''
-    return
+    return 0
   fi
-  value=${rest%%[!a-zA-Z0-9:._-]*}
-  printf '%s' "$value"
+  val=${rest%%[!a-zA-Z0-9:._-]*}
 }
 
 # The staged payload, when this call has one.
@@ -288,7 +297,7 @@ done
 # Optional flooding, for the bounded-capture test: emit `flood_bytes` of
 # padding on stdout before anything else, so the adapter's ceiling is what
 # decides what it retains.
-flood=$(field flood_bytes)
+field flood_bytes; flood=$val
 if [ -n "${flood:-}" ] && [ "$flood" -gt 0 ] 2>/dev/null; then
   i=0
   while [ "$i" -lt "$flood" ]; do
@@ -298,7 +307,7 @@ if [ -n "${flood:-}" ] && [ "$flood" -gt 0 ] 2>/dev/null; then
 fi
 
 # An optional hang, for the deadline test.
-hang=$(field hang_seconds)
+field hang_seconds; hang=$val
 if [ -n "${hang:-}" ] && [ "$hang" -gt 0 ] 2>/dev/null; then
   # A grandchild, so the deadline has a process *group* to reap rather than
   # one child it could trivially kill.
@@ -308,7 +317,7 @@ if [ -n "${hang:-}" ] && [ "$hang" -gt 0 ] 2>/dev/null; then
 fi
 
 if [ "$method" = "POST" ]; then
-  create=$(field create)
+  field create; create=$val
   case "$create" in
     accept|accept_then_drop)
       # A real receiver assigns a fresh id per accepted create. The counter is a
@@ -317,11 +326,12 @@ if [ "$method" = "POST" ]; then
       # on that being true rather than on the ids happening to differ.
       printf 'x' >> "$dir/creates"
       seen=$(wc -c < "$dir/creates" | tr -d ' ')
-      id=$(( $(field next_review_id) + seen - 1 ))
+      field next_review_id
+      id=$(( val + seen - 1 ))
       # GitHub reports the state a review is *in*, not the event that created
       # it: `COMMENT` reads back as `COMMENTED`, and so on. A fake that echoed
       # the event would let a verifier pass here that never matches GitHub.
-      state=$(field created_state)
+      field created_state; state=$val
       event=$(printf '%s' "$payload" | sed -n 's/.*"event":"\([A-Z_]*\)".*/\1/p')
       case "$event" in
         COMMENT) state=COMMENTED ;;
@@ -370,7 +380,7 @@ for arg in "$@"; do
 done
 
 if [ "$is_reviews" -eq 1 ]; then
-    fail=$(field fail_reads)
+    field fail_reads; fail=$val
     if [ -n "${fail:-}" ] && [ "$fail" -gt 0 ] 2>/dev/null; then
       printf 'read refused by scenario\n' >&2
       exit 1
@@ -379,7 +389,7 @@ if [ "$is_reviews" -eq 1 ]; then
     # `truncated` is a JSON document that lost its closing bracket, which is the
     # shape a stream cut mid-write takes when everything before the cut was
     # valid. Both must be refused rather than decoded into a partial list.
-    shape=$(field reviews_shape)
+    field reviews_shape; shape=$val
     case "$shape" in
       garbage)
         printf 'gh: this is not what you asked for\n'
@@ -397,7 +407,7 @@ if [ "$is_reviews" -eq 1 ]; then
     # another commit: what matters is that the adapter would have had to read
     # them to call the list complete, so returning only the prefix would be a
     # lie about the pull request's review history.
-    filler=$(field filler_reviews)
+    field filler_reviews; filler=$val
     i=0
     while [ -n "${filler:-}" ] && [ "$i" -lt "$filler" ] 2>/dev/null; do
       if [ "$i" -eq 0 ] && [ ! -f "$dir/reviews.jsonl" ]; then
@@ -424,12 +434,13 @@ else
   # single append per call, so two concurrent runs cannot interleave it.
   printf 'x' >> "$dir/reads"
   read_count=$(wc -c < "$dir/reads" | tr -d ' ')
-  head=$(field head_sha)
-  moved=$(field head_after_first)
+  field head_sha; head=$val
+  field head_after_first; moved=$val
   if [ -n "${moved:-}" ] && [ "$read_count" -gt 1 ]; then head="$moved"; fi
+  field base_sha; base=$val
   # GitHub's shape: the commits are nested under `head` and `base`.
   printf '{"number":7,"head":{"ref":"feature","sha":"%s"},"base":{"ref":"main","sha":"%s"}}\n' \
-    "$head" "$(field base_sha)"
+    "$head" "$base"
 fi
 exit 0
 "#;
