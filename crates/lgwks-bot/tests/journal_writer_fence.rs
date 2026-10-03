@@ -17,6 +17,17 @@
 use std::process::Child;
 use std::time::Duration;
 
+/// The scratch-path and cleanup-guard fixtures this file shares with the
+/// journal liveness, scale and crash-observation families.
+///
+/// This file was the third copy of both, and the fence it observes is the same
+/// device the others write to: a fourth reader of the disk must not be able to
+/// assert a different cleanup discipline than the rest.
+#[path = "support/journal.rs"]
+mod shared;
+
+use shared::{TempGuard, scratch};
+
 use lgwks_bot::effect::{
     ActionDigest, ActionId, AttemptId, EffectKey, EnvironmentEpoch, EnvironmentId, FlowRevision,
     RunId,
@@ -56,23 +67,6 @@ impl Drop for ProbeGuard {
             drop(child.wait());
         }
     }
-}
-
-/// A counter that gives concurrent test runs distinct scratch names.
-static SCRATCH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// A unique scratch path for one test.
-fn scratch(name: &str) -> std::path::PathBuf {
-    use std::sync::atomic::Ordering;
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_nanos())
-        .unwrap_or_default();
-    std::env::temp_dir().join(format!(
-        "lgwks-fence-{name}-{}-{}",
-        nanos,
-        SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ))
 }
 
 fn key(attempt: &str) -> Result<EffectKey, Box<dyn std::error::Error>> {
@@ -118,19 +112,6 @@ fn probe_body() -> TestResult {
     std::fs::write(&marker, b"held")?;
     pause(60_000);
     Ok(())
-}
-
-/// Removes a test's scratch path when the test ends, however it ends.
-struct TempGuard(std::path::PathBuf);
-
-impl Drop for TempGuard {
-    fn drop(&mut self) {
-        if self.0.is_dir() {
-            drop(std::fs::remove_dir_all(&self.0));
-        } else {
-            drop(std::fs::remove_file(&self.0));
-        }
-    }
 }
 
 #[test]
