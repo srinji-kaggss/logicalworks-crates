@@ -1,0 +1,45 @@
+stealth/space-bunny-alpha    old  aggregate  t2 compiled=True oracle=6/6
+stealth/space-bunny-alpha    old  pipeline   t0 compiled=True oracle=5/5
+stealth/space-bunny-alpha    old  aggregate  t1 compiled=True oracle=6/6
+stealth/space-bunny-alpha    old  pipeline   t1 compiled=True oracle=5/5
+stealth/space-bunny-alpha    old  pipeline   t2 compiled=True oracle=5/5
+stealth/space-bunny-alpha    new  aggregate  t1 compiled=True oracle=5/6
+stealth/space-bunny-alpha    old  aggregate  t0 compiled=True oracle=6/6
+stealth/space-bunny-alpha    new  aggregate  t2 compiled=True oracle=6/6
+stealth/space-bunny-alpha    new  aggregate  t0 compiled=True oracle=6/6
+stealth/space-bunny-alpha    new  pipeline   t0 compiled=True oracle=2/5
+stealth/space-bunny-alpha    new  pipeline   t2 compiled=True oracle=5/5
+stealth/space-bunny-alpha    new  pipeline   t1 compiled=True oracle=5/5
+deepseek/deepseek-v4.1-flash old  aggregate  t0 compiled=True oracle=6/6
+deepseek/deepseek-v4.1-flash old  aggregate  t2 compiled=True oracle=6/6
+deepseek/deepseek-v4.1-flash old  pipeline   t0 compiled=True oracle=5/5
+deepseek/deepseek-v4.1-flash old  pipeline   t1 compiled=True oracle=5/5
+deepseek/deepseek-v4.1-flash new  aggregate  t0 compiled=True oracle=6/6
+deepseek/deepseek-v4.1-flash new  aggregate  t1 compiled=True oracle=6/6
+deepseek/deepseek-v4.1-flash old  pipeline   t2 compiled=True oracle=5/5
+deepseek/deepseek-v4.1-flash old  aggregate  t1 compiled=True oracle=6/6
+deepseek/deepseek-v4.1-flash new  pipeline   t1 compiled=True oracle=5/5
+deepseek/deepseek-v4.1-flash new  pipeline   t0 compiled=True oracle=5/5
+deepseek/deepseek-v4.1-flash new  aggregate  t2 compiled=True oracle=6/6
+deepseek/deepseek-v4.1-flash new  pipeline   t2 compiled=True oracle=5/5
+
+wrote /Users/srinji/lwc-wt/aieval/bench/ai-authoring/results.jsonl
+wrote /Users/srinji/lwc-wt/aieval/bench/ai-authoring/summary.json
+     1450.05 real        65.71 user        49.99 sys
+           473874432  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             3621097  page reclaims
+              152857  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                3892  messages sent
+               58995  messages received
+                 130  signals received
+              181818  voluntary context switches
+              669719  involuntary context switches
+         14023408854  instructions retired
+         11539106444  cycles elapsed
+           471614448  peak memory footprint
