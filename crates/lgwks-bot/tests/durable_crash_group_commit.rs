@@ -28,7 +28,7 @@
 //! | Test | What it pins |
 //! |---|---|
 //! | `a_real_kill_mid_batch_holds_exactly_the_acknowledged_prefix` | the reopened store's records are exactly the acknowledged set — none lost, none invented |
-//! | `a_killed_run_with_no_acknowledgment_leaves_no_record` | a child killed before any run was acknowledged leaves a clean, reopenable store holding its header or that and one complete in-flight frame |
+//! | `a_killed_run_with_no_acknowledgment_leaves_no_record` | a child killed after opening its store and before its first run leaves a clean, reopenable store holding only its header |
 //! | `the_group_commit_probe_child_is_killed_not_exited` | the observation is a kill: a probe that died on its own would make the row a courtesy |
 
 #![cfg(all(feature = "script", feature = "ephemeral"))]
@@ -59,6 +59,22 @@ const PROBE_STORE: &str = "LGWKS_PROBE_STORE";
 const PROBE_MARKER: &str = "LGWKS_PROBE_MARKER";
 /// How many durable runs the child is ordered to commit.
 const PROBE_RUNS: &str = "LGWKS_PROBE_RUNS";
+/// Milliseconds the child holds, after its host is built and before its first run.
+///
+/// Set only by the no-acknowledgment row. Without it that row raced the child: on a
+/// fast runner the child got from creating its store to its first acknowledgment
+/// inside one of the parent's poll intervals, the "store exists and nothing is
+/// acknowledged" moment was never observed, and the row failed on its bound.
+const PROBE_HOLD_MS: &str = "LGWKS_PROBE_HOLD_MS";
+/// The hold the no-acknowledgment row asks for. Longer than the parent's whole poll
+/// bound, so the kill lands inside it however slow the runner is; it costs nothing,
+/// because the parent kills the child the moment it announces the hold.
+const NO_RECORD_HOLD_MS: u64 = 10_000;
+
+/// The file a holding child creates once its host is built, beside the marker.
+fn ready_path(marker: &Path) -> PathBuf {
+    marker.with_extension("ready")
+}
 
 /// The row that kills the child after its first acknowledgment.
 const TEST_MID_BATCH: &str = "a_real_kill_mid_batch_holds_exactly_the_acknowledged_prefix";
@@ -112,6 +128,16 @@ fn probe_body() -> TestResult {
         .map_err(|_| "the probe child's run count was not a number")?;
 
     let host = Host::builder("probe")?.run_store(&store)?.build()?;
+    if let Some(hold) = std::env::var_os(PROBE_HOLD_MS) {
+        let hold: u64 = hold
+            .to_str()
+            .and_then(|millis| millis.parse().ok())
+            .ok_or("the probe child's hold was not a number of milliseconds")?;
+        // Announce the hold only once the store is open, so the parent's kill lands
+        // after the store exists and before any record was appended to it.
+        std::fs::write(ready_path(&marker), b"")?;
+        pause(hold);
+    }
     for index in 0..runs {
         let report = lgwks_bot::rt::runtime::block_on(host.run(&one_step_task()?, index));
         assert!(
@@ -151,15 +177,18 @@ fn spawn_probe(
     store: &Path,
     marker: &Path,
     runs: u32,
+    hold_ms: Option<u64>,
 ) -> Result<ProbeGuard, Box<dyn Error>> {
-    Ok(ProbeGuard(Some(
-        probe_command(test_name)?
-            .env(PROBE_ENV, "1")
-            .env(PROBE_STORE, store)
-            .env(PROBE_MARKER, marker)
-            .env(PROBE_RUNS, runs.to_string())
-            .spawn()?,
-    )))
+    let mut command = probe_command(test_name)?;
+    command
+        .env(PROBE_ENV, "1")
+        .env(PROBE_STORE, store)
+        .env(PROBE_MARKER, marker)
+        .env(PROBE_RUNS, runs.to_string());
+    if let Some(hold) = hold_ms {
+        command.env(PROBE_HOLD_MS, hold.to_string());
+    }
+    Ok(ProbeGuard(Some(command.spawn()?)))
 }
 
 /// Run the probe body instead of the test when this process is the child.
@@ -190,7 +219,7 @@ fn a_real_kill_mid_batch_holds_exactly_the_acknowledged_prefix() -> TestResult {
         store,
         marker,
         mut child,
-    } = kill_scenario("gc-kill", TEST_MID_BATCH, 64)?;
+    } = kill_scenario("gc-kill", TEST_MID_BATCH, 64, None)?;
     // The kill waits for the marker to carry *content*, not merely to exist: the
     // child opens it in append mode before its first line is flushed, so a file
     // that exists can still be empty — and killing on an empty marker would leave
@@ -262,11 +291,16 @@ struct KillScenario {
 /// # Errors
 ///
 /// Whatever the scratch directory or the spawn reports.
-fn kill_scenario(tag: &str, test_name: &str, runs: u32) -> Result<KillScenario, Box<dyn Error>> {
+fn kill_scenario(
+    tag: &str,
+    test_name: &str,
+    runs: u32,
+    hold_ms: Option<u64>,
+) -> Result<KillScenario, Box<dyn Error>> {
     let dir = scratch_dir(tag)?;
     let store = dir.join("store");
     let marker = dir.join("acknowledged");
-    let child = spawn_probe(test_name, &store, &marker, runs)?;
+    let child = spawn_probe(test_name, &store, &marker, runs, hold_ms)?;
     Ok(KillScenario {
         guard: TempGuard(dir),
         store,
@@ -287,64 +321,39 @@ fn a_killed_run_with_no_acknowledgment_leaves_no_record() -> TestResult {
     if dispatch_to_probe()? {
         return Ok(());
     }
-    // The child is killed the instant it starts, so it has had no chance to
-    // acknowledge anything — the window before its first flush.
+    // The child opens its store, announces a bounded hold and waits; the kill lands
+    // inside that hold, so it has had no chance to acknowledge anything — the window
+    // before its first flush, reached deterministically rather than by outracing it.
     let KillScenario {
         guard: _kept,
         store,
         marker,
         mut child,
-    } = kill_scenario("gc-kill-empty", TEST_NO_RECORD, 64)?;
+    } = kill_scenario("gc-kill-empty", TEST_NO_RECORD, 64, Some(NO_RECORD_HOLD_MS))?;
     kill_when(&mut child, TEST_NO_RECORD, || {
-        Ok(store.exists() && acknowledged(&marker)?.is_empty())
+        Ok(ready_path(&marker).exists() && acknowledged(&marker)?.is_empty())
     })?;
 
     assert!(
         acknowledged(&marker)?.is_empty(),
         "the child acknowledged a run before it was killed, so this row proves nothing"
     );
-    // The store directory may not exist at all: a child killed before it opened its
-    // store leaves nothing, and "nothing" is a store this row can also accept.
-    //
-    // An empty marker does not mean an empty store. The child notes a run only after
-    // its append returned, so the kill can land after run 0's frame was flushed and
-    // before its id reached the marker — an unacknowledged record the device took,
-    // which a reopen replays (at-least-once, INV-BOT-130). The child is sequential, so
-    // that is at most one record: the store holds its header, or its header and
-    // exactly one complete frame. A retained torn tail, a second record or a refused
-    // open is still a failure, so the oracle stays an equality rather than a bound.
+    // The kill landed inside the hold, after the store was opened and before the
+    // first run began, so nothing was appended: the reopen holds exactly the header.
+    // (A kill after a run's append returned but before its id reached the marker
+    // would leave one unacknowledged record a reopen replays — at-least-once,
+    // INV-BOT-130 — which is why the hold sits before the first run rather than
+    // between a run and its acknowledgment.) A retained torn tail, any record or a
+    // refused open is a failure, so the oracle is an equality rather than a bound.
     let reopened = RunStore::open_in(&store, "probe")?;
-    let (empty, one_record) = (header_len(), one_record_len()?);
-    assert!(
-        reopened.committed_bytes() == empty || reopened.committed_bytes() == one_record,
-        "a store whose child was killed before any acknowledgment holds its header \
-         ({empty} bytes) or that and one complete in-flight frame ({one_record} bytes), \
-         and this one holds {} bytes",
-        reopened.committed_bytes()
+    let empty = header_len();
+    assert_eq!(
+        reopened.committed_bytes(),
+        empty,
+        "a store whose child was killed before its first run holds only its header \
+         ({empty} bytes)"
     );
     Ok(())
-}
-
-/// How many bytes a run store holds after exactly one probe run was recorded.
-///
-/// Measured by recording that run on a real store, for the reason [`header_len`]
-/// is: the row's claim is "one complete frame", not a length this file believes.
-///
-/// # Errors
-///
-/// Whatever the scratch directory, the host or the reopen reports, and a run that
-/// did not succeed.
-fn one_record_len() -> Result<u64, Box<dyn Error>> {
-    let scratch = Scratch::new("gc-one-record")?;
-    let store = scratch.path().join("store");
-    {
-        let host = Host::builder("probe")?.run_store(&store)?.build()?;
-        let report = lgwks_bot::rt::runtime::block_on(host.run(&one_step_task()?, 0));
-        if !report.disposition().is_success() {
-            return Err(format!("the reference run failed: {:?}", report.error()).into());
-        }
-    }
-    Ok(RunStore::open_in(&store, "probe")?.committed_bytes())
 }
 
 /// Wait until `reached` says the child has got far enough, then `SIGKILL` it.
