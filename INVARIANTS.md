@@ -106,6 +106,67 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
 
 Each of these was a shipped defect. Treat the list as the spec.
 
+- **INV-BOT-141** A fixed-model authoring cell varies the profile and nothing
+  else. A persona is a fixed preamble prepended to one prompt skeleton, and the
+  task, the API sheet, the hidden oracle, the repair budget and the
+  `sandbox-exec` closed-book profile are byte-identical across profiles, so any
+  difference between two cells of one `(model, api, task)` is attributable to
+  the instruction rather than to the inputs. The persona text is fixed rather
+  than generated, because a per-trial preamble would be a second uncontrolled
+  variable and the comparison would measure the draw. The profile is part of the
+  trial id, so two profiles of one cell cannot share a cargo `-C metadata` and
+  have one trial's oracle binary stand in for another's — the same defect the
+  per-trial package name exists to prevent. **What this does not claim:** a fixed
+  model reading a persona is not a novice, an expert under pressure, or an
+  anxious user. The profile axis measures how one fixed model behaves under five
+  instructions; it is not a measurement of human authorability and no human is
+  evaluated. · why: #87 step 7, #152's learnability row · enforced by:
+  `bench/ai-authoring/run.py` (`PROFILES`, `full_prompt`, and the trial-id
+  construction), whose `--profiles` argument rejects an unknown name rather than
+  silently running a cell with no preamble, and by the committed profile run
+  under `bench/ai-authoring/runs/` whose `summary.json` carries
+  `protocol.profiles` and `protocol.profile_text_is_fixed` beside the numbers
+- **INV-BOT-142** An oracle's cost is measured, and a metric that was not
+  measured says so. The oracle runs under `/usr/bin/time -l`, so
+  `oracle_wall_ms` is the wall time of the invocation that runs the oracle's
+  test binary — after the compile, so it is the oracle's own cost rather than a
+  build's — and `oracle_peak_rss_bytes` is that process's maximum resident set
+  size in bytes. `null` means *not measured* and never *measured as zero*:
+  collapsing those two would let a host without the timer report every trial as
+  using no memory at all. The RSS parser reads both field orders the flag takes,
+  because macOS prints `<value>  maximum resident set size` and GNU prints
+  `Maximum resident set size (kbytes): <value>`; matching on either one loses
+  the metric on the other host, and GNU's kibibytes are scaled to bytes rather
+  than reported 1024 times too small under a name that says bytes. · why: #87
+  step 7 (runtime cost axis) · enforced by: `bench/ai-authoring/run.py`
+  (`run_timed_cargo`, `parse_peak_rss`), verified against both real spellings and
+  against a near-miss label (`peak memory footprint`) that must read as absent
+- **INV-BOT-143** A trial that never compiled has not demonstrated cleanup. The
+  per-trial `cleanup_ok` flag is read from the task's own drop clause — the
+  oracle test that says a dropped future left nothing live — and a crate that
+  did not compile reports `false` rather than a cleanup result, because "the
+  drop test did not run" and "cleanup was fine" are different facts and the
+  first is what a failed build produces. The clause is named per task rather than
+  as a shape, so a task whose oracle renames it stops reporting a cleanup
+  verdict instead of silently reporting the wrong one. · why: #87 step 7 (safety
+  and recovery axis) · enforced by: `bench/ai-authoring/run.py`
+  (`DROP_CLAUSE_BY_TASK`, `cleanup_ok`), and by the mutants run, where
+  `mutant-pipeline` is the only cell with `cleanup_ok: false` because it is the
+  only one that fails its drop clause
+- **INV-BOT-144** A held-out task whose correct solution the harness cannot
+  express on one API surface is not asked on it. `recovery` has no old-API cell,
+  because the old `lgwks_bot::rt` surface has no durable run store, no
+  `remember`, no run identity and no resume, so it keeps no record of a completed
+  unit to consult and cannot express "finish the work without redoing a completed
+  unit" at all. The omission is recorded in every run's
+  `protocol.skipped_cells` with its reason, so it reads as a decision rather
+  than as a missing row, and a fixture hand-rolled to imitate the missing store
+  would be measuring that fixture rather than the crate. · why: #87 step 7 —
+  an absent arm presented as an untested one is the failure this names · enforced
+  by: `bench/ai-authoring/run.py` (`NEW_ONLY_TASKS`, `NEW_ONLY_TASK_WHY`, and the
+  job filter), which prints the skipped cells and writes them into the run's
+  protocol block
+
 - **INV-BOT-30** One declared clock governs every deadline this crate
   evaluates, and pausing it never disables the wall-clock watchdog.
   `rt::clock::Clock` is the authority; `rt::time::Deadline` names the clock that

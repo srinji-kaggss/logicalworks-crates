@@ -19,20 +19,50 @@ member.
 
 **Measured, per trial (never averaged across tasks or models):** whether the
 solution compiled, the number of compiler repairs, tokens in and out, model wall
-time, compile wall time, consumer lines, orchestration sites, and the per-test
-oracle verdict.
+time, compile wall time, consumer lines, orchestration sites, the per-test
+oracle verdict, the oracle's wall time and peak RSS, and whether the drop clause
+passed.
 
-**Not measured / not claimed:**
+**The evaluators are five fixed user profiles, not humans.** Each is a fixed
+persona preamble prepended to the *same* prompt skeleton, and the profile is the
+only thing that differs between two cells of one `(model, api, task)`:
 
-- **No human evaluators were run.** Judging authorability by people needs the
-  Director. This is a mechanical proxy: the model authors, the compiler and a
-  hidden oracle judge.
+| profile | who it is |
+|---|---|
+| `first-time` | has never used this crate's orchestration API; reads the sheet literally |
+| `expert-hurry` | knows the domain, is in a hurry, writes the shortest thing that might work |
+| `anxious` | distrusts the API; wants explicit cleanup and explicit error handling |
+| `misuser` | makes the plausible first mistake, then repairs from compiler/oracle feedback |
+| `agent` | an AI coding agent that must emit only code |
+
+What a profile comparison therefore **does** measure: how the same fixed model
+version behaves under five different instructions, on the same task, with the
+same sheet, the same hidden oracle, the same repair budget and the same
+sandbox. A profile that raises repairs or lines is a profile that costs the
+author something on *this* model, and the per-`(api, profile)` table below is
+that comparison.
+
+What it **does not** measure, and the earlier claim on this page was wrong about
+exactly this: it is **not** a measurement of human authorability, and no person
+was asked or consulted. A fixed model reading a persona is not a novice, an
+expert under time pressure, or an anxious user; it is that model reading text
+describing one. What the profiles buy is coverage of *instruction* conditions
+over a model that cannot itself change — which is the part of the axis
+[`docs/orchestration-acceptance.spec.md`](../../docs/orchestration-acceptance.spec.md)
+calls learnability that a fixed-model rig can reach at all. It does not
+substitute for the human half of that row, and no score here should be read as
+one.
+
+**Also not measured / not claimed:**
+
 - **The sample is small.** The default is three trials per cell. Uncertainty is
   reported as the *full per-trial list*, not as a confidence interval: a small
   sample does not earn one.
 - **This is not a leaderboard.** It compares two API surfaces of one crate
-  across fixed model versions; it says nothing about any other library.
+  across fixed model versions under five instructions; it says nothing about any
+  other library.
 - The absolute numbers are one host, one toolchain, one run.
+- `orchestration_sites` is a token-count proxy, not a proof of complexity.
 
 ## The two API sheets and the fairness rules
 
@@ -67,10 +97,31 @@ as `tests/oracle.rs`; it asserts on the harness instrumentation, one
   combined artifact (1); a failed `fetch_a` stops combine and publish and names
   the stage (2); the same for `fetch_b` (3); a slow stage → `Deadline` and no
   publish (4); dropping the future leaves no stage live (5).
+- **`recovery`** — `recover(world, store_dir, deadline)`. Clauses: the work
+  completes and the total is the sum (1); a second call finishes it without
+  re-running a completed unit (2); the effect is applied exactly once across any
+  number of calls (3); the overall deadline → `Deadline` with no unit left live
+  (4); dropping the future leaves no unit live (5). The correct solution needs a
+  host with a durable run store installed, a *derived* run identity that both
+  attempts agree on, a task helper both attempts run, and a read-before-apply on
+  the effect ledger.
+
+  **`recovery` has no old-API arm, and the reason is architectural.** The old
+  `lgwks_bot::rt` surface has no durable run store, no `remember`, no run
+  identity and no resume, so it keeps no record of a completed unit to consult
+  and cannot express clause 2 at all. A cell asking for one would measure a
+  model guessing at a capability the sheet does not offer. The omission is
+  recorded in every run's `summary.json` under `protocol.skipped_cells` rather
+  than left as a missing row.
 
 The oracles are deterministic: no counter is asserted on a wall-clock sleep. The
 only waits are short ones that let a future begin, plus the 200 ms the drop
-clause allows a cancelled body to be counted out.
+clause allows a cancelled body to be counted out. The `recovery` oracle's
+interruption drops the first attempt's future once the requested number of unit
+bodies has recorded — dropping rather than killing is deliberate, and is stated
+at the call site: a killed process leaves the same durable evidence, and
+arranging one would change what is measured from "does a resume work" to "does
+this runner manage a subprocess".
 
 ## The harness-owned world: `support/`
 
@@ -86,6 +137,14 @@ the harness, never by the solution.
   `StageName::{FetchA, FetchB, Combine, Publish}`, with configurable failing and
   slow stages and the same live-count instrumentation. `Artifact::value()`;
   `Published: From<Artifact>`.
+- `recovery::World`: the `recovery` task's durable units. `async fn unit(&Scope,
+  u32) -> Result<u64, UnitError>` counts its own body *inside* the `remember`
+  closure, so a replayed record does not increment the count — a replay and a
+  re-run return the same value, so only the count separates them.
+  `recovery::Ledger` is the effect: `applied(name)` is the read,
+  `apply(name)` counts every call including duplicates, and it refuses nothing —
+  a harness that refused a duplicate would make the no-duplicate clause
+  unfalsifiable, which is what that clause exists to detect.
 - Constructors for the oracle to configure fault plans: `failing(..)`,
   `delay(..)`, `uniform_delay(..)`, `slow(..)`.
 
@@ -141,6 +200,19 @@ substitutes the trial's real name when it copies them in.
 - `tokens_in` / `tokens_out` / `model_wall_ms` — summed over every model call in
   the trial (the initial attempt and every repair).
 - `compile_wall_ms` — summed over every cargo build in the trial.
+- `oracle_wall_ms` — the wall time of the `cargo test` invocation that runs the
+  oracle, taken under `/usr/bin/time -l`. The compile is already done by that
+  point, so this is the oracle's own cost rather than a build's.
+- `oracle_peak_rss_bytes` — that same process's maximum resident set size, in
+  bytes, or `null` on a host with no `/usr/bin/time`. `null` means *not
+  measured*, never *measured as zero*. The parser reads both field orders the
+  flag takes: macOS prints `67911680  maximum resident set size` (bytes) and GNU
+  prints `Maximum resident set size (kbytes): 66443` (kibibytes, scaled to
+  bytes).
+- `cleanup_ok` — the task's drop clause, read by name from
+  `DROP_CLAUSE_BY_TASK`. A crate that never compiled reports `false` rather than
+  a cleanup result, because "the drop test did not run" is not "cleanup was
+  fine".
 
 ### The lockfile
 
@@ -156,30 +228,39 @@ cache with no resolution.
 
 `reference/<api>-<task>.rs` are hand-written correct solutions, one per API and
 task. They are the dry-run's canned solutions and the proof that each task is
-solvable in each API. All four compile and pass every oracle clause.
+solvable in each API. `recovery` has only `new-recovery.rs`, for the reason given
+above. Every reference compiles and passes every oracle clause of its task.
 
-`reference/mutant-<task>.rs` are deliberately wrong inputs, one per task. The
-oracle must fail each for its intended clause:
+`reference/mutant-<task>.rs` are deliberately wrong inputs, one per task. Each is
+its reference — placed beside the mutant as `mod reference`, never forked — plus
+exactly one mutation, so the two cannot drift. The oracle must fail each for its
+intended clause:
 
-| mutant | intended clause it must fail | also fails |
-|---|---|---|
-| `mutant-aggregate` (unbounded fan-out) | `at_most_four_fetches_are_in_flight` | `the_overall_deadline_is_honoured` |
-| `mutant-pipeline` (detached spawn, leaked task set) | `dropping_the_future_leaves_no_stage_live` | — |
+| mutant | mutation | clause it must fail | also fails |
+|---|---|---|---|
+| `mutant-aggregate` (unbounded fan-out) | `join_all_bounded(usize::MAX, …)` | `at_most_four_fetches_are_in_flight` | `the_overall_deadline_is_honoured` |
+| `mutant-pipeline` (detached spawn, leaked task set) | work handed to a process-lifetime `JoinSet` | `dropping_the_future_leaves_no_stage_live` | — |
+| `mutant-recovery` (a private store per attempt) | each attempt books a fresh store directory, so the resume finds nothing | `a_resume_does_not_rerun_a_completed_unit` | — |
 
 The mutant sources are not estate code and are never built by the estate
-workspace; the pipeline mutant deliberately leaks a `JoinSet` with `Box::leak`.
-That is the defect, not an example.
+workspace; the pipeline mutant deliberately leaks a `JoinSet` with `Box::leak`
+and the recovery mutant deliberately ignores its `store_dir` argument. Those are
+the defects, not examples.
 
 ## How to rerun
 
 ```sh
-python3 bench/ai-authoring/run.py --dry-run --trials 1      # 4 reference cells
-python3 bench/ai-authoring/run.py --mutants                 # 2 negative controls
+python3 bench/ai-authoring/run.py --dry-run --trials 1      # every reference cell
+python3 bench/ai-authoring/run.py --mutants                 # one negative control per task
 AI_AUTHORING_CMD=<cli> python3 bench/ai-authoring/run.py \
     --models stealth/space-bunny-alpha,deepseek/deepseek-v4.1-flash \
-    --apis old,new --tasks aggregate,pipeline --trials 3 --parallel 4
+    --apis old,new --tasks aggregate,pipeline,recovery \
+    --profiles first-time,expert-hurry,anxious,misuser,agent \
+    --trials 2 --parallel 6
 ```
 
-The default model ids are `stealth/space-bunny-alpha` and
-`deepseek/deepseek-v4.1-flash`; the reviewer runs the real matrix, which needs a
-model credential this rig does not hold.
+`--profiles` defaults to all five and `--tasks` to all three. The default model
+ids are `stealth/space-bunny-alpha` and `deepseek/deepseek-v4.1-flash`. A model
+call must be closed-book and this runner enforces that with macOS
+`sandbox-exec`, so a host without it refuses rather than running the model
+open-book against the hidden oracle.
