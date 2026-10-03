@@ -241,10 +241,18 @@ impl Fixture {
         kill_after_marker(child, &self.marker, test_name)
     }
 
-    /// A reopened journal with attempt "1" already admitted: the state a
-    /// restart finds on the disk.
+    /// The journal a restart opens, having admitted nothing: the state a restart
+    /// finds on the disk, read without touching it.
+    fn reopened(&self) -> Result<FileJournal, Box<dyn std::error::Error>> {
+        Ok(FileJournal::open(&self.journal)?)
+    }
+
+    /// A restart that *re-offers* attempt "1" to the store that already holds
+    /// it. This is the replay, and the store's refusal of it is the observation
+    /// — so the name says what the call does rather than what the caller hopes
+    /// it does.
     fn restarted_journal(&self) -> Result<FileJournal, Box<dyn std::error::Error>> {
-        let mut journal = FileJournal::open(&self.journal)?;
+        let mut journal = self.reopened()?;
         admit(&mut journal, step_key()?)?;
         Ok(journal)
     }
@@ -308,11 +316,19 @@ enum Row {
     Duration,
     /// A replayed attempt is refused, named, and appends nothing.
     Idempotent,
+    /// The step ran once across the kill: the durable count is 1, and the
+    /// restart neither reruns it nor spends its budget a second time.
+    NoRerun,
 }
 
 impl Row {
     /// Every row of the family, in the order they are reported.
-    const ALL: [Row; 3] = [Row::Budget, Row::Duration, Row::Idempotent];
+    const ALL: [Row; 4] = [
+        Row::Budget,
+        Row::Duration,
+        Row::Idempotent,
+        Row::NoRerun,
+    ];
 
     /// The scratch directory this row works in.
     const fn scratch(self) -> &'static str {
@@ -320,6 +336,7 @@ impl Row {
             Self::Budget => "budget",
             Self::Duration => "duration",
             Self::Idempotent => "idempotent",
+            Self::NoRerun => "rerun",
         }
     }
 
@@ -328,6 +345,7 @@ impl Row {
             Self::Budget => budget_survives(fixture),
             Self::Duration => budget_is_a_duration(fixture),
             Self::Idempotent => replay_is_idempotent(fixture),
+            Self::NoRerun => step_did_not_rerun(fixture),
         }
     }
 }
@@ -396,6 +414,42 @@ fn replay_is_idempotent(row: &Fixture) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
+/// The step ran once across the kill, and the restart does not spend its budget
+/// a second time.
+///
+/// Two failures hide behind "the budget was restored". One is a rerun: the
+/// restart admits attempt "1" again, so the store grows a second copy and the
+/// effect the step performs happens twice. The other is a double-spend: the
+/// restart resumes the clock and then charges the *same* `SPENT` again, so the
+/// figure it recovers is right and its accounting is wrong. Both are visible
+/// here — the attempt count and the budget after the restart resumes — and
+/// neither is visible to a test that only checks the restored number.
+fn step_did_not_rerun(row: &Fixture) -> Result<(), Box<dyn std::error::Error>> {
+    // The restart opens the store, sees the attempt the killed child already
+    // admitted, and declines to admit it again.
+    let journal = row.reopened()?;
+    let attempts = journal.recover().len();
+    agree(
+        attempts,
+        1,
+        "the restart must find exactly the attempt the killed child admitted: a second \
+         copy is a rerun, and a rerun performs the effect twice",
+    );
+
+    // Resuming from the recovered reading spends nothing further. The clock is
+    // rebuilt at `LEFT`'s origin, so a restart that re-charges `SPENT` — or
+    // starts from zero — is visible as a shorter or a longer budget.
+    let resumed = Clock::virtual_at(row.child_elapsed()?);
+    let remaining = resumed.snapshot().remaining_from(BUDGET);
+    agree(
+        remaining,
+        LEFT,
+        "resuming from the recovered reading must spend nothing: a budget that came back \
+         shorter was charged twice, and one that came back longer was never charged at all",
+    );
+    Ok(())
+}
+
 /// The row a probe child runs.
 ///
 /// The parent asks this test to do its work; the child — re-executed with
@@ -432,7 +486,9 @@ fn a_torn_snapshot_after_the_kill_is_refused_not_read_as_a_shorter_step() -> Tes
     // A snapshot record an append interrupted mid-write leaves behind: half a
     // word, behind a marker claiming the write was acknowledged.
     let fixture = Fixture::new("torn")?;
-    fixture.restarted_journal()?;
+    let mut journal = fixture.reopened()?;
+    admit(&mut journal, step_key()?)?;
+    drop(journal);
     std::fs::write(fixture.journal.with_extension("elapsed"), [1_u8, 2, 3, 4])?;
     std::fs::write(&fixture.marker, b"acked")?;
 
