@@ -138,6 +138,44 @@ explicitly under that crate.
   where a blocking implementation reaches one poll and then sits inside the
   fsync. INV-BOT-52, INV-BOT-53.
 
+- Three defects found while merging `bot/hardening-122` (#87 step 5).
+  `a_killed_process_resumes_without_rerunning_finished_steps` failed roughly
+  one run in eight under load and reported that a step had run zero times when
+  it had demonstrably run: the parent waited on `path.exists()`, and
+  `std::fs::write` creates the file before its bytes are in it, so the kill could
+  land while the marker was still empty and `ran` parsed that as zero. The wait
+  is now for non-empty content.
+  The same test's `alpha` and `beta` markers sat inside their `remember` bodies,
+  where seeing one proved only that the body had started while the parent used
+  them as proof the record was already on the disk; the kill could land between
+  the marker and the append and the resume would re-run a step the test had
+  already called durable. Both markers are published after the await returns.
+  `sim::band_of` also used `swap_remove`, which answered a band index past the
+  last band with an out-of-bounds panic naming the length rather than the
+  mistake. No behaviour change to any store. INV-BOT-53.
+- The storage owner no longer needs a runtime (#87 step 5). It queued requests
+  through `rt::sync::mpsc`, which is the estate's bounded channel and the right
+  choice when a runtime exists, but this thread outlives every future that waits
+  on it and must not depend on a runtime being alive to be driven — so
+  `cargo clippy --no-default-features` could not compile it, and the journal has
+  compiled without `rt` since before this crate had a run store. `std::sync::mpsc`
+  is disallowed workspace-wide precisely because it has no bounded form; the
+  bound is now a `VecDeque` inside the lock the owner already holds, with a
+  checked push that refuses rather than grows, so a caller that outruns the
+  device by more than `DEFAULT_QUEUE_DEPTH` still gets `SubmitError::QueueFull`.
+  `StorageGate` becomes one type for both stores rather than a view
+  parameterised by one store's state and another's answer type. INV-BOT-50.
+- One definition each for four fixtures the two branches duplicated (#122).
+  `durable_crash_observation.rs` and `journal_writer_fence.rs` each carried their
+  own scratch-path builder and cleanup guard beside the pair in
+  `support/journal.rs`; `sim_task_resume.rs` had its own `Scratch` beside the one
+  in `support/resume.rs`; and `journal_liveness.rs` and `resume_liveness.rs` each
+  had their own `Parked` and `heartbeat`. All five now come from the shared
+  modules. The one real difference is kept rather than erased: a journal's
+  append is position-fenced and a record store's is not, so `Parked` carries an
+  optional tail and the journal family opens it with `Parked::at`. Migration:
+  none; every change is inside the crate's own tests.
+
 - Host-held resumable runs (#87 step 5). `HostBuilder::run_store(dir)` installs a
   durable, file-backed per-step record store — `task::RunStore`, chain-framed and
   `fsync`-ed per record, opened and replayed at installation so a refusal happens
