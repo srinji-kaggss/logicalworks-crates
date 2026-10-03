@@ -82,14 +82,12 @@ const MAX_WORKERS: usize = 10_000;
 /// outcome would only ever prove one shape's arm.
 fn seeded_shapes_match_the_declared_outcome(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
-        let index = usize::try_from(u64::from(sim.rng().below(10)))?;
-        let (name, build) = support::SHAPES
-            .get(index)
-            .copied()
-            .ok_or("the drawn shape index is outside the table")?;
-        let payload = build();
-        let surface = surface_for(sim.rng())?;
-        let decoder_limits = limits_for(sim.rng());
+        let Drawn {
+            name,
+            payload,
+            surface,
+            limits: decoder_limits,
+        } = draw_case(sim.rng())?;
         let decoder = lgwks_bot::proposal::Decoder::new(decoder_limits);
         let outcome = decoder.decode(&surface, &payload, Source::Model);
 
@@ -268,6 +266,41 @@ fn surface_for(rng: &mut Rng) -> Result<Surface, Box<dyn Error>> {
         builder = builder.holding(&[Cap::fs()]);
     }
     Ok(builder.build())
+}
+
+/// One drawn shape case: the payload, the surface it meets and the decoder's
+/// ceilings.
+struct Drawn {
+    /// The shape's name, for the failure message.
+    name: &'static str,
+    /// The payload the shape builds.
+    payload: Vec<u8>,
+    /// The surface the payload is decoded against.
+    surface: Surface,
+    /// The decoder's ceilings.
+    limits: PlanLimits,
+}
+
+/// Draw a shape case from the seed, in the one order both shape families draw it.
+///
+/// One function because the pure decode family and the `Host::run` family must
+/// draw the *same* case from the same seed: drawn in two places, the two would
+/// drift apart and stop being two views of one decision.
+fn draw_case(rng: &mut Rng) -> Result<Drawn, Box<dyn Error>> {
+    let index = usize::try_from(u64::from(rng.below(10)))?;
+    let (name, build) = support::SHAPES
+        .get(index)
+        .copied()
+        .ok_or("the drawn shape index is outside the table")?;
+    let payload = build();
+    let surface = surface_for(rng)?;
+    let limits = limits_for(rng);
+    Ok(Drawn {
+        name,
+        payload,
+        surface,
+        limits,
+    })
 }
 
 /// The decoder's ceilings drawn from the seed, within the crate's defaults.
@@ -746,14 +779,12 @@ fn same_seed_same_trace_hash(band: Band) -> TestResult {
 /// arm and the ledger's count are three views of one decision and must agree.
 fn seeded_runs_reach_the_declared_disposition(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
-        let index = usize::try_from(u64::from(sim.rng().below(10)))?;
-        let (name, build) = support::SHAPES
-            .get(index)
-            .copied()
-            .ok_or("the drawn shape index is outside the table")?;
-        let payload = build();
-        let surface = surface_for(sim.rng())?;
-        let decoder_limits = limits_for(sim.rng());
+        let Drawn {
+            name,
+            payload,
+            surface,
+            limits: decoder_limits,
+        } = draw_case(sim.rng())?;
         let tenant = surface.tenant().to_owned();
         let gate = gate_for(&surface, decoder_limits)?;
         let expected = declared_refusal(name, &surface, &decoder_limits);

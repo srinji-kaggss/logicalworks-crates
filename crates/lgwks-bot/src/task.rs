@@ -91,20 +91,26 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
+use crate::cap::{Cap, Deficit, Demand, Shortage, uncovered};
 use crate::effect::RunId;
+use crate::gate::GrantSet;
 use crate::rt::clock::Clock;
 use crate::rt::runtime::{Handle, Runtime};
 use crate::rt::sync::{CancellationToken, OwnedSemaphorePermit, Semaphore};
 use crate::rt::task_local;
-use crate::script::run_store::Records;
+use crate::script::run_store::{Authority as RecordsAuthority, AuthorityCheck, Records};
 use crate::script::trail::Trail;
 use crate::script::{DEFAULT_TRAIL_STEPS, FlowError, MAX_IN_FLIGHT, Scope, Tenant, within};
 
 use self::name::TaskName;
 
+mod ledger;
 mod name;
+pub mod repair;
 mod store;
 
+pub use ledger::{LeaseRefusal, RunLedger};
+pub use repair::{MAX_TICKET_NEEDS, RepairError, RepairTicket};
 pub use store::{
     MAX_RECORD_BYTES, MAX_RECORDS_PER_RUN, MAX_STORE_BYTES, RunStore, StoreError, StoreLimitKind,
 };
@@ -191,6 +197,17 @@ pub enum Disposition {
     /// The run was never admitted. The host was already cancelled, or was
     /// cancelled while the run waited for a permit, so no body ever ran.
     Refused,
+    /// The run was admitted against the host's budget but refused before its body
+    /// started: this host's grants do not cover what the task declared it needs.
+    ///
+    /// Distinct from [`Refused`](Self::Refused) because it says something
+    /// different. A `Refused` run was refused by the *host* — cancelled, or never
+    /// admitted — and no amount of authority would change it. A `Blocked` run is
+    /// the host willing and the authority missing, which is why it is the only
+    /// disposition a repair can move and the only one whose
+    /// [`Report::repair`] is `Some`. Its body never ran, so nothing was polled and
+    /// nothing was executed.
+    Blocked,
 }
 
 impl Disposition {
@@ -203,6 +220,7 @@ impl Disposition {
             Self::Cancelled => "Cancelled",
             Self::DeadlineExceeded => "DeadlineExceeded",
             Self::Refused => "Refused",
+            Self::Blocked => "Blocked",
         }
     }
 
@@ -272,6 +290,15 @@ pub struct Task<F> {
     name: TaskName,
     /// The author's body.
     body: F,
+    /// A task needs nothing by default: a body that reaches nothing declares nothing.
+    ///
+    /// A step that does reach something asks for it at the step that reaches,
+    /// through [`Scope::require`](crate::script::Scope::require). That is the step
+    /// that knows what the step is about to do, and it is where a repair is
+    /// relevant — a run that has already analyzed something and then finds the
+    /// publication blocked is the case a repair exists for, and a whole-task
+    /// declaration would have refused it before the analysis ran.
+    needs: Vec<Cap>,
 }
 
 impl<F> Task<F> {
@@ -279,6 +306,30 @@ impl<F> Task<F> {
     #[must_use]
     pub fn name(&self) -> &str {
         self.name.as_str()
+    }
+
+    /// The capabilities this task declares at its own admission boundary.
+    ///
+    /// Empty for every task that reaches nothing, which is the default and the
+    /// honest answer: a task that reaches something declares it at the step that
+    /// reaches rather than here, so the whole shortfall is reported where it is
+    /// discovered — after the work already done, and no earlier.
+    #[must_use]
+    pub fn needs(&self) -> &[Cap] {
+        &self.needs
+    }
+
+    /// Declare capabilities this task needs before its body runs at all.
+    ///
+    /// The blunt form of [`Scope::require`](crate::script::Scope::require): the
+    /// whole task is refused at admission if any of `caps` is uncovered, so
+    /// nothing runs and nothing is recorded. Use it for a task that reaches
+    /// something in its very first step; use `require` in the body when the reach
+    /// happens later, so the work before it survives to be replayed.
+    #[must_use]
+    pub fn requiring(mut self, caps: &[Cap]) -> Self {
+        self.needs = caps.to_vec();
+        self
     }
 
     /// A copy of the task's name, so a run can stamp its report without
@@ -289,11 +340,12 @@ impl<F> Task<F> {
 }
 
 impl<F: fmt::Debug> fmt::Debug for Task<F> {
-    /// The name and the body, so a task reads as what it is in a log line.
+    /// The name, the needs and the body, so a task reads as what it is in a log line.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Task")
             .field("name", &self.name.as_str())
+            .field("needs", &self.needs)
             .field("body", &self.body)
             .finish()
     }
@@ -333,6 +385,7 @@ pub fn task<F>(name: &str, body: F) -> Result<Task<F>, FlowError> {
     Ok(Task {
         name: TaskName::new(name)?,
         body,
+        needs: Vec::new(),
     })
 }
 
@@ -376,6 +429,20 @@ pub struct Report<O> {
     run: Option<RunId>,
     /// Where a stopped run stopped, for a caller that wants to resume it.
     ticket: Option<Ticket>,
+    /// Every unmet capability this run was admitted short of, as one shortfall.
+    ///
+    /// The complete answer, not the first: a run needing three capabilities this
+    /// host grants none of reports all three, so the repair is written once
+    /// against the whole shortfall instead of discovering it one refusal at a
+    /// time.
+    needs: Option<Deficit>,
+    /// The repair a blocked run hands back to whoever holds the authority.
+    ///
+    /// `Some` exactly when `needs` is `Some` and the run is repairable — which
+    /// means the host has a repair ledger to decide the repair against. A blocked
+    /// run on a host with no ledger names its needs and carries no ticket, because
+    /// there is nothing a ticket could be decided against.
+    repair: Option<RepairTicket>,
 }
 
 impl<O> Report<O> {
@@ -525,6 +592,30 @@ impl<O> Report<O> {
     #[must_use]
     pub const fn ticket(&self) -> Option<&Ticket> {
         self.ticket.as_ref()
+    }
+
+    /// Every capability this run was admitted short of, in one shortfall.
+    ///
+    /// `Some` only for a [`Disposition::Blocked`] run, and then it carries **every**
+    /// unmet requirement rather than the first: the repair ticket below is derived
+    /// from exactly this value, so a caller reading it knows what the whole repair
+    /// must cover. A run that was admitted needs nothing and reports `None`.
+    #[must_use]
+    pub const fn needs(&self) -> Option<&Deficit> {
+        self.needs.as_ref()
+    }
+
+    /// The repair a blocked run hands back, naming the run, the tenant, the epoch
+    /// it was minted at, and exactly the capabilities it needs.
+    ///
+    /// `Some` exactly when [`Report::needs`] is `Some` *and* this host has a repair
+    /// ledger to decide a repair against. A blocked run on a host with no ledger
+    /// names its needs and carries no ticket: a ticket whose budget and epoch
+    /// nothing could be checked against would be an authority a caller could apply
+    /// unchecked.
+    #[must_use]
+    pub const fn repair(&self) -> Option<&RepairTicket> {
+        self.repair.as_ref()
     }
 }
 
@@ -691,6 +782,25 @@ struct Installation {
     /// that behaved as though it had none would be claiming durability it does
     /// not have, which is the one thing INV-BOT-54 forbids.
     store: Option<store::RunStore>,
+    /// The durable repair ledger, when one was installed.
+    ///
+    /// `None` means this host cannot repair anything: a repair is decided
+    /// against a run's epoch, its root budget and the set of tickets already
+    /// applied to it, and a host with no ledger has none of those. Such a host
+    /// refuses every repair rather than applying one unchecked, which is the
+    /// difference between a repair and a widened authority.
+    ledger: Option<RunLedger>,
+    /// The capabilities this host's grant set carries.
+    ///
+    /// The base authority every run is admitted against, before any repair. A
+    /// repair never widens this: it authorizes one run, once, for the needs its
+    /// ticket named, and the next run on this host is admitted against the same
+    /// grant.
+    grants: GrantSet,
+    /// The most root attempts one run may be charged before it is refused.
+    repair_attempts: u64,
+    /// The most root spend one run may be charged before it is refused.
+    repair_spend: u64,
     /// The runtime [`Host::block_on`] drives on, built once on first use.
     reactor: Mutex<Option<Reactor>>,
 }
@@ -733,6 +843,10 @@ impl Host {
             progress: DEFAULT_TRAIL_STEPS,
             clock: Clock::wall(),
             store: None,
+            ledger: None,
+            grants: GrantSet::empty(),
+            repair_attempts: default_repair_attempts(),
+            repair_spend: default_repair_spend(),
         })
     }
 
@@ -785,6 +899,32 @@ impl Host {
         self.inner.store.as_ref()
     }
 
+    /// The durable repair ledger this host installed, when it has one.
+    ///
+    /// `None` is a host that cannot repair a blocked run: with no ledger there is
+    /// no epoch, no root budget and no record of applied tickets, so
+    /// [`Host::repair`] refuses rather than authorizing against nothing.
+    #[must_use]
+    pub fn run_ledger(&self) -> Option<&RunLedger> {
+        self.inner.ledger.as_ref()
+    }
+
+    /// The capabilities this host admits runs against.
+    ///
+    /// Read-only by borrow: the grant set is the host's authority and a repair
+    /// never widens it, so a caller that could hand it back could authorize a run
+    /// this host was never configured to run.
+    #[must_use]
+    pub fn grants(&self) -> &GrantSet {
+        &self.inner.grants
+    }
+
+    /// The root budget bounds this host charges a run's attempts against.
+    #[must_use]
+    pub fn repair_bounds(&self) -> (u64, u64) {
+        (self.inner.repair_attempts, self.inner.repair_spend)
+    }
+
     /// Stop every run under this host, including one waiting for a permit, and
     /// refuse every run started afterwards.
     ///
@@ -822,7 +962,8 @@ impl Host {
         F: Fn(Scope, I) -> Fut,
         Fut: Future<Output = Result<O, FlowError>>,
     {
-        self.execute(task, input, None).await
+        self.execute(task, input, None, None, &GrantSet::empty(), 1)
+            .await
     }
 
     /// [`Host::run`] under a run identity the caller already holds.
@@ -842,7 +983,8 @@ impl Host {
         F: Fn(Scope, I) -> Fut,
         Fut: Future<Output = Result<O, FlowError>>,
     {
-        self.execute(task, input, Some(run)).await
+        self.execute(task, input, Some(run), None, &GrantSet::empty(), 1)
+            .await
     }
 
     /// Resume from a [`Ticket`].
@@ -878,19 +1020,117 @@ impl Host {
                 ),
             });
         }
-        Ok(self.execute(task, input, Some(ticket.run())).await)
+        Ok(self
+            .execute(task, input, Some(ticket.run()), None, &GrantSet::empty(), 1)
+            .await)
     }
 
-    /// The one body of a run, shared by [`Host::run`] and [`Host::resume`].
+    /// Repair a run blocked on unmet authority, and resume it.
+    ///
+    /// The door a [`RepairTicket`] is answered at. It
+    /// resumes the run under the run's own id, so every step recorded before the
+    /// block replays without its body being polled — the prior analysis is not
+    /// rerun — and only the blocked remainder runs. That is the whole of what a
+    /// repair costs and the reason it is safe to hand out more authority: the
+    /// work already done is not done again.
+    ///
+    /// # What is refused, and in what order
+    ///
+    /// Nothing is applied until every check has passed, and each check leaves the
+    /// run blocked with its authority unchanged:
+    ///
+    /// 1. [`RepairError::NoLedger`] — a host with no repair ledger has no epoch,
+    ///    no root budget and no record of applied tickets, so there is nothing to
+    ///    decide this repair against. Applying it unchecked would be exactly the
+    ///    widen-on-replay this door exists to prevent.
+    /// 2. [`RepairError::ForeignTenant`] — the ticket names another tenant's run.
+    /// 3. [`RepairError::NotAuthorized`] — the grant does not cover every
+    ///    capability the ticket names, so the run would stay blocked.
+    /// 4. [`RepairError::OverWide`] — the grant carries any capability the ticket
+    ///    does not name, shipped or custom. Refused rather than narrowed, so what
+    ///    the caller believes was granted cannot exceed what was asked.
+    /// 5. [`RepairError::StaleEpoch`] / [`RepairError::AlreadyApplied`] /
+    ///    [`RepairError::BudgetSpent`] — decided by the ledger's one ordered step,
+    ///    against the run's *current* epoch, so two repairs delivered together
+    ///    cannot both apply.
+    ///
+    /// Only after all five does the run resume, and it resumes with exactly the
+    /// ticket's needs added — the authority applied is built from the ticket, not
+    /// taken from `grant`, so it cannot exceed the request even in principle. The
+    /// repair is charged against the run's root budget exactly as any other
+    /// attempt is, so an authorized repair consumes budget rather than resetting
+    /// it (T13).
+    ///
+    /// # Errors
+    ///
+    /// Every [`RepairError`] above. On success the returned [`Report`] is the run's
+    /// own report — it is the same run, resumed, not a second run — so its output,
+    /// its disposition and its step trail describe what the repaired run did.
+    pub async fn repair<I, O, F, Fut>(
+        &self,
+        ticket: &RepairTicket,
+        grant: &GrantSet,
+        task: &Task<F>,
+        input: I,
+        spend: u64,
+    ) -> Result<Report<O>, RepairError>
+    where
+        F: Fn(Scope, I) -> Fut,
+        Fut: Future<Output = Result<O, FlowError>>,
+    {
+        let ledger = self.inner.ledger.as_ref().ok_or(RepairError::NoLedger)?;
+        if ticket.tenant() != self.inner.tenant.as_str() {
+            return Err(RepairError::ForeignTenant {
+                ticket: ticket.tenant().to_owned(),
+                host: self.inner.tenant.as_str().to_owned(),
+            });
+        }
+        // The grant is checked against the ticket *before* the run is admitted and
+        // before the ledger is charged, so a denied repair costs nothing at all:
+        // no budget, no epoch, no step.
+        ticket.check_grant(grant)?;
+        // A run the ledger has never seen has no epoch and no budget, so its
+        // authority cannot be attributed; refused rather than minted.
+        let control = ledger
+            .control(ticket.run())
+            .ok_or_else(|| RepairError::UnknownRun {
+                run: ticket.run().id().to_hex(),
+            })?;
+        if control.epoch() != ticket.epoch() {
+            return Err(RepairError::StaleEpoch {
+                current: control.epoch(),
+                offered: ticket.epoch(),
+            });
+        }
+        let delta = ticket.delta();
+        Ok(self
+            .execute(task, input, Some(ticket.run()), Some(ticket), &delta, spend)
+            .await)
+    }
+
+    /// The one body of a run, shared by [`Host::run`], [`Host::resume`] and
+    /// [`Host::repair`].
     ///
     /// Split so there is exactly one place a run mints or adopts its identity,
-    /// builds its scope, installs the store and assembles its report — a second
-    /// copy of any of those is a second definition of what a resume means.
+    /// checks its authority, builds its scope, installs the store and assembles
+    /// its report — a second copy of any of those is a second definition of what
+    /// a resume means. `repair` is the one door that widens authority, and it is a
+    /// parameter rather than a branch, so the admission check below cannot be
+    /// bypassed by a caller that happens to hold a ticket.
+    ///
+    /// The root budget is charged for **every** run, repair or not, and it is
+    /// charged *before* the body so a run that spends its budget to zero reaches
+    /// the refusal rather than running once more. That is what makes a permanent
+    /// refusal plus repeated `NotApplied` finite: the budget is carried in the
+    /// run's own ledger, so a fresh process finds it where the last one left it.
     async fn execute<I, O, F, Fut>(
         &self,
         task: &Task<F>,
         input: I,
         resume: Option<RunId>,
+        repair: Option<&RepairTicket>,
+        grant_delta: &GrantSet,
+        spend: u64,
     ) -> Report<O>
     where
         F: Fn(Scope, I) -> Fut,
@@ -919,8 +1159,8 @@ impl Host {
             return self.refuse(started, task_name, error.to_string());
         }
         // A resume on a host with nothing to replay from would run every step
-        // again under a caller's belief that finished steps are kept. That is
-        // the silent downgrade a resume exists to rule out, so it is refused
+        // again under a caller's belief that finished steps are kept. That is the
+        // silent downgrade a resume exists to rule out, so it is refused
         // before any step runs.
         if let Some(run) = resume
             && self.inner.store.is_none()
@@ -954,6 +1194,31 @@ impl Host {
             );
         }
 
+        // The authority check, at the admission boundary and as one complete pass.
+        // Only the task's own declaration is checked here, and it is the blunt
+        // form: a task that reaches in its *first* step declares it with
+        // [`Task::requiring`] and is refused before its body, so nothing runs and
+        // nothing is recorded. A task that reaches later declares nothing here and
+        // asks at the step that reaches, through [`Scope::require`], so the work
+        // before the block survives to be replayed by a repair.
+        //
+        // The base grant and this run's repair delta are checked *together* and
+        // never one replacing the other: a repair adds authority for one run, and
+        // every capability the host already had still holds.
+        let covers = |cap: &Cap| self.inner.grants.grants(cap) || grant_delta.grants(cap);
+        let shortfall = Deficit::from_shortages(uncovered(
+            task.needs(),
+            covers,
+            Some(&Demand::new(task_name.as_str())),
+        ));
+        if let Some(deficit) = shortfall {
+            // Blocked before admission and before the body: nothing was polled and
+            // nothing executed, and the report names *every* unmet need plus the
+            // repair ticket that closes exactly those. Both come from this one
+            // `deficit`, so they cannot disagree about what the run was missing.
+            return self.blocked(started, task_name, run, deficit);
+        }
+
         // Admission first, so a run that never starts is never counted as one
         // and never leaves a step in the trail.
         let permit = match self.admit(started, &task_name).await {
@@ -971,6 +1236,8 @@ impl Host {
                     error: Some(failure.into_error()),
                     trail: TrailSnapshot::Empty,
                     run,
+                    needs: None,
+                    repair: None,
                 });
             }
         };
@@ -978,6 +1245,40 @@ impl Host {
         // drops while this run is suspended: the budget returns to what it was,
         // the in-flight count falls, and no body outlives the call.
         let _admission = self.charge(permit);
+
+        // The root budget is charged here, after the run was admitted and confirmed
+        // to have authority, but before the body runs. A repair is charged exactly
+        // like any other attempt — that is what makes an authorized repair *distinct*
+        // rather than a reset (T13). The refusal is reported as a terminal report
+        // rather than an error, because the run genuinely happened and its state is
+        // exactly this.
+        if let Some(run) = run
+            && let Some(ledger) = self.inner.ledger.as_ref()
+            && let Err(refusal) = ledger
+                .charge(
+                    self.inner.tenant.as_str(),
+                    run,
+                    repair.map(RepairTicket::stamp).as_ref(),
+                    spend,
+                    self.inner.repair_attempts,
+                    self.inner.repair_spend,
+                )
+                .await
+        {
+            return self.report(Terminal {
+                started,
+                task: task_name,
+                disposition: Disposition::Refused,
+                output: None,
+                error: Some(FlowError::failed(format_args!(
+                    "the run's root budget refused this attempt: {refusal}"
+                ))),
+                trail: TrailSnapshot::Empty,
+                run: Some(run),
+                needs: None,
+                repair: None,
+            });
+        }
 
         let trail = Trail::new(self.inner.limits.progress_capacity());
         // The host's clock, not a fresh one: a run's admission wait and its
@@ -1006,6 +1307,8 @@ impl Host {
                     error: Some(error),
                     trail: TrailSnapshot::Empty,
                     run,
+                    needs: None,
+                    repair: None,
                 });
             }
         };
@@ -1037,20 +1340,60 @@ impl Host {
         // same host inherits both. With no store the scope is entered with no
         // run at all, which is what makes "no durability" the default rather
         // than a claim.
-        // One composition whether or not a store is installed: two alternative
+        // One composition for all three task-local scopes rather than one per
+        // combination of "has a store" and "has a repair": two alternative
         // nestings in one future carry both in its frame, which is what pushed a
-        // two-review test past a 2 MiB thread stack. Boxed, so a run nested in
-        // another run's body costs the parent a pointer rather than its frame.
-        let outcome = Box::pin(crate::script::run_store::within(
-            self.records(run),
-            HELD_PERMITS.scope(charged, within(&scope, BODY_STEP, deadline, body)),
+        // two-review test past a 2 MiB thread stack, and a third would have
+        // widened the same frame again. Boxed, so a run nested in another run's
+        // body costs the parent a pointer rather than its frame.
+        let outcome = Box::pin(crate::script::run_store::with_authority(
+            Some(self.authority(grant_delta)),
+            crate::script::run_store::within(
+                self.records(run),
+                HELD_PERMITS.scope(charged, within(&scope, BODY_STEP, deadline, body)),
+            ),
         ))
         .await;
 
         let snapshot = trail.snapshot();
-        let (disposition, output, error) = match outcome {
-            Ok(value) => (Disposition::Succeeded, Some(value), None),
-            Err(error) => (disposition_of(&error), None, Some(error.located(&scope))),
+        let (disposition, output, error, needs) = match outcome {
+            Ok(value) => (Disposition::Succeeded, Some(value), None, None),
+            // A step that reached for authority it does not have blocks the run,
+            // and its own shortfall rides out with it: the report's needs and the
+            // repair ticket are both built from this one value, so they cannot
+            // disagree about what the run was missing. Every other failure is an
+            // ordinary located error.
+            Err(error) => {
+                let located = error.located(&scope);
+                let deficit = located.deficit().cloned();
+                match deficit {
+                    Some(deficit) => (Disposition::Blocked, None, Some(located), Some(deficit)),
+                    None => (disposition_of(&located), None, Some(located), None),
+                }
+            }
+        };
+        // A blocked run mints its repair ticket from the same shortfall the report
+        // carries, and only when the host holds a ledger to decide a later repair
+        // against. A blocked run *inside* a repair mints none: a repair that could
+        // not close the shortfall hands back the run it was given rather than a
+        // fresh ticket for the same block, which would be a way to retry a denied
+        // repair by asking again.
+        let repair = match (
+            needs.as_ref(),
+            run,
+            self.inner.ledger.as_ref(),
+            repair.is_some(),
+        ) {
+            (Some(deficit), Some(run), Some(ledger), false) => {
+                let epoch = ledger.control(run).map_or(0, |control| control.epoch());
+                Some(RepairTicket::of_deficit(
+                    run,
+                    self.inner.tenant.as_str(),
+                    epoch,
+                    deficit,
+                ))
+            }
+            _ => None,
         };
         self.report(Terminal {
             started,
@@ -1060,6 +1403,8 @@ impl Host {
             error,
             trail: TrailSnapshot::Taken(snapshot),
             run,
+            needs,
+            repair,
         })
     }
 
@@ -1076,6 +1421,61 @@ impl Host {
             error: Some(FlowError::Failed { at, reason }),
             trail: TrailSnapshot::Empty,
             run: None,
+            needs: None,
+            repair: None,
+        })
+    }
+
+    /// A run blocked on unmet authority: `Blocked`, no body, no step, every unmet
+    /// need, and — when this host has a ledger to decide a repair against — the
+    /// repair ticket naming exactly those needs.
+    ///
+    /// One assembly point for the two facts a caller acts on, because they come
+    /// from the same [`Deficit`] and a report that named a different set in its
+    /// needs and its ticket would be the one thing a caller could not detect.
+    fn blocked<O>(
+        &self,
+        started: Instant,
+        task: TaskName,
+        run: Option<RunId>,
+        deficit: Deficit,
+    ) -> Report<O> {
+        let at = Arc::from(task.as_str());
+        // A ticket is minted only for a run whose epoch the ledger knows and for a
+        // run that is *not* already carrying a repair: a repair that could not
+        // close the shortfall hands back the run it was given rather than minting a
+        // fresh ticket for the same block, which would be a way to retry a denied
+        // repair by asking again.
+        let repair = match (run, self.inner.ledger.as_ref()) {
+            (Some(run), Some(_ledger)) => {
+                let epoch = self
+                    .inner
+                    .ledger
+                    .as_ref()
+                    .and_then(|ledger| ledger.control(run))
+                    .map_or(0, |control| control.epoch());
+                Some(RepairTicket::of_deficit(
+                    run,
+                    self.inner.tenant.as_str(),
+                    epoch,
+                    &deficit,
+                ))
+            }
+            _ => None,
+        };
+        self.report(Terminal {
+            started,
+            task,
+            disposition: Disposition::Blocked,
+            output: None,
+            error: Some(FlowError::Failed {
+                at,
+                reason: String::from("this host's authority does not cover what this task needs"),
+            }),
+            trail: TrailSnapshot::Empty,
+            run,
+            needs: Some(deficit),
+            repair,
         })
     }
 
@@ -1116,6 +1516,22 @@ impl Host {
     #[cfg(not(feature = "ephemeral"))]
     fn mint_run(&self) -> Option<RunId> {
         None
+    }
+
+    /// The authority this run's steps consult: the host's grant plus the delta of
+    /// any repair this run carries.
+    ///
+    /// Always installed, including for a host that grants nothing. A step outside
+    /// any host has *no* authority and so requires nothing; a step under a host
+    /// that grants nothing has an authority covering nothing and is refused for
+    /// whatever it asked about. That distinction — nobody checked versus checked
+    /// and refused — is the whole reason this is installed unconditionally rather
+    /// than left absent when the grant set is empty.
+    fn authority(&self, grant_delta: &GrantSet) -> RecordsAuthority {
+        RecordsAuthority(Arc::new(RunAuthority {
+            base: self.inner.grants.clone(),
+            delta: grant_delta.clone(),
+        }))
     }
 
     /// The erased record store for this run, when there is one.
@@ -1256,6 +1672,8 @@ impl Host {
             error,
             trail,
             run,
+            needs,
+            repair,
         } = terminal;
         let (steps, dropped_steps) = match trail {
             TrailSnapshot::Taken((paths, dropped)) => (paths, dropped),
@@ -1306,6 +1724,8 @@ impl Host {
             task,
             run,
             ticket,
+            needs,
+            repair,
         }
     }
 
@@ -1521,6 +1941,10 @@ struct Terminal<O> {
     trail: TrailSnapshot,
     /// The run id its records are keyed by.
     run: Option<RunId>,
+    /// The unmet capabilities this run was admitted short of.
+    needs: Option<Deficit>,
+    /// The repair ticket a blocked run hands back.
+    repair: Option<RepairTicket>,
 }
 
 /// The step paths a report carries.
@@ -1537,9 +1961,45 @@ enum TrailSnapshot {
     Empty,
 }
 
-/// What an admitted run holds for the length of its body.
+// ── Authority ───────────────────────────────────────────────────────────────
+
+/// The authority a run's steps consult, erased for the task-local it rides in.
 ///
-/// `Held` owns the budget permit and releases it on drop; `Charged` holds
+/// A handle rather than the concrete type for the same reason [`Records`] is: it
+/// is installed as a `dyn` behind a task-local, and the script module must not
+/// depend on [`Host`](self::Host).
+/// One run's authority: the host's base grant plus this run's repair delta.
+///
+/// The two are kept apart rather than merged, because merging loses the question
+/// the repair door asks. A repair *adds* authority for one run and never widens
+/// the host's, so a step's coverage is "either", and a reader of this type can see
+/// which half answered.
+struct RunAuthority {
+    /// What the host admits every run against.
+    base: GrantSet,
+    /// What this run's repair authorized, limited to its ticket's needs.
+    delta: GrantSet,
+}
+
+impl AuthorityCheck for RunAuthority {
+    /// Every capability in `required` this run's authority does not cover.
+    ///
+    /// Checked against the base and the delta together, and named once each: a
+    /// capability the base already covers is not reported as short however many
+    /// times the delta repeats it, so the shortfall is what the run genuinely
+    /// lacks rather than what its repair happened to mention.
+    fn uncovered(&self, required: &[Cap]) -> Vec<Shortage> {
+        uncovered(
+            required,
+            |cap| self.base.grants(cap) || self.delta.grants(cap),
+            None,
+        )
+    }
+}
+
+/// What a run holds for the length of its body.
+///
+/// `Held` owns budget permit and releases it on drop; `Charged` holds
 /// nothing, because a nested run shares its ancestor's permit. Both are dropped
 /// on every exit path, so a suspended run the caller abandons returns its permit
 /// and its in-flight count with it.
@@ -1569,8 +2029,21 @@ pub struct HostBuilder {
     progress: usize,
     /// The clock every run's deadline is measured on.
     clock: Clock,
+    /// The base authority every run is admitted against.
+    ///
+    /// Checked against a task's declared [`needs`](Task::needs) at admission, as
+    /// one complete pass: every unmet capability is reported together, so a
+    /// blocked run names the whole shortfall and its repair ticket is written once
+    /// rather than one refusal at a time.
+    grants: GrantSet,
     /// The durable step-record store, when the caller installed one.
     store: Option<store::RunStore>,
+    /// The durable repair ledger, when the caller installed one.
+    ledger: Option<RunLedger>,
+    /// The most root attempts one run may be charged before it is refused.
+    repair_attempts: u64,
+    /// The most root spend one run may be charged before it is refused.
+    repair_spend: u64,
 }
 
 impl HostBuilder {
@@ -1649,10 +2122,68 @@ impl HostBuilder {
     /// Install a store this caller already opened.
     ///
     /// For a host whose store is opened once and shared, and for a caller that
-    /// wants the opened handle back for [`RunStore::tenant_of`] and the other
-    /// read-only queries.
+    /// wants to get the opened handle back for [`RunStore::tenant_of`] and the
+    /// other read-only queries.
     pub fn store(mut self, store: store::RunStore) -> Self {
         self.store = Some(store);
+        self
+    }
+
+    /// Admit runs against `grants`.
+    ///
+    /// The default is [`GrantSet::empty`]: a host grants nothing unless the
+    /// caller says so. There is deliberately no `grant_all` — a host that reached
+    /// everything by default would make the admission check above vacuous, and
+    /// the whole point of declaring a task's needs is that a missing capability
+    /// is *reported* rather than silently supplied.
+    pub fn grants(mut self, grants: GrantSet) -> Self {
+        self.grants = grants;
+        self
+    }
+
+    /// Install a durable repair ledger under `dir`.
+    ///
+    /// One file per tenant, named after it, so two tenants pointed at the same
+    /// directory never share a file — the same rule the step store follows. With
+    /// a ledger installed a blocked run's report carries a
+    /// [`RepairTicket`] and [`Host::repair`] can decide a
+    /// repair against the run's epoch, its root budget and the tickets already
+    /// applied to it.
+    ///
+    /// The ledger is opened — and its entries replayed — here, so a refusal
+    /// happens at installation rather than on the first repair of a run that has
+    /// already claimed to be repairable.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError`] when the ledger cannot be opened or replayed.
+    pub fn repair_ledger(mut self, dir: impl AsRef<std::path::Path>) -> Result<Self, StoreError> {
+        self.ledger = Some(RunLedger::open_in(dir.as_ref(), self.tenant.as_str())?);
+        Ok(self)
+    }
+
+    /// Install a ledger this caller already opened, and share it.
+    ///
+    /// For a host whose ledger is opened once and handed to several hosts of the
+    /// same tenant, and for a caller that wants the handle back to read the
+    /// budget a run has been charged.
+    pub fn ledger(mut self, ledger: RunLedger) -> Self {
+        self.ledger = Some(ledger);
+        self
+    }
+
+    /// Charge at most `attempts` attempts and `spend` against a run's root
+    /// budget.
+    ///
+    /// The root budget bounds the whole life of a run: every attempt and every
+    /// repair spends it, and nothing refills it. A run that exhausts it is
+    /// refused with [`RepairError::BudgetSpent`] however many times it is
+    /// delivered a ticket, which is what makes a permanent refusal plus repeated
+    /// `NotApplied` reach a finite answer rather than retry forever. A `spend` of
+    /// zero means attempts alone bound the run.
+    pub fn repair_bounds(mut self, attempts: u64, spend: u64) -> Self {
+        self.repair_attempts = attempts;
+        self.repair_spend = spend;
         self
     }
 
@@ -1712,6 +2243,10 @@ impl HostBuilder {
                 refused: AtomicU64::new(0),
                 clock: self.clock,
                 store: self.store,
+                ledger: self.ledger,
+                grants: self.grants,
+                repair_attempts: self.repair_attempts,
+                repair_spend: self.repair_spend,
                 reactor: Mutex::new(None),
             }),
         })
@@ -1734,6 +2269,27 @@ fn default_max_concurrent() -> NonZeroUsize {
 /// A ceiling with no default is a ceiling nobody honours.
 fn default_deadline() -> Duration {
     Duration::from_secs(30)
+}
+
+/// The most root attempts a run is charged before it is refused, when the builder
+/// says nothing.
+///
+/// Eight: enough for a run to be retried across a few transport failures and to
+/// take one authorized repair, and few enough that a run that keeps failing
+/// reaches the refusal rather than continuing. A default rather than infinity is
+/// the whole point — an unbounded root budget is the unlimited-retry loop T13
+/// names, spelled with a larger number.
+fn default_repair_attempts() -> u64 {
+    8
+}
+
+/// The most root spend a run is charged before it is refused, when the builder
+/// says nothing.
+///
+/// A multiple of [`default_repair_attempts`], so a caller that never names a spend
+/// gets a budget bounded by both axes rather than one that silently governs.
+fn default_repair_spend() -> u64 {
+    default_repair_attempts().saturating_mul(8)
 }
 
 // ── HostLimits ───────────────────────────────────────────────────────────────

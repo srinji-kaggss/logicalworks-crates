@@ -120,6 +120,25 @@ pub enum FlowError {
         /// What is wrong with it.
         reason: &'static str,
     },
+    /// A step reached for authority this run does not have.
+    ///
+    /// The one flow failure that is not a defect in the step and not a transient
+    /// condition: the host is willing, the work is well-formed, and the authority
+    /// is missing. It is never retryable on its own, because repeating the same
+    /// step against the same authority asks the same question and gets the same
+    /// answer — a permanent refusal plus repeated `NotApplied` must reach a finite
+    /// refusal rather than an unbounded retry loop.
+    ///
+    /// The unmet requirements ride with it, as a complete
+    /// [`Deficit`](crate::cap::Deficit) rather than the first one, so the run's
+    /// report can name every presently knowable need at once and the repair
+    /// ticket is written once against the whole shortfall.
+    Blocked {
+        /// The step that reached for the authority.
+        at: Arc<str>,
+        /// Every capability this step needs and the run does not have.
+        deficit: Box<crate::cap::Deficit>,
+    },
     /// A bound computed at run time is outside what the block accepts.
     InvalidBound {
         /// Which bound.
@@ -164,6 +183,7 @@ impl FlowError {
             | Self::Exhausted { .. }
             | Self::Throttled { .. }
             | Self::Failed { .. }
+            | Self::Blocked { .. }
             | Self::Refused { .. }
             | Self::Intervention { .. }
             | Self::TooDeep { .. }
@@ -190,6 +210,7 @@ impl FlowError {
             | Self::Failed { ref at, .. }
             | Self::Transient { ref at, .. }
             | Self::Bot { ref at, .. }
+            | Self::Blocked { ref at, .. }
             | Self::Refused { ref at, .. }
             | Self::Intervention { ref at, .. }
             | Self::TooDeep { ref at, .. } => at,
@@ -206,6 +227,21 @@ impl FlowError {
         self.located_at(scope.shared_path())
     }
 
+    /// Whether this error is a refusal for missing authority, and the whole
+    /// shortfall if it is.
+    ///
+    /// The one question a caller asking "was this run blocked rather than broken?"
+    /// needs answered, and it answers with the complete shortfall rather than the
+    /// first requirement, so the report that builds a repair ticket from it can be
+    /// written once against the whole set.
+    #[must_use]
+    pub fn deficit(&self) -> Option<&crate::cap::Deficit> {
+        match *self {
+            Self::Blocked { ref deficit, .. } => Some(deficit),
+            _ => None,
+        }
+    }
+
     /// [`FlowError::located`] against a path already in hand.
     #[must_use]
     pub(super) fn located_at(mut self, path: &Arc<str>) -> Self {
@@ -217,6 +253,7 @@ impl FlowError {
             | Self::Failed { ref mut at, .. }
             | Self::Transient { ref mut at, .. }
             | Self::Bot { ref mut at, .. }
+            | Self::Blocked { ref mut at, .. }
             | Self::Refused { ref mut at, .. }
             | Self::Intervention { ref mut at, .. }
             | Self::TooDeep { ref mut at, .. } => {
@@ -260,6 +297,12 @@ impl fmt::Display for FlowError {
                 write!(formatter, "{at}: failed (transient): {reason:?}")
             }
             Self::Bot { ref at, ref source } => write!(formatter, "{at}: {source}"),
+            Self::Blocked {
+                ref at,
+                ref deficit,
+            } => {
+                write!(formatter, "{at}: blocked: {deficit}")
+            }
             Self::Refused {
                 ref at,
                 ref refusal,
@@ -294,6 +337,7 @@ impl std::error::Error for FlowError {
             | Self::TimedOut { .. }
             | Self::Failed { .. }
             | Self::Transient { .. }
+            | Self::Blocked { .. }
             | Self::TooDeep { .. }
             | Self::InvalidTenant { .. }
             | Self::InvalidName { .. }
