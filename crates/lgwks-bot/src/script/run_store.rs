@@ -90,6 +90,62 @@ where
 task_local! {
     /// The durable record store for the run this future belongs to, if any.
     static RECORDS: Option<Records>;
+
+    /// The authority a step's `require` is checked against, if any.
+    static AUTHORITY: Option<Authority>;
+}
+
+/// The authority a run's steps are checked against: the host's grant plus the
+/// delta of any repair this run is carrying.
+///
+/// Object-safe and `Arc`-held for the same reason as [`RunRecords`] — it is
+/// installed as a `dyn` behind a task-local and consulted by borrowed methods, so
+/// a step body can ask what it may do without the host being named in its
+/// signature.
+#[derive(Clone)]
+pub(crate) struct Authority(pub(crate) Arc<dyn AuthorityCheck>);
+
+/// What a step's `require` asks of the run's authority.
+///
+/// One method, because there is one question: *is this capability covered right
+/// now*. It returns the whole shortfall rather than a `bool`, so a step that is
+/// short of three capabilities learns all three at once and the repair ticket
+/// built from the answer is written once.
+pub(crate) trait AuthorityCheck: Send + Sync {
+    /// Every capability in `required` this run's authority does not cover, in
+    /// declaration order, each named once.
+    fn uncovered(&self, required: &[crate::cap::Cap]) -> Vec<crate::cap::Shortage>;
+}
+
+impl Authority {
+    /// The shortfall for `required`, or `None` when no authority is installed —
+    /// which is a local run outside any host, where a step reaches nothing and so
+    /// needs nothing.
+    pub(crate) fn shortfall(
+        &self,
+        required: &[crate::cap::Cap],
+    ) -> Option<Vec<crate::cap::Shortage>> {
+        let short = self.0.uncovered(required);
+        (!short.is_empty()).then_some(short)
+    }
+}
+
+/// The authority installed for the current future, if any.
+pub(crate) fn authority() -> Option<Authority> {
+    AUTHORITY.try_with(Clone::clone).unwrap_or(None)
+}
+
+/// Install `authority` for the futures polled inside `body`; `None` installs the
+/// absence a run with no authority reports, through the same one composition.
+///
+/// Crate-private for the same reason as [`within`]: the host is the supported way
+/// to make a run checkable, and a caller who installed their own authority would
+/// be granting themselves the capability the step is asking about.
+pub(crate) async fn with_authority<R>(
+    authority: Option<Authority>,
+    body: impl Future<Output = R>,
+) -> R {
+    AUTHORITY.scope(authority, body).await
 }
 
 /// The durable store a run's durable steps consult.
@@ -278,6 +334,17 @@ impl StoredValue {
     /// wrong type.
     pub(crate) fn new(path: String, bytes: Vec<u8>) -> Self {
         Self { path, bytes }
+    }
+
+    /// The archived bytes, by value.
+    ///
+    /// The reader's door, and the counterpart to the borrow
+    /// [`StagedRecord::bytes`] takes on the writer's side. `pub(crate)` for the same
+    /// reason [`StoredValue::new`] is: the store hands these out and
+    /// [`crate::task::RunStore::lookup`] is the one place a caller may read them,
+    /// so no public field can hand a step of the wrong type a value it will decode.
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        self.bytes
     }
 }
 

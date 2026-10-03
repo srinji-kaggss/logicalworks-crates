@@ -405,6 +405,46 @@ impl Scope {
         }
         Ok(())
     }
+
+    /// Require `caps` before doing work that reaches them.
+    ///
+    /// The step-level half of admission. A [`Scope::root`] built by hand, and any
+    /// run outside a [`Host`](crate::task::Host), has no authority installed and so
+    /// requires nothing — the check is vacuous rather than false, because a step
+    /// outside a host has nothing to reach with either.
+    ///
+    /// Under a host, every capability in `caps` must be covered by the run's
+    /// authority: the host's grant plus the delta of any repair this run is
+    /// carrying. When any is missing, this returns
+    /// [`FlowError::Blocked`](crate::script::FlowError::Blocked) carrying **every**
+    /// unmet capability, not the first — so the run's report names the whole
+    /// shortfall at once and the repair ticket is written once against all of it.
+    ///
+    /// This is the step that blocks *after* the run has already done work, which is
+    /// the case a repair exists for: the analysis before it is recorded, so a
+    /// repair resumes and replays that record instead of paying for the analysis
+    /// again.
+    ///
+    /// # Errors
+    ///
+    /// [`FlowError::Blocked`](crate::script::FlowError::Blocked) naming every
+    /// unmet capability, or [`FlowError::Cancelled`](crate::script::FlowError::Cancelled)
+    /// if this scope is already stopped.
+    pub fn require(&self, caps: &[crate::cap::Cap]) -> Result<(), FlowError> {
+        self.checkpoint()?;
+        let Some(shortfall) =
+            super::run_store::authority().and_then(|authority| authority.shortfall(caps))
+        else {
+            return Ok(());
+        };
+        let Some(deficit) = crate::cap::Deficit::from_shortages(shortfall) else {
+            return Ok(());
+        };
+        Err(FlowError::Blocked {
+            at: Arc::clone(&self.inner.path),
+            deficit: Box::new(deficit),
+        })
+    }
 }
 
 /// Whether a child scope can be stopped apart from its parent.

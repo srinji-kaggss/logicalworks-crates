@@ -145,6 +145,8 @@ pub(crate) type Job<S, A> =
 /// moved no byte — a refusal, or an answer the index already held — and owes
 /// nothing. `Unsynced` is a step whose bytes are on the file and whose answer is
 /// owed one `sync_all` covering it and every other `Unsynced` member of its batch.
+/// `Committed` is a step that performed its own durability inside the ordered step
+/// and owes the batch nothing.
 pub(crate) enum Stage<A, S> {
     /// The step wrote nothing, so its answer owes no flush. The answer is itself
     /// a `Result`, because a refusal is an answer and is answered the moment the
@@ -162,13 +164,26 @@ pub(crate) enum Stage<A, S> {
         /// keeps the index from claiming bytes the device never took.
         settle: Box<dyn FnOnce(&mut S) + Send>,
     },
+    /// The step wrote its bytes and flushed them itself, inside the ordered step,
+    /// so its answer is ready and owes this batch no flush. The run ledger's
+    /// charge is the one caller (`script`): its correctness rests on deciding,
+    /// writing and folding under one lock before it returns — a later member of the
+    /// same batch must decide against the fold this one produced — so its fold
+    /// cannot be deferred to a batch settle the way a step record's can.
+    #[cfg(feature = "script")]
+    Committed(A),
 }
 
 impl<A, S> Stage<A, S> {
     /// How many bytes this step put on the file.
+    ///
+    /// A committed step's bytes are not carried by this batch — it already flushed
+    /// them itself — so they are not charged against this batch's byte ceiling.
     fn staged_bytes(&self) -> usize {
         match *self {
             Self::Settled(_) => 0,
+            #[cfg(feature = "script")]
+            Self::Committed(_) => 0,
             Self::Unsynced { bytes, .. } => bytes,
         }
     }
@@ -621,12 +636,35 @@ where
     where
         F: FnOnce(&mut File, &mut S) -> Result<Stage<A, S>, std::io::Error> + Send + 'static,
     {
+        let awaiting = self.enqueue_awaiting(job);
+        Box::pin(awaiting)
+    }
+
+    /// [`StorageOwner::submit_async`] without the type erasure, for a caller whose
+    /// own future must be `Send`.
+    ///
+    /// The erased form boxes into [`crate::BoxFuture`], which is deliberately not
+    /// `Send`: a durable step awaits it from inside a task body, and a body is
+    /// `Send` exactly when its author made it so. A caller on the *host's* own
+    /// path has no such choice — its future must be `Send` whatever the author's
+    /// body is, because the host may drive it on a multi-threaded runtime. The
+    /// concrete [`Awaiting`] is `Send` whenever `A` is, so returning it unboxed is
+    /// what keeps the host's path `Send` without weakening the erasure a step
+    /// body wants.
+    ///
+    /// The job is the same two-phase [`Stage`] step [`StorageOwner::submit`] runs;
+    /// a caller that performs its own durability inside the ordered step answers
+    /// [`Stage::Committed`] and owes the batch no flush.
+    pub(crate) fn enqueue_awaiting<F>(&self, job: F) -> Awaiting<S, A>
+    where
+        F: FnOnce(&mut File, &mut S) -> Result<Stage<A, S>, std::io::Error> + Send + 'static,
+    {
         let reply = Arc::new(Request::<S, A>::new());
         let outcome = self.enqueue(Box::new(job), Arc::clone(&reply));
-        Box::pin(Awaiting {
+        Awaiting {
             enqueued: Some(outcome),
             reply,
-        })
+        }
     }
 
     /// Hand one request to the owner, or report that this handle may not append.
@@ -667,7 +705,7 @@ where
 /// then park — which is exactly the shape that would need a second await to notice
 /// the answer. Here each poll reads the slot, so a missed wake costs a re-poll
 /// rather than a hang.
-struct Awaiting<S, A> {
+pub(crate) struct Awaiting<S, A> {
     /// Whether the request reached the owner at all. An error here is the queue's,
     /// and there is nothing to wait for. Taken on the first poll only.
     enqueued: Option<Result<(), SubmitError>>,
@@ -891,6 +929,10 @@ fn run_batch<S, A>(
                 flush_kind,
                 "the batch's flush failed, so this record's outcome is unknown",
             )),
+            // The step flushed its own bytes inside the ordered step, so its answer
+            // is ready whether or not this batch syncs.
+            #[cfg(feature = "script")]
+            Stage::Committed(answer) => Ok(answer),
         };
         if answer.is_err() {
             failed = true;
