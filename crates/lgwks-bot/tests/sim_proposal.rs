@@ -1057,4 +1057,6 @@ band_family::band_family! {
     two_tenants_admitting_on_one_host_stay_isolated_band_25 => two_tenants_admitting_on_one_host_stay_isolated, 25;
     two_tenants_admitting_on_one_host_stay_isolated_band_26 => two_tenants_admitting_on_one_host_stay_isolated, 26;
     two_tenants_admitting_on_one_host_stay_isolated_band_27 => two_tenants_admitting_on_one_host_stay_isolated, 27;
+    seeded_runs_reach_the_declared_disposition_band_28 => seeded_runs_reach_the_declared_disposition, 28;
+    seeded_runs_reach_the_declared_disposition_band_29 => seeded_runs_reach_the_declared_disposition, 29;
 }
