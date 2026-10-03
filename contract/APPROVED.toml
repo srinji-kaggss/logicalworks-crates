@@ -14,6 +14,12 @@
 # braid-ir, braid-governance, braid-test-support) stay in Braid.
 
 [policy]
+# Schema 2 adds the exact-origin identity (`origin`), the admitted-capability
+# policy keys (`features`, `required_features`, `uses_default_features`,
+# `optional`, `target`) and the explicit alias list (`aliases`). Schema 1 was a
+# class-only register; this one is migrated in place. See CHANGELOG "lgwks_deps
+# Changed".
+schema = 2
 enforce = true
 repository = "https://github.com/srinji-kaggss/logicalworks-crates"
 
@@ -389,6 +395,11 @@ version = "^0.19"
 owner = "lgwks_deps"
 capability = "ecs.world"
 source = "registry"
+# The substrate is compiled with default features off and only its `std`
+# feature on: `default-features = false` keeps `bevy_reflect` out, and `std`
+# is the one non-default feature this workspace asks for.
+uses_default_features = "false"
+features = "std"
 allowed_consumers = "lgwks_deps"
 allowed_kinds = "normal"
 reason = "Archetypal storage, per-component change ticks, and a topologically validated system schedule have no standard-library equivalent. `std` has no query engine, no stable generational identity, and no way to express 'run this when that value changed' without re-deriving it."
@@ -403,6 +414,9 @@ version = "^0.19"
 owner = "lgwks_deps"
 capability = "ecs.app"
 source = "registry"
+# The application layer is selected with default features off, so enabling it
+# cannot pull the renderer/windowing set by surprise.
+uses_default_features = "false"
 allowed_consumers = "lgwks_deps"
 allowed_kinds = "normal"
 reason = "Plugin composition, SubApp separation, and an application loop that the caller steps one frame at a time are absent from the standard library. Manual stepping is the property `lgwks_bot` needs: `App::update()` is called by the bot, and `App::run()` is never called."
@@ -417,6 +431,7 @@ version = "^0.19"
 owner = "lgwks_deps"
 capability = "ecs.virtual-clock"
 source = "registry"
+uses_default_features = "false"
 allowed_consumers = "lgwks_deps"
 allowed_kinds = "normal"
 reason = "A clock with pause, time scaling, and a fixed-timestep overstep accumulator has no standard-library equivalent; `std` offers only a wall clock. This is the virtual time source `docs/distributed-boundaries.md` records as missing."
@@ -431,6 +446,7 @@ version = "^0.19"
 owner = "lgwks_deps"
 capability = "ecs.state-machine"
 source = "registry"
+uses_default_features = "false"
 allowed_consumers = "lgwks_deps"
 allowed_kinds = "normal"
 reason = "A declared state machine with generational transitions, enter/exit schedules, and derived sub-states has no standard-library equivalent. It is the control-plane shape a reconciling bot needs, so the transition is data rather than a chain of conditionals."

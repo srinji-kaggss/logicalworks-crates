@@ -1,0 +1,70 @@
+id: std-score-evidence-closure
+actor: agent-or-human-dev
+job: Compare two candidates with a composed score, and afterwards be able to say
+  which evidence was measured, which was refused, and whether a refusal ever
+  became an acceptance — without reading the scorer's source.
+prior_knowledge:
+  - Knows the two candidates and roughly how similar they are; has not read
+    `lgwks_std::similarity`.
+  - Assumes a score is a number and that a low number means "no". Both are
+    wrong at the boundary, and this journey is where they learn it.
+start:
+  installation: lgwks_std in `core`; vectors, texts and bounding boxes in hand.
+  state: an over-limit input, a zero-magnitude vector, and a threshold of zero.
+success:
+  visible_outcome: every refusal names the component that could not be measured;
+    a refusal never satisfies an acceptance threshold, including threshold zero;
+    raw cosine keeps its `[-1, 1]` domain and the normalized contract keeps
+    `[0, 1]`; an over-budget input is refused before the row is allocated.
+states:
+  - name: measured
+    expectation: the composition reports a score and the acceptance decision,
+      with every component measured.
+  - name: refused
+    expectation: a component that could not be measured is named, and the
+      composition refuses rather than scoring zero into an accepted verdict.
+  - name: insufficient
+    expectation: all-zero effective evidence is an explicit refusal, not a
+      score of zero that any threshold would accept.
+  - name: over-budget
+    expectation: an input beyond a declared budget is refused with its limit
+      before the dynamic-programming row is allocated.
+invariants:
+  - A refusal is not a measurement; no threshold may read it as one.
+  - Raw cosine and normalized similarity have different domains; the mapping
+    between them is named, never implicit.
+  - A weighted evidence deficit may keep the maximum below one, and must not
+    be presented as an identity score.
+  - The `Similarity` trait's laws hold for every implementation behind it.
+trust_boundaries:
+  - Whatever produced the vectors may hand over a wrong dimension or a `NaN`;
+    the scorer refuses it rather than normalizing it away.
+  - The caller supplies the acceptance threshold, so a threshold of zero is a
+    real configuration that must not turn unavailable evidence into acceptance.
+recovery_contracts:
+  - Every refusal names the component index and the reason, so the caller can
+    repair the evidence instead of guessing.
+  - An insufficient-evidence state is distinct from a measured zero, and both
+    are distinct from a measured non-match.
+agent_contracts:
+  - `try_score` reports raw domain; the shared trait reports the normalized
+    contract; the two are never the same number by accident.
+  - Checked composition carries component identity, measurement versus
+    refusal, and applicability through to the acceptance decision.
+  - No legacy lossy adapter is the default authority-facing path.
+probes:
+  - id: opposite-vectors-split-domains
+    action: Score `[1]` against `[-1]` through the raw and explicitly adapted
+      paths; assert the raw value is `-1` and the normalized value is `0`.
+  - id: refused-component-never-accepts
+    action: Compose an over-limit `EditDistance` at thresholds zero and one;
+      assert both refuse rather than accept.
+  - id: all-zero-evidence-insufficient
+    action: Compose with all component weights zero; assert an explicit
+      insufficient-evidence refusal.
+  - id: budget-refused-before-allocation
+    action: Score inputs whose normalized length exceeds the declared budget;
+      assert the refusal names the limit.
+  - id: unicode-expansion-charges-the-normalized-unit
+    action: Score `İ` against `i`; assert the expanded normalized length is
+      what the budget charges.

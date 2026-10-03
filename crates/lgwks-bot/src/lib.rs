@@ -228,6 +228,54 @@ mod registry;
 /// composes those with the budget, the authority, the intent and any remote
 /// deduplication contract.
 pub mod retry;
+/// The canonical PR-review task: pin a subject, publish at that commit, and
+/// verify the publication independently.
+///
+/// [`review::review_pr`] pins the subject, runs the caller's analysis, checks
+/// freshness, publishes once at the reviewed commit, and verifies through a
+/// separate read-back. Its five outcomes are five facts a caller can act on
+/// without reading a message: [`review::ReviewOutcome::Published`] carries a verified
+/// review id, [`review::ReviewOutcome::Unknown`] an effect that may or may not have
+/// landed, [`review::ReviewOutcome::TargetMoved`] the two commits of a head that
+/// changed, and [`review::ReviewOutcome::Refused`] something the caller can repair.
+///
+/// The body manages no pid, no reap loop and no retry over publication. A lost
+/// response is reconciled by exactly one read, never by a second create — and
+/// [`review::ReviewOutcome::Unknown`] is what makes the local mode's limit visible
+/// rather than hidden: it holds no durable record between attempts, so an
+/// effect it cannot observe from GitHub is reported as unknown for the caller
+/// to decide.
+///
+/// # Example
+///
+/// ```
+/// # #[cfg(all(feature = "script", feature = "process"))]
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use lgwks_bot::domain::gh::{CommitId, Gh, PullRequest, Repository};
+/// use lgwks_bot::review::ReviewRequest;
+/// use lgwks_bot::script::{Scope, Tenant};
+/// use lgwks_bot::task::{Host, task};
+///
+/// let host = Host::builder(Tenant::new("reviewer")?.as_str())?.build()?;
+/// let pull = PullRequest::new(Repository::new("acme/widgets")?, 7);
+/// let review = task("review-pr", |scope: Scope, gh: Gh| async move {
+///     let request = ReviewRequest::new(pull, "COMMENT", "two findings")
+///         .with_marker("example");
+///     lgwks_bot::review::review_pr(scope, gh, request, |_snapshot, _step| {
+///         Ok(String::from("two findings"))
+///     })
+///     .await
+/// })?;
+/// // The run needs a `gh` on PATH and a repository to read; this example
+/// // stops before that rather than reaching the network.
+/// let _ = (CommitId::new("0".repeat(40))?, host, review);
+/// # Ok(())
+/// # }
+/// # #[cfg(not(all(feature = "script", feature = "process")))]
+/// # fn main() {}
+/// ```
+#[cfg(all(feature = "script", feature = "process"))]
+pub mod review;
 /// Async runtime surface (feature `rt`): owned `Runtime`, bounded fan-out,
 /// timers, channels, and opt-in drivers.
 #[cfg(feature = "rt")]

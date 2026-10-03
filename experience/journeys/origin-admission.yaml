@@ -1,0 +1,72 @@
+id: origin-admission
+actor: security-reviewer
+job: Approve a dependency edge by the origin it actually came from, so that a
+  later substitution inside the same source class cannot ride on an earlier
+  approval.
+prior_knowledge:
+  - Has read the register and knows the entry fields.
+  - Believes an approval whose `source` says `git` covers "some git repo".
+    This journey is where that belief is corrected.
+start:
+  installation: lgwks-deps built; a repo whose register approves one edge.
+  state: an approval that names a source class, and a manifest whose edge has
+    the same class but a different origin.
+success:
+  visible_outcome: a substituted Git repository, registry, external path or Git
+    revision is refused with the approved and observed identities named, while
+    the unchanged origin still passes and the workspace gate stays green.
+states:
+  - name: exact
+    expectation: an edge matching the authored origin is admitted; nothing else
+      in its class is.
+  - name: substituted
+    expectation: a different origin in the same class is `OriginDrift` naming
+      both the approved and observed identity.
+  - name: class-only
+    expectation: a legacy entry with no `origin` admits crates.io (both
+      spellings) and is insufficient — not permissive — for a Git or path edge.
+  - name: recovered
+    expectation: the writer adds the exact `origin` line and re-runs; the edge
+      is admitted and the failure is not repeated.
+invariants:
+  - A source class is not an approved origin (INV-DEP-12).
+  - An unknown origin scheme is refused at load and is never an ordinary
+    admitted origin.
+  - The repository's own class-only registry entries keep passing because
+    crates.io is the one deterministic registry they can mean.
+trust_boundaries:
+  - The register is human-authored and reviewable; the gate reads Cargo's
+    original source string and never canonicalizes two distinct sources into
+    one.
+recovery_contracts:
+  - The refusal names the approved origin, the observed origin and the entry.
+  - A class-only Git or path edge names the missing `origin` as the repair.
+agent_contracts:
+  - `Refusal::OriginDrift` carries `approved` and `declared`; it is deterministic
+    and sorted with the other refusals.
+probes:
+  - id: git-repository-substitution
+    action: Approve a Git repo, then audit an edge to a different repo of the
+      same class; assert `OriginDrift` with both URLs. Test
+      `tests/origin_binding.rs::a_substituted_git_repository_is_refused_with_both_origins`.
+  - id: git-revision-substitution
+    action: Change only the admitted revision/reference inside the approved
+      repo; assert `OriginDrift`. Test
+      `tests/origin_binding.rs::a_git_revision_change_is_refused_inside_the_approved_repository`.
+  - id: registry-substitution
+    action: Approve one registry source, audit another; assert `OriginDrift`
+      naming both. Test
+      `tests/origin_binding.rs::a_substituted_registry_is_refused_with_both_identities`.
+  - id: path-substitution
+    action: Approve one external path authority, audit another; assert
+      `OriginDrift` with both authorities. Test
+      `tests/origin_binding.rs::a_substituted_external_path_is_refused_with_both_authorities`.
+  - id: class-only-is-insufficient
+    action: A class-only Git entry must not admit any Git edge; a class-only
+      registry entry admits crates.io only. Tests
+      `lgwks_deps::tests::a_class_only_git_approval_is_insufficient_for_exact_origin`
+      and `lgwks_deps::tests::a_class_only_registry_approval_admits_crates_io_only`.
+  - id: sparse-registry-is-crates-io
+    action: Audit a `sparse+https://index.crates.io/` edge against a class-only
+      registry entry; assert it admits. Test
+      `metadata::tests::a_sparse_registry_source_is_classified_as_a_registry`.

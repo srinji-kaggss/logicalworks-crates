@@ -8,6 +8,22 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### lgwks_std Breaking
+
+- `similarity`: the `Similarity` implementation for `Cosine` now returns the
+  normalized `(raw + 1) / 2` score instead of raw cosine, so the trait's
+  documented `[0.0, 1.0]` interval holds for every implementation behind it
+  (#160 S1). **Migration:** a caller reading `Similarity::score` for a cosine
+  comparison and comparing against a raw-cosine threshold must call
+  `Cosine::try_score`, whose `[-1.0, 1.0]` domain is unchanged. The named
+  mapping is `Cosine::normalized_score`.
+- `similarity`: `ComponentOutcome` and `EvidenceVerdict` expose accessors
+  (`index`, `weight`, `score`, `reason`, `outcomes`) instead of public fields
+  (#160 S2). **Migration:** replace `verdict.score` with `verdict.score()` and
+  `outcome.index` with `outcome.index()`. The fields are private because an
+  outcome is a report about a measurement; a caller that could set a refused
+  component's score would defeat the contract.
+
 ### Fixed
 
 - `tests/http_alloc.rs` joins every single-shot server thread (warm-up, exact and
@@ -17,6 +33,51 @@ explicitly under that crate.
   assertion, ceiling or bound changed; the probe is deterministic across 30 runs.
 
 ### lgwks_std Added
+
+- `glob`, `similarity` and `retry` now state their sharing contract on the
+  types rather than leaving it to inference, and it is checked. `GlobPattern`
+  and `RetryPolicy` are documented `Send + Sync`; `CheckedEvidence` is now
+  genuinely shareable, because `CheckedEvidence::new` takes
+  `Box<dyn CheckedSimilarity<Value = Value> + Send + Sync>` and
+  `CheckedSimilarity::Value` is `Sync` (#154 item 7, hyperscale axis).
+  **Migration:** a custom `CheckedSimilarity` implementation must now satisfy
+  `Send + Sync` (and its `Value` type must be `Sync`) to be installable in a
+  `CheckedEvidence`. A stateless `Copy` scorer satisfies both with no code
+  change; one that holds interior mutability is refused at compile time rather
+  than producing a policy that is thread-safe from the outside and racy inside.
+  A custom scorer used single-threaded behind `Weighted` is unaffected.
+- `bench/std-measure`, a before/after latency harness for the `lgwks_std` paths
+  issues #153, #154, #160 and #164 changed, committed with its raw sample
+  output in `bench/std-measure/results.txt`. It reproduces the #154 G2 table
+  (`*a*` at n = 256..2048 and the six-token pattern, p50/p95/p99 over raw
+  samples) and the #164 retry flat-latency rows, and adds the
+  `O(attempt)`-walking backoff the shipped shift-and-compare form replaced so
+  the flat-latency claim has something to be flat against. See
+  `bench/std-measure/README.md` for the exact command.
+
+- `similarity::CheckedSimilarity`, the checked scoring seam, and
+  `similarity::CheckedEvidence`, the authority-facing composition that carries
+  component identity, the refusal, and applicability through to the acceptance
+  decision (#160 S2). Any refused component withdraws the whole verdict at
+  every threshold including `0.0`; surviving weights are not renormalized, and
+  all-zero effective evidence is `EvidenceError::InsufficientEvidence`.
+- `similarity::EvidenceError`, the typed refusal shared by every checked
+  scorer: `DimensionMismatch`, `ZeroMagnitude`, `NonFinite`, `InputTooLong`,
+  `CollectionTooLong`, `InsufficientEvidence`, and `Composition` (#160 S2).
+- `similarity::{Evidence, ComponentOutcome, EvidenceVerdict}` (#160 S2).
+- `similarity::BoundedJaccard`, a set scorer that charges its element budget
+  before dedup and before the quadratic scan, so hostile input is refused
+  without paying the work it was trying to cause (#160 S4). `Jaccard` remains
+  available and is documented as unbounded.
+- `similarity::is_exact_path_match`, the exact path comparison that the lossy
+  `PathSimilarity` heuristic is not (#160 S4).
+- `similarity::EditDistance::normalized_length`, the unit the scorer's budget
+  actually charges: the lower-case-expanded scalar count, which differs from the
+  raw count because `İ` expands to two (#160 S4).
+- `glob::GlobPattern::token_count` and
+  `glob::GlobScratch::{scalar_capacity, row_capacity, row_count,
+  storage_bytes}`, so a caller can report pattern storage, scalar indexing, and
+  rolling rows separately rather than as one RSS figure (#154).
 
 - `tests/fixtures/wire/consumer_record_v1.hex` is a retained archive that pins
   an application schema and the effective rkyv format (pointer width 32,
@@ -47,6 +108,17 @@ explicitly under that crate.
 - `online::tests::a_whole_probe_fits_one_wall_clock_budget` observes, from
   outside the injected dial, that one probe's resolved candidates share a single
   wall-clock budget rather than restarting per address. (#163)
+
+### lgwks_std Fixed
+
+- `similarity`: a refused component can no longer become an acceptance. The
+  infallible `Weighted::is_accepted` still maps a refusal to `0.0` for source
+  compatibility and is documented as lossy; `CheckedEvidence::verdict` is the
+  path that retains it (#160 S2).
+- `similarity`: the `Similarity` implementation for `EditDistance` no longer
+  reports two identical over-limit inputs as `0.0` through the trait's identity
+  contract when the checked form refuses them (#160 S1).
+
 ### Documentation
 
 - **#155/#170 — documentation claims reconciled to the code at this revision.**
@@ -199,6 +271,46 @@ explicitly under that crate.
   effect still needs the effect journal. Migration: none; every added item is
   additive, and a host that installs no store behaves exactly as before.
   INV-BOT-54.
+- `domain::gh` is a real adapter (#151): the GitHub CLI runs as one supervised
+  child through `Supervisor::run_process`, with bounded capture, a deadline and
+  process-group cleanup, instead of the typed `binding required` refusal the
+  domain returned before. `Gh::snapshot`, `Gh::read_reviews` and `Gh::publish`
+  each admit a validated `ProcessSpec`; arguments are a vector, so no shell is
+  involved. `Repository`, `CommitId` and `ReviewPayload::new` refuse what
+  GitHub would reject rather than sending it. A publication payload is staged as
+  a private file (`create_new`, mode 0600) and removed on every exit path; the
+  name comes from `lgwks_std::random` under `ephemeral`, and a build without
+  that feature refuses to publish rather than reuse a name the OS recycles.
+  Without the `process` feature every call refuses with `GhError::NoRunner`
+  rather than reporting an empty answer a caller could mistake for "GitHub has
+  no reviews". `GhQuery` and `PrSnapshotSource` expose the same binding through
+  `Query` and `Observe`; both require `bot.sys` and `bot.net`.
+- `review`, the canonical PR-review task (#87 step 6, #151): `review_pr` pins a
+  subject, runs a caller-supplied analysis, checks freshness, publishes once at
+  the reviewed commit, and verifies through a separate read-back.
+  `ReviewOutcome` is five states a caller can act on without reading a message —
+  `Published { verified }`, `Unknown`, `TargetMoved { reviewed, current }`,
+  `Refused`. A lost response is reconciled by one read, never a second create;
+  only a `Refused` certainty proves nothing was written, because a non-zero
+  exit cannot distinguish "never arrived" from "applied and the answer was
+  lost". Verification compares subject, body and state and deliberately ignores
+  the application marker, which locates a candidate and is not proof. The body
+  manages no pid, no reap loop and no retry over publication.
+  `cargo run -p lgwks_bot --features process --example review_pr -- <repo> <pr>
+  <EVENT> <body>` runs the whole path; `LGWKS_REVIEW_PUBLISH=0` is a
+  draft-only profile.
+- `domain::gh::MAX_REVIEWS_PER_PULL` and `GhError::ReviewCeiling` (#151):
+  `--paginate` follows GitHub's review pages until the client is done, so the
+  review list used to grow with a pull request's history rather than with any
+  bound of this crate's own. A review read now refuses a list longer than the
+  declared ceiling — a *typed refusal*, not a shortened list. The distinction
+  matters because a truncated list that decoded cleanly is indistinguishable
+  from the whole history, and a verification built on it would report "no
+  matching review" for a review that exists on a page nobody read. Exactly the
+  ceiling is accepted; one more is refused, naming the endpoint, the count and
+  the ceiling. This is a bound, not a truncation: a build without the
+  `process` feature still refuses every call with `NoRunner` rather than
+  reporting an empty snapshot, an empty review list, or review id `0`.
 - `inspect`, typed in-process structural code inspection (#150, R8; feature
   `inspect`): `inspect(&InspectRequest)` parses the subject's bytes with
   `lgwks_ast` and walks the tree against the versioned `RuleSet::STRUCTURAL_V1`
@@ -286,6 +398,59 @@ explicitly under that crate.
   against the hand-written `JoinSet`+`Semaphore` and `join_all_bounded` ways —
   and a `measure_overhead` example prints p50/p95/p99 for `Host::run` and
   `sys::Process`.
+
+### lgwks_deps Added
+
+- `[[approved]]` entries accept an optional `origin`: the exact admitted origin
+  for the entry's source class — a complete registry source, a Git repository
+  plus its admitted revision/reference policy, or an external path authority.
+  Admission now compares origin as well as class, so replacing an approved Git
+  repository, registry, path, or Git revision produces a typed
+  `Refusal::OriginDrift` carrying the approved and observed identities. A legacy
+  class-only entry is exact for crates.io (both its Git and sparse spellings)
+  and insufficient for a Git or path edge; an unknown origin scheme is refused
+  at load and never admitted (INV-DEP-12, #158 A1).
+- Sparse-registry sources (`sparse+…`) are classified as the `registry` source
+  class rather than an unknown scheme, so a sparse crates.io mirror compares as
+  crates.io.
+- Drift diagnosis with several approvals for one crate reports the dimension on
+  the approval that admits the edge's source class, instead of the first
+  mismatch from an unrelated class (#158 acceptance).
+- `[[approved]]` entries accept the admitted-capability policy keys `features`,
+  `required_features`, `uses_default_features`, `optional` and `target`, and an
+  explicit `aliases` list. `DirectEdge` now carries Cargo's authored `features`,
+  `uses_default_features`, `target` and `rename`, so a capability that changes
+  without a class or origin change is a typed `Refusal::FeatureDrift`,
+  `DefaultFeaturesDrift`, `OptionalityDrift` or `TargetDrift` instead of a pass.
+  A dimension an entry does not author is grandfathered (#158 A2, INV-DEP-13).
+- `metadata::DirectEdge::features`/`uses_default_features`/`target`/`rename` are
+  readable through accessors; `rename` is the manifest-local spelling and
+  `package` remains the upstream Cargo identity (#158 A2).
+- `check` prints a receipt binding the subject root, the contract identity and
+  schema version, the exact metadata subject, the policy mode and the assurance
+  scope, and `check --json` exposes the same under the stable keys `mode`,
+  `contract.{digest,schema,entries,repository}`, `subject.{digest,edges,resolved}`
+  and `scope`. `Contract::digest`/`schema` and the `Subject`/`Verdict` types back
+  it; `check_verdict` returns the receipt-bearing verdict (#158 A6, INV-DEP-15).
+- A register may author `[policy] schema`; the committed register is migrated to
+  `schema = 2`. Schema 1 remains readable (#158 A7).
+
+### lgwks_deps Changed
+
+- **Breaking for a Git or path edge: a class-only approval is insufficient.**
+  An `[[approved]]` entry whose `source` is `git` or `path` and that authors no
+  `origin` admits nothing in that class; it is no longer an implicit approval of
+  every origin. **Migration:** add `origin = "<exact source>"` to each Git or
+  path entry (a Git repository plus its `?rev=`/`?branch=` policy, or the exact
+  path authority). A class-only `registry` entry still admits crates.io in both
+  its Git and sparse spellings, so registry entries need no change (#158 A1,
+  INV-DEP-12).
+- Package and owner matching is now byte-exact against the Cargo-authored
+  identity. **Migration:** a register that relied on the implicit `-`/`_` (or
+  case) fold to match a differently-spelled package must either write the exact
+  Cargo name or add `aliases = "<spelling>"` to that entry; an alias is
+  collision-checked and names exactly one package. The committed register uses
+  exact names throughout and needs no alias (#158 A2, INV-DEP-14).
 
 ### lgwks_bot Changed
 

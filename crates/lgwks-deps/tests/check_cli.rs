@@ -233,17 +233,23 @@ fn conflicting_approval_keys_cannot_admit_a_real_path_edge() -> TestResult {
     )?;
     copy_fixture_files(&helper(), &helper_root, &["Cargo.toml", "src/lib.rs"])?;
     let register = scratch.path().join("APPROVED.toml");
-    let prefix = concat!(
-        "[policy]\n",
-        "enforce = true\n",
-        "[[approved]]\n",
-        "crate = \"helper\"\n",
-        "tier = \"boundary\"\n",
-        "version = \"*\"\n",
-        "owner = \"subject\"\n",
-        "capability = \"fixture.helper\"\n",
-        "source = \"path\"\n",
-        "allowed_consumers = \"subject,other\"\n",
+    // A path approval needs its exact origin (INV-DEP-12): the class alone is
+    // insufficient, and the resolved helper directory is that origin.
+    let prefix = format!(
+        concat!(
+            "[policy]\n",
+            "enforce = true\n",
+            "[[approved]]\n",
+            "crate = \"helper\"\n",
+            "tier = \"boundary\"\n",
+            "version = \"*\"\n",
+            "owner = \"subject\"\n",
+            "capability = \"fixture.helper\"\n",
+            "source = \"path\"\n",
+            "origin = \"{origin}\"\n",
+            "allowed_consumers = \"subject,other\"\n",
+        ),
+        origin = helper_root.display(),
     );
     let suffix = concat!(
         "allowed_kinds = \"normal\"\n",
@@ -301,8 +307,8 @@ fn conflicting_approval_keys_cannot_admit_a_real_path_edge() -> TestResult {
         refused
             .stderr
             .contains("duplicate key \"allowed_consumers\"")
-            && refused.stderr.contains("first assignment is at line 10")
-            && refused.stderr.contains("line 11"),
+            && refused.stderr.contains("first assignment is at line 11")
+            && refused.stderr.contains("line 12"),
         "the CLI refusal must name the field and both positions: {:?}",
         refused.stderr
     );
@@ -570,6 +576,127 @@ fn an_unknown_flag_is_refused() -> TestResult {
             .contains("unknown option for `check`: --bogus"),
         "the refusal quotes the token it did not recognise: {:?}",
         outcome.stderr
+    );
+    Ok(())
+}
+
+/// A complete `check` receipt binds the subject root, the contract identity and
+/// version, the exact metadata subject, the policy mode and the assurance scope.
+#[test]
+fn the_human_receipt_binds_contract_subject_and_mode() -> TestResult {
+    let enforcement = check_from(&clean(), &["check"])?;
+    assert_eq!(enforcement.code, Some(0), "stderr {:?}", enforcement.stderr);
+    for needle in [
+        "CONTRACT  fnv1a128:",
+        "SUBJECT   fnv1a128:",
+        "MODE      enforcement",
+        "SCOPE  ",
+    ] {
+        assert!(
+            enforcement.stdout.contains(needle),
+            "the receipt must carry {needle:?}: {:?}",
+            enforcement.stdout
+        );
+    }
+    assert!(
+        enforcement.stdout.contains(&format!("schema={}", 1_u32)),
+        "the contract version is bound: {:?}",
+        enforcement.stdout
+    );
+
+    let diagnosis = check_from(
+        &subject(),
+        &["check", "--contract", argument(&clean_register())?],
+    )?;
+    assert_eq!(diagnosis.code, Some(2));
+    assert!(
+        diagnosis.stderr.contains("MODE      diagnosis"),
+        "an override is diagnosis, not enforcement: {:?}",
+        diagnosis.stderr
+    );
+    Ok(())
+}
+
+/// The `--json` receipt exposes the same identities under stable keys.
+#[test]
+fn the_json_receipt_has_stable_identity_fields() -> TestResult {
+    let enforcement = check_from(&clean(), &["check", "--json"])?;
+    assert_eq!(enforcement.code, Some(0), "stderr {:?}", enforcement.stderr);
+    let payload: lgwks_std::json::Value = lgwks_std::json::from_str(&enforcement.stdout)?;
+    assert_eq!(payload["mode"], "enforcement");
+    assert_eq!(payload["contract"]["schema"], 1);
+    assert_eq!(payload["contract"]["entries"], 0);
+    assert_eq!(payload["subject"]["resolved"], true);
+    assert_eq!(payload["subject"]["edges"], 0);
+    assert!(
+        payload["contract"]["digest"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("fnv1a128:"),
+        "the contract digest is present and stable: {}",
+        payload["contract"]["digest"]
+    );
+    assert!(
+        payload["subject"]["digest"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("fnv1a128:"),
+        "the subject digest is present and stable: {}",
+        payload["subject"]["digest"]
+    );
+    assert!(
+        payload["scope"]
+            .as_str()
+            .unwrap_or("")
+            .contains("no enforcer"),
+        "the assurance scope travels with the receipt"
+    );
+
+    let diagnosis = check_from(
+        &subject(),
+        &[
+            "check",
+            "--contract",
+            argument(&clean_register())?,
+            "--json",
+        ],
+    )?;
+    let payload: lgwks_std::json::Value = lgwks_std::json::from_str(&diagnosis.stdout)?;
+    assert_eq!(payload["mode"], "diagnosis");
+    assert_eq!(payload["subject"]["resolved"], true);
+    Ok(())
+}
+
+/// A receipt is a binding: changing the register changes its digest, and
+/// changing the graph changes the subject digest.
+#[test]
+fn the_receipt_changes_when_its_subject_changes() -> TestResult {
+    let scratch = Scratch::new("receipt-binding")?;
+    let first = scratch.path().join("first.toml");
+    let second = scratch.path().join("second.toml");
+    std::fs::write(&first, "[policy]\nschema = 2\nenforce = true\n")?;
+    std::fs::write(
+        &second,
+        "[policy]\nschema = 2\nenforce = true\n# a changed register\n",
+    )?;
+
+    let digest_of = |register: &Path| -> Result<String, Box<dyn Error>> {
+        let outcome = check_from(
+            &clean(),
+            &["check", "--contract", argument(register)?, "--json"],
+        )?;
+        let payload: lgwks_std::json::Value = lgwks_std::json::from_str(&outcome.stdout)?;
+        Ok(payload["contract"]["digest"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned())
+    };
+
+    let first_digest = digest_of(&first)?;
+    let second_digest = digest_of(&second)?;
+    assert_ne!(
+        first_digest, second_digest,
+        "a changed register must change the bound contract digest"
     );
     Ok(())
 }

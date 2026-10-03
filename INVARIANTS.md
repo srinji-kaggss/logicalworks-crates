@@ -53,6 +53,55 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
   position; valid unique fields have order-independent meaning, and parsed
   approvals cannot be mutated outside the crate. · why: #157 ·
   enforced by: `contract::tests::invariant_register_uses_the_shared_duplicate_key_refusal`
+- **INV-DEP-12** A source class is not an approved origin: an admission compares
+  the Cargo origin (a complete registry source, a Git repository plus its
+  admitted revision/reference policy, or an external path authority), so a
+  substitution inside an approved class is `OriginDrift`, never a pass. A legacy
+  class-only entry is exact for crates.io — both its Git and sparse spellings —
+  and insufficient for a Git or path edge; an unknown scheme is neither
+  authorable nor an ordinary admitted origin. · why: #158 A1 · enforced by:
+  `tests/origin_binding.rs`, `tests/sim_origin.rs`, and
+  `lgwks_deps::tests::an_approved_git_origin_admits_only_that_repository`,
+  `lgwks_deps::tests::a_git_revision_policy_change_is_an_origin_drift`,
+  `lgwks_deps::tests::an_approved_registry_origin_refuses_a_different_registry`,
+  `lgwks_deps::tests::a_class_only_registry_approval_admits_crates_io_only`,
+  `lgwks_deps::tests::a_class_only_git_approval_is_insufficient_for_exact_origin`,
+  `lgwks_deps::tests::an_approved_path_origin_refuses_a_different_path`,
+  `lgwks_deps::tests::an_unknown_scheme_is_not_an_admitted_origin`,
+  `lgwks_deps::tests::multiple_approvals_report_the_relevant_failed_dimension`,
+  `metadata::tests::a_sparse_registry_source_is_classified_as_a_registry`
+- **INV-DEP-13** An approval may author admitted-capability policy: `features`
+  (the complete set of upstream features the edge may enable), `required_features`
+  (a subset that must be enabled), `uses_default_features` and `optional` (the
+  exact authored bit) and `target` (the exact scope; `""` is unconditional). A
+  dimension an entry authors is enforced exactly — an enabled feature outside the
+  set, a missing required feature, a flipped bit, a changed scope is a typed
+  `Refusal::{FeatureDrift, DefaultFeaturesDrift, OptionalityDrift, TargetDrift}`;
+  a dimension an entry does not author is grandfathered rather than refused.
+  Mandatory and allowed features are distinguished, so ordering is never
+  significant. · why: #158 A2 · enforced by: `tests/feature_policy.rs`,
+  `tests/sim_dependency_policy.rs`, and
+  `lgwks_deps::tests::a_class_only_registry_approval_admits_crates_io_only`
+- **INV-DEP-14** Cargo package identity is byte-exact: an approval admits an
+  observed package name only when it is that name, or a name the entry lists in
+  its explicit `aliases`. There is no implicit `-`/`_` fold or case fold, so two
+  distinct packages whose spellings fold alike cannot share one authority. An
+  alias names exactly one package (collision-checked at load, including against
+  another package's real name), and a `package =` rename stays a local spelling
+  of the upstream identity rather than a second one. · why: #158 A2 · enforced by:
+  `tests/identity_binding.rs`,
+  `contract::tests::lookup_is_exact_and_only_an_explicit_alias_is_tolerated`,
+  `contract::tests::aliases_collide_rather_than_share_authority`
+- **INV-DEP-15** A `check` receipt binds the subject root, the contract identity
+  and schema version (a stable digest of the register text), the exact metadata
+  subject (a stable digest over every direct edge's identity), the policy mode
+  (`--contract` diagnosis versus committed enforcement) and the assurance scope;
+  the `--json` form exposes the same under stable keys. The digest is an identity
+  fingerprint, not an adversarial integrity claim. · why: #158 A6 · enforced by:
+  `tests/check_cli.rs` (`the_human_receipt_binds_contract_subject_and_mode`,
+  `the_json_receipt_has_stable_identity_fields`,
+  `the_receipt_changes_when_its_subject_changes`)
+
 ## lgwks_bot — durable execution
 
 Each of these was a shipped defect. Treat the list as the spec.
@@ -102,6 +151,31 @@ Each of these was a shipped defect. Treat the list as the spec.
 
 ## lgwks_std
 
+- **INV-STD-SIM-2** A score and a refusal are different things. Raw cosine keeps
+  its `[-1, 1]` domain and the shared `Similarity` contract reads it through the
+  explicit, named `(raw + 1) / 2` mapping, so every implementation behind the
+  trait satisfies its `[0.0, 1.0]` and identity laws. A weight total below `1.0`
+  is a declared evidence deficit and is never renormalized or presented as
+  identity. Any refused component withdraws the whole composed verdict at every
+  threshold including `0.0`, is attributed to its component index, and its
+  weight is not redistributed onto a surviving neighbour; all-zero effective
+  evidence is an explicit `InsufficientEvidence`. The infallible `Similarity`
+  and `Weighted::is_accepted` methods remain lossy for source compatibility and
+  are not the authority-facing path. An edit or set budget is charged against
+  the *normalized* unit — the lower-case-expanded scalar count — and a set
+  budget is charged before dedup and before the quadratic scan. The lossy path
+  heuristic is not reachable as an exact-match proof. · why: #160 S1/S2/S4 ·
+  enforced by: `tests/similarity_evidence_contract.rs`
+  (`cosine_trait_impl_stays_inside_the_documented_unit_interval`,
+  `a_refused_component_is_not_accepted_at_threshold_zero`,
+  `all_zero_weight_refuses_regardless_of_threshold`,
+  `typed_refusals_carry_component_identity_through_composition`,
+  `bounded_jaccard_refuses_before_the_quadratic_scan`,
+  `budget_refusal_precedes_amplification_and_is_measurable`,
+  `the_edit_budget_charges_the_normalized_unit_not_the_raw_scalar_count`,
+  `the_heuristic_path_score_is_never_an_exact_match_proof`), `similarity.rs`
+  (`every_evidence_error_variant_is_exercised_by_a_test`), and
+  `tests/sim_similarity_sweep.rs` (`the_same_seed_replays_to_the_same_trace`)
 - **INV-STD-SIM-1** The documented `Geometry::score` accepts both `[f64; 4]`
   and `BoundingBox`. · why: #160 S3 · enforced by:
   `tests/similarity_public_api.rs`
@@ -200,9 +274,29 @@ Each of these was a shipped defect. Treat the list as the spec.
   component-invalid `**` as typed errors. Compilation is O(M); each token
   transition is O(N) over the finite Unicode scalar alphabet; reusable
   scratch retains one scalar index and two rolling rows in O(N), with no row
-  allocation per token. · enforced by: `glob::tests` work-growth, scratch
-  capacity, Unicode, strict-error and exact double-star cases, plus
-  `tests/glob_public.rs`
+  allocation per token. A compiled `GlobPattern` carries no caller data and
+  holds no interior mutability, so one pattern serves any number of concurrent
+  callers; the mutable half is the caller-owned `GlobScratch`, which
+  `is_match_with` takes by `&mut`. · enforced by: `glob::tests` work-growth,
+  scratch capacity, Unicode, strict-error and exact double-star cases, plus
+  `tests/glob_public.rs` and `tests/sim_shared_policy_tiers.rs`
+  (`one_shared_matcher_evidence_policy_and_retry_policy_serve_every_tier`,
+  `the_shared_values_are_reachable_through_an_arc_clone`)
+- **INV-STD-SHARED-POLICY** One compiled matcher, one evidence policy and one
+  retry policy serve 100, 1 000 and 10 000 concurrent callers with answers
+  bit-identical to the single-threaded reference, zero divergence at every tier,
+  and memory that does not scale with the caller count. Each caller owns its
+  scratch; the shared values carry no caller data. A host that cannot reach a
+  tier reports the requested tier and the level reached. A checked composition
+  is `Send + Sync` because it is immutable and its components are, so the
+  sharing claim is on the types rather than inferred from a run that did not
+  crash; two tenants' policies over one input never cross. · why: the reviewer
+  note on #154 item 7 and the hyperscale axis · enforced by:
+  `tests/sim_shared_policy_tiers.rs`
+  (`one_shared_matcher_evidence_policy_and_retry_policy_serve_every_tier`,
+  `the_shared_values_are_reachable_through_an_arc_clone`),
+  `glob::tests::a_compiled_pattern_is_shareable_across_threads_by_construction`,
+  and `tests/sim_tenant_isolation.rs`
 - **INV-CODEC-1** JSON and RON text/slice decoders preserve input borrowing
   where their decoders support it; escaped text that needs allocation is not
   reported as borrowed. RON writer failures distinguish serialization from I/O
@@ -627,6 +721,51 @@ Each of these was a shipped defect. Treat the list as the spec.
   `saturation_reaches_100_1000_and_10000_with_recovery`,
   `two_tenants_stay_isolated`, `a_dropped_run_releases_everything`,
   `names_inputs_and_limits`) and `examples/compare_orchestration.rs`
+
+- **INV-BOT-80** A GitHub publication is reported only from an independent
+  read-back, never from a client's exit code. `ReviewOutcome::Published` is
+  produced only when a review at the reviewed commit, with the intended body and
+  state, was observed on a separate call; the create's own success is transport
+  evidence and is never one. A publish step that failed for any reason other
+  than a `Refused` certainty — a non-zero exit, a dropped connection, a
+  deadline — leaves the effect unobserved and is reconciled by exactly one read,
+  because an exit code cannot distinguish "never arrived" from "applied and the
+  answer was lost". A reconciliation that cannot establish the outcome stays
+  `Unknown` and issues no second create. A head that changed between the pinned
+  read and the publication is `TargetMoved`, naming both commits, and publishes
+  nothing; the review subject is never silently re-pointed at the new head.
+  Verification compares subject, body and state and ignores the application
+  marker. A staged payload carries a name no two concurrent publications share,
+  taken from `lgwks_std::random` under `ephemeral`; a build without that feature
+  refuses to publish rather than reuse a name the OS recycles. A review read is
+  bounded by the declared `domain::gh::MAX_REVIEWS_PER_PULL` rather than by
+  `--paginate`'s patience: a list longer than the ceiling is refused whole with
+  `GhError::ReviewCeiling`, because a prefix that decoded cleanly is
+  indistinguishable from the whole history and would report "no matching
+  review" for a review on a page nobody read. A build without the `process`
+  feature refuses every call with `GhError::NoRunner` and returns no snapshot,
+  review list or review id at all. · why: #151, #87 step 6 (PR-06, PR-07,
+  PR-09) · enforced by:
+  `tests/pr_review_journey.rs` (`a_lost_response_is_reconciled_by_reading_back_and_never_reposted`,
+  `a_loss_that_cannot_be_reconciled_stays_unknown_and_still_does_not_repost`,
+  `a_moved_head_is_a_typed_refusal_and_publishes_nothing`,
+  `a_review_is_published_at_the_pinned_head_and_verified_by_a_separate_read`,
+  `a_non_zero_exit_is_not_a_published_review`,
+  `a_client_that_never_starts_is_a_definite_non_effect_and_is_not_reconciled`,
+  `two_identities_on_one_repository_stay_isolated`) and
+  `tests/sim_review_pr.rs` (`subject_r64`, `publication_r64`, `identity_r64`,
+  `same_seed_same_trace_hash`, `every_outcome_is_reachable_in_the_family`),
+  `tests/sim_review_path.rs` (`verified_and_not_observed_r32`,
+  `gh_exit_failures_r32`, `deadline_stop_r32`,
+  `head_moved_between_snapshot_and_publish_r32`,
+  `malformed_and_oversized_answers_r32`,
+  `a_publication_the_ceiling_cannot_verify_stays_unknown`,
+  `same_seed_same_trace_hash_r32`, `saturation_r32`,
+  `two_tenants_on_one_pull_request_r32`, `cancellation_under_faults_r16`,
+  `duplicate_submission_r16`, `two_repositories_on_one_host_r16`) and
+  `tests/gh_binding.rs` (`a_review_list_past_the_ceiling_is_refused_not_truncated`,
+  `a_review_list_exactly_at_the_ceiling_is_read`,
+  `a_malformed_review_list_is_refused_rather_than_decoded_into_a_partial_answer`)
 
 ## Open questions for the Director
 

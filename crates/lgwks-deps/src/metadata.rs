@@ -160,6 +160,28 @@ pub struct DirectEdge {
     pub workspace: bool,
     /// Repository declared by a workspace path target, when present.
     pub target_repository: Option<String>,
+    /// Features Cargo reports as enabled on this authored declaration.
+    ///
+    /// Retained verbatim, including the ordering Cargo emitted it in, so an
+    /// admitted-feature policy compares against what the manifest actually
+    /// asked for rather than against a re-derived set.
+    pub(crate) features: Vec<String>,
+    /// Whether the declaration enables the dependency's default features.
+    ///
+    /// This is the authored `default-features = false` decision, preserved even
+    /// though it is not part of the resolved dependency graph: a capability
+    /// policy that admits an edge with defaults off and refuses one that turned
+    /// them on has to see the authored bit.
+    pub(crate) uses_default_features: bool,
+    /// The target `cfg(…)` this declaration is scoped to, or `None` when it is
+    /// unconditional. Cargo reports target-specific tables here.
+    pub(crate) target: Option<String>,
+    /// The manifest-local alias when `package =` renamed the upstream crate.
+    ///
+    /// Distinct from [`package`](Self::package), which is Cargo's package
+    /// identity and the name the register approves. A rename is a local
+    /// spelling and never a second identity.
+    pub(crate) rename: Option<String>,
 }
 
 impl DirectEdge {
@@ -179,6 +201,30 @@ impl DirectEdge {
     #[must_use]
     pub fn requirement(&self) -> &str {
         &self.requirement
+    }
+
+    /// Features Cargo reports enabled on this declaration.
+    #[must_use]
+    pub fn features(&self) -> &[String] {
+        &self.features
+    }
+
+    /// Whether the declaration enables the dependency's default features.
+    #[must_use]
+    pub const fn uses_default_features(&self) -> bool {
+        self.uses_default_features
+    }
+
+    /// The target `cfg(…)` this declaration is scoped to, when scoped.
+    #[must_use]
+    pub fn target(&self) -> Option<&str> {
+        self.target.as_deref()
+    }
+
+    /// The manifest-local alias when the dependency was renamed.
+    #[must_use]
+    pub fn rename(&self) -> Option<&str> {
+        self.rename.as_deref()
     }
 }
 
@@ -408,19 +454,44 @@ struct CargoDependency {
     /// absolute in current Cargo, resolved against the declaring package's
     /// directory when relative. Present only when `source` is absent.
     path: Option<String>,
+    /// Features Cargo reports enabled on this declaration. Absent in
+    /// hand-written fixtures and older schema revisions, so it defaults empty;
+    /// real Cargo always emits it.
+    #[serde(default)]
+    features: Vec<String>,
+    /// Whether the declaration enables default features. Cargo always emits
+    /// this; a fixture that omits it is read as the Cargo default, `true`.
+    #[serde(default = "default_true")]
+    uses_default_features: bool,
+    /// Target `cfg(…)` for a target-specific declaration.
+    #[serde(default)]
+    target: Option<String>,
+    /// Local alias when the manifest renamed the dependency with `package =`.
+    #[serde(default)]
+    rename: Option<String>,
+}
+
+/// The Cargo default for `uses_default_features` when a fixture omits the key.
+const fn default_true() -> bool {
+    true
 }
 
 /// Classifies one authored edge by the origin Cargo recorded.
 ///
 /// A `source` key takes precedence over `path`, matching Cargo's own reading:
 /// a registry package reached through a path override reports both, and the
-/// registry spelling is what the register approves. `registry+` and `git+` are
-/// the two schemes the gate names; any other scheme is carried verbatim as
+/// registry spelling is what the register approves. `registry+`, `sparse+` and
+/// `git+` are the schemes the gate names — the two registry spellings differ
+/// only in transport and name one registry — while any other scheme is carried
+/// verbatim as
 /// [`DependencySource::Other`] so an unknown origin is reported rather than
 /// dropped. An edge with neither key cannot be placed at all and is refused.
 fn source(dependency: &CargoDependency) -> Result<DependencySource, MetadataError> {
     match (dependency.source.as_deref(), dependency.path.as_deref()) {
         (Some(value), _) if value.starts_with("registry+") => {
+            Ok(DependencySource::Registry(value.to_owned()))
+        }
+        (Some(value), _) if value.starts_with("sparse+") => {
             Ok(DependencySource::Registry(value.to_owned()))
         }
         (Some(value), _) if value.starts_with("git+") => {
@@ -525,15 +596,34 @@ fn direct_edges(metadata: CargoMetadata) -> Result<Vec<DirectEdge>, MetadataErro
                 target_repository: member
                     .and_then(|(_, repository)| repository)
                     .map(str::to_owned),
+                features: dependency.features.clone(),
+                uses_default_features: dependency.uses_default_features,
+                target: dependency.target.clone(),
+                rename: dependency.rename.clone(),
             });
         }
     }
+    // A package may declare the same upstream crate several times (once per
+    // target, once renamed, once optional); every dimension the register can
+    // distinguish joins the sort so the emitted order is a total order and two
+    // runs over one document agree.
     edges.sort_by(|left, right| {
-        (&left.consumer, &left.package, left.kind).cmp(&(
-            &right.consumer,
-            &right.package,
-            right.kind,
-        ))
+        (
+            &left.consumer,
+            &left.package,
+            left.kind,
+            &left.target,
+            &left.rename,
+            &left.features,
+        )
+            .cmp(&(
+                &right.consumer,
+                &right.package,
+                right.kind,
+                &right.target,
+                &right.rename,
+                &right.features,
+            ))
     });
     Ok(edges)
 }
@@ -1658,6 +1748,36 @@ mod tests {
         assert!(serde.optional);
         assert!(!serde.workspace);
         assert_eq!(proptest.kind, DependencyKind::Dev);
+        Ok(())
+    }
+
+    /// A sparse-registry source names the same registry class as the Git
+    /// index, so an admission comparing registry identity is not defeated by
+    /// Cargo's transport spelling.
+    #[test]
+    fn a_sparse_registry_source_is_classified_as_a_registry() -> TestResult {
+        let input = r#"{
+          "packages": [{
+            "id": "app",
+            "name": "app",
+            "repository": null,
+            "manifest_path": "/repo/Cargo.toml",
+            "dependencies": [
+              {"name":"serde","source":"sparse+https://index.crates.io/","req":"^1","kind":null,"optional":false,"path":null}
+            ]
+          }],
+          "workspace_members": ["app"]
+        }"#;
+        let edges = parse(input)?;
+        let edge = edges
+            .first()
+            .ok_or("the sparse registry edge must be extracted")?;
+        assert_eq!(
+            edge.source.class(),
+            "registry",
+            "a sparse+ source is a registry, not an unknown scheme"
+        );
+        assert_eq!(edge.source.detail(), "sparse+https://index.crates.io/");
         Ok(())
     }
 
