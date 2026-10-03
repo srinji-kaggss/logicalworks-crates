@@ -18,41 +18,53 @@
 use std::error::Error;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use lgwks_bot::journal::StorageGate;
-use lgwks_bot::script::{FlowError, Scope, remember};
-use lgwks_bot::task::{Task, task};
 
-/// The named future a task body returns, so a body has one type every call site can
-/// pass to a [`Task`].
-///
-/// `Pin<Box<dyn Future>>` rather than the concrete anonymous future: the point of
-/// these files is to prove what the store and the report do, and a boxed future is
-/// the only spelling of "a task body" that can be named in a signature.
-pub type BodyFuture = Pin<Box<dyn Future<Output = Result<u32, FlowError>>>>;
+#[cfg(feature = "script")]
+pub use body::{BodyFuture, OneStep, boxed_body, one_step_task};
 
-/// The task type both files build over [`BodyFuture`].
-pub type OneStep = Task<fn(Scope, u32) -> BodyFuture>;
+/// The durable task body the resume files drive. Gated on `script`, so the
+/// journal liveness target — which shares only the parked-device instrument —
+/// builds with `rt` alone.
+#[cfg(feature = "script")]
+mod body {
+    use std::future::Future;
+    use std::pin::Pin;
 
-/// A task whose whole body is one `remember` call over a caller-chosen value.
-///
-/// One task rather than one per test, because the durable claim is about the
-/// `remember` and not about the body around it, and two differently-shaped bodies
-/// would be two different things being measured.
-pub fn one_step_task() -> Result<OneStep, FlowError> {
-    task("step", boxed_body)
-}
+    use lgwks_bot::script::{FlowError, Scope, remember};
+    use lgwks_bot::task::{Task, task};
 
-/// The one-step body behind its nameable return type.
-pub fn boxed_body(scope: Scope, value: u32) -> BodyFuture {
-    Box::pin(
-        async move { remember(&scope, "v", || async move { Ok::<_, FlowError>(value) }).await },
-    )
+    /// The named future a task body returns, so a body has one type every call site can
+    /// pass to a [`Task`].
+    ///
+    /// `Pin<Box<dyn Future>>` rather than the concrete anonymous future: the point of
+    /// these files is to prove what the store and the report do, and a boxed future is
+    /// the only spelling of "a task body" that can be named in a signature.
+    pub type BodyFuture = Pin<Box<dyn Future<Output = Result<u32, FlowError>>>>;
+
+    /// The task type both files build over [`BodyFuture`].
+    pub type OneStep = Task<fn(Scope, u32) -> BodyFuture>;
+
+    /// A task whose whole body is one `remember` call over a caller-chosen value.
+    ///
+    /// One task rather than one per test, because the durable claim is about the
+    /// `remember` and not about the body around it, and two differently-shaped bodies
+    /// would be two different things being measured.
+    pub fn one_step_task() -> Result<OneStep, FlowError> {
+        task("step", boxed_body)
+    }
+
+    /// The one-step body behind its nameable return type.
+    pub fn boxed_body(scope: Scope, value: u32) -> BodyFuture {
+        Box::pin(
+            async move { remember(&scope, "v", || async move { Ok::<_, FlowError>(value) }).await },
+        )
+    }
 }
 
 /// A unique scratch directory, removed when the guard ends.

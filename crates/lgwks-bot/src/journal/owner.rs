@@ -580,17 +580,19 @@ fn serve<S, A>(
         // unable to say whether they landed, which is the same position a failed
         // write leaves it in: poisoned until a reopen replays the truth.
         let failed = outcome.is_err() || reply.was_abandoned();
-        // The answer goes out whether or not anyone is listening: a caller that has
-        // gone cannot be told, but the bytes have moved either way, and the poison
-        // below is what makes the next caller read the file back rather than trust a
-        // view that may be behind it.
-        reply.publish(outcome);
         if failed {
             // A failure inside the ordered step may have moved a prefix of the
             // bytes, so the handle cannot say what is on the disk and refuses every
-            // later append until a reopen replays the truth.
+            // later append until a reopen replays the truth. Latched *before* the
+            // answer goes out: a caller woken by the failure may append again at
+            // once, and must find the handle already refusing.
             lock(&slot).poisoned = true;
         }
+        // The answer goes out whether or not anyone is listening: a caller that has
+        // gone cannot be told, but the bytes have moved either way, and the poison
+        // above is what makes the next caller read the file back rather than trust
+        // a view that may be behind it.
+        reply.publish(outcome);
     }
     drop(file);
     drop(state);
