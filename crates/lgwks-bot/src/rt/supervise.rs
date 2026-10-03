@@ -1320,6 +1320,16 @@ impl Supervisor {
     /// - **Truthful about a stop.** A deadline kill is reported through
     ///   [`ProcessRun::deadline_fired`], not as a normal exit, and its cleanup
     ///   receipt is the group's.
+    /// - **Observable while it runs.** `on_line`, when given, is called once per
+    ///   newline-terminated line of **stdout** as the child writes it, from the
+    ///   same pipe read that retains the output. It is what makes a service's
+    ///   readiness an observation of the child's output rather than a timer: the
+    ///   caller's own readiness gate is closed on the line the child printed,
+    ///   while the child is still running, and a child that never prints is
+    ///   never released. The observer is called only for lines the capture read,
+    ///   so a spec whose stdout is not [`StdioPolicy::Capture`](crate::rt::process::StdioPolicy::Capture)
+    ///   observes nothing — the caller declares the capture, and this is the same
+    ///   declaration. See [`Supervisor::run_process_observed`].
     ///
     /// # Errors
     ///
@@ -1328,8 +1338,35 @@ impl Supervisor {
     /// the program — both establish that nothing ran. A failure *after* the
     /// child started is [`ProcessRunError::AfterStart`], which establishes the
     /// opposite and is why the two are distinguishable.
-    #[cfg(all(unix, feature = "process"))]
+    ///
+    /// One method on every target: the Unix body is [`Self::run_process_observed`]
+    /// and the non-Unix body is its typed pre-fork refusal, and choosing between
+    /// them behind one signature is what keeps a caller from having to know which
+    /// platform it compiled for before it can run a command.
+    #[cfg(feature = "process")]
     pub async fn run_process(&mut self, spec: &ProcessSpec) -> Result<ProcessRun, ProcessRunError> {
+        self.run_process_observed(spec, None).await
+    }
+
+    /// [`Supervisor::run_process`] with an observer on the child's stdout lines.
+    ///
+    /// The form a service's readiness takes. The observer is a `&dyn Fn` rather
+    /// than a boxed closure because it lives only for the run's duration and
+    /// never crosses a thread: it is called on the task driving this child, from
+    /// inside the pipe read, between the child's write and this caller's next
+    /// observation. A `None` observer is the same call with no observation, and
+    /// is what [`Supervisor::run_process`] does.
+    ///
+    /// # Errors
+    ///
+    /// As [`Supervisor::run_process`]: the observer changes what the caller
+    /// observes *while* the child runs, never what the run reports after it.
+    #[cfg(all(unix, feature = "process"))]
+    pub async fn run_process_observed(
+        &mut self,
+        spec: &ProcessSpec,
+        on_line: Option<LineObserver<'_>>,
+    ) -> Result<ProcessRun, ProcessRunError> {
         let Some(permit) = self.claim().await else {
             return Err(ProcessRunError::Refused);
         };
@@ -1348,7 +1385,10 @@ impl Supervisor {
         let task = self.allocate_task_id();
         let group = ProcessGroup::of(&child, task, permit, Arc::clone(&self.cleanup_owners));
         self.spawned = self.spawned.saturating_add(1);
-        let end = drive_process(&clock, child, deadline, &token, group, out_limit, err_limit).await;
+        let end = drive_process_observed(
+            &clock, child, deadline, &token, group, out_limit, err_limit, on_line,
+        )
+        .await;
         self.completed = self.completed.saturating_add(1);
         let deadline_fired = matches!(end.observation, ProcessObservation::Deadline);
         let settled = match end.observation {
@@ -1401,13 +1441,14 @@ impl Supervisor {
 
     /// Process-group containment is unavailable on non-Unix targets.
     #[cfg(all(not(unix), feature = "process"))]
-    pub async fn run_process(&mut self, spec: &ProcessSpec) -> Result<ProcessRun, ProcessRunError> {
-        let _ = spec;
+    pub async fn run_process_observed(
+        &mut self,
+        spec: &ProcessSpec,
+        on_line: Option<LineObserver<'_>>,
+    ) -> Result<ProcessRun, ProcessRunError> {
+        let _ = (spec, on_line);
         Err(ProcessRunError::NotStarted {
-            source: io::Error::new(
-                io::ErrorKind::Unsupported,
-                "lgwks_bot: supervised process-group cleanup is Unix-only",
-            ),
+            source: Self::no_process_group(),
         })
     }
 
@@ -1415,10 +1456,21 @@ impl Supervisor {
     #[cfg(all(not(unix), feature = "process"))]
     pub async fn spawn_process(&mut self, spec: &ProcessSpec) -> io::Result<TaskId> {
         let _ = spec;
-        Err(io::Error::new(
+        Err(Self::no_process_group())
+    }
+
+    /// The one refusal every non-Unix process door returns.
+    ///
+    /// Both doors say the same thing for the same reason — there is no process
+    /// group to own, reap or clean up on this target — so the message is written
+    /// once. A second copy is a second statement about the same boundary, and
+    /// the two would drift.
+    #[cfg(all(not(unix), feature = "process"))]
+    fn no_process_group() -> io::Error {
+        io::Error::new(
             io::ErrorKind::Unsupported,
             "lgwks_bot: supervised process-group cleanup is Unix-only",
-        ))
+        )
     }
 
     /// Cancel every task, wait for the set to drain, and return what it
@@ -2200,6 +2252,29 @@ async fn observe_pid_without_reaping(
     }
 }
 
+/// Called once for each newline-terminated line of a child's stdout, as the
+/// child writes it.
+///
+/// The shape a service's readiness gate takes: a long-lived child announces the
+/// address or fact it is ready at on one line, and the caller closes its own
+/// gate on that line rather than on a timer.
+///
+/// `Send + Sync` because a process driver is also run from
+/// [`Supervisor::spawn_process`]'s spawned task, which must be `Send`; a
+/// non-`Send` observer would force the unobserved driver to have a different
+/// signature from the observed one. The bound is honest rather than a
+/// convenience: the observer receives a line it must not retain, it is called
+/// synchronously on the task driving one child, and a readiness gate it closes
+/// is an `Arc`-backed fact that *is* shareable. A caller whose gate needs
+/// thread-local state cannot be one, and should not be.
+///
+/// The bytes exclude the line terminator and one trailing carriage return, so
+/// the same line is observed identically on a CRLF writer and an LF one, and
+/// they borrow from the read buffer rather than being copied: the observation and
+/// the retained capture are the same bytes, seen once.
+#[cfg(feature = "process")]
+pub type LineObserver<'a> = &'a (dyn Fn(&[u8]) + Send + Sync + 'a);
+
 /// The terminal observation of one supervised child, before it is mapped to a
 /// public report.
 ///
@@ -2252,17 +2327,60 @@ fn task_end(end: ProcessEnd) -> TaskEnd {
     }
 }
 
+/// Drive one started child to a terminal observation, observing nothing.
+///
+/// This is the driver behind [`Supervisor::spawn_process`], whose body runs on
+/// a spawned task that must be `Send` — and an observed driver's parameter is a
+/// `dyn Fn`, which is not. The observation is therefore an argument of
+/// [`drive_process_observed`] and *this* call supplies `None`, so there is one
+/// body of process driving rather than two and the spawned path is a name for
+/// the unobserved one rather than a second implementation of it.
+#[cfg(all(unix, feature = "process"))]
+async fn drive_process(
+    clock: &Clock,
+    child: Child,
+    deadline: Option<Duration>,
+    token: &CancellationToken,
+    group: ProcessGroup<'static>,
+    out_limit: Option<NonZeroUsize>,
+    err_limit: Option<NonZeroUsize>,
+) -> ProcessEnd {
+    drive_process_observed(
+        clock, child, deadline, token, group, out_limit, err_limit, None,
+    )
+    .await
+}
+
 /// Drive one started child to a terminal observation: drain its captured
-/// streams, wait for its exit (or the deadline, or cancellation), signal its
+/// streams, waiting for its exit (or the deadline, or cancellation), signal its
 /// process group, and reap it.
 ///
-/// This is the single body behind [`Supervisor::spawn_process`] and
-/// [`Supervisor::run_process`]. The three phases run concurrently as
+/// This is the single body behind [`Supervisor::run_process`] and
+/// [`Supervisor::run_process_observed`]. The three phases run concurrently as
 /// [`join3`]: the two pipe reads must make progress while the child runs, or a
 /// child that writes more than a pipe buffer would block forever waiting for a
 /// reader that is waiting for it to exit.
+///
+/// `on_line` is forwarded to the **stdout** read only. It is not a second read
+/// of the child's output: it is called from inside the read that retains that
+/// output, on the bytes that read just observed, so an observation and a
+/// capture can never disagree about what the child wrote.
+///
+/// Eight parameters is one over the usual bound, and the eighth is the observer.
+/// The other seven are the child's *owned* run facts — the clock it is observed
+/// on, the child, its deadline, its stop, its cleanup obligation and the two
+/// capture ceilings — which `prepare_process` already assembles once for both
+/// runners. Bundling them into a struct would be a second shape for the same
+/// seven facts, and a caller that built one by hand could pair a deadline with
+/// the wrong child's capture ceiling; passing them together is what keeps that
+/// pairing a property of the supervisor rather than of a call site.
 #[cfg(all(unix, feature = "process"))]
-async fn drive_process(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the seven run facts are the child's owned bounds and the eighth is the \
+              observer; see the driver's doc comment"
+)]
+async fn drive_process_observed(
     clock: &Clock,
     mut child: Child,
     deadline: Option<Duration>,
@@ -2270,10 +2388,11 @@ async fn drive_process(
     mut group: ProcessGroup<'static>,
     out_limit: Option<NonZeroUsize>,
     err_limit: Option<NonZeroUsize>,
+    on_line: Option<LineObserver<'_>>,
 ) -> ProcessEnd {
     let pid = child.id().and_then(|raw| i32::try_from(raw).ok());
-    let capture_out = capture(child.stdout.take(), out_limit);
-    let capture_err = capture(child.stderr.take(), err_limit);
+    let capture_out = capture(child.stdout.take(), out_limit, on_line);
+    let capture_err = capture(child.stderr.take(), err_limit, None);
     // Reading the pipes and waiting for the child are independent futures over
     // disjoint state; only the group is borrowed, and that borrow ends when
     // this future completes.
@@ -2333,8 +2452,22 @@ async fn drive_process(
 /// writes far more than the ceiling cannot block on a full pipe. The retained
 /// buffer is sized once to the ceiling, so the retained capacity is bounded by
 /// the policy rather than by what the child wrote.
+///
+/// `on_line`, when given, is called once for each newline-terminated line of
+/// **stdout** as it arrives, before the ceiling is consulted and whether or not
+/// the bytes are retained. It is what lets a service's readiness come from what
+/// the child printed rather than from a timer: the observer sees the same bytes
+/// the capture retains, in the same order, at the moment they were read — so it
+/// is an observation of the run rather than a second read of the child's
+/// output. A trailing fragment with no newline is not delivered: a partial line
+/// is not a line, and a caller waiting for one must keep waiting for the
+/// newline rather than being woken by half a message.
 #[cfg(all(unix, feature = "process"))]
-async fn capture<R>(reader: Option<R>, limit: Option<NonZeroUsize>) -> CapturedStream
+async fn capture<R>(
+    reader: Option<R>,
+    limit: Option<NonZeroUsize>,
+    on_line: Option<LineObserver<'_>>,
+) -> CapturedStream
 where
     R: AsyncRead + Unpin,
 {
@@ -2346,11 +2479,25 @@ where
     let mut bytes: Vec<u8> = Vec::with_capacity(cap);
     let mut total: u64 = 0;
     let mut buffer = [0_u8; 8192];
+    // Bytes of the current line not yet terminated. Bounded by
+    // `MAX_OBSERVED_LINE_BYTES`, so a child that writes an unterminated
+    // megabyte cannot grow this without limit: the fragment is dropped once it
+    // exceeds the bound and the count says how much was not observed.
+    let mut fragment: Vec<u8> = Vec::new();
+    let mut dropped_from_fragment: u64 = 0;
     loop {
         match reader.read(&mut buffer).await {
             Ok(0) => break,
             Ok(read) => {
                 total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+                let Some(chunk) = buffer.get(..read) else {
+                    continue;
+                };
+                if let Some(observe) = on_line {
+                    for line in lines_of(chunk, &mut fragment, &mut dropped_from_fragment) {
+                        observe(line);
+                    }
+                }
                 if bytes.len() < cap {
                     let room = cap.saturating_sub(bytes.len());
                     let take = room.min(read);
@@ -2365,6 +2512,61 @@ where
     }
     let truncated = total > u64::try_from(cap).unwrap_or(u64::MAX);
     CapturedStream::from_parts(bytes, total, truncated)
+}
+
+/// The longest unterminated line the stdout observer will hold.
+///
+/// A child printing a megabyte without a newline is a child that is not
+/// speaking the line protocol an observer waits for, and retaining that
+/// megabyte on its behalf would make the observer the unbounded buffer the
+/// capture ceiling exists to prevent. 8 KiB is longer than any line a service
+/// announces its readiness with, and longer than the pipe read buffer, so a line
+/// that fits in one read is never split across the bound.
+#[cfg(all(unix, feature = "process"))]
+const MAX_OBSERVED_LINE_BYTES: usize = 8 * 1024;
+
+/// Append `chunk` to `fragment`, yielding each newline-terminated line.
+///
+/// Split out of [`capture`] so the splitting rule is one definition rather than
+/// one copy per captured stream, and so it can be exercised without a child.
+///
+/// `fragment` holds the unterminated tail of the last line. It is capped at
+/// [`MAX_OBSERVED_LINE_BYTES`]: a longer tail is dropped rather than grown, and
+/// `dropped` accumulates what was not observed so a caller can tell a short line
+/// from a line this observer refused to assemble.
+#[cfg(all(unix, feature = "process"))]
+fn lines_of<'a>(
+    chunk: &'a [u8],
+    fragment: &'a mut Vec<u8>,
+    dropped: &mut u64,
+) -> impl Iterator<Item = &'a [u8]> {
+    let mut complete = Vec::new();
+    for (index, byte) in chunk.iter().enumerate() {
+        if *byte != b'\n' {
+            if fragment.len() < MAX_OBSERVED_LINE_BYTES {
+                fragment.push(*byte);
+            } else {
+                *dropped = dropped.saturating_add(1);
+            }
+            continue;
+        }
+        let end = index.saturating_sub(fragment.len());
+        if let Some(line) = chunk.get(end..index) {
+            complete.push(strip_carriage_return(line));
+        }
+        fragment.clear();
+    }
+    complete.into_iter()
+}
+
+/// Drop one trailing carriage return, so a CRLF line and an LF line observe the
+/// same bytes.
+#[cfg(all(unix, feature = "process"))]
+fn strip_carriage_return(line: &[u8]) -> &[u8] {
+    match line.split_last() {
+        Some((&b'\r', head)) => head,
+        _ => line,
+    }
 }
 
 /// Poll three futures to completion on the calling task, returning their

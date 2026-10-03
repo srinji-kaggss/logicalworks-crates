@@ -24,7 +24,8 @@
 //! | `retry up to 3 times, waiting 100ms:` | [`retry`] | retry storms; retrying a permanent failure; a new identity per attempt |
 //! | `together:` | `try_join!` | sequential awaits that should overlap; a failed branch that keeps running |
 //! | `step name:` | [`Scope::enter`] | anonymous work with no stable key or error location |
-//! | [`admit`] | an untrusted payload becoming an instruction; a refusal with no location, no provenance or no ceiling |
+//! | `await ready(&db, 30s)` | [`Readiness`] | a readiness guessed by sleeping; a poll loop; a stale instance releasing dependants |
+//! | `admit the model's plan:` | [`admit`] | an untrusted payload becoming an instruction; a refusal with no location, no provenance or no ceiling |
 //!
 //! [`admit`] is the one way a task body crosses untrusted model or tool output
 //! into a run. It enters its step, charges one run-scoped [`Gate`] — a decoder, a
@@ -74,6 +75,7 @@
 //! [`Tenant`]: crate::script::Tenant
 //! [`StepKey`]: crate::script::StepKey
 //! [`Architecture`]: crate::script::Architecture
+//! [`Readiness`]: crate::script::Readiness
 
 mod admit;
 mod control;
@@ -81,6 +83,7 @@ mod each;
 mod error;
 mod map;
 mod policy;
+mod ready;
 pub(crate) mod run_store;
 pub(crate) mod scope;
 pub(crate) mod trail;
@@ -101,6 +104,10 @@ pub use control::{at_most, attempts, retry, within, within_on};
 pub use each::each;
 pub use error::{FlowError, OptionExt, ResultExt};
 pub use map::{Architecture, FlowShape, StepKind, StepShape};
+pub use ready::{
+    FailAfterReady, Generation, MAX_DEPENDANTS, MAX_NAME_BYTES, Readiness, ReadinessError, Ready,
+    ReadyOutcome,
+};
 pub use rt_clock::Clock;
 pub use run_store::{Appended, Durable, remember};
 pub use scope::{Scope, StepKey, Tenant};
