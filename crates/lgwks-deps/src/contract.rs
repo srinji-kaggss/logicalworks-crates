@@ -23,6 +23,10 @@ use std::fmt;
 /// Where an approved crate sits in the ladder. Only two tiers are admissible:
 /// ELIMINATE and CONSOLIDATE crates do not get entries, they get an
 /// `lgwks_std` module, and an entry claiming either tier is a category error.
+///
+/// Public so a surface freeze can be expressed in the register's own vocabulary
+/// rather than as a second list of crate names maintained beside it; see
+/// [`crate::audit_direct`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Tier {
@@ -90,6 +94,37 @@ pub struct Entry {
     pub(crate) review: String,
     /// Line where the entry opened, for diagnosis.
     pub(crate) line: usize,
+}
+
+impl Entry {
+    /// The ladder tier this approval sits in.
+    ///
+    /// Public for the same reason [`crate::Tier`] is: the gate reads a tier off
+    /// an entry to decide whether a surface may be frozen, and an audit that had
+    /// to reach into `pub(crate)` fields could not be written at all.
+    #[must_use]
+    pub fn tier(&self) -> Tier {
+        self.tier
+    }
+
+    /// Workspace crate that is responsible for this capability.
+    ///
+    /// Public because the surface freeze in [`crate::audit_direct`] decides who
+    /// a re-tiered approval belongs to by owner, and a decision a caller cannot
+    /// reach is a decision it cannot make.
+    #[must_use]
+    pub fn owner(&self) -> &str {
+        &self.owner
+    }
+
+    /// Package name as `Cargo.lock` spells it.
+    ///
+    /// The companion of [`Entry::owner`] for the same reason: a refusal that
+    /// reports a violated freeze has to say which edge it is about.
+    #[must_use]
+    pub fn krate(&self) -> &str {
+        &self.krate
+    }
 }
 
 /// The parsed register.
@@ -1015,6 +1050,15 @@ impl Contract {
         self.entries
             .iter()
             .filter(move |entry| normalise(&entry.krate) == wanted)
+    }
+
+    /// Every approval in the register, in the order it was written.
+    ///
+    /// The register-wide counterpart of [`Contract::approvals_for`], for a check
+    /// that is about the register's whole posture rather than one package's
+    /// edges: the surface freeze reads every entry once.
+    pub fn approvals(&self) -> impl Iterator<Item = &Entry> {
+        self.entries.iter()
     }
 }
 

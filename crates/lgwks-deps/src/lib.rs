@@ -284,6 +284,25 @@ pub enum Refusal {
         /// Capability the approval claims to supply.
         capability: String,
     },
+    /// A frozen surface's external edge was re-tiered out of the register's own
+    /// approved tier, which is how `lgwks_ast` is refused the growth
+    /// INV-DEP-1 forbids.
+    ///
+    /// `invariants.rs` reads INV-DEP-1 as *the finished, standalone `lgwks_ast`*:
+    /// it is a closed surface whose register entries must keep saying `boundary`.
+    /// A growth attempt that promotes the new edge to `vendor` — or demotes it
+    /// out of the register entirely, which this crate separately refuses as
+    /// [`Refusal::UnregisteredEdge`] — is how the freeze is expressed. No name
+    /// is hardcoded and no exemption is invented: the freeze covers exactly the
+    /// edges a register says a surface owns, and it covers no more.
+    FrozenSurfaceTier {
+        /// Frozen surface package that owns the edge.
+        consumer: String,
+        /// External package name whose approval was re-tiered.
+        krate: String,
+        /// Tier the approval now claims.
+        tier: String,
+    },
     /// `[policy] enforce = false` was used to turn a tree that *actually
     /// carries refusals* into a passing build.
     ///
@@ -362,6 +381,16 @@ impl fmt::Display for Refusal {
                 formatter,
                 "unused approval for {krate} capability {capability} owned by {owner}"
             ),
+            Self::FrozenSurfaceTier {
+                ref consumer,
+                ref krate,
+                ref tier,
+            } => write!(
+                formatter,
+                "{consumer} is a frozen surface and its {krate} edge is tiered {tier}; \
+                 a frozen surface's edges stay boundary, and the surface's approved set \
+                 is closed"
+            ),
             Self::AdoptionModeRefusals { refusals } => write!(
                 formatter,
                 "[policy] enforce = false stood down {refusals} dependency-edge \
@@ -389,7 +418,8 @@ impl Refusal {
             | Self::RequirementDrift { ref krate, .. }
             | Self::SourceDrift { ref krate, .. }
             | Self::KindNotAllowed { ref krate, .. }
-            | Self::UnusedApproval { ref krate, .. } => krate,
+            | Self::UnusedApproval { ref krate, .. }
+            | Self::FrozenSurfaceTier { ref krate, .. } => krate,
             Self::AdoptionModeRefusals { .. } => "<policy>",
         }
     }
@@ -524,9 +554,46 @@ fn edge_matches(entry: &contract::Entry, edge: &DirectEdge) -> bool {
             .any(|kind| kind == edge.kind.as_str())
 }
 
+/// Surfaces whose external edges are frozen: the finished, standalone crates
+/// INV-DEP-1 closes.
+///
+/// This is *not* a list of surfaces to audit — that question is answered
+/// generically, from Cargo's own `workspace_members`, so a newly declared
+/// member is audited from its first commit and nothing has to be listed here to
+/// be classified. It is only the subset whose approved edge set may not grow.
+/// The registry of what is frozen is the register: a crate is frozen once some
+/// `[[approved]]` entry names it as `owner`, and freezing therefore cannot be
+/// smuggled past this gate by editing this array.
+const FROZEN_SURFACES: [&str; 1] = ["lgwks_ast"];
+
+/// The tier an approval for a frozen surface must keep claiming.
+const FROZEN_TIER: contract::Tier = contract::Tier::Boundary;
+
+/// Every approval that re-tiers a frozen surface's own edge away from
+/// [`FROZEN_TIER`], as one refusal each.
+///
+/// The second, structural half of INV-DEP-1's *never grow `lgwks_ast`*: adding
+/// the edge at all is already refused as [`Refusal::UnregisteredEdge`], and
+/// re-approving it as `vendor` rather than `boundary` is what a growth attempt
+/// would reach for next. Both refusals name the surface, so a refusal says which
+/// surface is in violation rather than only which crate is unowned.
+fn frozen_surface_tier_refusals(register: &Contract) -> Vec<Refusal> {
+    let frozen: Vec<String> = FROZEN_SURFACES.iter().map(|name| normalise(name)).collect();
+    register
+        .approvals()
+        .filter(|entry| entry.tier() != FROZEN_TIER)
+        .filter(|entry| frozen.iter().any(|name| *name == normalise(entry.owner())))
+        .map(|entry| Refusal::FrozenSurfaceTier {
+            consumer: entry.owner().to_owned(),
+            krate: entry.krate().to_owned(),
+            tier: entry.tier().to_string(),
+        })
+        .collect()
+}
+
 /// Audits authored direct dependency edges against semantic ownership.
 pub fn audit_direct(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
-    let mut refusals = Vec::new();
+    let mut refusals = frozen_surface_tier_refusals(register);
     if let Some(expected) = register.repository.as_ref() {
         for edge in edges.iter().filter(|edge| edge.workspace) {
             if let Some(declared) = edge.target_repository.as_ref()
