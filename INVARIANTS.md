@@ -148,6 +148,67 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_fresh_snapshot_admits_at_the_declared_ceiling`,
   `a_bounded_repeating_task_reports_exhaustion_not_a_hang`).
 
+- **INV-BOT-32** A reach for authority is checked at the step that reaches, and
+  the refusal carries the whole shortfall. `Scope::require` names every capability
+  the step needs and this run's authority — the host's grant plus any repair
+  delta, checked together and never one replacing the other — does not cover, as
+  one `FlowError::Blocked` carrying a complete `Deficit`. A run is therefore
+  `Blocked` rather than `Failed`, which is the distinction a repair acts on: the
+  host was willing and the authority was missing. The report's `needs` and its
+  `repair` ticket are both derived from that one `Deficit`, so they cannot
+  disagree about what the run was missing, and a task that reaches in its *first*
+  step may still declare at its admission boundary with `Task::requiring` and be
+  refused before anything runs. · why: #87 step 3 (T23) · enforced by:
+  `tests/repair.rs` (`a_run_short_of_authority_is_blocked_naming_every_need`,
+  `a_blocked_run_leaves_its_finished_analysis_recorded`,
+  `a_host_without_a_ledger_refuses_every_repair`,
+  `the_journey_declares_no_admission_boundary_needs`)
+- **INV-BOT-33** A repair authorizes one run, once, for exactly the needs its
+  ticket names. `Host::repair` resumes under the run's own id, so every step
+  recorded before the block replays without its body being polled and only the
+  blocked remainder runs; the analysis is not paid for twice. A grant that does
+  not cover the ticket's needs is `NotAuthorized` and one that reaches outside
+  them is `OverWide`, both refused before any authority is applied, so the caller's
+  belief about what was granted cannot exceed what was asked. The host's own
+  grant is never widened: the next run on that host is still blocked. A host with
+  no repair ledger refuses every repair, because there is no epoch, root budget or
+  applied-ticket set to decide one against. · why: #87 step 3 (T23) · enforced by:
+  `tests/repair.rs` (`a_repair_runs_the_blocked_remainder_without_rerunning_the_analysis`,
+  `a_repair_widens_one_run_and_not_the_host`,
+  `a_denied_repair_leaves_the_run_blocked_with_its_authority_unchanged`,
+  `an_over_wide_grant_is_refused_rather_than_narrowed`) and
+  `tests/sim_repair.rs::seeded_orders_reach_the_same_state_band_*`
+- **INV-BOT-34** A repair ticket is a report, never a grant, and its identity is
+  its content. `RepairTicket::stamp` hashes the run, the tenant, the epoch and the
+  *sorted* needs, so a caller that rebuilds a ticket from the same facts produces
+  the same identity and two spellings of one request are one ticket. A ticket
+  delivered twice is refused `AlreadyApplied` and a ticket from an epoch the run
+  has moved past is refused `StaleEpoch`; the ledger's decide-and-write is one
+  ordered step on its own thread, so "applied once" is a fact about bytes rather
+  than about the order two threads happened to run in. A refused repair charges
+  nothing, mints no epoch and leaves the ledger byte-identical. · why: #87 step 3
+  (T24) · enforced by: `tests/repair.rs`
+  (`the_same_ticket_delivered_twice_applies_once`,
+  `a_ticket_from_an_older_epoch_is_refused_as_stale`,
+  `a_denied_repair_costs_nothing`) and
+  `tests/sim_repair.rs::seeded_orders_reach_the_same_state_band_*`
+- **INV-BOT-35** A run's root budget is carried in its own ledger, is charged by
+  every attempt including a repair, and is never refilled by one. The counters
+  are cumulative read-modify-write state rather than a replayed step record, so
+  they get their own chained file over the shared frame grammar and the shared
+  storage-owner thread (INV-BOT-51). A budget that is spent refuses the next
+  attempt with `BudgetSpent`, which is what makes a permanent refusal plus
+  repeated `NotApplied` reach a finite typed answer rather than an unbounded retry
+  loop, and an authorized repair is a distinct event that *consumes* budget rather
+  than resetting it (T13). Two tenants over one directory keep separate ledgers,
+  separate run ids and separate epochs, and one tenant's ticket is refused by the
+  other tenant's host. · why: #87 step 3 (T13, T24) · enforced by:
+  `tests/repair.rs` (`the_root_budget_stays_charged_across_repair_and_resume`) and
+  `tests/sim_repair.rs` (`seeded_orders_reach_the_same_state_band_*`,
+  `tenants_keep_their_own_tickets_and_budgets_band_*`,
+  `saturation_applies_each_ticket_once_band_*`, and the opt-in
+  `the_declared_repair_tiers_are_measured`)
+
 - **INV-BOT-1** Journal before acknowledge: a live settlement is journaled before it is
   acknowledged. · why: cef8059b (#112)
 - **INV-BOT-2** A settlement binds to the generation it names; a transition binds to
