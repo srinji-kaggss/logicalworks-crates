@@ -1413,7 +1413,7 @@ impl ReplayCursor for File {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::effect::{
         ActionDigest, ActionId, AttemptId, EnvironmentEpoch, EnvironmentId, FlowRevision, RunId,
@@ -1453,7 +1453,10 @@ mod tests {
     static SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     /// A scratch path unique to one test run.
-    fn scratch(name: &str) -> PathBuf {
+    ///
+    /// Shared with `journal::owner`'s tests, so the journal's two test suites name
+    /// their scratch files one way (INV-DEP-6).
+    pub(in crate::journal) fn scratch(name: &str) -> PathBuf {
         let unique = SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

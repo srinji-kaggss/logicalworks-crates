@@ -1058,7 +1058,6 @@ mod tests {
     //! what the contract promises a failed group commit does.
 
     use std::error::Error;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     use crate::effect::RunId;
     use crate::script::run_store::RunRecords;
@@ -1087,16 +1086,6 @@ mod tests {
     /// other and the duplicate path cannot fold one as another's answer.
     const PAYLOAD: [u8; MEMBERS] = [1, 2, 3];
 
-    /// A scratch directory unique to this test process and call.
-    ///
-    /// The process id separates concurrent test processes and the counter separates
-    /// calls within one. Never the repository's own tree.
-    fn scratch_dir() -> std::path::PathBuf {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let call = NEXT.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("lgwks-owner-flush-{}-{call}", std::process::id()))
-    }
-
     /// A failed batch's flush answers every member, folds none, and leaves the file
     /// as the only authority.
     ///
@@ -1105,7 +1094,7 @@ mod tests {
     /// Whatever the store, the scope or the filesystem reports.
     #[test]
     fn a_failed_batch_flush_acknowledges_nobody_and_folds_nothing() -> Result<(), Box<dyn Error>> {
-        let dir = scratch_dir();
+        let dir = crate::journal::file::tests::scratch("owner-flush");
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("store");
 
