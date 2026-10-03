@@ -218,12 +218,28 @@ fn pause(millis: u64) {
 /// land mid-flight: the parent decides when the process dies, and the only
 /// facts the child has produced are the ones already on the disk.
 fn probe_body() -> TestResult {
+    lgwks_std::trace::warn!(
+        operation = "probe_body",
+        "operation refused its request; the typed error carries the facts"
+    );
     let path = std::env::var_os(PROBE_JOURNAL)
         .ok_or("the probe child was started without a journal path")?;
-    let events: usize = std::env::var(PROBE_EVENTS)
-        .map_err(|_| "the probe child was started without an event count")?
-        .parse()
-        .map_err(|_| "the probe event count was not a number")?;
+    // Explicit matches rather than `map_err`: `VarError`'s own text names
+    // whether the variable is unset or unprintable, and `ParseIntError`'s names
+    // a digit. Neither says which probe variable was misconfigured, which is
+    // what a reader of a failed child has to know.
+    let event_count = match std::env::var(PROBE_EVENTS) {
+        Ok(count) => count,
+        Err(_unset_or_unprintable) => {
+            return Err("the probe child was started without an event count".into());
+        }
+    };
+    let events: usize = match event_count.parse() {
+        Ok(events) => events,
+        Err(_not_a_number) => {
+            return Err("the probe event count was not a number".into());
+        }
+    };
     let marker = std::env::var_os(PROBE_MARKER)
         .ok_or("the probe child was started without a marker path")?;
 

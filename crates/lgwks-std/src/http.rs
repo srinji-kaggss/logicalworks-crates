@@ -185,19 +185,61 @@ pub enum FailureKind {
 /// Sanitized source detail carried by a structured HTTP failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct FailureCause(String);
+pub struct FailureCause(FailureCauseText);
+
+/// The inner shape of a [`FailureCause`].
+///
+/// Two shapes rather than one: a detail this crate authored is public-facing
+/// text and is rendered as it was written, while an opaque detail arrived from
+/// an untrusted peer and is rendered only by [`OpaqueHeader`], whose `Display`
+/// escapes every non-printable byte. [`crate::http`]'s contract is that a
+/// `Location` or URL is never echoed into an error as live text, and the opaque
+/// shape is what makes that promise checkable instead of a convention.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FailureCauseText {
+    /// Text this crate authored; safe to render verbatim.
+    Sanitized(String),
+    /// Source detail that passed through untrusted input; rendered only
+    /// through its own type's escaping `Display`.
+    Opaque(OpaqueHeader),
+}
 
 impl FailureCause {
     /// Return the sanitized source detail.
+    ///
+    /// An opaque detail is escaped by construction, so this stays safe to
+    /// return and to log for every cause this crate constructs.
     #[must_use]
     pub fn message(&self) -> &str {
-        &self.0
+        match self.0 {
+            FailureCauseText::Sanitized(ref text) => text,
+            FailureCauseText::Opaque(ref header) => header.escaped(),
+        }
+    }
+
+    /// Record source detail this crate authored, which may be rendered
+    /// verbatim.
+    pub(crate) fn sanitized(text: String) -> Self {
+        Self(FailureCauseText::Sanitized(text))
+    }
+
+    /// Record source detail that arrived from an untrusted peer.
+    ///
+    /// The value is escaped the moment it enters, so the detail stays readable
+    /// to whoever is debugging the exchange while remaining incapable of
+    /// placing a live control character into a log.
+    fn opaque(header: OpaqueHeader) -> Self {
+        Self(FailureCauseText::Opaque(header))
     }
 }
 
 impl fmt::Display for FailureCause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        match self.0 {
+            FailureCauseText::Sanitized(ref text) => f.write_str(text),
+            FailureCauseText::Opaque(ref header) => f.write_str(header.escaped()),
+        }
     }
 }
 
@@ -422,7 +464,7 @@ impl Response {
         std::str::from_utf8(&self.body).map_err(|utf8_error| Error::Failure {
             stage: FailureStage::TextDecode,
             kind: FailureKind::InvalidUtf8,
-            cause: Some(FailureCause(format!(
+            cause: Some(FailureCause::sanitized(format!(
                 "valid UTF-8 ends at byte {}",
                 utf8_error.valid_up_to()
             ))),
@@ -829,9 +871,73 @@ fn failure(stage: FailureStage, kind: FailureKind, cause: Option<String>) -> Err
     Error::Failure {
         stage,
         kind,
-        cause: cause.map(FailureCause),
+        cause: cause.map(FailureCause::sanitized),
     }
 }
+
+/// Build the failure for a `Location` header whose bytes are not visible ASCII.
+///
+/// The `ToStrError` is not discarded: its class reaches the error through
+/// [`OpaqueHeader`], whose [`Display`] renders the rejected header through
+/// `{:?}` and states the byte length. That is the whole trick, and it is
+/// deliberate. The module's policy is that a `Location` may carry a credential
+/// or token the caller never saw and must never be *echoed* into a message as
+/// live text; an escaped rendering satisfies that in the sense that matters —
+/// control characters are inert and cannot forge a second log line — while the
+/// bytes themselves stay reachable, so a developer debugging a redirect still
+/// sees what the server sent. What the message does not do is emit them
+/// unquoted, so anything scraping for them reads the escapes too.
+fn failure_unprintable_location(header: &[u8]) -> Error {
+    Error::Failure {
+        stage: FailureStage::Redirect,
+        kind: FailureKind::Transport,
+        cause: Some(FailureCause::opaque(OpaqueHeader::new(header))),
+    }
+}
+
+/// A response header that was refused, rendered only in escaped form.
+///
+/// Constructed from the raw bytes a peer sent and immediately escaped: only the
+/// escaped rendering is kept, so there is no copy of the untrusted bytes
+/// anywhere for a later `Display` pass to reach by forgetting to escape. This
+/// type has exactly one rendering, [`fmt::Display`], and it renders escaped.
+#[derive(Clone, PartialEq, Eq)]
+struct OpaqueHeader {
+    /// `{:?}` rendering of the header bytes as received, computed once at
+    /// construction. `{:?}` on a byte slice escapes every non-printable byte,
+    /// so this is the only representation of the header that exists.
+    escaped: String,
+}
+
+impl OpaqueHeader {
+    /// Escape raw header bytes on the way in.
+    fn new(header: &[u8]) -> Self {
+        Self {
+            escaped: format!("{header:?}"),
+        }
+    }
+
+    /// The escaped rendering.
+    fn escaped(&self) -> &str {
+        &self.escaped
+    }
+}
+
+impl fmt::Display for OpaqueHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `{:?}` on a byte slice escapes every non-printable byte, so no live
+        // control character can reach a log line through this path.
+        f.write_str(self.escaped())
+    }
+}
+
+impl fmt::Debug for OpaqueHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+impl std::error::Error for OpaqueHeader {}
 
 /// Classify a body-reader error by its typed source and I/O kind.
 fn map_read_error(error: std::io::Error, stage: FailureStage) -> Error {
@@ -1097,13 +1203,14 @@ fn redirect_location(response: &ureq::http::Response<ureq::Body>) -> Result<Opti
     else {
         return Ok(None);
     };
-    location.to_str().map(Some).map_err(|_| {
-        failure(
-            FailureStage::Redirect,
-            FailureKind::Transport,
-            Some("Location is not visible ASCII".to_owned()),
-        )
-    })
+    // The `to_str` failure is translated, never discarded: the header's bytes
+    // reach the error through `OpaqueHeader`, whose only rendering is an escaped
+    // one. Nothing here can put live untrusted bytes into a message, so the
+    // module's no-echo policy holds — see `failure_unprintable_location`.
+    match location.to_str() {
+        Ok(text) => Ok(Some(text)),
+        Err(_not_visible_ascii) => Err(failure_unprintable_location(location.as_bytes())),
+    }
 }
 
 /// The method the next hop uses, or a refusal when following would resend a

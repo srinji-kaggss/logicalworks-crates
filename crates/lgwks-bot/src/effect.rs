@@ -797,7 +797,11 @@ impl EffectKey {
         }
     }
 
-    /// The run.
+    /// Which run every key built from this identity belongs to.
+    ///
+    /// Generated and persisted before the first admission, so two runs of the
+    /// same flow against the same environment are distinguishable. It is the
+    /// half of the identity that survives a restart unchanged.
     #[must_use]
     pub const fn run(self) -> RunId {
         self.run
@@ -827,13 +831,20 @@ impl EffectKey {
         self.digest
     }
 
-    /// The environment.
+    /// Which environment every key built from this identity acts on.
+    ///
+    /// Names the process or container the host created -- not a pid, and not a
+    /// display name, either of which a restart reuses for a different thing.
     #[must_use]
     pub const fn environment(self) -> EnvironmentId {
         self.environment
     }
 
-    /// The environment's fencing generation.
+    /// Which generation of that environment this dispatch is fenced against.
+    ///
+    /// A recycled environment carries a higher epoch, so a dispatch in flight
+    /// when the old one died is refused rather than applied to whatever now
+    /// occupies the same identity.
     #[must_use]
     pub const fn epoch(self) -> EnvironmentEpoch {
         self.epoch
@@ -1000,19 +1011,30 @@ impl EffectIdentity {
         })
     }
 
-    /// The run.
+    /// Which run every key built from this identity belongs to.
+    ///
+    /// Generated and persisted before the first admission, so two runs of the
+    /// same flow against the same environment are distinguishable. It is the
+    /// half of the identity that survives a restart unchanged.
     #[must_use]
     pub const fn run(self) -> RunId {
         self.run
     }
 
-    /// The environment.
+    /// Which environment every key built from this identity acts on.
+    ///
+    /// Names the process or container the host created -- not a pid, and not a
+    /// display name, either of which a restart reuses for a different thing.
     #[must_use]
     pub const fn environment(self) -> EnvironmentId {
         self.environment
     }
 
-    /// The flow revision.
+    /// The digest of the flow document this identity was admitted under.
+    ///
+    /// Editing the document changes this, so a key minted against a revised flow
+    /// cannot be mistaken for one against the document that was validated. An
+    /// ephemeral run has no document and carries a constant instead.
     #[must_use]
     pub const fn flow(self) -> FlowRevision {
         self.flow

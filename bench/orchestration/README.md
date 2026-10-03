@@ -17,10 +17,14 @@ python3 bench/orchestration/run.py --render results.json   # the tables below
 ```
 
 The runner builds every way into a temporary directory, which it removes at
-the end. It runs each (way, scenario) cell five times, one process at a time,
-reads peak RSS from `/usr/bin/time -l`, and prints a line per cell followed by
-the verdicts. Needs `cargo`, `go`, `node`/`npm` and `uv`. Third-party code is
-pinned by lockfile or hash:
+the end. That is its own scratch space and is not the `lgwks_bot` journal:
+`../README.md` describes the journal `lgwks-bench` now writes to
+`$TMPDIR/lgwks-bench-journal-<pid>/` and does *not* remove, because a journal
+is a record rather than a build product. Nothing in this directory dispatches a
+`lgwks_bot` effect, so it needs no such directory. It runs each (way, scenario)
+cell five times, one process at a time, reads peak RSS from `/usr/bin/time -l`,
+and prints a line per cell followed by the verdicts. Needs `cargo`, `go`,
+`node`/`npm` and `uv`. Third-party code is pinned by lockfile or hash:
 
 - `go/go.sum` for errgroup.
 - `node/package-lock.json` for Effect.

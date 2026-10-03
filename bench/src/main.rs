@@ -23,6 +23,24 @@
 //! whose workload is random can only be checked for self-consistency; this one
 //! can be checked against arithmetic.
 //!
+//! # The measured bots dispatch through a journal on disk
+//!
+//! An admitted bot is refused at assembly without an effect scope, and an
+//! external effect is refused at the handoff unless the scope's journal promises
+//! `DurabilityPromise::ProcessCrash`. `MemoryJournal` promises `Ephemeral`, so
+//! the bots this rig measures -- whose action does not declare itself local --
+//! journal to `FileJournal` on disk, under `$TMPDIR`, one file per bot.
+//!
+//! That puts a `write` and an `fsync` inside every measured window, and it is
+//! the honest cost of the configuration rather than something this rig can
+//! decline: there is no in-memory journal the crate will admit here. It also
+//! makes a timing run impractical, because an append on a typical filesystem
+//! costs milliseconds and the scenarios fire an effect every tick. The
+//! allocation report still runs, and it prints what a measured window now
+//! costs beside the allocations it contains. The figures committed in
+//! `README.md` predate this and exclude the disk; read them for what they
+//! measured, not for what the bot now costs.
+//!
 //! # What is deliberately excluded
 //!
 //! Raw-`bevy_ecs` and CEL/zen-engine comparators are not here. A raw-bevy
@@ -37,11 +55,18 @@ mod stats;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use lgwks_bot::{Auth, Bot, BotError, Cap, Evaluate, Execute, GrantSet, Observe};
+use lgwks_bot::broker::Broker;
+use lgwks_bot::effect::{EnvironmentId, FlowRevision, RunId};
+use lgwks_bot::journal::FileJournal;
+use lgwks_bot::spec::{EffectIdentity, EffectScope};
+use lgwks_bot::{
+    Auth, Bot, BotError, Cap, DispatchCertainty, Evaluate, Execute, GrantSet, Observe,
+};
 
 // ── The allocation counter ───────────────────────────────────────────────────
 //
@@ -208,7 +233,7 @@ struct Even(Rc<Cell<u64>>);
 impl Evaluate<u64> for Even {
     fn check(&self, value: &u64) -> Result<bool, BotError> {
         self.0.set(self.0.get().saturating_add(1));
-        Ok(*value % 2 == 0)
+        Ok(value.is_multiple_of(2))
     }
 
     fn condition_id(&self) -> &'static str {
@@ -256,7 +281,7 @@ impl HandRolled {
         let mut fired = 0;
         for _ in 0..self.entries {
             evals.set(evals.get().saturating_add(1));
-            if value % 2 == 0 {
+            if value.is_multiple_of(2) {
                 fired += 1;
             }
         }
@@ -336,11 +361,53 @@ const SCENARIOS: &[Scenario] = &[
 
 // ── Building both engines ────────────────────────────────────────────────────
 
+/// Create this run's scratch directory, the only place a journal of this rig
+/// is allowed to live.
+///
+/// Created once and handed down as a `&Path` rather than minted per call site:
+/// a measured bot holds its journal for its whole life, so a per-call directory
+/// would leave one directory open behind every bot and hide how many of them a
+/// run actually builds.
+///
+/// Nothing here removes it on the way out. A journal is the record of what left
+/// the process, and a measurement rig that deleted it at exit would be
+/// discarding the very evidence it exists to produce; the directory is
+/// `lgwks-bench-journal-<pid>`, so a run's records are under the run's own pid
+/// and are the caller's to remove.
+///
+/// # Errors
+///
+/// Whatever [`std::fs::create_dir_all`] reports for the path it was given,
+/// which is the case where the directory cannot be created at all.
+fn open_scratch_dir() -> Result<PathBuf, std::io::Error> {
+    let scratch = std::env::temp_dir().join(format!("lgwks-bench-journal-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch)?;
+    Ok(scratch)
+}
+
+/// The next journal file `bot_number` gets in this run's scratch directory.
+///
+/// One file per bot rather than one per run, and that is not tidiness: the
+/// identity in [`bench_effects`] is fixed, so every scenario records the same
+/// effect keys, and a journal holding more than one bot's attempts for a key
+/// sees the same key climb its ladder twice and refuses the repeat at the fence.
+/// A fresh file per bot is also a fresh history, so no bot starts against
+/// another one's committed frames.
+fn bench_journal_path(scratch: &Path, bot_number: usize) -> PathBuf {
+    scratch.join(format!("bot-{bot_number}.journal"))
+}
+
+/// Admit one scenario's chains as a bot that dispatches under a durable scope.
+///
+/// `scratch` is this run's scratch directory and `bot_number` distinguishes this
+/// bot's journal from its neighbours' within it.
 fn build_bot(
     scenario: &Scenario,
     clock: &Clock,
     tally: &Rc<Cell<u64>>,
     evals: &Rc<Cell<u64>>,
+    scratch: &Path,
+    bot_number: usize,
 ) -> Result<Bot, BotError> {
     let mut builder = Bot::builder("bench").observe(Source {
         clock: clock.clone(),
@@ -358,7 +425,70 @@ fn build_bot(
             builder = builder.on(Even(evals.clone()), Tally(tally.clone()));
         }
     }
-    builder.build(&GrantSet::empty())
+    builder
+        .with_effects(bench_effects(&bench_journal_path(scratch, bot_number))?)
+        .build(&GrantSet::empty())
+}
+
+/// The effect scope every measured bot dispatches through.
+///
+/// A bot is refused at assembly without one: the change that made dispatch
+/// durable also made it mandatory, and this rig was not updated with it, so
+/// `lgwks-bench` failed at startup with `IncompleteSpec { field: "effects" }`
+/// and reported nothing at all.
+///
+/// The values are fixed rather than minted, so a measured run is reproducible
+/// and two scenarios are not dispatching under different identities. They are
+/// also fixed *across* the run rather than per bot, which is why each bot gets
+/// its own journal file; see [`bench_journal_path`].
+///
+/// The journal is on disk, and that is the honest cost of the configuration
+/// rather than a choice this rig can make its way out of. These are
+/// `EffectLifetime::External` effects, because [`Tally`] does not override
+/// [`Execute::effect_lifetime`] and an action that does not say so is assumed to
+/// leave the process. The admission gate on the handoff path then requires
+/// [`lgwks_bot::journal::DurabilityPromise::ProcessCrash`], and
+/// [`lgwks_bot::journal::MemoryJournal`] reports
+/// [`lgwks_bot::journal::DurabilityPromise::Ephemeral`], so the in-memory
+/// journal this rig used to build is refused at the first dispatch with
+/// `PromiseUnmet { required: ProcessCrash, offered: Ephemeral }`.
+/// [`FileJournal`] earns the promise it advertises — the frame is written and
+/// the file is synced before the acknowledgment exists — and accepts the
+/// dispatch.
+///
+/// What that buys, and what it costs, are both inside the measured window: a
+/// tick that decides to fire an effect now pays a write and an `fsync` before
+/// it returns. Every timing below and in `README.md` was taken against the
+/// in-memory journal and does not include it, so treat those figures as a
+/// statement about the schedule rather than about the schedule plus its
+/// durability.
+fn bench_effects(journal_path: &Path) -> Result<EffectScope, BotError> {
+    // Every failure below is a refusal by the bench's own fixed identifiers, so
+    // it names this rig rather than a caller's environment.
+    fn refused(cause: impl std::fmt::Display) -> BotError {
+        BotError::DomainError {
+            domain: String::from("bench::effect_scope"),
+            certainty: DispatchCertainty::NotDelivered,
+            cause: cause.to_string(),
+        }
+    }
+    let environment =
+        EnvironmentId::from_hex("2122232425262728292a2b2c2d2e2f30").map_err(refused)?;
+    let mut broker = Broker::new();
+    broker.register(environment).map_err(refused)?;
+    Ok(EffectScope::new(
+        EffectIdentity::new(
+            RunId::from_hex("0102030405060708090a0b0c0d0e0f10").map_err(refused)?,
+            environment,
+            FlowRevision::from_tagged(
+                "blake3_256",
+                "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            )
+            .map_err(refused)?,
+        ),
+        broker,
+        Box::new(FileJournal::open(journal_path).map_err(refused)?),
+    ))
 }
 
 fn build_handrolled(scenario: &Scenario) -> Vec<HandRolled> {
@@ -388,14 +518,28 @@ struct Measurement {
 /// Run one scenario paired: within a round, the bot is timed and then the
 /// baseline is timed on the same input window, so machine drift lands on both
 /// legs and cancels in the ratio.
-fn measure(scenario: &Scenario) -> Result<Measurement, BotError> {
+///
+/// `scratch` is this run's journal directory and `bot_number` names this
+/// scenario's journal within it.
+fn measure(
+    scenario: &Scenario,
+    scratch: &Path,
+    bot_number: usize,
+) -> Result<Measurement, BotError> {
     let clock = Clock::new();
     let tally = Rc::new(Cell::new(0u64));
     let evals_bot_cell = Rc::new(Cell::new(0u64));
     let evals_base_cell = Cell::new(0u64);
 
     let build_start = Instant::now();
-    let mut bot = build_bot(scenario, &clock, &tally, &evals_bot_cell)?;
+    let mut bot = build_bot(
+        scenario,
+        &clock,
+        &tally,
+        &evals_bot_cell,
+        scratch,
+        bot_number,
+    )?;
     let build_bot = build_start.elapsed();
 
     let mut chains = build_handrolled(scenario);
@@ -490,7 +634,10 @@ fn cap_check_scaling() -> Result<Vec<(usize, f64)>, BotError> {
 }
 
 /// Time `Bot::builder(..).build(&grants)` -- the admission path.
-fn build_cost(sources: usize) -> Result<Duration, BotError> {
+///
+/// The timed span includes opening the journal, because `build` is what
+/// admits the chains and the journal is part of what they are admitted with.
+fn build_cost(sources: usize, scratch: &Path, bot_number: usize) -> Result<Duration, BotError> {
     let clock = Clock::new();
     let tally = Rc::new(Cell::new(0u64));
     let evals = Rc::new(Cell::new(0u64));
@@ -505,7 +652,7 @@ fn build_cost(sources: usize) -> Result<Duration, BotError> {
         rounds: 1,
     };
     let start = Instant::now();
-    let _bot = build_bot(&scenario, &clock, &tally, &evals)?;
+    let _bot = build_bot(&scenario, &clock, &tally, &evals, scratch, bot_number)?;
     Ok(start.elapsed())
 }
 
@@ -517,12 +664,22 @@ fn build_cost(sources: usize) -> Result<Duration, BotError> {
 /// claim in this rig that the timings cannot make: that the schedule is a
 /// function of its inputs. The formal statement of the same property, and the
 /// proof, are in `../proofs/`.
-fn determinism_probe(scenario: &Scenario, ticks: u64) -> Result<(bool, usize), BotError> {
-    let run = || -> Result<Vec<u64>, BotError> {
+///
+/// `bot_number` and its successor name the two journals, which is what the
+/// comparison requires: a replay has to start from an empty history to be a
+/// replay, and a journal that already holds the first run's attempts would
+/// refuse the second's outright.
+fn determinism_probe(
+    scenario: &Scenario,
+    ticks: u64,
+    scratch: &Path,
+    bot_number: usize,
+) -> Result<(bool, usize), BotError> {
+    let run = |bot_number: usize| -> Result<Vec<u64>, BotError> {
         let clock = Clock::new();
         let tally = Rc::new(Cell::new(0u64));
         let evals = Rc::new(Cell::new(0u64));
-        let mut bot = build_bot(scenario, &clock, &tally, &evals)?;
+        let mut bot = build_bot(scenario, &clock, &tally, &evals, scratch, bot_number)?;
         let mut per_tick = Vec::with_capacity(ticks as usize);
         for tick in 0..ticks {
             clock.set(tick);
@@ -530,8 +687,8 @@ fn determinism_probe(scenario: &Scenario, ticks: u64) -> Result<(bool, usize), B
         }
         Ok(per_tick)
     };
-    let first = run()?;
-    let second = run()?;
+    let first = run(bot_number)?;
+    let second = run(bot_number + 1)?;
     let fired: u64 = first.iter().sum();
     Ok((first == second, fired as usize))
 }
@@ -545,7 +702,97 @@ fn determinism_probe(scenario: &Scenario, ticks: u64) -> Result<(bool, usize), B
 /// through the same window, which is the control: a hand-rolled loop over the
 /// same workload should allocate nothing, and a non-zero count there would mean
 /// the counter is picking up something other than the bot.
-fn alloc_report() -> Result<String, Box<dyn std::error::Error>> {
+///
+/// The disk I/O the journal now does is *inside* the counted window, on the
+/// tick that fires an effect, because a tick that dispatches cannot return
+/// before the frame it is recording has been written and synced. The counters
+/// are unaffected by that in the way a reader might expect: the file's own
+/// buffer is heap memory, so a steady tick on a quiet source still shows the
+/// small number it showed under the in-memory journal.
+fn measure_allocations(
+    scenario: &Scenario,
+    warm: u64,
+    ticks: u64,
+    scratch: &Path,
+    bot_number: usize,
+) -> Result<AllocRow, Box<dyn std::error::Error>> {
+    let clock = Clock::new();
+    let tally = Rc::new(Cell::new(0u64));
+    let evals_bot_cell = Rc::new(Cell::new(0u64));
+    let evals_base_cell = Cell::new(0u64);
+
+    let mut bot = build_bot(
+        scenario,
+        &clock,
+        &tally,
+        &evals_bot_cell,
+        scratch,
+        bot_number,
+    )?;
+    let mut chains = build_handrolled(scenario);
+
+    for tick in 0..warm {
+        clock.set(tick);
+        let _ = bot.tick()?;
+    }
+    for tick in 0..warm {
+        let _ = chains
+            .iter_mut()
+            .map(|c| c.tick(tick, &evals_base_cell))
+            .sum::<u64>();
+    }
+
+    ALLOCS.store(0, Ordering::Relaxed);
+    BYTES.store(0, Ordering::Relaxed);
+    COUNTING.store(1, Ordering::Relaxed);
+    for tick in warm..warm.saturating_add(ticks) {
+        clock.set(tick);
+        let _ = bot.tick()?;
+    }
+    COUNTING.store(0, Ordering::Relaxed);
+    let bot_allocs = ALLOCS.load(Ordering::Relaxed);
+    let bot_bytes = BYTES.load(Ordering::Relaxed);
+
+    ALLOCS.store(0, Ordering::Relaxed);
+    COUNTING.store(1, Ordering::Relaxed);
+    for tick in warm..warm.saturating_add(ticks) {
+        let _ = chains
+            .iter_mut()
+            .map(|c| c.tick(tick, &evals_base_cell))
+            .sum::<u64>();
+    }
+    COUNTING.store(0, Ordering::Relaxed);
+    let base_allocs = ALLOCS.load(Ordering::Relaxed);
+    Ok(AllocRow {
+        name: scenario.name,
+        allocs_per_tick: bot_allocs as f64 / ticks as f64,
+        bytes_per_tick: bot_bytes as f64 / ticks as f64,
+        mean_bytes: bot_bytes as f64 / bot_allocs.max(1) as f64,
+        base_allocs_per_tick: base_allocs as f64 / ticks as f64,
+    })
+}
+
+/// One scenario's allocation row, every figure per tick.
+struct AllocRow {
+    /// The scenario's name, as the table's first column.
+    name: &'static str,
+    /// Allocations per counted tick for the bot.
+    allocs_per_tick: f64,
+    /// Bytes allocated per counted tick for the bot.
+    bytes_per_tick: f64,
+    /// Mean bytes per allocation; `0.0` when nothing allocated at all.
+    mean_bytes: f64,
+    /// Allocations per counted tick for the hand-rolled baseline.
+    base_allocs_per_tick: f64,
+}
+
+/// Build the allocation table, against `scratch` and under this run's pid.
+///
+/// # Errors
+///
+/// Any [`BotError`] an admitted bot reports, any [`std::io::Error`] the scratch
+/// directory reports, and the failure of the underlying write to the report.
+fn alloc_report(scratch: &Path) -> Result<String, Box<dyn std::error::Error>> {
     let mut out = String::new();
     writeln!(
         out,
@@ -554,64 +801,36 @@ fn alloc_report() -> Result<String, Box<dyn std::error::Error>> {
     )?;
     writeln!(
         out,
-        "  scenario                allocs/tick   bytes/tick   mean bytes   baseline allocs/tick"
+        "  scenario                allocs/tick   bytes/tick   mean bytes   baseline allocs/tick   row cost"
     )?;
 
-    for scenario in SCENARIOS {
-        let clock = Clock::new();
-        let tally = Rc::new(Cell::new(0u64));
-        let evals_bot_cell = Rc::new(Cell::new(0u64));
-        let evals_base_cell = Cell::new(0u64);
-
-        let mut bot = build_bot(scenario, &clock, &tally, &evals_bot_cell)?;
-        let mut chains = build_handrolled(scenario);
-
-        // Warm up, so anything allocated once by the schedule's first run (a
-        // lazily-grown buffer, a query's internal state) is already in place.
-        let warm = 64u64;
-        for tick in 0..warm {
-            clock.set(tick);
-            let _ = bot.tick()?;
-        }
-        for tick in 0..warm {
-            let _ = chains
-                .iter_mut()
-                .map(|c| c.tick(tick, &evals_base_cell))
-                .sum::<u64>();
-        }
-
-        let ticks = 512u64;
-        ALLOCS.store(0, Ordering::Relaxed);
-        BYTES.store(0, Ordering::Relaxed);
-        COUNTING.store(1, Ordering::Relaxed);
-        for tick in warm..warm.saturating_add(ticks) {
-            clock.set(tick);
-            let _ = bot.tick()?;
-        }
-        COUNTING.store(0, Ordering::Relaxed);
-        let bot_allocs = ALLOCS.load(Ordering::Relaxed);
-        let bot_bytes = BYTES.load(Ordering::Relaxed);
-
-        ALLOCS.store(0, Ordering::Relaxed);
-        COUNTING.store(1, Ordering::Relaxed);
-        for tick in warm..warm.saturating_add(ticks) {
-            let _ = chains
-                .iter_mut()
-                .map(|c| c.tick(tick, &evals_base_cell))
-                .sum::<u64>();
-        }
-        COUNTING.store(0, Ordering::Relaxed);
-        let base_allocs = ALLOCS.load(Ordering::Relaxed);
-
-        let per_tick = bot_allocs as f64 / ticks as f64;
+    // Warm up, so anything allocated once by the schedule's first run (a
+    // lazily-grown buffer, a query's internal state) is already in place.
+    let warm = 64u64;
+    let ticks = 512u64;
+    for (index, scenario) in SCENARIOS.iter().enumerate() {
+        let row_start = Instant::now();
+        let row = measure_allocations(scenario, warm, ticks, scratch, index)?;
+        // The table reports allocs and bytes, neither of which says what the
+        // journal's disk I/O costs, and that is now the dominant term in a
+        // moving tick. The per-tick wall clock beside each row says what the
+        // measured window cost end to end, so a reader who takes these rows as
+        // a statement about the schedule can see how much of it was the disk.
+        //
+        // Not a free-standing benchmark: the counter is live for the bot's half
+        // of the window and for the baseline's, and off for the warm-up and
+        // the `Vec`s between them, and the counted path also pays the counter.
+        // It bounds the cost of the row rather than measuring the tick alone.
+        let row_per_tick_ms = (row_start.elapsed().as_secs_f64() / ticks as f64) * 1e3;
         writeln!(
             out,
-            "  {:<20} {:>10.1}   {:>10.1}   {:>10.1}   {:>19.1}",
-            scenario.name,
-            per_tick,
-            bot_bytes as f64 / ticks as f64,
-            bot_bytes as f64 / bot_allocs.max(1) as f64,
-            base_allocs as f64 / ticks as f64,
+            "  {:<20} {:>10.1}   {:>10.1}   {:>10.1}   {:>19.1}   {:>9.1} ms/tick",
+            row.name,
+            row.allocs_per_tick,
+            row.bytes_per_tick,
+            row.mean_bytes,
+            row.base_allocs_per_tick,
+            row_per_tick_ms,
         )?;
     }
     // Per-tick trace for one scenario. A mean over 512 ticks hides the shape of
@@ -623,11 +842,17 @@ fn alloc_report() -> Result<String, Box<dyn std::error::Error>> {
     let clock = Clock::new();
     let tally = Rc::new(Cell::new(0u64));
     let evals = Rc::new(Cell::new(0u64));
-    let mut bot = build_bot(scenario, &clock, &tally, &evals)?;
+    let trace_bot_number = SCENARIOS.len();
+    let mut bot = build_bot(scenario, &clock, &tally, &evals, scratch, trace_bot_number)?;
     for tick in 0..64u64 {
         clock.set(tick);
         let _ = bot.tick()?;
     }
+    // Timed from here rather than from the top of this block, because the
+    // divisor below counts sixty traced ticks and the sixty warm-up ticks above
+    // are a different sixty. Both windows are on a quiet source, so they differ
+    // by a journal open and a buffer's first fill.
+    let trace_start = Instant::now();
     write!(
         out,
         "\n  per-tick allocations, {} (a value moves every {} ticks)\n    ",
@@ -641,11 +866,65 @@ fn alloc_report() -> Result<String, Box<dyn std::error::Error>> {
         COUNTING.store(0, Ordering::Relaxed);
         write!(out, "{}:{} ", tick, ALLOCS.load(Ordering::Relaxed))?;
     }
+    // The trace above shows where the allocations are and not what they cost,
+    // and under a file-backed journal those are no longer the same question:
+    // the allocation count is a steady few hundred either way, while the wall
+    // clock on a tick that fired is the `sync` the durability promise is made
+    // of. Sixty traced ticks, whatever that costs, said rather than estimated.
+    //
+    // This window is quiet by construction -- `steady-64x100` moves its value
+    // once every hundred ticks -- so the figure is the cost of a tick that
+    // decides nothing, and it is the floor rather than the headline. A tick that
+    // dispatches is in the `row cost` column above.
+    let trace_ticks = 60.0;
+    let trace_per_tick_ms = (trace_start.elapsed().as_secs_f64() / trace_ticks) * 1e3;
+    writeln!(
+        out,
+        "\n  those 60 quiet ticks took {:.1} ms/tick end to end, counting on",
+        trace_per_tick_ms
+    )?;
     writeln!(out, "\n")?;
     Ok(out)
 }
 
 // ── Reporting ────────────────────────────────────────────────────────────────
+
+/// Refuses to report a timing between two engines that did different work.
+///
+/// THE FAIRNESS GATE, on both axes. A ratio between two engines doing different
+/// amounts of work is not a measurement. Effects catch a baseline that produces
+/// different results; evaluations catch a baseline that reaches the same results
+/// by skipping the work.
+///
+/// A helper rather than two checks in the report loop: this is the condition
+/// under which every number in this rig is meaningless, so it is one predicate
+/// with one name rather than two comparisons a reader has to notice are paired.
+fn check_fairness(m: &Measurement) -> Result<(), Box<dyn std::error::Error>> {
+    lgwks_std::trace::warn!(
+        operation = "check_fairness",
+        "operation refused its request; the typed error carries the facts"
+    );
+    if m.effects_bot != m.effects_base {
+        return Err(format!(
+            "FAIRNESS CHECK FAILED for '{}': bot fired {} effects, baseline fired {}. \
+             The two engines are not doing the same work, so no timing from this \
+             scenario is reportable.",
+            m.name, m.effects_bot, m.effects_base
+        )
+        .into());
+    }
+    if m.evals_bot != m.evals_base {
+        return Err(format!(
+            "FAIRNESS CHECK FAILED for '{}': bot evaluated the condition {} times, \
+             baseline {} times. The effect counts agree, so this is a baseline that \
+             reaches the same answer with less work -- which is exactly the comparison \
+             this gate exists to refuse.",
+            m.name, m.evals_bot, m.evals_base
+        )
+        .into());
+    }
+    Ok(())
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     lgwks_std::trace::warn!(
@@ -655,8 +934,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let run_timings = !args.iter().any(|a| a == "--capcheck-only");
 
+    // One scratch directory for the whole process, and every bot this run
+    // admits writes its journal inside it under a number of its own. Both modes
+    // need it, so it is made before either branch rather than inside one.
+    let scratch = open_scratch_dir()?;
+
     if args.iter().any(|a| a == "--alloc-report") {
-        print!("{}", alloc_report()?);
+        print!("{}", alloc_report(&scratch)?);
         return Ok(());
     }
 
@@ -670,33 +954,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     if run_timings {
-        for scenario in SCENARIOS {
-            let m = measure(scenario)?;
+        for (index, scenario) in SCENARIOS.iter().enumerate() {
+            let m = measure(scenario, &scratch, index)?;
 
-            // THE FAIRNESS GATE, on both axes. A ratio between two engines doing
-            // different amounts of work is not a measurement, so refuse to report
-            // one. Effects catch a baseline that produces different results;
-            // evaluations catch a baseline that reaches the same results by
-            // skipping the work.
-            if m.effects_bot != m.effects_base {
-                return Err(format!(
-                    "FAIRNESS CHECK FAILED for '{}': bot fired {} effects, baseline fired {}. \
-                     The two engines are not doing the same work, so no timing from this \
-                     scenario is reportable.",
-                    m.name, m.effects_bot, m.effects_base
-                )
-                .into());
-            }
-            if m.evals_bot != m.evals_base {
-                return Err(format!(
-                    "FAIRNESS CHECK FAILED for '{}': bot evaluated the condition {} times, \
-                     baseline {} times. The effect counts agree, so this is a baseline that \
-                     reaches the same answer with less work -- which is exactly the comparison \
-                     this gate exists to refuse.",
-                    m.name, m.evals_bot, m.evals_base
-                )
-                .into());
-            }
+            check_fairness(&m)?;
 
             let mut ratios: Vec<f64> = m
                 .bot
@@ -810,9 +1071,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         growth * growth
     )?;
 
-    // Build cost.
-    let build_1 = build_cost(1)?;
-    let build_64 = build_cost(64)?;
+    // Build cost. The two admission measurements and the two replay arms follow,
+    // so their journal numbers are counted from here on.
+    let build_cost_first = SCENARIOS.len();
+    let build_1 = build_cost(1, &scratch, build_cost_first)?;
+    let build_64 = build_cost(64, &scratch, build_cost_first + 1)?;
     writeln!(
         human,
         "admission (build) cost\n  1 source: {:.3} ms\n  64 sources: {:.3} ms\n",
@@ -821,7 +1084,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     // Determinism.
-    let (deterministic, fired) = determinism_probe(&SCENARIOS[1], 500)?;
+    let (deterministic, fired) =
+        determinism_probe(&SCENARIOS[1], 500, &scratch, build_cost_first + 2)?;
     writeln!(
         human,
         "determinism probe (500 ticks, replayed)\n  identical per-tick effect sequence: {}\n  total effects: {}\n",

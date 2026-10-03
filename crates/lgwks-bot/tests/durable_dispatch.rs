@@ -1022,6 +1022,26 @@ struct ForeignTailAckJournal {
     forge_once: Cell<bool>,
 }
 
+/// The forged attempt id this fixture admits under.
+///
+/// A helper so the only return path in the trait method above belongs to it:
+/// the method is a [`EffectJournal`] implementation that adds one forged pair of
+/// events to a real journal, and its refusal has to say so the way every other
+/// refusal in the crate does.
+fn attempt_two() -> Result<AttemptId, JournalError> {
+    lgwks_std::trace::warn!(
+        operation = "attempt_two",
+        "operation refused its request; the typed error carries the facts"
+    );
+    // "2" is a literal in this fixture, so the parse cannot fail; the arm exists
+    // because the type demands one and `JournalError` has nothing to add that
+    // the parse error does not already say.
+    match AttemptId::from_decimal("2") {
+        Ok(attempt) => Ok(attempt),
+        Err(_not_an_attempt) => Err(JournalError::Exhausted),
+    }
+}
+
 impl EffectJournal for ForeignTailAckJournal {
     fn durability(&self) -> DurabilityPromise {
         self.store.borrow().durability()
@@ -1049,9 +1069,11 @@ impl EffectJournal for ForeignTailAckJournal {
             .borrow_mut()
             .compare_and_append(expected_tail, event)?;
         if self.forge_once.replace(false) && matches!(event, EffectEvent::IntentAdmitted { .. }) {
-            let foreign_key = event
-                .key()
-                .with_attempt(AttemptId::from_decimal("2").map_err(|_| JournalError::Exhausted)?);
+            // "2" is a literal in this fixture, so the parse cannot fail; the
+            // arm exists because the type demands one and `JournalError` has
+            // nothing to add that the parse error does not already say.
+            let attempt = attempt_two()?;
+            let foreign_key = event.key().with_attempt(attempt);
             let mut store = self.store.borrow_mut();
             let tail = store.tail();
             store.compare_and_append(tail, &EffectEvent::IntentAdmitted { key: foreign_key })?;

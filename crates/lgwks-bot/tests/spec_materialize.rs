@@ -59,10 +59,19 @@ fn take_trace() -> Vec<String> {
 
 /// Parse a target as a count, or refuse it — the malformed-input case a
 /// constructor reports through admission.
+///
+/// The `ParseIntError` is recorded rather than dropped: `target` is untrusted
+/// text, and the parse error's own message ("invalid digit found in string",
+/// "cannot parse integer from empty string") is the part that says whether the
+/// value was empty or merely non-numeric. `BotError::IncompleteSpec` renders it
+/// through `Escaped`, so the untrusted text it quotes cannot forge a log line.
 fn parse_count(target: &str) -> Result<u16, BotError> {
     target
         .parse::<u16>()
-        .map_err(|_| BotError::IncompleteSpec { field: "target" })
+        .map_err(|not_a_count| BotError::IncompleteSpec {
+            field: "target",
+            cause: not_a_count.to_string(),
+        })
 }
 
 /// A source that reports the count its `target` parsed to.
@@ -474,7 +483,9 @@ fn admission_reports_all_five_needs_in_one_set() -> TestResult<()> {
             Need::SourceTargetRejected {
                 chain: 3,
                 domain: "test::counter".into(),
-                cause: "incomplete bot spec: missing target".into(),
+                // Both halves, because the constructor reports both: the field
+                // that is missing and the parse failure that made it missing.
+                cause: "incomplete bot spec: missing target: invalid digit found in string".into(),
             },
             Need::MissingCapability {
                 chain: 4,
@@ -609,7 +620,8 @@ fn empty_chains_are_refused_by_the_materializer() -> TestResult<()> {
         matches!(
             refusal,
             Err(Admission::Refused(BotError::IncompleteSpec {
-                field: "chains"
+                field: "chains",
+                ..
             }))
         ),
         "a materialized bot with no chains is a refused document: {refusal:?}"

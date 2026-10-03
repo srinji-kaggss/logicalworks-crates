@@ -726,12 +726,49 @@ fn single_component(name: &str) -> io::Result<std::ffi::CString> {
             format!("{name:?} is not a single path component"),
         ));
     }
-    std::ffi::CString::new(name).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "path component contains an interior NUL",
-        )
+    std::ffi::CString::new(name).map_err(|cause| {
+        // The offset is read off the cause before the cause is moved into the
+        // error: `CString::new` already located the NUL, and restating a second
+        // copy of that number could only disagree with it.
+        let at = cause.nul_position();
+        io::Error::new(io::ErrorKind::InvalidInput, InteriorNul { cause, at })
     })
+}
+
+/// Why a path component could not become a `CString`.
+///
+/// A named type rather than a `String`: the [`std::ffi::NulError`] travels
+/// inside it and is what makes the refusal observable, while the rendered text
+/// stays the module's own phrase and never quotes the rejected name.
+#[cfg(unix)]
+#[derive(Debug)]
+struct InteriorNul {
+    /// The interior-NUL failure `CString::new` reported, kept as the cause so
+    /// `Error::source` reaches it rather than losing it at the translation.
+    cause: std::ffi::NulError,
+    /// Offset of the NUL byte within the rejected component.
+    at: usize,
+}
+
+#[cfg(unix)]
+impl std::fmt::Display for InteriorNul {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Deliberately no `{:?}` of the rejected name: this path is reached
+        // with caller-supplied text, and a name carrying CR/LF would forge a
+        // second line in whatever log interpolates the `io::Error`.
+        write!(
+            formatter,
+            "path component contains an interior NUL at offset {}",
+            self.at
+        )
+    }
+}
+
+#[cfg(unix)]
+impl std::error::Error for InteriorNul {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.cause)
+    }
 }
 
 /// Map a raw `st_mode` word to the kind this crate reports.

@@ -271,7 +271,15 @@ async fn by_joinset(ctx: Arc<Ctx>, tenant: Arc<str>, items: Vec<u32>) -> Result<
         let permit = Arc::clone(&permits)
             .acquire_owned()
             .await
-            .map_err(|_closed| FlowError::failed("semaphore closed"))?;
+            // The `AcquireError` is read rather than dropped, and it is read
+            // as what it is: a `Semaphore`'s acquire fails only when the semaphore
+            // has been closed, so this message says exactly that rather than
+            // guessing at a classification the type does not carry.
+            .map_err(|closed| {
+                FlowError::failed(format!(
+                    "semaphore closed before a permit was granted: {closed}"
+                ))
+            })?;
         let (ctx, tenant) = (Arc::clone(&ctx), Arc::clone(&tenant));
         set.spawn(async move {
             let _permit = permit;

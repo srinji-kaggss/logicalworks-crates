@@ -123,6 +123,10 @@ impl Source {
     where
         O: Observe + 'static,
         O::Output: Clone + PartialEq + PartialOrd + std::str::FromStr + InputIdentity + 'static,
+        // Propagated from `parse_bound`: a threshold argument that fails to
+        // parse is reported with the parse error's own text, so an output type
+        // whose parse error cannot be rendered cannot be a threshold bound.
+        <O::Output as std::str::FromStr>::Err: std::fmt::Display,
     {
         Self::erase(source, make_ordered_condition::<O>)
     }
@@ -212,6 +216,7 @@ where
         "always" => Ok(Condition::new::<O::Output, _>(|_: &O::Output| true)),
         _ => Err(BotError::UnknownCondition {
             condition: identifier.to_owned(),
+            argument_parse: String::from("not an identifier this build knows"),
         }),
     }
 }
@@ -222,6 +227,11 @@ fn make_ordered_condition<O>(condition_id: &str) -> Result<Condition, BotError>
 where
     O: Observe + 'static,
     O::Output: Clone + PartialEq + PartialOrd + std::str::FromStr + 'static,
+    // Propagated from `parse_bound`, which carries the parse failure into the
+    // error rather than dropping it. An output type whose `FromStr` error cannot
+    // be rendered cannot be used as a threshold bound, because a caller
+    // repairing a bad spec would have nothing to read.
+    <O::Output as std::str::FromStr>::Err: std::fmt::Display,
 {
     let identifier = condition_id.trim();
     if let Some(argument) = parenthesized(identifier, "threshold::above") {
@@ -248,15 +258,29 @@ fn parenthesized<'a>(identifier: &'a str, prefix: &str) -> Option<&'a str> {
 }
 
 /// Parse a threshold argument as `T`, reporting the whole identifier on failure.
-fn parse_bound<T: std::str::FromStr>(argument: &str, identifier: &str) -> Result<T, BotError> {
-    // `ParseError`'s text is "invalid digit found in string" or "cannot parse
-    // integer from empty string". Neither names the argument the caller has to
-    // fix, which is what `identifier` is for.
+///
+/// The `FromStr` error is carried rather than dropped. `ParseIntError`'s own
+/// text is "invalid digit found in string" or "cannot parse integer from empty
+/// string", which says what the standard library saw and nothing about the
+/// condition the caller has to repair — but it is the part that distinguishes
+/// an empty threshold from a malformed one, so it rides along beside
+/// `identifier`.
+fn parse_bound<T>(argument: &str, identifier: &str) -> Result<T, BotError>
+where
+    T: std::str::FromStr,
+    // The parse failure is carried into the error, so the error type has to be
+    // renderable. Every std numeric and bool parser meets this; a `FromStr`
+    // whose `Err` cannot print would be refusing in a way this error cannot
+    // report, which is why the bound is here rather than the field being
+    // dropped.
+    T::Err: std::fmt::Display,
+{
     argument
         .trim()
         .parse::<T>()
-        .map_err(|_not_this_type| BotError::UnknownCondition {
+        .map_err(|not_this_type| BotError::UnknownCondition {
             condition: identifier.to_owned(),
+            argument_parse: not_this_type.to_string(),
         })
 }
 

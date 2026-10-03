@@ -70,9 +70,28 @@ pub enum BotError {
     },
     /// The bot spec is incomplete: a required field is missing (currently the
     /// name; an empty chain list is allowed).
+    ///
+    /// `cause` is the detail the producing site refused with. It is required
+    /// rather than optional because the field name alone does not say *why* the
+    /// value was missing: a threshold that does not parse and a chain list that
+    /// is absent are both "missing target", and only the cause tells a caller
+    /// which one it is looking at. Rendered through [`Escaped`] because it
+    /// originates in the spec document.
     IncompleteSpec {
         /// What is missing.
         field: &'static str,
+        /// Why the field is missing, in the producing site's own words.
+        ///
+        /// Required rather than optional because the two ways this is reached
+        /// are different defects with different repairs: a field that was absent
+        /// from a document, and a field whose translation failed. It is untrusted
+        /// -- it names something from the spec document -- so it renders through
+        /// the escaping wrapper.
+        ///
+        /// A site with no underlying error states its own reason rather than
+        /// leaving this empty; there is no "unknown" here, because a caller
+        /// holding this is being told what to repair.
+        cause: String,
     },
     /// The spec names a domain this binary does not run.
     ///
@@ -146,6 +165,17 @@ pub enum BotError {
     UnknownCondition {
         /// The condition identifier the spec spelled.
         condition: String,
+        /// The parse failure the registry recorded for the identifier's
+        /// argument, rendered as the `FromStr` error's own text.
+        ///
+        /// It is required because the identifier alone cannot distinguish the
+        /// two ways this is reached: an identifier outside the vocabulary, and
+        /// an identifier in it whose threshold argument does not parse. A
+        /// caller repairing a spec needs to know which. Held as a `String` and
+        /// rendered through [`Escaped`], exactly as [`BotError::MalformedSpec`]
+        /// holds its cause, so a payload that reaches it cannot forge a log
+        /// line.
+        argument_parse: String,
     },
     /// The synchronous adapter, [`Bot::tick`](crate::Bot::tick), was called on a
     /// thread an async runtime is already driving.
@@ -970,8 +1000,16 @@ impl fmt::Display for BotError {
             Self::CapabilityDenied { ref deficit } => {
                 write!(f, "capability denied: {deficit}")
             }
-            Self::IncompleteSpec { field } => {
-                write!(f, "incomplete bot spec: missing {field}")
+            // One `write!`, so there is a single fallible step and no partially
+            // rendered sentence if the formatter refuses part-way. `cause` is
+            // escaped for the same reason `field`'s neighbours are: it names
+            // something from the spec document.
+            Self::IncompleteSpec { field, ref cause } => {
+                write!(
+                    f,
+                    "incomplete bot spec: missing {field}: {}",
+                    Escaped(cause)
+                )
             }
             Self::UnregisteredDomain { ref domain } => {
                 write!(f, "unregistered domain: {}", Escaped(domain))
@@ -997,10 +1035,18 @@ impl fmt::Display for BotError {
                 "bot spec declares version {found}, but this build materializes version \
                  {supported} only"
             ),
-            Self::UnknownCondition { ref condition } => write!(
+            Self::UnknownCondition {
+                ref condition,
+                ref argument_parse,
+            } => write!(
                 f,
-                "unknown condition {}: not in the supported wire vocabulary",
-                Escaped(condition)
+                // `argument_parse` distinguishes an identifier this build does
+                // not know from one whose threshold argument does not parse --
+                // two different repairs -- so it is rendered rather than dropped.
+                "unknown condition {}: not in the supported wire vocabulary, or its threshold \
+                 argument did not parse ({})",
+                Escaped(condition),
+                Escaped(argument_parse)
             ),
             Self::TickInsideRuntime => f.write_str(
                 "tick: the synchronous adapter cannot park a thread an async runtime is driving; \
@@ -1511,6 +1557,20 @@ mod tests {
             },
             BotError::MalformedSpec {
                 cause: payload.clone(),
+            },
+            // Both spec-refusal variants grew an untrusted payload since this
+            // list was written, so each gets its own row here: `IncompleteSpec`
+            // names the missing field and records why it was missing, and
+            // `UnknownCondition` names the identifier and records how its
+            // argument refused to parse. Neither may render a live control
+            // character.
+            BotError::IncompleteSpec {
+                field: "target",
+                cause: payload.clone(),
+            },
+            BotError::UnknownCondition {
+                condition: payload.clone(),
+                argument_parse: payload.clone(),
             },
             BotError::DomainError {
                 domain: payload.clone(),

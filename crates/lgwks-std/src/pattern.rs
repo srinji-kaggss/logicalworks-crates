@@ -126,7 +126,7 @@ impl Default for PatternConfig {
 }
 
 /// Typed refusal from a bounded matching or replacement operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PatternRunError {
     /// Input exceeded its configured byte ceiling.
@@ -144,7 +144,12 @@ pub enum PatternRunError {
         attempted: usize,
     },
     /// The allocator refused an output reservation.
-    AllocationFailed,
+    AllocationFailed {
+        /// The reservation failure the allocator reported, kept so the capacity
+        /// request that was refused stays attached to the error instead of
+        /// being dropped at the translation boundary.
+        cause: std::collections::TryReserveError,
+    },
     /// The engine violated its group-zero capture invariant.
     MissingWholeMatch,
 }
@@ -159,14 +164,23 @@ impl core::fmt::Display for PatternRunError {
                 f,
                 "replacement would produce {attempted} bytes; limit is {limit}"
             ),
-            Self::AllocationFailed => f.write_str("replacement output allocation failed"),
+            Self::AllocationFailed { ref cause } => {
+                write!(f, "replacement output allocation failed: {cause}")
+            }
             Self::MissingWholeMatch => {
                 f.write_str("regex engine returned captures without group zero")
             }
         }
     }
 }
-impl std::error::Error for PatternRunError {}
+impl std::error::Error for PatternRunError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match *self {
+            Self::AllocationFailed { ref cause } => Some(cause),
+            _ => None,
+        }
+    }
+}
 
 impl core::fmt::Display for PatternError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -566,7 +580,7 @@ impl BoundedString {
                 .clamp(attempted, self.limit);
             self.value
                 .try_reserve_exact(target.saturating_sub(self.value.len()))
-                .map_err(|_| PatternRunError::AllocationFailed)?;
+                .map_err(|cause| PatternRunError::AllocationFailed { cause })?;
         }
         self.value.push_str(value);
         Ok(())

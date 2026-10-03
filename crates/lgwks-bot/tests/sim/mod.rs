@@ -386,7 +386,14 @@ impl Sim {
         self.clock.now() >= self.faults.crash_at
     }
 
-    /// Record a fact.
+    /// Append a fact to this run's replay trace.
+    ///
+    /// [`assert_replays`] runs every seed in the band twice and compares the two
+    /// sweeps, so a fact recorded here is part of what determinism is asserted
+    /// over. Recording a fact the run's behaviour does not actually depend on
+    /// would make that assertion weaker, not stronger: it would pass on a run
+    /// that took a different path and merely happened to end saying the same
+    /// thing.
     pub fn record(&mut self, fact: &str) {
         self.trace.record(fact);
     }

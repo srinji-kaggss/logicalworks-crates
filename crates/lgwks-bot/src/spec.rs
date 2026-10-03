@@ -1448,7 +1448,10 @@ mod tests {
                 Bot::builder("")
                     .with_effects(test_effects()?)
                     .build(&GrantSet::empty()),
-                Err(BotError::IncompleteSpec { field: "name" })
+                Err(BotError::IncompleteSpec {
+                    field: "name",
+                    cause: _,
+                })
             ),
             "the no-chains entry point must reject an empty name"
         );
@@ -1459,7 +1462,10 @@ mod tests {
                     .observe(NeedsNet(vec![]))
                     .with_effects(test_effects()?)
                     .build(&GrantSet::empty()),
-                Err(BotError::IncompleteSpec { field: "name" })
+                Err(BotError::IncompleteSpec {
+                    field: "name",
+                    cause: _,
+                })
             ),
             "the with-chains entry point must reject the same empty name"
         );

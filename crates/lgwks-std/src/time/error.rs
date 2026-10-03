@@ -2,6 +2,7 @@
 
 use std::error::Error;
 use std::fmt;
+use std::num::TryFromIntError;
 
 /// Which calendar or clock field failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +27,12 @@ pub enum Field {
 }
 
 /// Why conversion between Unix parts and the platform clock was refused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Clone` but deliberately not `Copy`: [`UnixTimeError::SystemTimeOutsideI64Range`]
+/// carries the [`TryFromIntError`] the narrowing actually produced, and a
+/// caller that only wants the failure still gets the exact seconds count that
+/// did not fit rather than a bare "out of range".
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum UnixTimeError {
     /// Adding the nanosecond carry exceeded the signed seconds domain.
@@ -47,6 +53,20 @@ pub enum UnixTimeError {
     SystemTimeOutsideI64Range {
         /// Whether the instant precedes the Unix epoch.
         before_epoch: bool,
+        /// The narrowing failure itself, so the seconds count that did not fit
+        /// `i64` stays attached to the refusal instead of being dropped at the
+        /// translation boundary.
+        cause: TryFromIntError,
+    },
+    /// Negating a pre-epoch seconds count left the signed domain.
+    ///
+    /// Separate from [`UnixTimeError::SystemTimeOutsideI64Range`] because no
+    /// integer conversion failed here: the magnitude was already a valid
+    /// `i64` and `checked_neg` was what refused. Naming it separately keeps the
+    /// variant's `cause` field meaning exactly one thing.
+    NegationOverflow {
+        /// Magnitude of the seconds count whose negation did not fit `i64`.
+        magnitude: u64,
     },
 }
 
@@ -67,19 +87,36 @@ impl fmt::Display for UnixTimeError {
                 formatter,
                 "platform SystemTime cannot represent ({seconds}, {nanoseconds})"
             ),
-            Self::SystemTimeOutsideI64Range { before_epoch } => write!(
+            Self::SystemTimeOutsideI64Range {
+                before_epoch,
+                ref cause,
+            } => write!(
                 formatter,
-                "SystemTime {} the epoch is outside the i64 Unix-seconds range",
+                "SystemTime {} the epoch is outside the i64 Unix-seconds range: {cause}",
                 if before_epoch { "before" } else { "after" }
+            ),
+            Self::NegationOverflow { magnitude } => write!(
+                formatter,
+                "negating {magnitude} pre-epoch seconds leaves the i64 Unix-seconds range"
             ),
         }
     }
 }
 
-impl Error for UnixTimeError {}
+impl Error for UnixTimeError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match *self {
+            Self::SystemTimeOutsideI64Range { ref cause, .. } => Some(cause),
+            _ => None,
+        }
+    }
+}
 
 /// Why canonical RFC 3339 formatting was refused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Clone` but not `Copy`, because [`UnixTimeError`] is not `Copy` once
+/// [`UnixTimeError::SystemTimeOutsideI64Range`] carries its cause.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FormatError {
     /// The platform clock instant cannot be converted to `i64` Unix parts.
@@ -94,7 +131,7 @@ pub enum FormatError {
 impl fmt::Display for FormatError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            Self::UnixTime(error) => write!(formatter, "cannot format instant: {error}"),
+            Self::UnixTime(ref error) => write!(formatter, "cannot format instant: {error}"),
             Self::YearOutsideRfc3339 { year } => write!(
                 formatter,
                 "UTC year {year} is outside RFC 3339's four-digit year range 0000..=9999"
@@ -263,8 +300,9 @@ fn fmt_missing_offset(formatter: &mut fmt::Formatter<'_>, at: usize) -> fmt::Res
 
 impl fmt::Display for ParseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Every field of every variant is `Copy`, so matching on `*self` binds
-        // them by value and no arm needs to dereference.
+        // Every field of every variant but `UnrepresentableInstant` is `Copy`,
+        // so matching on `*self` binds those by value; the one arm that holds a
+        // `UnixTimeError` borrows rather than moving it out of `&self`.
         match *self {
             Self::TooShort { len, at } => fmt_too_short(formatter, len, at),
             Self::Malformed { at, byte } => fmt_malformed(formatter, at, byte),
@@ -281,7 +319,7 @@ impl fmt::Display for ParseError {
                 formatter,
                 "leap second is unsupported by the SystemTime profile at offset {at}"
             ),
-            Self::UnrepresentableInstant(error) => {
+            Self::UnrepresentableInstant(ref error) => {
                 write!(formatter, "parsed instant is not representable: {error}")
             }
             Self::MissingOffset { at } => fmt_missing_offset(formatter, at),

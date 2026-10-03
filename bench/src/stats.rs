@@ -33,7 +33,11 @@ impl Rng {
     /// at zero and would return zero forever.
     #[must_use]
     pub fn new(seed: u64) -> Self {
-        Self(if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed })
+        Self(if seed == 0 {
+            0x9E37_79B9_7F4A_7C15
+        } else {
+            seed
+        })
     }
 
     /// The next raw 64-bit draw.
@@ -48,6 +52,15 @@ impl Rng {
 
     /// A uniform draw in `[0, 1)`, from the top 53 bits (the mantissa width of
     /// an `f64`), so every representable value in range is reachable.
+    ///
+    /// The other half of this generator's surface and nothing in the rig
+    /// resamples a continuous statistic today, so it is held deliberately:
+    /// removing it would make the next continuous bootstrap a change to a
+    /// statistical primitive rather than a change to a caller.
+    #[expect(
+        dead_code,
+        reason = "the generator's uniform draw is half its surface and no scenario resamples a continuous statistic today; deleting it would make the next continuous bootstrap a change to a statistical primitive rather than to a caller"
+    )]
     pub fn next_unit(&mut self) -> f64 {
         let bits = self.next_u64() >> 11;
         (bits as f64) / ((1u64 << 53) as f64)
@@ -104,12 +117,7 @@ pub fn median(values: &mut [f64]) -> f64 {
 /// produces. It assumes only that the rounds are exchangeable, which the paired
 /// design is what buys.
 #[must_use]
-pub fn bootstrap_median_ci(
-    sample: &[f64],
-    iterations: usize,
-    level: f64,
-    seed: u64,
-) -> (f64, f64) {
+pub fn bootstrap_median_ci(sample: &[f64], iterations: usize, level: f64, seed: u64) -> (f64, f64) {
     if sample.is_empty() {
         return (f64::NAN, f64::NAN);
     }

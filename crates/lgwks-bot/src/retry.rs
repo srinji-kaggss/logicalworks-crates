@@ -223,7 +223,11 @@ impl DeduplicationContract {
         self.action
     }
 
-    /// The bound payload.
+    /// The digest of the payload this deduplication contract is bound to.
+    ///
+    /// A resend with a different payload is a different request, and the remote
+    /// is not obliged to deduplicate it -- so a caller confirming that a retry is
+    /// still the same request compares this rather than the action id alone.
     #[must_use]
     pub const fn payload(&self) -> ActionDigest {
         self.payload

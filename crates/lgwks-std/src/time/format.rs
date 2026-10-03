@@ -60,13 +60,15 @@ pub fn unix_parts(at: SystemTime) -> Result<(i64, u32), UnixTimeError> {
     );
     match at.duration_since(UNIX_EPOCH) {
         Ok(duration) => {
-            // Checked rather than converted-and-mapped: the only way the
-            // conversion fails is a whole-second count past `i64::MAX`, so the
-            // condition names exactly that and the variant carries no detail the
-            // check has not already stated.
-            let seconds = i64::try_from(duration.as_secs()).map_err(|_out_of_range| {
+            // The narrowing is checked rather than assumed: a whole-second
+            // count past `i64::MAX` is the only way this can fail, and the
+            // `TryFromIntError` it produces travels on inside the variant so
+            // the count that did not fit is still reachable after the
+            // translation.
+            let seconds = i64::try_from(duration.as_secs()).map_err(|cause| {
                 UnixTimeError::SystemTimeOutsideI64Range {
                     before_epoch: false,
+                    cause,
                 }
             })?;
             Ok((seconds, duration.subsec_nanos()))
@@ -79,14 +81,16 @@ pub fn unix_parts(at: SystemTime) -> Result<(i64, u32), UnixTimeError> {
                 return Ok((i64::MIN, 0));
             }
             // One whole-second count does not fit `i64`, and the guard above
-            // answers exactly it. Any other value is a whole number of seconds
-            // that `i64::MAX` is seven orders of magnitude larger than, so the
-            // conversion is total here and the error it cannot produce is
-            // named rather than discarded.
+            // answers exactly it. The `Err` arm therefore does carry the
+            // seconds count that overflowed, so it is attached to the refusal
+            // rather than dropped on the way through.
             let whole = match i64::try_from(duration.as_secs()) {
                 Ok(whole) => whole,
-                Err(_out_of_range) => {
-                    return Err(UnixTimeError::SystemTimeOutsideI64Range { before_epoch: true });
+                Err(cause) => {
+                    return Err(UnixTimeError::SystemTimeOutsideI64Range {
+                        before_epoch: true,
+                        cause,
+                    });
                 }
             };
             let nanos = duration.subsec_nanos();
@@ -94,8 +98,19 @@ pub fn unix_parts(at: SystemTime) -> Result<(i64, u32), UnixTimeError> {
                 whole.checked_neg()
             } else {
                 whole.checked_neg().and_then(|value| value.checked_sub(1))
-            }
-            .ok_or(UnixTimeError::SystemTimeOutsideI64Range { before_epoch: true })?;
+            };
+            let seconds = match seconds {
+                Some(seconds) => seconds,
+                None => {
+                    // Only negation can refuse here, and it refuses for exactly
+                    // one magnitude: `i64::MIN`. Naming it in its own variant is
+                    // what keeps the fact observable — fabricating a conversion
+                    // failure here would attach a cause that never happened.
+                    return Err(UnixTimeError::NegationOverflow {
+                        magnitude: whole.unsigned_abs(),
+                    });
+                }
+            };
             Ok((
                 seconds,
                 if nanos == 0 {
@@ -115,10 +130,14 @@ pub fn unix_parts(at: SystemTime) -> Result<(i64, u32), UnixTimeError> {
 #[must_use]
 pub fn unix_parts_lossy(at: SystemTime) -> (i64, u32) {
     unix_parts(at).unwrap_or_else(|error| match error {
-        UnixTimeError::SystemTimeOutsideI64Range { before_epoch: true } => (i64::MIN, 0),
+        UnixTimeError::SystemTimeOutsideI64Range {
+            before_epoch: true, ..
+        } => (i64::MIN, 0),
         UnixTimeError::SystemTimeOutsideI64Range {
             before_epoch: false,
+            ..
         }
+        | UnixTimeError::NegationOverflow { .. }
         | UnixTimeError::SecondsOverflow { .. }
         | UnixTimeError::SystemTimeOutOfRange { .. } => (i64::MAX, 0),
     })

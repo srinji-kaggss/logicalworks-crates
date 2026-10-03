@@ -17,6 +17,35 @@ CARGO_TARGET_DIR=/tmp/lgwks-bench-target \
 results and prints a human table; `results.json` in this directory is the
 committed record of the run described below.
 
+### The journals, and why the timing run no longer finishes
+
+Every bot this rig admits dispatches an external effect, and an external effect
+requires a journal whose `durability()` meets `ProcessCrash`
+(`crates/lgwks-bot/src/ecs.rs`). `MemoryJournal` reports `Ephemeral` and is
+refused at the first dispatch, so the rig journals to
+`$TMPDIR/lgwks-bench-journal-<pid>/bot-<n>.journal`, one file per bot, and
+leaves them there: a journal is the record of what left the process, and a
+measurement rig that deleted it would discard the evidence it exists to
+produce. Remove the directory yourself between runs.
+
+The consequence is in the runtime, not in the arguments. One append on this
+machine's filesystem is a `write` plus an `fsync`, and `--alloc-report` costs
+what the run says:
+
+| scenario | effects the report fires | row cost, ms/tick |
+|---|---:|---:|
+| `poll-only-64x100` | 0 | 0.0 |
+| `steady-64x100` | 128 | 3.5 |
+| `churn-64x1` | 31 232 | 798.3 |
+| `fanout-1x64` | 31 744 | 501.9 |
+| `wide-256x10` | 32 256 | 160.4 |
+
+That is about 8 minutes for the counting run, and the timing scenarios repeat
+that workload over 24 rounds plus warm-up, so they no longer complete at all.
+The cost is proportional to how many effects a tick fires, not to what the
+schedule decides, which is the cost of the configuration the crate now requires;
+see the section above on what the committed table does and does not cover.
+
 ## The headline, stated before the method
 
 **`lgwks_bot` is not state of the art on throughput, and this rig does not claim
@@ -41,15 +70,49 @@ dispatches should look like.
 `opt-level = 3`, `lto = true`, `codegen-units = 1`. One machine, one run: these
 are absolute numbers for this host, not a cross-platform claim.
 
+### What these figures are and are not, as of the file-backed journal
+
+**Every number in this document predates a change to the rig's own
+configuration, and that change is on the bot's side of the comparison.** An
+admitted bot is now refused at assembly unless it is given an effect scope, and
+the scope has to carry a journal whose durability promise meets what an external
+handoff requires. `MemoryJournal` reports `Ephemeral` and is refused, so the
+rig's measured bots dispatch through a `FileJournal` on this machine's disk, and
+the write and `fsync` an effect needs are now inside every timed window.
+
+That moves the bot leg by roughly three orders of magnitude on the scenarios
+that fire effects, and it moves `churn-64x1` and `wide-256x10` by more than
+the runtime of a full timing run on this filesystem. The figures below are
+therefore left exactly as measured rather than restated against a configuration
+they were not taken on, and read as what they are:
+
+- They are the cost of **the schedule and the four verbs**, measured against an
+  in-memory journal — which the crate would now refuse to dispatch an external
+  effect through.
+- They are **not** the cost of `lgwks_bot` as it has to be configured today,
+  which includes a durable record per effect.
+- They are **not** the cost of durability either. Nothing here measures what
+  `journal::FileJournal` costs per append; the only figure this repository has
+  for that is the crate's own note that a four-rung attempt costs four flushes
+  at about 3.3 ms each (`crates/lgwks-bot/src/journal/file.rs`).
+
+Nothing in the measured table has been recomputed, because a full timing run
+against the file-backed journal does not complete in a usable time on this
+machine. Regenerating them is a deliberate future run, not something to
+estimate; the wall-clock figure the allocation report prints beside each row
+(`--alloc-report`, `row cost`, ms/tick) is the honest cost of a measured window
+as the rig stands, and it is not a substitute for a re-measured table.
+
 ## Method
 
 ### The baseline is the null hypothesis, not a strawman
 
 The comparator is a hand-rolled loop that polls the same sources, detects the
 same changes, evaluates the same condition, and performs the same effect. It
-holds no ECS world, no ledger, no `Auth` proof and no capability set. The
-question it answers is: *what does this work cost when nothing is being
-guaranteed?* Everything above that line is the price of the guarantees.
+holds no ECS world, no ledger, no `Auth` proof, no capability set and no
+journal. The question it answers is: *what does this work cost when nothing is
+being guaranteed?* Everything above that line is the price of the guarantees —
+and the durable journal is now the largest single term in that price.
 
 ### The fairness gate, on two axes
 

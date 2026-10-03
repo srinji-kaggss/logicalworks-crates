@@ -452,13 +452,21 @@ impl<O> Report<O> {
         self.effects
     }
 
-    /// The tenant this run was for.
+    /// The tenant this run was admitted for.
+    ///
+    /// Fixed at admission and not a property of the work, so a caller charging
+    /// the run reads it here rather than tracking which tenant's flow it came
+    /// from.
     #[must_use]
     pub fn tenant(&self) -> &Tenant {
         &self.tenant
     }
 
-    /// The task that ran.
+    /// The declared name of the task this run executed.
+    ///
+    /// Borrowed from the run rather than returned, so it cannot outlive the run
+    /// it names. Two runs of the same task share it, and a task name says nothing
+    /// about which tenant it ran for.
     #[must_use]
     pub fn task_name(&self) -> &str {
         self.task.as_str()

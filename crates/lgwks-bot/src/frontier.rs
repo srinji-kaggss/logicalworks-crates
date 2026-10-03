@@ -955,7 +955,14 @@ impl Frontier {
         frontier
     }
 
-    /// The policy in force.
+    /// The politeness limits this frontier enforces.
+    ///
+    /// Fixed at construction -- [`Frontier::new`] is the only way one is chosen
+    /// and there is no setter -- so this answers "what was this run admitted
+    /// under", not "what could be raised to". A caller that wants a different
+    /// budget builds a different frontier: a reservation ledger is one
+    /// accounting, and changing its limits mid-flight would change what the
+    /// reservations it already issued mean.
     #[must_use]
     pub fn policy(&self) -> &PolitenessPolicy {
         &self.policy

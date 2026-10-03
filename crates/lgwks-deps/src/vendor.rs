@@ -53,15 +53,27 @@ pub struct Report {
 /// Why coverage could not be verified. Every variant is a refusal, not a
 /// pass: a gate that passes when it cannot read its own inputs reports
 /// success for the one condition it exists to catch.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Neither `Clone` nor `PartialEq` is derived, because
+/// [`VendorError::NoTree`] now carries the `std::io::Error` that stopped the
+/// config from being read and `io::Error` is neither `Clone` nor `PartialEq`.
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum VendorError {
     /// The lock file could not be read.
     Lock(lock::LockError),
     /// The repo carries no vendored-sources directory to check against.
+    ///
+    /// `cause` is present only when the config could not be *read*; it carries
+    /// the I/O failure, so a missing file is distinguishable from a config that
+    /// was read and simply names no tree. A config that parsed and named
+    /// nothing leaves it unset, because there was no read failure to carry.
     NoTree {
         /// Config path that names no tree.
         config: PathBuf,
+        /// The read failure, when the refusal came from failing to read the
+        /// config rather than from reading one that declares no tree.
+        cause: Option<std::io::Error>,
     },
     /// The tree directory itself could not be listed.
     TreeUnreadable {
@@ -85,11 +97,25 @@ impl fmt::Display for VendorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::Lock(ref cause) => write!(f, "Cargo.lock: {cause}"),
-            Self::NoTree { ref config } => write!(
-                f,
-                "{} names no [source.vendored-sources] directory — vendor check needs a tree",
-                config.display()
-            ),
+            Self::NoTree {
+                ref config,
+                ref cause,
+            } => match *cause {
+                // Only this crate's own error text is rendered. `io::Error`
+                // can wrap a `Path` of its own and a caller-supplied path can
+                // carry CR/LF, so the kind is named instead of the message.
+                Some(ref cause) => write!(
+                    f,
+                    "{} cannot be read ({:?}) — vendor check needs a tree",
+                    config.display(),
+                    cause.kind()
+                ),
+                None => write!(
+                    f,
+                    "{} names no [source.vendored-sources] directory — vendor check needs a tree",
+                    config.display()
+                ),
+            },
             Self::TreeUnreadable {
                 ref tree,
                 ref cause,
@@ -103,7 +129,24 @@ impl fmt::Display for VendorError {
     }
 }
 
-impl Error for VendorError {}
+impl Error for VendorError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match *self {
+            Self::Lock(ref cause) => Some(cause),
+            // `io_error_source` exists only so the coercion to a trait object
+            // happens inside a function that returns one: `as_conversions` is
+            // forbidden in this workspace, and a closure cannot spell the
+            // unsizing coercion the way a return type can.
+            Self::NoTree { ref cause, .. } => cause.as_ref().map(io_error_source),
+            _ => None,
+        }
+    }
+}
+
+/// Upcast one `io::Error` to the standard error-source type.
+fn io_error_source(cause: &std::io::Error) -> &(dyn Error + 'static) {
+    cause
+}
 
 impl From<lock::LockError> for VendorError {
     fn from(cause: lock::LockError) -> Self {
@@ -117,8 +160,9 @@ impl From<lock::LockError> for VendorError {
 /// cargo itself uses for source replacement, so the check can never drift to
 /// a tree cargo is not resolving.
 fn tree_from_config(config: &Path) -> Result<Option<PathBuf>, VendorError> {
-    let text = std::fs::read_to_string(config).map_err(|_| VendorError::NoTree {
+    let text = std::fs::read_to_string(config).map_err(|cause| VendorError::NoTree {
         config: config.to_path_buf(),
+        cause: Some(cause),
     })?;
     let mut in_section = false;
     for line in text.lines() {
@@ -132,6 +176,7 @@ fn tree_from_config(config: &Path) -> Result<Option<PathBuf>, VendorError> {
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| VendorError::NoTree {
                     config: config.to_path_buf(),
+                    cause: None,
                 })?;
             let directory = PathBuf::from(value);
             let directory = if directory.is_absolute() {
@@ -143,6 +188,7 @@ fn tree_from_config(config: &Path) -> Result<Option<PathBuf>, VendorError> {
                     .map(|root| root.join(directory))
                     .ok_or_else(|| VendorError::NoTree {
                         config: config.to_path_buf(),
+                        cause: None,
                     })?
             };
             return Ok(Some(directory));
@@ -161,7 +207,10 @@ pub fn tree_for(repo: &Path) -> Result<PathBuf, VendorError> {
             Ok(canonical) => Ok(canonical),
             Err(_) => Ok(tree),
         },
-        None => Err(VendorError::NoTree { config }),
+        None => Err(VendorError::NoTree {
+            config,
+            cause: None,
+        }),
     }
 }
 

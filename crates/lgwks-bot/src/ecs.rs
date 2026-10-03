@@ -3911,6 +3911,7 @@ impl EcsBot {
         if spec.chains.is_empty() {
             return Err(Admission::Refused(BotError::IncompleteSpec {
                 field: "chains",
+                cause: String::from("the document declares no observation chains at all"),
             }));
         }
 
@@ -5149,13 +5150,21 @@ impl EcsBot {
             "operation refused its request; the typed error carries the facts"
         );
         if name.is_empty() {
-            return Err(BotError::IncompleteSpec { field: "name" });
+            return Err(BotError::IncompleteSpec {
+                field: "name",
+                cause: String::from("the bot was given an empty name"),
+            });
         }
         // Refused before the capability gate, because a bot that cannot record
         // a dispatch is not a bot that is missing a capability — it is one that
         // was never given a dispatch path, and the repair is different.
         let Some(effects) = effects else {
-            return Err(BotError::IncompleteSpec { field: "effects" });
+            return Err(BotError::IncompleteSpec {
+                field: "effects",
+                cause: String::from(
+                    "no effect scope was supplied, so a dispatch could not be recorded",
+                ),
+            });
         };
         // What recovery found, folded in before the world exists. A key naming
         // an action this bot does not declare is a foreign journal — the
