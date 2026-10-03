@@ -27,6 +27,17 @@ approved_on = "2026-09-20"
 review = "crates/lgwks-bot/src/verb.rs"
 
 [[invariant]]
+id = "INV-BOT-115"
+statement = "The sys domain's verbs report a child's length-framed stdout reading."
+scope = "lgwks_bot"
+owner = "lgwks_bot"
+enforcement = "static-check"
+enforced_by = "crates/lgwks-bot/tests/sys_process_binding.rs"
+approved_by = "maintainer"
+approved_on = "2026-10-03"
+review = "crates/lgwks-bot/tests/sys_process_binding.rs"
+
+[[invariant]]
 id = "INV-AST-ONE-PARSER"
 statement = "AST consumers use the one shared parser surface."
 scope = "lgwks_ast"

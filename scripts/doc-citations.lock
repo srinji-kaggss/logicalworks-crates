@@ -54,22 +54,22 @@ crates/lgwks-bot/src/language.rs:641	pub fn aliases(&self) -> Vec<Alias> {
 crates/lgwks-bot/src/rt/mod.rs:80	//! This is not a scheduler with realtime guarantees. Future completion order
 crates/lgwks-bot/src/rt/mod.rs:100	/// engine's `task_local!` needs only the `rt` feature this module already
 crates/lgwks-bot/src/rt/mod.rs:111	#[cfg(feature = "io")]
-crates/lgwks-bot/src/rt/process.rs:45	Capture(NonZeroUsize),
-crates/lgwks-bot/src/rt/process.rs:352	pub struct ProcessRun {
-crates/lgwks-bot/src/rt/process.rs:453	pub enum ProcessRunError {
+crates/lgwks-bot/src/rt/process.rs:51	Capture(NonZeroUsize),
+crates/lgwks-bot/src/rt/process.rs:408	pub struct ProcessRun {
+crates/lgwks-bot/src/rt/process.rs:1030	pub enum ProcessRunError {
 crates/lgwks-bot/src/rt/runtime.rs:102	let mut builder = lgwks_deps::tokio::runtime::Builder::new_current_thread();
 crates/lgwks-bot/src/rt/runtime.rs:105	if self.worker_threads.is_some() && workers.get() > MAX_WORKER_THREADS {
 crates/lgwks-bot/src/rt/supervise.rs:9	//! # Why a task cannot leak
+crates/lgwks-bot/src/rt/supervise.rs:57	//! cannot be written without a [`Budget`]. Every iteration races the
 crates/lgwks-bot/src/rt/supervise.rs:92	//! permits inside a task this supervisor owns can deadlock with itself. The
 crates/lgwks-bot/src/rt/supervise.rs:148	/// otherwise never make, which is why it is not larger.
-crates/lgwks-bot/src/rt/supervise.rs:834	/// long enough on one worker and far too short on several, and the failure is
-crates/lgwks-bot/src/rt/supervise.rs:887	pub fn new(max_in_flight: usize) -> Self {
-crates/lgwks-bot/src/rt/supervise.rs:1235	/// # Why the description is borrowed
-crates/lgwks-bot/src/rt/supervise.rs:1297	let end =
-crates/lgwks-bot/src/rt/supervise.rs:2599	if let Some(text) = payload.downcast_ref::<String>() {
-crates/lgwks-bot/src/rt/supervise.rs:2612	if kept.len() < text.len() {
-crates/lgwks-bot/src/rt/supervise.rs:2635	/// private interval of iterations the loop yields to the executor, so a
-crates/lgwks-bot/src/rt/supervise.rs:2660	/// [`repeat`], so a caller that never asks for a clock observes the behaviour it
+crates/lgwks-bot/src/rt/supervise.rs:164	/// longer than the budget overruns it by one iteration. Cancellation is not
+crates/lgwks-bot/src/rt/supervise.rs:847	/// long enough on one worker and far too short on several, and the failure is
+crates/lgwks-bot/src/rt/supervise.rs:900	pub fn new(max_in_flight: usize) -> Self {
+crates/lgwks-bot/src/rt/supervise.rs:1248	/// # Why the description is borrowed
+crates/lgwks-bot/src/rt/supervise.rs:1310	let end =
+crates/lgwks-bot/src/rt/supervise.rs:2837	/// it, so cancellation interrupts a body that is itself awaiting: the body's
+crates/lgwks-bot/src/rt/supervise.rs:2875	/// [`repeat`], so a caller that never asks for a clock observes the behaviour it
 crates/lgwks-bot/src/rt/task.rs:170	where
 crates/lgwks-bot/src/semantic.rs:13	//! This tier is consulted only when the lexicon returns [`Resolution::Absent`] —
 crates/lgwks-bot/src/semantic.rs:117	pub trait Embedder {

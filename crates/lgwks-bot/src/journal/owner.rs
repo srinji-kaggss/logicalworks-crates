@@ -439,12 +439,31 @@ where
     where
         F: FnOnce(&mut File, &mut S) -> Result<A, std::io::Error> + Send + 'static,
     {
+        let awaiting = self.enqueue_awaiting(job);
+        Box::pin(awaiting)
+    }
+
+    /// [`StorageOwner::submit_async`] without the type erasure, for a caller whose
+    /// own future must be `Send`.
+    ///
+    /// The erased form boxes into [`crate::BoxFuture`], which is deliberately not
+    /// `Send`: a durable step awaits it from inside a task body, and a body is
+    /// `Send` exactly when its author made it so. A caller on the *host's* own
+    /// path has no such choice — its future must be `Send` whatever the author's
+    /// body is, because the host may drive it on a multi-threaded runtime. The
+    /// concrete [`Awaiting`] is `Send` whenever `A` is, so returning it unboxed is
+    /// what keeps the host's path `Send` without weakening the erasure a step
+    /// body wants.
+    pub(crate) fn enqueue_awaiting<F>(&self, job: F) -> Awaiting<A>
+    where
+        F: FnOnce(&mut File, &mut S) -> Result<A, std::io::Error> + Send + 'static,
+    {
         let reply = Arc::new(Answer::new());
         let outcome = self.enqueue(Box::new(job), Arc::clone(&reply));
-        Box::pin(Awaiting {
+        Awaiting {
             enqueued: Some(outcome),
             reply,
-        })
+        }
     }
 
     /// Hand one request to the owner, or report that this handle may not append.
@@ -472,9 +491,10 @@ where
 /// A named future rather than an inline `async` block because its `poll` has to
 /// re-check the slot on every wake, and an `async` block's body would run once and
 /// then park — which is exactly the shape that would need a second await to notice
-/// the answer. Here each poll reads the slot, so a missed wake costs a re-poll
-/// rather than a hang.
-struct Awaiting<A> {
+/// the answer. Each poll registers its waker *before* it reads the slot, because a
+/// wake is only ever fired once: a poll that read first and registered second
+/// could miss the one wake the owner sends and park for ever.
+pub(crate) struct Awaiting<A> {
     /// Whether the request reached the owner at all. An error here is the queue's,
     /// and there is nothing to wait for. Taken on the first poll only.
     enqueued: Option<Result<(), SubmitError>>,
@@ -493,14 +513,17 @@ impl<A> std::future::Future for Awaiting<A> {
         if let Some(Err(cause)) = this.enqueued.take() {
             return std::task::Poll::Ready(Err(cause));
         }
-        // The answer is published under the slot's lock and the waker registered
-        // under the waker's, and the owner publishes before it notifies, so neither
-        // can be missed: either the answer is already here, or the waker it fired
-        // belongs to this poll.
+        // Register first, then look. The owner writes the slot and only then takes
+        // the waker, so whichever side moves second sees the other: a publish that
+        // takes the waker after this registration wakes this poll, and one that
+        // took it before had already written the slot, which the look below reads.
+        // Looking first and registering after is a lost wakeup — a publish landing
+        // between the two finds no waker to fire and writes an answer this poll
+        // has already decided is not there, so the task parks for ever.
+        *lock(&this.reply.waker) = Some(cx.waker().clone());
         if let Some(answer) = this.reply.take() {
             return std::task::Poll::Ready(answer.map_err(SubmitError::Device));
         }
-        *lock(&this.reply.waker) = Some(cx.waker().clone());
         std::task::Poll::Pending
     }
 }
@@ -643,5 +666,91 @@ fn next<S, A>(
             .wait_timeout(held, Duration::from_millis(1))
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         held = guard;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StorageOwner, lock};
+    use std::fs::File;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    /// A scratch path no other test in this process shares (INV-DEP-6: nanos and
+    /// a counter, never a pid or a thread id).
+    fn scratch(name: &str) -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("lgwks-owner-{name}-{nanos}-{serial}"))
+    }
+
+    /// How many awaited round trips the race gets to land in.
+    const ROUND_TRIPS: u64 = 200_000;
+
+    /// How long the round trips may take before a parked one is called a hang.
+    /// Measured at a few seconds for the whole sweep; a lost wakeup never ends.
+    const PATIENCE: Duration = Duration::from_secs(60);
+
+    /// An answer the owner publishes while the awaiting poll is between "the slot
+    /// is empty" and "my waker is registered" still wakes that poll.
+    ///
+    /// Each round trip is one `submit_async` driven by a bare `block_on`, so the
+    /// owner thread publishes concurrently with the poll that checks for its
+    /// answer. If the poll checked the slot before registering its waker, a
+    /// publish landing between the two would find no waker to fire and leave an
+    /// answer nobody reads: `block_on` parks for ever. That is the hang CI showed
+    /// as `sim_repair saturation_applies_each_ticket_once` parked past 600 s, and
+    /// the watchdog here turns it into a failure naming the round trip that
+    /// parked, rather than a test that never returns.
+    #[test]
+    fn an_answer_published_during_registration_still_wakes_the_poll()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = scratch("wake");
+        let owner = StorageOwner::<(), u64>::spawn(File::create(&path)?, (), false)?;
+        let progress = Arc::new((Mutex::new((0_u64, false)), Condvar::new()));
+        let reported = Arc::clone(&progress);
+        let driver = lgwks_std::task::spawn_blocking(move || -> Result<(), String> {
+            let (ref state, ref changed) = *reported;
+            let mut outcome = Ok(());
+            for trip in 0..ROUND_TRIPS {
+                match lgwks_std::task::block_on(owner.submit_async(move |_, _| Ok(trip))) {
+                    Ok(answer) if answer == trip => {}
+                    other => {
+                        outcome = Err(format!("round trip {trip} answered {other:?}"));
+                        break;
+                    }
+                }
+                lock(state).0 = trip + 1;
+                changed.notify_all();
+            }
+            // Finished or failed, the watchdog is told, so a refusal is reported
+            // as itself rather than as a hang.
+            lock(state).1 = true;
+            changed.notify_all();
+            outcome
+        });
+
+        let (ref state, ref changed) = *progress;
+        let (held, waited) = changed
+            .wait_timeout_while(lock(state), PATIENCE, |progress| !progress.1)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (completed, done) = *held;
+        drop(held);
+        if waited.timed_out() && !done {
+            return Err(format!(
+                "round trip {completed} of {ROUND_TRIPS} parked for {PATIENCE:?}: the owner \
+                 published an answer whose poll had not yet registered a waker, so nothing \
+                 woke it"
+            )
+            .into());
+        }
+        lgwks_std::task::block_on(driver)?;
+        std::fs::remove_file(&path)?;
+        Ok(())
     }
 }

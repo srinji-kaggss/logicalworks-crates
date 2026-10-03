@@ -53,6 +53,34 @@ pub enum FlowError {
         /// The last attempt's failure.
         last: Box<FlowError>,
     },
+    /// An untrusted payload was refused by the [`admit`](crate::script::admit) step.
+    ///
+    /// Typed rather than a [`FlowError::Failed`] with the refusal's text, because
+    /// the whole point of admitting model output as data is that a caller can match
+    /// on *why* without parsing a string — and because the [`Provenance`](crate::proposal::Provenance)
+    /// of the exact refused bytes travels with it, so no refusal in a report is
+    /// unattributable. Not retryable: a payload refused for its content will be
+    /// refused the same way however many times it is re-read.
+    Refused {
+        /// Where the refusal was located.
+        at: Arc<str>,
+        /// Why the payload did not become work.
+        refusal: Box<crate::proposal::Refusal>,
+        /// Where the refused bytes came from.
+        provenance: crate::proposal::Provenance,
+    },
+    /// The run reached a finite typed intervention instead of repairing again.
+    ///
+    /// Distinct from [`FlowError::Refused`]: the refusal is about *this* payload,
+    /// while an intervention is about the run's ledger and is reached by repeated
+    /// unchanged failure. Not retryable — another attempt would be exactly the
+    /// repair the intervention refused.
+    Intervention {
+        /// Where the intervention was located.
+        at: Arc<str>,
+        /// What the run reached.
+        intervention: Box<crate::proposal::Intervention>,
+    },
     /// A permanent failure: repeating the step gives the same answer.
     Failed {
         /// Where it failed.
@@ -92,6 +120,35 @@ pub enum FlowError {
         /// What is wrong with it.
         reason: &'static str,
     },
+    /// A request key did not validate.
+    ///
+    /// A request key is the caller-supplied idempotency identity of a durable
+    /// submission ([`Host::submit`](crate::task::Host::submit)), so it is
+    /// validated before it is hashed into a run identity and refused here
+    /// rather than at the first submission.
+    InvalidRequestKey {
+        /// What is wrong with it.
+        reason: &'static str,
+    },
+    /// A step reached for authority this run does not have.
+    ///
+    /// The one flow failure that is not a defect in the step and not a transient
+    /// condition: the host is willing, the work is well-formed, and the authority
+    /// is missing. It is never retryable on its own, because repeating the same
+    /// step against the same authority asks the same question and gets the same
+    /// answer — a permanent refusal plus repeated `NotApplied` must reach a finite
+    /// refusal rather than an unbounded retry loop.
+    ///
+    /// The unmet requirements ride with it, as a complete
+    /// [`Deficit`](crate::cap::Deficit) rather than the first one, so the run's
+    /// report can name every presently knowable need at once and the repair
+    /// ticket is written once against the whole shortfall.
+    Blocked {
+        /// The step that reached for the authority.
+        at: Arc<str>,
+        /// Every capability this step needs and the run does not have.
+        deficit: Box<crate::cap::Deficit>,
+    },
     /// A bound computed at run time is outside what the block accepts.
     InvalidBound {
         /// Which bound.
@@ -124,8 +181,9 @@ impl FlowError {
     ///
     /// `TimedOut` and `Transient` are; a bot error is when its retry class is
     /// [`RetryClass::Safe`](crate::error::RetryClass::Safe) (the effect definitely did not happen). A
-    /// cancellation, a permanent failure, an exhausted retry, and every
-    /// validation failure are not: repeating them is a retry storm.
+    /// cancellation, a permanent failure, an exhausted retry, a refused payload,
+    /// an intervention, and every validation failure are not: repeating them is a
+    /// retry storm.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match *self {
@@ -135,9 +193,13 @@ impl FlowError {
             | Self::Exhausted { .. }
             | Self::Throttled { .. }
             | Self::Failed { .. }
+            | Self::Blocked { .. }
+            | Self::Refused { .. }
+            | Self::Intervention { .. }
             | Self::TooDeep { .. }
             | Self::InvalidTenant { .. }
             | Self::InvalidName { .. }
+            | Self::InvalidRequestKey { .. }
             | Self::InvalidBound { .. } => false,
         }
     }
@@ -159,8 +221,14 @@ impl FlowError {
             | Self::Failed { ref at, .. }
             | Self::Transient { ref at, .. }
             | Self::Bot { ref at, .. }
+            | Self::Blocked { ref at, .. }
+            | Self::Refused { ref at, .. }
+            | Self::Intervention { ref at, .. }
             | Self::TooDeep { ref at, .. } => at,
-            Self::InvalidTenant { .. } | Self::InvalidName { .. } | Self::InvalidBound { .. } => "",
+            Self::InvalidTenant { .. }
+            | Self::InvalidName { .. }
+            | Self::InvalidRequestKey { .. }
+            | Self::InvalidBound { .. } => "",
         }
     }
 
@@ -171,6 +239,21 @@ impl FlowError {
     #[must_use]
     pub fn located(self, scope: &Scope) -> Self {
         self.located_at(scope.shared_path())
+    }
+
+    /// Whether this error is a refusal for missing authority, and the whole
+    /// shortfall if it is.
+    ///
+    /// The one question a caller asking "was this run blocked rather than broken?"
+    /// needs answered, and it answers with the complete shortfall rather than the
+    /// first requirement, so the report that builds a repair ticket from it can be
+    /// written once against the whole set.
+    #[must_use]
+    pub fn deficit(&self) -> Option<&crate::cap::Deficit> {
+        match *self {
+            Self::Blocked { ref deficit, .. } => Some(deficit),
+            _ => None,
+        }
     }
 
     /// [`FlowError::located`] against a path already in hand.
@@ -184,12 +267,18 @@ impl FlowError {
             | Self::Failed { ref mut at, .. }
             | Self::Transient { ref mut at, .. }
             | Self::Bot { ref mut at, .. }
+            | Self::Blocked { ref mut at, .. }
+            | Self::Refused { ref mut at, .. }
+            | Self::Intervention { ref mut at, .. }
             | Self::TooDeep { ref mut at, .. } => {
                 if at.is_empty() {
                     *at = Arc::clone(path);
                 }
             }
-            Self::InvalidTenant { .. } | Self::InvalidName { .. } | Self::InvalidBound { .. } => {}
+            Self::InvalidTenant { .. }
+            | Self::InvalidName { .. }
+            | Self::InvalidRequestKey { .. }
+            | Self::InvalidBound { .. } => {}
         }
         self
     }
@@ -225,11 +314,29 @@ impl fmt::Display for FlowError {
                 write!(formatter, "{at}: failed (transient): {reason:?}")
             }
             Self::Bot { ref at, ref source } => write!(formatter, "{at}: {source}"),
+            Self::Blocked {
+                ref at,
+                ref deficit,
+            } => {
+                write!(formatter, "{at}: blocked: {deficit}")
+            }
+            Self::Refused {
+                ref at,
+                ref refusal,
+                ref provenance,
+            } => write!(formatter, "{at}: {refusal} (from {provenance})"),
+            Self::Intervention {
+                ref at,
+                ref intervention,
+            } => write!(formatter, "{at}: {intervention}"),
             Self::TooDeep { ref at, limit } => {
                 write!(formatter, "{at}: steps nested deeper than {limit}")
             }
             Self::InvalidTenant { reason } => write!(formatter, "invalid tenant: {reason}"),
             Self::InvalidName { reason } => write!(formatter, "invalid task name: {reason}"),
+            Self::InvalidRequestKey { reason } => {
+                write!(formatter, "invalid request key: {reason}")
+            }
             Self::InvalidBound { what, value, max } => {
                 write!(formatter, "{what}: {value} is outside 1..={max}")
             }
@@ -241,14 +348,20 @@ impl std::error::Error for FlowError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match *self {
             Self::Bot { ref source, .. } => Some(&**source),
+            Self::Refused { ref refusal, .. } => Some(&**refusal),
+            Self::Intervention {
+                ref intervention, ..
+            } => Some(&**intervention),
             Self::Exhausted { ref last, .. } | Self::Throttled { ref last, .. } => Some(&**last),
             Self::Cancelled { .. }
             | Self::TimedOut { .. }
             | Self::Failed { .. }
             | Self::Transient { .. }
+            | Self::Blocked { .. }
             | Self::TooDeep { .. }
             | Self::InvalidTenant { .. }
             | Self::InvalidName { .. }
+            | Self::InvalidRequestKey { .. }
             | Self::InvalidBound { .. } => None,
         }
     }

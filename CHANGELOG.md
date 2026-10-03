@@ -59,6 +59,32 @@ explicitly under that crate.
   actually started, beside `stalled`: zero for the ordinary tick where every
   source answered on its first poll, and one per observation wave that had a
   source still pending. **Migration:** none; it is an accessor.
+- `rt::process::CapturedStream::frames(ceiling)`, the door a caller reads its own
+  child's output through: infallible, and the reason a `ProcessRun`'s captured
+  stdout can be read as frames without the caller re-plumbing the bytes into a
+  reader. It is `pub` because callers outside the crate read their child's
+  output through it, and it is the path the T05 tests exercise rather than a
+  hand-plumbed slice.
+- `rt::process::read_frames`, a bounded reader for the length-framed records a
+  supervised child's output carries. It reuses the crate's existing frame
+  grammar (`journal::frame`) rather than restating it, so a torn tail has one
+  meaning across the file stores and a subprocess's streams. A record is
+  `FrameRead::Frame` only when its prefix named the bytes that followed; the two
+  truncations, a malformed prefix and the caller's ceiling are refusals that
+  carry no payload, and `FrameRead::payload()` returns `None` for every one of
+  them. The payload ceiling is charged from the prefix before a payload is read,
+  so a stream cannot request an allocation by claiming a large record. Accepting
+  rows T03, T05, T21 and T22. No existing item changed.
+- `rt::process::DEFAULT_FRAME_CEILING`, the one retained-byte ceiling a caller
+  needs in order to read a child's framed output without inventing a bound.
+- `domain::sys::Process::frame_stdout(ceiling)` and
+  `ProcessState::stdout_frames()`, which wire the frame reader above into the
+  sys domain's real verb path: a `Process` built with `frame_stdout` reports each
+  run's stdout as a framed reading on the `ProcessState` its `Observe`, `Execute`
+  and `Query` calls return, byte-exact where the lossy `stdout()` is not, and a
+  domain built without it reports `None` and an unchanged `stdout()`.
+  `CapturedStream::frames`/`read_frames` (INV-BOT-110/114) previously had no
+  production caller; the domain's verbs are now that caller (INV-BOT-115).
 
 ### lgwks_bot Fixed
 
@@ -82,6 +108,99 @@ explicitly under that crate.
   every chain's first commit was reported as a skip. It is three states now, and
   admission is marked where a generation *takes* the value rather than where the
   transition is handed back, which for an entry awaiting evidence is never.
+- `rt::process`: a capture's own cut is no longer reported as the child's
+  truncation. When `CapturedStream::truncated()` is true the retained bytes are a
+  prefix **the capture** cut, so a framed read of them could end in
+  `TruncatedPrefix`/`TruncatedPayload` — or, worse, read as a clean
+  `EndOfStream` when the cut landed on a record boundary — and a caller would
+  take a capture's bound for the child's own failure to write.
+  `CapturedStream::frames` now overrides exactly those three endings with
+  `FrameRead::CeilingReached { ceiling: <the capture's retained capacity> }` and
+  `is_complete()` is `false`. An untruncated capture still reports the child's own
+  truncation, and a reader's ceiling reached over an untruncated capture still
+  reports the reader's; the two ceilings are separate facts and are no longer
+  conflated.
+- `rt::process`: the capture-ceiling override above no longer overwrites the two
+  endings it had no business touching. A `MalformedPrefix` was decided from a
+  whole prefix the capture *did* retain — declared `0`, or past the reader's
+  ceiling — so it is rot in the child's output and stands. A `CeilingReached`
+  the *reader* reached stopped the pass before the cut mattered, so it keeps the
+  reader's ceiling. Replacing either was fail-open: a caller looking for
+  corruption was handed a bound it never hit, and a caller looking for its own
+  bound was told something larger stopped it.
+- `rt::process`: `Frames::of_slice`'s unreachable `Err` arm fails closed. It
+  returned an empty `EndOfStream` — a *complete* reading, from a pass that
+  stopped without one. It now keeps the whole records and retained payload bytes
+  the pass had read and ends in `CeilingReached { ceiling: retained_bytes }`,
+  which is not complete. The arm is unreachable by construction (a byte slice's
+  reads cannot fail), so no test exercises it.
+- `rt::process`: `FrameRead::MalformedPrefix` no longer claims a legal record is
+  rot. A declared length of `0` or past the ceiling still names no record this
+  grammar writes and is still refused, but a legal declared length that merely
+  exceeds the room remaining after earlier records is now
+  `FrameRead::CeilingReached` — a well-formed record with nowhere to go is a
+  bound, not corruption. The charge is still made before a payload byte is read,
+  so no allocation past the ceiling is possible.
+- `rt::process`: a record's payload is read into its own exactly-sized `Vec`,
+  allocated only after the ceiling charge and then moved into the record. The
+  shared "reused" buffer this replaces allocated and copied every payload a
+  second time, so every byte was copied twice and the reuse comment was untrue;
+  on truncation the partial is that same `Vec` truncated in place rather than a
+  second copy.
+
+- A host-side stop is no longer recorded as a request's outcome. `Host::submit`
+  wrote a `@terminal` record for every disposition that was not a success, so
+  `Cancelled` (the host's stop arrived mid-run) and `Refused` (the host declined
+  before admission) became the request's permanent recorded verdict. Since the
+  key *is* the request's identity and its body runs at most once under it, one
+  shutdown left a key that no later submission could ever complete: every repeat
+  reattached to the stop and the body's recorded durable steps were never
+  resumed. `@terminal` is now written for exactly the three dispositions that
+  are the request's own verdict under its declared task — `Succeeded`, `Failed`
+  and `DeadlineExceeded`, the deadline included because the same declaration
+  that fixed the key also fixed the run's budget — and a host stop writes
+  nothing. The classification is one exhaustive `match` over `Disposition`, so
+  a variant added later fails to compile until its relationship to a request
+  key is decided by hand. The stop is still reported to the caller that saw it
+  (`Submission::Executed` carrying the disposition); what no longer happens is a
+  restart turning into a request that can never succeed. INV-BOT-102.
+- `Host::resume` settles a request that `Host::submit` left incomplete, under
+  the same rule: a resumed run whose receipt exists and whose verdict does not
+  records that verdict, so a request interrupted by a host stop (or by a client
+  that walked away) can reach a recorded terminal at all instead of reporting
+  `InFlight` forever. Settling is deliberately narrow — `Host::run` writes no
+  reserved record, a resume of a run with no `@request` receipt is an ordinary
+  resume, an already-settled run is left alone, and a `Refused`/`Cancelled`
+  report is returned untouched, so a cross-tenant resume stays `Refused`. A
+  store that refuses to record a verdict a run *reached* is reported as
+  `Failed`, since recording an outcome and reporting success are one fact.
+- **Breaking:** `Host::resume` and `Host::resume_ticket` now require
+  `O: lgwks_bot::script::Durable`. A resumed run may be settling a request, and
+  a recorded verdict is made of an archived output. `Host::run` is unchanged.
+  **Migration:** a caller whose task returns a value that is not archivable must
+  return a `Durable` one, or route the run through `Host::run` plus an explicit
+  run id it owns rather than a resume.
+- `Host::repair` settles a request too. A request `Host::submit` started that
+  blocked on authority records no verdict (`Blocked` is not the request's
+  outcome), and the repair is the attempt that reaches one — but it did not
+  record it, so a key repaired to success still answered `InFlight` to every
+  later submission until a separate `Host::resume` ran. The repair now settles
+  under the same rule as `resume`, and the key reattaches, from a reopened store
+  as well (`tests/request_key.rs::a_repaired_request_is_settled_and_reattaches`).
+- **Breaking:** `Host::repair` now requires `O: lgwks_bot::script::Durable`, for
+  the reason `Host::resume` does. **Migration:** as for `Host::resume`.
+
+### lgwks_bot Changed
+
+- `rt::supervise::CleanupReceipt`'s documentation now states what
+  `CleanupConfirmed` does and does not claim. It claims that every process still
+  *in the supervised group* when the group was last observed is gone — an
+  observation of `killpg(group, 0)`. It does not claim that no process the
+  supervisor started is still running: a descendant that called `setsid` has
+  left the group by construction, so its survival is not a counterexample.
+  Nothing about the type or its variants changed; a caller needing the stronger
+  guarantee needs a kernel job object or a cgroup, which this crate does not
+  have. Accepting row T21.
 
 ### lgwks_std Breaking
 
@@ -101,11 +220,58 @@ explicitly under that crate.
 
 ### Fixed
 
+- `lgwks_bot`: `tests/sim_review_path.rs`'s saturation tiers shard each
+  saturation tier across receivers of at most 100 runs, so the fixture's
+  read-back stays linear. The merged receiver `cat`'d its whole
+  `reviews.jsonl` on every read, so 1,000 and 10,000 runs piped ~10 GB and
+  pushed most runs past the capture ceiling and the review ceiling, ending them
+  `Unknown` while the family's three inequalities still passed — the big tiers
+  were timing a degenerate world. Every run now reaches a verified
+  `Published`, and creates are asserted `==` runs per receiver and in total
+  rather than `<=`. The tiers, the single `Host`, the `join_all_bounded`
+  pipeline and its `min(N, 64)` bound are unchanged; measured
+  143.202s → see INV-BOT-97 (#151 review finding).
+- `lgwks_bot`: the fake `gh`'s review store commits each record with a
+  trailing newline, and a read-back keeps only newline-terminated lines. An
+  `O_APPEND` write is atomic against other appends but not against a reader:
+  on tmpfs (CI's `TMPDIR=/dev/shm`) a concurrent read-back saw the front half
+  of another run's record, cut mid-string at byte 8,193, and
+  `saturation_r32_tier_10000` failed with one run `Unknown` out of 100 on a
+  receiver. `tests/gh_binding.rs::a_record_still_being_appended_is_not_read_back`
+  plants a committed record and a torn one and asserts only the first is read.
+- `lgwks_bot`: the fake `gh` in `tests/support/fake_gh.rs` no longer forks an
+  external helper on the common path. One `gh api` create or read used to fork
+  `sed`/`cat`/`tail`/`tr` several times (a saturation family runs five calls per
+  review); the behaviour file and the create payload are now cut with shell
+  parameter expansion, the receiver's store is read back with the `read`
+  builtin and its leading separator dropped with `${store#?}`, and the two
+  append-only counters take their byte count with `read` and `${#..}` rather
+  than `wc -c`. Measured: one clean run forks 21 helper processes before and 0
+  after; a `gh api` create went 9 → 0, a review-list read 2 → 0, a pull-request
+  read 4 → 0. The race-free store is unchanged — one `O_APPEND` write with a
+  leading separator, the first byte dropped on read, an empty store reading
+  `[]` — and every existing assertion is untouched. `saturation_r32` fell
+  152.964s → 72.063s on this host (ubuntu CI runs it under `dash`, where the
+  removed forks cost more). The family is now one `#[test]` per tier
+  (`saturation_r32_tier_100`, `saturation_r32_tier_1000`,
+  `saturation_r32_tier_10000`) calling the same `run_saturation_tier`, so
+  nextest schedules the tiers alongside the rest of the suite instead of a
+  serialized loop: 0.610s / 5.372s / 60.388s sequential, 66.371s combined. No
+  tier was dropped, shrunk or `#[ignore]`d.
 - `tests/http_alloc.rs` joins every single-shot server thread (warm-up, exact and
   cut) before the next measurement is armed, so a detached server can no longer
   free its `reply` inside a later window and net the eager peak to zero; the
   servers carry bounded read/write timeouts so the join cannot block. No
   assertion, ceiling or bound changed; the probe is deterministic across 30 runs.
+- `lgwks_bot`: the storage owner's awaited answer could be written and never
+  woken. `Awaiting::poll` read the answer slot and only then registered its
+  waker, while the owner writes the slot and only then takes the waker to fire
+  it, so a publish landing between the poll's read and its registration found no
+  waker and left the awaiting task parked for ever. GitHub CI showed it as
+  `tests/sim_repair.rs::saturation_applies_each_ticket_once_band_09` (PR #239)
+  and `band_03` (PR #241) parked past 600 s, with the job cancelled at its
+  15-minute timeout, and the poll now registers its waker before it reads the
+  slot so whichever side moves second observes the other (INV-BOT-140).
 
 ### lgwks_std Added
 
@@ -235,6 +401,269 @@ explicitly under that crate.
 
 ### lgwks_bot Added
 
+- Two missing arms of the request-keyed submission are now covered rather than
+  assumed. `DeadlineExceeded` is the request's own verdict — the same declaration
+  that fixed the key also fixed the run's budget — so a request that overran its
+  budget reattaches to that recorded deadline instead of re-running a body that
+  has already overrun once, and the durable step recorded before the overrun
+  survives it. A store that refuses the `@terminal` write during `Host::resume`
+  is reported as `Failed` naming both that the outcome went unrecorded and which
+  bound refused it, and records **nothing**, so the request stays unsettled and a
+  later client reads `InFlight` rather than a verdict that was never written.
+  Enforced by `tests/request_key.rs`
+  (`an_expired_deadline_is_the_requests_recorded_outcome`,
+  `a_store_that_refuses_the_terminal_write_reports_the_refusal`) and by the
+  seeded families `expired_deadlines_are_recorded_band_16..23` and
+  `settle_refusals_are_reported_and_leave_the_request_unsettled_seed_a..p` in
+  `tests/sim_request_key.rs`, two tenants over one store file, each seed swept
+  twice for an identical trace hash. No production behaviour changed.
+- `Disposition::Blocked` is not the request's own verdict, so a blocked run
+  records no `@terminal` — recording it would poison its key exactly as a host
+  stop does, and an authorized repair can still move it. It carries a
+  `DISPOSITION_BLOCKED` code so `disposition_code` stays an exhaustive match over
+  `Disposition`, which is what INV-BOT-102 relies on to catch a later variant.
+- `Host::submit`: a request-keyed durable submission. A caller supplies a
+  `RequestKey`; the host derives the run identity from the tenant and the key,
+  records the input's canonical `InputDigest` under a reserved `@request` record
+  before any step runs, and records the terminal outcome under `@terminal`
+  after. `Submission::Executed` is a first run, `Submission::Reattached` returns
+  the recorded report without re-entering the body, `Submission::InFlight`
+  reports a request whose waiter was dropped mid-effect (the run to settle and
+  the records that survived, kept apart), and a different input under one key is
+  a typed `RequestError::Conflict` naming both digests. A host with no store
+  refuses with `RequestError::NoStore`. Supported by `RequestKey`, `InputDigest`,
+  `Submission`, `InFlight`, `RequestConflict` and `RequestError` (T30, T17;
+  INV-BOT-100, INV-BOT-101).
+- `FlowError::InvalidRequestKey`: the typed refusal a malformed `RequestKey`
+  names, alongside the tenant and task-name refusals.
+- Fourteen seeded simulation families, one per refusal arm of the review
+  subject, coverage and partial-submission path (#231, INV-BOT-96). No
+  production behaviour changed: `subject_coverage_and_partial_faults` asserted
+  that every fault reaches *some* correct outcome variant, which is satisfied by
+  a world in which the right arm is reached for the wrong reason, so each arm
+  now asks a different question of the same seeded worlds — a coverage refusal
+  reaches the receiver with zero creates; the file-count and byte ceilings are
+  refused on separate axes, each naming its own bound, with the byte family's
+  draws asserted to stay under the file ceiling so a refusal for the wrong bound
+  cannot pass as evidence for it; a renamed repository is refused naming both the
+  requested and canonical repository; a `build.rs` in the changed-file inventory
+  is never executed, proven by a marker file named in the child's own environment
+  and referenced by the patch text; a lost response onto a draft is `Pending`
+  and a partial submission reports both the applied and intended counts, neither
+  issuing a second create; a create whose read-back lost permission is
+  `Unverified` with the applied review id retained and inside the receiver's own
+  id range; the permission and transport arms are disjoint, naming an HTTP status
+  and a credential versus a child's exit and no status, and are `Unverified` and
+  `Unknown` through the journey; a publication is pinned to the commit that was
+  read; two tenants' coverage verdicts stay isolated; and concurrent runs on one
+  pull request conserve their creates and their read-backs. The test file's share
+  of the repository's deterministic-simulation evidence is restored, which the
+  `simulation-evidence` gate requires at one half of all tests.
+- `domain::gh::read_diff`, a bounded changed-file inventory for the PR-review
+  subject (#87 step 6, T31): `Gh::read_diff` reads a pull request's changed
+  files as **data** and bounds them on two separate axes — at most
+  `MAX_DIFF_FILES_PER_PULL` files (`GhError::DiffFileCeiling`) and at most
+  `MAX_DIFF_BYTES` bytes of patch text (`GhError::DiffTooLarge`) — refusing the
+  whole inventory rather than truncating it. A server that declines to render
+  the diff (`406`) is `GhError::DiffUnavailable`. A renamed repository is
+  `GhError::MovedRepository` naming both the requested and canonical
+  repositories, so the subject identity is never silently re-pointed. A client
+  that names an HTTP `401`/`403`/`404` is `GhError::Unauthorized` rather than a
+  transport failure. `GhOutcome::http_status` exposes the status the client
+  named. No file in the inventory — including a `build.rs` — is compiled,
+  imported, built, shelled or loaded (INV-BOT-21).
+- `ReviewOutcome::{Incomplete, Pending, Partial, Unverified}` (#87 step 6,
+  T31/T33/T34): an unavailable or over-ceiling diff is an `Incomplete` coverage
+  decision (nothing is published); a lost response reconciled onto an
+  unsubmitted draft is `Pending`; a submitted review that landed with fewer
+  inline comments than intended is `Partial` with both counts; and a create
+  that returned an id whose read-back lost permission is `Unverified` with the
+  applied review id retained. No path issues a second create, and a read that
+  failed for any other reason stays `Unknown`. `ReviewComment`,
+  `ReviewPayload::with_comments` and `ReviewRecord`'s comment-count comparison
+  carry the inline comments the partial check reads. INV-BOT-81.
+- Repairing a blocked run, end to end (feature `script`; `ephemeral` for minting
+  a run id). A step reaches for authority with `Scope::require(&[Cap])`, and a
+  run whose authority — the host's grant plus any repair delta — does not cover
+  it is `Blocked` with a complete `Deficit` rather than `Failed`: the host was
+  willing and the authority was missing, which is the distinction a repair acts
+  on. `Report::needs` and `Report::repair` are both derived from that one value,
+  so they cannot disagree. `Host::repair(ticket, grant, task, input, spend)`
+  resumes under the run's own id, so the steps recorded before the block replay
+  without their bodies being polled and only the blocked remainder runs. The
+  grant may not be short (`RepairError::NotAuthorized`) nor carry any capability,
+  shipped or custom, the ticket does not name (`OverWide`); the authority the
+  repaired run receives is built from the ticket's needs, never taken from the
+  grant, and the host's own grant is never widened — the next run on that host is
+  still blocked. `HostBuilder::grants`,
+  `repair_ledger` and `repair_bounds` configure it.
+- `task::RunLedger`: the durable per-run control ledger — root spend and attempt
+  budget, repair epoch, and the set of applied tickets — over the shared frame
+  grammar and the shared storage-owner thread (INV-BOT-51). A ticket's identity is
+  its content (run, tenant, epoch, sorted needs), so the same ticket delivered
+  twice is refused `AlreadyApplied` and an older ticket is refused `StaleEpoch`;
+  decide-and-write is one ordered step on the ledger's own thread, so "applied
+  once" is a fact about bytes. A refused repair charges nothing, mints no epoch
+  and leaves the ledger byte-identical. A repair consumes the root budget rather
+  than refilling it, so a permanent refusal plus repeated `NotApplied` reaches a
+  finite `BudgetSpent` (#87 step 3, T13/T23/T24).
+- `task::repair`: `RepairTicket` (a report, never a grant), `RepairError` with a
+  typed arm per refusal.
+- Deterministic-simulation evidence for the repair door, one seeded family per
+  arm rather than one family that reads a final counter (#87 T13/T23/T24). The new
+  families in `tests/sim_repair.rs` are: `the_step_that_reaches_is_the_step_that_blocks`
+  (a `Task::requiring` reach is `Blocked` at the admission boundary with no body
+  poll, no permit, no record and no root attempt charged) and
+  `a_wide_need_set_costs_one_analysis` (a shortfall of one to four capabilities
+  costs exactly one analysis, and the report's and the ticket's needs are the same
+  set in the same order);
+  `a_custom_capability_is_refused_at_every_width` (the over-wide check walks the
+  grant rather than a candidate list, so a custom name is refused at one need and
+  at four, and the ledger is left byte-identical) and
+  `a_ticket_never_names_another_tenants_run` (the ticket's own tenant check
+  refuses before admission and before the ledger, so the asking tenant's ledger
+  never gains an entry);
+  `a_mixed_decision_order_pins_each_arm` (each arm observed per decision rather
+  than inferred from the endpoint), `every_repair_charges_the_root_budget_once`
+  and `a_spent_budget_refuses_every_later_attempt` (the budget sequence, and a
+  finite refusal at either ceiling that charges nothing and is stable across later
+  attempts), `a_reopen_reads_back_the_charged_budget` and
+  `a_repaired_run_survives_a_reopened_host` (the replay rests on bytes a second
+  host opened), `a_host_spent_on_one_run_still_repairs_the_next` (a spent run's
+  ceiling bounds that run alone, and recovery after the refusal is through a
+  reopen — the handle the refusal poisons is INV-BOT-50's, not this door's), and
+  `a_bounded_sweep_repairs_every_ticket_once` (100 and 1,000 runs over one
+  ledger, each ticket applied exactly once and each run charged exactly twice; the
+  10,000 tier of the declared claim stays on the opt-in
+  `the_declared_repair_tiers_are_measured`, measured at 488 s against 48 s for the
+  two that run on every ordinary pass).
+  No behaviour changed; these are the properties INV-BOT-33/34/35 stated with no
+  arm-level evidence, recorded as INV-BOT-36/37/38.
+  **Known limit, stated rather than left to be discovered:** `Host::repair` still
+  has no production caller inside `lgwks_bot` — it is the door the front door
+  exposes and an embedding host calls, so every exercise of it here is a test. The
+  behaviours it gates (the blocked disposition, the ledger charge, the ticket) are
+  all on the real `Host::run` path, and this package adds no new capability that
+  only tests reach; it widens the evidence over the one that had a single point.
+- `task::Control` is re-exported from `lgwks_bot::task`. `RunLedger::control`
+  already returned it — a caller reading a run's budget or epoch had to name the
+  type to hold it, and there was no path to the name — so the name is now public
+  beside the handle that returns it. Additive: no existing signature changes.
+- `Disposition::Blocked` on the front door, distinct from `Refused`: a `Refused`
+  run was refused by the host and no authority would change it, while a `Blocked`
+  run is the one an authorized repair can move. `Task::requiring` is the blunt
+  form for a task that reaches in its first step; `Scope::require` is the one that
+  leaves the work before the block replayable. `FlowError::Blocked` is
+  `#[non_exhaustive]`-added and never retryable.
+- `proposal` (feature `script`): the boundary where untrusted model output
+  becomes work. Issue #87's rule is that an AI proposal is an **untrusted task
+  input**, and that validation, provenance, no-progress detection, bounded repair,
+  tenant-scoped artifacts and serialized writes belong in the host/adapter
+  contract rather than in a prompt — so this module reads bytes and refuses them
+  rather than prompting a model. It is **not** a fifth verb: an admitted `Plan` is
+  a list of names to perform through the existing verbs, the operations a proposal
+  may name are exactly the ones the host registered in a `Surface`, and the crate
+  calls no network model at all. `StubModel` is a deterministic double from a seed
+  to output bytes, because the guarantee here is about *admission* and admission is
+  identical whoever produced the bytes (#87 T26–T29, T35).
+  - `Decoder`: a hand-written bounded line grammar with a byte ceiling, a
+    per-field ceiling and a field-count ceiling. `install`, `credential` and `host`
+    are *recognised* so their refusals name what was asked for — a decoder that had
+    never heard of them would report `Malformed` and an attempt to widen authority
+    would read as a broken document. An unknown field is refused rather than
+    ignored, and a refused payload returns no plan beside its refusal.
+  - `Refusal`: a typed arm per refusal, with `SandboxEscape` as its own arm so an
+    escape stays observable, and `is_privilege_attempt` for the five arms that are
+    attempts rather than syntax. Every outcome carries `Provenance` — the source
+    (model, tool output or document), the tenant and the digest of the exact bytes.
+  - `Completion`: admitted only with the evidence it names present.
+    `Coverage::from_claim` maps *every* payload claim onto `Partial`, so a plan
+    cannot be talked into full coverage, and `Coverage::Complete` has no
+    constructor reachable from a decoder.
+  - `RepairLedger` and `PlanBudget`: one unchanged fingerprint past its ceiling is
+    a typed `Intervention`, and recording new evidence moves no repetition count,
+    so it cannot erase what a failure already cost.
+  - `Checkpoint`: `Durable`, so a context reset recovers completed steps, user
+    corrections *with their kind*, `Unknown`-classed effects and evidence
+    references through the run store.
+  - `ArtifactStore`: keyed by `(tenant, digest)`, so identical bytes from two
+    tenants are two artifacts; writes to one key serialized and idempotent by
+    content, reads lock-free of the writer, every bound a typed refusal that
+    leaves the store unchanged.
+- `script::admit` (feature `script`): the one step a task body uses to admit model
+  or tool output, and the fix for the defect a reviewer found on the `proposal`
+  module above — it shipped with **no production caller**, so every property
+  INV-BOT-90..94 state held for a boundary nothing invoked. The estate rule is
+  "wired or it does not exist", so the capability lands called from the run path
+  in the same change rather than deleted (#87 T26–T29).
+  - It is a `script` block rather than a helper because a task body can only act on
+    a `FlowError`: it enters its step, so a refusal reads `admit/plan` like every
+    other located failure; it charges one **run-scoped** `Gate` — decoder, surface,
+    `PlanBudget`, `RepairLedger` — so the fourth identical refusal across four
+    separate `Host::run`s is a finite typed `Intervention` rather than four
+    refusals a caller has to correlate; and it records each refusal through the
+    run store under `<step>/refusal` *before* returning the error, so a run resumed
+    on a fresh host reads back what the first run refused rather than re-deriving
+    that nothing was refused.
+  - `FlowError` gains two arms, `Refused { at, refusal, provenance }` and
+    `Intervention { at, intervention }`. Both are typed and both carry the
+    `Provenance` of the refused bytes, so no refusal reaching a `Report` is a
+    string a caller must parse or an unattributable failure. Both are non-retryable:
+    a payload refused for its content is refused however often it is re-read, and
+    another attempt is exactly the repair an intervention refused.
+  - `Gate` is shared by clone and its lock is held across the charge, the decode
+    and the ledger update and **never across an `.await`**, so a fan-out can hand
+    one gate to every body without the budget becoming per-body.
+  - It admits a `Plan` of operation *names* and performs nothing. Not a fifth verb,
+    and not an untyped plan interpreter: performing a plan's operations is still
+    the caller's job through the existing verbs, and `EffectKnowledge` continues
+    to report that a run performed no external effect.
+- `task::RunStore::lookup`: the reader's door onto a durable step's value — the
+  archived bytes committed for a step key under a run, or `None`. Without it, the
+  only way to see what a previous instance recorded was to re-run the step that
+  wrote it, which is why a resumed run could not read back a refusal. `Err` is a
+  read failure (a run another tenant owns), never a miss (INV-BOT-7).
+- `script::Readiness<T>`, a typed, generation-bound readiness fact and the wait
+  that consumes it (#87 T18 / LC-09). A `Ready<T>` carries the `Generation` its
+  instance was admitted under, so the four ways a readiness can say "no" are four
+  different facts rather than one boolean: a signal from an older instance is
+  `StaleGeneration`, one from a generation this readiness never issued is
+  `UnknownGeneration`, a second release at a settled generation is `AlreadyReady`
+  (the first release survives it — it is not a second release), and a duplicate
+  failure is `AlreadyFailed`. `ReadinessError::released` is false for every arm,
+  and `is_permanent` separates the one retryable refusal from the rest, so an
+  enclosing `retry` cannot loop on a stale instance.
+- `Readiness::fail` reaches a dependant that has **already been released**: it
+  cancels the token of every dependant the release handed out, so a dependant
+  still running learns the service is gone rather than talking to a dead
+  process, and `failed_at` distinguishes that from a failure before anyone was
+  released (which owes nobody a cancellation). `Readiness::shutdown` is the
+  separate fact — a teardown is a stop, not a failure, and the waiting side sees
+  `FlowError::Cancelled` so a routine restart does not read as an outage.
+- `Generation`: a monotone, saturating counter with `FIRST`, `next` and `at`. Not
+  a timestamp, because cross-host clock skew is unmeasured (INV-BOT-30), and not a
+  random token, because a token can answer "the same or not" but never "older",
+  which is exactly the question a restarted instance's surviving handle asks. A
+  restart is a **new** readiness at a **new** generation, and that is what makes
+  the old instance's handle unable to release anybody.
+- `Readiness::wait(scope, limit)`: one admission, one `watch` subscription and one
+  `select!`. No sleep and no poll loop, charged to the step's own budget through
+  the existing `within` so it is bounded and stopped by the scope's stop, and an
+  already-released readiness resolves without spending its budget — the property
+  a guessed sleep cannot have. A readiness admits at most `MAX_DEPENDANTS`
+  dependants, charged *before* a slot is taken, so a refused admission leaves
+  capacity exactly as it was.
+- `Supervisor::run_process_observed`, a stdout-line observer for a supervised
+  child, and the `rt::supervise::LineObserver` alias that names it. The observer
+  is called from inside the same pipe read that retains the child's output, on the
+  bytes that read just observed, so an observation and a capture cannot disagree
+  about what the child wrote; it fires before the capture ceiling is consulted
+  and whether or not the bytes are retained, and never arms a timer. A long-lived
+  service's readiness therefore comes from what the child printed — a `sh -c`
+  child that prints a readiness line gates on its own output, with no timer
+  anywhere in the path. `Supervisor::run_process` is that call with `None` and
+  is now one method on every target, the Unix and non-Unix bodies differing
+  behind it.
 - More than one million task executions in flight at once on one node, measured
   (#152 §4). `tests/task_million.rs` (opt-in, `LGWKS_MILLION=1`) admits
   1,048,576 `Host::run` executions across sixteen tenant hosts, each saturated

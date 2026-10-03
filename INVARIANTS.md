@@ -147,6 +147,179 @@ Each of these was a shipped defect. Treat the list as the spec.
   `reading_a_snapshot_has_no_side_effect_on_admission`,
   `a_fresh_snapshot_admits_at_the_declared_ceiling`,
   `a_bounded_repeating_task_reports_exhaustion_not_a_hang`).
+- **INV-BOT-60** A readiness is a typed, generation-bound fact, and a dependant
+  never learns it by sleeping. `script::Readiness<T>` releases its dependants
+  with a `Ready<T>` that carries the `Generation` the instance was admitted
+  under, so four refusals are four different facts rather than one boolean: a
+  signal from an older instance is `StaleGeneration`, one from a generation this
+  readiness never issued is `UnknownGeneration`, a second release at a settled
+  generation is `AlreadyReady` (the first release survives it, and it is not a
+  second release), and a duplicate failure is `AlreadyFailed`. Every one of them
+  released nobody, and `ReadinessError::released` says so for all of them. A
+  failure *after* the release cancels the token of every dependant it released,
+  so a dependant still running learns the service is gone, and `failed_at`
+  distinguishes that from a failure before anyone was released. A shutdown is a
+  stop rather than a failure: the waiting side sees `FlowError::Cancelled`, so a
+  routine restart does not read as an outage. `Generation` is a monotone
+  saturating counter, never a timestamp — cross-host clock skew is unmeasured
+  (INV-BOT-30) — and a restart is a *new* readiness at a *new* generation, which
+  is what makes a surviving handle from the old instance unable to release
+  anybody. The wait is one admission, one `watch` subscription and one
+  `select!`: no sleep and no poll loop, charged to the step's own budget through
+  `within` so it is bounded and stopped by the scope's stop, and an
+  already-released readiness resolves without spending its budget. Admission is
+  charged **before** a slot is taken against `MAX_DEPENDANTS`, so a refused
+  admission leaves capacity exactly as it was. · why: #87 T18 / LC-09 · enforced
+  by: `tests/ready.rs` (`a_failure_before_ready_reaches_the_dependant_and_the_report`,
+  `a_duplicate_ready_signal_is_refused_and_releases_nothing`,
+  `a_stale_generation_is_refused_and_releases_nothing`,
+  `a_restarted_service_arms_a_new_readiness`,
+  `a_failure_after_ready_cancels_every_dependant_still_running`,
+  `a_shutdown_is_a_stop_and_not_a_failure`,
+  `a_wait_is_budgeted_cancellable_and_immediate_when_already_released`,
+  `dependants_are_capped_at_the_declared_bound`,
+  `no_readiness_path_sleeps_or_polls`) and `tests/sim_ready.rs`
+  (`an_interleaving_never_releases_a_stale_generation`,
+  `a_duplicate_releases_once_in_every_interleaving`,
+  `a_failure_after_ready_reaches_every_running_dependant`,
+  `two_tenants_never_cross_a_readiness`,
+  `saturation_admits_up_to_the_declared_cap`,
+  `the_same_seed_replays_the_same_trace`).
+- **INV-BOT-61** A long-lived service's readiness is observed from its own
+  output, never from a clock. `Supervisor::run_process_observed` hands the
+  caller each newline-terminated line of the child's **stdout** from inside the
+  same pipe read that retains it, so the observation and the capture are the same
+  bytes seen once and cannot disagree about what the child wrote; the observer is
+  called before the capture ceiling is consulted and whether or not the bytes are
+  retained, so a chatty child cannot make its own readiness unobservable. A
+  trailing fragment with no newline is not delivered — a partial line is not a
+  line. The unterminated tail is capped at `MAX_OBSERVED_LINE_BYTES`, so a child
+  that prints a megabyte without a newline cannot make the observer the
+  unbounded buffer the capture ceiling exists to prevent. The observer arms no
+  timer, and `Supervisor::run_process` is that same call with `None`: there is no
+  second process driver and no second readiness path, on any target. · why: #87
+  T18 / LC-09 · enforced by: `tests/ready.rs::real_process`
+  (`a_child_printing_its_address_releases_the_dependants`,
+  `a_child_that_dies_without_printing_never_releases_the_dependants`,
+  `a_child_that_dies_after_announcing_stops_the_dependants`) and
+  `tests/ready.rs::no_readiness_path_sleeps_or_polls`, which asserts against the
+  module's own source that neither the wait nor the observer arms one.
+
+- **INV-BOT-32** A reach for authority is checked at the step that reaches, and
+  the refusal carries the whole shortfall. `Scope::require` names every capability
+  the step needs and this run's authority — the host's grant plus any repair
+  delta, checked together and never one replacing the other — does not cover, as
+  one `FlowError::Blocked` carrying a complete `Deficit`. A run is therefore
+  `Blocked` rather than `Failed`, which is the distinction a repair acts on: the
+  host was willing and the authority was missing. The report's `needs` and its
+  `repair` ticket are both derived from that one `Deficit`, so they cannot
+  disagree about what the run was missing, and a task that reaches in its *first*
+  step may still declare at its admission boundary with `Task::requiring` and be
+  refused before anything runs. · why: #87 step 3 (T23) · enforced by:
+  `tests/repair.rs` (`a_run_short_of_authority_is_blocked_naming_every_need`,
+  `a_blocked_run_leaves_its_finished_analysis_recorded`,
+  `a_host_without_a_ledger_refuses_every_repair`,
+  `the_journey_declares_no_admission_boundary_needs`)
+- **INV-BOT-33** A repair authorizes one run, once, for exactly the needs its
+  ticket names. `Host::repair` resumes under the run's own id, so every step
+  recorded before the block replays without its body being polled and only the
+  blocked remainder runs; the analysis is not paid for twice. A grant that does
+  not cover the ticket's needs is `NotAuthorized` and one that reaches outside
+  them is `OverWide`, both refused before any authority is applied, so the caller's
+  belief about what was granted cannot exceed what was asked. The host's own
+  grant is never widened: the next run on that host is still blocked. A host with
+  no repair ledger refuses every repair, because there is no epoch, root budget or
+  applied-ticket set to decide one against. · why: #87 step 3 (T23) · enforced by:
+  `tests/repair.rs` (`a_repair_runs_the_blocked_remainder_without_rerunning_the_analysis`,
+  `a_repair_widens_one_run_and_not_the_host`,
+  `a_denied_repair_leaves_the_run_blocked_with_its_authority_unchanged`,
+  `an_over_wide_grant_is_refused_rather_than_narrowed`) and
+  `tests/sim_repair.rs::seeded_orders_reach_the_same_state_band_*`
+- **INV-BOT-34** A repair ticket is a report, never a grant, and its identity is
+  its content. `RepairTicket::stamp` hashes the run, the tenant, the epoch and the
+  *sorted* needs, so a caller that rebuilds a ticket from the same facts produces
+  the same identity and two spellings of one request are one ticket. A ticket
+  delivered twice is refused `AlreadyApplied` and a ticket from an epoch the run
+  has moved past is refused `StaleEpoch`; the ledger's decide-and-write is one
+  ordered step on its own thread, so "applied once" is a fact about bytes rather
+  than about the order two threads happened to run in. A refused repair charges
+  nothing, mints no epoch and leaves the ledger byte-identical. · why: #87 step 3
+  (T24) · enforced by: `tests/repair.rs`
+  (`the_same_ticket_delivered_twice_applies_once`,
+  `a_ticket_from_an_older_epoch_is_refused_as_stale`,
+  `a_denied_repair_costs_nothing`) and
+  `tests/sim_repair.rs::seeded_orders_reach_the_same_state_band_*`
+- **INV-BOT-35** A run's root budget is carried in its own ledger, is charged by
+  every attempt including a repair, and is never refilled by one. The counters
+  are cumulative read-modify-write state rather than a replayed step record, so
+  they get their own chained file over the shared frame grammar and the shared
+  storage-owner thread (INV-BOT-51). A budget that is spent refuses the next
+  attempt with `BudgetSpent`, which is what makes a permanent refusal plus
+  repeated `NotApplied` reach a finite typed answer rather than an unbounded retry
+  loop, and an authorized repair is a distinct event that *consumes* budget rather
+  than resetting it (T13). Two tenants over one directory keep separate ledgers,
+  separate run ids and separate epochs, and one tenant's ticket is refused by the
+  other tenant's host. · why: #87 step 3 (T13, T24) · enforced by:
+  `tests/repair.rs` (`the_root_budget_stays_charged_across_repair_and_resume`) and
+  `tests/sim_repair.rs` (`seeded_orders_reach_the_same_state_band_*`,
+  `tenants_keep_their_own_tickets_and_budgets_band_*`,
+  `saturation_applies_each_ticket_once_band_*`,
+  `every_repair_charges_the_root_budget_once`,
+  `a_spent_budget_refuses_every_later_attempt`,
+  `a_host_spent_on_one_run_still_repairs_the_next`,
+  `a_bounded_sweep_repairs_every_ticket_once`, and the opt-in
+  `the_declared_repair_tiers_are_measured`)
+- **INV-BOT-36** A refusal is one arm, not one shape, and the repair door is
+  orderable: which arm a decision hits, what it charges and what it leaves behind
+  are each observable rather than inferred from the run's final counters. A grant
+  that is both short and wide reports the missing half first, so the half a caller
+  must fix is the half they are told; the over-wide arm then names every capability
+  the ticket never asked for — shipped or custom — at every need width, because the
+  check walks the grant rather than a list of candidates. A ticket naming another
+  tenant's run is refused by the ticket's own tenant check, before admission and
+  before the ledger, so the asking tenant's ledger never gains an entry for a run it
+  does not own. Each arm leaves the ledger **byte-identical**, which is a claim
+  about the file and is measured on the file rather than on a handle agreeing with
+  itself. A refused repair and a refused attempt are both exactly nothing: no
+  budget, no epoch, no step, and the counters the ceiling was measured against never
+  move afterwards. · why: #87 step 3 (T24) — the arms were stated by the type but
+  exercised only through the order family, which reads an endpoint and could not
+  say which arm produced it · enforced by: `tests/sim_repair.rs`
+  (`a_mixed_decision_order_pins_each_arm`, `a_custom_capability_is_refused_at_every_width`,
+  `a_ticket_never_names_another_tenants_run`) and `tests/repair.rs`
+  (`an_over_wide_grant_is_refused_rather_than_narrowed`,
+  `a_custom_capability_outside_the_ticket_is_refused`,
+  `a_denied_repair_costs_nothing`)
+- **INV-BOT-37** A run's durable state is read back from the file, not from a
+  handle. The repair's replay rests on bytes a *second* host opened: the recorded
+  analysis is not re-polled and the publication runs once, on the run that asked
+  for it, with the first host dropped entirely before the second is built. The
+  ledger's counters replay to exactly what the live write left — tenant, attempts,
+  spend, epoch and applied-ticket count, for every run on the chain — so which
+  handle a caller read cannot decide what a run holds. A budget refusal drops the
+  step store's handle with the refused append outstanding (INV-BOT-50), so recovery
+  from a spent budget is *through a reopen* and is claimed only in that form; the
+  other runs sharing the host keep their own budgets and still close. · why: #87
+  step 3 (T23, T13) — a replay served from a live handle would pass every assertion
+  about poll counts while proving nothing about the store · enforced by:
+  `tests/sim_repair.rs` (`a_repaired_run_survives_a_reopened_host`,
+  `a_reopen_reads_back_the_charged_budget`,
+  `a_host_spent_on_one_run_still_repairs_the_next`) and
+  `tests/repair.rs::a_blocked_run_leaves_its_finished_analysis_recorded`
+- **INV-BOT-38** A first-step reach is refused at the admission boundary with the
+  whole shortfall in one pass, and costs nothing to name. A task that reaches in
+  its first step declares its need with `Task::requiring` and is `Blocked` before
+  its body: no step polled, no permit taken, no record written and no root attempt
+  charged — so the report's `needs` and the ticket's needs are the *whole* of what a
+  repair would grant, and there is no replay to buy. The complementary journey,
+  which reaches after its analysis, still costs exactly one analysis at every need
+  width, and the ticket names that run's shortfall in the order the reach named it.
+  · why: #87 step 3 (T23) — the blunt form had no end-to-end evidence at all, and
+  the one-need case is the only width where the ticket's grant is exactly the run's
+  authority · enforced by: `tests/sim_repair.rs`
+  (`the_step_that_reaches_is_the_step_that_blocks`, `a_wide_need_set_costs_one_analysis`)
+  and `tests/repair.rs` (`a_run_short_of_authority_is_blocked_naming_every_need`,
+  `the_journey_declares_no_admission_boundary_needs`)
 
 - **INV-BOT-1** Journal before acknowledge: a live settlement is journaled before it is
   acknowledged. · why: cef8059b (#112)
@@ -183,6 +356,130 @@ Each of these was a shipped defect. Treat the list as the spec.
   release capacity and emit an attributed terminal receipt. · why: #143 R10
   ownerless-cleanup finding · enforced by: `rt::supervise::tests` and
   `tests/rt_process.rs`
+- **INV-BOT-110** A length-framed record a child's output carries is read through
+  the crate's one frame grammar (`journal::frame`, INV-BOT-51), so "what a torn
+  tail is" has one answer across the file stores and a subprocess's streams. A
+  record is `FrameRead::Frame` only when its prefix named the bytes that
+  followed; the two truncations, a malformed prefix and the caller's ceiling are
+  refusals that carry no payload, and `payload()` returns `None` for every one of
+  them, so there is no path from a truncated output to bytes a caller decodes.
+  The payload ceiling is charged from the prefix *before* a payload is read, so a
+  stream cannot ask for an allocation by claiming a large record. **Malformed is
+  not "too big for what is left":** `MalformedPrefix` is exactly the two lengths
+  no writer of this grammar produces — `declared == 0`, or `declared > ceiling`
+  — and a *legal* declared length that merely exceeds the room remaining after
+  earlier records is `CeilingReached`, because a well-formed record with nowhere
+  to go is a bound, not rot. Each payload is read into its own exactly-sized
+  `Vec`, allocated only after the charge and then moved into the record, so no
+  byte is copied twice and a truncated partial is that same `Vec` truncated in
+  place. A caller reads its child's output through
+  `CapturedStream::frames(ceiling)`, the one door from a `ProcessRun` to the
+  grammar, and the production door to that reading is the sys domain's own
+  verbs: a `Process` built with `Process::frame_stdout` reports the framed
+  reading on the `ProcessState` its `Observe`, `Execute` and `Query` calls
+  return, so the grammar is reached from the run path rather than only from a
+  test. · why: #87 acceptance row T05 (LC-02/11) · enforced by:
+  `tests/sys_process_binding.rs`
+  (`a_framed_record_cut_off_mid_frame_is_a_typed_refusal`,
+  `a_framed_stream_that_ends_cleanly_is_complete`,
+  `a_legal_record_without_room_is_the_ceiling_and_rot_is_still_refused`,
+  `a_prefix_past_the_ceiling_is_refused_before_it_is_allocated`,
+  `the_execute_verb_reports_stdout_frames_two_records_and_a_cut_third`,
+  `the_execute_verb_reports_the_capture_ceiling_when_the_child_overruns_it`) and
+  `tests/sim_process_output.rs` (`cuts_are_refused_never_decoded_band_00`,
+  `cuts_are_refused_never_decoded_band_01`,
+  `room_without_a_record_is_the_ceiling_band_00`,
+  `room_without_a_record_is_the_ceiling_band_01`,
+  `verb_framed_reads_agree_with_the_model_band_00`,
+  `verb_framed_reads_agree_with_the_model_band_01`)
+- **INV-BOT-114** A capture's own cut is reported as the capture's ceiling, never
+  as the child's truncation and never as a clean end — but only for the endings
+  the cut could have decided. When `CapturedStream::truncated()` is true the
+  retained bytes are a prefix **the capture** cut, so they are not the child's
+  whole output however they happen to end — including the case where they end
+  exactly on a record boundary, which is the case a naive reader reports as a
+  complete stream. A framed read through `CapturedStream::frames` therefore
+  overrides exactly `EndOfStream`, `TruncatedPrefix` and `TruncatedPayload` with
+  `FrameRead::CeilingReached { ceiling: <the capture's retained capacity> }`, and
+  `is_complete()` is `false` for each. The two endings it does **not** override
+  are the two the cut cannot have reached: a `MalformedPrefix` was decided from a
+  whole prefix the capture did retain (declared `0`, or a length past the
+  reader's ceiling), so it is rot in the child's output and stands; and a
+  `CeilingReached` the *reader* reached stopped the pass before the cut mattered,
+  so it names the reader's ceiling and stands. Replacing either would be
+  fail-open in the same direction: a caller looking for corruption would be handed
+  a bound it never hit, and a caller looking for its own bound would be told
+  something larger stopped it. The two ceilings are separate facts and are never
+  conflated: an untruncated capture reports the child's own truncation, and a
+  reader ceiling reached over an untruncated capture reports the reader's. · why:
+  #87 acceptance row T05 (LC-02/11), the capture-ceiling/confusable-child-truncation
+  defect and the fail-open override the reviewer found in it · enforced by:
+  `tests/sys_process_binding.rs`
+  (`a_capture_ceiling_ends_the_framed_read_rather_than_the_child`,
+  `an_untruncated_capture_reports_the_child_own_truncation`,
+  `a_rot_prefix_before_the_capture_cut_stays_refused`,
+  `a_reader_ceiling_over_a_truncated_capture_is_the_readers_own`) and
+  `tests/sim_process_output.rs`
+  (`capture_cuts_end_at_the_capture_ceiling_band_00`,
+  `capture_cuts_end_at_the_capture_ceiling_band_01`,
+  `capture_cuts_saturate_at_the_declared_tiers`,
+  `rot_before_the_capture_cut_is_the_ending_band_00`,
+  `rot_before_the_capture_cut_is_the_ending_band_01`)
+- **INV-BOT-115** The frame grammar a child's output carries is reached from the
+  sys domain's own verbs, not only from a reader a caller plumbs by hand. A
+  `Process` built with `Process::frame_stdout` reports each run's stdout as
+  `ProcessState::stdout_frames`, a reading of the same bytes the lossy
+  `ProcessState::stdout` decodes, so a binary record round-trips byte-exact where
+  the text view cannot, while a domain built without it reports `None` and an
+  unchanged `stdout`. The production door is the `Observe`, `Execute` and `Query`
+  verbs on `Process`: each calls the one private dispatch method, which runs the
+  process once, and `ProcessState::from_run` fills the framed reading through
+  `CapturedStream::frames` — so the capability `INV-BOT-110` and `INV-BOT-114`
+  describe has a caller on the real run path rather than only in a test. · why:
+  the wired-or-it-does-not-exist defect for T05 (INV-BOT-110 and INV-BOT-114
+  shipped with zero production callers) · enforced by: `tests/sys_process_binding.rs`
+  (`the_execute_verb_reports_stdout_frames_two_records_and_a_cut_third`,
+  `the_execute_verb_reports_the_capture_ceiling_when_the_child_overruns_it`,
+  `a_domain_without_frame_stdout_reports_no_frames_and_unchanged_stdout`,
+  `a_binary_record_round_trips_through_frames_while_stdout_is_lossy`) and
+  `tests/sim_process_output.rs`
+  (`verb_framed_reads_agree_with_the_model_band_00`,
+  `verb_framed_reads_agree_with_the_model_band_01`,
+  `verb_two_tenants_never_cross_band_00`,
+  `verb_two_tenants_never_cross_band_01`)
+- **INV-BOT-111** A captured stream's four facts — the retained head at the
+  ceiling, the retained capacity, the exact total and the truncation flag — are
+  reported from one drain that keeps reading past its ceiling, so a flooding child
+  against a slow reader is bounded by its declared ceiling rather than by a pipe
+  buffer, and the total is still exact when the output was truncated. A reader
+  that waits for the child to exit before reading would deadlock on such a child,
+  so the deadline-bounded variant is the control that distinguishes a concurrent
+  drain from a sequential one. · why: #87 acceptance row T05 (LC-02/11) ·
+  enforced by: `tests/sys_process_binding.rs`
+  (`a_flooding_child_against_a_slow_reader_stays_within_its_ceiling`,
+  `a_flooding_child_is_drained_while_it_runs_not_after_it_exits`) and
+  `tests/sim_process_output.rs` (`a_seeded_flood_stays_bounded_on_one_worker_band_00`,
+  `a_seeded_flood_stays_bounded_on_one_worker_band_01`)
+- **INV-BOT-112** `CleanupReceipt::CleanupConfirmed` claims that every process
+  still in the supervised group when the group was last observed is gone — an
+  observation of `killpg(group, 0)`. It does **not** claim that no process the
+  supervisor started is still running: a descendant that called `setsid` has left
+  the group by construction, so its survival is not a counterexample. A receipt
+  claiming the stronger thing would need a kernel job object or a cgroup, neither
+  of which this crate has, and the bound is stated on the receipt itself rather
+  than left to be inferred from a green test. · why: #87 acceptance row T21
+  (LC-10), observed against a real `setsid` escape · enforced by:
+  `tests/process_escape.rs` (`a_session_escape_is_not_reported_as_complete_tree_cleanup`,
+  `cleanup_never_signals_a_process_outside_the_supervisors_group`)
+- **INV-BOT-113** A callback that never reaches an await point is observable only
+  from outside the process that runs it, and the observation is **detection, not
+  preemption**. A thread watchdog shares the fate of the executor it watches, so
+  the row's oracle is a separately timed child process that the parent kills with
+  a real `SIGKILL`; nothing in this crate can stop a poll in flight, and
+  `Supervisor::shutdown` says so itself. · why: #87 acceptance row T03 (DX-05,
+  LC-08) · enforced by: `tests/t03_non_yielding.rs`
+  (`a_non_yielding_callback_is_detected_from_outside_and_not_preempted`,
+  `the_same_front_door_admits_a_callback_that_does_yield`)
 - **INV-BOT-14** Shipped journals refuse appends and opens beyond their explicit
   event/byte ceilings without deleting or partially replaying committed or
   unresolved evidence. · why: #143 R06 · enforced by:
@@ -687,6 +984,97 @@ Each of these was a shipped defect. Treat the list as the spec.
   `finished_steps_run_once`, `tenants_stay_isolated`, `same_seed_replays`),
   which sweeps every step boundary of every seeded run twice for an identical
   trace hash.
+- **INV-BOT-100** A request key is an identity, not a lock, and `Host::submit`
+  makes the three outcomes distinct. The run identity is derived, not minted:
+  it is a domain-separated hash of the host's tenant and the key, so the same
+  request on another process or day derives the same run and its receipt is
+  findable without a second table. The input's canonical `InputDigest` (the
+  `InputIdentity` schema id framed with its identity bytes) is recorded under
+  `@request` before any step runs; the terminal outcome is recorded under
+  `@terminal` after, and **only for the dispositions that are the request's own
+  verdict** — `Succeeded`, `Failed` and `DeadlineExceeded` (INV-BOT-102).
+  A repeat with the same key and digest reattaches to the recorded terminal and
+  never re-enters the body; a repeat with the same key and a different digest is
+  a typed `RequestError::Conflict` naming both digests and writes nothing;
+  distinct keys derive distinct runs and are never collapsed; one key under two
+  tenants derives two runs over a shared store file. A host with no store
+  refuses with `RequestError::NoStore` rather than downgrading to a plain run.
+  · why: #87 step 7 (T30) · enforced by: `tests/request_key.rs`
+  (`a_duplicate_identical_request_reattaches_without_rerunning`,
+  `a_reattach_survives_a_reopened_store`,
+  `same_key_with_a_different_payload_is_a_typed_conflict`,
+  `distinct_request_keys_are_distinct_runs`,
+  `two_tenants_never_share_a_request_run`,
+  `a_submission_without_a_store_is_refused`,
+  `a_recorded_request_answers_over_a_changed_body`,
+  `an_expired_deadline_is_the_requests_recorded_outcome`) and
+  `tests/sim_request_key.rs` (`collisions_across_two_tenants`, `same_seed_replays`,
+  `expired_deadlines_are_recorded_band_16..23`,
+  `concurrent_submissions_across_tiers`).
+- **INV-BOT-101** A durable submission's receipt outlives the client that
+  submitted it, and the in-flight state is reported as two separate facts. If a
+  waiter is dropped while the body is in flight, the `@request` receipt and any
+  completed step records are already on the disk and no `@terminal` record is;
+  a later client that submits the same key and input receives
+  `Submission::InFlight` — not a fabricated success and not a re-run of the
+  parked body — which names the run to settle (`InFlight::run`) and how many
+  records survived (`InFlight::records`). A host stop leaves the same state, for
+  the same reason and with the same answer (INV-BOT-102). The host remains the
+  cleanup owner: the run store is the host's, so settling the un-recorded step is
+  a `resume` of that run, never the client's to hold. The crate deliberately does
+  not drive a dropped non-`Send` body in the background; what survives is the
+  durable record, which is what a resume needs. · why: #87 step 7 (T17) ·
+  enforced by: `tests/request_key.rs`
+  (`a_dropped_client_leaves_the_request_in_flight_for_a_later_client`,
+  `a_host_stop_mid_run_leaves_the_request_resumable`) and
+  `tests/sim_request_key.rs` (`drop_and_reattach`,
+  `host_stops_never_poison_a_key_band_00..03`).
+- **INV-BOT-102** A host-side stop is not the request's outcome, so it is never
+  recorded as one. `Host::submit` records `@terminal` for exactly the three
+  dispositions that are **the request's own verdict** under its declared task —
+  `Succeeded`, `Failed` and `DeadlineExceeded`, the deadline included because
+  the same declaration that fixed the key also fixed the run's budget.
+  `Disposition::Cancelled` (the host's stop arrived after admission) and
+  `Disposition::Refused` (the host declined before it) are this host declining
+  to finish the run, and record **no** terminal path: a key whose terminal
+  record names a host stop is a key nothing can ever complete, because the key
+  *is* the request's identity, its body runs at most once, and the one fact that
+  made the request resumable — that no terminal record exists — is the very fact
+  a stop recorded as the verdict destroys. The stop is still reported to the
+  caller that saw it (`Submission::Executed` carrying the disposition), so the
+  call is never silent; what it does not do is turn one restart into a request
+  that can never succeed. The classification is one **exhaustive** match over
+  `Disposition` (`task::terminal_for`), so a variant added later breaks the build
+  until its relationship to a request key is decided by hand. `Host::resume` is
+  the door that **settles** a request a `submit` left incomplete — it records
+  the same three verdicts, under the same rule — because `submit` reports an
+  incomplete request rather than re-running its body; without it a stopped
+  request would report `InFlight` forever, which is the permanent outcome this
+  entry removes. Settling is deliberately narrow: `Host::run` writes no reserved
+  record, a resume of a run with no `@request` receipt is an ordinary resume and
+  records nothing, a run already holding a terminal record is left alone, and a
+  `Refused`/`Cancelled` report is returned untouched so a store that cannot be
+  *read* while checking an outcome nobody will write cannot turn a cross-tenant
+  `Refused` into a `Failed`. A store that refuses to record a verdict a run
+  *reached* is reported as `Failed`, because recording an outcome and reporting
+  success are one fact. The same declaration that fixed the key also fixed the
+  run's budget, so `DeadlineExceeded` is the request's own verdict and is
+  recorded: a request that overran its own budget reattaches to that deadline
+  rather than re-running a body that has already overrun once, and the recorded
+  step before the overrun survives it. A refused settlement records **nothing**,
+  so the request stays unsettled and a later client reads `InFlight` rather than
+  a verdict that was never written. · why: #87 step 7 (T30), the review defect
+  where one shutdown poisoned a key permanently · enforced by: `tests/request_key.rs`
+  (`a_host_stop_mid_run_leaves_the_request_resumable`,
+  `a_refusal_before_admission_is_not_recorded_as_the_outcome`,
+  `a_failed_run_is_the_requests_recorded_outcome`,
+  `an_expired_deadline_is_the_requests_recorded_outcome`,
+  `a_store_that_refuses_the_terminal_write_reports_the_refusal`,
+  `a_dropped_client_leaves_the_request_in_flight_for_a_later_client`) and
+  `tests/sim_request_key.rs` (`host_stops_never_poison_a_key_band_00..03`,
+  `same_seed_replays_host_stops_band_00..03`,
+  `expired_deadlines_are_recorded_band_16..23`,
+  `settle_refusals_are_reported_and_leave_the_request_unsettled_seed_a..p`).
 - **INV-BOT-40** The committed record can be replayed without materializing it:
   `FileJournal::replay` streams frames from its own read-only descriptor,
   retaining at most one event, applies the same frame validation and event
@@ -716,6 +1104,17 @@ Each of these was a shipped defect. Treat the list as the spec.
   handle. · why: #122 item 4 / #156 · enforced by: `tests/journal_liveness.rs`
   (`a_slow_store_lets_the_runtime_and_the_release_progress`,
   `a_cancelled_append_leaves_the_runtime_and_the_handle_live`)
+- **INV-BOT-140** An awaited answer registers its waker before it reads the
+  slot. The owner writes the slot and only then takes the waker to fire it, and
+  a wake is fired once, so read-then-register is a lost wakeup: the poll
+  decides the answer is absent, the publish finds no waker, and the task parks
+  for ever; registering first and reading second means whichever side moves
+  second observes the other. · why: GitHub CI parked
+  `tests/sim_repair.rs::saturation_applies_each_ticket_once_band_09` (PR #239)
+  and `_band_03` (PR #241) past 600 s and cancelled the job at its 15-minute
+  timeout; the run ledger's charge goes through this owner (INV-BOT-35/51).
+  · enforced by:
+  `crates/lgwks-bot/src/journal/owner.rs::tests::an_answer_published_during_registration_still_wakes_the_poll`
 - **INV-BOT-44** A real process kill while an append is in flight, against a
   store that has not answered, leaves a clean journal: the reopen reports no
   committed event and no torn tail, and the retry lands exactly once. The kill
@@ -802,7 +1201,8 @@ Each of these was a shipped defect. Treat the list as the spec.
   `head_moved_between_snapshot_and_publish_r32`,
   `malformed_and_oversized_answers_r32`,
   `a_publication_the_ceiling_cannot_verify_stays_unknown`,
-  `same_seed_same_trace_hash_r32`, `saturation_r32`,
+  `same_seed_same_trace_hash_r32`, `saturation_r32_tier_100`,
+  `saturation_r32_tier_1000`, `saturation_r32_tier_10000`,
   `two_tenants_on_one_pull_request_r32`, `cancellation_under_faults_r16`,
   `duplicate_submission_r16`, `two_repositories_on_one_host_r16`) and
   `tests/gh_binding.rs` (`a_review_list_past_the_ceiling_is_refused_not_truncated`,
@@ -931,6 +1331,292 @@ Each of these was a shipped defect. Treat the list as the spec.
   (`a_wave_spends_one_watchdog_and_a_mass_of_waves_spends_one_each`) and
   `tests/sim_observe_refresh.rs`, whose `band_family!` declaration runs
   (`a_wave_spends_one_watchdog_and_a_fast_wave_spends_none`).
+
+- **INV-BOT-81** A review's subject is the repository the caller named and the
+  diff that was read, and a publication is reported only from evidence of the
+  exact state that landed. `Gh::read_diff` reads the changed-file inventory as
+  **data — never executed**, including a `build.rs` whose patch text would
+  perform an effect — bounded on two separate axes (file count against
+  `MAX_DIFF_FILES_PER_PULL`, patch bytes against `MAX_DIFF_BYTES`) with typed
+  refusals, and the inventory is refused whole rather than truncated. An
+  unavailable diff (`406`, `GhError::DiffUnavailable`) or either diff ceiling is
+  an `Incomplete` coverage decision, never a clean review; a renamed-repository
+  answer is `GhError::MovedRepository` naming both the requested and canonical
+  repositories, and the journey refuses rather than silently re-pointing the
+  subject. The publish path distinguishes what landed from what was read back: a
+  lost response reconciled onto an unsubmitted draft is `Pending`, onto a
+  submitted review carrying fewer inline comments than intended is `Partial`
+  (with both counts), and a create that returned an id whose read-back lost
+  permission (`GhError::Unauthorized`, from `401`/`403`/`404`) is `Unverified`
+  with the applied review id retained; a read that failed for any other reason
+  stays `Unknown`. No path issues a second create, and a non-zero exit that named
+  no HTTP status stays a transport failure rather than being guessed into a
+  permission one. · why: #151, #87 step 6 (PR-02, PR-03, PR-04, PR-07, PR-08,
+  PR-09, PR-10), T31/T33/T34 · enforced by:
+  `tests/pr_review_journey.rs`
+  (`an_unavailable_diff_is_an_incomplete_coverage_and_publishes_nothing`,
+  `a_diff_past_the_file_ceiling_is_an_incomplete_coverage`,
+  `a_diff_past_the_byte_ceiling_is_an_incomplete_coverage`,
+  `a_renamed_repository_is_refused_and_never_silently_re_pointed`,
+  `an_untrusted_build_script_in_the_diff_is_never_executed`,
+  `a_pending_draft_is_reconciled_as_a_draft_and_never_reposted`,
+  `a_partial_submission_is_reconciled_as_partial_and_never_reposted`,
+  `a_lost_read_permission_reports_unverified_and_retains_the_review_id`),
+  `tests/gh_binding.rs`
+  (`a_renamed_repository_is_a_typed_move_naming_both_names`,
+  `a_permission_refusal_is_a_typed_unauthorized_not_a_transport_failure`,
+  `a_failure_naming_no_status_stays_a_transport_failure`,
+  `a_diff_past_its_file_ceiling_is_a_typed_coverage_refusal`,
+  `an_unavailable_diff_is_a_typed_coverage_refusal`,
+  `a_changed_file_inventory_is_read_as_data`),
+  `tests/sim_review_path.rs` (`subject_coverage_and_partial_faults` bands 00
+  through 07 (64 seeds), `same_seed_same_trace_hash_subject` bands 08 through
+  11 (32 seeds), `two_identities_subject` bands 12 through 13 (16 seeds)), and
+  `tests/sim_review_pr.rs` (`review_comments_are_carried_and_omitted_r16`)
+- **INV-BOT-96** Each refusal arm of a review is a *seeded property of its own*,
+  not one point in a sweep that checks outcome shapes. `subject_coverage_and_partial_faults`
+  asserts that every fault reaches *some* correct variant; that assertion is
+  satisfied by a world in which the right arm is reached for the wrong reason, so
+  every arm below asks a different question of the same seeded worlds. A coverage
+  refusal reaches the receiver with **zero** creates, so a review cannot be
+  published against a scope nobody read. The two diff ceilings are refused on
+  **separate axes** — a file-count refusal names files, a byte refusal names
+  patch bytes, and a run charged against one bound fails the other family — and
+  the byte family's draws are additionally asserted to stay under the *file*
+  ceiling, so a refusal for the wrong bound cannot pass as evidence for it. A
+  renamed repository is refused naming **both** the requested and the canonical
+  name and publishes nothing. A `build.rs` in the changed-file inventory is
+  **never executed**: the oracle is a marker file named in the child's own
+  environment and referenced by the patch text, so any execution — compiling,
+  shelling, or handing the patch anywhere — removes a file the test asserts is
+  still there, while the review itself still publishes because a hostile file in
+  an inventory is data. A lost response onto an unsubmitted draft is `Pending`
+  and a partial submission carries **both** the applied and intended counts, each
+  measured at the receiver, and neither issues a second create. A create whose
+  read-back lost permission is `Unverified` with the **applied review id
+  retained**, and the id must lie in the range the receiver actually handed out —
+  a `Unverified` without it would force a caller to re-post to find out whether
+  anything landed. The permission and transport arms are **disjoint**: the
+  permission arm names an HTTP status and a credential, the transport arm names a
+  child's exit and no status, and through the whole journey they are `Unverified`
+  and `Unknown` respectively — merging them either discards applied-effect
+  evidence or over-reports a blocking state for a failure nobody can attribute to
+  permissions. A publication is pinned to the commit that was read, so a run that
+  re-pointed the subject after a rename would fail rather than publish at code it
+  never read. · why: #231 review (the arm families were untested under fault
+  density) · enforced by: `tests/sim_review_path.rs`
+  (`an_unavailable_diff_publishes_nothing`,
+  `a_diff_past_the_file_ceiling_publishes_nothing`,
+  `a_diff_past_the_byte_ceiling_publishes_nothing`,
+  `the_two_diff_ceilings_are_refused_separately`,
+  `a_renamed_repository_is_refused_naming_both`,
+  `an_untrusted_build_script_is_never_executed`,
+  `a_pending_draft_is_never_reposted`,
+  `a_partial_submission_reports_both_counts`,
+  `an_unverified_effect_retains_its_review_id`,
+  `unauthorized_and_transport_stay_distinct`,
+  `permission_loss_and_transport_outcome_differ`,
+  `subject_saturation_conserves_creates`,
+  `two_tenants_coverage_stays_isolated`,
+  `a_publication_is_pinned_to_the_read_commit`)
+- **INV-BOT-97** A scale measurement is not evidence when the world it ran
+  against went degenerate. The saturation tiers drive 100, 1,000 and 10,000
+  runs of the real journey, and every one of them must reach a *verified*
+  `Published` outcome: with no fault configured and a history inside both the
+  capture ceiling and `domain::gh::MAX_REVIEWS_PER_PULL`, an `Unknown` is a
+  failure of the measurement, not a tolerated outcome. Creates are therefore
+  exactly one per run per receiver — `==`, never the `<=` a duplicate-post
+  defect satisfies as readily as a correct run — and read-backs are at least
+  creates per receiver as well as in total. The fixture is what does not
+  survive scale, so the tier is sharded across receivers of at most 100 runs:
+  every read-back reads its receiver's whole `reviews.jsonl`, so one receiver
+  holding the whole tier pipes a quadratic answer, and past ~590 reviews that
+  answer exceeds `CAPTURE` and past 1,000 it is refused with `ReviewCeiling` —
+  which ends each run `Unknown` while every inequality the family asserted
+  still holds. The shard keeps the concurrency under test unchanged — one
+  `Host`, one `join_all_bounded` pipeline at `in_flight = min(N, 64)`, and the
+  inputs ordered receiver-major so the bound is reached on a *single* pull
+  request. A tier that could not reach its own run count, or a receiver whose
+  share is cancelled out by a healthy one in the totals, is a measurement that
+  proved nothing; the per-receiver assertions exist to make that visible
+  instead of arithmetic. · why: #151 review finding on
+  `tests/sim_review_path.rs`'s saturation tiers (a >300 s family that also timed
+  a degenerate world) · enforced by: `tests/sim_review_path.rs`
+  (`saturation_r32_tier_100`, `saturation_r32_tier_1000`,
+  `saturation_r32_tier_10000`, which assert per receiver and in total, and
+  `same_seed_same_trace_hash_r32` for the replay the tier still owes)
+
+- **INV-BOT-90** Model output is an untrusted *task input*, and crossing into the
+  host is a typed refusal rather than an instruction. A payload is decoded by a
+  hand-written bounded decoder against a `Surface` of the operations the host
+  registered, so `install` and `credential` have no operation to name and are
+  refused by what they asked for rather than as malformed documents; an unknown
+  field is refused rather than ignored, a refused payload returns no plan beside
+  its refusal, and every refusal and every admitted plan carries the
+  `Provenance` of the exact bytes that produced it — including which untrusted
+  source, since a model's mistake and a hostile tool's output are the same bytes
+  with a different provenance. A sandbox escape — an absolute, traversing or
+  drive-qualified path, or a `host` field naming another tenant — is its own
+  `SandboxEscape` arm precisely so it stays *observable*: a refusal reported as
+  malformed is a refusal nobody can find. A capability the run does not hold is
+  refused by name, so the repair is a deliberate grant. It is not a fifth verb:
+  an admitted `Plan` is a list of names to perform through the existing verbs, and
+  this crate calls no network model — `StubModel` is a deterministic double,
+  because the guarantee is about admission and admission is identical whoever
+  produced the bytes. The bytes reach the run through one step,
+  `script::admit`, so a refusal a task body sees is located at that step like
+  every other `FlowError`, carries the `Provenance` of the exact bytes, and
+  keeps its typed arm rather than arriving as a string a caller must parse.
+  · why: #87 T26 · enforced by: `tests/proposal.rs`
+  (`a_malformed_payload_never_becomes_work`,
+  `an_injected_instruction_is_refused_by_name`,
+  `a_tool_install_is_refused_and_the_surface_is_unchanged`,
+  `a_credential_read_is_refused`,
+  `a_sandbox_escape_stays_an_observable_refusal`,
+  `an_unknown_operation_is_refused_whatever_asked_for_it`,
+  `a_capability_the_run_does_not_hold_is_refused_by_name`,
+  `a_refusal_is_attributable_to_its_exact_bytes`,
+  `the_model_is_a_deterministic_double`,
+  `an_injected_instruction_is_refused_at_its_step_on_a_real_run`,
+  `a_well_formed_proposal_is_admitted_on_a_real_run`,
+  `a_capability_the_run_does_not_hold_is_refused_by_name_on_a_real_run`) and
+  `tests/sim_proposal.rs`
+  (`seeded_shapes_match_the_declared_outcome_band_00..07`,
+  `seeded_runs_reach_the_declared_disposition_band_20..23`)
+
+- **INV-BOT-91** A completion claim is admitted only with the evidence it names
+  present, and truncated data never becomes a full-coverage claim. The three
+  untrue successes are three outcomes, not one: a claim whose evidence is absent
+  is `NotEvidenced` with the references named, a claim whose evidence is present
+  but whose coverage is short is `Incomplete`, and only a claim passing both is
+  `Admitted`. `Coverage::from_claim` maps *every* payload claim — including the
+  exact spelling `complete` — onto `Partial`, so a `Plan` cannot be talked into
+  full coverage however many lines it carries, and `Coverage::Complete` has no
+  constructor reachable from a decoder. A claim naming more references than
+  `MAX_EVIDENCE_REFS` is refused whole rather than trimmed, since a trimmed claim
+  asserts completeness over the prefix it kept. An abandoned run is admitted as
+  `Abandoned`, visibly not the same thing as a finish. A claim is settled inside a
+  task body on the run path, so the three outcomes reach a caller through the run
+  that produced them rather than through a call only a test made. · why: #87
+  T27/T35 · enforced by: `tests/proposal.rs`
+  (`the_three_untrue_successes_report_distinct_outcomes`,
+  `an_abandoned_run_is_not_a_finished_one`,
+  `an_over_long_evidence_claim_is_refused_whole`,
+  `a_truncated_payload_never_becomes_a_full_coverage_claim`,
+  `a_well_formed_proposal_is_admitted_on_a_real_run`) and
+  `tests/sim_proposal.rs`
+  (`same_seed_same_trace_hash_band_16..19`,
+  `seeded_runs_reach_the_declared_disposition_band_20..23`)
+
+- **INV-BOT-92** A context reset recovers what the run already learned, because
+  the checkpoint is `Durable` and round-trips through the run store rather than
+  living in the instance that wrote it. `Checkpoint` carries completed steps,
+  user corrections *with their kind*, `Unknown`-classed effects and evidence
+  references, so a new task instance resuming the same run id recovers them; a
+  `Refusal` correction stays a refusal rather than being re-read as an override,
+  and an `Unknown` effect is still `Unknown` rather than absent. Every list is
+  bounded, every bound is a declared constant, and the charge comes **before**
+  the append — a refusal leaves the checkpoint exactly as it was, which is the
+  defect the suite found in its own first draft and fixed. Re-recording a
+  completed step is a no-op, so a resumed step cannot inflate the count or trip
+  the ceiling, and reconciling an existing effect reference replaces rather than
+  joins. A truncated archive is refused, never decoded into a partial
+  checkpoint. The *refusals* round-trip on the same store and under the same
+  mechanism: `script::admit` records each one under `<step>/refusal` before it
+  returns the `FlowError`, so a new instance resuming the same run id reads
+  back which arm fired, at which step, for which bytes and from which
+  untrusted producer — a fact it cannot re-derive, having never seen the
+  payload. A resumed run reads it back from a *reopened* store through
+  `RunStore::lookup`, not from the handle that wrote it. · why: #87 T27 ·
+  enforced by: `tests/proposal.rs`
+  (`a_context_reset_preserves_completed_work_corrections_unknowns_and_evidence`,
+  `a_checkpoint_round_trips_through_the_run_store`,
+  `a_checkpoint_refuses_to_grow_past_its_ceiling`,
+  `a_resumed_run_reads_back_the_refusal_the_first_run_recorded`)
+
+- **INV-BOT-93** An artifact is keyed by `(tenant, digest)`, so a digest is never
+  an authorization. Two tenants holding identical bytes get distinct keys and
+  separate shelves, and a tenant that wrote nothing reads nothing whatever digest
+  it names; the isolation is of the index rather than a check the caller
+  remembers. Writes to one key are serialized through one writer path, so exactly
+  one writer commits and every later writer of identical content is told
+  `AlreadyPresent` — with a `writers` receipt counting every writer that reached
+  the key, which is how "serialized" is observed rather than asserted. Reads take
+  no writer lock, so independent reads and writes to other keys progress. The
+  store never hands out a *prefix* of an artifact, and every ceiling
+  (per-artifact bytes, artifacts per tenant, tenant-name length) is a typed
+  refusal that leaves the store byte-identical. · why: #87 T28 · enforced by:
+  `tests/proposal.rs` (`two_tenants_on_one_digest_stay_isolated`,
+  `conflicting_writes_to_one_key_are_serialized_and_idempotent`,
+  `reads_progress_while_a_write_is_in_flight`,
+  `an_oversized_artifact_is_refused_and_the_store_is_unchanged`) and
+  `tests/sim_proposal.rs`
+  (`two_tenants_on_one_digest_stay_isolated_band_08..11`,
+  `concurrent_readers_and_conflicting_writers_band_12..15`,
+  `saturation_reaches_100_1000_and_10000`,
+  `two_tenant_saturation_keeps_its_shelves_apart`,
+  `two_tenants_admitting_on_one_host_stay_isolated_band_24..27`)
+
+- **INV-BOT-94** Repeated unchanged failure reaches a finite typed intervention,
+  and new evidence does not erase what a failure already cost. `RepairLedger`
+  counts one *unchanged* fingerprint and returns `Intervention::NoProgress`
+  once the declared `repeat` ceiling is exceeded, and it never returns to
+  repairing that fingerprint afterwards; a run filling the ledger with *different*
+  failures reaches `Intervention::LedgerFull`, which is its own arm because those
+  are different facts. `record_evidence` adds to the ledger and marks progress
+  but moves no repetition count and does not clear the recorded-evidence mark, so
+  the count the ceiling is measured against never falls — progress on one axis
+  cannot buy unbounded attempts on another, and `spent` is monotone for the whole
+  run. Bounded repair is a declared `PlanBudget` ceiling rather than a property of
+  the loop, and a refused charge does not underflow it. The ceiling is **run-scoped**:
+  `script::Gate` holds one budget and one ledger shared by every `Host::run` that
+  admits through it, so the fourth identical refusal across four separate runs is
+  the intervention — a per-call ledger would refuse every time and never intervene,
+  and a per-body budget would be a fresh ceiling per fan-out item. The budget is
+  charged **before** the decode, so a payload refused for its content still costs
+  an admission and a refusal loop cannot dodge its own ceiling; a budget refusal is
+  *not* recorded against the ledger, because no payload was tried and there is no
+  unchanged failure to count. The lock is held across the charge, the decode and
+  the ledger update and never across an `.await`. · why: #87 T29 · enforced
+  by: `tests/proposal.rs`
+  (`repeated_unchanged_failure_reaches_a_finite_intervention`,
+  `a_ledger_of_distinct_failures_reaches_its_own_intervention`,
+  `new_evidence_does_not_erase_root_spend`, `a_plan_budget_bounds_repair`,
+  `repeated_unchanged_failure_reaches_a_finite_intervention_across_runs`,
+  `a_plan_budget_bounds_repair_across_runs`) and `tests/sim_proposal.rs`
+  (`saturation_over_admit_conserves_the_budget`,
+  `seeded_runs_reach_the_declared_disposition_band_20..23`)
+
+- **INV-BOT-95** Untrusted output reaches a run through one step, and that step is
+  a `script` block rather than a helper a caller must remember to locate. The estate
+  rule is "wired or it does not exist", and the defect this entry records is a
+  capability shipped with no production caller: only tests reached the decoder and
+  the ledger, so every property INV-BOT-90..94 state held for a boundary nothing
+  invoked. `script::admit` is the invocation, and it is a block because a task body
+  can only act on a `FlowError`: it enters its step (`scope.enter`), so a refusal
+  reads `admit/plan` like every other located failure rather than at the run
+  boundary; it returns a typed arm —
+  `FlowError::Refused { at, refusal, provenance }` or
+  `FlowError::Intervention { at, intervention }` — so the `Provenance` of the
+  refused bytes survives to the `Report` instead of being flattened into a
+  `Display` string; and both arms are non-retryable, since a payload refused for
+  its content is refused however often it is re-read and another attempt is exactly
+  the repair an intervention refused. It admits a `Plan` of operation *names* and
+  performs nothing: not a fifth verb, and not an untyped plan interpreter. What is
+  **not** claimed: `admit` records the refusal, not the admitted plan's execution —
+  performing a plan's operations is the caller's job through the existing verbs,
+  and a run whose plan is admitted has still performed no external effect, which is
+  what `EffectKnowledge` continues to report. · why: #87 T26/T27/T29 (the
+  no-production-caller defect) · enforced by: `tests/proposal.rs`
+  (`an_injected_instruction_is_refused_at_its_step_on_a_real_run`,
+  `a_well_formed_proposal_is_admitted_on_a_real_run`,
+  `a_capability_the_run_does_not_hold_is_refused_by_name_on_a_real_run`,
+  `repeated_unchanged_failure_reaches_a_finite_intervention_across_runs`,
+  `a_plan_budget_bounds_repair_across_runs`,
+  `a_resumed_run_reads_back_the_refusal_the_first_run_recorded`) and
+  `tests/sim_proposal.rs` (`seeded_runs_reach_the_declared_disposition_band_20..23`,
+  `two_tenants_admitting_on_one_host_stay_isolated_band_24..27`,
+  `saturation_over_admit_conserves_the_budget`)
 
 ## Open questions for the Director
 

@@ -8,9 +8,7 @@
     feature = "process"
 ))]
 
-use std::fs;
-use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 use lgwks_bot::Runtime;
 use lgwks_bot::rt::process::ProcessSpec;
@@ -19,86 +17,169 @@ use lgwks_bot::rt::time::{Instant, sleep};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-// Shared with the storefront consumer probes: one definition of where a
-// nested build puts its artifacts. A probe used to build into its own scratch
-// directory, compiling `lgwks_bot` and every dependency cold: two probes,
-// ~41 s each, the longest tests in the suite.
-#[path = "../../lgwks-deps/tests/support/target_dir.rs"]
-mod target_dir;
+// The compile-probe harness, shared with `t02_compile_surface`: one definition
+// of where a nested build puts its artifacts, so the two targets cannot drift.
+#[path = "support/compile.rs"]
+mod compile;
 
-use target_dir::{workspace_root, workspace_target_dir};
+use compile::{assert_refused_for, compile_probe};
 
-/// Type-checks a one-file consumer of `lgwks_bot` and returns cargo's output.
+/// The probe compiled: the same harness, the same lockfile, the same features.
 ///
-/// The probe starts from the workspace lockfile, so it resolves the versions
-/// the workspace build compiled rather than whatever the local registry cache
-/// holds newest. Scratch is named by wall-clock nanos plus a sequence, not a
-/// process or thread id (both are reused) and not `lgwks_std::random` (behind
-/// features this test is built without).
-fn compile_probe(
-    name: &str,
-    dependency: &str,
-    main: &str,
-) -> Result<Output, Box<dyn std::error::Error>> {
-    static DIR_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_nanos())
-        .unwrap_or(0);
-    let seq = DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!("{name}-{nanos}-{seq}"));
-    fs::create_dir_all(root.join("src"))?;
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    fs::copy(
-        workspace_root()?.join("Cargo.lock"),
-        root.join("Cargo.lock"),
-    )?;
-    fs::write(
-        root.join("Cargo.toml"),
-        format!(
-            "[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\nlgwks_bot = {{ path = \"{}\"{dependency} }}\n",
-            manifest_dir.display()
-        ),
-    )?;
-    fs::write(root.join("src/main.rs"), main)?;
-    let output = Command::new(env!("CARGO"))
-        .args(["check", "--offline", "--manifest-path"])
-        .arg(root.join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", workspace_target_dir()?)
-        .output();
-    fs::remove_dir_all(&root)?;
-    Ok(output?)
-}
-
-/// The probe was refused by the compiler for the reason named, not by cargo
-/// for some other one. A bare `!status.success()` also passed when the probe
-/// never reached rustc at all: an offline resolution failure, a lock error, a
-/// missing toolchain.
-fn assert_refused_for(output: &Output, code: &str, symbol: &str) {
+/// The positive control every negative probe needs. A refusal is only evidence
+/// if the harness *could* have accepted a correct consumer, and the way that
+/// fails is invisibly: an offline resolution error or a missing toolchain also
+/// produces `!status.success()`, indistinguishable from the intended refusal
+/// unless a correct program is shown to compile through the identical path.
+fn assert_accepted(output: &Output, description: &str) {
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        !output.status.success(),
-        "the probe unexpectedly compiled:\n{text}"
-    );
-    assert!(
-        text.contains(&format!("error[{code}]")) && text.contains(symbol),
-        "the probe failed, but not with {code} naming `{symbol}`:\n{text}"
+        output.status.success(),
+        "the positive control ({description}) must compile, so a refusal below is \
+         the compiler's judgement about the symbol and not this harness failing \
+         to build the probe:\n{text}"
     );
 }
 
+/// Run one positive control: a correct consumer of the surface under test.
+fn compiles(name: &str, dependency: &str, description: &str, main: &str) -> TestResult {
+    let output = compile_probe(name, dependency, main)?;
+    assert_accepted(&output, description);
+    Ok(())
+}
+
+/// Run one negative probe and require the named refusal from the compiler.
+fn refused(name: &str, dependency: &str, code: &str, symbol: &str, main: &str) -> TestResult {
+    let output = compile_probe(name, dependency, main)?;
+    assert_refused_for(&output, code, symbol);
+    Ok(())
+}
+
+/// The feature set every probe in this file builds against.
+///
+/// One constant rather than four spellings of the same list: the positive and
+/// negative halves of one row must differ only in the program they compile, and
+/// a pair that had drifted apart in features would be two different experiments
+/// under one name.
+const PROCESS_FEATURES: &str = ", features = [\"process\"]";
+
 #[test]
 fn public_process_description_rejects_direct_execution() -> TestResult {
-    let output = compile_probe(
+    refused(
         "t22-process-probe",
-        ", features = [\"process\"]",
+        PROCESS_FEATURES,
+        "E0603",
+        "Command",
         "use lgwks_bot::rt::process::Command;\n\nfn main() {\n    let mut command = Command::new(\"true\");\n    let _ = command.spawn();\n}\n",
-    )?;
-    assert_refused_for(&output, "E0603", "Command");
-    Ok(())
+    )
+}
+
+/// A description cannot be asked for the status of a run it did not perform.
+///
+/// `status` is the shape a caller reaches for the moment it wants a handle it
+/// never got. The `ProcessSpec` carries no child, so there is no status to read
+/// and the method is absent from the type rather than returning a placeholder —
+/// a method that returned `None` would be a method a caller could learn to
+/// ignore.
+#[test]
+fn a_process_description_cannot_report_a_status() -> TestResult {
+    refused(
+        "t22-status-probe",
+        PROCESS_FEATURES,
+        "E0599",
+        "status",
+        "use lgwks_bot::rt::process::ProcessSpec;\n\nfn main() {\n    let mut spec = ProcessSpec::new(\"sh\");\n    let _ = spec.status();\n}\n",
+    )
+}
+
+/// A description cannot hand back a child's output either.
+///
+/// The other half of the same hole: `output` would be the one method that turns
+/// a data description into a source of bytes, and it is absent for the same
+/// reason `status` is — nothing about the spec has ever run.
+#[test]
+fn a_process_description_cannot_produce_output() -> TestResult {
+    refused(
+        "t22-output-probe",
+        PROCESS_FEATURES,
+        "E0599",
+        "output",
+        "use lgwks_bot::rt::process::ProcessSpec;\n\nfn main() {\n    let mut spec = ProcessSpec::new(\"sh\");\n    let _ = spec.output();\n}\n",
+    )
+}
+
+/// The private engine command is not reachable through a mutable handle.
+///
+/// Every other escape on this row is a method; this one is the field shape. A
+/// `pub(crate)` field is what keeps the engine's own `Command` — and therefore
+/// `Command::spawn` — out of reach, and a `&mut` accessor to it would be the same
+/// hole wearing a different hat. Both a mutating accessor and an owned one are
+/// refused, because handing out either would let a caller start the child the
+/// supervisor is supposed to own.
+#[test]
+fn a_process_description_exposes_no_mutable_engine_handle() -> TestResult {
+    refused(
+        "t22-engine-mut-probe",
+        PROCESS_FEATURES,
+        "E0599",
+        "engine_mut",
+        "use lgwks_bot::rt::process::ProcessSpec;\n\nfn main() {\n    let mut spec = ProcessSpec::new(\"sh\");\n    let _ = spec.engine_mut();\n}\n",
+    )
+}
+
+/// `ProcessSpec` is not a smart pointer to anything.
+///
+/// The escape that a method probe cannot see: a `Deref` impl would hand every
+/// method of some inner engine to a caller holding only a description, and no
+/// list of absent methods would ever catch it. `ProcessSpec` is a plain record,
+/// so both `&spec` and `&mut spec` fail to dereference — and the `&mut` arm is
+/// the one that matters, because a `Deref` to the engine would be a mutable
+/// handle by another spelling.
+#[test]
+fn a_process_description_cannot_deref_to_an_engine() -> TestResult {
+    refused(
+        "t22-deref-probe",
+        PROCESS_FEATURES,
+        "E0614",
+        "cannot be dereferenced",
+        "use lgwks_bot::rt::process::ProcessSpec;\n\nfn main() {\n    let spec = ProcessSpec::new(\"sh\");\n    let _shared: &ProcessSpec = &*spec;\n    let mut spec = ProcessSpec::new(\"sh\");\n    let _mutable: &mut ProcessSpec = &mut *spec;\n}\n",
+    )
+}
+
+/// The same harness accepts a correct consumer of the description's real surface.
+///
+/// Every refusal above is paired with this. The four probes differ from this
+/// program only in which symbol they name, so a green refusal is the compiler
+/// answering about that symbol: if this control failed, all five would "pass" for
+/// one reason that has nothing to do with the row.
+#[test]
+fn the_readable_description_surface_compiles_for_an_external_consumer() -> TestResult {
+    compiles(
+        "t22-description-control",
+        PROCESS_FEATURES,
+        "the inspection surface of ProcessSpec",
+        "use lgwks_bot::rt::process::{ProcessSpec, StdioPolicy};\n\nfn main() {\n    let mut spec = ProcessSpec::new(\"sh\");\n    spec.arg(\"-c\").arg(\"exit 0\");\n    let _ = spec.program();\n    let _ = spec.args();\n    let _ = spec.stdout_policy();\n    let _ = spec.deadline_duration();\n    let _ = StdioPolicy::default();\n}\n",
+    )
+}
+
+/// And the sanctioned runner — the one path that does execute — compiles too.
+///
+/// The negative probes prove the description is inert; this proves the crate has
+/// not simply removed the capability. `Supervisor` takes the description by
+/// borrow and keeps the engine handle itself, which is the whole design: a
+/// consumer can describe work, and only the supervisor performs it.
+#[test]
+fn the_sanctioned_runner_accepts_the_same_description() -> TestResult {
+    compiles(
+        "t22-runner-control",
+        PROCESS_FEATURES,
+        "the supervised runner that owns the engine handle",
+        "use lgwks_bot::rt::process::ProcessSpec;\nuse lgwks_bot::rt::supervise::Supervisor;\n\nfn main() {\n    let mut spec = ProcessSpec::new(\"sh\");\n    spec.arg(\"-c\").arg(\"exit 0\");\n    let _supervisor = Supervisor::new(1);\n    let _ = format!(\"{:?}\", spec.program());\n}\n",
+    )
 }
 
 #[test]

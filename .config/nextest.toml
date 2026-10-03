@@ -1,0 +1,7 @@
+# journal_scale measures how many OS threads the process can create and then
+# holds that many tenant journals open. On Linux the thread limit is per user,
+# so a sibling test forked meanwhile can fail to spawn with EAGAIN (main CI run
+# 37091933076). It runs with every test slot to itself.
+[[profile.default.overrides]]
+filter = 'binary(journal_scale)'
+threads-required = 'num-test-threads'

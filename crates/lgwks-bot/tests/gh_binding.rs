@@ -328,6 +328,44 @@ fn a_review_list_exactly_at_the_ceiling_is_read() -> TestResult {
     Ok(())
 }
 
+/// The fake receiver's read-back never hands out a record another run is still
+/// appending. On tmpfs a concurrent reader can see the front half of an append
+/// (CI read a store cut mid-string at byte 8,193), so the fixture commits each
+/// record with its trailing newline and reads only committed lines. Without
+/// that, the adapter would see a torn document, and a saturation run whose
+/// own review landed fine would be reported `Unknown`.
+#[test]
+fn a_record_still_being_appended_is_not_read_back() -> TestResult {
+    let fake = FakeGh::install("torn-append", HEAD)?;
+    fake.configure(Scenario::new(HEAD))?;
+    std::fs::write(
+        fake.dir().join("reviews.jsonl"),
+        format!(
+            ",{{\"id\":9001,\"commit_id\":\"{HEAD}\",\"state\":\"COMMENTED\",\"body\":\"b\",\"comment_count\":0}}\n\
+             ,{{\"id\":9002,\"commit_id\":\"{HEAD}\",\"sta"
+        ),
+    )?;
+    let gh = Gh::new(Repository::new("acme/widgets")?)
+        .program(fake.program())
+        .capture_limit(limit(64 * 1024)?)
+        .deadline(Some(Duration::from_secs(10)))
+        .env("PATH", fake.search_path()?);
+
+    let reviews = lgwks_bot::Runtime::new()?.block_on(async {
+        gh.read_reviews(&lgwks_bot::domain::gh::PullRequest::new(
+            Repository::new("acme/widgets")?,
+            7,
+        ))
+        .await
+    })?;
+    assert_eq!(
+        reviews.len(),
+        1,
+        "the committed record is read and the half-appended one is not: {reviews:?}"
+    );
+    Ok(())
+}
+
 #[test]
 fn a_malformed_review_list_is_refused_rather_than_decoded_into_a_partial_answer() -> TestResult {
     for shape in ["garbage", "truncated"] {
@@ -431,4 +469,199 @@ impl LossyQuery for Gh {
             lgwks_bot::Query::query(&query, (auth, &())).await
         })
     }
+}
+
+// ── Typed refusals the journey depends on (T31, T34) ────────────────────────
+
+/// The pull request every refusal test reads.
+fn pull() -> Result<lgwks_bot::domain::gh::PullRequest, Box<dyn std::error::Error>> {
+    Ok(lgwks_bot::domain::gh::PullRequest::new(
+        Repository::new("acme/widgets")?,
+        7,
+    ))
+}
+
+/// A renamed repository is a typed move naming both names, never a silent
+/// re-point at the canonical one.
+#[test]
+fn a_renamed_repository_is_a_typed_move_naming_both_names() -> TestResult {
+    let fake = FakeGh::install("moved-adapter", HEAD)?;
+    fake.configure(Scenario::new(HEAD).repository_moved())?;
+    let gh = fake.binding("acme/widgets", 64 * 1024)?;
+
+    let error = lgwks_bot::Runtime::new()?
+        .block_on(gh.snapshot(&pull()?))
+        .err()
+        .ok_or("a renamed repository must be refused, not silently followed")?;
+    match error {
+        GhError::MovedRepository {
+            ref requested,
+            ref canonical,
+        } => {
+            assert_eq!(
+                requested, "acme/widgets",
+                "the move names the repository the caller requested"
+            );
+            assert_eq!(
+                canonical, "acme/newrepo",
+                "and the canonical repository the answer named"
+            );
+        }
+        other => {
+            return Err(format!("expected a typed move, got {other:?} ({other})").into());
+        }
+    }
+    Ok(())
+}
+
+/// A `403` from the client is a typed permission refusal, not a transport
+/// failure, and retrying it cannot help.
+#[test]
+fn a_permission_refusal_is_a_typed_unauthorized_not_a_transport_failure() -> TestResult {
+    let fake = FakeGh::install("denied-adapter", HEAD)?;
+    fake.configure(Scenario::new(HEAD).deny_reads())?;
+    let gh = fake.binding("acme/widgets", 64 * 1024)?;
+
+    let error = lgwks_bot::Runtime::new()?
+        .block_on(gh.read_reviews(&pull()?))
+        .err()
+        .ok_or("a denied read must be refused")?;
+    assert!(
+        !error.is_read_only_retryable(),
+        "a permission refusal is not fixed by retrying: {error}"
+    );
+    match error {
+        GhError::Unauthorized { status, .. } => assert_eq!(
+            status, 403,
+            "the refusal carries the status the client named: {status}"
+        ),
+        other => {
+            return Err(format!("expected Unauthorized, got {other:?} ({other})").into());
+        }
+    }
+    Ok(())
+}
+
+/// A failure that named no HTTP status stays a transport failure — the
+/// classification is not a rename of every non-zero exit.
+#[test]
+fn a_failure_naming_no_status_stays_a_transport_failure() -> TestResult {
+    let fake = FakeGh::install("no-status", HEAD)?;
+    fake.configure(Scenario::new(HEAD).fail_reads(1))?;
+    let gh = fake.binding("acme/widgets", 64 * 1024)?;
+
+    let error = lgwks_bot::Runtime::new()?
+        .block_on(gh.read_reviews(&pull()?))
+        .err()
+        .ok_or("a refused read must be an error")?;
+    assert!(
+        matches!(error, GhError::Transport { .. }),
+        "an unclassifiable failure is a transport failure: {error:?}"
+    );
+    assert!(
+        !matches!(error, GhError::Unauthorized { .. }),
+        "and it is never guessed into a permission outcome"
+    );
+    Ok(())
+}
+
+/// A changed-file inventory past its ceiling is a typed coverage refusal.
+#[test]
+fn a_diff_past_its_file_ceiling_is_a_typed_coverage_refusal() -> TestResult {
+    let fake = FakeGh::install("files-ceiling", HEAD)?;
+    let over = u32::try_from(lgwks_bot::domain::gh::MAX_DIFF_FILES_PER_PULL)
+        .map_err(|_| "the file ceiling must fit the fixture's counter")?
+        .saturating_add(1);
+    fake.configure(Scenario::new(HEAD).with_filler_files(over))?;
+    let gh = fake.binding("acme/widgets", 4 * 1024 * 1024)?;
+
+    let error = lgwks_bot::Runtime::new()?
+        .block_on(gh.read_diff(&pull()?))
+        .err()
+        .ok_or("a diff past the file ceiling must be refused")?;
+    assert!(
+        error.is_coverage_incomplete(),
+        "either diff ceiling is a coverage refusal: {error}"
+    );
+    match error {
+        GhError::DiffFileCeiling { files, ceiling, .. } => {
+            assert_eq!(files, usize::try_from(over).unwrap_or(usize::MAX));
+            assert_eq!(ceiling, lgwks_bot::domain::gh::MAX_DIFF_FILES_PER_PULL);
+        }
+        other => {
+            return Err(format!("expected DiffFileCeiling, got {other:?} ({other})").into());
+        }
+    }
+    Ok(())
+}
+
+/// A server that declines to render the diff is a typed coverage refusal.
+#[test]
+fn an_unavailable_diff_is_a_typed_coverage_refusal() -> TestResult {
+    let fake = FakeGh::install("diff-gone", HEAD)?;
+    fake.configure(Scenario::new(HEAD).diff_unavailable())?;
+    let gh = fake.binding("acme/widgets", 64 * 1024)?;
+
+    let error = lgwks_bot::Runtime::new()?
+        .block_on(gh.read_diff(&pull()?))
+        .err()
+        .ok_or("an unavailable diff must be refused")?;
+    assert!(
+        error.is_coverage_incomplete(),
+        "an unavailable diff is a coverage refusal: {error}"
+    );
+    assert!(
+        matches!(error, GhError::DiffUnavailable { .. }),
+        "and it is its own typed arm, not a transport failure: {error:?}"
+    );
+    Ok(())
+}
+
+/// The changed-file inventory is read as data and carries each file's metadata.
+///
+/// The build script's patch text would remove the marker file if anything ran
+/// it; nothing does, and the assertion is that the patch is *text* the adapter
+/// read rather than a program it executed.
+#[test]
+fn a_changed_file_inventory_is_read_as_data() -> TestResult {
+    let fake = FakeGh::install("inventory", HEAD)?;
+    fake.configure(Scenario::new(HEAD).hostile_build_script())?;
+    let gh = fake.binding("acme/widgets", 64 * 1024)?;
+
+    let diff = lgwks_bot::Runtime::new()?.block_on(gh.read_diff(&pull()?))?;
+    assert_eq!(
+        diff.number(),
+        7,
+        "the inventory names the pull request it was read for"
+    );
+    assert_eq!(diff.files().len(), 1, "one changed file");
+    assert!(!diff.is_empty(), "an inventory with a file is not empty");
+    let file = diff.files().first().ok_or("the one changed file")?;
+    assert_eq!(file.filename(), "build.rs");
+    assert_eq!(file.status(), "added");
+    assert_eq!(file.additions(), 1);
+    assert_eq!(file.deletions(), 0);
+    assert!(
+        file.patch()
+            .is_some_and(|patch| patch.contains("LGWKS_TEST_MARKER")),
+        "the patch text is read as data: {:?}",
+        file.patch()
+    );
+    assert!(
+        diff.patch_bytes() > 0,
+        "the inventory reports the patch bytes it carries: {}",
+        diff.patch_bytes()
+    );
+
+    // The empty default inventory is empty and carries no patch bytes.
+    let bare = FakeGh::install("inventory-empty", HEAD)?;
+    bare.configure(Scenario::new(HEAD))?;
+    let gh = bare.binding("acme/widgets", 64 * 1024)?;
+    let empty = lgwks_bot::Runtime::new()?.block_on(gh.read_diff(&pull()?))?;
+    assert!(
+        empty.is_empty(),
+        "a pull request with no changed files is an empty inventory"
+    );
+    assert_eq!(empty.patch_bytes(), 0);
+    Ok(())
 }

@@ -56,16 +56,7 @@ impl FakeGh {
         std::fs::write(&log, b"")?;
 
         let behaviour = dir.join("behaviour.json");
-        std::fs::write(
-            &behaviour,
-            format!(
-                "{{\"head_sha\":\"{head_sha}\",\"base_sha\":\"{}\",\"create\":\"accept\",\
-                 \"reviews\":[],\"next_review_id\":9001,\"created_body\":\"\",\
-                 \"created_state\":\"COMMENT\",\"fail_reads\":0,\"hang_seconds\":0,\
-                 \"flood_bytes\":0,\"filler_reviews\":0,\"reviews_shape\":\"\"}}\n",
-                "b".repeat(40),
-            ),
-        )?;
+        std::fs::write(&behaviour, Scenario::new(head_sha).to_behaviour())?;
 
         let script = dir.join("gh");
         std::fs::write(&script, FAKE_GH_SOURCE)?;
@@ -112,6 +103,28 @@ impl FakeGh {
     /// pinning an absolute path — which is exactly what a deployment does.
     pub const fn program(&self) -> &'static str {
         "gh"
+    }
+
+    /// A [`Gh`](lgwks_bot::domain::gh::Gh) binding pointed at this fake, with
+    /// the named capture ceiling.
+    ///
+    /// One definition rather than a per-test builder, because the two lines of
+    /// binding are what make a test "run through the adapter", and a copy is a
+    /// place for one test to quietly stop doing it.
+    pub fn binding(
+        &self,
+        repository: &str,
+        capture: usize,
+    ) -> Result<lgwks_bot::domain::gh::Gh, Box<dyn std::error::Error>> {
+        Ok(
+            lgwks_bot::domain::gh::Gh::new(lgwks_bot::domain::gh::Repository::new(repository)?)
+                .program(self.program())
+                .capture_limit(
+                    std::num::NonZeroUsize::new(capture).ok_or("a non-zero capture ceiling")?,
+                )
+                .deadline(Some(std::time::Duration::from_secs(20)))
+                .env("PATH", self.search_path()?),
+        )
     }
 
     /// Every invocation's argv, in order, one per line with tab separators.
@@ -220,7 +233,14 @@ const FAKE_GH_SOURCE: &str = r#"#!/bin/sh
 # behaviour file. Never touches the network.
 set -u
 
-dir=$(dirname "$0")
+# Every fork below is paid once per call, and a saturation family makes tens of
+# thousands of calls, so the bookkeeping avoids command substitution wherever a
+# parameter expansion answers the same question. `$0` is the path `execvp`
+# resolved, so stripping its last component is what `dirname` printed.
+case "$0" in
+  */*) dir=${0%/*} ;;
+  *) dir=. ;;
+esac
 log="$dir/argv.log"
 behaviour="$dir/behaviour.json"
 
@@ -228,40 +248,41 @@ behaviour="$dir/behaviour.json"
 # the calls that *started* is the measurement the duplicate-post tests need.
 # The whole line is assembled in memory and written with one append, so two
 # concurrent runs of the fake cannot interleave halves of a line.
+# A literal tab, kept out of a command substitution: a saturation family makes
+# tens of thousands of calls and every `$(...)` is a fork of its own.
+tab='	'
 line=""
 for arg in "$@"; do
-  line="$line$arg$(printf '\t')"
+  line="$line$arg$tab"
 done
 printf '%s\n' "$line" >> "$log"
 
-# Every field is read once, in one `sed`, into a single line that is then cut
-# with shell parameter expansion. A saturation family runs four calls per review
-# and each of those used to fork `sed` three or more times, so the fixture's own
-# bookkeeping dominated the measurement; the behaviour file is one short line, so
-# reading it once per invocation is the same work for a fraction of the forks.
+# The behaviour file is one line of JSON the fixture itself writes, so a field
+# is read once per invocation and cut with parameter expansion rather than by
+# forking `sed` per lookup. A saturation family runs five calls per review
+# (snapshot, diff, freshness, publish, verify), and the fixture's own
+# bookkeeping must not dominate the measurement, so the read is one builtin and
+# each lookup is one expansion.
 #
-# The result is a flat `key=value` line, which the cut below relies on: the
-# fixture writes the behaviour file itself, so the separator is one this file
-# controls rather than one parsed from arbitrary input.
-flatten() {
-  sed -e 's/,/\n/g' "$behaviour" | sed -n 's/.*"\([A-Za-z_]*\)":"\{0,1\}\([^,"}]*\).*/\1=\2/p'
-}
-BEHAVIOUR=$(flatten)
+# Read once rather than per lookup: a key present under neither the quoted nor
+# the numeric shape yields the empty string, which is exactly what the callers
+# treat as "unspecified". The value charset is the fixture's own — alphanumeric
+# plus `:._-` — so a value ends at the first character outside it.
+BEHAVIOUR=""
+IFS= read -r BEHAVIOUR < "$behaviour"
 
-# One scalar field out of the behaviour file. A quoted string keeps its
-# spaces, because the shell splits on them otherwise.
-#
-# Read once per invocation rather than per lookup: a key present under neither
-# shape yields the empty string, which is exactly what the callers treat as
-# "unspecified".
 field() {
-  rest=${BEHAVIOUR#*"$1="}
+  val=""
+  q="\"$1\":\""
+  rest=${BEHAVIOUR#*"$q"}
   if [ "$rest" = "$BEHAVIOUR" ]; then
-    printf ''
-    return
+    u="\"$1\":"
+    rest=${BEHAVIOUR#*"$u"}
+    if [ "$rest" = "$BEHAVIOUR" ]; then
+      return 0
+    fi
   fi
-  value=${rest%%[!a-zA-Z0-9:._-]*}
-  printf '%s' "$value"
+  val=${rest%%[!a-zA-Z0-9:._-]*}
 }
 
 # The staged payload, when this call has one.
@@ -269,7 +290,9 @@ payload=""
 previous=""
 for arg in "$@"; do
   if [ "$previous" = "--input" ] && [ -f "$arg" ]; then
-    payload=$(cat "$arg")
+    # The staged payload is one line of JSON the adapter wrote, so it is read
+    # with the builtin rather than forked through `cat`.
+    IFS= read -r payload < "$arg"
     # The adapter removes the staged file as soon as the child exits, so the
     # payload is copied into the receiver's own store here: what the receiver
     # actually received, which is what a test asserts against.
@@ -288,7 +311,7 @@ done
 # Optional flooding, for the bounded-capture test: emit `flood_bytes` of
 # padding on stdout before anything else, so the adapter's ceiling is what
 # decides what it retains.
-flood=$(field flood_bytes)
+field flood_bytes; flood=$val
 if [ -n "${flood:-}" ] && [ "$flood" -gt 0 ] 2>/dev/null; then
   i=0
   while [ "$i" -lt "$flood" ]; do
@@ -298,7 +321,7 @@ if [ -n "${flood:-}" ] && [ "$flood" -gt 0 ] 2>/dev/null; then
 fi
 
 # An optional hang, for the deadline test.
-hang=$(field hang_seconds)
+field hang_seconds; hang=$val
 if [ -n "${hang:-}" ] && [ "$hang" -gt 0 ] 2>/dev/null; then
   # A grandchild, so the deadline has a process *group* to reap rather than
   # one child it could trivially kill.
@@ -308,40 +331,84 @@ if [ -n "${hang:-}" ] && [ "$hang" -gt 0 ] 2>/dev/null; then
 fi
 
 if [ "$method" = "POST" ]; then
-  create=$(field create)
+  field create; create=$val
   case "$create" in
-    accept|accept_then_drop)
-      # A real receiver assigns a fresh id per accepted create. The counter is a
-      # single append, so two concurrent creates cannot be handed the same id —
-      # and a test that checks two identities verify *distinct* reviews depends
-      # on that being true rather than on the ids happening to differ.
+    accept|accept_then_drop|pending|partial)
+      # A real receiver assigns a fresh id per accepted create. The append is
+      # one atomic write, so the count of accepted creates is exact; the count
+      # is read back with the builtin (`read` takes the append log whole and
+      # `${#..}` is its byte count) rather than by forking `wc`. The read
+      # follows the append, so two creates racing here can read the same count
+      # and share an id — the same window this counter always had — and that is
+      # safe: a read-back reconciles on subject, body and state, and every
+      # id-asserting family runs its creates sequentially.
       printf 'x' >> "$dir/creates"
-      seen=$(wc -c < "$dir/creates" | tr -d ' ')
-      id=$(( $(field next_review_id) + seen - 1 ))
+      seen_raw=""
+      IFS= read -r seen_raw < "$dir/creates"
+      seen=${#seen_raw}
+      field next_review_id
+      id=$(( val + seen - 1 ))
       # GitHub reports the state a review is *in*, not the event that created
       # it: `COMMENT` reads back as `COMMENTED`, and so on. A fake that echoed
       # the event would let a verifier pass here that never matches GitHub.
-      state=$(field created_state)
-      event=$(printf '%s' "$payload" | sed -n 's/.*"event":"\([A-Z_]*\)".*/\1/p')
+      field created_state; state=$val
+      event=${payload##*\"event\":\"}
+      event=${event%%\"*}
       case "$event" in
         COMMENT) state=COMMENTED ;;
         APPROVE) state=APPROVED ;;
         REQUEST_CHANGES) state=CHANGES_REQUESTED ;;
       esac
+      # A pending draft is never submitted, whatever event the request named:
+      # it is the state GitHub holds a create in when no event is submitted, and
+      # the read-back must report it as a draft rather than as a publication.
+      if [ "$create" = "pending" ]; then state=PENDING; fi
       # The record is rendered from the *payload the adapter sent*, not from the
       # scenario's defaults. That is what makes the read-back a real
       # observation: a receiver that answered from its own configuration would
       # verify a body the adapter never published, and the lost-response test
       # would pass without the write having produced anything.
-      body=$(printf '%s' "$payload" | sed -n 's/.*"body":"\([^"]*\)".*/\1/p')
-      commit=$(printf '%s' "$payload" | sed -n 's/.*"commit_id":"\([^"]*\)".*/\1/p')
+      #
+      # An inline comment also carries a `body`, and the match is greedy, so the
+      # comments array is removed before the top-level body is read: otherwise a
+      # payload with comments would record the last comment's text as the review
+      # body.
+      top=${payload%%,\"comments\"*}
+      body=${top##*\"body\":\"}
+      body=${body%%\"*}
+      commit=${payload##*\"commit_id\":\"}
+      commit=${commit%%\"*}
+      # How many inline comments this review reports: none for everything but a
+      # partial landing, which reports the configured applied count — fewer than
+      # the payload intended, which is what makes it a *partial* submission.
+      comments=0
+      if [ "$create" = "partial" ]; then field applied_comments; comments=$val; fi
       printf '%s\n' "$payload" > "$dir/applied-$id.json"
-      if [ -f "$dir/reviews.jsonl" ]; then printf ',' >> "$dir/reviews.jsonl"; fi
-      printf '{"id":%s,"commit_id":"%s","state":"%s","body":"%s"}' \
-        "$id" "$commit" "$state" "$body" >> "$dir/reviews.jsonl"
+      # The separator goes into `reviews.jsonl` as **one** `>>` append, always, in
+      # front of the record. `>>` opens `O_APPEND`, and two writes by
+      # descriptors on a regular file cannot interleave, so one append is atomic
+      # against every other append however many creates race.
+      #
+      # Two earlier spellings were not safe, and both produced a read-back a
+      # concurrent receiver could not answer: writing the separator separately,
+      # which the kernel interleaved into `[,,{...}]`, and probing for the file
+      # to decide whether a separator was owed, which two creates could both
+      # read as absent into `{...}{...}`. There is no first record to make bare
+      # here, so there is nothing to probe.
+      #
+      # The record ends with a newline, and that newline is its commit mark. An
+      # append is atomic against other *appends*, not against a *reader*: on
+      # tmpfs (CI's `TMPDIR=/dev/shm`) the copy goes a page at a time and the
+      # file grows as it goes, so a concurrent read-back can see the front half
+      # of another run's record. CI saw exactly that, a read-back cut mid-string
+      # at byte 8,193 (two pages). A JSON-encoded record never holds a raw
+      # newline, so a line without one is a record still being written, and the
+      # reader below leaves it out.
+      printf ',{"id":%s,"commit_id":"%s","state":"%s","body":"%s","comment_count":%s}\n' \
+        "$id" "$commit" "$state" "$body" "${comments:-0}" >> "$dir/reviews.jsonl"
       if [ "$create" = "accept" ]; then
-        printf '{"id":%s,"commit_id":"%s","state":"%s","body":"%s"}\n' \
-          "$id" "$commit" "$state" "$body"
+        printf '{"id":%s,"commit_id":"%s","state":"%s","body":"%s","comment_count":%s}\n' \
+          "$id" "$commit" "$state" "$body" "${comments:-0}"
         exit 0
       fi
       # The effect lands and the *response* is lost: the review is recorded in
@@ -357,50 +424,82 @@ if [ "$method" = "POST" ]; then
   esac
 fi
 
-# A read. The review list is identified by scanning argv for a `.../reviews`
-# path, not by position: `gh api --method GET .../reviews --paginate` puts a
-# flag after the path, so a suffix match would read the pull request instead.
+# A read. The review list and the changed-file inventory are each identified by
+# scanning argv for their path, not by position: `gh api --method GET
+# .../reviews --paginate` puts a flag after the path, so a suffix match over the
+# whole vector would read the pull request instead.
 is_reviews=0
-previous=""
+is_files=0
 for arg in "$@"; do
   case "$arg" in
     */reviews) is_reviews=1 ;;
+    */files) is_files=1 ;;
   esac
-  previous="$arg"
 done
 
 if [ "$is_reviews" -eq 1 ]; then
-    fail=$(field fail_reads)
+    field fail_reads; fail=$val
     if [ -n "${fail:-}" ] && [ "$fail" -gt 0 ] 2>/dev/null; then
       printf 'read refused by scenario\n' >&2
+      exit 1
+    fi
+    # A permission refusal, for the lost-read-permission probe: the shape `gh`
+    # prints when a credential cannot reach the resource, which the adapter
+    # reports as its own typed permission failure.
+    field deny_reads; deny=$val
+    if [ "$deny" = "1" ]; then
+      printf 'gh: Bad credentials (HTTP 403)\n' >&2
       exit 1
     fi
     # A malformed answer, for the decode-refusal probes. `garbage` is not JSON;
     # `truncated` is a JSON document that lost its closing bracket, which is the
     # shape a stream cut mid-write takes when everything before the cut was
     # valid. Both must be refused rather than decoded into a partial list.
-    shape=$(field reviews_shape)
+    field reviews_shape; shape=$val
     case "$shape" in
       garbage)
         printf 'gh: this is not what you asked for\n'
         exit 0
         ;;
     esac
-    # The list is the receiver's own store, copied verbatim. `sh` is not asked to
-    # parse JSON on the way out: each accepted create appended its rendered
-    # record to `reviews.jsonl`, so a scenario that posted one review reads back
-    # exactly that review and a receiver with many reviews does not pay a
-    # `sed` per stored review on every read.
+    # The list is the receiver's own store, read back as a document. `sh` is not
+    # asked to parse JSON on the way out: each accepted create appended its
+    # rendered record to `reviews.jsonl`, so a scenario that posted one review
+    # reads back exactly that review and a receiver with many reviews does not
+    # pay a `sed` per stored review on every read.
+    #
+    # The store is `{...},{...}` — a record per create with a *leading*
+    # separator, which is what one atomic append can carry. Two earlier
+    # spellings were not safe and both produced a read-back a concurrent
+    # receiver could not answer: a separator written by its own append, which
+    # the kernel interleaved into `[,,{...}]`, and a separator decided by an
+    # existence probe, which two creates could both read as absent.
+    #
+    # So the store's leading separator is dropped on the way out. Each record is
+    # one newline-terminated line, and the builtin `read` loop keeps only the
+    # lines it saw end: `read` reports a final line with no newline as a
+    # failure, so a record another run is still appending — visible half-copied
+    # on tmpfs — ends the loop instead of reaching the answer. `${store#?}`
+    # then drops the first separator, one byte, without forking a reader on
+    # every read-back. An absent or empty store yields an empty string, so `[`
+    # is still followed by `]` and a pull request with no reviews reads back as
+    # `[]`.
     printf '['
-    if [ -f "$dir/reviews.jsonl" ]; then cat "$dir/reviews.jsonl"; fi
+    if [ -s "$dir/reviews.jsonl" ]; then
+      store=""
+      while IFS= read -r record; do
+        store="$store$record"
+      done < "$dir/reviews.jsonl"
+      printf '%s' "${store#?}"
+    fi
     # Filler reviews, for the review-ceiling probe. They are real records on
     # another commit: what matters is that the adapter would have had to read
     # them to call the list complete, so returning only the prefix would be a
     # lie about the pull request's review history.
-    filler=$(field filler_reviews)
+    field filler_reviews; filler=$val
     i=0
     while [ -n "${filler:-}" ] && [ "$i" -lt "$filler" ] 2>/dev/null; do
-      if [ "$i" -eq 0 ] && [ ! -f "$dir/reviews.jsonl" ]; then
+      if [ "$i" -eq 0 ] && [ ! -s "$dir/reviews.jsonl" ]; then
         :
       else
         printf ','
@@ -416,20 +515,76 @@ if [ "$is_reviews" -eq 1 ]; then
   else
     printf ']\n'
   fi
+elif [ "$is_files" -eq 1 ]; then
+  # The changed-file inventory. A scenario can decline to render the diff, or
+  # report a list long enough or heavy enough to exceed the adapter's ceilings.
+  field files_shape; shape=$val
+  if [ "$shape" = "unavailable" ]; then
+    printf 'gh: the diff is too large to render (HTTP 406)\n' >&2
+    exit 1
+  fi
+  printf '['
+  first=1
+  # A hostile build script in the inventory: its patch text would remove the
+  # file named by `LGWKS_TEST_MARKER` if anything executed it. Nothing does; the
+  # inventory is read as data, and this is the oracle that observes it.
+  field build_script; build=$val
+  if [ "$build" = "1" ]; then
+    first=0
+    printf '{"filename":"build.rs","status":"added","additions":1,"deletions":0,"patch":"rm -f $LGWKS_TEST_MARKER; echo EXECUTED"}'
+  fi
+  field filler_files; filler=$val
+  i=0
+  while [ -n "${filler:-}" ] && [ "$i" -lt "$filler" ] 2>/dev/null; do
+    if [ "$first" -eq 0 ]; then printf ','; fi
+    first=0
+    printf '{"filename":"filler-%s.txt","status":"modified","additions":1,"deletions":0,"patch":"x"}' "$i"
+    i=$((i + 1))
+  done
+  field diff_bytes; bytes=$val
+  if [ -n "${bytes:-}" ] && [ "$bytes" -gt 0 ] 2>/dev/null; then
+    if [ "$first" -eq 0 ]; then printf ','; fi
+    first=0
+    printf '{"filename":"big.rs","status":"modified","additions":1,"deletions":0,"patch":"'
+    # `bytes` bytes of patch text as one JSON string. No newline: a raw newline
+    # inside a JSON string is invalid, and the adapter would refuse the document
+    # rather than exceed the byte ceiling this scenario is about.
+    head -c "$bytes" /dev/zero | tr '\0' 'P'
+    printf '"}'
+  fi
+  printf ']\n'
 else
-  # The pull-request read. `head_after_first` models a head that moves between
-  # two reads: the first read reports `head_sha`, and every read after it
-  # reports `head_after_first` — so a freshness check comparing the two reads
-  # sees exactly the change it is meant to catch. The counter is bumped with a
-  # single append per call, so two concurrent runs cannot interleave it.
-  printf 'x' >> "$dir/reads"
-  read_count=$(wc -c < "$dir/reads" | tr -d ' ')
-  head=$(field head_sha)
-  moved=$(field head_after_first)
-  if [ -n "${moved:-}" ] && [ "$read_count" -gt 1 ]; then head="$moved"; fi
-  # GitHub's shape: the commits are nested under `head` and `base`.
-  printf '{"number":7,"head":{"ref":"feature","sha":"%s"},"base":{"ref":"main","sha":"%s"}}\n' \
-    "$head" "$(field base_sha)"
+  field snapshot_shape; shape=$val
+  if [ "$shape" = "moved" ]; then
+    # GitHub's renamed-repository answer: a move object naming the canonical
+    # location, which the adapter reports rather than silently following.
+    printf '{"message":"Moved Permanently","documentation_url":"https://docs.github.com/rest","url":"https://api.github.com/repos/acme/newrepo/pulls/7"}\n'
+  else
+    # The pull-request read. `head_after_first` models a head that moves between
+    # two reads: the first read reports `head_sha`, and every read after it
+    # reports `head_after_first` — so a freshness check comparing the two reads
+    # sees exactly the change it is meant to catch. The counter is bumped with a
+    # single append per call, so two concurrent runs cannot interleave it.
+    field head_sha; head=$val
+    field head_after_first; moved=$val
+    # Only a scenario that names a second head pays for the read counter: the
+    # count decides whether this is the first read or a later one, and when no
+    # second head is configured the answer is never consulted. The count is the
+    # builtin byte count of the appends (see `creates` above), and it still
+    # bumps with one atomic append per read, so two concurrent reads cannot
+    # interleave it.
+    if [ -n "${moved:-}" ]; then
+      printf 'x' >> "$dir/reads"
+      read_raw=""
+      IFS= read -r read_raw < "$dir/reads"
+      read_count=${#read_raw}
+      if [ "$read_count" -gt 1 ]; then head="$moved"; fi
+    fi
+    # GitHub's shape: the commits are nested under `head` and `base`.
+    field base_sha; base=$val
+    printf '{"number":7,"head":{"ref":"feature","sha":"%s"},"base":{"ref":"main","sha":"%s"}}\n' \
+      "$head" "$base"
+  fi
 fi
 exit 0
 "#;
@@ -474,6 +629,26 @@ pub struct Scenario {
     /// `garbage` for something that is not JSON, or `truncated` for a JSON
     /// document whose closing bracket was lost.
     pub reviews_shape: &'static str,
+    /// What the pull-request read emits instead of a pull request: `""` for the
+    /// real object, or `moved` for a renamed-repository redirect naming the
+    /// canonical location.
+    pub snapshot_shape: &'static str,
+    /// What the changed-file read emits: `""` for a real list, or `unavailable`
+    /// for a server that declines to render the diff (a `406`).
+    pub files_shape: &'static str,
+    /// How many filler files the changed-file read reports, for the file-count
+    /// ceiling.
+    pub filler_files: u32,
+    /// The bytes of patch text one reported file carries, for the byte ceiling.
+    pub diff_bytes: u32,
+    /// How many inline comments a `partial` create lands, when it lands fewer
+    /// than the payload intended.
+    pub applied_comments: u32,
+    /// Whether the review read is denied with a `403` permission answer.
+    pub deny_reads: bool,
+    /// Whether the changed-file inventory names a `build.rs` whose patch text
+    /// would perform an effect if it were ever executed.
+    pub build_script: bool,
 }
 
 impl Scenario {
@@ -491,6 +666,13 @@ impl Scenario {
             flood_bytes: 0,
             filler_reviews: 0,
             reviews_shape: "",
+            snapshot_shape: "",
+            files_shape: "",
+            filler_files: 0,
+            diff_bytes: 0,
+            applied_comments: 0,
+            deny_reads: false,
+            build_script: false,
         }
     }
 
@@ -584,6 +766,83 @@ impl Scenario {
         self
     }
 
+    /// The receiver records the create as an unsubmitted draft and drops the
+    /// response.
+    ///
+    /// GitHub creates a review in `PENDING` when the request names no event. The
+    /// effect lands (the review exists) and the response is lost, which is the
+    /// state a reconciliation must report as a draft, never as a publication and
+    /// never as no effect.
+    #[must_use]
+    pub fn records_pending_draft(mut self) -> Self {
+        self.create = "pending";
+        self
+    }
+
+    /// The receiver records the create with only `applied` of its inline
+    /// comments and drops the response.
+    ///
+    /// The submitted review is real and about the right commit, but fewer
+    /// comments landed than intended — the partial submission PR-08 names.
+    #[must_use]
+    pub fn records_partial_comments(mut self, applied: u32) -> Self {
+        self.create = "partial";
+        self.applied_comments = applied;
+        self
+    }
+
+    /// The repository answers with a renamed-repository redirect.
+    #[must_use]
+    pub fn repository_moved(mut self) -> Self {
+        self.snapshot_shape = "moved";
+        self
+    }
+
+    /// The changed-file read answers with a server that declines to render the
+    /// diff (a `406`).
+    #[must_use]
+    pub fn diff_unavailable(mut self) -> Self {
+        self.files_shape = "unavailable";
+        self
+    }
+
+    /// The changed-file read reports `count` filler files.
+    #[must_use]
+    pub fn with_filler_files(mut self, count: u32) -> Self {
+        self.filler_files = count;
+        self
+    }
+
+    /// One reported file carries `bytes` of patch text.
+    #[must_use]
+    pub fn with_diff_bytes(mut self, bytes: u32) -> Self {
+        self.diff_bytes = bytes;
+        self
+    }
+
+    /// The review read answers with a `403` permission refusal.
+    ///
+    /// The shape `gh` prints when a credential cannot reach the resource, which
+    /// the adapter reports as its own typed permission failure rather than as a
+    /// transport outage.
+    #[must_use]
+    pub fn deny_reads(mut self) -> Self {
+        self.deny_reads = true;
+        self
+    }
+
+    /// The changed-file inventory names a `build.rs` that would perform an
+    /// effect if anything ever executed its patch text.
+    ///
+    /// The effect is a shell command that removes the file named by
+    /// `LGWKS_TEST_MARKER`, so a non-execution oracle can observe whether the
+    /// review path ran it. Nothing here runs it: the inventory is read as data.
+    #[must_use]
+    pub fn hostile_build_script(mut self) -> Self {
+        self.build_script = true;
+        self
+    }
+
     /// The behaviour file this scenario is, as the fake reads it.
     ///
     /// Written here rather than assembled by each test so the keys the fake
@@ -603,7 +862,11 @@ impl Scenario {
              \"create\":\"{create}\",\"next_review_id\":9001,\
              \"created_body\":\"{body}\",\"created_state\":\"{state}\",\
              \"fail_reads\":{fail_reads},\"hang_seconds\":{hang},\"flood_bytes\":{flood},\
-             \"filler_reviews\":{filler},\"reviews_shape\":\"{shape}\"}}\n",
+             \"filler_reviews\":{filler},\"reviews_shape\":\"{shape}\",\
+             \"snapshot_shape\":\"{snapshot}\",\"files_shape\":\"{files}\",\
+             \"filler_files\":{filler_files},\"diff_bytes\":{diff_bytes},\
+             \"applied_comments\":{applied},\"deny_reads\":{deny},\
+             \"build_script\":{build_script}}}\n",
             head = self.head,
             create = self.create,
             body = self.created_body,
@@ -613,6 +876,13 @@ impl Scenario {
             flood = self.flood_bytes,
             filler = self.filler_reviews,
             shape = self.reviews_shape,
+            snapshot = self.snapshot_shape,
+            files = self.files_shape,
+            filler_files = self.filler_files,
+            diff_bytes = self.diff_bytes,
+            applied = self.applied_comments,
+            deny = u8::from(self.deny_reads),
+            build_script = u8::from(self.build_script),
         )
     }
 }
