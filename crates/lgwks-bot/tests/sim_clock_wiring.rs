@@ -972,6 +972,123 @@ fn only_the_tenant_whose_clock_advanced_is_refused() -> Result<(), Box<dyn std::
     Ok(())
 }
 
+/// Where a body leaves the clock readings it took, for the parent to read back.
+///
+/// An alias rather than the spelled-out type because the closure that consumes
+/// it is already inside three layers of generic syntax, and a nested `>>` in a
+/// parameter position is unreadable — this is what the parser first refused.
+type Reading = Arc<std::sync::Mutex<Option<(Duration, Duration)>>>;
+
+/// Two tenants, two clocks, one task id, joined rather than awaited in turn.
+#[test]
+fn two_tenants_racing_the_same_task_id_stay_separate_under_their_own_clocks()
+-> Result<(), Box<dyn std::error::Error>> {
+    use lgwks_bot::task::{Disposition, Host, task};
+
+    // The sequential twin above proves the clocks are separate objects. It runs
+    // acme to completion and only then starts globex, so it cannot see a clock
+    // that reads another tenant's state *while both are live* — which is the
+    // only shape a shared-atomic defect takes in production. Here the two runs
+    // are joined, so both bodies are inside their host at once, under one task
+    // name and one declared budget, and each spends only its own clock.
+    let deadline = Duration::from_secs(60);
+    let acme_clock = Clock::virtual_at(Duration::ZERO);
+    let globex_clock = Clock::virtual_at(Duration::ZERO);
+
+    let acme = Host::builder("acme")?
+        .default_deadline(deadline)
+        .clock(acme_clock)
+        .build()?;
+    let globex = Host::builder("globex")?
+        .default_deadline(deadline)
+        .clock(globex_clock.clone())
+        .build()?;
+
+    // The *same* task name on both hosts, and the same body: only the input
+    // differs, so a difference in the verdict can only be the clock. The
+    // readings leave through slots rather than through the run's output,
+    // because the run that *fails* is exactly the one whose pre-spend reading
+    // matters, and a failed run carries no output.
+    let acme_slot = Arc::new(std::sync::Mutex::new(None));
+    let globex_slot = Arc::new(std::sync::Mutex::new(None));
+    let work = task(
+        "shared-task-id",
+        |scope: Scope, (spend, slot): (bool, Reading)| async move {
+            // Read the clock the scope handed us *before* spending, so the reading
+            // is the one a shared clock would have already polluted.
+            let seen_before = scope.clock().now();
+            let mut observed = (seen_before, seen_before);
+            if spend {
+                let landed = scope
+                    .clock()
+                    .advance(deadline.saturating_add(Duration::from_secs(1)));
+                observed.1 = scope.clock().now();
+                if let Err(error) = landed {
+                    if let Ok(mut held) = slot.lock() {
+                        *held = Some(observed);
+                    }
+                    return Err(lgwks_bot::script::FlowError::failed(error.to_string()));
+                }
+            }
+            if let Ok(mut held) = slot.lock() {
+                *held = Some(observed);
+            }
+            Ok(observed)
+        },
+    )?;
+
+    let (acme_report, globex_report) = block_on(async {
+        lgwks_bot::join!(
+            acme.run(&work, (true, Arc::clone(&acme_slot))),
+            globex.run(&work, (false, Arc::clone(&globex_slot)))
+        )
+    });
+    let acme_slot = Arc::into_inner(acme_slot);
+    let globex_slot = Arc::into_inner(globex_slot);
+    let acme_seen = acme_slot
+        .and_then(|held| held.into_inner().ok())
+        .flatten()
+        .ok_or("acme's body recorded no clock reading")?;
+    let globex_seen = globex_slot
+        .and_then(|held| held.into_inner().ok())
+        .flatten()
+        .ok_or("globex's body recorded no clock reading")?;
+
+    assert_eq!(
+        acme_report.disposition(),
+        Disposition::DeadlineExceeded,
+        "acme spent its own budget while globex was running, so acme alone must be refused ({:?})",
+        acme_report.error()
+    );
+    assert_eq!(
+        globex_report.disposition(),
+        Disposition::Succeeded,
+        "globex spent nothing while acme was running, so globex must succeed ({:?})",
+        globex_report.error()
+    );
+
+    // The reading each body took *during* the race: globex's must show the
+    // instant before its own (never-taken) spend, with acme's advance nowhere
+    // in it. A shared clock would have shown globex acme's elapsed time here.
+    assert_eq!(
+        acme_seen.0,
+        Duration::ZERO,
+        "acme read its clock before spending, and must have seen a zero origin"
+    );
+    assert_eq!(
+        globex_seen,
+        (Duration::ZERO, Duration::ZERO),
+        "globex's clock must read zero before and after, while acme's was racing ahead: \
+         a shared clock would have carried acme's advance into globex's body"
+    );
+    assert_eq!(
+        globex_clock.now(),
+        Duration::ZERO,
+        "acme's concurrent run must not leave a mark on globex's clock"
+    );
+    Ok(())
+}
+
 #[test]
 fn repeat_on_reads_the_clock_it_is_given() -> Result<(), Box<dyn std::error::Error>> {
     use lgwks_bot::rt::supervise::repeat_on;
