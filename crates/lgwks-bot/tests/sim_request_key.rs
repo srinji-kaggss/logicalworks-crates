@@ -455,14 +455,23 @@ fn host_stops_never_poison_a_key(band: Band) -> TestResult {
 /// show that a request's recorded work survives its own overrun. The floor keeps
 /// every drawn request in the state this family is about: progress committed,
 /// then the deadline ends it.
-const MIN_DEADLINE_MILLIS: u32 = 20;
+///
+/// Wide of that floor on purpose. The budget is charged against the wall clock
+/// and the first durable step is three `fsync`-ed records before the body starts
+/// waiting, so on a machine already running dozens of sibling test binaries those
+/// records can outlast a tight budget — and the sweep would then be measuring the
+/// scheduler instead of the classification. A few hundred milliseconds is still
+/// far below the crate default this family is contrasted with, so an overrun is
+/// always the *drawn* budget firing and never a host abandoning a step that was
+/// about to finish.
+const MIN_DEADLINE_MILLIS: u32 = 250;
 
 /// The longest budget a deadline sweep draws, in milliseconds.
 ///
-/// Well above the floor so the sweep covers a range rather than one number, and
-/// below any budget that would let a parked body finish — which it never does,
-/// because the body waits on something that never arrives.
-const MAX_DEADLINE_MILLIS: u32 = 200;
+/// Well clear of the floor so the sweep covers a range rather than one number,
+/// and below any budget that would let a parked body finish — which it never
+/// does, because the body waits on something that never arrives.
+const MAX_DEADLINE_MILLIS: u32 = 1_500;
 
 /// How many requests one seeded deadline sweep drives.
 const MAX_DEADLINE_REQUESTS: u32 = 2;

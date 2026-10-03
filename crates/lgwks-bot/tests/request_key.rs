@@ -546,6 +546,95 @@ fn a_refusal_before_admission_is_not_recorded_as_the_outcome() -> TestResult {
     Ok(())
 }
 
+/// A failure reason whose archived `@terminal` record is refused by the store's
+/// per-record byte ceiling.
+///
+/// The ceiling itself, not some large number: the archived record carries this
+/// reason plus the disposition code, the step path and the framing head, so a
+/// reason at the ceiling is already past what one record may carry, and the
+/// smallest refusal is the one that proves the *declared bound* is what refused
+/// the write rather than some other accident of size.
+const OVER_CEILING_REASON: usize = lgwks_bot::task::MAX_RECORD_BYTES;
+
+/// A store that refuses the `@terminal` write is reported as `Failed`, not
+/// returned as a success nobody can find later.
+///
+/// Recording an outcome and reporting success are one fact (INV-BOT-102), so
+/// the resume that *reached* a verdict but could not record it reports the
+/// refusal — and, critically, records nothing: the request stays unsettled, so a
+/// later client is told `InFlight` rather than being handed a verdict that was
+/// never written. This is the error path through `Host::resume`, and it had no
+/// coverage at all.
+///
+/// The refusal is real rather than mocked: the run's failure reason is archived
+/// into the `@terminal` record, and one byte past the store's declared
+/// per-record ceiling makes the framing refuse with the typed ceiling error.
+#[test]
+fn a_store_that_refuses_the_terminal_write_reports_the_refusal() -> TestResult {
+    let scratch = Scratch::new("req-ceiling")?;
+    let store = RunStore::open(scratch.join("shared.runstore"))?;
+    let parking = host_on("acme", store.clone())?;
+    let settling = host_on("acme", store.clone())?;
+    let recorded = Arc::new(AtomicBool::new(false));
+    let parked = parking_task(Arc::clone(&recorded))?;
+    let key = RequestKey::new("verdict-the-store-will-refuse")?;
+
+    // The first submission leaves the request in flight: the body parks after
+    // its first durable record, so there is a receipt, a record, and no verdict.
+    drop_after_first_step(Box::pin(parking.submit(&key, &parked, 1u32)), &recorded);
+    let seen = lgwks_bot::block_on(settling.submit(&key, &parked, 1u32))?;
+    let run = match seen {
+        Submission::InFlight(in_flight) => in_flight.run(),
+        other => {
+            return Err(format!(
+                "a dropped waiter must leave the request in flight; got {other:?}"
+            )
+            .into());
+        }
+    };
+
+    // A body whose failure reason is at the ceiling a terminal record may carry,
+    // so the settle-time write is refused by the store's own bound.
+    let oversize = "r".repeat(OVER_CEILING_REASON);
+    let oversize_task = task(
+        "oversize",
+        move |_scope: lgwks_bot::script::Scope, _: u32| {
+            let oversize = oversize.clone();
+            async move { Err::<u32, _>(FlowError::failed(oversize)) }
+        },
+    )?;
+
+    let settled = lgwks_bot::block_on(settling.resume(run, &oversize_task, 1u32));
+    assert_eq!(
+        settled.disposition(),
+        Disposition::Failed,
+        "a run that reached a verdict the store refused to record is Failed, not Succeeded"
+    );
+    let error = settled.error().ok_or("the refusal names its failure")?;
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("was not recorded"),
+        "the report names that the outcome was not recorded: {rendered}"
+    );
+    assert!(
+        rendered.contains("record's bytes"),
+        "the report names the ceiling that refused it, rather than only that something failed: \
+         {rendered}"
+    );
+
+    // Nothing was recorded as the verdict, so the request is still unsettled: a
+    // reopen reports `InFlight` rather than handing a later client a verdict
+    // that was never written.
+    let reopened = host_on("acme", store)?;
+    let after = lgwks_bot::block_on(reopened.submit(&key, &oversize_task, 1u32))?;
+    assert!(
+        matches!(after, Submission::InFlight(_)),
+        "a request whose verdict the store refused is still unsettled, not reattached to; got {:?}",
+        after.report().map(lgwks_bot::task::Report::disposition)
+    );
+    Ok(())
+}
+
 /// A failure the *body* produced is the request's verdict, so it is recorded:
 /// the control on the two tests above.
 #[test]
