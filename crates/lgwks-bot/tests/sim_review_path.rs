@@ -23,9 +23,12 @@
 //! - `head_moved_between_snapshot_and_publish_r32`: the refusal, at every seed.
 //! - `malformed_and_oversized_answers_r32`: answers that are not the review
 //!   history, and must be refused rather than read as a short one.
-//! - `saturation_r32`: 100, 1,000 and 10,000 concurrent runs, each checked at
-//!   its own receiver; one host, one bounded pipeline, receivers sharded at
-//!   100 runs so the fixture's read-back stays linear.
+//! - `saturation_r32_tier_100`/`_1000`/`_10000`: 100, 1,000 and 10,000 concurrent
+//!   runs as one test per tier, each checked at its own receiver; one host, one
+//!   bounded pipeline per tier, receivers sharded at 100 runs so the fixture's
+//!   read-back stays linear. Splitting the tiers into separate tests lets
+//!   nextest schedule them alongside the rest of the suite rather than in one
+//!   serialized loop.
 //! - `two_tenants_on_one_pull_request_r32`: two identities on one pull request,
 //!   each verifying only its own review.
 //! - `retention_is_bounded_by_the_declared_ceiling`: what the adapter holds is
@@ -1355,14 +1358,30 @@ fn run_saturation_tier(
 
 /// The saturation family: many concurrent runs, each bounded.
 ///
-/// Three levels rather than one, because a bound that holds at 100 and leaks at
-/// 10,000 is not a bound. Each tier is run by [`run_saturation_tier`], which
-/// owns the shard and the per-receiver assertions.
+/// One declared test per tier rather than one test looping over three, because
+/// nextest schedules *tests* concurrently while a single test runs on a single
+/// worker: the three-tier loop serialized the 10,000-run tier behind the
+/// 1,000-run one and held the suite's critical path for their sum. Each tier is
+/// still run by [`run_saturation_tier`], so the shard, the single `Host`, the
+/// one bounded [`lgwks_bot::rt::task::join_all_bounded`] pipeline and the
+/// per-receiver equalities are exactly the ones the loop used.
 #[test]
-fn saturation_r32() -> TestResult {
-    for concurrency in [100usize, 1_000, 10_000] {
-        run_saturation_tier(concurrency, concurrency.min(IN_FLIGHT_CAP), "saturation")?;
-    }
+fn saturation_r32_tier_100() -> TestResult {
+    run_saturation_tier(100, 100.min(IN_FLIGHT_CAP), "saturation-100")?;
+    Ok(())
+}
+
+/// The 1,000-run tier of the saturation family (see `saturation_r32_tier_100`).
+#[test]
+fn saturation_r32_tier_1000() -> TestResult {
+    run_saturation_tier(1_000, 1_000.min(IN_FLIGHT_CAP), "saturation-1000")?;
+    Ok(())
+}
+
+/// The 10,000-run tier of the saturation family (see `saturation_r32_tier_100`).
+#[test]
+fn saturation_r32_tier_10000() -> TestResult {
+    run_saturation_tier(10_000, 10_000.min(IN_FLIGHT_CAP), "saturation-10000")?;
     Ok(())
 }
 
@@ -1875,6 +1894,10 @@ fn subject_scenario(fault: SubjectFault, head: &str, draw: SubjectDraw) -> Scena
 }
 
 /// Run one seed's subject fault through the real path.
+///
+/// The fault is this seed's own, so this is [`run_subject_fault`] with the fault
+/// taken from the seed rather than named by the caller. It delegates rather than
+/// repeating the run, so the sweep and the arm families cannot drift apart.
 fn run_subject_seed(index: u64) -> Result<(SubjectFault, Run), Box<dyn std::error::Error>> {
     run_subject_fault(SubjectFault::for_index(index), index)
 }

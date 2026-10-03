@@ -79,6 +79,48 @@ explicitly under that crate.
   on truncation the partial is that same `Vec` truncated in place rather than a
   second copy.
 
+- A host-side stop is no longer recorded as a request's outcome. `Host::submit`
+  wrote a `@terminal` record for every disposition that was not a success, so
+  `Cancelled` (the host's stop arrived mid-run) and `Refused` (the host declined
+  before admission) became the request's permanent recorded verdict. Since the
+  key *is* the request's identity and its body runs at most once under it, one
+  shutdown left a key that no later submission could ever complete: every repeat
+  reattached to the stop and the body's recorded durable steps were never
+  resumed. `@terminal` is now written for exactly the three dispositions that
+  are the request's own verdict under its declared task — `Succeeded`, `Failed`
+  and `DeadlineExceeded`, the deadline included because the same declaration
+  that fixed the key also fixed the run's budget — and a host stop writes
+  nothing. The classification is one exhaustive `match` over `Disposition`, so
+  a variant added later fails to compile until its relationship to a request
+  key is decided by hand. The stop is still reported to the caller that saw it
+  (`Submission::Executed` carrying the disposition); what no longer happens is a
+  restart turning into a request that can never succeed. INV-BOT-102.
+- `Host::resume` settles a request that `Host::submit` left incomplete, under
+  the same rule: a resumed run whose receipt exists and whose verdict does not
+  records that verdict, so a request interrupted by a host stop (or by a client
+  that walked away) can reach a recorded terminal at all instead of reporting
+  `InFlight` forever. Settling is deliberately narrow — `Host::run` writes no
+  reserved record, a resume of a run with no `@request` receipt is an ordinary
+  resume, an already-settled run is left alone, and a `Refused`/`Cancelled`
+  report is returned untouched, so a cross-tenant resume stays `Refused`. A
+  store that refuses to record a verdict a run *reached* is reported as
+  `Failed`, since recording an outcome and reporting success are one fact.
+- **Breaking:** `Host::resume` and `Host::resume_ticket` now require
+  `O: lgwks_bot::script::Durable`. A resumed run may be settling a request, and
+  a recorded verdict is made of an archived output. `Host::run` is unchanged.
+  **Migration:** a caller whose task returns a value that is not archivable must
+  return a `Durable` one, or route the run through `Host::run` plus an explicit
+  run id it owns rather than a resume.
+- `Host::repair` settles a request too. A request `Host::submit` started that
+  blocked on authority records no verdict (`Blocked` is not the request's
+  outcome), and the repair is the attempt that reaches one — but it did not
+  record it, so a key repaired to success still answered `InFlight` to every
+  later submission until a separate `Host::resume` ran. The repair now settles
+  under the same rule as `resume`, and the key reattaches, from a reopened store
+  as well (`tests/request_key.rs::a_repaired_request_is_settled_and_reattaches`).
+- **Breaking:** `Host::repair` now requires `O: lgwks_bot::script::Durable`, for
+  the reason `Host::resume` does. **Migration:** as for `Host::resume`.
+
 ### lgwks_bot Changed
 
 - `rt::supervise::CleanupReceipt`'s documentation now states what
@@ -125,7 +167,7 @@ explicitly under that crate.
   shares the one storage owner — thread, bounded rings and poison latch — with the
   group-committed step store, and `StorageOwner::enqueue_awaiting` returns the
   concrete `Send` future the host's own path needs (INV-BOT-132).
-- `lgwks_bot`: `tests/sim_review_path.rs::saturation_r32` shards each
+- `lgwks_bot`: `tests/sim_review_path.rs`'s saturation tiers shard each
   saturation tier across receivers of at most 100 runs, so the fixture's
   read-back stays linear. The merged receiver `cat`'d its whole
   `reviews.jsonl` on every read, so 1,000 and 10,000 runs piped ~10 GB and
@@ -136,11 +178,47 @@ explicitly under that crate.
   rather than `<=`. The tiers, the single `Host`, the `join_all_bounded`
   pipeline and its `min(N, 64)` bound are unchanged; measured
   143.202s → see INV-BOT-97 (#151 review finding).
+- `lgwks_bot`: the fake `gh`'s review store commits each record with a
+  trailing newline, and a read-back keeps only newline-terminated lines. An
+  `O_APPEND` write is atomic against other appends but not against a reader:
+  on tmpfs (CI's `TMPDIR=/dev/shm`) a concurrent read-back saw the front half
+  of another run's record, cut mid-string at byte 8,193, and
+  `saturation_r32_tier_10000` failed with one run `Unknown` out of 100 on a
+  receiver. `tests/gh_binding.rs::a_record_still_being_appended_is_not_read_back`
+  plants a committed record and a torn one and asserts only the first is read.
+- `lgwks_bot`: the fake `gh` in `tests/support/fake_gh.rs` no longer forks an
+  external helper on the common path. One `gh api` create or read used to fork
+  `sed`/`cat`/`tail`/`tr` several times (a saturation family runs five calls per
+  review); the behaviour file and the create payload are now cut with shell
+  parameter expansion, the receiver's store is read back with the `read`
+  builtin and its leading separator dropped with `${store#?}`, and the two
+  append-only counters take their byte count with `read` and `${#..}` rather
+  than `wc -c`. Measured: one clean run forks 21 helper processes before and 0
+  after; a `gh api` create went 9 → 0, a review-list read 2 → 0, a pull-request
+  read 4 → 0. The race-free store is unchanged — one `O_APPEND` write with a
+  leading separator, the first byte dropped on read, an empty store reading
+  `[]` — and every existing assertion is untouched. `saturation_r32` fell
+  152.964s → 72.063s on this host (ubuntu CI runs it under `dash`, where the
+  removed forks cost more). The family is now one `#[test]` per tier
+  (`saturation_r32_tier_100`, `saturation_r32_tier_1000`,
+  `saturation_r32_tier_10000`) calling the same `run_saturation_tier`, so
+  nextest schedules the tiers alongside the rest of the suite instead of a
+  serialized loop: 0.610s / 5.372s / 60.388s sequential, 66.371s combined. No
+  tier was dropped, shrunk or `#[ignore]`d.
 - `tests/http_alloc.rs` joins every single-shot server thread (warm-up, exact and
   cut) before the next measurement is armed, so a detached server can no longer
   free its `reply` inside a later window and net the eager peak to zero; the
   servers carry bounded read/write timeouts so the join cannot block. No
   assertion, ceiling or bound changed; the probe is deterministic across 30 runs.
+- `lgwks_bot`: the storage owner's awaited answer could be written and never
+  woken. `Awaiting::poll` read the answer slot and only then registered its
+  waker, while the owner writes the slot and only then takes the waker to fire
+  it, so a publish landing between the poll's read and its registration found no
+  waker and left the awaiting task parked for ever. GitHub CI showed it as
+  `tests/sim_repair.rs::saturation_applies_each_ticket_once_band_09` (PR #239)
+  and `band_03` (PR #241) parked past 600 s, with the job cancelled at its
+  15-minute timeout, and the poll now registers its waker before it reads the
+  slot so whichever side moves second observes the other (INV-BOT-140).
 
 ### lgwks_std Added
 
@@ -297,6 +375,41 @@ explicitly under that crate.
   the owner thread — and read through the store's public surface. A caller that
   gave up on its answer is still counted as a staged record, so the ratio cannot
   report a better batching factor than the store achieved.
+- Two missing arms of the request-keyed submission are now covered rather than
+  assumed. `DeadlineExceeded` is the request's own verdict — the same declaration
+  that fixed the key also fixed the run's budget — so a request that overran its
+  budget reattaches to that recorded deadline instead of re-running a body that
+  has already overrun once, and the durable step recorded before the overrun
+  survives it. A store that refuses the `@terminal` write during `Host::resume`
+  is reported as `Failed` naming both that the outcome went unrecorded and which
+  bound refused it, and records **nothing**, so the request stays unsettled and a
+  later client reads `InFlight` rather than a verdict that was never written.
+  Enforced by `tests/request_key.rs`
+  (`an_expired_deadline_is_the_requests_recorded_outcome`,
+  `a_store_that_refuses_the_terminal_write_reports_the_refusal`) and by the
+  seeded families `expired_deadlines_are_recorded_band_16..23` and
+  `settle_refusals_are_reported_and_leave_the_request_unsettled_seed_a..p` in
+  `tests/sim_request_key.rs`, two tenants over one store file, each seed swept
+  twice for an identical trace hash. No production behaviour changed.
+- `Disposition::Blocked` is not the request's own verdict, so a blocked run
+  records no `@terminal` — recording it would poison its key exactly as a host
+  stop does, and an authorized repair can still move it. It carries a
+  `DISPOSITION_BLOCKED` code so `disposition_code` stays an exhaustive match over
+  `Disposition`, which is what INV-BOT-102 relies on to catch a later variant.
+- `Host::submit`: a request-keyed durable submission. A caller supplies a
+  `RequestKey`; the host derives the run identity from the tenant and the key,
+  records the input's canonical `InputDigest` under a reserved `@request` record
+  before any step runs, and records the terminal outcome under `@terminal`
+  after. `Submission::Executed` is a first run, `Submission::Reattached` returns
+  the recorded report without re-entering the body, `Submission::InFlight`
+  reports a request whose waiter was dropped mid-effect (the run to settle and
+  the records that survived, kept apart), and a different input under one key is
+  a typed `RequestError::Conflict` naming both digests. A host with no store
+  refuses with `RequestError::NoStore`. Supported by `RequestKey`, `InputDigest`,
+  `Submission`, `InFlight`, `RequestConflict` and `RequestError` (T30, T17;
+  INV-BOT-100, INV-BOT-101).
+- `FlowError::InvalidRequestKey`: the typed refusal a malformed `RequestKey`
+  names, alongside the tenant and task-name refusals.
 - Fourteen seeded simulation families, one per refusal arm of the review
   subject, coverage and partial-submission path (#231, INV-BOT-96). No
   production behaviour changed: `subject_coverage_and_partial_faults` asserted
