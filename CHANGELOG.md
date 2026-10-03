@@ -26,11 +26,22 @@ explicitly under that crate.
 
 ### Fixed
 
-- `tests/http_alloc.rs` joins every single-shot server thread (warm-up, exact and
-  cut) before the next measurement is armed, so a detached server can no longer
-  free its `reply` inside a later window and net the eager peak to zero; the
-  servers carry bounded read/write timeouts so the join cannot block. No
-  assertion, ceiling or bound changed; the probe is deterministic across 30 runs.
+- The group-commit failure test is no longer a test that does not test. The
+  seeded `tests/sim_group_commit.rs` family named for a failed batch never failed
+  one — the flush-failure switch is a `#[cfg(test)]` seam no simulation can reach —
+  so it is renamed to what it actually proves,
+  `every_flushed_batch_acknowledges_every_member`, and the all-or-nothing answer of
+  a *failed* batch is now injected and observed on the shipped store by
+  `journal::owner::tests::a_failed_batch_flush_acknowledges_nobody_and_folds_nothing`:
+  a three-member batch whose covering `sync_all` is refused answers every member
+  with the failure, folds none of them into the handle's index, latches one poison
+  against which every later submit is refused, and is read back from a reopen of
+  the file rather than from the handle (INV-BOT-130/131).
+- `journal::owner`'s ordered step grew the third answer shape `Stage::Committed`,
+  for a step that flushes its own bytes inside the step, so the run ledger's charge
+  shares the one storage owner — thread, bounded rings and poison latch — with the
+  group-committed step store, and `StorageOwner::enqueue_awaiting` returns the
+  concrete `Send` future the host's own path needs (INV-BOT-132).
 
 ### lgwks_std Added
 

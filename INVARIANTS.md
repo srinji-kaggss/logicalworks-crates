@@ -875,7 +875,11 @@ Each of these was a shipped defect. Treat the list as the spec.
   ordered (INV-BOT-51). The readable half of a record's fold waits for the flush —
   the chain head and committed length do not, because the next member of the same
   batch must chain over them and a head that lagged a write would fork the chain.
-  A reopen therefore replays exactly the acknowledged history.
+  A reopen therefore replays exactly the file's complete frames — every
+  acknowledged record, plus any unacknowledged batch whose bytes the device did
+  take (at-least-once, INV-BOT-54) — and never a torn or invented one. That is why
+  the failed-batch test reads its answer back from `RunStore::open` rather than
+  from the handle, whose index folded nothing.
   Bounded on both axes and declared as constants: `MAX_BATCH_RECORDS` (64 records)
   and `MAX_BATCH_BYTES` (256 KiB) cap one flush, and two bounded rings cap the
   requests — `DEFAULT_QUEUE_DEPTH` (64) for what the owner drains and
@@ -901,9 +905,16 @@ Each of these was a shipped defect. Treat the list as the spec.
   serves 128 concurrent submitters (the two ring ceilings) and refuses the 129th —
   reproduced exactly at c=128 succeed / c=130 refuse. Peak RSS 14,139,392 bytes
   before and 13,287,424 bytes after at c=16, i.e. unchanged within noise.
-  · why: #152 §group commit · enforced by: `tests/sim_group_commit.rs`
+  · why: #152 §group commit · enforced by:
+  `crates/lgwks-bot/src/journal/owner.rs::tests::a_failed_batch_flush_acknowledges_nobody_and_folds_nothing`,
+  which refuses the covering flush of a three-member batch on the shipped store
+  and observes every member refused, no member folded into the handle's index, one
+  poison latched, every later submit refused, and a reopen that replays exactly the
+  file's complete frames; `tests/sim_group_commit.rs`
   (`acknowledged_equals_replayed`, `submission_order_is_layout_order`,
-  `a_failed_batch_acknowledges_nobody`,
+  `every_flushed_batch_acknowledges_every_member` — the control: no seeded
+  simulation can reach the `#[cfg(test)]` flush switch, so a sim proves only that
+  a store whose batches all flushed acknowledges every member —
   `no_record_is_acknowledged_before_its_covering_sync`,
   `a_torn_tail_at_a_batch_boundary_drops_only_the_incomplete_record`,
   `two_tenants_on_one_store_stay_isolated`,
@@ -929,7 +940,27 @@ Each of these was a shipped defect. Treat the list as the spec.
   control against which the concurrent tier's 0.09 is a measurement.
   · why: #152 §group commit · enforced by: `tests/sim_group_commit.rs`
   (`acknowledged_equals_replayed`, `saturation_reaches_every_tier_and_records_the_ceiling`),
+  `crates/lgwks-bot/src/journal/owner.rs::tests::a_failed_batch_flush_acknowledges_nobody_and_folds_nothing`
+  (the failed batch's durable reality is read from a reopen of the file, not the
+  handle that refused it), and
   `tests/durable_crash_group_commit.rs::a_real_kill_mid_batch_holds_exactly_the_acknowledged_prefix`
+- **INV-BOT-132** One storage owner serves every durable store with one ordered
+  step whose answer has three shapes: `Settled` (nothing was written, the answer is
+  ready), `Unsynced` (bytes are on the file and the answer and fold are owed the
+  batch's one flush), and `Committed` (the step wrote and flushed its own bytes
+  inside the ordered step, so it owes the batch nothing). A step whose *later*
+  member must decide against its fold — the run ledger's charge, which applies a
+  repair ticket once and moves an epoch — answers `Committed`, so its fold cannot
+  be deferred to a batch settle the way a step record's can. Both stores therefore
+  run on the same owner thread, the same bounded rings and the same poison latch,
+  and `StorageOwner::enqueue_awaiting` returns the concrete `Send` future the
+  host's own path needs, unboxed, without weakening the erased `BoxFuture` a task
+  body awaits. · why: #152 §group commit merged with the repair ledger (#87
+  T13/T23/T24) · enforced by: the ledger's own families (`tests/repair.rs`,
+  `tests/sim_repair.rs`), which charge through the owner's unboxed awaiting future
+  and answer `Committed`, and
+  `crates/lgwks-bot/src/journal/owner.rs::tests::a_failed_batch_flush_acknowledges_nobody_and_folds_nothing`,
+  which drives the `Settled`/`Unsynced` failure path on the same owner
 - **INV-BOT-40** The committed record can be replayed without materializing it:
   `FileJournal::replay` streams frames from its own read-only descriptor,
   retaining at most one event, applies the same frame validation and event
