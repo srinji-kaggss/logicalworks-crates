@@ -426,6 +426,21 @@ explicitly under that crate.
 
 ### lgwks_std Added
 
+- Seven new deterministic simulation families, 116 source-visible `#[test]`
+  functions, over the `lgwks_std` modules that had none: `tests/sim_hex.rs`,
+  `tests/sim_encoding.rs`, `tests/sim_id.rs`, `tests/sim_leb128.rs`,
+  `tests/sim_hash.rs`, `tests/sim_codec.rs` and `tests/sim_pattern.rs`. Each
+  file drives the shipped public API over seeded payloads and checks the answer
+  against a reference model written in the test from the documented contract
+  rather than against the implementation under test, carries the boundary
+  lengths `0/1/2/3/255/4 KiB` (or the module's own), and ends in the
+  `same_seed_same_trace_hash` and `distinct_seeds_diverge` oracles from
+  `tests/support/seeded_sweep.rs`. **No behaviour change:** every family passed
+  against the code as shipped, and where a first draft disagreed with the
+  shipped decoder it was the draft that was corrected — the reference model is
+  the thing that was wrong, and the corrections are named in the commits. New
+  `INV-STD-HASH-1` records the determinism property `hash` was already
+  documenting but not pinning.
 - `glob`, `similarity` and `retry` now state their sharing contract on the
   types rather than leaving it to inference, and it is checked. `GlobPattern`
   and `RetryPolicy` are documented `Send + Sync`; `CheckedEvidence` is now

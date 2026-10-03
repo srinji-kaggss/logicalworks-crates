@@ -696,16 +696,105 @@ Each of these was a shipped defect. Treat the list as the spec.
 - **INV-HEX-1** `hex::decode_into` requires exact destination length and validates
   the entire input before writing, so every refusal leaves the destination
   unchanged. · enforced by: `hex::tests::decode_into_validates_exact_length_and_preserves_output_on_failure`
+  and `tests/sim_hex.rs`
+  (`a_seeded_payload_round_trips_through_encode_and_decode`,
+  `decode_into_requires_the_exact_destination_length`,
+  `a_refused_decode_into_never_writes_a_prefix_of_the_destination`,
+  `a_non_digit_is_reported_at_its_first_exact_offset`,
+  `an_odd_length_is_refused_before_any_destination_width_check`,
+  `the_empty_and_single_byte_payloads_are_exact_endpoints`,
+  `uppercase_and_lowercase_spellings_decode_to_the_same_bytes`,
+  `refusals_report_their_arm_and_both_of_their_offsets`,
+  `constant_payloads_are_exact_at_every_boundary_length`,
+  `every_truncated_prefix_is_refused_or_is_a_shorter_value`,
+  `the_wide_payload_boundary_is_exercised_at_its_declared_length`,
+  `the_same_seed_replays_to_the_same_hex_trace`,
+  `distinct_hex_seeds_diverge_in_their_trace`)
 - **INV-ENCODING-1** Percent escape errors report original-input byte offsets;
   UTF-8 errors name offsets in decoded bytes and never present them as source
-  coordinates. · enforced by: `encoding::tests::percent_refuses_a_non_hex_escape`
-  and `encoding::tests::percent_refuses_escapes_that_decode_to_invalid_utf8`
+  coordinates. · enforced by: `encoding::tests::percent_refuses_a_non_hex_escape`,
+  `encoding::tests::percent_refuses_escapes_that_decode_to_invalid_utf8`,
+  and `tests/sim_encoding.rs`
+  (`a_seeded_component_round_trips_through_percent_encoding`,
+  `multi_byte_scalars_are_escaped_one_byte_at_a_time`,
+  `a_malformed_escape_is_reported_at_its_original_input_offset`,
+  `a_utf8_failure_is_reported_in_decoded_bytes_not_source_bytes`,
+  `a_truncated_escape_names_the_percent_in_source_bytes`,
+  `lower_and_upper_case_escape_digits_decode_to_the_same_byte`,
+  `the_empty_and_single_byte_payloads_are_exact_endpoints`,
+  `every_truncated_prefix_is_refused_or_is_shorter`,
+  `every_reported_coordinate_is_a_real_position_in_its_own_space`,
+  `a_seeded_payload_round_trips_through_base64`,
+  `every_truncated_base64_prefix_is_refused_on_its_length`,
+  `a_corrupted_base64_character_is_refused_at_its_offset`,
+  `the_wide_boundary_renders_and_decodes_at_its_declared_length`,
+  `refusals_fold_their_arm_and_both_of_their_coordinates`,
+  `the_same_seed_replays_to_the_same_encoding_trace`,
+  `distinct_encoding_seeds_diverge_in_their_trace`)
 - **INV-ID-1** UUID v4 masks apply to generated IDs only; parsing and raw-byte
   construction preserve arbitrary UUID values, and malformed hex reports both
-  group start and invalid character offsets. · enforced by: `id::tests`
+  group start and invalid character offsets. · enforced by: `id::tests` and
+  `tests/sim_id.rs`
+  (`arbitrary_bytes_round_trip_through_parse_and_display`,
+  `the_rendered_form_has_the_documented_hyphen_layout`,
+  `generated_identifiers_carry_the_v4_masks`,
+  `parsing_preserves_version_and_variant_bits_a_generator_would_have_stamped`,
+  `the_reported_version_follows_the_variant_rule_of_the_drawn_bits`,
+  `malformed_hex_reports_both_the_group_start_and_the_character_offset`,
+  `a_wrong_length_is_refused_before_anything_is_parsed`,
+  `every_separator_position_is_required`,
+  `an_upper_case_spelling_parses_to_the_same_identifier`,
+  `every_truncation_of_a_canonical_form_is_refused`,
+  `the_all_zero_and_all_one_values_are_exact_endpoints`,
+  `a_multi_byte_character_in_a_group_is_refused_at_its_own_offset`,
+  `refusals_fold_their_arm_and_both_of_their_coordinates`,
+  `the_same_seed_replays_to_the_same_id_trace`,
+  `distinct_id_seeds_diverge_in_their_trace`,
+  `two_seeds_draw_two_different_identifiers`)
 - **INV-LEB128-1** Integer decoders accept only minimal encodings and return the
   consumed prefix length; trailing input remains with the caller. · enforced by:
   `leb128::tests::distinguishes_prefix_trailing_bytes_from_nonminimal_and_truncated_input`
+  and `tests/sim_leb128.rs`
+  (`a_seeded_unsigned_value_round_trips_at_both_widths`,
+  `a_seeded_signed_value_round_trips_at_both_widths`,
+  `every_boundary_value_is_encoded_minimally`,
+  `trailing_bytes_are_left_to_the_caller`,
+  `a_redundant_padding_group_is_refused_as_non_minimal`,
+  `an_unterminated_run_is_refused_as_truncated_at_its_own_length`,
+  `an_over_wide_run_is_refused_as_overflow_at_its_own_group`,
+  `the_target_width_decides_where_a_run_stops_being_valid`,
+  `every_truncation_of_an_encoding_is_refused`,
+  `every_single_byte_corruption_is_refused_or_changes_the_value`,
+  `the_endpoints_are_exact_at_both_widths`,
+  `refusals_fold_their_arm_and_their_offset`,
+  `the_encoder_appends_to_the_buffer_it_is_given`,
+  `the_same_seed_replays_to_the_same_leb128_trace`,
+  `distinct_leb128_seeds_diverge_in_their_trace`)
+- **INV-STD-HASH-1** A digest is a function of the bytes alone: the same message
+  always hashes to the same digest, an incremental `Hasher` equals the one-shot
+  `blake3` at every chunking of that message, and a framed feed is the digest of
+  its documented `u64` little-endian length prefix followed by the part — so a
+  stream of variable-length parts is unambiguous where a plain concatenation is
+  not. · why: the `hash` module had no deterministic simulation family at all,
+  its whole coverage being nine unit tests on one hand-written message each ·
+  enforced by: `hash::tests` and `tests/sim_hash.rs`
+  (`the_same_bytes_always_produce_the_same_digest`,
+  `incremental_hashing_equals_one_shot_at_every_seeded_chunking`,
+  `a_trailing_byte_changes_the_digest`,
+  `a_single_bit_change_changes_the_digest`,
+  `unframed_splits_conflate_where_framed_splits_do_not`,
+  `a_framed_feed_equals_the_digest_of_its_documented_prefix`,
+  `an_empty_framed_part_is_distinct_from_no_part`,
+  `a_keyed_digest_depends_on_the_key_and_the_message`,
+  `the_hex_form_round_trips_at_both_cases`,
+  `a_digest_hex_of_the_wrong_length_is_refused_on_its_length`,
+  `a_digest_hex_with_a_bad_character_is_refused_as_a_hex_refusal`,
+  `the_empty_message_is_hashed_as_a_message`,
+  `the_wide_boundary_is_hashed_at_its_declared_length`,
+  `constant_messages_at_distinct_lengths_are_distinct_digests`,
+  `the_same_seed_replays_to_the_same_hash_trace`,
+  `distinct_hash_seeds_diverge_in_their_trace`,
+  `two_seeds_draw_two_different_messages`)
 - **INV-TIME-1** RFC 3339 parsing validates offset component bounds and refuses
   leap-second labels the `SystemTime` profile cannot preserve; checked Unix
   conversion and canonical formatting report range failures instead of
@@ -810,8 +899,27 @@ Each of these was a shipped defect. Treat the list as the spec.
   `json::tests::unescaped_string_fields_borrow_from_text_and_slice`,
   `json::tests::escaped_string_cannot_be_returned_as_a_borrowed_str`,
   `ron::tests::unescaped_string_fields_borrow_from_text_and_slice`,
-  `ron::tests::writer_preserves_serialization_and_io_failures`, and
-  `tests/serde_facade_consumers.rs`
+  `ron::tests::writer_preserves_serialization_and_io_failures`,
+  `tests/serde_facade_consumers.rs`, and `tests/sim_codec.rs`
+  (`a_seeded_value_round_trips_through_json_text`,
+  `a_seeded_value_round_trips_through_ron_text`,
+  `an_unescaped_json_field_borrows_from_the_supplied_text`,
+  `an_unescaped_json_field_borrows_from_the_supplied_slice`,
+  `an_unescaped_ron_field_borrows_from_the_supplied_input`,
+  `an_escaped_field_is_refused_as_a_borrow_in_both_codecs`,
+  `a_malformed_document_is_refused_by_both_the_borrowing_and_owned_paths`,
+  `a_non_utf8_slice_is_refused_as_a_transport_fault`,
+  `a_non_utf8_json_slice_is_refused_with_a_document_location`,
+  `trailing_content_after_a_document_is_refused_in_both_codecs`,
+  `a_syntax_error_keeps_its_source_location`,
+  `each_codec_renders_its_own_documented_shape`,
+  `a_value_tree_round_trips_the_drawn_value`,
+  `the_empty_containers_are_values_in_both_codecs`,
+  `multi_byte_text_round_trips_through_both_codecs`,
+  `a_shape_with_empty_collections_still_round_trips`,
+  `the_same_seed_replays_to_the_same_codec_trace`,
+  `distinct_codec_seeds_diverge_in_their_trace`,
+  `two_seeds_draw_two_different_values`)
 - **INV-WIRE-1** `lgwks_std::wire` is a feature-unified rkyv archive facade, not a
   canonical semantic encoding or versioned envelope. The effective byte order,
   alignment, and archived pointer width are observable via
@@ -834,8 +942,27 @@ Each of these was a shipped defect. Treat the list as the spec.
   `pattern::tests::configured_limits_refuse_input_and_amplified_output`,
   `pattern::tests::configured_pattern_compile_size_and_nesting_limits_are_enforced`,
   `pattern::tests::greedy_adversary_and_literal_control_keep_exact_match_workloads`,
-  `pattern::tests::bounded_replacement_expands_exactly_like_the_engine`, and
-  `tests/pattern_external.rs`
+  `pattern::tests::bounded_replacement_expands_exactly_like_the_engine`,
+  `tests/pattern_external.rs`, and `tests/sim_pattern.rs`
+  (`a_bounded_match_agrees_with_the_unbounded_engine`,
+  `an_input_past_the_ceiling_is_refused_by_every_operation`,
+  `the_input_ceiling_admits_its_own_boundary_and_refuses_one_byte_past`,
+  `an_amplifying_replacement_is_refused_before_the_append`,
+  `a_refused_replacement_returns_no_prefix`,
+  `a_bounded_replacement_expands_exactly_like_the_engine`,
+  `a_bounded_find_all_yields_the_engines_spans_in_order`,
+  `a_bounded_split_yields_the_engines_pieces`,
+  `a_bounded_capture_agrees_with_the_engines_group_by_group`,
+  `a_no_match_borrows_and_still_honours_the_output_ceiling`,
+  `a_compile_ceiling_is_refused_with_the_limit_and_the_size`,
+  `the_compile_ceilings_and_a_syntax_error_are_three_distinct_refusals`,
+  `a_refusals_escape_the_pattern_text`,
+  `a_hostile_haystack_is_answered_under_a_backtracking_pattern`,
+  `the_empty_pattern_and_empty_haystack_are_exact_degenerate_cases`,
+  `the_output_ceiling_is_exact_at_its_boundary`,
+  `the_same_seed_replays_to_the_same_pattern_trace`,
+  `distinct_pattern_seeds_diverge_in_their_trace`,
+  `two_seeds_draw_two_different_haystacks`)
 - **INV-FS-2** A successful strict directory walk has no known omissions; a
   tolerant walk returns each known omission alongside its entries, and an
   unresolved root is always refused. Path-based identity rechecks are
