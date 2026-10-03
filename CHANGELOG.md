@@ -267,11 +267,79 @@ explicitly under that crate.
   Concurrent verb calls on one `Process` share a bounded slot pool
   (`DEFAULT_MAX_CONCURRENT`, set with `Process::max_concurrent`), claimed
   before the fork, so a burst of calls never forks a burst of children.
+- `FileJournal::replay` returns a `Replay` that streams the committed frames
+  from its own read-only descriptor, one event at a time, so a caller that only
+  folds the record pays for the largest frame rather than the whole history.
+  It applies the same frame validation `open` does and is bounded by
+  `MAX_JOURNAL_EVENTS`; the materialized `events()` view is unchanged (#122
+  item 2).
+- `StorageGate::storage_gate` is public, so a slow-store liveness test can
+  release a parked device from its own thread rather than from the runtime
+  awaiting the append (#156).
+- `EffectJournal::reserve_handoff_capacity` reserves room for a whole external
+  handoff — intent, preparation and the settlement that lands after the effect
+  has left the process — before the first rung is written. The default is
+  permissive; `FileJournal` refuses the handoff against its event ceiling, so a
+  durable journal can never leave an attempt admitted and unable to settle
+  (#122 item 2 / #156).
 - The `compare_orchestration` example gains a `host` way — `Host::run` per item
   with the host's admission ceiling as the fan-out bound and matched semantics
   against the hand-written `JoinSet`+`Semaphore` and `join_all_bounded` ways —
   and a `measure_overhead` example prints p50/p95/p99 for `Host::run` and
   `sys::Process`.
+
+### lgwks_deps Added
+
+- `[[approved]]` entries accept an optional `origin`: the exact admitted origin
+  for the entry's source class — a complete registry source, a Git repository
+  plus its admitted revision/reference policy, or an external path authority.
+  Admission now compares origin as well as class, so replacing an approved Git
+  repository, registry, path, or Git revision produces a typed
+  `Refusal::OriginDrift` carrying the approved and observed identities. A legacy
+  class-only entry is exact for crates.io (both its Git and sparse spellings)
+  and insufficient for a Git or path edge; an unknown origin scheme is refused
+  at load and never admitted (INV-DEP-12, #158 A1).
+- Sparse-registry sources (`sparse+…`) are classified as the `registry` source
+  class rather than an unknown scheme, so a sparse crates.io mirror compares as
+  crates.io.
+- Drift diagnosis with several approvals for one crate reports the dimension on
+  the approval that admits the edge's source class, instead of the first
+  mismatch from an unrelated class (#158 acceptance).
+- `[[approved]]` entries accept the admitted-capability policy keys `features`,
+  `required_features`, `uses_default_features`, `optional` and `target`, and an
+  explicit `aliases` list. `DirectEdge` now carries Cargo's authored `features`,
+  `uses_default_features`, `target` and `rename`, so a capability that changes
+  without a class or origin change is a typed `Refusal::FeatureDrift`,
+  `DefaultFeaturesDrift`, `OptionalityDrift` or `TargetDrift` instead of a pass.
+  A dimension an entry does not author is grandfathered (#158 A2, INV-DEP-13).
+- `metadata::DirectEdge::features`/`uses_default_features`/`target`/`rename` are
+  readable through accessors; `rename` is the manifest-local spelling and
+  `package` remains the upstream Cargo identity (#158 A2).
+- `check` prints a receipt binding the subject root, the contract identity and
+  schema version, the exact metadata subject, the policy mode and the assurance
+  scope, and `check --json` exposes the same under the stable keys `mode`,
+  `contract.{digest,schema,entries,repository}`, `subject.{digest,edges,resolved}`
+  and `scope`. `Contract::digest`/`schema` and the `Subject`/`Verdict` types back
+  it; `check_verdict` returns the receipt-bearing verdict (#158 A6, INV-DEP-15).
+- A register may author `[policy] schema`; the committed register is migrated to
+  `schema = 2`. Schema 1 remains readable (#158 A7).
+
+### lgwks_deps Changed
+
+- **Breaking for a Git or path edge: a class-only approval is insufficient.**
+  An `[[approved]]` entry whose `source` is `git` or `path` and that authors no
+  `origin` admits nothing in that class; it is no longer an implicit approval of
+  every origin. **Migration:** add `origin = "<exact source>"` to each Git or
+  path entry (a Git repository plus its `?rev=`/`?branch=` policy, or the exact
+  path authority). A class-only `registry` entry still admits crates.io in both
+  its Git and sparse spellings, so registry entries need no change (#158 A1,
+  INV-DEP-12).
+- Package and owner matching is now byte-exact against the Cargo-authored
+  identity. **Migration:** a register that relied on the implicit `-`/`_` (or
+  case) fold to match a differently-spelled package must either write the exact
+  Cargo name or add `aliases = "<spelling>"` to that entry; an alias is
+  collision-checked and names exactly one package. The committed register uses
+  exact names throughout and needs no alias (#158 A2, INV-DEP-14).
 
 ### lgwks_bot Changed
 
@@ -279,8 +347,22 @@ explicitly under that crate.
   absent so a document written before the field existed still parses. A version
   this build does not implement is refused by `BotSpec::from_json` and by
   `Bot::from_spec`.
+- `DomainRegistry::source` and `DomainRegistry::action` return `None` for an
+  identifier declared more than once, not the first matching constructor. An
+  ambiguous identifier no longer resolves by declaration order; `validate()`
+  already refused such a registry by name at every construction path, and this
+  closes the raw lookup so a caller that skips validation cannot reach an
+  ambiguous constructor either (#122). Migration: a caller that relied on the
+  first-wins result should pick the duplicate it means, or the registry should
+  be repaired; `validate()` reports both positions.
 
 ### lgwks_bot Fixed
+
+- The `registry` module documentation said "A duplicate is not refused: lookup
+  is in declaration order and the first entry wins", which had been false since
+  `DomainRegistry::validate` landed. It now states the truth: `validate` refuses
+  a duplicated identifier and names both positions, and the raw `source`/`action`
+  lookups refuse an ambiguous identifier too (#122).
 
 - A process group whose leader is an unreaped zombie reports `EPERM` on a
   further `killpg` (macOS/BSD). That is a still-present group, not a refused
@@ -293,6 +375,21 @@ explicitly under that crate.
   after the leader dies, and the zombie leader then makes every further
   `killpg` return `EPERM` without reaching it; Linux aborts such a fork. A
   drop after the fork (T20) leaves no running member on either.
+
+- The journal-scale invariants were renumbered `INV-BOT-23..28` to
+  `INV-BOT-40..45`, because the old numbers were taken by another branch's
+  register. Only the identifiers moved; every enforced-by reference still
+  resolves. `INV-BOT-45` now states the tiered 100/1,000/10,000 sweep and its
+  requested/reached/ceiling receipt (#122 item 1).
+- `FileJournal::storage_gate`'s documentation now says what the handle is: a
+  fault-injection and liveness instrument whose held gate parks every append on
+  that journal by design, opened only through `open_with_stalled_storage`, never
+  by `open` (#122 item 2).
+- The registry-identifier invariant and the ambiguous-append invariant this
+  branch added were renumbered to `INV-BOT-46` and `INV-BOT-47`, because the
+  numbers they first carried were already taken on `main` (structural
+  inspection, and the task front door). Only the identifiers moved; both
+  invariants' `enforced by` references still resolve (#122, #118).
 
 ### lgwks_bot Breaking
 

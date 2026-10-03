@@ -1,0 +1,18 @@
+# A real, locked, path-only Cargo workspace captured as a metadata fixture.
+#
+# Each member depends on the single local `engine` package and varies exactly
+# one authored dimension from `baseline`: an extra feature, default-features
+# off, optionality, a target scope, and a rename. The raw
+# `cargo metadata --no-deps --format-version 1` output is `baseline.json`; see
+# README.md for the exact command that regenerates it.
+[workspace]
+resolver = "2"
+members = [
+    "engine",
+    "baseline",
+    "feature",
+    "default_off",
+    "optional",
+    "target_scope",
+    "renamed",
+]

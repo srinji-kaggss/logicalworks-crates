@@ -166,6 +166,7 @@
 //! first error in declaration order is returned.
 
 use std::any::Any;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU128};
 
@@ -559,23 +560,47 @@ struct Effects {
     /// not encode an admitted grade, so recovery falls back to the journal's
     /// declared durability rather than changing persisted event bytes.
     requirements: Vec<(EffectKey, DurabilityPromise)>,
-    /// Attempts whose effect is recorded as landed, by the key that landed.
+    /// The most recently applied key for each action, keyed by action.
     ///
-    /// Written when a recovered attempt is settled `Applied`, and seeded at
-    /// assembly from the attempts [`crate::journal::recover`] reads back as
-    /// applied or verified, and read by the walk before it dispatches: the
-    /// record says the effect landed, so the entry it was about is done *for
-    /// the generation the key names*. A source that moves opens a new
-    /// generation, and new work, which is the one thing that may legitimately
-    /// re-run an acknowledged action.
+    /// Written when an attempt is settled `Applied`, and seeded at assembly
+    /// from the attempts [`crate::journal::recover`] reads back as applied or
+    /// verified, and read by the walk before it dispatches: the record says the
+    /// effect landed, so the entry it was about is done *for the generation the
+    /// key names*. A source that moves opens a new generation, and new work,
+    /// which is the one thing that may legitimately re-run an acknowledged
+    /// action.
+    ///
+    /// Held as the *latest* key per action, not as every key ever applied: the
+    /// contract identity question ("does the value the run now sees match the
+    /// one the last applied episode carried?") is a question about the last
+    /// episode for that action, and keeping older ones would both grow
+    /// unboundedly and mis-answer it. One entry per action for the life of the
+    /// controller is the retention horizon.
     ///
     /// Held as whole keys rather than as `(action, revision)` pairs because a
     /// key carries the generation as a digest, and a recovered key has no
     /// integer revision to pair with it — the digest is one-way. Comparing the
-    /// digest the run would mint for its current revision against the digests
-    /// it holds answers the same question, and it answers it for an
+    /// digest the run would mint for its current revision against the digest it
+    /// holds answers the same question, and it answers it for an
     /// acknowledgement this process never made.
-    applied: Vec<EffectKey>,
+    applied_latest: HashMap<ActionId, EffectKey>,
+    /// The event identities that have landed, as `(action, digest)`.
+    ///
+    /// An *event* identity answers a different question from the contract
+    /// identity: a redelivery of the same event retires however many other
+    /// episodes came between (issue #101), so membership over the tagged
+    /// history is the right shape. Stored as the digest rather than the whole
+    /// key because the digest is exactly what the question compares — the
+    /// attempt number is deliberately not part of it.
+    ///
+    /// The set is bounded by the distinct `(action, digest)` pairs the run has
+    /// applied, which is the journal's own deduplication horizon; older event
+    /// identities are not evicted, because doing so would let a redelivery of
+    /// an older event re-run (#129). This is the same retention the previous
+    /// `Vec<EffectKey>` had; the change is that both questions are now answered
+    /// in constant time instead of by scanning a growing vector, which was
+    /// Θ(N²) over a run that applied N distinct keys.
+    applied_events: HashSet<(ActionId, ActionDigest)>,
     /// The latest attempt the journal records for each action it names.
     ///
     /// Seeded once, at assembly, from [`crate::journal::recover`], and read
@@ -601,16 +626,29 @@ struct RecordedOutcome {
 
 impl Effects {
     /// A scope with nothing recovered yet.
-    const fn new(scope: EffectScope, tail: JournalPosition) -> Self {
+    fn new(scope: EffectScope, tail: JournalPosition) -> Self {
         Self {
             scope,
             tail,
             unsettled: Vec::new(),
             recording: Vec::new(),
             requirements: Vec::new(),
-            applied: Vec::new(),
+            applied_latest: HashMap::new(),
+            applied_events: HashSet::new(),
             attempted: Vec::new(),
         }
+    }
+
+    /// Note that `key`'s effect is recorded as landed.
+    ///
+    /// The one place both indexes move, so the two answers the walk asks of
+    /// them cannot drift: the contract identity keeps the latest key per
+    /// action, and the event identity keeps the `(action, digest)` membership.
+    /// Idempotent, because an outcome may be settled once live and once by a
+    /// reopen.
+    fn note_applied(&mut self, key: EffectKey) {
+        self.applied_events.insert((key.action(), key.digest()));
+        self.applied_latest.insert(key.action(), key);
     }
 
     /// The position, evidence, and typed journal refusal behind one held
@@ -663,6 +701,16 @@ impl Effects {
                 self.scope
                     .journal()
                     .admit_external_handoff()
+                    .map_err(DispatchError::Journal)?;
+                // Reserve the whole handoff — intent, preparation and the
+                // settlement that lands only after the effect has left the
+                // process — before the first rung is written. A journal that
+                // admitted the first two and refused the third would leave an
+                // attempt that cannot be settled without deleting unresolved
+                // evidence (#122 item 2 / #156).
+                self.scope
+                    .journal()
+                    .reserve_handoff_capacity(3)
                     .map_err(DispatchError::Journal)?;
                 DurabilityPromise::ProcessCrash
             }
@@ -824,10 +872,7 @@ impl Effects {
             // The identity names an event. A returning one is the same event
             // again: a redelivery of work that already landed, and it retires
             // however many other episodes came between (issue #101).
-            return self
-                .applied
-                .iter()
-                .any(|key| key.action() == action && key.digest() == digest);
+            return self.applied_events.contains(&(action, digest));
         }
         // The identity names only content. A restart that still sees the value
         // the last applied episode carried retires — that is the #101 property
@@ -838,10 +883,8 @@ impl Effects {
         // "Latest for this action" is "latest for this entry": `ActionId` is
         // derived from the bot name, the chain, the entry and the domain, so
         // one entry has one action and one action has one entry.
-        self.applied
-            .iter()
-            .rev()
-            .find(|key| key.action() == action)
+        self.applied_latest
+            .get(&action)
             .is_some_and(|key| key.digest() == digest)
     }
 
@@ -1023,8 +1066,8 @@ impl Effects {
     fn fold_outcome(&mut self, key: EffectKey, evidence: EffectEvidence) {
         self.requirements.retain(|entry| entry.0 != key);
         self.note_journal_attempt(key.action(), key.attempt());
-        if evidence == EffectEvidence::Applied && !self.applied.contains(&key) {
-            self.applied.push(key);
+        if evidence == EffectEvidence::Applied {
+            self.note_applied(key);
         }
     }
 
@@ -1210,7 +1253,7 @@ impl fmt::Debug for Effects {
             .field("identity", &self.identity())
             .field("journal", &self.scope.journal().durability())
             .field("unsettled", &self.unsettled.len())
-            .field("applied", &self.applied.len())
+            .field("applied", &self.applied_events.len())
             .field("attempted", &self.attempted.len())
             .finish()
     }
@@ -5234,7 +5277,7 @@ impl EcsBot {
                 // landed below its advertised grade.
                 AttemptStatus::Applied | AttemptStatus::Verified => {
                     if ledger.effects.scope.journal().durability() == DurabilityPromise::Ephemeral {
-                        ledger.effects.applied.push(key);
+                        ledger.effects.note_applied(key);
                     } else if let Err(cause) = ledger
                         .effects
                         .confirm_recorded_outcome(key, EffectEvidence::Applied)
@@ -5245,7 +5288,7 @@ impl EcsBot {
                             cause,
                         });
                     } else {
-                        ledger.effects.applied.push(key);
+                        ledger.effects.note_applied(key);
                     }
                 }
                 // Nothing to hold. `Prepared` means the intent was admitted and
@@ -8815,5 +8858,196 @@ mod tests {
             "f2e18c137ba6e62e78f672c22c02bc66",
             "the refused-binding vector moved: the v2 identity scheme changed"
         );
+    }
+
+    /// The applied-key index answers the same questions the vector did, at a
+    /// history size where scanning before every push was quadratic.
+    ///
+    /// This drives the shipped path: [`Effects::note_applied`] is what the live
+    /// settle and the recovered seeding both call, and [`Effects::applied_in`]
+    /// is what the walk asks before it dispatches. Each key's digest is the one
+    /// `applied_in` recomputes for its coordinates, which is the discriminating
+    /// part — a wrong index answers false for a key it holds. The old
+    /// `Vec<EffectKey>` would need Θ(n²) comparisons to build this set; the
+    /// indexed form builds and queries it in one pass.
+    #[test]
+    fn applied_membership_answers_at_scale_where_a_scan_would_be_quadratic() -> TestResult {
+        /// Distinct actions, one per obligation. Large enough that the removed
+        /// scan-before-push is visibly quadratic, small enough for a suite.
+        const COUNT: u64 = 50_000;
+
+        /// A distinct 16-byte action id for `index`.
+        fn action_for(index: u64) -> Result<ActionId, Box<dyn std::error::Error>> {
+            Ok(ActionId::from_hex(&format!(
+                "{:032x}",
+                index.wrapping_add(1)
+            ))?)
+        }
+        /// The coordinates `applied_in` would ask about for `index`.
+        fn coordinates(index: u64) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+            let chain = index.checked_rem(16).unwrap_or(0);
+            let entry = index.checked_div(16).unwrap_or(0);
+            Ok((usize::try_from(chain)?, usize::try_from(entry)?))
+        }
+
+        let scope = test_effects()?;
+        let mut effects = Effects::new(scope, JournalPosition::genesis());
+        let identity = effects.identity();
+        let flow = identity.flow();
+        let run = identity.run();
+        let environment = identity.environment();
+        let epoch = EnvironmentEpoch::from_decimal("1")?;
+        let attempt = AttemptId::from_decimal("1")?;
+        let input = [0u8; 16];
+
+        for index in 0..COUNT {
+            let (chain, entry) = coordinates(index)?;
+            let key = EffectKey::new(
+                run,
+                action_for(index)?,
+                attempt,
+                flow,
+                derive_action_digest(flow, chain, entry, &input),
+                environment,
+                epoch,
+            );
+            effects.note_applied(key);
+        }
+
+        // A duplicate settlement must not grow either index.
+        let (chain, entry) = coordinates(0)?;
+        effects.note_applied(EffectKey::new(
+            run,
+            action_for(0)?,
+            attempt,
+            flow,
+            derive_action_digest(flow, chain, entry, &input),
+            environment,
+            epoch,
+        ));
+        assert_eq!(
+            effects.applied_events.len(),
+            usize::try_from(COUNT)?,
+            "a duplicate settlement changed the event-identity index"
+        );
+        assert_eq!(
+            effects.applied_latest.len(),
+            usize::try_from(COUNT)?,
+            "a duplicate settlement changed the latest-key index"
+        );
+
+        for index in 0..COUNT {
+            let (chain, entry) = coordinates(index)?;
+            let action = action_for(index)?;
+            assert!(
+                effects.applied_in(action, chain, entry, input, true),
+                "the event identity for obligation {index} is absent from the index"
+            );
+            assert!(
+                effects.applied_in(action, chain, entry, input, false),
+                "the contract identity for obligation {index} is absent from the index"
+            );
+        }
+
+        // An action the run never applied is not held, in either identity.
+        let absent = action_for(COUNT)?;
+        assert!(
+            !effects.applied_in(absent, 0, 0, input, true)
+                && !effects.applied_in(absent, 0, 0, input, false),
+            "an unapplied obligation must not resolve as done"
+        );
+        Ok(())
+    }
+
+    /// A durable journal that grades itself `ProcessCrash` but refuses to
+    /// reserve settlement capacity, counting the appends it was asked for.
+    ///
+    /// The shipped [`FileJournal`](crate::journal::FileJournal) reserves room
+    /// against its own event ceiling; this stands in for the moment that
+    /// ceiling is reached, which a test cannot reach without a hundred thousand
+    /// real flushes.
+    struct NoSettlementRoom {
+        /// The record the appends would have gone to.
+        inner: MemoryJournal,
+        /// How many appends were asked for, whether or not one happened.
+        appends: Rc<Cell<usize>>,
+    }
+
+    impl EffectJournal for NoSettlementRoom {
+        fn durability(&self) -> DurabilityPromise {
+            DurabilityPromise::ProcessCrash
+        }
+
+        fn tail(&self) -> JournalPosition {
+            self.inner.tail()
+        }
+
+        fn committed(&self) -> Result<Vec<EffectEvent>, JournalError> {
+            EffectJournal::committed(&self.inner)
+        }
+
+        fn compare_and_append(
+            &mut self,
+            expected_tail: JournalPosition,
+            event: &EffectEvent,
+        ) -> Result<DurableAck, JournalError> {
+            self.appends.set(self.appends.get().saturating_add(1));
+            self.inner.compare_and_append(expected_tail, event)
+        }
+
+        fn reserve_handoff_capacity(&self, rungs: u64) -> Result<(), JournalError> {
+            Err(JournalError::CapacityExceeded {
+                resource: crate::journal::JournalLimitKind::Events,
+                limit: 0,
+                requested: rungs,
+            })
+        }
+    }
+
+    /// An external handoff is refused before any rung when the settlement
+    /// record does not fit, so no attempt is ever left admitted and unable to
+    /// settle.
+    ///
+    /// Acceptance for #122 item 2 / #156: the reservation happens before the
+    /// first write, so a journal that cannot hold the settlement refuses the
+    /// handoff and the store stays untouched — rather than admitting the intent
+    /// and the preparation and then being unable to persist the outcome.
+    #[test]
+    fn an_external_handoff_reserves_settlement_capacity_before_any_rung() -> TestResult {
+        let appends = Rc::new(Cell::new(0));
+        let journal = NoSettlementRoom {
+            inner: MemoryJournal::new(),
+            appends: Rc::clone(&appends),
+        };
+        let scope = test_effects_with(Box::new(journal))?;
+        let mut effects = Effects::new(scope, JournalPosition::genesis());
+        let key = EffectKey::new(
+            RunId::from_hex(TEST_RUN)?,
+            ActionId::from_hex("1112131415161718191a1b1c1d1e1f20")?,
+            AttemptId::from_decimal("1")?,
+            FlowRevision::from_tagged("blake3_256", TEST_FLOW)?,
+            ActionDigest::from_tagged(
+                "blake3_256",
+                "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeffe0e1e2e3e4e5e6e7e8e9eaebecedeeef",
+            )?,
+            EnvironmentId::from_hex(TEST_ENV)?,
+            EnvironmentEpoch::from_decimal("1")?,
+        );
+
+        match lgwks_std::task::block_on(effects.prepare(key, EffectLifetime::External)) {
+            Err(DispatchError::Journal(JournalError::CapacityExceeded { .. })) => {}
+            Err(other) => {
+                return Err(format!("expected a capacity refusal, got {other:?}").into());
+            }
+            Ok(_) => {
+                return Err("a handoff with no settlement room must be refused".into());
+            }
+        }
+        assert_eq!(
+            appends.get(),
+            0,
+            "the handoff must be refused before the first rung is written"
+        );
+        Ok(())
     }
 }

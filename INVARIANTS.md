@@ -53,6 +53,55 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
   position; valid unique fields have order-independent meaning, and parsed
   approvals cannot be mutated outside the crate. · why: #157 ·
   enforced by: `contract::tests::invariant_register_uses_the_shared_duplicate_key_refusal`
+- **INV-DEP-12** A source class is not an approved origin: an admission compares
+  the Cargo origin (a complete registry source, a Git repository plus its
+  admitted revision/reference policy, or an external path authority), so a
+  substitution inside an approved class is `OriginDrift`, never a pass. A legacy
+  class-only entry is exact for crates.io — both its Git and sparse spellings —
+  and insufficient for a Git or path edge; an unknown scheme is neither
+  authorable nor an ordinary admitted origin. · why: #158 A1 · enforced by:
+  `tests/origin_binding.rs`, `tests/sim_origin.rs`, and
+  `lgwks_deps::tests::an_approved_git_origin_admits_only_that_repository`,
+  `lgwks_deps::tests::a_git_revision_policy_change_is_an_origin_drift`,
+  `lgwks_deps::tests::an_approved_registry_origin_refuses_a_different_registry`,
+  `lgwks_deps::tests::a_class_only_registry_approval_admits_crates_io_only`,
+  `lgwks_deps::tests::a_class_only_git_approval_is_insufficient_for_exact_origin`,
+  `lgwks_deps::tests::an_approved_path_origin_refuses_a_different_path`,
+  `lgwks_deps::tests::an_unknown_scheme_is_not_an_admitted_origin`,
+  `lgwks_deps::tests::multiple_approvals_report_the_relevant_failed_dimension`,
+  `metadata::tests::a_sparse_registry_source_is_classified_as_a_registry`
+- **INV-DEP-13** An approval may author admitted-capability policy: `features`
+  (the complete set of upstream features the edge may enable), `required_features`
+  (a subset that must be enabled), `uses_default_features` and `optional` (the
+  exact authored bit) and `target` (the exact scope; `""` is unconditional). A
+  dimension an entry authors is enforced exactly — an enabled feature outside the
+  set, a missing required feature, a flipped bit, a changed scope is a typed
+  `Refusal::{FeatureDrift, DefaultFeaturesDrift, OptionalityDrift, TargetDrift}`;
+  a dimension an entry does not author is grandfathered rather than refused.
+  Mandatory and allowed features are distinguished, so ordering is never
+  significant. · why: #158 A2 · enforced by: `tests/feature_policy.rs`,
+  `tests/sim_dependency_policy.rs`, and
+  `lgwks_deps::tests::a_class_only_registry_approval_admits_crates_io_only`
+- **INV-DEP-14** Cargo package identity is byte-exact: an approval admits an
+  observed package name only when it is that name, or a name the entry lists in
+  its explicit `aliases`. There is no implicit `-`/`_` fold or case fold, so two
+  distinct packages whose spellings fold alike cannot share one authority. An
+  alias names exactly one package (collision-checked at load, including against
+  another package's real name), and a `package =` rename stays a local spelling
+  of the upstream identity rather than a second one. · why: #158 A2 · enforced by:
+  `tests/identity_binding.rs`,
+  `contract::tests::lookup_is_exact_and_only_an_explicit_alias_is_tolerated`,
+  `contract::tests::aliases_collide_rather_than_share_authority`
+- **INV-DEP-15** A `check` receipt binds the subject root, the contract identity
+  and schema version (a stable digest of the register text), the exact metadata
+  subject (a stable digest over every direct edge's identity), the policy mode
+  (`--contract` diagnosis versus committed enforcement) and the assurance scope;
+  the `--json` form exposes the same under stable keys. The digest is an identity
+  fingerprint, not an adversarial integrity claim. · why: #158 A6 · enforced by:
+  `tests/check_cli.rs` (`the_human_receipt_binds_contract_subject_and_mode`,
+  `the_json_receipt_has_stable_identity_fields`,
+  `the_receipt_changes_when_its_subject_changes`)
+
 ## lgwks_bot — durable execution
 
 Each of these was a shipped defect. Treat the list as the spec.
@@ -519,6 +568,70 @@ Each of these was a shipped defect. Treat the list as the spec.
   disposition, output or located error, and every report says no external
   effect is known. · why: #87 step 1 (T01–T04, T36) · enforced by:
   `tests/task_front_door.rs` and `tests/sim_task.rs`
+- **INV-BOT-40** The committed record can be replayed without materializing it:
+  `FileJournal::replay` streams frames from its own read-only descriptor,
+  retaining at most one event, applies the same frame validation and event
+  ceiling `open` does, and yields exactly the acknowledged history. The
+  materialized `events()` view and the stream agree on every seed. · why: #122
+  item 2 · enforced by: `tests/sim_journal_liveness.rs`
+  (`streaming_replay_r00..r15`)
+- **INV-BOT-41** A durable journal reserves room for the whole external handoff
+  — intent, preparation and settlement — before the first rung is written, so
+  it never leaves an attempt admitted and unable to settle. A journal with no
+  settlement room refuses the handoff with `CapacityExceeded` and writes
+  nothing. · why: #122 item 2 / #156 · enforced by:
+  `ecs::tests::an_external_handoff_reserves_settlement_capacity_before_any_rung`
+- **INV-BOT-42** Applied-key membership is answered by index, not by scanning a
+  growing vector: the contract identity keeps the latest key per action and the
+  event identity keeps `(action, digest)` membership, so a run that applied N
+  distinct keys does O(N) work rather than the removed `Vec`'s Θ(N²)
+  membership-before-push. Both indexes retain one entry per action / per
+  distinct event for the controller's life, the same horizon the vector had, so
+  the #101 redelivery and #129 new-episode semantics are preserved. · why: #122
+  item 2 / #156 · enforced by:
+  `ecs::tests::applied_membership_answers_at_scale_where_a_scan_would_be_quadratic`
+- **INV-BOT-43** The durable write is performed by the storage owner thread, not
+  the thread that awaits the append: a parked device leaves the runtime and an
+  unrelated ready task free to progress, and a release from an independent
+  thread is what lets the append finish. A dropped waiter still poisons the
+  handle. · why: #122 item 4 / #156 · enforced by: `tests/journal_liveness.rs`
+  (`a_slow_store_lets_the_runtime_and_the_release_progress`,
+  `a_cancelled_append_leaves_the_runtime_and_the_handle_live`)
+- **INV-BOT-44** A real process kill while an append is in flight, against a
+  store that has not answered, leaves a clean journal: the reopen reports no
+  committed event and no torn tail, and the retry lands exactly once. The kill
+  is a real `SIGKILL` of a child that handed the storage owner the append and
+  then parked. · why: #122 item 2 / #156 · enforced by:
+  `tests/durable_crash_observation.rs`
+  (`a_real_kill_mid_append_leaves_no_duplicate_and_no_lost_receipt`)
+- **INV-BOT-45** Concurrent tenant appends over separate files stay isolated,
+  lose nothing and duplicate nothing, and one acknowledged append's latency
+  tails stay bounded on the shipped path where the write and `sync_all` run on
+  the storage owner. The tiered sweep runs 100, 1,000 and 10,000 concurrent
+  tenant journals; a tier the host cannot reach is clamped to the level the
+  process really can, and the requested, reached and ceiling levels are recorded
+  together with the p50/p95/p99 append latency and the peak RSS, so no reader is
+  told a concurrency number nobody ran (the INV-BOT-16 rule). · why: #122 item 2
+  / #156 · enforced by: `tests/journal_scale.rs`
+  (`concurrent_tenant_appends_scale_with_isolation`,
+  `append_latency_tails_are_bounded`) and `tests/sim_journal_liveness.rs`
+  (`tenant_tiers_replay_at_the_level_the_sim_can_drive`)
+- **INV-BOT-46** A registry identifier declared twice in one role has one
+  meaning: refused. `DomainRegistry::validate` names the identifier, role and
+  both positions before any build, and the raw `source`/`action` lookups never
+  resolve an ambiguous identifier to its first declaration, so dispatch never
+  depends on declaration order. One identifier used once per role stays valid.
+  · why: #122 item 1 · enforced by: `tests/registry.rs`
+  (`an_ambiguous_identifier_is_not_resolved_by_declaration_order`,
+  `a_duplicate_source_identifier_is_refused_with_both_positions`,
+  `refusal_is_independent_of_declaration_order`)
+- **INV-BOT-47** An append whose reply was lost but whose record committed is
+  reconciled by readback and settled, never resent and never stalled on; an
+  append that may have committed and did not reports the occurrence as certain
+  and lands its record on the retry without re-entering the action.
+  · why: #118 item 1 · enforced by: `tests/ambiguous_commit.rs`
+  (`a_committed_outcome_with_a_lost_reply_settles_without_resending`,
+  `an_unknown_outcome_that_did_not_commit_reports_occurrence_and_records_on_retry`)
 - **INV-BOT-70** The task front door's nine-axis evidence: a drawn scale of
   concurrent `Host::run` never exceeds the admission ceiling and returns every
   permit (100/1,000/10,000 tiers with recovery); two hosts with different
