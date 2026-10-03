@@ -109,7 +109,7 @@ mod name;
 pub mod repair;
 mod store;
 
-pub use ledger::{LeaseRefusal, RunLedger};
+pub use ledger::{Control, LeaseRefusal, RunLedger};
 pub use repair::{MAX_TICKET_NEEDS, RepairError, RepairTicket};
 pub use store::{
     MAX_RECORD_BYTES, MAX_RECORDS_PER_RUN, MAX_STORE_BYTES, RunStore, StoreError, StoreLimitKind,

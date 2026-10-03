@@ -1661,27 +1661,7 @@ fn subject_scenario(fault: SubjectFault, head: &str, draw: SubjectDraw) -> Scena
 
 /// Run one seed's subject fault through the real path.
 fn run_subject_seed(index: u64) -> Result<(SubjectFault, Run), Box<dyn std::error::Error>> {
-    let fault = SubjectFault::for_index(index);
-    let draw = SubjectDraw::for_seed(index);
-    let host = host()?;
-    let job = review_task()?;
-    let fake = FakeGh::install(fault.label(), HEAD)?;
-    fake.configure(subject_scenario(fault, HEAD, draw))?;
-
-    let mut request = request(7)?;
-    if fault == SubjectFault::PartialComments {
-        request = request.with_comments(comments(draw.intended));
-    }
-    let report = host.block_on(&job, (gh_for(&fake, fault.capture())?, request))?;
-    let argv = normalized_argv(&fake.calls()?);
-    Ok((
-        fault,
-        Run {
-            report,
-            creates: fake.creates()?,
-            argv,
-        },
-    ))
+    run_subject_fault(SubjectFault::for_index(index), index)
 }
 
 /// The subject family: every fault reaches its own distinct outcome, and none
@@ -1908,7 +1888,7 @@ fn over_ceiling_draw(index: u64) -> SubjectDraw {
 
 /// Run one seed under one subject fault and return the receiver's record.
 ///
-/// The same [`run_subject_seed`] the banded families drive, so an arm family
+/// [`run_subject_seed`] is this with the seed's own fault, so an arm family
 /// cannot be testing a different run than the sweep does. The fault is named
 /// rather than taken from the seed so an arm family sweeps *one* arm across
 /// many draws, which is the sampling the arm properties are about.
