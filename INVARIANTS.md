@@ -808,7 +808,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `tests/gh_binding.rs` (`a_review_list_past_the_ceiling_is_refused_not_truncated`,
   `a_review_list_exactly_at_the_ceiling_is_read`,
   `a_malformed_review_list_is_refused_rather_than_decoded_into_a_partial_answer`)
-- **INV-BOT-90** A source declares when its own cached baseline is unsound, and
+- **INV-BOT-120** A source declares when its own cached baseline is unsound, and
   the substrate acts on the declaration rather than on a heuristic it could not
   have derived. `Observe::cache_state` returns a typed
   `RefreshReason::{Disconnected, WatchOverflow, StaleRemoteKey, InvalidationFailed}`,
@@ -833,10 +833,11 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_forced_refresh_commits_the_newer_value_and_then_returns_to_quiet`,
   `a_failed_refresh_keeps_the_baseline_marked`,
   `two_tenants_sources_forced_refreshes_stay_attributed_to_their_own_chain`),
-  `tests/sim_observe_refresh.rs` (`forced_refresh_band_00`..`05`,
-  `a_refresh_that_never_lands_band_06`..`09`) and
+  `tests/sim_observe_refresh.rs` (`forced_refresh_matches_the_schedule` and
+  `a_refresh_that_never_lands_stays_marked`, each swept over bands 00–05 and
+  06–09 by the shared `band_family!` declaration) and
   `verb::tests::only_supersession_leaves_the_baseline_sound`
-- **INV-BOT-91** An observation the substrate passes over is reported as its own
+- **INV-BOT-121** An observation the substrate passes over is reported as its own
   outcome, not as a fired effect and not as a retire. `Committed` records per
   chain whether the value sitting in the observation slot has been admitted into
   a generation yet, and a commit that replaces an *unacted* value reports it in
@@ -855,9 +856,10 @@ Each of these was a shipped defect. Treat the list as the spec.
   `tests/observe_refresh.rs`
   (`an_intermediate_value_is_reported_as_superseded_rather_than_fired_or_retired`,
   `identical_payloads_with_distinct_event_ids_both_execute_and_a_redelivery_does_not`)
-  and `tests/sim_observe_refresh.rs` (`event_identities_band_14`..`17`,
-  `tenants_never_cross_band_10`..`13`)
-- **INV-BOT-92** A chain held open does not starve an independent chain. A
+  and `tests/sim_observe_refresh.rs` (`event_identities_are_per_event` and
+  `tenants_never_cross`, swept over bands 14–17 and 10–13 by the shared
+  `band_family!` declaration)
+- **INV-BOT-122** A chain held open does not starve an independent chain. A
   generation whose action reports an indeterminate outcome stays held, so its
   transition is walked on every tick and never released; the walk stops *at that
   chain* and the chains behind it are still reached, which is what the existing

@@ -10,7 +10,7 @@ explicitly under that crate.
 
 ### lgwks_bot Added
 
-- `verb::RefreshReason` and `Observe::cache_state` (INV-BOT-90). A source that
+- `verb::RefreshReason` and `Observe::cache_state` (INV-BOT-120). A source that
   caches can now declare that its cached baseline is unsound, naming which of
   four failures it was: `Disconnected`, `WatchOverflow`, `StaleRemoteKey` or
   `InvalidationFailed`. Before this the substrate's shortcut — do not re-poll a
@@ -23,7 +23,7 @@ explicitly under that crate.
   every existing `Observe` impl keeps compiling and keeps its current behaviour;
   an existing source that overrides the deprecated `fingerprint` should move its
   state to `cache_state`, since that method no longer suppresses anything.
-- `TickReport` and `Bot::tick_report` (INV-BOT-90, INV-BOT-91). What the last
+- `TickReport` and `Bot::tick_report` (INV-BOT-120, INV-BOT-121). What the last
   tick observed about its own sources, beside the count of effects it fired:
   `forced` names the chains whose baseline the tick refused and re-read and the
   cause each source declared, `superseded` names the observations replaced before
@@ -36,7 +36,7 @@ explicitly under that crate.
 ### lgwks_bot Fixed
 
 - An intermediate observation overtaken before any entry acted on it is now
-  reported rather than vanishing between "fired" and "retired" (INV-BOT-91).
+  reported rather than vanishing between "fired" and "retired" (INV-BOT-121).
   Which chain's committed value had been admitted into a generation was a
   boolean, so "never observed" and "observed and overtaken" read the same — and
   every chain's first commit was reported as a skip. It is three states now, and
