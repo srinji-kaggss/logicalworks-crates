@@ -927,6 +927,93 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_review_list_exactly_at_the_ceiling_is_read`,
   `a_malformed_review_list_is_refused_rather_than_decoded_into_a_partial_answer`)
 
+- **INV-BOT-81** A review's subject is the repository the caller named and the
+  diff that was read, and a publication is reported only from evidence of the
+  exact state that landed. `Gh::read_diff` reads the changed-file inventory as
+  **data — never executed**, including a `build.rs` whose patch text would
+  perform an effect — bounded on two separate axes (file count against
+  `MAX_DIFF_FILES_PER_PULL`, patch bytes against `MAX_DIFF_BYTES`) with typed
+  refusals, and the inventory is refused whole rather than truncated. An
+  unavailable diff (`406`, `GhError::DiffUnavailable`) or either diff ceiling is
+  an `Incomplete` coverage decision, never a clean review; a renamed-repository
+  answer is `GhError::MovedRepository` naming both the requested and canonical
+  repositories, and the journey refuses rather than silently re-pointing the
+  subject. The publish path distinguishes what landed from what was read back: a
+  lost response reconciled onto an unsubmitted draft is `Pending`, onto a
+  submitted review carrying fewer inline comments than intended is `Partial`
+  (with both counts), and a create that returned an id whose read-back lost
+  permission (`GhError::Unauthorized`, from `401`/`403`/`404`) is `Unverified`
+  with the applied review id retained; a read that failed for any other reason
+  stays `Unknown`. No path issues a second create, and a non-zero exit that named
+  no HTTP status stays a transport failure rather than being guessed into a
+  permission one. · why: #151, #87 step 6 (PR-02, PR-03, PR-04, PR-07, PR-08,
+  PR-09, PR-10), T31/T33/T34 · enforced by:
+  `tests/pr_review_journey.rs`
+  (`an_unavailable_diff_is_an_incomplete_coverage_and_publishes_nothing`,
+  `a_diff_past_the_file_ceiling_is_an_incomplete_coverage`,
+  `a_diff_past_the_byte_ceiling_is_an_incomplete_coverage`,
+  `a_renamed_repository_is_refused_and_never_silently_re_pointed`,
+  `an_untrusted_build_script_in_the_diff_is_never_executed`,
+  `a_pending_draft_is_reconciled_as_a_draft_and_never_reposted`,
+  `a_partial_submission_is_reconciled_as_partial_and_never_reposted`,
+  `a_lost_read_permission_reports_unverified_and_retains_the_review_id`),
+  `tests/gh_binding.rs`
+  (`a_renamed_repository_is_a_typed_move_naming_both_names`,
+  `a_permission_refusal_is_a_typed_unauthorized_not_a_transport_failure`,
+  `a_failure_naming_no_status_stays_a_transport_failure`,
+  `a_diff_past_its_file_ceiling_is_a_typed_coverage_refusal`,
+  `an_unavailable_diff_is_a_typed_coverage_refusal`,
+  `a_changed_file_inventory_is_read_as_data`),
+  `tests/sim_review_path.rs` (`subject_coverage_and_partial_faults` bands 00
+  through 07 (64 seeds), `same_seed_same_trace_hash_subject` bands 08 through
+  11 (32 seeds), `two_identities_subject` bands 12 through 13 (16 seeds)), and
+  `tests/sim_review_pr.rs` (`review_comments_are_carried_and_omitted_r16`)
+- **INV-BOT-96** Each refusal arm of a review is a *seeded property of its own*,
+  not one point in a sweep that checks outcome shapes. `subject_coverage_and_partial_faults`
+  asserts that every fault reaches *some* correct variant; that assertion is
+  satisfied by a world in which the right arm is reached for the wrong reason, so
+  every arm below asks a different question of the same seeded worlds. A coverage
+  refusal reaches the receiver with **zero** creates, so a review cannot be
+  published against a scope nobody read. The two diff ceilings are refused on
+  **separate axes** — a file-count refusal names files, a byte refusal names
+  patch bytes, and a run charged against one bound fails the other family — and
+  the byte family's draws are additionally asserted to stay under the *file*
+  ceiling, so a refusal for the wrong bound cannot pass as evidence for it. A
+  renamed repository is refused naming **both** the requested and the canonical
+  name and publishes nothing. A `build.rs` in the changed-file inventory is
+  **never executed**: the oracle is a marker file named in the child's own
+  environment and referenced by the patch text, so any execution — compiling,
+  shelling, or handing the patch anywhere — removes a file the test asserts is
+  still there, while the review itself still publishes because a hostile file in
+  an inventory is data. A lost response onto an unsubmitted draft is `Pending`
+  and a partial submission carries **both** the applied and intended counts, each
+  measured at the receiver, and neither issues a second create. A create whose
+  read-back lost permission is `Unverified` with the **applied review id
+  retained**, and the id must lie in the range the receiver actually handed out —
+  a `Unverified` without it would force a caller to re-post to find out whether
+  anything landed. The permission and transport arms are **disjoint**: the
+  permission arm names an HTTP status and a credential, the transport arm names a
+  child's exit and no status, and through the whole journey they are `Unverified`
+  and `Unknown` respectively — merging them either discards applied-effect
+  evidence or over-reports a blocking state for a failure nobody can attribute to
+  permissions. A publication is pinned to the commit that was read, so a run that
+  re-pointed the subject after a rename would fail rather than publish at code it
+  never read. · why: #231 review (the arm families were untested under fault
+  density) · enforced by: `tests/sim_review_path.rs`
+  (`an_unavailable_diff_publishes_nothing`,
+  `a_diff_past_the_file_ceiling_publishes_nothing`,
+  `a_diff_past_the_byte_ceiling_publishes_nothing`,
+  `the_two_diff_ceilings_are_refused_separately`,
+  `a_renamed_repository_is_refused_naming_both`,
+  `an_untrusted_build_script_is_never_executed`,
+  `a_pending_draft_is_never_reposted`,
+  `a_partial_submission_reports_both_counts`,
+  `an_unverified_effect_retains_its_review_id`,
+  `unauthorized_and_transport_stay_distinct`,
+  `permission_loss_and_transport_outcome_differ`,
+  `subject_saturation_conserves_creates`,
+  `two_tenants_coverage_stays_isolated`,
+  `a_publication_is_pinned_to_the_read_commit`)
 - **INV-BOT-90** Model output is an untrusted *task input*, and crossing into the
   host is a typed refusal rather than an instruction. A payload is decoded by a
   hand-written bounded decoder against a `Surface` of the operations the host

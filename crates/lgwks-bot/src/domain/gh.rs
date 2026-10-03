@@ -209,6 +209,16 @@ pub struct ReviewRecord {
     /// The top-level body.
     #[serde(default)]
     body: Option<String>,
+    /// How many inline comments the receiver reports on this review.
+    ///
+    /// `None` is a fact about the answer, not a missing field: a receiver that
+    /// reports no comment count has not established that any comment landed,
+    /// and a verifier that read that as "all of them did" would verify a
+    /// partial submission as a whole one. The review object the GitHub REST API
+    /// returns for the reviews endpoint does not enumerate comments, so the
+    /// count is what a read-back can compare without a second call per review.
+    #[serde(default)]
+    comment_count: Option<u64>,
     /// The login of the review's author.
     #[serde(default)]
     user: Option<ReviewAuthor>,
@@ -249,6 +259,52 @@ impl ReviewRecord {
         self.user.as_ref()
     }
 
+    /// The inline comment count a verification compares, with an unreported
+    /// count read as zero.
+    ///
+    /// Zero is the honest default in the comparing direction: a review whose
+    /// receiver reported no comment count has established no comment landed, so
+    /// a payload that intended comments does not match it and the reconciliation
+    /// reports the difference rather than assuming it away.
+    #[must_use]
+    pub fn applied_comments(&self) -> usize {
+        self.comment_count
+            .and_then(|count| usize::try_from(count).ok())
+            .unwrap_or(0)
+    }
+
+    /// Whether the receiver reports this review as an unsubmitted draft.
+    ///
+    /// GitHub creates a review in `PENDING` when the create request omits an
+    /// event. A pending review is an effect that landed and was never submitted,
+    /// which is a different fact from a submitted review and from no review at
+    /// all — and it is not a publication.
+    #[must_use]
+    pub fn is_pending(&self) -> bool {
+        self.state == REVIEW_STATE_PENDING
+    }
+
+    /// Whether this record is about the same subject and says the same body as
+    /// `intended`, ignoring state and comment count.
+    ///
+    /// Used to recognise a *pending draft* of the intended review: the same
+    /// commit and the same body, held in `PENDING` rather than submitted.
+    #[must_use]
+    pub fn matches_subject_body(&self, intended: &ReviewPayload) -> bool {
+        self.commit_id.as_deref() == Some(intended.commit_id.as_str())
+            && self.body.as_deref() == Some(intended.body.as_str())
+    }
+
+    /// Whether this record matches `intended` on subject, body and state, but
+    /// not necessarily on the inline comment count.
+    ///
+    /// The partial-submission case: the review was submitted about the right
+    /// commit saying the right thing, and fewer comments than intended landed.
+    #[must_use]
+    pub fn matches_except_comments(&self, intended: &ReviewPayload) -> bool {
+        self.matches_subject_body(intended) && self.state == intended.state()
+    }
+
     /// Build a record from the fields a read-back verification reads.
     ///
     /// Public because a consumer that keeps its own receipt of what it
@@ -263,6 +319,7 @@ impl ReviewRecord {
             commit_id: Some(String::from(commit_id)),
             state: String::from(state),
             body: Some(String::from(body)),
+            comment_count: None,
             user: None,
         }
     }
@@ -277,12 +334,15 @@ impl ReviewRecord {
     /// `COMMENTED`, and comparing the request's spelling would verify nothing
     /// against the real API. The marker is never compared on its own: it
     /// travels inside the body, so it is checked only as part of the whole body,
-    /// and a matching marker with a different body is a different review.
+    /// and a matching marker with a different body is a different review. The
+    /// inline comment count is compared too: a review whose top-level body
+    /// landed but whose comments were accepted only in part is a partial
+    /// submission, not the whole one, and the review journey reports the
+    /// difference rather than folding it into a match.
     #[must_use]
     pub fn matches(&self, intended: &ReviewPayload) -> bool {
-        self.commit_id.as_deref() == Some(intended.commit_id.as_str())
-            && self.body.as_deref() == Some(intended.body.as_str())
-            && self.state == intended.state()
+        self.matches_except_comments(intended)
+            && self.applied_comments() == intended.comments().len()
     }
 }
 
@@ -301,6 +361,174 @@ impl ReviewAuthor {
     #[must_use]
     pub fn login(&self) -> Option<&str> {
         self.login.as_deref()
+    }
+}
+
+/// The review state GitHub reports for an unsubmitted draft.
+///
+/// A review created without an event is held in `PENDING` until it is
+/// submitted. It is an effect that landed and was never submitted, which the
+/// journey reports as its own state rather than as a publication or as no
+/// effect at all.
+pub const REVIEW_STATE_PENDING: &str = "PENDING";
+
+/// One inline review comment, bound to a path and line in the pinned subject.
+///
+/// A comment is a distinct remote operation from the top-level review body
+/// (PR-08), so it is carried as data rather than folded into the body: a review
+/// whose body landed and whose comments were accepted only in part is a partial
+/// submission, and the count is what makes "in part" decidable.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(crate = "lgwks_std::json::serde")]
+#[non_exhaustive]
+pub struct ReviewComment {
+    /// The repository-relative path the comment is about.
+    path: String,
+    /// The line in the file the comment is about.
+    line: u64,
+    /// The comment body.
+    body: String,
+}
+
+impl ReviewComment {
+    /// A comment on `path` at `line` saying `body`.
+    #[must_use]
+    pub fn new(path: impl Into<String>, line: u64, body: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            line,
+            body: body.into(),
+        }
+    }
+
+    /// The repository-relative path.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// The line the comment is about.
+    #[must_use]
+    pub const fn line(&self) -> u64 {
+        self.line
+    }
+
+    /// The comment body.
+    #[must_use]
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+}
+
+/// One changed file in a pull request, as the files endpoint reports it.
+///
+/// The inventory is what binds a review's findings to the pinned subject: a
+/// finding whose location is not in this list is not in the diff that was read.
+/// It is a *transport* view of one file — the fields a coverage decision reads.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(crate = "lgwks_std::json::serde")]
+#[non_exhaustive]
+pub struct ChangedFile {
+    /// The repository-relative path.
+    #[serde(default)]
+    filename: String,
+    /// `added`, `modified`, `removed`, `renamed` or similar.
+    #[serde(default)]
+    status: String,
+    /// Lines added.
+    #[serde(default)]
+    additions: u64,
+    /// Lines removed.
+    #[serde(default)]
+    deletions: u64,
+    /// The unified diff hunk, when the receiver reports one.
+    #[serde(default)]
+    patch: Option<String>,
+}
+
+impl ChangedFile {
+    /// The repository-relative path.
+    #[must_use]
+    pub fn filename(&self) -> &str {
+        &self.filename
+    }
+
+    /// The change status.
+    #[must_use]
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+
+    /// Lines added.
+    #[must_use]
+    pub const fn additions(&self) -> u64 {
+        self.additions
+    }
+
+    /// Lines removed.
+    #[must_use]
+    pub const fn deletions(&self) -> u64 {
+        self.deletions
+    }
+
+    /// The unified diff hunk, when the receiver reports one.
+    #[must_use]
+    pub fn patch(&self) -> Option<&str> {
+        self.patch.as_deref()
+    }
+
+    /// The bytes of patch text this entry carries, zero when it carries none.
+    #[must_use]
+    pub fn patch_bytes(&self) -> usize {
+        self.patch.as_ref().map_or(0, String::len)
+    }
+}
+
+/// One pull request's changed-file inventory, bounded to the pinned subject.
+///
+/// The list is read as **data**: nothing here is compiled, imported, built,
+/// shelled or loaded. A file named `build.rs` in this list is a changed file
+/// whose patch text was read, never a build script that ran.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PullDiff {
+    /// The pull request number the inventory was read for.
+    number: u64,
+    /// The changed files, in the order the receiver reported them.
+    files: Vec<ChangedFile>,
+    /// Total bytes of patch text, summed over every changed file.
+    patch_bytes: usize,
+}
+
+impl PullDiff {
+    /// The pull request number.
+    #[must_use]
+    pub const fn number(&self) -> u64 {
+        self.number
+    }
+
+    /// The changed files.
+    #[must_use]
+    pub fn files(&self) -> &[ChangedFile] {
+        &self.files
+    }
+
+    /// How many files the pull request changed.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Whether the inventory is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    /// Total bytes of patch text across every changed file.
+    #[must_use]
+    pub const fn patch_bytes(&self) -> usize {
+        self.patch_bytes
     }
 }
 
@@ -347,6 +575,59 @@ struct RefWire {
     /// The commit the reference points at.
     #[serde(default)]
     sha: String,
+}
+
+/// The body GitHub sends for a renamed repository, reduced to what it takes to
+/// name the canonical repository.
+///
+/// A renamed repository answers a request for its old name with a
+/// `Moved Permanently` object rather than a pull request. The `url` names the
+/// canonical API location, from which the canonical `owner/repo` is read; a
+/// client that silently followed it would review a subject the caller never
+/// named, so the adapter reports the move and the journey refuses.
+#[cfg(feature = "process")]
+#[derive(Default, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde")]
+struct MovedWire {
+    /// The server's message, typically `Moved Permanently`.
+    #[serde(default)]
+    message: Option<String>,
+    /// The canonical API URL, when the answer names one.
+    #[serde(default)]
+    url: Option<String>,
+}
+
+#[cfg(feature = "process")]
+impl MovedWire {
+    /// The canonical `owner/repo` this move names, when the answer names one.
+    ///
+    /// Only a `Moved Permanently` message with a parseable canonical URL is a
+    /// move. A body that carries neither is not a move, so it is reported as a
+    /// malformed pull request rather than as a renamed repository.
+    fn canonical(&self) -> Option<String> {
+        let message = self.message.as_deref()?;
+        if !message.to_ascii_lowercase().contains("moved") {
+            return None;
+        }
+        canonical_repo_from_url(self.url.as_deref()?)
+    }
+}
+
+/// The `owner/repo` named by an `api.github.com/repos/...` URL.
+///
+/// Reads the two path segments after `/repos/` and validates the result through
+/// [`Repository::new`], so a URL that does not name a well-formed repository
+/// yields `None` rather than a malformed identity.
+#[cfg(feature = "process")]
+fn canonical_repo_from_url(url: &str) -> Option<String> {
+    let (_, tail) = url.split_once("/repos/")?;
+    let mut segments = tail.split('/');
+    let owner = segments.next()?;
+    let repo = segments.next()?;
+    let spec = format!("{owner}/{repo}");
+    Repository::new(spec)
+        .ok()
+        .map(|repo| repo.as_str().to_owned())
 }
 
 impl From<PullWire> for PrSnapshot {
@@ -433,6 +714,14 @@ pub struct ReviewPayload {
     event: String,
     /// The top-level body, with the marker trailer when there is a marker.
     body: String,
+    /// The inline comments to publish, in order.
+    ///
+    /// Each is a distinct remote operation from the top-level body (PR-08), so
+    /// the create request carries them as a `comments` array rather than folding
+    /// them into the body. Omitted from the wire when empty, so a payload that
+    /// declares no comments is byte-for-byte what it always was.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    comments: Vec<ReviewComment>,
     /// An application marker that helps a read-back locate a candidate review.
     ///
     /// GitHub's create-review request has no field for it, so it is not sent
@@ -484,6 +773,12 @@ impl ReviewPayload {
     #[must_use]
     pub fn marker(&self) -> &str {
         &self.marker
+    }
+
+    /// The inline comments the payload will publish.
+    #[must_use]
+    pub fn comments(&self) -> &[ReviewComment] {
+        &self.comments
     }
 }
 
@@ -541,8 +836,21 @@ impl ReviewPayload {
             commit_id: subject.as_str().to_owned(),
             event,
             body,
+            comments: Vec::new(),
             marker,
         })
+    }
+
+    /// Attach `comments` to the payload, replacing any already carried.
+    ///
+    /// Each comment is a distinct remote operation from the top-level body, so
+    /// a review whose comments were accepted only in part is a *partial*
+    /// submission rather than the whole one; the reconciliation compares the
+    /// count that landed against the count declared here.
+    #[must_use]
+    pub fn with_comments(mut self, comments: Vec<ReviewComment>) -> Self {
+        self.comments = comments;
+        self
     }
 }
 
@@ -628,6 +936,33 @@ impl GhOutcome {
     pub const fn cleanup_confirmed(&self) -> bool {
         self.cleanup_confirmed
     }
+
+    /// The HTTP status `gh` named on stderr, when it named one.
+    ///
+    /// `gh api` reports an API error as `gh: <message> (HTTP <status>)` on the
+    /// child's stderr and exits non-zero. The status is a fact about what the
+    /// server answered — `401` and `403` are a credential that cannot reach the
+    /// resource, `404` is a resource that is absent **or** not visible to this
+    /// credential, `406` is a diff the server declines to render — and it makes
+    /// failures a caller must act on differently decidable by type rather than
+    /// by reading the message. A run that named no status returns `None`, so an
+    /// unclassifiable failure stays a transport failure rather than being
+    /// guessed into a permission one.
+    #[must_use]
+    pub fn http_status(&self) -> Option<u16> {
+        http_status_in(&self.stderr)
+    }
+}
+
+/// The HTTP status a `gh api` error line names, when it names one.
+///
+/// Scans for the `HTTP ` marker `gh` writes (for example `(HTTP 404)`) and reads
+/// the run of digits that follows it. A status larger than a `u16` cannot be a
+/// real HTTP status, so anything that does not parse is `None`.
+fn http_status_in(text: &str) -> Option<u16> {
+    let (_, rest) = text.rsplit_once("HTTP ")?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse::<u16>().ok()
 }
 
 impl GhOutcome {
@@ -677,6 +1012,25 @@ impl GhOutcome {
 /// answer for a caller that cannot hold them all is a refusal rather than a
 /// prefix of the list presented as the list.
 pub const MAX_REVIEWS_PER_PULL: usize = 1_000;
+
+/// The most changed files one diff inventory will accept.
+///
+/// The files endpoint is paginated exactly as the reviews endpoint is, so
+/// without a stated ceiling the inventory grows with a pull request's size
+/// rather than with this crate's declaration. The limit is GitHub's own
+/// per-comparison file ceiling, so a pull request this adapter refuses is one
+/// the API itself would refuse to render: the honest answer for a caller that
+/// cannot hold them all is a refusal rather than an inventory prefix presented
+/// as the whole diff.
+pub const MAX_DIFF_FILES_PER_PULL: usize = 3_000;
+
+/// The most bytes of changed-file patch text one diff inventory will accept.
+///
+/// A separate axis from [`MAX_DIFF_FILES_PER_PULL`]: one enormous file and many
+/// tiny ones grow different bounds, and a count ceiling cannot see patch text
+/// growth. A list past this is refused with [`GhError::DiffTooLarge`] rather than
+/// decoded into a partial diff a coverage decision could read as complete.
+pub const MAX_DIFF_BYTES: usize = 256 * 1024;
 
 // ── The adapter ─────────────────────────────────────────────────────────────
 
@@ -892,6 +1246,22 @@ impl Gh {
         let outcome = self.call(&args).await?;
         outcome.require_success("reading the pull request head")?;
         let snapshot = outcome.parse_json::<PrSnapshot>()?;
+        // A renamed repository answers with a move object rather than a pull
+        // request, which decodes to a snapshot with no commits. It is reported
+        // as a typed move naming the canonical repository, never silently
+        // followed: the subject identity a review is about is the repository the
+        // caller named, and re-pointing it here would review code nobody
+        // asked about.
+        if snapshot.head_sha().is_empty()
+            && snapshot.base_sha().is_empty()
+            && let Ok(moved) = outcome.parse_json::<MovedWire>()
+            && let Some(canonical) = moved.canonical()
+        {
+            return Err(GhError::MovedRepository {
+                requested: self.repository.as_str().to_owned(),
+                canonical,
+            });
+        }
         if snapshot.head_sha().len() != SHA_HEX_LEN || snapshot.base_sha().len() != SHA_HEX_LEN {
             return Err(GhError::Response {
                 path,
@@ -915,6 +1285,22 @@ impl Gh {
     /// this adapter to a supervised runner.
     #[cfg(not(feature = "process"))]
     pub async fn read_reviews(&self, _pull: &PullRequest) -> Result<Vec<ReviewRecord>, GhError> {
+        Err(GhError::NoRunner)
+    }
+
+    /// Read the changed-file inventory of `pull`, without the `process` feature.
+    ///
+    /// There is no supervised runner in this build, so the call is not made and
+    /// no inventory is invented. An empty list here would be read as "the pull
+    /// request changed no files" — a claim this build cannot make — so the
+    /// refusal is the honest one, exactly as it is for every other read.
+    ///
+    /// # Errors
+    ///
+    /// [`GhError::NoRunner`], always. Rebuild with the `process` feature to bind
+    /// this adapter to a supervised runner.
+    #[cfg(not(feature = "process"))]
+    pub async fn read_diff(&self, _pull: &PullRequest) -> Result<PullDiff, GhError> {
         Err(GhError::NoRunner)
     }
 
@@ -957,6 +1343,75 @@ impl Gh {
             });
         }
         Ok(reviews)
+    }
+
+    /// Read the changed-file inventory of `pull`, through a real supervised call.
+    ///
+    /// The files endpoint is paginated exactly as the reviews endpoint is, so
+    /// the inventory is bounded on **two separate axes** rather than by the
+    /// client's patience: at most [`MAX_DIFF_FILES_PER_PULL`] files
+    /// ([`GhError::DiffFileCeiling`]) and at most [`MAX_DIFF_BYTES`] bytes of
+    /// patch text ([`GhError::DiffTooLarge`]). Both are typed refusals, not
+    /// truncations: a partial inventory that decoded cleanly is indistinguishable
+    /// from the whole diff, and a coverage decision built on it would report a
+    /// complete scope it never read. A server that declines to render the diff
+    /// (`406`) is [`GhError::DiffUnavailable`], which is an *incomplete coverage*
+    /// — never a clean review of a diff nobody read.
+    ///
+    /// The inventory is read as data: no file in it is compiled, imported, built,
+    /// shelled or loaded.
+    ///
+    /// # Errors
+    ///
+    /// As [`Gh::snapshot`], plus [`GhError::DiffUnavailable`] when the server
+    /// declines to render the diff, [`GhError::DiffFileCeiling`] and
+    /// [`GhError::DiffTooLarge`] when it is past a declared bound, and
+    /// [`GhError::Response`] or [`GhError::MalformedResponse`] when the answer is
+    /// not a changed-file list.
+    #[cfg(feature = "process")]
+    pub async fn read_diff(&self, pull: &PullRequest) -> Result<PullDiff, GhError> {
+        let path = format!(
+            "repos/{}/pulls/{}/files",
+            pull.repository().as_str(),
+            pull.number()
+        );
+        let args = self.args_for(&["--method", "GET", &path, "--paginate"]);
+        let outcome = self.call(&args).await?;
+        if !outcome.succeeded() {
+            // A `406` is the server declining to render a diff it considers too
+            // large, which is the *unavailable diff* this read exists to report:
+            // a typed coverage-incomplete answer, not a transport outage.
+            if outcome.http_status() == Some(406) {
+                return Err(GhError::DiffUnavailable {
+                    path,
+                    reason: outcome.stderr().trim().to_owned(),
+                });
+            }
+            outcome.require_success("reading the pull request's changed files")?;
+        }
+        let files = outcome.parse_json::<Vec<ChangedFile>>()?;
+        if files.len() > MAX_DIFF_FILES_PER_PULL {
+            return Err(GhError::DiffFileCeiling {
+                path,
+                files: files.len(),
+                ceiling: MAX_DIFF_FILES_PER_PULL,
+            });
+        }
+        let patch_bytes = files.iter().fold(0usize, |total, file| {
+            total.saturating_add(file.patch_bytes())
+        });
+        if patch_bytes > MAX_DIFF_BYTES {
+            return Err(GhError::DiffTooLarge {
+                path,
+                bytes: patch_bytes,
+                ceiling: MAX_DIFF_BYTES,
+            });
+        }
+        Ok(PullDiff {
+            number: pull.number(),
+            files,
+            patch_bytes,
+        })
     }
 
     /// Publish one review on `pull`, without the `process` feature.
@@ -1053,11 +1508,29 @@ impl GhOutcome {
         }
         match self.exit_code {
             Some(0) => Ok(()),
-            Some(code) => Err(GhError::Transport {
-                what: what.to_owned(),
-                exit_code: Some(code),
-                stderr: self.stderr.clone(),
-            }),
+            Some(code) => {
+                // `401` and `403` are a credential that cannot reach the
+                // resource; `404` is a resource that is absent **or** not
+                // visible to this credential, and the client cannot tell them
+                // apart. For a read, both are "the resource's existence is not
+                // established for this credential", which a caller must act on
+                // as a permission outcome rather than as a transport outage, so
+                // they are reported as [`GhError::Unauthorized`] rather than
+                // flattened into [`GhError::Transport`]. A status the client did
+                // not name stays a transport failure.
+                if let Some(status @ (401 | 403 | 404)) = self.http_status() {
+                    return Err(GhError::Unauthorized {
+                        what: what.to_owned(),
+                        status,
+                        reason: self.stderr.clone(),
+                    });
+                }
+                Err(GhError::Transport {
+                    what: what.to_owned(),
+                    exit_code: Some(code),
+                    stderr: self.stderr.clone(),
+                })
+            }
             None => Err(GhError::Transport {
                 what: what.to_owned(),
                 exit_code: None,
@@ -1314,6 +1787,71 @@ pub enum GhError {
         /// The ceiling that refused them.
         ceiling: usize,
     },
+    /// The client reported an authentication or authorization failure.
+    ///
+    /// `401` and `403` are a credential that cannot reach the resource; `404`
+    /// is a resource that is absent **or** not visible to this credential, and
+    /// the client cannot distinguish them. All three are reported here rather
+    /// than flattened into [`GhError::Transport`], because a caller must act on
+    /// a permission outcome differently: a lost read permission is an
+    /// *unverified* publication, never a clean failure and never a second write.
+    Unauthorized {
+        /// What the call was doing.
+        what: String,
+        /// The status the client named.
+        status: u16,
+        /// The retained stderr.
+        reason: String,
+    },
+    /// The repository's answer was a moved-repository redirect.
+    ///
+    /// A renamed repository answers a request for its old name with a move
+    /// object carrying the canonical location. The subject identity is reported
+    /// rather than silently re-pointed: the review is about the repository the
+    /// caller named, and a client that followed the redirect would review code
+    /// nobody asked about.
+    MovedRepository {
+        /// The repository the caller named.
+        requested: String,
+        /// The canonical repository the answer named.
+        canonical: String,
+    },
+    /// The diff for the pull request could not be produced.
+    ///
+    /// The server declined to render it (typically `406` for a diff too large).
+    /// This is an *incomplete coverage*: a review of it would be a clean report
+    /// over a diff nobody read.
+    DiffUnavailable {
+        /// The endpoint the answer came from.
+        path: String,
+        /// What the server said.
+        reason: String,
+    },
+    /// The changed-file inventory is longer than the declared ceiling.
+    ///
+    /// Reported rather than truncated, for the same reason
+    /// [`GhError::ReviewCeiling`] is: a prefix of the inventory that decoded
+    /// cleanly is indistinguishable from the whole diff.
+    DiffFileCeiling {
+        /// The endpoint the answer came from.
+        path: String,
+        /// How many files the client reported.
+        files: usize,
+        /// The ceiling that refused them.
+        ceiling: usize,
+    },
+    /// The changed files' patch text is larger than the declared ceiling.
+    ///
+    /// A *separate* axis from [`GhError::DiffFileCeiling`]: one enormous file
+    /// and many tiny ones grow different bounds.
+    DiffTooLarge {
+        /// The endpoint the answer came from.
+        path: String,
+        /// How many bytes of patch text the client reported.
+        bytes: usize,
+        /// The ceiling that refused them.
+        ceiling: usize,
+    },
     /// The answer was not valid JSON of the expected type.
     MalformedResponse {
         /// Which stream it came from.
@@ -1356,6 +1894,21 @@ impl GhError {
                 | Self::MalformedResponse { .. }
                 | Self::Transport { .. }
                 | Self::ReviewCeiling { .. }
+        )
+    }
+
+    /// Whether this refusal means the subject's coverage could not be completed.
+    ///
+    /// An unavailable diff and either diff ceiling are the *coverage* refusals:
+    /// the pull request's changes could not be read whole, so a review built on
+    /// what was read would claim a scope nobody covered. A caller distinguishes
+    /// them from a transport failure because the honest response is a coverage
+    /// decision — an incomplete review — rather than a run failure.
+    #[must_use]
+    pub const fn is_coverage_incomplete(&self) -> bool {
+        matches!(
+            *self,
+            Self::DiffUnavailable { .. } | Self::DiffFileCeiling { .. } | Self::DiffTooLarge { .. }
         )
     }
 }
@@ -1440,6 +1993,50 @@ impl std::fmt::Display for GhError {
                     "{path}: the payload could not be staged: {source}"
                 )
             }
+            Self::Unauthorized {
+                ref what,
+                status,
+                ref reason,
+            } => write!(
+                formatter,
+                "{what} was refused by a credential that cannot reach the resource \
+                 (HTTP {status}): {reason:?}"
+            ),
+            Self::MovedRepository {
+                ref requested,
+                ref canonical,
+            } => write!(
+                formatter,
+                "the repository {requested} moved to {canonical}; the subject identity is not \
+                 re-pointed, so nothing is reviewed under the canonical name until the caller \
+                 names it"
+            ),
+            Self::DiffUnavailable {
+                ref path,
+                ref reason,
+            } => write!(
+                formatter,
+                "{path}: the diff could not be produced, so the coverage is incomplete: {reason:?}"
+            ),
+            Self::DiffFileCeiling {
+                ref path,
+                files,
+                ceiling,
+            } => write!(
+                formatter,
+                "{path}: the pull request changes {files} files, past the ceiling of {ceiling}; \
+                 the inventory was not returned, because a prefix of it is not the diff"
+            ),
+            Self::DiffTooLarge {
+                ref path,
+                bytes,
+                ceiling,
+            } => write!(
+                formatter,
+                "{path}: the changed files carry {bytes} bytes of patch text, past the ceiling \
+                 of {ceiling}; the inventory was not returned, because a prefix of it is not \
+                 the diff"
+            ),
         }
     }
 }
@@ -1460,6 +2057,11 @@ impl std::error::Error for GhError {
             | Self::Response { .. }
             | Self::TruncatedResponse { .. }
             | Self::ReviewCeiling { .. }
+            | Self::Unauthorized { .. }
+            | Self::MovedRepository { .. }
+            | Self::DiffUnavailable { .. }
+            | Self::DiffFileCeiling { .. }
+            | Self::DiffTooLarge { .. }
             | Self::MalformedResponse { .. }
             | Self::PayloadNotSent { .. }
             | Self::Staging { .. } => None,
