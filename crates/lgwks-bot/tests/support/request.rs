@@ -132,12 +132,23 @@ pub fn parking_task(
 ///
 /// One definition for both request targets, so "drop the waiter" means the same
 /// thing in the unit test and in the simulation.
+///
+/// A submission that returns before its first record is a body that never reached one, and
+/// the flag says so to every caller that reads it afterwards rather than the loop spinning
+/// on a future that can make no further progress.
 pub fn drop_after_first_step<F: Future>(mut submit: Pin<Box<F>>, recorded: &AtomicBool) {
     lgwks_bot::block_on(std::future::poll_fn(|context| {
         if recorded.load(Ordering::SeqCst) {
             return Poll::Ready(());
         }
-        let _pending = submit.as_mut().poll(context);
+        // A finished submission is never polled again: the body sets the
+        // flag inside the very poll that may also finish `submit`, and
+        // re-polling a completed future is a panic. Either way the waiter is
+        // dropped below, so the caller still sees the state a client that
+        // walked away leaves.
+        if submit.as_mut().poll(context).is_ready() {
+            return Poll::Ready(());
+        }
         context.waker().wake_by_ref();
         Poll::Pending
     }));
