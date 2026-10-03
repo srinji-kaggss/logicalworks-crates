@@ -318,7 +318,17 @@ fn a_refusal_is_attributable_to_its_exact_bytes() -> TestResult {
 /// completed work, user corrections, `Unknown` effects and evidence references.
 #[test]
 fn a_context_reset_preserves_completed_work_corrections_unknowns_and_evidence() -> TestResult {
-    let scratch = std::env::temp_dir().join(format!("lgwks-proposal-t27-{}", std::process::id()));
+    // Random bytes name the directory, never the process id: the OS reuses a pid,
+    // so two runs in two processes would share a scratch directory and one would
+    // delete the other's store mid-run. `lgwks_std::random` is the estate's one
+    // distinguishable source. The randomness names the *directory* and never
+    // enters an assertion, so the test's observations are unchanged.
+    let unique = lgwks_std::random::bytes::<8>()?;
+    let suffix = unique
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let scratch = std::env::temp_dir().join(format!("lgwks-proposal-t27-{suffix}"));
     if scratch.exists() {
         std::fs::remove_dir_all(&scratch)?;
     }

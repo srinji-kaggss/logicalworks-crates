@@ -160,6 +160,41 @@ explicitly under that crate.
 
 ### lgwks_bot Added
 
+- `proposal` (feature `script`): the boundary where untrusted model output
+  becomes work. Issue #87's rule is that an AI proposal is an **untrusted task
+  input**, and that validation, provenance, no-progress detection, bounded repair,
+  tenant-scoped artifacts and serialized writes belong in the host/adapter
+  contract rather than in a prompt — so this module reads bytes and refuses them
+  rather than prompting a model. It is **not** a fifth verb: an admitted `Plan` is
+  a list of names to perform through the existing verbs, the operations a proposal
+  may name are exactly the ones the host registered in a `Surface`, and the crate
+  calls no network model at all. `StubModel` is a deterministic double from a seed
+  to output bytes, because the guarantee here is about *admission* and admission is
+  identical whoever produced the bytes (#87 T26–T29, T35).
+  - `Decoder`: a hand-written bounded line grammar with a byte ceiling, a
+    per-field ceiling and a field-count ceiling. `install`, `credential` and `host`
+    are *recognised* so their refusals name what was asked for — a decoder that had
+    never heard of them would report `Malformed` and an attempt to widen authority
+    would read as a broken document. An unknown field is refused rather than
+    ignored, and a refused payload returns no plan beside its refusal.
+  - `Refusal`: a typed arm per refusal, with `SandboxEscape` as its own arm so an
+    escape stays observable, and `is_privilege_attempt` for the five arms that are
+    attempts rather than syntax. Every outcome carries `Provenance` — the source
+    (model, tool output or document), the tenant and the digest of the exact bytes.
+  - `Completion`: admitted only with the evidence it names present.
+    `Coverage::from_claim` maps *every* payload claim onto `Partial`, so a plan
+    cannot be talked into full coverage, and `Coverage::Complete` has no
+    constructor reachable from a decoder.
+  - `RepairLedger` and `PlanBudget`: one unchanged fingerprint past its ceiling is
+    a typed `Intervention`, and recording new evidence moves no repetition count,
+    so it cannot erase what a failure already cost.
+  - `Checkpoint`: `Durable`, so a context reset recovers completed steps, user
+    corrections *with their kind*, `Unknown`-classed effects and evidence
+    references through the run store.
+  - `ArtifactStore`: keyed by `(tenant, digest)`, so identical bytes from two
+    tenants are two artifacts; writes to one key serialized and idempotent by
+    content, reads lock-free of the writer, every bound a typed refusal that
+    leaves the store unchanged.
 - More than one million task executions in flight at once on one node, measured
   (#152 §4). `tests/task_million.rs` (opt-in, `LGWKS_MILLION=1`) admits
   1,048,576 `Host::run` executions across sixteen tenant hosts, each saturated

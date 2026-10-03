@@ -809,6 +809,110 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_review_list_exactly_at_the_ceiling_is_read`,
   `a_malformed_review_list_is_refused_rather_than_decoded_into_a_partial_answer`)
 
+- **INV-BOT-90** Model output is an untrusted *task input*, and crossing into the
+  host is a typed refusal rather than an instruction. A payload is decoded by a
+  hand-written bounded decoder against a `Surface` of the operations the host
+  registered, so `install` and `credential` have no operation to name and are
+  refused by what they asked for rather than as malformed documents; an unknown
+  field is refused rather than ignored, a refused payload returns no plan beside
+  its refusal, and every refusal and every admitted plan carries the
+  `Provenance` of the exact bytes that produced it — including which untrusted
+  source, since a model's mistake and a hostile tool's output are the same bytes
+  with a different provenance. A sandbox escape — an absolute, traversing or
+  drive-qualified path, or a `host` field naming another tenant — is its own
+  `SandboxEscape` arm precisely so it stays *observable*: a refusal reported as
+  malformed is a refusal nobody can find. A capability the run does not hold is
+  refused by name, so the repair is a deliberate grant. It is not a fifth verb:
+  an admitted `Plan` is a list of names to perform through the existing verbs, and
+  this crate calls no network model — `StubModel` is a deterministic double,
+  because the guarantee is about admission and admission is identical whoever
+  produced the bytes. · why: #87 T26 · enforced by: `tests/proposal.rs`
+  (`a_malformed_payload_never_becomes_work`,
+  `an_injected_instruction_is_refused_by_name`,
+  `a_tool_install_is_refused_and_the_surface_is_unchanged`,
+  `a_credential_read_is_refused`,
+  `a_sandbox_escape_stays_an_observable_refusal`,
+  `an_unknown_operation_is_refused_whatever_asked_for_it`,
+  `a_capability_the_run_does_not_hold_is_refused_by_name`,
+  `a_refusal_is_attributable_to_its_exact_bytes`,
+  `the_model_is_a_deterministic_double`) and `tests/sim_proposal.rs`
+  (`seeded_shapes_match_the_declared_outcome_band_00..07`)
+
+- **INV-BOT-91** A completion claim is admitted only with the evidence it names
+  present, and truncated data never becomes a full-coverage claim. The three
+  untrue successes are three outcomes, not one: a claim whose evidence is absent
+  is `NotEvidenced` with the references named, a claim whose evidence is present
+  but whose coverage is short is `Incomplete`, and only a claim passing both is
+  `Admitted`. `Coverage::from_claim` maps *every* payload claim — including the
+  exact spelling `complete` — onto `Partial`, so a `Plan` cannot be talked into
+  full coverage however many lines it carries, and `Coverage::Complete` has no
+  constructor reachable from a decoder. A claim naming more references than
+  `MAX_EVIDENCE_REFS` is refused whole rather than trimmed, since a trimmed claim
+  asserts completeness over the prefix it kept. An abandoned run is admitted as
+  `Abandoned`, visibly not the same thing as a finish. · why: #87 T27/T35 ·
+  enforced by: `tests/proposal.rs`
+  (`the_three_untrue_successes_report_distinct_outcomes`,
+  `an_abandoned_run_is_not_a_finished_one`,
+  `an_over_long_evidence_claim_is_refused_whole`) and `tests/sim_proposal.rs`
+  (`same_seed_same_trace_hash_band_16..19`)
+
+- **INV-BOT-92** A context reset recovers what the run already learned, because
+  the checkpoint is `Durable` and round-trips through the run store rather than
+  living in the instance that wrote it. `Checkpoint` carries completed steps,
+  user corrections *with their kind*, `Unknown`-classed effects and evidence
+  references, so a new task instance resuming the same run id recovers them; a
+  `Refusal` correction stays a refusal rather than being re-read as an override,
+  and an `Unknown` effect is still `Unknown` rather than absent. Every list is
+  bounded, every bound is a declared constant, and the charge comes **before**
+  the append — a refusal leaves the checkpoint exactly as it was, which is the
+  defect the suite found in its own first draft and fixed. Re-recording a
+  completed step is a no-op, so a resumed step cannot inflate the count or trip
+  the ceiling, and reconciling an existing effect reference replaces rather than
+  joins. A truncated archive is refused, never decoded into a partial
+  checkpoint. · why: #87 T27 · enforced by: `tests/proposal.rs`
+  (`a_context_reset_preserves_completed_work_corrections_unknowns_and_evidence`,
+  `a_checkpoint_round_trips_through_the_run_store`,
+  `a_checkpoint_refuses_to_grow_past_its_ceiling`)
+
+- **INV-BOT-93** An artifact is keyed by `(tenant, digest)`, so a digest is never
+  an authorization. Two tenants holding identical bytes get distinct keys and
+  separate shelves, and a tenant that wrote nothing reads nothing whatever digest
+  it names; the isolation is of the index rather than a check the caller
+  remembers. Writes to one key are serialized through one writer path, so exactly
+  one writer commits and every later writer of identical content is told
+  `AlreadyPresent` — with a `writers` receipt counting every writer that reached
+  the key, which is how "serialized" is observed rather than asserted. Reads take
+  no writer lock, so independent reads and writes to other keys progress. The
+  store never hands out a *prefix* of an artifact, and every ceiling
+  (per-artifact bytes, artifacts per tenant, tenant-name length) is a typed
+  refusal that leaves the store byte-identical. · why: #87 T28 · enforced by:
+  `tests/proposal.rs` (`two_tenants_on_one_digest_stay_isolated`,
+  `conflicting_writes_to_one_key_are_serialized_and_idempotent`,
+  `reads_progress_while_a_write_is_in_flight`,
+  `an_oversized_artifact_is_refused_and_the_store_is_unchanged`) and
+  `tests/sim_proposal.rs`
+  (`two_tenants_on_one_digest_stay_isolated_band_08..11`,
+  `concurrent_readers_and_conflicting_writers_band_12..15`,
+  `saturation_reaches_100_1000_and_10000`,
+  `two_tenant_saturation_keeps_its_shelves_apart`)
+
+- **INV-BOT-94** Repeated unchanged failure reaches a finite typed intervention,
+  and new evidence does not erase what a failure already cost. `RepairLedger`
+  counts one *unchanged* fingerprint and returns `Intervention::NoProgress`
+  once the declared `repeat` ceiling is exceeded, and it never returns to
+  repairing that fingerprint afterwards; a run filling the ledger with *different*
+  failures reaches `Intervention::LedgerFull`, which is its own arm because those
+  are different facts. `record_evidence` adds to the ledger and marks progress
+  but moves no repetition count and does not clear the recorded-evidence mark, so
+  the count the ceiling is measured against never falls — progress on one axis
+  cannot buy unbounded attempts on another, and `spent` is monotone for the whole
+  run. Bounded repair is a declared `PlanBudget` ceiling rather than a property of
+  the loop, and a refused charge does not underflow it. · why: #87 T29 · enforced
+  by: `tests/proposal.rs`
+  (`repeated_unchanged_failure_reaches_a_finite_intervention`,
+  `a_ledger_of_distinct_failures_reaches_its_own_intervention`,
+  `new_evidence_does_not_erase_root_spend`, `a_plan_budget_bounds_repair`)
+
 ## Open questions for the Director
 
 - For INV-BOT-1..10: which crash/recovery test exercises each one? The ones without a
