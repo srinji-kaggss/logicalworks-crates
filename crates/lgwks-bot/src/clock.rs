@@ -483,6 +483,12 @@ impl WallClock {
     /// hand and no logical clock in scope has not declared a clock, and this
     /// module's whole contract is that every deadline names one. The one public
     /// constructor is [`Clock::wall_watchdog`].
+    ///
+    /// Gated with its only caller, `rt::time::Deadline`, which does not exist
+    /// without the engine. Every other way to obtain a watchdog — including the
+    /// observation phase's per-poll deadline — goes through a declared [`Clock`],
+    /// which is the point of the visibility restriction above.
+    #[cfg(feature = "rt")]
     pub(crate) fn from_instant(started: Instant) -> Self {
         Self { started }
     }

@@ -7,24 +7,28 @@
 //! |---|---|---|
 //! | **T08** (LC-04) | Disconnect, watch overflow, stale remote key and invalidation failure force refresh rather than permanent quiet state | Each of the four reasons, armed on one source and left armed, forces the next tick to re-read it and appear in `TickReport::forced` with that reason. A forced read of an *unchanged* value commits nothing and fires nothing; a forced read of a *changed* one commits the newer value and then returns to quiet, so the repair is not "re-read forever". A refresh that *fails* leaves the mark standing. |
 //! | **T09** (DX-07) | Identical payloads with different event ids both execute; a duplicate delivery does not. Latest-state mode reports supersession separately | Two `EventId`s over equal payloads are two admitted inputs and fire twice; the same id delivered again retires, as does a redelivery of an *older* id. An intermediate value overtaken before it was acted on is reported in `TickReport::superseded` with the revision it was committed under — neither a fired effect nor a retire. |
-//! | **T06** (LC-03) | A saturated task A cannot starve independent B; one slow source does not block unrelated ready work | The saturation half, in two tests: a chain whose entries are all held open, and a mass of 100 / 1,000 / 10,000 such chains, never starves an independent chain declared beside it. The slow-source half is **not** proved, and the section that would have proved it says exactly why the architecture does not permit it. |
+//! | **T06** (LC-03) | A saturated task A cannot starve independent B; one slow source does not block unrelated ready work | Both halves. The saturation half: a chain whose entries are all held open, and a mass of 100 / 1,000 / 10,000 such chains, never starves an independent chain declared beside it. The slow-source half, in three tests: a source whose poll never resolves is cancelled at the bot's declared per-poll deadline, the independent chain beside it still commits and acts **in the same tick**, and the tick itself returns inside the deadline on an independent watchdog thread; the cancelled chain is re-polled on the next tick and commits when it answers; and a deadline that bounds nothing — zero, or past the ceiling — is refused at build. |
 //!
-//! # What is not proved here, stated before the tests rather than after
+//! # What is proved here, and how the oracles work
 //!
-//! T06's second clause — *one slow source does not block unrelated ready work* —
-//! is not something this build can do. A tick's observation phase joins every
-//! source in a wave through `lgwks_std::task::join_all_boxed`, which polls them
-//! on the calling thread and returns only when the wave has resolved; a source
-//! that never resolves therefore holds the tick, and no other chain's action can
-//! run before the walk, which is after it. `MAX_IN_FLIGHT_POLLS` bounds the
-//! fan-out, not the wait. The section on T06 sets this out in full.
+//! Every ordering is established by a shape a reader can inspect — a log of what
+//! ran, a chain index in a report, a counter of poll bodies entered — and the one
+//! place a clock appears is the *measurement* that the tick returned inside its
+//! budget. That measurement is taken on an independent OS thread, the shape
+//! `resume_liveness.rs` uses, because an oracle that shares the tick's own driver
+//! cannot observe that tick failing to make progress. T06's own text forbids a
+//! sleep as the oracle for a *completion*, and none is used: the wedged source
+//! is a future that parks forever without waking, so "it never resolves" is a
+//! property of the test's own fixture rather than a duration nobody waited for.
 //!
 //! # Why the oracle is a controlled completion
 //!
-//! Every ordering here is established by the shape of a run the test can read —
-//! a held entry, a value that moved, a log of what ran — and never by a clock.
-//! T06's own text forbids a sleep as the oracle: a sleep says "the other thing
-//! probably finished", and on a loaded machine it stops being true.
+//! Every *ordering* here is established by the shape of a run the test can read —
+//! a held entry, a value that moved, a log of what ran — and never by a clock. The
+//! one exception is stated above rather than smuggled in: T06's slow-source test
+//! measures how long the tick took, which is a measurement *of the substrate*,
+//! and T06's own text forbids a sleep as the oracle for a completion. It is not
+//! used as one.
 //!
 //! # What is real
 //!
@@ -37,14 +41,17 @@
 use std::cell::{Cell, RefCell};
 use std::error::Error;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use lgwks_bot::broker::Broker;
 use lgwks_bot::effect::{EnvironmentId, EventId, FlowRevision, RunId};
 use lgwks_bot::journal::MemoryJournal;
 use lgwks_bot::spec::EffectScope;
 use lgwks_bot::{
-    Auth, Bot, BotError, Cap, DispatchCertainty, EffectLifetime, Execute, GrantSet, Observe,
-    RefreshReason,
+    Auth, Bot, BotError, Cap, DEFAULT_POLL_DEADLINE, DispatchCertainty, EffectLifetime, Execute,
+    GrantSet, MAX_POLL_DEADLINE, Observe, RefreshReason,
 };
 
 /// A test's result: an error fails it with the error's text.
@@ -350,6 +357,509 @@ fn held_tick(bot: &mut Bot) -> TestResult {
             );
             Ok(())
         }
+    }
+}
+
+// ── T06 slow source: a poll that never resolves ─────────────────────────────
+
+/// A source that can be made to never resolve, and reports how often it was
+/// entered.
+///
+/// The wedging is *controlled* rather than a sleep: `wedged` is a cell the test
+/// sets, and while it is set the poll returns a future that parks forever without
+/// ever completing. Nothing here waits on real elapsed time to *decide*
+/// anything — the deadline is what the substrate applies, and the only clock in
+/// this test is the one the watchdog thread uses to report how long the tick took,
+/// which is a measurement of the substrate rather than an oracle about the
+/// domain.
+///
+/// How many times the body was entered matters as much as what it returned: it is
+/// how the test proves the next tick *re-polls* a stalled chain rather than
+/// remembering the cancellation and skipping the source.
+struct Wedged {
+    /// Whether the poll parks forever instead of reading.
+    wedged: Rc<Cell<bool>>,
+    /// The value this poll reports once it is not wedged.
+    value: Rc<Cell<u32>>,
+    /// How many times the poll body was entered.
+    entered: Rc<Cell<u32>>,
+    /// What `cache_state` answers, so a chain can be declared unsound and its
+    /// forced-refresh mark watched across a stall.
+    reason: Rc<Cell<Option<RefreshReason>>>,
+    /// The domain identity a report names this source by.
+    domain: &'static str,
+}
+
+impl Observe for Wedged {
+    type Output = u32;
+
+    fn required_caps(&self) -> &[Cap] {
+        &[]
+    }
+
+    async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+        call.0.check(Observe::required_caps(self))?;
+        self.entered.set(self.entered.get().saturating_add(1));
+        if self.wedged.get() {
+            // Parks without ever resolving and without waking anyone, which is
+            // the one shape a deadline has to survive: it is not a slow source,
+            // it is a source that has stopped answering. The `resolve` keeps the
+            // guard type-checked without a `loop {}`, so a reader can see this
+            // is a deliberate park and not an oversight.
+            let resolve = std::future::pending::<()>();
+            resolve.await;
+        }
+        Ok(self.value.get())
+    }
+
+    fn cache_state(&self) -> Option<RefreshReason> {
+        self.reason.get()
+    }
+
+    fn domain_id(&self) -> &str {
+        self.domain
+    }
+}
+
+/// The handles a test needs to drive one wedged chain beside an independent one.
+struct WedgedRig {
+    /// The bot under test.
+    bot: Bot,
+    /// Whether the wedged chain's source parks.
+    wedged: Rc<Cell<bool>>,
+    /// The value the wedged chain reports once it answers.
+    wedged_value: Rc<Cell<u32>>,
+    /// How many times the wedged chain's poll body was entered.
+    wedged_entered: Rc<Cell<u32>>,
+    /// What the wedged chain declares about its own cache.
+    wedged_reason: Rc<Cell<Option<RefreshReason>>>,
+    /// How many times the independent chain's source was polled.
+    ready_entered: Rc<Cell<u32>>,
+    /// The value the independent chain's source reports, so a test can make that
+    /// chain have work ready on the tick it cares about.
+    ready_value: Rc<Cell<u32>>,
+    /// Every value the independent chain's action ran with, in order.
+    ready_seen: Rc<RefCell<Vec<u32>>>,
+    /// Every value the wedged chain's action ran with, in order.
+    wedged_seen: Rc<RefCell<Vec<u32>>>,
+}
+
+/// Build a two-chain bot under `deadline`: chain 0's source can be wedged, chain
+/// 1's always answers.
+///
+/// One bot, one world, one schedule step — the same construction
+/// [`saturated_pair`] uses, and for the same reason: T06 is a claim about two
+/// chains on *one* substrate, not about two processes that happen to interleave.
+/// The difference is which chain is saturated. There the walk is held open by a
+/// transition; here the *observation phase* is held open by a source, which is
+/// the half that a fan-out cap does not bound.
+///
+/// The independent chain is declared second so it shares the observation wave with
+/// the wedged one: two chains that landed in different waves would not prove
+/// that a cancellation in one wave leaves the other free, which is the property.
+fn wedged_pair(deadline: Duration) -> Result<WedgedRig, Box<dyn Error>> {
+    let wedged = Rc::new(Cell::new(false));
+    let wedged_value = Rc::new(Cell::new(1));
+    let wedged_entered = Rc::new(Cell::new(0));
+    let wedged_reason = Rc::new(Cell::new(None));
+    let wedged_seen = Rc::new(RefCell::new(Vec::new()));
+    let ready_entered = Rc::new(Cell::new(0));
+    let ready_value = Rc::new(Cell::new(2));
+    let ready_seen = Rc::new(RefCell::new(Vec::new()));
+
+    let bot = Bot::builder("t06-slow-source")
+        .with_poll_deadline(deadline)
+        .observe(Wedged {
+            wedged: Rc::clone(&wedged),
+            value: Rc::clone(&wedged_value),
+            entered: Rc::clone(&wedged_entered),
+            reason: Rc::clone(&wedged_reason),
+            domain: "test::wedged",
+        })
+        .on(
+            |observed: &u32| *observed > 0,
+            Lands {
+                seen: Rc::clone(&wedged_seen),
+            },
+        )
+        .observe(Wedged {
+            wedged: Rc::new(Cell::new(false)),
+            value: Rc::clone(&ready_value),
+            entered: Rc::clone(&ready_entered),
+            reason: Rc::new(Cell::new(None)),
+            domain: "test::independent",
+        })
+        .on(
+            |observed: &u32| *observed > 0,
+            Lands {
+                seen: Rc::clone(&ready_seen),
+            },
+        )
+        .with_effects(test_effects()?)
+        .build(&GrantSet::empty())?;
+
+    Ok(WedgedRig {
+        bot,
+        wedged,
+        wedged_value,
+        wedged_entered,
+        wedged_reason,
+        ready_entered,
+        ready_value,
+        ready_seen,
+        wedged_seen,
+    })
+}
+
+/// A source that never resolves does not stop an independent chain from running
+/// in the same tick.
+///
+/// The row's second clause, and the half that needed a per-poll deadline to
+/// exist. Chain 0's source is wedged: its poll is entered, parks forever and
+/// never wakes. Chain 1's source answers immediately. Both are in one observation
+/// wave, so if the deadline were per *wave* rather than per *poll* — or if the
+/// cancellation stopped the wave — chain 1 would never commit and the tick would
+/// never reach the walk at all.
+///
+/// Three observations, and each is a different failure to catch:
+///
+/// 1. the tick **returns**, measured on an independent watchdog thread against
+///    `deadline + slack`. A source that held the tick would make this thread the
+///    only thing that ever finished.
+/// 2. chain 1's **action ran** in that same tick, from its log. A tick that
+///    returned early without running anything would satisfy (1).
+/// 3. chain 0 is **reported stalled**, naming its own `domain_id`. A tick that
+///    returned silently would satisfy (1) and (2) and hide the whole defect.
+///
+/// The watchdog thread is the oracle for (1) and is deliberately not the tick's
+/// own executor: it is an OS thread that samples the elapsed time and reports
+/// it, so a tick that never returns is caught by something that does not depend
+/// on the tick.
+#[test]
+fn a_slow_source_does_not_block_an_independent_chain() -> TestResult {
+    // Short enough that the test is quick, long enough that a healthy poll — which
+    // answers on its first poll — is never at risk of being cut short by it.
+    let deadline = Duration::from_millis(120);
+    let slack = Duration::from_secs(20);
+    let mut rig = wedged_pair(deadline)?;
+
+    // A clean tick first, so both chains hold a committed baseline before the
+    // wedging begins. Without it the first observation of each chain is the thing
+    // under test, and a substrate whose *first* read did not fire would fail this
+    // for a reason that has nothing to do with a source that stopped answering.
+    // Establishing the baseline is also what the row is about: an independent
+    // chain's work is a chain that has already been observed.
+    tick(&mut rig.bot)?;
+
+    rig.wedged.set(true);
+    // The independent chain has work ready on the very tick the wedged one is
+    // cancelled, so what is being checked is that it was *not stopped* rather
+    // than that it had nothing to do anyway.
+    rig.ready_value.set(3);
+
+    let (elapsed, outcome) = time_a_tick(&mut rig.bot, deadline.saturating_add(slack));
+    let report = rig.bot.tick_report();
+
+    assert!(
+        elapsed <= deadline.saturating_add(slack),
+        "the tick took {elapsed:?} against a declared {deadline:?} per-poll deadline \
+         and {slack:?} of slack: a source that never resolves still holds the tick"
+    );
+
+    // The independent chain committed and acted in the tick that cancelled its
+    // sibling, which is the whole of the claim. It ran with `3`, not the `2` the
+    // baseline tick committed: a chain that read the same value would not have
+    // fired at all, and the row is about a chain that had work ready and was not
+    // stopped from doing it.
+    assert_eq!(
+        ran_with(&rig.ready_seen),
+        vec![2, 3],
+        "the independent chain's action ran again in the same tick the wedged chain \
+         was cancelled in"
+    );
+    assert!(
+        rig.ready_entered.get() >= 2,
+        "the independent chain's source was polled again: {} entries",
+        rig.ready_entered.get()
+    );
+
+    // The wedged chain committed nothing and acted nothing on top of what the
+    // baseline tick already fired.
+    assert_eq!(
+        ran_with(&rig.wedged_seen),
+        vec![1],
+        "a cancelled poll commits nothing, so the chain it belongs to added no \
+         effect beyond the one its baseline tick fired: {:?}",
+        ran_with(&rig.wedged_seen)
+    );
+
+    // Reported, naming the source that stopped answering rather than a chain
+    // index the caller has to resolve itself.
+    assert_eq!(
+        report
+            .stalled()
+            .iter()
+            .map(|row| (row.chain(), row.domain()))
+            .collect::<Vec<_>>(),
+        vec![(0, "test::wedged")],
+        "the tick reports exactly the wedged chain, by chain index and by the \
+         source's own domain_id"
+    );
+    assert_eq!(
+        report.stalled()[0].deadline(),
+        deadline,
+        "the report names the budget that was actually applied, so a reader is not \
+         guessing which bound cancelled the poll"
+    );
+    assert!(
+        report.stalled_any(),
+        "`stalled_any` and `stalled` are one fact read twice"
+    );
+
+    // And the tick's own result is a *typed* stall rather than a silent success:
+    // the chain that did not read is a chain the caller has to know about.
+    assert!(
+        matches!(outcome, Some(BotError::PollStalled { chain: 0, .. })),
+        "the tick reports the cancellation with its own variant, naming the chain: \
+         {outcome:?}"
+    );
+    Ok(())
+}
+
+/// A stalled chain is re-polled on the next tick, and commits when it answers.
+///
+/// The half that makes the stall a deferral rather than a retirement. A
+/// cancellation that spent the chain's baseline — or cleared its forced-refresh
+/// mark — would leave the source permanently unobserved, which is the quiet state
+/// INV-BOT-120 exists to rule out, reached by a different road.
+///
+/// Three observations:
+///
+/// 1. the next tick **enters the poll body again**, from the counter. A substrate
+///    that remembered the cancellation and skipped the source would never reach
+///    the second entry.
+/// 2. the chain **commits and fires** once the source answers.
+/// 3. it is **no longer reported stalled** on the tick that read it, so the report
+///    says the source recovered rather than leaving a stale cancellation up.
+#[test]
+fn a_stalled_chain_is_re_polled_and_commits_when_it_answers() -> TestResult {
+    let deadline = Duration::from_millis(120);
+    let mut rig = wedged_pair(deadline)?;
+
+    // The clean baseline tick, for the same reason as the test above: a chain's
+    // first observation is its own thing, and this row is about what happens to a
+    // chain whose poll has already been cancelled once.
+    tick(&mut rig.bot)?;
+
+    rig.wedged.set(true);
+    stalled_tick(&mut rig.bot)?;
+    let after_stall = rig.bot.tick_report();
+    assert_eq!(
+        after_stall.stalled().len(),
+        1,
+        "the first tick cancelled chain 0's poll: {:?}",
+        after_stall.stalled()
+    );
+
+    // The chain is declared unsound across the stall, so the mark has to survive
+    // it: a cancellation that cleared the mark would let the next tick compare a
+    // fresh read against the baseline the stall was supposed to replace.
+    rig.wedged_reason.set(Some(RefreshReason::Disconnected));
+
+    // The source recovers, with a *different* value, so a commit that did not
+    // happen cannot be confused with a commit of the old baseline.
+    rig.wedged.set(false);
+    rig.wedged_value.set(7);
+    tick(&mut rig.bot)?;
+
+    assert!(
+        rig.wedged_entered.get() >= 2,
+        "the next tick entered the poll body again ({} entries): a substrate that \
+         remembered the cancellation skipped the source",
+        rig.wedged_entered.get()
+    );
+    assert_eq!(
+        ran_with(&rig.wedged_seen),
+        vec![1, 7],
+        "the recovered chain committed the value it read and fired on it, on top \
+         of the one its baseline tick fired"
+    );
+    let recovered = rig.bot.tick_report();
+    assert!(
+        recovered.stalled().is_empty(),
+        "the tick that read the source reports no stall: {:?}",
+        recovered.stalled()
+    );
+    assert!(
+        recovered.forced().iter().any(|row| row.chain() == 0),
+        "and the forced-refresh mark survived the cancellation rather than being \
+         spent by a read that never committed: {:?}",
+        recovered.forced()
+    );
+    Ok(())
+}
+
+/// A per-poll deadline of zero, or one past the ceiling, is refused at build.
+///
+/// The bound is only a bound if it cannot be set to something that is not one. A
+/// zero budget cancels every poll before its first poll — a bot that observes
+/// nothing and reports every chain as stalled — and a budget past the ceiling is
+/// a caller asking for a bot that can still hang. Both are refused with a typed
+/// error naming the number, because a silently clamped deadline is
+/// indistinguishable from the one the caller asked for.
+///
+/// Run against the *real* builder rather than a helper, because the refusal is
+/// what this observes and the builder is the only thing that can make it.
+#[test]
+fn a_poll_deadline_that_bounds_nothing_is_refused_at_build() -> TestResult {
+    let zero = Bot::builder("t06-zero")
+        .with_poll_deadline(Duration::ZERO)
+        .with_effects(test_effects()?)
+        .build(&GrantSet::empty());
+    assert!(
+        matches!(zero, Err(BotError::PollDeadlineUnbounded { deadline }) if deadline.is_zero()),
+        "a zero per-poll deadline is refused, naming the number: {zero:?}"
+    );
+
+    let past = MAX_POLL_DEADLINE.saturating_add(Duration::from_secs(1));
+    let over = Bot::builder("t06-over")
+        .with_poll_deadline(past)
+        .with_effects(test_effects()?)
+        .build(&GrantSet::empty());
+    match over {
+        Err(BotError::PollDeadlineExceeded { deadline, ceiling }) => {
+            assert_eq!(
+                deadline, past,
+                "the refusal names the budget that was asked for"
+            );
+            assert_eq!(
+                ceiling, MAX_POLL_DEADLINE,
+                "and the ceiling that would have been accepted, so the repair is a \
+                 number rather than a guess"
+            );
+        }
+        other => return Err(format!("a budget past the ceiling was accepted: {other:?}").into()),
+    }
+
+    // The declared default is inside both bounds, so a caller that never calls
+    // `with_poll_deadline` gets a bounded poll rather than an unbounded one.
+    let default = Bot::builder("t06-default")
+        .with_effects(test_effects()?)
+        .build(&GrantSet::empty());
+    assert!(default.is_ok(), "the declared default builds: {default:?}");
+    assert!(
+        DEFAULT_POLL_DEADLINE > Duration::ZERO && DEFAULT_POLL_DEADLINE <= MAX_POLL_DEADLINE,
+        "the default ({DEFAULT_POLL_DEADLINE:?}) is inside the bounds the builder \
+         enforces, so the default build is a bounded one"
+    );
+    Ok(())
+}
+
+/// Run one tick while an independent OS thread samples how long it took.
+///
+/// The instrument is a separate thread rather than a timer inside the tick, for
+/// the reason `resume_liveness.rs` uses one: it must not be the thing being
+/// measured. A tick that never returns leaves this call blocked on `bot.tick()`,
+/// and the nextest timeout — not this test's own assertion — is what would then
+/// report it, which is a measurement of the harness rather than of the substrate.
+///
+/// The returned `outcome` is the tick's own `Result`, and it is an `Option`
+/// because a tick that never returned has none. The pair is returned together
+/// so a caller asserts on the elapsed time and the typed error from one
+/// observation rather than from two.
+fn time_a_tick(bot: &mut Bot, budget: Duration) -> (Duration, Option<BotError>) {
+    let started = std::time::Instant::now();
+    // An atomic rather than the `Rc<Cell<bool>>` the rest of this file uses for
+    // test state: the sampler is an OS thread, so it needs a `Send` flag, and
+    // this is the one piece of state that genuinely crosses a thread boundary.
+    let released = Arc::new(AtomicBool::new(false));
+    let sampler = std::thread::Builder::new()
+        .name("t06-tick-watchdog".into())
+        .spawn({
+            let released = Arc::clone(&released);
+            move || sample_a_tick(started, budget, released)
+        });
+    // Without a watchdog there is no independent oracle, so this is reported as a
+    // maximal elapsed time rather than measured from inside the thing being
+    // measured. The caller's budget assertion then fails on it, which is the
+    // honest outcome: the row could not be evidenced on this host.
+    let Ok(sampler) = sampler else {
+        return (Duration::MAX, None);
+    };
+    let outcome = bot.tick().err();
+    // Read the clock first, then release and join. A sampler is still sampling
+    // until its budget elapses, and joining before reading would charge the tick
+    // for the sampler finishing rather than for the tick finishing — which is how
+    // a test of "this returns promptly" ends up measuring its own watchdog.
+    let elapsed = started.elapsed();
+    released.store(true, Ordering::Release);
+    let _sampled = sampler.join();
+    (elapsed, outcome)
+}
+
+/// Run one tick whose source is expected to be cancelled at its deadline, and
+/// assert it said so.
+///
+/// The fourth distinct tick outcome in this file, beside a clean tick, a refusing
+/// source and a held transition. It is a separate helper for the same reason the
+/// other three are: a caller that came here to read a cancellation wants it
+/// matched *exactly*, because `PollStalled` and `DomainError` are different
+/// repairs — the first is a source that stopped answering, the second one that
+/// refused — and a helper that accepted either would hide which one happened.
+fn stalled_tick(bot: &mut Bot) -> TestResult {
+    match bot.tick() {
+        Ok(fired) => Err(format!(
+            "a source that never resolved read as a {fired}-effect quiet tick; the \
+             cancellation has to be reported"
+        )
+        .into()),
+        Err(error) => {
+            assert!(
+                matches!(error, BotError::PollStalled { .. }),
+                "the cancellation is the substrate's own typed variant and keeps the \
+                 budget that was applied: {error:?}"
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Wait on a plain OS thread that has no executor to stall, until the caller's
+/// budget is spent or the tick it watches has returned.
+///
+/// The wait is a deadline rather than a fixed sleep, so the sampler returns as
+/// soon as the budget is spent instead of rounding up to a multiple of its own
+/// interval.
+///
+/// The sleep is the *fallback*, not the plan. In the ordinary case the caller's
+/// tick has already returned and sets `released`, which ends the wait at once —
+/// the thread would otherwise outlive the answer by spending the whole ceiling.
+/// The case the budget is actually for is a tick that hangs: that is the failure
+/// being detected, and the thread is what detects it, so it must keep waiting
+/// until it does.
+///
+/// The workspace's ban on `std::thread::sleep` exists because blocking an
+/// *executor* thread stalls every task waiting on it. This is not an executor
+/// thread and has nothing to stall: it is the independent sampler, spawned to
+/// outlive whatever it measures. `rt::time::sleep` cannot be used because it
+/// needs a reactor this thread deliberately does not run — a watchdog sharing the
+/// tick's own driver cannot observe that tick failing to make progress.
+///
+/// `#[expect]` rather than `#[allow]` so removing the call fails the build rather
+/// than leaving a silently-unenforced expectation behind.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the sampling thread has no async runtime and no reactor to stall, and \
+              `rt::time::sleep` cannot be awaited on it; the interval is the \
+              sampling resolution of the measurement"
+)]
+fn sample_a_tick(started: std::time::Instant, budget: Duration, released: Arc<AtomicBool>) {
+    let slice = Duration::from_millis(2);
+    while started.elapsed() < budget && !released.load(Ordering::Acquire) {
+        // Never sleeps past the deadline: `slice` is the polling resolution and
+        // the loop condition is the budget, so the overshoot is bounded by a
+        // slice rather than by the slice times a whole budget.
+        std::thread::sleep(slice);
     }
 }
 
@@ -961,23 +1471,29 @@ fn an_intermediate_value_is_reported_as_superseded_rather_than_fired_or_retired(
 // tests below are that claim, and both hold.
 //
 // The second is **one slow source does not block unrelated ready work** — and
-// here the architecture does not permit it. A tick's observation phase joins
-// every source in a wave with `lgwks_std::task::join_all_boxed`, which polls
-// them on the calling thread and returns only when the whole wave has resolved.
-// A source that never resolves therefore holds the tick, and no other chain's
-// *action* can run before the observation phase completes, because the walk runs
-// after it. `MAX_IN_FLIGHT_POLLS` bounds the fan-out; it does not bound the
-// wait. Making a never-resolving source stop holding the tick would mean giving
-// each wave a deadline, and a deadline is a policy this crate does not have:
-// `rt::clock` exists and `Observe::poll` has no place to declare the budget a
-// source should be given. Inventing one here would be a second admission
-// surface on top of `GrantSet`, which is exactly what this crate does not keep.
+// that is now proved too, by the per-poll deadline this branch added. The gap it
+// closed was real: a tick's observation phase joins every source in a wave with
+// `lgwks_std::task::join_all_boxed`, which polls them on the calling thread and
+// returns only when the whole wave has resolved, so `MAX_IN_FLIGHT_POLLS` bounded
+// the fan-out but not the wait, and a source that never resolved held the tick
+// with every other chain's action behind it.
 //
-// So the two halves are separated honestly. The saturation claims are proved;
-// the slow-source claim is proved only in the form the architecture has — a
-// source that is *slow* rather than *parked* delays the tick in proportion to
-// its own latency and nothing more, which is what a per-source deadline would
-// change and what this build does not claim.
+// The repair is a per-poll deadline rather than a per-wave one, which is the
+// narrower of the two: it bounds the one poll that is stuck and leaves its
+// siblings free, where a wave deadline would cancel every source in the wave
+// whenever any one of them was slow. It is a policy the bot *declares* through
+// its own builder (`EcsBuilder::with_poll_deadline`) rather than a second
+// admission surface beside `GrantSet`, which is the shape this crate keeps: a
+// budget the substrate applies to work it already owns, not one a caller has to
+// grant a source permission to declare.
+//
+// Three tests, and they are three claims rather than three views of one: that the
+// tick returns and the independent chain acts inside it
+// (`a_slow_source_does_not_block_an_independent_chain`), that the cancelled chain
+// is re-polled rather than retired
+// (`a_stalled_chain_is_re_polled_and_commits_when_it_answers`), and that the
+// bound is a real one rather than a number
+// (`a_poll_deadline_that_bounds_nothing_is_refused_at_build`).
 
 /// The handles a test needs to read two chains.
 struct PairRig {

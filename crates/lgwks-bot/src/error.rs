@@ -34,6 +34,7 @@
 //! the message.
 
 use std::fmt;
+use std::time::Duration;
 
 use super::broker::DispatchError;
 use super::cap::Deficit;
@@ -165,6 +166,49 @@ pub enum BotError {
     /// and nothing for the adapter to detect, so this variant is documented
     /// rather than constructed.
     TickInsideRuntime,
+    /// A source poll was cancelled by the bot's declared per-poll deadline
+    /// before it resolved.
+    ///
+    /// Not a [`Self::DomainError`] because the domain reported nothing: the
+    /// substrate stopped waiting, so it knows the poll did not finish and
+    /// nothing at all about why it was slow. Carries the budget the poll was
+    /// actually given, so a caller triaging the stall is reading the number the
+    /// bot declared rather than one the report had to invent.
+    ///
+    /// `NotDelivered`, so a consumer's retry classifier reads it as safe: a
+    /// cancelled observation commits nothing and no effect was attempted on its
+    /// account.
+    PollStalled {
+        /// The chain whose source stopped answering, in declaration order.
+        chain: usize,
+        /// The budget the poll was given, as the bot declared it.
+        deadline: Duration,
+    },
+    /// The declared per-poll deadline was refused, because it would bound
+    /// nothing.
+    ///
+    /// A zero budget cancels every poll before it is first polled, so a bot
+    /// built with one observes nothing forever and reports every chain as
+    /// stalled. That is a wiring mistake with a distinct repair, not a tuning
+    /// choice, and it is refused at build rather than discovered on the first
+    /// tick.
+    PollDeadlineUnbounded {
+        /// The zero that was asked for.
+        deadline: Duration,
+    },
+    /// The declared per-poll deadline was refused, because it is above the
+    /// ceiling this crate will grant.
+    ///
+    /// The ceiling exists because the deadline is the one bound standing between
+    /// a source that stops answering and a bot that stops ticking. A budget past
+    /// it converts a recoverable stall into a hang, and the caller who wants a
+    /// longer one has to say why rather than discovering it at run time.
+    PollDeadlineExceeded {
+        /// The budget that was asked for.
+        deadline: Duration,
+        /// The largest budget that would have been accepted.
+        ceiling: Duration,
+    },
     /// A domain action failed at runtime.
     ///
     /// Carries [`DispatchCertainty`] rather than leaving a consumer to infer
@@ -785,6 +829,11 @@ impl BotError {
                 EffectEvidence::Applied => DispatchCertainty::Occurred,
                 EffectEvidence::NotApplied => DispatchCertainty::NotDelivered,
             },
+            // A cancelled observation read nothing, so nothing left the process
+            // on this account and the next tick is a plain retry. Folding it
+            // into the `Refused` arm above would make a caller classify a source
+            // that recovers on the next tick as one whose wiring will never work.
+            Self::PollStalled { .. } => DispatchCertainty::NotDelivered,
             _ => DispatchCertainty::Refused,
         }
     }
@@ -1185,6 +1234,23 @@ impl fmt::Display for BotError {
                     Escaped(&cause.to_string())
                 )
             }
+            Self::PollStalled { chain, deadline } => write!(
+                f,
+                "source poll for chain {chain} was cancelled at its declared {deadline:?} \
+                 per-poll deadline: nothing was read, nothing committed, and the other chains \
+                 of this tick were not stopped"
+            ),
+            Self::PollDeadlineUnbounded { deadline } => write!(
+                f,
+                "per-poll deadline of {deadline:?} bounds no wait: every poll would be \
+                 cancelled before it was first polled"
+            ),
+            Self::PollDeadlineExceeded { deadline, ceiling } => write!(
+                f,
+                "per-poll deadline of {deadline:?} is above the {ceiling:?} ceiling: a source \
+                 that stops answering would hold the tick for longer than any bound this bot \
+                 grants"
+            ),
             Self::SessionBudgetExceeded { steps, budget } => {
                 write!(
                     f,

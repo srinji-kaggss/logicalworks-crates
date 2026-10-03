@@ -168,7 +168,13 @@
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::future::Future;
 use std::num::{NonZeroU32, NonZeroU128};
+use std::pin::Pin;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::task::{Poll, Waker};
+use std::thread;
+use std::time::Duration;
 
 // `self` is load-bearing: the `Component` and `Resource` derives expand to
 // `bevy_ecs::…` paths, so the crate name has to be in scope at the use site even
@@ -207,6 +213,14 @@ use super::spec::{
 use super::verb::EffectLifetime;
 use super::verb::RefreshReason;
 use super::verb::{Evaluate, Execute, Observe};
+
+// The one declared clock every deadline in this crate names (INV-BOT-30). Only
+// its wall watchdog is read below — a source that stopped answering is not
+// waiting for time, so a logical counter a caller can advance is the wrong
+// authority for it — but it is reached through the crate's clock rather than
+// through a free-floating `Instant`, which is what makes the elapsed time that
+// cancelled a poll traceable to a named authority.
+use crate::clock::Clock;
 
 // ── The effect path: identity, fencing, and the write-ahead record ─────────
 
@@ -1351,6 +1365,16 @@ struct Invalidated {
     reasons: Vec<Option<RefreshReason>>,
 }
 
+/// The bot's declared per-poll deadline, as the commit step reads it.
+///
+/// A resource beside `EcsBot::poll_deadline` rather than a second source of
+/// truth: `observe_fold` is a schedule step and can only reach the world, so the
+/// value it needs to put on a typed cancellation has to be there. It is inserted
+/// from the same field the observation phase reads, so the number on the error and
+/// the number that bounded the poll cannot differ.
+#[derive(Debug, Clone, Copy, Resource)]
+struct PollBudget(Duration);
+
 impl Invalidated {
     /// Mark `chain` invalid for `reason`, keeping the reason it already had.
     ///
@@ -1413,6 +1437,52 @@ impl ForcedRefresh {
     }
 }
 
+/// One source whose poll this tick cancelled at its per-poll deadline.
+///
+/// Reported rather than dropped, and beside [`ForcedRefresh`] rather than folded
+/// into it, because the two are different facts with different repairs: a forced
+/// refresh is a source that *told* the substrate its baseline was unsound, and a
+/// stall is a source that *stopped answering*. The first is fixed by the domain
+/// reconnecting; the second is bounded by the deadline, and a bot that reported
+/// one as the other would send a reader to the wrong place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StalledSource {
+    /// The chain whose poll was cancelled, read through `chain`.
+    chain: usize,
+    /// The source's own domain identifier, read through `domain`.
+    domain: String,
+    /// The budget that was applied, read through `deadline`.
+    deadline: Duration,
+}
+
+impl StalledSource {
+    /// The chain whose poll was cancelled.
+    ///
+    /// The chain's index in declaration order, which is what `pending()` and the
+    /// settlement reports name too, so one index identifies a chain across every
+    /// report this bot produces.
+    #[must_use]
+    pub const fn chain(&self) -> usize {
+        self.chain
+    }
+
+    /// The source's own domain identifier.
+    ///
+    /// The same spelling `Observe::domain_id` returns, so a caller triaging a
+    /// stall can name the domain without holding the declaration order — which is
+    /// the whole reason the report carries it.
+    #[must_use]
+    pub fn domain(&self) -> &str {
+        &self.domain
+    }
+
+    /// The per-poll budget that was applied when this poll was cancelled.
+    #[must_use]
+    pub const fn deadline(&self) -> Duration {
+        self.deadline
+    }
+}
+
 /// What one tick observed about its own sources, beside the effects it fired.
 ///
 /// The count of fired effects answers "what did this tick do"; this answers
@@ -1435,6 +1505,8 @@ pub struct TickReport {
     forced: Vec<ForcedRefresh>,
     /// The observations this tick passed over, read through `superseded`.
     superseded: Vec<SupersededObservation>,
+    /// The sources this tick stopped waiting for, read through `stalled`.
+    stalled: Vec<StalledSource>,
 }
 
 impl TickReport {
@@ -1477,6 +1549,28 @@ impl TickReport {
     #[must_use]
     pub fn superseded_any(&self) -> bool {
         !self.superseded.is_empty()
+    }
+
+    /// Sources whose poll this tick cancelled at the per-poll deadline.
+    ///
+    /// In chain order, at most one entry per chain. Every one of them committed
+    /// nothing, so a caller reconciling "what did the tick see" against the fired
+    /// count must read this beside `fired` rather than instead of it: the chains
+    /// named here are the ones whose absence from the effects is explained, not
+    /// the ones that had nothing to say.
+    ///
+    /// Empty is the ordinary answer, and it is distinguishable from a tick that
+    /// never happened because this is published by the tick that ran, whatever
+    /// that tick's own result was.
+    #[must_use]
+    pub fn stalled(&self) -> &[StalledSource] {
+        &self.stalled
+    }
+
+    /// Whether this tick gave up on any source.
+    #[must_use]
+    pub fn stalled_any(&self) -> bool {
+        !self.stalled.is_empty()
     }
 }
 
@@ -1742,6 +1836,243 @@ struct Plan {
 /// polled in additional waves.
 const MAX_IN_FLIGHT_POLLS: usize = 32;
 
+/// How long one source poll may take before the tick stops waiting for it.
+///
+/// `MAX_IN_FLIGHT_POLLS` above bounds how many sources are polled at once; this
+/// bounds how long the tick waits for any one of them. Without it a source that
+/// never resolves holds the whole tick — the observation wave is joined through
+/// `lgwks_std::task::join_all_boxed`, which polls on the calling thread and
+/// returns only when the wave has resolved — and every other chain's action is
+/// held behind a source nobody can make progress for. That is T06's slow-source
+/// half, and it was the one claim this substrate could not make.
+///
+/// Thirty seconds, and the reasoning is about what the number has to be rather
+/// than about taste. It is long enough that a source reading a socket, a
+/// `spawn_blocking` thread, or an ordinary remote call finishes first, so an
+/// ordinary tick is never cut short by it; and it is short enough that "the
+/// source is wedged" is a fact a caller waits one poll budget to observe rather
+/// than a change observed at the next deploy. [`MAX_POLL_DEADLINE`] is the
+/// ceiling a caller may raise it to, and the builder refuses anything past it.
+pub const DEFAULT_POLL_DEADLINE: Duration = Duration::from_secs(30);
+
+/// The largest per-poll deadline [`EcsBuilder::with_poll_deadline`] will grant.
+///
+/// A ceiling rather than an unconstrained field, because the deadline is the one
+/// bound between a wedged source and a bot that never ticks again. A caller who
+/// needs longer than this is making a statement about their whole fan-out, and
+/// the refusal is where that statement belongs.
+pub const MAX_POLL_DEADLINE: Duration = Duration::from_secs(600);
+
+/// Take `mutex`, treating poisoning as non-fatal.
+///
+/// The watchdog state is three writes that have to happen in one order across
+/// two threads. Every critical section here moves whole values in or out and
+/// writes no partial state, so a poisoned lock still guards a consistent value
+/// and the panic is already the watchdog's to report. Recovering the guard is
+/// therefore correct, and it is why this is not an `unwrap`.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// One poll's deadline watchdog, shared with the poll loop.
+///
+/// Two halves under two primitives rather than three atomics, because the
+/// invariant is an *ordering* between three writes across two threads and a lock
+/// is what makes "install the waker, then read the flag" one indivisible step.
+/// With atomics the same sequence needs a re-check after every publish, and the
+/// window that produces is exactly the lost wakeup that hangs a tick.
+#[derive(Debug, Default)]
+struct PollWatchdog {
+    /// What the two threads share.
+    state: Mutex<WatchdogState>,
+    /// How the reaper waits, and how the poll loop ends that wait early.
+    ///
+    /// A condition variable rather than a sleep, because a poll that resolves
+    /// must not leave a thread parked for the rest of its budget: that is the
+    /// cost this was built to remove, not to move.
+    settled: Condvar,
+}
+
+/// The guarded half of [`PollWatchdog`].
+#[derive(Debug, Default)]
+struct WatchdogState {
+    /// Whether the deadline has passed. Read on the polling thread, written by
+    /// the reaper.
+    expired: bool,
+    /// Whether the poll finished, so the reaper has nothing left to do.
+    released: bool,
+    /// The task to wake when the deadline passes.
+    ///
+    /// Left installed across the reaper's wait rather than cleared before it:
+    /// clearing is what loses the wakeup. The reaper clears it on the way *out*
+    /// by taking it, and the poll loop installs it again on every turn, so the
+    /// one case that must not happen — a deadline expiring against a poll loop
+    /// that is already parked with this field empty — cannot be constructed.
+    waker: Option<Waker>,
+}
+
+/// Watch one poll's deadline and wake the poll loop when it passes.
+///
+/// The remaining budget is recomputed on every pass rather than slept once, so
+/// the deadline is honoured to the quantum rather than to a multiple of it, and
+/// a spurious wake — which a condition variable is free to produce — costs one
+/// extra turn rather than a missed deadline.
+///
+/// The waker is *not* cleared before the wait, and `released` is *not* set
+/// without the notification. Those are the two halves of the same mistake: the
+/// poll loop installs its waker on the turn that finds `expired` false and then
+/// parks, so a reaper that cleared the slot on the way into its wait would expire
+/// against an empty one; and a reaper that published `released` before notifying
+/// would sleep out the whole budget on a poll that had already returned. Both are
+/// avoided by making the notification happen while the lock is held, which is what
+/// `settled.notify_all()` inside the same critical section as the write buys.
+fn reaper(clock: &Clock, deadline: Duration, watchdog: &PollWatchdog) {
+    let fired = clock.wall_watchdog();
+    let mut state = lock(&watchdog.state);
+    while !state.released {
+        let remaining = deadline.saturating_sub(fired.elapsed());
+        if remaining.is_zero() {
+            state.expired = true;
+            // Woken with the lock held, because the waker must be taken here: a
+            // poll loop that installs one immediately afterwards would otherwise
+            // park against a waker nobody holds.
+            if let Some(waker) = state.waker.take() {
+                waker.wake();
+            }
+            return;
+        }
+        let (woken, _) = watchdog
+            .settled
+            .wait_timeout(state, remaining)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state = woken;
+    }
+}
+
+/// Run `poll` under `deadline`, reporting a typed stall rather than waiting
+/// forever.
+///
+/// This is the whole of T06's slow-source half, and it is one function because
+/// there is exactly one place in this crate where a source poll is awaited and
+/// exactly one place that can therefore bound it. Putting the bound anywhere
+/// else would mean a second place that could forget it.
+///
+/// # Why the *watchdog* half of the declared clock
+///
+/// The crate's one declared clock ([`crate::rt::clock::Clock`], INV-BOT-30) has
+/// two halves, and this takes the one that is always on: a real-time watchdog
+/// that keeps running when the logical counter is frozen. That is the correct
+/// authority here, and the reason is in the clock's own contract — a source that
+/// stopped answering is not waiting for time to pass, it has stopped making
+/// progress entirely. A logical deadline would either expire against a poll that
+/// was merely slow (because a test advanced the clock) or wait on the wedged one
+/// forever (because nothing advanced it).
+///
+/// The declaration is still load-bearing: the watchdog is obtained *through* a
+/// [`crate::rt::clock::Clock`], so the elapsed time that cancelled this poll
+/// traces back to a clock the crate named rather than to a free-floating
+/// `Instant` someone sampled at a call site.
+///
+/// # What "cancelled" means
+///
+/// The poll future is dropped where it stands. It committed nothing, so its
+/// chain's baseline and its forced-refresh mark are exactly as they were, and the
+/// next tick re-polls it — the same rule a failed poll already follows, and for
+/// the same reason: the value this poll was supposed to replace is still there.
+/// Dropping a future is cooperative, so a poll that already handed work to
+/// `spawn_blocking` has its handle released and its thread runs to completion;
+/// that is the documented behaviour of the estate's executor, and it is why the
+/// stall report is about *this bot's* observation and not about the source's
+/// side effects.
+///
+/// A sibling poll in the same wave is not touched: the deadline is per poll, so a
+/// wedged source never stops the chains beside it from committing and acting.
+async fn bounded_poll<F>(
+    deadline: Duration,
+    chain: usize,
+    mut poll: Pin<Box<F>>,
+) -> Result<Option<Erased>, BotError>
+where
+    F: Future<Output = Result<Option<Erased>, BotError>>,
+{
+    let clock = Clock::wall();
+    let watchdog = Arc::new(PollWatchdog::default());
+
+    // `std::thread::Builder` rather than the `std::thread::spawn` this workspace
+    // bans: the handle is joined below, so the thread is owned by this call for
+    // its whole life rather than being fire-and-forget with an invisible panic.
+    let reaped = match thread::Builder::new()
+        .name("lgwks-poll-deadline".into())
+        .spawn({
+            let clock = clock.clone();
+            let watchdog = Arc::clone(&watchdog);
+            move || reaper(&clock, deadline, &watchdog)
+        }) {
+        Ok(handle) => handle,
+        // A watchdog that could not start is not a reason to run the poll
+        // unbounded: this tick would then be exactly as wedged as it was before
+        // the deadline existed. Reported as a stall so the caller sees a source
+        // that is unresolved, not a bot that silently stopped bounding it.
+        Err(_) => return Err(BotError::PollStalled { chain, deadline }),
+    };
+
+    let outcome = std::future::poll_fn(|cx| {
+        // Install, then read — both under the lock, which is what closes the
+        // window a reaper firing between them would open. See `PollWatchdog`.
+        let mut state = lock(&watchdog.state);
+        if state.expired {
+            return Poll::Ready(Err(BotError::PollStalled { chain, deadline }));
+        }
+        let replace = state
+            .waker
+            .as_ref()
+            .is_none_or(|installed| !installed.will_wake(cx.waker()));
+        if replace {
+            state.waker = Some(cx.waker().clone());
+        }
+        drop(state);
+
+        match poll.as_mut().poll(cx) {
+            // Polled before a late expiry is consulted, so a poll that resolved
+            // in the same turn the deadline passed still answers with what it
+            // read. A cancellation landing on a poll that was about to finish is
+            // indistinguishable from one that never was going to, and only the
+            // value is a fact.
+            Poll::Ready(outcome) => Poll::Ready(outcome),
+            Poll::Pending => {
+                if lock(&watchdog.state).expired {
+                    Poll::Ready(Err(BotError::PollStalled { chain, deadline }))
+                } else {
+                    Poll::Pending
+                }
+            }
+        }
+    })
+    .await;
+
+    // Released and notified as one step, under one lock. Setting `released`
+    // without the notification would be a lost wakeup: the reaper would find it
+    // on its next turn only after `wait_timeout` returned, which for a poll that
+    // resolved in a microsecond means the thread sits in its wait for the whole
+    // budget. The notification is inside the same critical section as the write
+    // precisely so that turn cannot be lost.
+    {
+        let mut state = lock(&watchdog.state);
+        state.released = true;
+        state.waker = None;
+        watchdog.settled.notify_all();
+    }
+    // A reaper panic is not this function's outcome to report: the poll's own
+    // answer is the observation, and the thread has either done its work or
+    // given up. Joining rather than detaching is what keeps the thread owned to
+    // the call that started it, which is the whole reason it was spawned with a
+    // handle in the first place.
+    let _joined = reaped.join();
+    outcome
+}
+
 /// Compare two erased outputs as `S::Output`.
 ///
 /// A downcast that fails is reported as *different* rather than equal: treating
@@ -1829,11 +2160,25 @@ where
     }
 }
 
-/// The parked error, if the tick has already failed.
+/// Whether the tick is parked, so its steps commit and run nothing.
+///
+/// A **domain** failure parks a tick: the substrate could not act on what a chain
+/// told it, and the tick's contract is that such a tick commits nothing and fires
+/// nothing. A **cancelled** poll does not, and that distinction is the whole of
+/// T06's slow-source half. A source that stopped answering said nothing, so the
+/// chains beside it have real observations to commit — withholding them because
+/// one unrelated source was slow is exactly the starvation the per-poll deadline
+/// exists to prevent.
+///
+/// The report still names every cancelled chain, and the tick still returns the
+/// typed cancellation; what it does not do is stop the bot.
 fn parked(world: &World) -> bool {
-    world
-        .get_resource::<TickError>()
-        .is_some_and(|error| error.0.is_some())
+    world.get_resource::<TickError>().is_some_and(|error| {
+        error
+            .0
+            .as_ref()
+            .is_some_and(|error| !matches!(error, BotError::PollStalled { .. }))
+    })
 }
 
 // ── The work ledger: eligible work, separate from change detection ─────────
@@ -3572,17 +3917,50 @@ fn observe_fold(world: &mut World) {
     // `BotError` is the caller's evidence and is deliberately not `Clone` —
     // copying it to report it would let a caller settle an effect against a
     // duplicate of the failure rather than the failure itself.
+    //
+    // A cancelled poll is **not** one of those errors, and that is the whole
+    // difference between the two rows it could otherwise be confused for. A
+    // source that refused reported a fact about itself, so the tick that heard
+    // it has nothing to commit and reports the failure. A source that stopped
+    // answering told the substrate nothing at all, so the chains *beside* it
+    // still have real observations to commit — the same rule that already lets
+    // one chain's failing action leave the effects before it live. Treating the
+    // cancellation as a failure here would mean one wedged source stopped every
+    // chain on the bot from committing for as long as it stayed wedged, which is
+    // precisely the starvation this deadline exists to prevent.
     let mut first_error = None;
-    for result in polled.iter_mut() {
-        if result.is_err() {
+    let mut first_stall = None;
+    for (index, result) in polled.iter_mut().enumerate() {
+        let stalled = matches!(result, Err(BotError::PollStalled { .. }));
+        if stalled {
+            first_stall.get_or_insert(index);
+            *result = Ok(None);
+        } else if result.is_err() && first_error.is_none() {
             first_error = std::mem::replace(result, Ok(None)).err();
-            break;
         }
     }
-    if let Some(error) = first_error {
-        world.resource_mut::<TickError>().0 = Some(error);
-        put_polled(world, polled);
-        return;
+    // One stall is reported and the rest are already named in the tick report, so
+    // the tick's own `Result` carries a single typed cancellation the way it
+    // carries a single first domain failure. The report is the complete list; this
+    // is the one a caller matching on the variant can act on.
+    match (first_stall, first_error) {
+        // A cancellation is reported and the commit *proceeds*: the chains beside
+        // the wedged one have real observations, and withholding them is the
+        // starvation this deadline exists to prevent.
+        (Some(chain), _) => {
+            world.resource_mut::<TickError>().0 = Some(BotError::PollStalled {
+                chain,
+                deadline: world.resource::<PollBudget>().0,
+            });
+        }
+        // A domain failure stops the commit, as it always did: the tick's contract
+        // is that a tick which could not act on what a chain said commits nothing.
+        (None, Some(error)) => {
+            world.resource_mut::<TickError>().0 = Some(error);
+            put_polled(world, polled);
+            return;
+        }
+        (None, None) => {}
     }
 
     // The rendezvous. The results arrived in chain order because `poll_sources`
@@ -4057,6 +4435,14 @@ pub struct EcsBot {
     world: World,
     /// The validated schedule.
     schedule: Schedule,
+    /// How long one source poll may take before the tick stops waiting for it.
+    ///
+    /// A field rather than a resource because nothing in the schedule reads it:
+    /// it bounds the observation phase alone, and a resource would put a second
+    /// writer next to the phase that owns it. The declared default is
+    /// [`DEFAULT_POLL_DEADLINE`] and the builder's override is the only other
+    /// value a bot can carry.
+    poll_deadline: Duration,
 }
 
 impl EcsBot {
@@ -4068,6 +4454,7 @@ impl EcsBot {
             chains: Vec::new(),
             policy: RetryPolicy::DEFAULT,
             effects: None,
+            poll_deadline: DEFAULT_POLL_DEADLINE,
         }
     }
 
@@ -4386,7 +4773,7 @@ impl EcsBot {
         // and a mutable borrow of a resource cannot be held across them.
         let mut polled = std::mem::take(&mut self.world.non_send_mut::<Polled>().0);
         polled.clear();
-        let invalidations = self.poll_sources(&mut polled).await;
+        let (invalidations, stalled) = self.poll_sources(&mut polled).await;
         self.world.non_send_mut::<Polled>().0 = polled;
 
         // Published before the schedule runs, so the report describes this tick's
@@ -4396,6 +4783,7 @@ impl EcsBot {
         // already declared its cache unsound when it failed.
         self.record_invalidations(&invalidations);
         self.publish_refreshes();
+        self.publish_stalls(&stalled);
 
         self.schedule.run(&mut self.world);
 
@@ -4540,6 +4928,29 @@ impl EcsBot {
     /// fan-out. Determinism is unaffected: the results are collected in
     /// declaration order whatever order they resolve in.
     ///
+    /// # Bounded in time as well as in width
+    ///
+    /// Each poll runs under [`bounded_poll`], which gives it
+    /// [`Self::poll_deadline`] of *real* elapsed time before the wave drops it.
+    /// Without that, the fan-out cap is the only bound this phase has and a
+    /// source that never resolves holds the tick forever — which is T06's
+    /// slow-source half, and it was the one claim this substrate could not make.
+    ///
+    /// The bound is measured on the wall watchdog half of the crate's one
+    /// declared clock ([`crate::rt::clock::Clock`], INV-BOT-30) rather than on
+    /// its logical counter, because a source that stopped answering is not
+    /// waiting for time to pass: it has stopped making progress entirely, and a
+    /// logical clock a caller can advance would either fire the deadline for a
+    /// poll that was merely slow or wait on the wedged one forever. What the
+    /// clock names is the *source* of the elapsed time, so a reader can ask
+    /// which clock governed the cancellation.
+    ///
+    /// A cancelled poll commits nothing, keeps its chain's baseline and its
+    /// forced-refresh mark standing, and is reported through
+    /// [`TickReport::stalled`]. Its siblings in the wave are not stopped: the
+    /// deadline is per poll, so the chains beside a wedged one still commit and
+    /// act in the same tick.
+    ///
     /// # Why the output is a parameter
     ///
     /// `polled` is the caller's buffer, already cleared and already holding the
@@ -4585,7 +4996,7 @@ impl EcsBot {
     async fn poll_sources(
         &self,
         polled: &mut Vec<Result<Option<Erased>, BotError>>,
-    ) -> Vec<Option<RefreshReason>> {
+    ) -> (Vec<Option<RefreshReason>>, Vec<usize>) {
         let count = self.world.non_send::<Chains>().0.len();
         polled.clear();
         polled.resize_with(count, || Ok(None));
@@ -4596,6 +5007,13 @@ impl EcsBot {
         // closures below borrow the world's sources immutably for their whole
         // life.
         let mut declared = self.declared_refresh(count);
+        // The chains whose poll was cancelled, in declaration order. Collected
+        // here rather than published by the caller because the poll phase is the
+        // only place that knows which poll was cut short, and the report must be
+        // published before the schedule step runs on the strength of this tick's
+        // observation — a tick that then failed still has to say which source it
+        // gave up on.
+        let mut stalled: Vec<usize> = Vec::new();
 
         for wave_index in 0..count.div_ceil(MAX_IN_FLIGHT_POLLS) {
             let base = wave_index.saturating_mul(MAX_IN_FLIGHT_POLLS);
@@ -4643,14 +5061,19 @@ impl EcsBot {
                         .and_then(|slot| slot.as_ref())
                         .or_else(|| ledger.bound(index))
                 };
-                chain.source.poll_any(&grants.0, baseline)
+                let poll = Box::pin(chain.source.poll_any(&grants.0, baseline));
+                Box::pin(bounded_poll(self.poll_deadline, index, poll))
             }));
             let results = batch.await;
 
             for (&(index, _), result) in wave.iter().zip(results) {
-                if let Some(slot) = polled.get_mut(index) {
-                    *slot = result;
+                let Some(slot) = polled.get_mut(index) else {
+                    continue;
+                };
+                if matches!(result, Err(BotError::PollStalled { .. })) {
+                    stalled.push(index);
                 }
+                *slot = result;
             }
         }
 
@@ -4683,7 +5106,20 @@ impl EcsBot {
                 _ => {}
             }
         }
-        declared
+        // The `Some(false)` arm above is exactly what a cancelled poll reaches,
+        // and that is deliberate: a stalled poll read nothing, so its baseline is
+        // as unsound as it was and the mark has to outlive this tick, which is
+        // the same rule a failed poll already follows. Clearing the mark on a
+        // stall would re-read the source against the very baseline the stall
+        // left standing, which is the quiet state INV-BOT-120 exists to rule
+        // out.
+        //
+        // Sorted rather than in wave-completion order: a chain's index is its
+        // identity everywhere else in this crate, and a report whose order
+        // depended on which wave finished first could not be compared across two
+        // runs of one seed.
+        stalled.sort_unstable();
+        (declared, stalled)
     }
 
     /// What each of `count` chains declares about its own caching right now.
@@ -4767,6 +5203,33 @@ impl EcsBot {
                 .collect()
         };
         self.world.resource_mut::<TickReport>().forced = forced;
+    }
+
+    /// Copy this tick's cancelled polls onto the tick report, in chain order.
+    ///
+    /// The same build-then-assign shape as [`Self::publish_refreshes`] and the
+    /// same reason: naming a chain's domain needs two shared borrows of the world
+    /// and writing the report needs a mutable one.
+    fn publish_stalls(&mut self, stalled: &[usize]) {
+        let rows: Vec<StalledSource> = {
+            let order = self.world.resource::<Order>();
+            stalled
+                .iter()
+                .map(|chain| {
+                    let domain = order
+                        .0
+                        .get(*chain)
+                        .and_then(|entity| self.world.get::<SourceId>(*entity))
+                        .map_or_else(String::new, |id| id.domain().to_owned());
+                    StalledSource {
+                        chain: *chain,
+                        domain,
+                        deadline: self.poll_deadline,
+                    }
+                })
+                .collect()
+        };
+        self.world.resource_mut::<TickReport>().stalled = rows;
     }
 
     /// Run the effects the decision phase selected, in the order it selected
@@ -5393,9 +5856,64 @@ pub struct EcsBuilder {
     /// resend a merge. A default-off variant of the same bot would be worse
     /// still, because nothing would exercise it.
     effects: Option<EffectScope>,
+    /// How long one source poll may take before the tick stops waiting for it.
+    ///
+    /// A declared bound rather than a hidden one, so a caller who has been
+    /// waiting on a wedged source can read the budget from the builder instead of
+    /// discovering it as a mystery. Defaults to [`DEFAULT_POLL_DEADLINE`].
+    poll_deadline: Duration,
 }
 
 impl EcsBuilder {
+    /// Set how long one source poll may take before the tick stops waiting for it.
+    ///
+    /// The bound that makes T06's slow-source half true. A poll that misses it is
+    /// dropped mid-flight, commits nothing, leaves its chain's baseline and its
+    /// forced-refresh mark standing, and is reported in
+    /// [`TickReport::stalled`] — so the chains beside it commit and act in the
+    /// same tick rather than waiting on a source that will not answer.
+    ///
+    /// Bounded at both ends, because both ends are the same fact: a zero budget
+    /// cancels every poll before its first poll, and a budget past
+    /// [`MAX_POLL_DEADLINE`] is a caller asking for a bot that can still hang.
+    /// Both are [`BotError`]s at [`build`](Self::build), not panics and not
+    /// silently clamped values, because a clamp is indistinguishable from the
+    /// budget the caller asked for.
+    ///
+    /// ```
+    /// # use std::time::Duration;
+    /// # use lgwks_bot::spec::EffectScope;
+    /// # use lgwks_bot::{Bot, BotError, GrantSet};
+    /// # fn effects() -> Result<EffectScope, Box<dyn std::error::Error>> {
+    /// #     unreachable!("the doctest has no journal to build one from")
+    /// # }
+    /// let scope = effects()?;
+    /// let refused = Bot::builder("zero")
+    ///     .with_poll_deadline(Duration::ZERO)
+    ///     .with_effects(scope)
+    ///     .build(&GrantSet::empty());
+    /// assert!(matches!(
+    ///     refused,
+    ///     Err(BotError::PollDeadlineUnbounded { .. })
+    /// ));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// Defaults to [`DEFAULT_POLL_DEADLINE`] for a caller that never calls this,
+    /// which is what makes it a declared policy rather than a hidden constant.
+    ///
+    /// # Errors
+    ///
+    /// [`BotError::PollDeadlineUnbounded`] for [`Duration::ZERO`], and
+    /// [`BotError::PollDeadlineExceeded`] for a budget above
+    /// [`MAX_POLL_DEADLINE`]. Both surface from [`build`](Self::build), so this
+    /// call itself cannot fail.
+    #[must_use]
+    pub fn with_poll_deadline(mut self, deadline: Duration) -> Self {
+        self.poll_deadline = deadline;
+        self
+    }
+
     /// Set the retry budget for entries whose effect definitely did not happen.
     ///
     /// Additive and defaulted: a caller that never calls this gets
@@ -5462,13 +5980,26 @@ impl EcsBuilder {
             entries: Vec::new(),
             policy: self.policy,
             effects: self.effects,
+            poll_deadline: self.poll_deadline,
         }
     }
 
     /// Build with no observation chains: a bot that only serves direct
     /// `Query` and `Execute` calls.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`EcsBuilder::with_poll_deadline`] documents, plus the
+    /// admission refusals [`EcsBot::assemble`] raises.
     pub fn build(self, grants: &GrantSet) -> Result<EcsBot, BotError> {
-        EcsBot::assemble(self.name, self.chains, grants, self.policy, self.effects)
+        EcsBot::assemble(
+            self.name,
+            self.chains,
+            grants,
+            self.policy,
+            self.effects,
+            self.poll_deadline,
+        )
     }
 }
 
@@ -5554,6 +6085,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
             entries,
             policy,
             effects,
+            poll_deadline,
         } = self;
         prior.push(EcsChain {
             source: Box::new(previous),
@@ -5569,6 +6101,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
             entries: Vec::new(),
             policy,
             effects,
+            poll_deadline,
         }
     }
 
@@ -5589,6 +6122,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
             entries,
             policy,
             effects,
+            poll_deadline,
         } = self;
         prior.push(EcsChain {
             source: Box::new(source),
@@ -5597,7 +6131,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
             witness: Witness::of::<S::Output>(),
             entries,
         });
-        EcsBot::assemble(name, prior, grants, policy, effects)
+        EcsBot::assemble(name, prior, grants, policy, effects, poll_deadline)
     }
 }
 
@@ -5626,8 +6160,10 @@ pub struct EcsObserveBuilder<S> {
     source: S,
     /// Tuples attached so far, each already erased for storage.
     entries: Vec<ChainEntry>,
-    /// Carried from [`EcsBuilder`] alongside `name`.
+    /// Carried from [`EcsBuilder`] alongside `policy`.
     policy: RetryPolicy,
+    /// Carried from [`EcsBuilder`] alongside `policy`.
+    poll_deadline: Duration,
 }
 
 impl EcsBot {
@@ -5640,9 +6176,26 @@ impl EcsBot {
         grants: &GrantSet,
         policy: RetryPolicy,
         effects: Option<EffectScope>,
+        poll_deadline: Duration,
     ) -> Result<Self, BotError> {
         if name.is_empty() {
             return Err(BotError::IncompleteSpec { field: "name" });
+        }
+        // Refused before anything is built or polled, and for the same reason the
+        // name is: a budget of zero cancels every poll before its first poll, so
+        // a bot built with one observes nothing forever and reports every chain
+        // as stalled. A refusal here names the number and the repair rather than
+        // producing a bot whose every tick is a cancellation.
+        if poll_deadline.is_zero() {
+            return Err(BotError::PollDeadlineUnbounded {
+                deadline: poll_deadline,
+            });
+        }
+        if poll_deadline > MAX_POLL_DEADLINE {
+            return Err(BotError::PollDeadlineExceeded {
+                deadline: poll_deadline,
+                ceiling: MAX_POLL_DEADLINE,
+            });
         }
         // Refused before the capability gate, because a bot that cannot record
         // a dispatch is not a bot that is missing a capability — it is one that
@@ -5710,6 +6263,7 @@ impl EcsBot {
         world.insert_resource(Fired::default());
         world.insert_resource(TickError::default());
         world.insert_resource(Policy(policy));
+        world.insert_resource(PollBudget(poll_deadline));
 
         let mut order = Vec::with_capacity(chains.len());
         for (index, chain) in chains.iter().enumerate() {
@@ -5876,6 +6430,7 @@ impl EcsBot {
             name,
             world,
             schedule,
+            poll_deadline,
         })
     }
 }
