@@ -199,7 +199,7 @@ fn spawn_probe(
     marker_path: &std::path::Path,
     events: usize,
 ) -> Result<ProbeGuard, Box<dyn std::error::Error>> {
-let journal_path = &row.journal;
+    let journal_path = &row.journal;
     Ok(ProbeGuard(Some(
         probe_command(test_name)?
             .env(PROBE_ENV, "1")

@@ -28,18 +28,14 @@ use lgwks_bot::effect::{
 pub const RUN: &str = "0102030405060708090a0b0c0d0e0f10";
 pub const ACTION: &str = "1112131415161718191a1b1c1d1e1f20";
 pub const ENV: &str = "2122232425262728292a2b2c2d2e2f30";
-pub const FLOW_HEX: &str =
-    "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+pub const FLOW_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
 /// The key for attempt `attempt` under the shared identity.
 ///
 /// `digest` is the attempt's content identity; a different digest is a
 /// different attempt with its own ladder, which is exactly the distinction the
 /// recovery rows turn on.
-pub fn key(
-    attempt: &str,
-    digest: &str,
-) -> Result<EffectKey, Box<dyn std::error::Error>> {
+pub fn key(attempt: &str, digest: &str) -> Result<EffectKey, Box<dyn std::error::Error>> {
     Ok(EffectKey::new(
         RunId::from_hex(RUN)?,
         ActionId::from_hex(ACTION)?,

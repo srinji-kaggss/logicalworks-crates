@@ -125,17 +125,33 @@ where
     // `Arc::clone` here rather than the caller's `timed_out` closure: the
     // closure is borrowed by neither future, and passing the path keeps one
     // error variant from being built in two places that can drift apart.
+    //
+    // The two refusal arms are boxed. A `select!` builds one future per branch
+    // and holds them all for the body's whole life, so an unboxed engine timer
+    // makes *every* `within` frame as large as the engine's timer state. That is
+    // paid once per nesting level — a flow that nests steps pays it once per
+    // level — and on a deeply nested tree the frames alone exhaust the caller's
+    // stack. Boxing moves the two arms to the heap; the frame that remains is
+    // the body's own future, which the caller sized.
+    let logical = Box::pin(settle_logical_bound(
+        &deadline,
+        Arc::clone(&at),
+        limit,
+        body,
+    ));
+    let watchdog = Box::pin(time::sleep(limit));
+    let stopped = Box::pin(scope.token().cancelled());
     lgwks_deps::tokio::select! {
         biased;
         // Read the logical bound before the engine's timer, so an advance that
         // has already spent the budget wins even if the timer arm is also ready.
-        finished = settle_logical_bound(&deadline, Arc::clone(&at), limit, body) => finished,
+        finished = logical => finished,
         // The engine's timer is the bound for a wall clock and nothing else; it
         // is exactly the old `time::timeout`, so a scope nobody gave a clock to
         // behaves as it always has.
-        () = time::sleep(limit) => Err(timed_out()),
+        () = watchdog => Err(timed_out()),
         // A stop, from the scope or anything it descends from.
-        () = scope.token().cancelled() => Err(FlowError::Cancelled { at: Arc::clone(&at) }),
+        () = stopped => Err(FlowError::Cancelled { at: Arc::clone(&at) }),
     }
 }
 

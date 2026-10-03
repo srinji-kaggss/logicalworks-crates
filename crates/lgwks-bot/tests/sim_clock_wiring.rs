@@ -1192,3 +1192,96 @@ fn a_hundred_thousand_joined_tasks_all_reach_a_terminal_state()
     );
     Ok(())
 }
+
+/// A deep nest of clock-governed steps stays inside a bounded stack.
+///
+/// This is the regression for a defect the clock wiring introduced and that no
+/// functional assertion could see. [`within`](lgwks_bot::script::within) races
+/// the body's future against a logical-clock poll and an engine watchdog; a
+/// `select!` builds one future per branch and holds them all for the body's life.
+/// With the branches held inline, *every* `within` frame was as large as the
+/// engine's timer state — paid once per nesting level — and `sim_task`'s nested
+/// trees overflowed a test thread's default 2 MiB stack. Every assertion still
+/// passed; the process died before reaching them.
+///
+/// Two things make this a real observation rather than a repeat of that report:
+///
+/// - the depth and the stack are **chosen by measurement** so the test fails
+///   when the arms are unboxed and passes when they are boxed. A larger stack
+///   would make it pass either way, which is the one thing a regression test must
+///   not do; the constants below say which configuration discriminates.
+/// - the result is a completed value, so a run that merely *survived* without
+///   computing the right answer still fails.
+#[test]
+fn a_deep_nest_of_clock_governed_steps_is_stack_bounded() -> Result<(), Box<dyn std::error::Error>>
+{
+    /// Deep enough that an unboxed `select!` arm overflows the stack below, shallow
+    /// enough that a correctly boxed one is comfortable.
+    ///
+    /// This pair was chosen by measurement, not by guess: at 1,024 levels on a
+    /// 1,536 KiB stack this test **passes** with the arms boxed and **overflows**
+    /// with them inline. A shallower or more generously budgeted configuration
+    /// passes either way, and a regression test that cannot fail is not one.
+    const DEPTH: usize = 1_024;
+    /// The stack the nest is run on — the discriminating half of the pair above.
+    /// A 1,024 KiB budget passes whether or not the arms are boxed; 1,536 KiB
+    /// passes only when they are.
+    const STACK_BYTES: usize = 1_536 * 1024;
+
+    let clock = Clock::virtual_at(Duration::ZERO);
+    // A root scope built on the same declared clock, so the nest's budgets are
+    // the logical ones and the test measures the wiring rather than the engine's
+    // timer.
+    let scope = Scope::with_clock(
+        Tenant::new("acme").map_err(|error| error.to_string())?,
+        clock.clone(),
+    );
+    let outcome = std::thread::Builder::new()
+        .stack_size(STACK_BYTES)
+        .name("lgwks-deep-nest".to_owned())
+        .spawn(move || block_on(Box::pin(nest(&clock, &scope, DEPTH))))
+        .map_err(|error| format!("the nest thread could not start: {error}"))?
+        .join()
+        .map_err(|_| {
+            "the nest thread panicked or overflowed its stack: a deeply nested \
+                       clock-governed step no longer fits in 2 MiB"
+        })??;
+
+    assert_eq!(
+        outcome,
+        u64::try_from(DEPTH).unwrap_or(u64::MAX),
+        "every level of the nest must run exactly once and report its own depth"
+    );
+    Ok(())
+}
+
+/// One level of the nest: `depth` clock-governed steps wrapped around the next.
+///
+/// `remaining` counts down to the leaf, so the value each level returns is the
+/// number of levels it actually executed rather than the constant it was
+/// handed — a level that skipped its body would report its argument back and
+/// the sum would still look right.
+async fn nest(
+    clock: &Clock,
+    scope: &Scope,
+    remaining: usize,
+) -> Result<u64, lgwks_bot::script::FlowError> {
+    if remaining == 0 {
+        return Ok(0);
+    }
+    let inner = lgwks_bot::script::within_on(
+        clock,
+        scope,
+        "nest",
+        Duration::from_secs(30),
+        // Boxed because this function recurses — an unboxed recursive `async fn`
+        // does not compile. That boxing is also exactly what makes this test
+        // discriminating: it puts the *nest's* frame on the heap and leaves the
+        // `within` frame — the one the clock wiring changed — on the stack, once
+        // per level. A regression that enlarged the `within` frame shows up here
+        // as a stack overflow rather than being absorbed by the heap.
+        Box::pin(nest(clock, scope, remaining.saturating_sub(1))),
+    )
+    .await?;
+    Ok(inner.saturating_add(1))
+}

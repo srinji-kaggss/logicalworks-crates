@@ -30,8 +30,8 @@
 
 mod common;
 
-use common::key;
 use common::ProbeGuard;
+use common::key;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -323,12 +323,7 @@ enum Row {
 
 impl Row {
     /// Every row of the family, in the order they are reported.
-    const ALL: [Row; 4] = [
-        Row::Budget,
-        Row::Duration,
-        Row::Idempotent,
-        Row::NoRerun,
-    ];
+    const ALL: [Row; 4] = [Row::Budget, Row::Duration, Row::Idempotent, Row::NoRerun];
 
     /// The scratch directory this row works in.
     const fn scratch(self) -> &'static str {
