@@ -208,6 +208,15 @@ command = "cargo clippy --workspace --all-targets --locked -- -D warnings"
 ci_step = "Clippy all workspace targets"
 
 [[lane]]
+id = "scan"
+group = "quality"
+surfaces = "local ci"
+required = true
+fast = true
+command = "cargo run --locked --release -p lgwks_deps --bin lgwks-deps -- scan"
+ci_step = "Scan reports zero findings"
+
+[[lane]]
 id = "docs-all-features"
 group = "docs"
 surfaces = "local ci"

@@ -391,6 +391,15 @@ Each of these was a shipped defect. Treat the list as the spec.
   disposition, output or located error, and every report says no external
   effect is known. · why: #87 step 1 (T01–T04, T36) · enforced by:
   `tests/task_front_door.rs` and `tests/sim_task.rs`
+- **INV-SCAN-ZERO** No file this workspace ships carries a source finding: no
+  error is silently discarded, no fallible return reaches a caller with no
+  recorded signal, no statement chains more than three fallible steps without an
+  intermediate binding, and no public item's documentation is a paraphrase of its
+  own name. A file the scanner cannot parse is a refusal, not a pass. · why: the
+  name appeared in `scan.rs`'s module doc while 433 findings sat in shipped source
+  and no lane ran it — the invariant was advertised and unenforced · enforced by:
+  the `scan` lane (`scripts/gate-lanes.toml`, `ci.yml`), which exits 2 on any
+  finding
 
 ## Open questions for the Director
 

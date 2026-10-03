@@ -201,6 +201,12 @@ jobs:
           components: clippy
       - name: Clippy all workspace targets
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # INV-SCAN-ZERO. `scan` was the gate's own debt ledger and no lane ran it,
+      # so 433 findings sat in shipped source while the name was advertised as
+      # an invariant nothing checked. It is a lane now, and it refuses on any
+      # finding rather than reporting a count.
+      - name: Scan reports zero findings
+        run: cargo run --locked --release -p lgwks_deps --bin lgwks-deps -- scan
       - name: Clippy feature matrix
         # Per-crate all-features (gpui excluded: it needs the Xcode Metal
         # toolchain and is covered by the gpui-macos job, not ubuntu lanes).
