@@ -808,6 +808,76 @@ Each of these was a shipped defect. Treat the list as the spec.
   `tests/gh_binding.rs` (`a_review_list_past_the_ceiling_is_refused_not_truncated`,
   `a_review_list_exactly_at_the_ceiling_is_read`,
   `a_malformed_review_list_is_refused_rather_than_decoded_into_a_partial_answer`)
+- **INV-BOT-90** A source declares when its own cached baseline is unsound, and
+  the substrate acts on the declaration rather than on a heuristic it could not
+  have derived. `Observe::cache_state` returns a typed
+  `RefreshReason::{Disconnected, WatchOverflow, StaleRemoteKey, InvalidationFailed}`,
+  read from the source itself after its poll resolves and never guessed: the
+  substrate cannot know whether somebody else's transport is up, so a heuristic
+  would be a guess about a domain it does not own. A chain that declares one is
+  polled with `None` as its baseline, which makes the poll a read, which commits
+  the value the source reported and marks the chain moved — a forced refresh that
+  compared its fresh read against the baseline it had just been told was unsound
+  would keep the stale value forever and re-observe on every tick without ever
+  converging. The mark is spent only by a read that *committed*; a poll that
+  failed leaves it standing, because the baseline it was supposed to replace is
+  still there. The mark is per chain, so one source's failure never re-reads a
+  healthy sibling. `TickReport::forced` names the chain, the source's own
+  `domain_id` and the cause, published before the schedule runs so a failed tick
+  still reports what its sources had already declared. Every report field is
+  private behind an accessor: a caller that could edit the record of what a tick
+  observed could make a bot that went quiet for the wrong reason look like one
+  that went quiet for the right one. · why: #87 step 3 (T08, LC-04) · enforced by:
+  `tests/observe_refresh.rs`
+  (`a_declared_failure_forces_a_refresh_rather_than_a_permanent_quiet_state`,
+  `a_forced_refresh_commits_the_newer_value_and_then_returns_to_quiet`,
+  `a_failed_refresh_keeps_the_baseline_marked`,
+  `two_tenants_sources_forced_refreshes_stay_attributed_to_their_own_chain`),
+  `tests/sim_observe_refresh.rs` (`forced_refresh_band_00`..`05`,
+  `a_refresh_that_never_lands_band_06`..`09`) and
+  `verb::tests::only_supersession_leaves_the_baseline_sound`
+- **INV-BOT-91** An observation the substrate passes over is reported as its own
+  outcome, not as a fired effect and not as a retire. `Committed` records per
+  chain whether the value sitting in the observation slot has been admitted into
+  a generation yet, and a commit that replaces an *unacted* value reports it in
+  `TickReport::superseded` with the revision the **replaced** value carried —
+  what a caller correlates is "the generation for revision 4 never ran", and
+  revision 4 is the one this names. Three states rather than one boolean, because
+  "replaced before it was acted on" and "never observed at all" both read as
+  `false` in the two-state form, and conflating them makes every chain's first
+  commit a reported skip. Admission is marked where a generation *takes* the
+  value out of the slot, not where the transition is handed back: for an entry
+  awaiting evidence the handover is never reached, so the handover would leave
+  every value a held generation is holding reported as unacted — a pass-over
+  claim about a value that was already owed work. A forced refresh is not a
+  supersession and a supersession is not a forced refresh; neither is counted
+  among the other's. · why: #87 step 3 (T09, DX-07) · enforced by:
+  `tests/observe_refresh.rs`
+  (`an_intermediate_value_is_reported_as_superseded_rather_than_fired_or_retired`,
+  `identical_payloads_with_distinct_event_ids_both_execute_and_a_redelivery_does_not`)
+  and `tests/sim_observe_refresh.rs` (`event_identities_band_14`..`17`,
+  `tenants_never_cross_band_10`..`13`)
+- **INV-BOT-92** A chain held open does not starve an independent chain. A
+  generation whose action reports an indeterminate outcome stays held, so its
+  transition is walked on every tick and never released; the walk stops *at that
+  chain* and the chains behind it are still reached, which is what the existing
+  "a failure stops its own chain" rule already gives and this names from the
+  capacity side. The saturation is bounded: a transition is one state per entry of
+  the spec, so a held chain costs its declared slots and nothing more. At 100,
+  1,000 and 10,000 held chains on one bot an independent chain declared beside
+  them still completes, every held chain still reaches its own action once, and
+  every one is still **reported** as held — a dropped hold is a lost effect
+  nobody would ever see. The tier reached is recorded rather than clamped.
+  **Not claimed:** that a slow *source* fails to block unrelated ready work. A
+  tick joins its observation wave through `lgwks_std::task::join_all_boxed`, which
+  polls on the calling thread and returns only when the wave has resolved, so a
+  source that never resolves holds the tick and no other chain's action can run
+  before the walk, which is after it; `MAX_IN_FLIGHT_POLLS` bounds the fan-out,
+  not the wait. Bounding it would mean a per-source deadline, which is an
+  admission surface this crate does not have — `GrantSet` is the one. · why:
+  #87 step 3 (T06, LC-03) · enforced by: `tests/observe_refresh.rs`
+  (`a_chain_held_at_capacity_does_not_starve_an_independent_chain`,
+  `a_saturated_mass_does_not_starve_an_independent_chain_at_every_tier`)
 
 ## Open questions for the Director
 

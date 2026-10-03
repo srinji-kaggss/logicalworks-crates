@@ -8,6 +8,41 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### lgwks_bot Added
+
+- `verb::RefreshReason` and `Observe::cache_state` (INV-BOT-90). A source that
+  caches can now declare that its cached baseline is unsound, naming which of
+  four failures it was: `Disconnected`, `WatchOverflow`, `StaleRemoteKey` or
+  `InvalidationFailed`. Before this the substrate's shortcut — do not re-poll a
+  source whose value compares equal — assumed a baseline was sound, and in all
+  four cases "unchanged" and "I stopped looking" are the same observation, so the
+  bot settled into a permanent quiet state whose only symptom was zero fired
+  effects. The reason is read from the source itself after its poll resolves and
+  never guessed, because the substrate cannot know whether somebody else's
+  transport is up. **Migration:** none. `cache_state` defaults to `None`, so
+  every existing `Observe` impl keeps compiling and keeps its current behaviour;
+  an existing source that overrides the deprecated `fingerprint` should move its
+  state to `cache_state`, since that method no longer suppresses anything.
+- `TickReport` and `Bot::tick_report` (INV-BOT-90, INV-BOT-91). What the last
+  tick observed about its own sources, beside the count of effects it fired:
+  `forced` names the chains whose baseline the tick refused and re-read and the
+  cause each source declared, `superseded` names the observations replaced before
+  any entry acted on them. The count says what ran; this says what had to be
+  re-read to decide, and a quiet bot is exactly where only the first is
+  uninformative. Published before the schedule step runs, so a tick that failed
+  still reports what its sources had already declared. Every field is private
+  behind an accessor. **Migration:** none; reading it is optional.
+
+### lgwks_bot Fixed
+
+- An intermediate observation overtaken before any entry acted on it is now
+  reported rather than vanishing between "fired" and "retired" (INV-BOT-91).
+  Which chain's committed value had been admitted into a generation was a
+  boolean, so "never observed" and "observed and overtaken" read the same — and
+  every chain's first commit was reported as a skip. It is three states now, and
+  admission is marked where a generation *takes* the value rather than where the
+  transition is handed back, which for an entry awaiting evidence is never.
+
 ### lgwks_std Breaking
 
 - `similarity`: the `Similarity` implementation for `Cosine` now returns the
