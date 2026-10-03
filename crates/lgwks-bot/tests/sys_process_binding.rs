@@ -451,6 +451,108 @@ fn a_capture_ceiling_ends_the_framed_read_rather_than_the_child() -> TestResult 
     Ok(())
 }
 
+/// Rot the capture retained stands: a capture's cut never launders a child's
+/// malformed prefix into the capture's own ceiling.
+///
+/// The child writes a **zero-length prefix** — a length no writer of this grammar
+/// produces — and then 32 bytes, against an 8-byte capture. Only eight of those
+/// bytes were retained, so *some* of what a reader sees is a prefix the capture
+/// cut; the first four are not. They are a whole prefix that named a zero-length
+/// record, and that is rot in the child's output, decided entirely from bytes the
+/// capture did retain. An implementation that reports every ending as the
+/// capture's ceiling replaces that rot with a bound the caller did not hit, which
+/// is the fail-open direction: a caller looking for corruption would see a
+/// ceiling and go looking for a large record instead.
+#[test]
+fn a_rot_prefix_before_the_capture_cut_stays_refused() -> TestResult {
+    const CAPTURE: usize = 8;
+    // `\000\000\000\000` is the prefix `[0, 0, 0, 0]` — a declared length of zero.
+    // 32 more bytes follow, so the 8-byte capture certainly cut.
+    let script = "printf '\\000\\000\\000\\000'; head -c 32 /dev/zero | tr '\\0' 'x'";
+    let runtime = lgwks_bot::Runtime::new()?;
+    let run = runtime.block_on(async {
+        let mut supervisor = Supervisor::new(1);
+        supervisor
+            .run_process(&captured_shell(script, CAPTURE))
+            .await
+    })?;
+    assert!(
+        run.stdout().truncated(),
+        "36 bytes into an 8-byte capture, so the retained bytes are a prefix the capture cut"
+    );
+    assert_eq!(
+        run.stdout().bytes().len(),
+        CAPTURE,
+        "the whole 8-byte window is retained, so every prefix inside it was read whole"
+    );
+
+    let frames = run.stdout().frames(4096);
+    assert_eq!(
+        frames.ended(),
+        &FrameRead::MalformedPrefix {
+            declared: 0,
+            ceiling: 4096,
+        },
+        "the capture cut *later* bytes; the zero-length prefix before the cut was read whole \
+         and is rot in the child's output, so it stands"
+    );
+    assert!(
+        !frames.is_complete(),
+        "a reading of a capture-cut prefix is never a complete reading of the child"
+    );
+    Ok(())
+}
+
+/// The same cut, with a reader ceiling the reader itself reached first: the
+/// reader's own `CeilingReached` stands rather than the capture's.
+///
+/// The stream is four whole records of a two-byte payload, so three of them fit
+/// inside the capture and charge the reader exactly its 6-byte ceiling — the
+/// ceiling counts payload bytes, not stream bytes — while the fourth is cut. The
+/// reader therefore stops on its own bound, having read only bytes the capture
+/// retained in full, and never reaches the prefix the cut fell in the middle of.
+/// Which ceiling stopped the pass is the fact a caller acts on, and a capture cut
+/// that happened to truncate as well must not replace the reader's answer with
+/// the capture's capacity.
+#[test]
+fn a_reader_ceiling_over_a_truncated_capture_is_the_readers_own() -> TestResult {
+    const CAPTURE: usize = 20;
+    const READER: usize = 6;
+    // `[0,0,0,2] ok` six bytes each, four of them: 24 bytes against a 20-byte
+    // capture. The three whole records inside the capture are exactly the reader's
+    // ceiling of six payload bytes, and the fourth is the cut.
+    let script = "printf '\\000\\000\\000\\002ok\\000\\000\\000\\002ok\\000\\000\\000\\002ok\\000\\000\\000\\002ok'";
+    let runtime = lgwks_bot::Runtime::new()?;
+    let run = runtime.block_on(async {
+        let mut supervisor = Supervisor::new(1);
+        supervisor
+            .run_process(&captured_shell(script, CAPTURE))
+            .await
+    })?;
+    assert!(
+        run.stdout().truncated(),
+        "24 bytes into a 20-byte capture, so the capture did cut its retained prefix"
+    );
+    assert!(
+        run.stdout().retained_capacity() > READER,
+        "the capture's own capacity must exceed the reader's, or the two ceilings could \
+         never be told apart"
+    );
+
+    let frames = run.stdout().frames(READER);
+    assert_eq!(
+        frames.ended(),
+        &FrameRead::CeilingReached { ceiling: READER },
+        "the reader charged its own ceiling and stopped before the capture's cut could matter"
+    );
+    assert_eq!(
+        frames.retained_bytes(),
+        READER,
+        "every byte the reader retained is accounted for at its own ceiling"
+    );
+    Ok(())
+}
+
 /// The control for the case above: a capture that retained the child's whole
 /// output reports the child's own truncation, not the capture's ceiling.
 ///
