@@ -120,6 +120,14 @@ explicitly under that crate.
   rather than `<=`. The tiers, the single `Host`, the `join_all_bounded`
   pipeline and its `min(N, 64)` bound are unchanged; measured
   143.202s → see INV-BOT-97 (#151 review finding).
+- `lgwks_bot`: the fake `gh`'s review store commits each record with a
+  trailing newline, and a read-back keeps only newline-terminated lines. An
+  `O_APPEND` write is atomic against other appends but not against a reader:
+  on tmpfs (CI's `TMPDIR=/dev/shm`) a concurrent read-back saw the front half
+  of another run's record, cut mid-string at byte 8,193, and
+  `saturation_r32_tier_10000` failed with one run `Unknown` out of 100 on a
+  receiver. `tests/gh_binding.rs::a_record_still_being_appended_is_not_read_back`
+  plants a committed record and a torn one and asserts only the first is read.
 - `lgwks_bot`: the fake `gh` in `tests/support/fake_gh.rs` no longer forks an
   external helper on the common path. One `gh api` create or read used to fork
   `sed`/`cat`/`tail`/`tr` several times (a saturation family runs five calls per

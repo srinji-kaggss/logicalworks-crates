@@ -395,7 +395,16 @@ if [ "$method" = "POST" ]; then
       # to decide whether a separator was owed, which two creates could both
       # read as absent into `{...}{...}`. There is no first record to make bare
       # here, so there is nothing to probe.
-      printf ',{"id":%s,"commit_id":"%s","state":"%s","body":"%s","comment_count":%s}' \
+      #
+      # The record ends with a newline, and that newline is its commit mark. An
+      # append is atomic against other *appends*, not against a *reader*: on
+      # tmpfs (CI's `TMPDIR=/dev/shm`) the copy goes a page at a time and the
+      # file grows as it goes, so a concurrent read-back can see the front half
+      # of another run's record. CI saw exactly that, a read-back cut mid-string
+      # at byte 8,193 (two pages). A JSON-encoded record never holds a raw
+      # newline, so a line without one is a record still being written, and the
+      # reader below leaves it out.
+      printf ',{"id":%s,"commit_id":"%s","state":"%s","body":"%s","comment_count":%s}\n' \
         "$id" "$commit" "$state" "$body" "${comments:-0}" >> "$dir/reviews.jsonl"
       if [ "$create" = "accept" ]; then
         printf '{"id":%s,"commit_id":"%s","state":"%s","body":"%s","comment_count":%s}\n' \
@@ -466,16 +475,21 @@ if [ "$is_reviews" -eq 1 ]; then
     # the kernel interleaved into `[,,{...}]`, and a separator decided by an
     # existence probe, which two creates could both read as absent.
     #
-    # So the store's leading separator is dropped on the way out. A record is
-    # written with no newline, so the builtin `read` takes the whole store in one
-    # call and `${store#?}` drops its first character — one byte, exactly what
-    # `tail -c +2` copied, without forking a reader on every read-back. An
-    # absent or empty store yields an empty string, so `[` is still followed by
-    # `]` and a pull request with no reviews reads back as `[]`.
+    # So the store's leading separator is dropped on the way out. Each record is
+    # one newline-terminated line, and the builtin `read` loop keeps only the
+    # lines it saw end: `read` reports a final line with no newline as a
+    # failure, so a record another run is still appending — visible half-copied
+    # on tmpfs — ends the loop instead of reaching the answer. `${store#?}`
+    # then drops the first separator, one byte, without forking a reader on
+    # every read-back. An absent or empty store yields an empty string, so `[`
+    # is still followed by `]` and a pull request with no reviews reads back as
+    # `[]`.
     printf '['
     if [ -s "$dir/reviews.jsonl" ]; then
       store=""
-      IFS= read -r store < "$dir/reviews.jsonl"
+      while IFS= read -r record; do
+        store="$store$record"
+      done < "$dir/reviews.jsonl"
       printf '%s' "${store#?}"
     fi
     # Filler reviews, for the review-ceiling probe. They are real records on
