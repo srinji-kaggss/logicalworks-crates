@@ -56,16 +56,7 @@ impl FakeGh {
         std::fs::write(&log, b"")?;
 
         let behaviour = dir.join("behaviour.json");
-        std::fs::write(
-            &behaviour,
-            format!(
-                "{{\"head_sha\":\"{head_sha}\",\"base_sha\":\"{}\",\"create\":\"accept\",\
-                 \"reviews\":[],\"next_review_id\":9001,\"created_body\":\"\",\
-                 \"created_state\":\"COMMENT\",\"fail_reads\":0,\"hang_seconds\":0,\
-                 \"flood_bytes\":0,\"filler_reviews\":0,\"reviews_shape\":\"\"}}\n",
-                "b".repeat(40),
-            ),
-        )?;
+        std::fs::write(&behaviour, Scenario::new(head_sha).to_behaviour())?;
 
         let script = dir.join("gh");
         std::fs::write(&script, FAKE_GH_SOURCE)?;
@@ -112,6 +103,28 @@ impl FakeGh {
     /// pinning an absolute path — which is exactly what a deployment does.
     pub const fn program(&self) -> &'static str {
         "gh"
+    }
+
+    /// A [`Gh`](lgwks_bot::domain::gh::Gh) binding pointed at this fake, with
+    /// the named capture ceiling.
+    ///
+    /// One definition rather than a per-test builder, because the two lines of
+    /// binding are what make a test "run through the adapter", and a copy is a
+    /// place for one test to quietly stop doing it.
+    pub fn binding(
+        &self,
+        repository: &str,
+        capture: usize,
+    ) -> Result<lgwks_bot::domain::gh::Gh, Box<dyn std::error::Error>> {
+        Ok(
+            lgwks_bot::domain::gh::Gh::new(lgwks_bot::domain::gh::Repository::new(repository)?)
+                .program(self.program())
+                .capture_limit(
+                    std::num::NonZeroUsize::new(capture).ok_or("a non-zero capture ceiling")?,
+                )
+                .deadline(Some(std::time::Duration::from_secs(20)))
+                .env("PATH", self.search_path()?),
+        )
     }
 
     /// Every invocation's argv, in order, one per line with tab separators.
@@ -319,7 +332,7 @@ fi
 if [ "$method" = "POST" ]; then
   field create; create=$val
   case "$create" in
-    accept|accept_then_drop)
+    accept|accept_then_drop|pending|partial)
       # A real receiver assigns a fresh id per accepted create. The counter is a
       # single append, so two concurrent creates cannot be handed the same id —
       # and a test that checks two identities verify *distinct* reviews depends
@@ -338,13 +351,28 @@ if [ "$method" = "POST" ]; then
         APPROVE) state=APPROVED ;;
         REQUEST_CHANGES) state=CHANGES_REQUESTED ;;
       esac
+      # A pending draft is never submitted, whatever event the request named:
+      # it is the state GitHub holds a create in when no event is submitted, and
+      # the read-back must report it as a draft rather than as a publication.
+      if [ "$create" = "pending" ]; then state=PENDING; fi
       # The record is rendered from the *payload the adapter sent*, not from the
       # scenario's defaults. That is what makes the read-back a real
       # observation: a receiver that answered from its own configuration would
       # verify a body the adapter never published, and the lost-response test
       # would pass without the write having produced anything.
-      body=$(printf '%s' "$payload" | sed -n 's/.*"body":"\([^"]*\)".*/\1/p')
+      #
+      # An inline comment also carries a `body`, and the match is greedy, so the
+      # comments array is removed before the top-level body is read: otherwise a
+      # payload with comments would record the last comment's text as the review
+      # body.
+      top=$(printf '%s' "$payload" | sed 's/,"comments".*//')
+      body=$(printf '%s' "$top" | sed -n 's/.*"body":"\([^"]*\)".*/\1/p')
       commit=$(printf '%s' "$payload" | sed -n 's/.*"commit_id":"\([^"]*\)".*/\1/p')
+      # How many inline comments this review reports: none for everything but a
+      # partial landing, which reports the configured applied count — fewer than
+      # the payload intended, which is what makes it a *partial* submission.
+      comments=0
+      if [ "$create" = "partial" ]; then field applied_comments; comments=$val; fi
       printf '%s\n' "$payload" > "$dir/applied-$id.json"
       # The separator goes into `reviews.jsonl` as **one** `>>` append, always, in
       # front of the record. `>>` opens `O_APPEND`, and two writes by
@@ -357,11 +385,11 @@ if [ "$method" = "POST" ]; then
       # to decide whether a separator was owed, which two creates could both
       # read as absent into `{...}{...}`. There is no first record to make bare
       # here, so there is nothing to probe.
-      printf ',{"id":%s,"commit_id":"%s","state":"%s","body":"%s"}' \
-        "$id" "$commit" "$state" "$body" >> "$dir/reviews.jsonl"
+      printf ',{"id":%s,"commit_id":"%s","state":"%s","body":"%s","comment_count":%s}' \
+        "$id" "$commit" "$state" "$body" "${comments:-0}" >> "$dir/reviews.jsonl"
       if [ "$create" = "accept" ]; then
-        printf '{"id":%s,"commit_id":"%s","state":"%s","body":"%s"}\n' \
-          "$id" "$commit" "$state" "$body"
+        printf '{"id":%s,"commit_id":"%s","state":"%s","body":"%s","comment_count":%s}\n' \
+          "$id" "$commit" "$state" "$body" "${comments:-0}"
         exit 0
       fi
       # The effect lands and the *response* is lost: the review is recorded in
@@ -377,22 +405,31 @@ if [ "$method" = "POST" ]; then
   esac
 fi
 
-# A read. The review list is identified by scanning argv for a `.../reviews`
-# path, not by position: `gh api --method GET .../reviews --paginate` puts a
-# flag after the path, so a suffix match would read the pull request instead.
+# A read. The review list and the changed-file inventory are each identified by
+# scanning argv for their path, not by position: `gh api --method GET
+# .../reviews --paginate` puts a flag after the path, so a suffix match over the
+# whole vector would read the pull request instead.
 is_reviews=0
-previous=""
+is_files=0
 for arg in "$@"; do
   case "$arg" in
     */reviews) is_reviews=1 ;;
+    */files) is_files=1 ;;
   esac
-  previous="$arg"
 done
 
 if [ "$is_reviews" -eq 1 ]; then
     field fail_reads; fail=$val
     if [ -n "${fail:-}" ] && [ "$fail" -gt 0 ] 2>/dev/null; then
       printf 'read refused by scenario\n' >&2
+      exit 1
+    fi
+    # A permission refusal, for the lost-read-permission probe: the shape `gh`
+    # prints when a credential cannot reach the resource, which the adapter
+    # reports as its own typed permission failure.
+    field deny_reads; deny=$val
+    if [ "$deny" = "1" ]; then
+      printf 'gh: Bad credentials (HTTP 403)\n' >&2
       exit 1
     fi
     # A malformed answer, for the decode-refusal probes. `garbage` is not JSON;
@@ -450,21 +487,66 @@ if [ "$is_reviews" -eq 1 ]; then
   else
     printf ']\n'
   fi
+elif [ "$is_files" -eq 1 ]; then
+  # The changed-file inventory. A scenario can decline to render the diff, or
+  # report a list long enough or heavy enough to exceed the adapter's ceilings.
+  field files_shape; shape=$val
+  if [ "$shape" = "unavailable" ]; then
+    printf 'gh: the diff is too large to render (HTTP 406)\n' >&2
+    exit 1
+  fi
+  printf '['
+  first=1
+  # A hostile build script in the inventory: its patch text would remove the
+  # file named by `LGWKS_TEST_MARKER` if anything executed it. Nothing does; the
+  # inventory is read as data, and this is the oracle that observes it.
+  field build_script; build=$val
+  if [ "$build" = "1" ]; then
+    first=0
+    printf '{"filename":"build.rs","status":"added","additions":1,"deletions":0,"patch":"rm -f $LGWKS_TEST_MARKER; echo EXECUTED"}'
+  fi
+  field filler_files; filler=$val
+  i=0
+  while [ -n "${filler:-}" ] && [ "$i" -lt "$filler" ] 2>/dev/null; do
+    if [ "$first" -eq 0 ]; then printf ','; fi
+    first=0
+    printf '{"filename":"filler-%s.txt","status":"modified","additions":1,"deletions":0,"patch":"x"}' "$i"
+    i=$((i + 1))
+  done
+  field diff_bytes; bytes=$val
+  if [ -n "${bytes:-}" ] && [ "$bytes" -gt 0 ] 2>/dev/null; then
+    if [ "$first" -eq 0 ]; then printf ','; fi
+    first=0
+    printf '{"filename":"big.rs","status":"modified","additions":1,"deletions":0,"patch":"'
+    # `bytes` bytes of patch text as one JSON string. No newline: a raw newline
+    # inside a JSON string is invalid, and the adapter would refuse the document
+    # rather than exceed the byte ceiling this scenario is about.
+    head -c "$bytes" /dev/zero | tr '\0' 'P'
+    printf '"}'
+  fi
+  printf ']\n'
 else
-  # The pull-request read. `head_after_first` models a head that moves between
-  # two reads: the first read reports `head_sha`, and every read after it
-  # reports `head_after_first` — so a freshness check comparing the two reads
-  # sees exactly the change it is meant to catch. The counter is bumped with a
-  # single append per call, so two concurrent runs cannot interleave it.
-  printf 'x' >> "$dir/reads"
-  read_count=$(wc -c < "$dir/reads" | tr -d ' ')
-  field head_sha; head=$val
-  field head_after_first; moved=$val
-  if [ -n "${moved:-}" ] && [ "$read_count" -gt 1 ]; then head="$moved"; fi
-  field base_sha; base=$val
-  # GitHub's shape: the commits are nested under `head` and `base`.
-  printf '{"number":7,"head":{"ref":"feature","sha":"%s"},"base":{"ref":"main","sha":"%s"}}\n' \
-    "$head" "$base"
+  field snapshot_shape; shape=$val
+  if [ "$shape" = "moved" ]; then
+    # GitHub's renamed-repository answer: a move object naming the canonical
+    # location, which the adapter reports rather than silently following.
+    printf '{"message":"Moved Permanently","documentation_url":"https://docs.github.com/rest","url":"https://api.github.com/repos/acme/newrepo/pulls/7"}\n'
+  else
+    # The pull-request read. `head_after_first` models a head that moves between
+    # two reads: the first read reports `head_sha`, and every read after it
+    # reports `head_after_first` — so a freshness check comparing the two reads
+    # sees exactly the change it is meant to catch. The counter is bumped with a
+    # single append per call, so two concurrent runs cannot interleave it.
+    printf 'x' >> "$dir/reads"
+    read_count=$(wc -c < "$dir/reads" | tr -d ' ')
+    field head_sha; head=$val
+    field head_after_first; moved=$val
+    if [ -n "${moved:-}" ] && [ "$read_count" -gt 1 ]; then head="$moved"; fi
+    # GitHub's shape: the commits are nested under `head` and `base`.
+    field base_sha; base=$val
+    printf '{"number":7,"head":{"ref":"feature","sha":"%s"},"base":{"ref":"main","sha":"%s"}}\n' \
+      "$head" "$base"
+  fi
 fi
 exit 0
 "#;
@@ -509,6 +591,26 @@ pub struct Scenario {
     /// `garbage` for something that is not JSON, or `truncated` for a JSON
     /// document whose closing bracket was lost.
     pub reviews_shape: &'static str,
+    /// What the pull-request read emits instead of a pull request: `""` for the
+    /// real object, or `moved` for a renamed-repository redirect naming the
+    /// canonical location.
+    pub snapshot_shape: &'static str,
+    /// What the changed-file read emits: `""` for a real list, or `unavailable`
+    /// for a server that declines to render the diff (a `406`).
+    pub files_shape: &'static str,
+    /// How many filler files the changed-file read reports, for the file-count
+    /// ceiling.
+    pub filler_files: u32,
+    /// The bytes of patch text one reported file carries, for the byte ceiling.
+    pub diff_bytes: u32,
+    /// How many inline comments a `partial` create lands, when it lands fewer
+    /// than the payload intended.
+    pub applied_comments: u32,
+    /// Whether the review read is denied with a `403` permission answer.
+    pub deny_reads: bool,
+    /// Whether the changed-file inventory names a `build.rs` whose patch text
+    /// would perform an effect if it were ever executed.
+    pub build_script: bool,
 }
 
 impl Scenario {
@@ -526,6 +628,13 @@ impl Scenario {
             flood_bytes: 0,
             filler_reviews: 0,
             reviews_shape: "",
+            snapshot_shape: "",
+            files_shape: "",
+            filler_files: 0,
+            diff_bytes: 0,
+            applied_comments: 0,
+            deny_reads: false,
+            build_script: false,
         }
     }
 
@@ -619,6 +728,83 @@ impl Scenario {
         self
     }
 
+    /// The receiver records the create as an unsubmitted draft and drops the
+    /// response.
+    ///
+    /// GitHub creates a review in `PENDING` when the request names no event. The
+    /// effect lands (the review exists) and the response is lost, which is the
+    /// state a reconciliation must report as a draft, never as a publication and
+    /// never as no effect.
+    #[must_use]
+    pub fn records_pending_draft(mut self) -> Self {
+        self.create = "pending";
+        self
+    }
+
+    /// The receiver records the create with only `applied` of its inline
+    /// comments and drops the response.
+    ///
+    /// The submitted review is real and about the right commit, but fewer
+    /// comments landed than intended — the partial submission PR-08 names.
+    #[must_use]
+    pub fn records_partial_comments(mut self, applied: u32) -> Self {
+        self.create = "partial";
+        self.applied_comments = applied;
+        self
+    }
+
+    /// The repository answers with a renamed-repository redirect.
+    #[must_use]
+    pub fn repository_moved(mut self) -> Self {
+        self.snapshot_shape = "moved";
+        self
+    }
+
+    /// The changed-file read answers with a server that declines to render the
+    /// diff (a `406`).
+    #[must_use]
+    pub fn diff_unavailable(mut self) -> Self {
+        self.files_shape = "unavailable";
+        self
+    }
+
+    /// The changed-file read reports `count` filler files.
+    #[must_use]
+    pub fn with_filler_files(mut self, count: u32) -> Self {
+        self.filler_files = count;
+        self
+    }
+
+    /// One reported file carries `bytes` of patch text.
+    #[must_use]
+    pub fn with_diff_bytes(mut self, bytes: u32) -> Self {
+        self.diff_bytes = bytes;
+        self
+    }
+
+    /// The review read answers with a `403` permission refusal.
+    ///
+    /// The shape `gh` prints when a credential cannot reach the resource, which
+    /// the adapter reports as its own typed permission failure rather than as a
+    /// transport outage.
+    #[must_use]
+    pub fn deny_reads(mut self) -> Self {
+        self.deny_reads = true;
+        self
+    }
+
+    /// The changed-file inventory names a `build.rs` that would perform an
+    /// effect if anything ever executed its patch text.
+    ///
+    /// The effect is a shell command that removes the file named by
+    /// `LGWKS_TEST_MARKER`, so a non-execution oracle can observe whether the
+    /// review path ran it. Nothing here runs it: the inventory is read as data.
+    #[must_use]
+    pub fn hostile_build_script(mut self) -> Self {
+        self.build_script = true;
+        self
+    }
+
     /// The behaviour file this scenario is, as the fake reads it.
     ///
     /// Written here rather than assembled by each test so the keys the fake
@@ -638,7 +824,11 @@ impl Scenario {
              \"create\":\"{create}\",\"next_review_id\":9001,\
              \"created_body\":\"{body}\",\"created_state\":\"{state}\",\
              \"fail_reads\":{fail_reads},\"hang_seconds\":{hang},\"flood_bytes\":{flood},\
-             \"filler_reviews\":{filler},\"reviews_shape\":\"{shape}\"}}\n",
+             \"filler_reviews\":{filler},\"reviews_shape\":\"{shape}\",\
+             \"snapshot_shape\":\"{snapshot}\",\"files_shape\":\"{files}\",\
+             \"filler_files\":{filler_files},\"diff_bytes\":{diff_bytes},\
+             \"applied_comments\":{applied},\"deny_reads\":{deny},\
+             \"build_script\":{build_script}}}\n",
             head = self.head,
             create = self.create,
             body = self.created_body,
@@ -648,6 +838,13 @@ impl Scenario {
             flood = self.flood_bytes,
             filler = self.filler_reviews,
             shape = self.reviews_shape,
+            snapshot = self.snapshot_shape,
+            files = self.files_shape,
+            filler_files = self.filler_files,
+            diff_bytes = self.diff_bytes,
+            applied = self.applied_comments,
+            deny = u8::from(self.deny_reads),
+            build_script = u8::from(self.build_script),
         )
     }
 }

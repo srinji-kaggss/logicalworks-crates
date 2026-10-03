@@ -263,8 +263,63 @@ Each of these was a shipped defect. Treat the list as the spec.
   `tests/repair.rs` (`the_root_budget_stays_charged_across_repair_and_resume`) and
   `tests/sim_repair.rs` (`seeded_orders_reach_the_same_state_band_*`,
   `tenants_keep_their_own_tickets_and_budgets_band_*`,
-  `saturation_applies_each_ticket_once_band_*`, and the opt-in
+  `saturation_applies_each_ticket_once_band_*`,
+  `every_repair_charges_the_root_budget_once`,
+  `a_spent_budget_refuses_every_later_attempt`,
+  `a_host_spent_on_one_run_still_repairs_the_next`,
+  `a_bounded_sweep_repairs_every_ticket_once`, and the opt-in
   `the_declared_repair_tiers_are_measured`)
+- **INV-BOT-36** A refusal is one arm, not one shape, and the repair door is
+  orderable: which arm a decision hits, what it charges and what it leaves behind
+  are each observable rather than inferred from the run's final counters. A grant
+  that is both short and wide reports the missing half first, so the half a caller
+  must fix is the half they are told; the over-wide arm then names every capability
+  the ticket never asked for — shipped or custom — at every need width, because the
+  check walks the grant rather than a list of candidates. A ticket naming another
+  tenant's run is refused by the ticket's own tenant check, before admission and
+  before the ledger, so the asking tenant's ledger never gains an entry for a run it
+  does not own. Each arm leaves the ledger **byte-identical**, which is a claim
+  about the file and is measured on the file rather than on a handle agreeing with
+  itself. A refused repair and a refused attempt are both exactly nothing: no
+  budget, no epoch, no step, and the counters the ceiling was measured against never
+  move afterwards. · why: #87 step 3 (T24) — the arms were stated by the type but
+  exercised only through the order family, which reads an endpoint and could not
+  say which arm produced it · enforced by: `tests/sim_repair.rs`
+  (`a_mixed_decision_order_pins_each_arm`, `a_custom_capability_is_refused_at_every_width`,
+  `a_ticket_never_names_another_tenants_run`) and `tests/repair.rs`
+  (`an_over_wide_grant_is_refused_rather_than_narrowed`,
+  `a_custom_capability_outside_the_ticket_is_refused`,
+  `a_denied_repair_costs_nothing`)
+- **INV-BOT-37** A run's durable state is read back from the file, not from a
+  handle. The repair's replay rests on bytes a *second* host opened: the recorded
+  analysis is not re-polled and the publication runs once, on the run that asked
+  for it, with the first host dropped entirely before the second is built. The
+  ledger's counters replay to exactly what the live write left — tenant, attempts,
+  spend, epoch and applied-ticket count, for every run on the chain — so which
+  handle a caller read cannot decide what a run holds. A budget refusal drops the
+  step store's handle with the refused append outstanding (INV-BOT-50), so recovery
+  from a spent budget is *through a reopen* and is claimed only in that form; the
+  other runs sharing the host keep their own budgets and still close. · why: #87
+  step 3 (T23, T13) — a replay served from a live handle would pass every assertion
+  about poll counts while proving nothing about the store · enforced by:
+  `tests/sim_repair.rs` (`a_repaired_run_survives_a_reopened_host`,
+  `a_reopen_reads_back_the_charged_budget`,
+  `a_host_spent_on_one_run_still_repairs_the_next`) and
+  `tests/repair.rs::a_blocked_run_leaves_its_finished_analysis_recorded`
+- **INV-BOT-38** A first-step reach is refused at the admission boundary with the
+  whole shortfall in one pass, and costs nothing to name. A task that reaches in
+  its first step declares its need with `Task::requiring` and is `Blocked` before
+  its body: no step polled, no permit taken, no record written and no root attempt
+  charged — so the report's `needs` and the ticket's needs are the *whole* of what a
+  repair would grant, and there is no replay to buy. The complementary journey,
+  which reaches after its analysis, still costs exactly one analysis at every need
+  width, and the ticket names that run's shortfall in the order the reach named it.
+  · why: #87 step 3 (T23) — the blunt form had no end-to-end evidence at all, and
+  the one-need case is the only width where the ticket's grant is exactly the run's
+  authority · enforced by: `tests/sim_repair.rs`
+  (`the_step_that_reaches_is_the_step_that_blocks`, `a_wide_need_set_costs_one_analysis`)
+  and `tests/repair.rs` (`a_run_short_of_authority_is_blocked_naming_every_need`,
+  `the_journey_declares_no_admission_boundary_needs`)
 
 - **INV-BOT-1** Journal before acknowledge: a live settlement is journaled before it is
   acknowledged. · why: cef8059b (#112)
@@ -927,7 +982,94 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_review_list_exactly_at_the_ceiling_is_read`,
   `a_malformed_review_list_is_refused_rather_than_decoded_into_a_partial_answer`)
 
-- **INV-BOT-96** A scale measurement is not evidence when the world it ran
+- **INV-BOT-81** A review's subject is the repository the caller named and the
+  diff that was read, and a publication is reported only from evidence of the
+  exact state that landed. `Gh::read_diff` reads the changed-file inventory as
+  **data — never executed**, including a `build.rs` whose patch text would
+  perform an effect — bounded on two separate axes (file count against
+  `MAX_DIFF_FILES_PER_PULL`, patch bytes against `MAX_DIFF_BYTES`) with typed
+  refusals, and the inventory is refused whole rather than truncated. An
+  unavailable diff (`406`, `GhError::DiffUnavailable`) or either diff ceiling is
+  an `Incomplete` coverage decision, never a clean review; a renamed-repository
+  answer is `GhError::MovedRepository` naming both the requested and canonical
+  repositories, and the journey refuses rather than silently re-pointing the
+  subject. The publish path distinguishes what landed from what was read back: a
+  lost response reconciled onto an unsubmitted draft is `Pending`, onto a
+  submitted review carrying fewer inline comments than intended is `Partial`
+  (with both counts), and a create that returned an id whose read-back lost
+  permission (`GhError::Unauthorized`, from `401`/`403`/`404`) is `Unverified`
+  with the applied review id retained; a read that failed for any other reason
+  stays `Unknown`. No path issues a second create, and a non-zero exit that named
+  no HTTP status stays a transport failure rather than being guessed into a
+  permission one. · why: #151, #87 step 6 (PR-02, PR-03, PR-04, PR-07, PR-08,
+  PR-09, PR-10), T31/T33/T34 · enforced by:
+  `tests/pr_review_journey.rs`
+  (`an_unavailable_diff_is_an_incomplete_coverage_and_publishes_nothing`,
+  `a_diff_past_the_file_ceiling_is_an_incomplete_coverage`,
+  `a_diff_past_the_byte_ceiling_is_an_incomplete_coverage`,
+  `a_renamed_repository_is_refused_and_never_silently_re_pointed`,
+  `an_untrusted_build_script_in_the_diff_is_never_executed`,
+  `a_pending_draft_is_reconciled_as_a_draft_and_never_reposted`,
+  `a_partial_submission_is_reconciled_as_partial_and_never_reposted`,
+  `a_lost_read_permission_reports_unverified_and_retains_the_review_id`),
+  `tests/gh_binding.rs`
+  (`a_renamed_repository_is_a_typed_move_naming_both_names`,
+  `a_permission_refusal_is_a_typed_unauthorized_not_a_transport_failure`,
+  `a_failure_naming_no_status_stays_a_transport_failure`,
+  `a_diff_past_its_file_ceiling_is_a_typed_coverage_refusal`,
+  `an_unavailable_diff_is_a_typed_coverage_refusal`,
+  `a_changed_file_inventory_is_read_as_data`),
+  `tests/sim_review_path.rs` (`subject_coverage_and_partial_faults` bands 00
+  through 07 (64 seeds), `same_seed_same_trace_hash_subject` bands 08 through
+  11 (32 seeds), `two_identities_subject` bands 12 through 13 (16 seeds)), and
+  `tests/sim_review_pr.rs` (`review_comments_are_carried_and_omitted_r16`)
+- **INV-BOT-96** Each refusal arm of a review is a *seeded property of its own*,
+  not one point in a sweep that checks outcome shapes. `subject_coverage_and_partial_faults`
+  asserts that every fault reaches *some* correct variant; that assertion is
+  satisfied by a world in which the right arm is reached for the wrong reason, so
+  every arm below asks a different question of the same seeded worlds. A coverage
+  refusal reaches the receiver with **zero** creates, so a review cannot be
+  published against a scope nobody read. The two diff ceilings are refused on
+  **separate axes** — a file-count refusal names files, a byte refusal names
+  patch bytes, and a run charged against one bound fails the other family — and
+  the byte family's draws are additionally asserted to stay under the *file*
+  ceiling, so a refusal for the wrong bound cannot pass as evidence for it. A
+  renamed repository is refused naming **both** the requested and the canonical
+  name and publishes nothing. A `build.rs` in the changed-file inventory is
+  **never executed**: the oracle is a marker file named in the child's own
+  environment and referenced by the patch text, so any execution — compiling,
+  shelling, or handing the patch anywhere — removes a file the test asserts is
+  still there, while the review itself still publishes because a hostile file in
+  an inventory is data. A lost response onto an unsubmitted draft is `Pending`
+  and a partial submission carries **both** the applied and intended counts, each
+  measured at the receiver, and neither issues a second create. A create whose
+  read-back lost permission is `Unverified` with the **applied review id
+  retained**, and the id must lie in the range the receiver actually handed out —
+  a `Unverified` without it would force a caller to re-post to find out whether
+  anything landed. The permission and transport arms are **disjoint**: the
+  permission arm names an HTTP status and a credential, the transport arm names a
+  child's exit and no status, and through the whole journey they are `Unverified`
+  and `Unknown` respectively — merging them either discards applied-effect
+  evidence or over-reports a blocking state for a failure nobody can attribute to
+  permissions. A publication is pinned to the commit that was read, so a run that
+  re-pointed the subject after a rename would fail rather than publish at code it
+  never read. · why: #231 review (the arm families were untested under fault
+  density) · enforced by: `tests/sim_review_path.rs`
+  (`an_unavailable_diff_publishes_nothing`,
+  `a_diff_past_the_file_ceiling_publishes_nothing`,
+  `a_diff_past_the_byte_ceiling_publishes_nothing`,
+  `the_two_diff_ceilings_are_refused_separately`,
+  `a_renamed_repository_is_refused_naming_both`,
+  `an_untrusted_build_script_is_never_executed`,
+  `a_pending_draft_is_never_reposted`,
+  `a_partial_submission_reports_both_counts`,
+  `an_unverified_effect_retains_its_review_id`,
+  `unauthorized_and_transport_stay_distinct`,
+  `permission_loss_and_transport_outcome_differ`,
+  `subject_saturation_conserves_creates`,
+  `two_tenants_coverage_stays_isolated`,
+  `a_publication_is_pinned_to_the_read_commit`)
+- **INV-BOT-97** A scale measurement is not evidence when the world it ran
   against went degenerate. The saturation tiers drive 100, 1,000 and 10,000
   runs of the real journey, and every one of them must reach a *verified*
   `Published` outcome: with no fault configured and a history inside both the
