@@ -1098,6 +1098,41 @@ impl PacePlan {
     fn never_stalled(&self, chain: usize) -> bool {
         (1..=self.ticks).all(|tick| self.at(chain, tick).pace == Pace::Fast)
     }
+
+    /// A plan whose *last* tick is `tick`, with `per_chain` naming each chain's
+    /// pacing on it.
+    ///
+    /// Built per tick rather than drawn for the whole run, because the family that
+    /// uses it arms one tick at a time: the question is how one *wave* spends its
+    /// watchdogs, and a plan that decided a run's pacings up front would answer
+    /// it only on whichever tick the draw happened to land on.
+    fn one_tick(per_chain: &[u32], tick: u32) -> PacePlan {
+        let mut windows = [[PaceWindow {
+            pace: Pace::Fast,
+            value: 1,
+        }; MAX_CHAINS]; MAX_TICKS];
+        let row = usize::try_from(tick.saturating_sub(1)).unwrap_or(0);
+        for (index, window) in windows.iter_mut().enumerate() {
+            for (chain, cell) in window.iter_mut().enumerate() {
+                *cell = PaceWindow {
+                    pace: if per_chain.get(chain).copied() == Some(WEDGED_PACE) {
+                        Pace::Wedged
+                    } else {
+                        Pace::Fast
+                    },
+                    // A distinct value per cell, so a commit of one chain's
+                    // value can never be mistaken for another's.
+                    value: u32::try_from(index.saturating_mul(MAX_CHAINS).saturating_add(chain))
+                        .unwrap_or(0)
+                        .saturating_add(1),
+                };
+            }
+        }
+        PacePlan {
+            windows,
+            ticks: u32::try_from(row.saturating_add(1)).unwrap_or(1),
+        }
+    }
 }
 
 /// The longest run this family drives.
@@ -1567,6 +1602,102 @@ fn subject_count(plan: &PacePlan) -> usize {
         .unwrap_or(0)
 }
 
+/// A seeded scope spends one watchdog on a wave that has a poll left pending,
+/// and none at all on a wave whose every source answers.
+///
+/// The property the whole wave-level watchdog exists for, stated as a number
+/// rather than as an adjective. A bot of *n* chains used to start and join one OS
+/// thread *per source poll, per tick* — including the ordinary tick, where every
+/// source answered on its first poll and the thread had nothing to do — so a
+/// thousand chains paid a thousand spawns a tick that had no slow source in it at
+/// all. The ordinary tick is the common one, so its cost is the one that decides
+/// whether a bot scales at all.
+///
+/// # What the number is read from
+///
+/// `TickReport::watchdogs`, which is operator data a caller reads beside
+/// `stalled`. Not a `#[cfg(test)]` counter and not a field only a test can reach:
+/// a thread count the product cannot report is a thread count the product has
+/// promised nothing about, and a test reading one of its own would be measuring
+/// its own instrumentation rather than the substrate.
+///
+/// # Why the seed is still there
+///
+/// The *count* is the easy half to assert and the easy half to fake: a family
+/// that always wedged a source would pass against an implementation that spawns a
+/// thread per poll, and a family that never wedged one would pass against an
+/// implementation that never spawns any. The seed picks the scope, so both arms
+/// and everything between them is driven, and the count is checked against the
+/// scope the seed chose rather than against a fixed expectation.
+///
+/// Two tenants share the process and are read independently, so "one watchdog per
+/// wave" is also "one watchdog per *tenant's* wave": a counter shared across
+/// tenants would report one where two were started, and one tenant alone could
+/// never see the difference.
+///
+/// The mixed scope costs one real deadline per wedged tick, because that is what
+/// a wedged source *is* — the substrate genuinely has to wait for the wall clock.
+/// That is the honest cost of the family, and it is why the scopes are per tick
+/// rather than a mixture inside one tick.
+fn a_wave_spends_one_watchdog_and_a_fast_wave_spends_none(band: Band) -> TestResult {
+    sim::assert_replays(band, |sim| {
+        // Cut before anything is built: the tick count is a draw like any other,
+        // and a run that drew six ticks of wedged sources would spend six real
+        // deadlines waiting for the wall clock rather than exercising the claim.
+        let ceiling = u32::try_from(MAX_TICKS).unwrap_or(6);
+        let ticks = sim.rng().between(2, ceiling);
+
+        // Which chains wedge is re-drawn per tick from the same stream, so a run
+        // that wedged every chain on tick 1 and nothing after it is one this
+        // family produces, and so is its exact mirror.
+        let mut pacings: [Vec<u32>; 2] = [vec![0; MAX_CHAINS], vec![0; MAX_CHAINS]];
+        let mut subjects = [
+            paced_tenant(0, SIM_DEADLINE)?,
+            paced_tenant(1, SIM_DEADLINE)?,
+        ];
+
+        for tick in 1..=ticks {
+            for (index, subject) in subjects.iter_mut().enumerate() {
+                let drawn = pacings
+                    .get_mut(index)
+                    .ok_or("the run has exactly two tenants")?;
+                for pace in drawn.iter_mut() {
+                    *pace = if sim.rng().chance(350) {
+                        WEDGED_PACE
+                    } else {
+                        0
+                    };
+                }
+                let plan = PacePlan::one_tick(drawn, tick);
+                let _rows = paced_tick(subject, &plan, tick)?;
+
+                let report = subject.bot.tick_report();
+                let wedged = drawn.iter().filter(|pace| **pace == WEDGED_PACE).count();
+                assert_eq!(
+                    report.watchdogs(),
+                    u32::from(wedged > 0),
+                    "tick {tick}, tenant {index}: {wedged} of this tenant's chains \
+                     never resolved, so the wave spent {} watchdog threads — one for \
+                     the wave with a poll still pending, and none at all when every \
+                     source answered",
+                    report.watchdogs()
+                );
+                assert_eq!(
+                    report.stalled().len(),
+                    wedged,
+                    "tick {tick}, tenant {index}: every wedged chain is reported \
+                     stalled, and no chain that answered is"
+                );
+                sim.record(&format!(
+                    "tick {tick} tenant {index} wedged={wedged} watchdogs={}",
+                    report.watchdogs()
+                ));
+            }
+        }
+        Ok(())
+    })
+}
+
 /// The stall families replay exactly, twice over.
 ///
 /// `assert_replays` sweeps the band twice and compares the two hash vectors, so a
@@ -1594,7 +1725,13 @@ fn the_same_seed_replays_a_stalled_wave(band: Band) -> TestResult {
             for (index, subject) in subjects.iter_mut().enumerate() {
                 let plan = schedules.get(index).copied().unwrap_or(left);
                 let _rows = paced_tick(subject, &plan, tick)?;
-                for row in subject.bot.tick_report().stalled() {
+                let report = subject.bot.tick_report();
+                // The watchdog count beside the stall list: a run that replayed
+                // its decisions but started a different number of threads is a
+                // run whose *cost* was not deterministic, which is exactly what
+                // this family exists to notice about a deadline.
+                sim.record(&format!("watchdogs {index} {}", report.watchdogs()));
+                for row in report.stalled() {
                     sim.record(&format!("stalled {index} {} {}", row.chain(), row.domain()));
                 }
                 for forced in subject.bot.tick_report().forced() {
@@ -1648,4 +1785,6 @@ band_family::band_family! {
     saturation_band_31 => a_saturated_wave_stalls_every_chain_and_still_lets_the_next_tenant_commit, 31;
     stall_replay_band_32 => the_same_seed_replays_a_stalled_wave, 32;
     stall_replay_band_33 => the_same_seed_replays_a_stalled_wave, 33;
+    watchdog_budget_band_34 => a_wave_spends_one_watchdog_and_a_fast_wave_spends_none, 34;
+    watchdog_budget_band_35 => a_wave_spends_one_watchdog_and_a_fast_wave_spends_none, 35;
 }
