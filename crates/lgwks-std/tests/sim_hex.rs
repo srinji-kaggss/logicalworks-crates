@@ -19,7 +19,7 @@ mod seeded_sweep;
 use lgwks_std::hex::{DecodeError, decode, decode_into, encode};
 
 use seeded_bytes::{
-    below, fold_bytes, fold_refusal, next_byte, next_bytes, next_text, repeated,
+    below, fold_bytes, fold_refusal, next_byte, next_bytes, next_text, reference_nibble, repeated,
 };
 use seeded_sweep::{
     SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, fold_usize,
@@ -72,21 +72,6 @@ fn reference_encode(bytes: &[u8]) -> String {
         rendered.push(char::from_digit(low, 16).unwrap_or('?'));
     }
     rendered
-}
-
-/// Decodes one ASCII character to the nibble it denotes, or `None` when the
-/// character is outside the documented hex alphabet.
-fn reference_nibble(character: u8) -> Option<u8> {
-    match character {
-        b'0'..=b'9' => character.checked_sub(b'0'),
-        b'a'..=b'f' => character
-            .checked_sub(b'a')
-            .and_then(|nibble| nibble.checked_add(10)),
-        b'A'..=b'F' => character
-            .checked_sub(b'A')
-            .and_then(|nibble| nibble.checked_add(10)),
-        _ => None,
-    }
 }
 
 /// Decodes a hex payload under the documented contract: even length, every
@@ -630,7 +615,8 @@ fn a_seed_draws_a_different_payload_at_the_same_length() {
     fold_bytes(&mut trace, &left);
     fold(&mut trace, u64::try_from(right.len()).unwrap_or(0));
     assert_ne!(
-        trace, initial_trace(),
+        trace,
+        initial_trace(),
         "the two payload streams must fold into distinct traces"
     );
 }

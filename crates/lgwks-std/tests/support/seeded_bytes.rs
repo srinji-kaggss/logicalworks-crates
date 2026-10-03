@@ -12,7 +12,8 @@
 use crate::seeded_sweep::{fold, fold_usize, next_seed};
 
 /// The printable ASCII alphabet a text-shaped payload is drawn from.
-const TEXT_ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_.~/:?";
+const TEXT_ALPHABET: &[u8] =
+    b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_.~/:?";
 
 /// One byte drawn from the sweep stream rooted at `state`.
 #[must_use]
@@ -73,4 +74,38 @@ pub fn fold_refusal(trace: &mut u64, arm: u64, first: usize, second: usize) {
     fold(trace, arm);
     fold_usize(trace, first);
     fold_usize(trace, second);
+}
+
+/// Decodes one ASCII character to the nibble it denotes, or `None` when it is
+/// outside the documented hex alphabet `[0-9a-fA-F]`.
+///
+/// Three families need this exact predicate as an oracle: the hex codec's own
+/// reference decoder, the percent escaper's reference decoder, and the UUID
+/// reference parser. Each uses it to compute an answer the shipped code never
+/// returns, so the shared copy is a model rather than a wrapper — it does not
+/// call into `lgwks_std` and must not start to.
+#[must_use]
+pub fn reference_nibble(character: u8) -> Option<u8> {
+    match character {
+        b'0'..=b'9' => character.checked_sub(b'0'),
+        b'a'..=b'f' => character
+            .checked_sub(b'a')
+            .and_then(|nibble| nibble.checked_add(10)),
+        b'A'..=b'F' => character
+            .checked_sub(b'A')
+            .and_then(|nibble| nibble.checked_add(10)),
+        _ => None,
+    }
+}
+
+/// The `0x00`..=`0xff` rendering of one byte as two uppercase hex digits, the
+/// spelling RFC 3986 requires of an escape.
+#[must_use]
+pub fn reference_escape(byte: u8) -> String {
+    let high = u32::from(byte >> 4);
+    let low = u32::from(byte & 0x0f);
+    let mut rendered = String::from("%");
+    rendered.push(char::from_digit(high, 16).unwrap_or('0').to_ascii_uppercase());
+    rendered.push(char::from_digit(low, 16).unwrap_or('0').to_ascii_uppercase());
+    rendered
 }
