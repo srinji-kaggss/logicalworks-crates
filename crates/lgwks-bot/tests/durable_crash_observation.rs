@@ -58,6 +58,9 @@ const PROBE_ENV: &str = "LGWKS_JOURNAL_PROBE";
 const PROBE_JOURNAL: &str = "LGWKS_PROBE_JOURNAL";
 const PROBE_EVENTS: &str = "LGWKS_PROBE_EVENTS";
 const PROBE_MARKER: &str = "LGWKS_PROBE_MARKER";
+/// Turns this test binary into a probe child that parks mid-append, with its
+/// storage device held closed, and waits to be killed with nothing written.
+const PROBE_STALLED: &str = "LGWKS_PROBE_STALLED";
 
 /// A unique scratch directory for one test, and a guard that removes it.
 fn scratch(
@@ -177,6 +180,17 @@ fn probe_body() -> TestResult {
     Err("the probe child parked for its whole bound and was never killed".into())
 }
 
+/// This test binary re-invoked as a named test with a fresh, empty environment.
+///
+/// One builder for every probe, so the executable and argument shape cannot
+/// drift between the acknowledged-append probes and the stalled-append one.
+fn probe_command(test_name: &str) -> Result<std::process::Command, Box<dyn std::error::Error>> {
+    let executable = std::env::current_exe()?;
+    let mut command = std::process::Command::new(executable);
+    command.args([test_name, "--exact", "--nocapture"]);
+    Ok(command)
+}
+
 /// Spawn this test binary as a probe child ordered to append `events` ladder
 /// rungs and then park.
 fn spawn_probe(
@@ -185,14 +199,27 @@ fn spawn_probe(
     marker_path: &std::path::Path,
     events: usize,
 ) -> Result<ProbeGuard, Box<dyn std::error::Error>> {
-    let journal_path = &row.journal;
-    let executable = std::env::current_exe()?;
+let journal_path = &row.journal;
     Ok(ProbeGuard(Some(
-        std::process::Command::new(executable)
-            .args([test_name, "--exact", "--nocapture"])
+        probe_command(test_name)?
             .env(PROBE_ENV, "1")
             .env(PROBE_JOURNAL, journal_path)
             .env(PROBE_EVENTS, events.to_string())
+            .env(PROBE_MARKER, marker_path)
+            .spawn()?,
+    )))
+}
+
+/// Spawn this test binary as a probe child that parks mid-append.
+fn spawn_stalled_probe(
+    test_name: &str,
+    journal_path: &std::path::Path,
+    marker_path: &std::path::Path,
+) -> Result<ProbeGuard, Box<dyn std::error::Error>> {
+    Ok(ProbeGuard(Some(
+        probe_command(test_name)?
+            .env(PROBE_STALLED, "1")
+            .env(PROBE_JOURNAL, journal_path)
             .env(PROBE_MARKER, marker_path)
             .spawn()?,
     )))
@@ -622,6 +649,108 @@ fn the_file_journal_recovers_exactly_what_the_memory_journal_recovers() -> TestR
     assert_eq!(
         file_journal.recover().status(this_key),
         Some(AttemptStatus::Verified)
+    );
+    Ok(())
+}
+
+// ── A real kill while an append is in flight, on a store that is not answering
+
+/// The child that dies mid-append.
+///
+/// It opens a journal whose storage device is held closed, hands the owner one
+/// append — which cannot complete until the device is released — writes the
+/// marker, and waits to be killed. Nothing is on the disk when the kill lands,
+/// so the reopen must show an empty, clean journal and the retry must land
+/// exactly once: no duplicate, no lost receipt.
+fn stalled_probe_body() -> TestResult {
+    use std::task::{Context, Waker};
+
+    let path = std::env::var_os(PROBE_JOURNAL)
+        .ok_or("the stalled probe was started without a journal path")?;
+    let marker = std::env::var_os(PROBE_MARKER)
+        .ok_or("the stalled probe was started without a marker path")?;
+
+    let mut journal = FileJournal::open_with_stalled_storage(&path)?;
+    let event = EffectEvent::IntentAdmitted {
+        key: key("1", DIGEST_A)?,
+    };
+    let tail = journal.tail();
+    let mut append = Box::pin(journal.compare_and_append_async(tail, &event));
+    // One poll: the owner is handed the request and parks on the closed device.
+    // The append is now genuinely in flight, and no byte has reached the disk.
+    // A single poll needs no runtime, so this kill test runs under every feature
+    // set rather than only where `rt` is compiled in.
+    let mut cx = Context::from_waker(Waker::noop());
+    if append.as_mut().poll(&mut cx).is_ready() {
+        return Err("the stalled append completed before the kill".into());
+    }
+    std::fs::write(&marker, b"in-flight")?;
+
+    // Park until the parent kills us. Bounded, so a parent that never kills
+    // cannot leave a stray process behind.
+    for _ in 0..600 {
+        pause(100);
+    }
+    Err("the stalled probe parked for its whole bound and was never killed".into())
+}
+
+#[test]
+fn a_real_kill_mid_append_leaves_no_duplicate_and_no_lost_receipt() -> TestResult {
+    if std::env::var_os(PROBE_STALLED).is_some() {
+        return stalled_probe_body();
+    }
+    let row = Row::new("midappend")?;
+    let journal_path = &row.journal;
+    let marker = &row.marker;
+
+    let child = spawn_stalled_probe(
+        "a_real_kill_mid_append_leaves_no_duplicate_and_no_lost_receipt",
+        &journal_path,
+        &marker,
+    )?;
+    kill_after_marker(
+        child,
+        marker,
+        "a_real_kill_mid_append_leaves_no_duplicate_and_no_lost_receipt",
+    )?;
+
+    // The append never completed: the owner was parked, so nothing reached the
+    // disk. A clean, empty journal is the only honest answer — not a torn tail
+    // and not a phantom committed event.
+    let mut journal = FileJournal::open(&journal_path)?;
+    assert!(
+        !journal.torn_tail_repaired(),
+        "an append that wrote nothing cannot leave a torn tail"
+    );
+    assert_eq!(
+        journal.committed()?.len(),
+        0,
+        "an in-flight append killed before its device answered must not commit"
+    );
+
+    // The retry lands exactly once: there was no acknowledgment to lose, and
+    // the fact on the disk is the first and only one for the attempt.
+    let this_key = key("1", DIGEST_A)?;
+    let ack = journal.compare_and_append(
+        journal.tail(),
+        &EffectEvent::IntentAdmitted { key: this_key },
+    )?;
+    assert_eq!(
+        ack.promise(),
+        DurabilityPromise::ProcessCrash,
+        "the retry earns the same durable promise the killed append would have"
+    );
+    drop(journal);
+    let reopened = FileJournal::open(&journal_path)?;
+    assert_eq!(
+        reopened.committed()?.len(),
+        1,
+        "the retry must land exactly once, never a duplicate"
+    );
+    assert_eq!(
+        reopened.recover().status(this_key),
+        Some(AttemptStatus::Prepared),
+        "the retry's own admission is the recovered answer"
     );
     Ok(())
 }

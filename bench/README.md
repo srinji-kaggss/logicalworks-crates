@@ -1,3 +1,17 @@
+# The measurement rigs
+
+Two instruments live here, each its own Cargo workspace root so neither is seen
+by the estate's dependency contract:
+
+- **This file.** The `lgwks_bot` rig, which measures the bot against a
+  hand-rolled baseline doing the same work.
+- **[`std-measure/`](std-measure/)**, the `lgwks_std` before/after harness for
+  issues #153, #154, #160 and #164. It reproduces the #154 G2 table and the
+  #164 retry flat-latency rows from raw per-call samples, with its committed
+  output in [`std-measure/results.txt`](std-measure/results.txt).
+
+---
+
 # The `lgwks_bot` benchmark rig
 
 This directory measures `lgwks_bot` against a hand-rolled baseline that performs

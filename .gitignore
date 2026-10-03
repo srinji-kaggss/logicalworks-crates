@@ -12,7 +12,7 @@ graphify-out/
 # is a second such root (its own workspace, for the raw-tokio comparison), so it
 # needs its own line rather than a rewrite of the one above.
 bench/target/
-bench/async/target/
+bench/*/target/
 
 # Member crates can be built on their own (`cargo test -p lgwks_bot`), which
 # puts a target directory beside the crate rather than at the workspace root, so

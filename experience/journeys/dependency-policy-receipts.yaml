@@ -1,0 +1,95 @@
+id: dependency-policy-receipts
+actor: security-reviewer
+job: Approve a dependency edge by its exact Cargo identity and its authored
+  capability, so that a feature, default, optionality, target or rename change
+  cannot ride on an earlier class approval — and hand an agent a receipt that
+  binds the verdict to the contract and the metadata graph it was reached on.
+prior_knowledge:
+  - Has read the register and knows the entry fields, including `origin`.
+  - Believes a `-`/`_` spelling difference is one package, and that adding a
+    feature to a dependency is invisible to the gate. This journey corrects both.
+start:
+  installation: lgwks-deps built; a repo whose register approves one edge.
+  state: an approval that names a source class and, optionally, a capability
+    policy; a manifest whose edge differs by one authored dimension.
+success:
+  visible_outcome: an edge whose authored features, defaults, optionality,
+    target, package spelling or rename drift from the policy is refused with the
+    dimension named, while the unchanged edge passes, the workspace gate stays
+    green, and `check` prints a receipt binding contract and subject.
+states:
+  - name: exact
+    expectation: an edge matching the approved identity and every authored policy
+      dimension is admitted; nothing else is.
+  - name: drifted
+    expectation: a feature added, defaults turned on, optionality flipped, a
+      target scope changed, or a fold-alike package substituted is refused with
+      the relevant dimension named.
+  - name: aliased
+    expectation: a differently-spelled package is admitted only when the entry
+      authors that exact `aliases` spelling; an alias a second package also needs
+      is refused at load.
+  - name: renamed
+    expectation: a `package =` rename keeps the upstream identity; the local
+      spelling is carried for evidence and never becomes an approval.
+  - name: receipted
+    expectation: `check` names the subject root, contract digest and schema,
+      subject digest and mode (enforcement or diagnosis), and the scope sentence.
+invariants:
+  - An authored policy dimension is enforced exactly; an unauthored one is
+    grandfathered, never a silent widening (INV-DEP-13).
+  - Identity is byte-exact; an alias is explicit, singular and collision-checked
+    (INV-DEP-14).
+  - A receipt binds the contract revision and the audited subject, not just the
+    root (INV-DEP-15).
+trust_boundaries:
+  - The register is human-authored and reviewable; the gate reads Cargo's
+    authored bits and never folds two identities into one.
+  - The digest is an identity fingerprint, not a cryptographic integrity claim.
+recovery_contracts:
+  - The refusal names the dimension and both the admitted and observed values.
+  - The repair for a class-only Git/path entry is to author its exact `origin`.
+  - The repair for a widened capability is to narrow the edge or widen the
+    authored policy in a reviewed diff.
+agent_contracts:
+  - `check --json` emits stable keys (`mode`, `contract`, `subject`, `scope`) an
+    agent can branch on without parsing prose.
+  - `Contract::digest`, `Contract::schema`, `Subject::digest` and `Subject::edges`
+    are the machine-readable identities behind the receipt.
+probes:
+  - id: feature-widening-refused
+    action: Approve an engine with `features = "std"`, audit an edge that also
+      enables `extra`; assert `FeatureDrift`. Test
+      `tests/feature_policy.rs::an_unapproved_feature_is_refused_and_a_required_feature_must_be_present`.
+  - id: defaults-widening-refused
+    action: Approve `uses_default_features = "false"` and audit defaults-on; assert
+      `DefaultFeaturesDrift`. Test
+      `tests/feature_policy.rs::defaults_off_is_admitted_and_defaults_on_is_refused`.
+  - id: optionality-and-target-refused
+    action: Flip optionality and change a target scope; assert the two drifts.
+      Test `tests/feature_policy.rs::optionality_and_target_scope_are_policed`.
+  - id: bevy-delta-without-widening
+    action: Approve bevy_ecs with defaults off and `features = "std"`; audit the
+      real manifest edge (admitted) and a `multi_threaded` widening (refused).
+      Test
+      `tests/feature_policy.rs::the_intended_bevy_delta_is_admitted_and_a_widening_is_refused`.
+  - id: fold-alike-cannot-share-authority
+    action: Approve `engine-core` and audit an `engine_core` edge; assert it is
+      unregistered, then author the alias and assert admission. Test
+      `tests/identity_binding.rs::a_fold_alike_package_cannot_borrow_an_approval`
+      and `an_explicit_alias_admits_the_alias_spelling_only`.
+  - id: rename-is-not-identity
+    action: Audit an edge renamed to `local_engine`; assert it is judged under the
+      upstream identity and an approval for the alias alone does not admit it.
+      Test
+      `tests/identity_binding.rs::a_rename_is_preserved_but_is_not_the_upstream_identity`.
+  - id: receipt-binds-contract-and-subject
+    action: Run `check` under committed enforcement and under `--contract`; assert
+      the mode, contract digest and subject digest differ as bound. Tests
+      `tests/check_cli.rs::the_human_receipt_binds_contract_subject_and_mode`,
+      `the_json_receipt_has_stable_identity_fields`,
+      `the_receipt_changes_when_its_subject_changes`.
+  - id: schema-migration-and-compat
+    action: Parse a schema-1 register and a schema-2 register through the same
+      public API; assert the committed register is schema 2 and an unknown future
+      version is refused. Test `tests/contract_schema_compat.rs`.

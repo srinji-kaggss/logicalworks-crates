@@ -8,6 +8,22 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### lgwks_std Breaking
+
+- `similarity`: the `Similarity` implementation for `Cosine` now returns the
+  normalized `(raw + 1) / 2` score instead of raw cosine, so the trait's
+  documented `[0.0, 1.0]` interval holds for every implementation behind it
+  (#160 S1). **Migration:** a caller reading `Similarity::score` for a cosine
+  comparison and comparing against a raw-cosine threshold must call
+  `Cosine::try_score`, whose `[-1.0, 1.0]` domain is unchanged. The named
+  mapping is `Cosine::normalized_score`.
+- `similarity`: `ComponentOutcome` and `EvidenceVerdict` expose accessors
+  (`index`, `weight`, `score`, `reason`, `outcomes`) instead of public fields
+  (#160 S2). **Migration:** replace `verdict.score` with `verdict.score()` and
+  `outcome.index` with `outcome.index()`. The fields are private because an
+  outcome is a report about a measurement; a caller that could set a refused
+  component's score would defeat the contract.
+
 ### Fixed
 
 - `tests/http_alloc.rs` joins every single-shot server thread (warm-up, exact and
@@ -17,6 +33,51 @@ explicitly under that crate.
   assertion, ceiling or bound changed; the probe is deterministic across 30 runs.
 
 ### lgwks_std Added
+
+- `glob`, `similarity` and `retry` now state their sharing contract on the
+  types rather than leaving it to inference, and it is checked. `GlobPattern`
+  and `RetryPolicy` are documented `Send + Sync`; `CheckedEvidence` is now
+  genuinely shareable, because `CheckedEvidence::new` takes
+  `Box<dyn CheckedSimilarity<Value = Value> + Send + Sync>` and
+  `CheckedSimilarity::Value` is `Sync` (#154 item 7, hyperscale axis).
+  **Migration:** a custom `CheckedSimilarity` implementation must now satisfy
+  `Send + Sync` (and its `Value` type must be `Sync`) to be installable in a
+  `CheckedEvidence`. A stateless `Copy` scorer satisfies both with no code
+  change; one that holds interior mutability is refused at compile time rather
+  than producing a policy that is thread-safe from the outside and racy inside.
+  A custom scorer used single-threaded behind `Weighted` is unaffected.
+- `bench/std-measure`, a before/after latency harness for the `lgwks_std` paths
+  issues #153, #154, #160 and #164 changed, committed with its raw sample
+  output in `bench/std-measure/results.txt`. It reproduces the #154 G2 table
+  (`*a*` at n = 256..2048 and the six-token pattern, p50/p95/p99 over raw
+  samples) and the #164 retry flat-latency rows, and adds the
+  `O(attempt)`-walking backoff the shipped shift-and-compare form replaced so
+  the flat-latency claim has something to be flat against. See
+  `bench/std-measure/README.md` for the exact command.
+
+- `similarity::CheckedSimilarity`, the checked scoring seam, and
+  `similarity::CheckedEvidence`, the authority-facing composition that carries
+  component identity, the refusal, and applicability through to the acceptance
+  decision (#160 S2). Any refused component withdraws the whole verdict at
+  every threshold including `0.0`; surviving weights are not renormalized, and
+  all-zero effective evidence is `EvidenceError::InsufficientEvidence`.
+- `similarity::EvidenceError`, the typed refusal shared by every checked
+  scorer: `DimensionMismatch`, `ZeroMagnitude`, `NonFinite`, `InputTooLong`,
+  `CollectionTooLong`, `InsufficientEvidence`, and `Composition` (#160 S2).
+- `similarity::{Evidence, ComponentOutcome, EvidenceVerdict}` (#160 S2).
+- `similarity::BoundedJaccard`, a set scorer that charges its element budget
+  before dedup and before the quadratic scan, so hostile input is refused
+  without paying the work it was trying to cause (#160 S4). `Jaccard` remains
+  available and is documented as unbounded.
+- `similarity::is_exact_path_match`, the exact path comparison that the lossy
+  `PathSimilarity` heuristic is not (#160 S4).
+- `similarity::EditDistance::normalized_length`, the unit the scorer's budget
+  actually charges: the lower-case-expanded scalar count, which differs from the
+  raw count because `İ` expands to two (#160 S4).
+- `glob::GlobPattern::token_count` and
+  `glob::GlobScratch::{scalar_capacity, row_capacity, row_count,
+  storage_bytes}`, so a caller can report pattern storage, scalar indexing, and
+  rolling rows separately rather than as one RSS figure (#154).
 
 - `tests/fixtures/wire/consumer_record_v1.hex` is a retained archive that pins
   an application schema and the effective rkyv format (pointer width 32,
@@ -47,6 +108,17 @@ explicitly under that crate.
 - `online::tests::a_whole_probe_fits_one_wall_clock_budget` observes, from
   outside the injected dial, that one probe's resolved candidates share a single
   wall-clock budget rather than restarting per address. (#163)
+
+### lgwks_std Fixed
+
+- `similarity`: a refused component can no longer become an acceptance. The
+  infallible `Weighted::is_accepted` still maps a refusal to `0.0` for source
+  compatibility and is documented as lossy; `CheckedEvidence::verdict` is the
+  path that retains it (#160 S2).
+- `similarity`: the `Similarity` implementation for `EditDistance` no longer
+  reports two identical over-limit inputs as `0.0` through the trait's identity
+  contract when the checked form refuses them (#160 S1).
+
 ### Documentation
 
 - **#155/#170 — documentation claims reconciled to the code at this revision.**
@@ -182,11 +254,79 @@ explicitly under that crate.
   Concurrent verb calls on one `Process` share a bounded slot pool
   (`DEFAULT_MAX_CONCURRENT`, set with `Process::max_concurrent`), claimed
   before the fork, so a burst of calls never forks a burst of children.
+- `FileJournal::replay` returns a `Replay` that streams the committed frames
+  from its own read-only descriptor, one event at a time, so a caller that only
+  folds the record pays for the largest frame rather than the whole history.
+  It applies the same frame validation `open` does and is bounded by
+  `MAX_JOURNAL_EVENTS`; the materialized `events()` view is unchanged (#122
+  item 2).
+- `StorageGate::storage_gate` is public, so a slow-store liveness test can
+  release a parked device from its own thread rather than from the runtime
+  awaiting the append (#156).
+- `EffectJournal::reserve_handoff_capacity` reserves room for a whole external
+  handoff — intent, preparation and the settlement that lands after the effect
+  has left the process — before the first rung is written. The default is
+  permissive; `FileJournal` refuses the handoff against its event ceiling, so a
+  durable journal can never leave an attempt admitted and unable to settle
+  (#122 item 2 / #156).
 - The `compare_orchestration` example gains a `host` way — `Host::run` per item
   with the host's admission ceiling as the fan-out bound and matched semantics
   against the hand-written `JoinSet`+`Semaphore` and `join_all_bounded` ways —
   and a `measure_overhead` example prints p50/p95/p99 for `Host::run` and
   `sys::Process`.
+
+### lgwks_deps Added
+
+- `[[approved]]` entries accept an optional `origin`: the exact admitted origin
+  for the entry's source class — a complete registry source, a Git repository
+  plus its admitted revision/reference policy, or an external path authority.
+  Admission now compares origin as well as class, so replacing an approved Git
+  repository, registry, path, or Git revision produces a typed
+  `Refusal::OriginDrift` carrying the approved and observed identities. A legacy
+  class-only entry is exact for crates.io (both its Git and sparse spellings)
+  and insufficient for a Git or path edge; an unknown origin scheme is refused
+  at load and never admitted (INV-DEP-12, #158 A1).
+- Sparse-registry sources (`sparse+…`) are classified as the `registry` source
+  class rather than an unknown scheme, so a sparse crates.io mirror compares as
+  crates.io.
+- Drift diagnosis with several approvals for one crate reports the dimension on
+  the approval that admits the edge's source class, instead of the first
+  mismatch from an unrelated class (#158 acceptance).
+- `[[approved]]` entries accept the admitted-capability policy keys `features`,
+  `required_features`, `uses_default_features`, `optional` and `target`, and an
+  explicit `aliases` list. `DirectEdge` now carries Cargo's authored `features`,
+  `uses_default_features`, `target` and `rename`, so a capability that changes
+  without a class or origin change is a typed `Refusal::FeatureDrift`,
+  `DefaultFeaturesDrift`, `OptionalityDrift` or `TargetDrift` instead of a pass.
+  A dimension an entry does not author is grandfathered (#158 A2, INV-DEP-13).
+- `metadata::DirectEdge::features`/`uses_default_features`/`target`/`rename` are
+  readable through accessors; `rename` is the manifest-local spelling and
+  `package` remains the upstream Cargo identity (#158 A2).
+- `check` prints a receipt binding the subject root, the contract identity and
+  schema version, the exact metadata subject, the policy mode and the assurance
+  scope, and `check --json` exposes the same under the stable keys `mode`,
+  `contract.{digest,schema,entries,repository}`, `subject.{digest,edges,resolved}`
+  and `scope`. `Contract::digest`/`schema` and the `Subject`/`Verdict` types back
+  it; `check_verdict` returns the receipt-bearing verdict (#158 A6, INV-DEP-15).
+- A register may author `[policy] schema`; the committed register is migrated to
+  `schema = 2`. Schema 1 remains readable (#158 A7).
+
+### lgwks_deps Changed
+
+- **Breaking for a Git or path edge: a class-only approval is insufficient.**
+  An `[[approved]]` entry whose `source` is `git` or `path` and that authors no
+  `origin` admits nothing in that class; it is no longer an implicit approval of
+  every origin. **Migration:** add `origin = "<exact source>"` to each Git or
+  path entry (a Git repository plus its `?rev=`/`?branch=` policy, or the exact
+  path authority). A class-only `registry` entry still admits crates.io in both
+  its Git and sparse spellings, so registry entries need no change (#158 A1,
+  INV-DEP-12).
+- Package and owner matching is now byte-exact against the Cargo-authored
+  identity. **Migration:** a register that relied on the implicit `-`/`_` (or
+  case) fold to match a differently-spelled package must either write the exact
+  Cargo name or add `aliases = "<spelling>"` to that entry; an alias is
+  collision-checked and names exactly one package. The committed register uses
+  exact names throughout and needs no alias (#158 A2, INV-DEP-14).
 
 ### lgwks_bot Changed
 
@@ -194,8 +334,22 @@ explicitly under that crate.
   absent so a document written before the field existed still parses. A version
   this build does not implement is refused by `BotSpec::from_json` and by
   `Bot::from_spec`.
+- `DomainRegistry::source` and `DomainRegistry::action` return `None` for an
+  identifier declared more than once, not the first matching constructor. An
+  ambiguous identifier no longer resolves by declaration order; `validate()`
+  already refused such a registry by name at every construction path, and this
+  closes the raw lookup so a caller that skips validation cannot reach an
+  ambiguous constructor either (#122). Migration: a caller that relied on the
+  first-wins result should pick the duplicate it means, or the registry should
+  be repaired; `validate()` reports both positions.
 
 ### lgwks_bot Fixed
+
+- The `registry` module documentation said "A duplicate is not refused: lookup
+  is in declaration order and the first entry wins", which had been false since
+  `DomainRegistry::validate` landed. It now states the truth: `validate` refuses
+  a duplicated identifier and names both positions, and the raw `source`/`action`
+  lookups refuse an ambiguous identifier too (#122).
 
 - A process group whose leader is an unreaped zombie reports `EPERM` on a
   further `killpg` (macOS/BSD). That is a still-present group, not a refused
@@ -208,6 +362,21 @@ explicitly under that crate.
   after the leader dies, and the zombie leader then makes every further
   `killpg` return `EPERM` without reaching it; Linux aborts such a fork. A
   drop after the fork (T20) leaves no running member on either.
+
+- The journal-scale invariants were renumbered `INV-BOT-23..28` to
+  `INV-BOT-40..45`, because the old numbers were taken by another branch's
+  register. Only the identifiers moved; every enforced-by reference still
+  resolves. `INV-BOT-45` now states the tiered 100/1,000/10,000 sweep and its
+  requested/reached/ceiling receipt (#122 item 1).
+- `FileJournal::storage_gate`'s documentation now says what the handle is: a
+  fault-injection and liveness instrument whose held gate parks every append on
+  that journal by design, opened only through `open_with_stalled_storage`, never
+  by `open` (#122 item 2).
+- The registry-identifier invariant and the ambiguous-append invariant this
+  branch added were renumbered to `INV-BOT-46` and `INV-BOT-47`, because the
+  numbers they first carried were already taken on `main` (structural
+  inspection, and the task front door). Only the identifiers moved; both
+  invariants' `enforced by` references still resolve (#122, #118).
 
 ### lgwks_bot Breaking
 

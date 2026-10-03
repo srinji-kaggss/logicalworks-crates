@@ -388,6 +388,43 @@ fn one_identifier_across_both_roles_remains_valid() {
     );
 }
 
+/// A lookup must not resolve an ambiguous identifier by declaration order.
+///
+/// `build_source`/`build_action` validate first and refuse with both positions,
+/// but the raw lookups are public and a caller that reaches them directly must
+/// not receive "whichever constructor was declared first". The ambiguous and the
+/// absent identifier are both `None` here; `validate` is what tells them apart.
+#[test]
+fn an_ambiguous_identifier_is_not_resolved_by_declaration_order() {
+    assert!(
+        DUPLICATE_SOURCES.source("github::repository").is_none(),
+        "a duplicated source id resolved to its first declaration"
+    );
+    assert!(
+        REVERSED_DUPLICATES.source("github::repository").is_none(),
+        "a duplicated source id resolved to its first declaration when reversed"
+    );
+    assert!(
+        DUPLICATE_ACTIONS.action("notify::slack").is_none(),
+        "a duplicated action id resolved to its first declaration"
+    );
+
+    // The unambiguous registries still resolve, so the refusal is about the
+    // duplicate and not about the lookup itself.
+    assert!(
+        TEST_DOMAINS.source("github::repository").is_some(),
+        "an unambiguous source id stopped resolving"
+    );
+    assert!(
+        MIXED_ROLES.source("shared::domain").is_some(),
+        "a cross-role id stopped resolving as a source"
+    );
+    assert!(
+        MIXED_ROLES.action("shared::domain").is_some(),
+        "a cross-role id stopped resolving as an action"
+    );
+}
+
 #[test]
 fn validate_names_the_first_duplicate_pair_and_passes_clean_lists() {
     assert!(

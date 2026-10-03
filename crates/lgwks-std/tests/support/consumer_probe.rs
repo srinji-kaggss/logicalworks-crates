@@ -50,3 +50,36 @@ pub fn build_and_run(manifest: &str, main_rs: &str) -> Result<String, Box<dyn st
     }
     Ok(stdout)
 }
+
+/// Render a probe manifest named `package_name` that depends on this crate with
+/// default features off and exactly `features` on.
+pub fn manifest(package_name: &str, features: &[&str]) -> String {
+    let features = if features.is_empty() {
+        String::new()
+    } else {
+        let quoted: Vec<String> = features
+            .iter()
+            .map(|feature| format!("{feature:?}"))
+            .collect();
+        format!(", features = [{}]", quoted.join(", "))
+    };
+    format!(
+        "[package]\nname = {package_name:?}\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+         [dependencies]\nlgwks_std = {{ path = {:?}, default-features = false{features} }}\n",
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+    )
+}
+
+/// The value of the `<label> <integer>` line named `label` in probe output, or
+/// `u64::MAX` when it is absent, so a missing measurement fails every bound
+/// that uses it instead of silently reading as zero.
+pub fn measurement(stdout: &str, label: &str) -> u64 {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let (name, value) = line.rsplit_once(' ')?;
+            Some((name.trim(), value.trim().parse::<u64>().ok()?))
+        })
+        .find_map(|(name, value)| (name == label).then_some(value))
+        .unwrap_or(u64::MAX)
+}

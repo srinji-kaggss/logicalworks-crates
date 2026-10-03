@@ -1,0 +1,90 @@
+id: std-shared-policy-saturation
+actor: agent-or-human-dev
+job: Match and score from many callers at once — one compiled glob pattern, one
+  evidence policy, one retry policy, two tenants — and get back exactly the
+  answer a single-threaded reference produces, with memory that does not grow
+  with the caller count.
+prior_knowledge:
+  - Knows the paths, the candidate pairs, and the retry budget they want; has
+    not read `lgwks_std::glob`, `similarity` or `retry`.
+  - Assumes a compiled pattern, an evidence policy and a retry policy are
+    immutable so sharing them across threads is free. It is free, and this
+    journey is where they learn *why*, and what happens when they are not.
+start:
+  installation: lgwks_std in `core`; one compiled `GlobPattern`, one
+    `CheckedEvidence`, one `RetryPolicy`, and one `GlobScratch` per caller.
+  state: 100, then 1 000, then 10 000 concurrent callers on the same policy
+    values, and two tenants whose policies differ.
+success:
+  visible_outcome: every caller's answer equals the single-threaded reference,
+    no caller observes another's policy or scratch, peak memory stays bounded
+    as callers scale, and the report names the tier reached and the ceiling
+    that bounded it.
+states:
+  - name: shared-reference-result
+    expectation: a compiled pattern, a checked composition and a retry policy
+      are read-only values, so N concurrent callers produce N identical answers.
+  - name: caller-owned-scratch
+    expectation: the one mutable matching buffer is per-caller; a shared one
+      would let one caller observe another caller's path.
+  - name: tenant-isolated-policy
+    expectation: two tenants with different policies over the same input never
+      see each other's threshold, weights or budget.
+  - name: saturated-but-bounded
+    expectation: at the ceiling tier the answers are still identical, the
+      report states the requested tier and the tier reached, and peak RSS is
+      bounded rather than proportional to callers.
+  - name: recovered-after-saturation
+    expectation: once the peak tier drains, a later call matches the reference
+      again, so saturation left no residue behind.
+invariants:
+  - A compiled glob pattern holds no caller data; matching state is caller-owned
+    scratch, so sharing the pattern across threads shares no mutable state.
+  - A checked composition carries its own scorers, weights and threshold;
+    reading it never writes to it.
+  - A retry policy is a pure value with no interior mutability and no clock, so
+    one policy serves every caller unchanged.
+  - Two tenants' policies on the same input never cross, whatever order they
+    run in.
+trust_boundaries:
+  - The host's thread ceiling is untrusted: a tier that cannot be spawned is
+    reported as the ceiling reached, not silently skipped.
+  - Caller-supplied paths and candidate pairs are untrusted input; the policy
+    decides whether they are within budget, and a refusal is a refusal.
+recovery_contracts:
+  - A tier that hits the host ceiling reports both the requested level and the
+    level reached, and the ceiling that bounded it.
+  - After the peak tier drains, the next call matches the single-threaded
+    reference, so a saturation episode leaves nothing behind.
+agent_contracts:
+  - Shared policy values are shared; mutable scratch is not. Every concurrent
+    caller supplies its own.
+  - A matcher's answer is a function of (pattern, path), never of which thread
+    asked or how many others asked.
+  - Two tenants never observe each other's policy, on the same input, in the
+    same run.
+probes:
+  - id: one-pattern-thousand-callers
+    action: Share one compiled `GlobPattern` and one `GlobScratch` per caller
+      across 100, then 1 000, then 10 000 std threads; assert every answer
+      equals the single-threaded reference and the report names p50/p95/p99 and
+      peak RSS per tier.
+  - id: one-evidence-policy-shared
+    action: Share one `CheckedEvidence` across the same tiers; assert every
+      verdict, every outcome index and every refusal equals the reference.
+  - id: one-retry-policy-shared
+    action: Share one `RetryPolicy` across the same tiers; assert every delay is
+      bit-identical to the single-threaded value for the same (attempt,
+      entropy).
+  - id: caller-scratch-is-not-shared
+    action: Give each caller its own `GlobScratch` and assert a caller never
+      observes another caller's path-length buffers; share one scratch across
+      callers and assert the oracle catches it.
+  - id: two-tenants-one-input
+    action: Seed two tenants with different thresholds, weights and budgets;
+      interleave their calls on the same input across every tier; assert each
+      sees only its own policy and the trace replays identically under one
+      seed.
+  - id: drain-after-saturation
+    action: After the peak tier joins, run a final call on the shared values and
+      assert it matches the reference exactly.
