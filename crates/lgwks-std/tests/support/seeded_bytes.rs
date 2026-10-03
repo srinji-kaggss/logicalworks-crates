@@ -105,7 +105,15 @@ pub fn reference_escape(byte: u8) -> String {
     let high = u32::from(byte >> 4);
     let low = u32::from(byte & 0x0f);
     let mut rendered = String::from("%");
-    rendered.push(char::from_digit(high, 16).unwrap_or('0').to_ascii_uppercase());
-    rendered.push(char::from_digit(low, 16).unwrap_or('0').to_ascii_uppercase());
+    rendered.push(
+        char::from_digit(high, 16)
+            .unwrap_or('0')
+            .to_ascii_uppercase(),
+    );
+    rendered.push(
+        char::from_digit(low, 16)
+            .unwrap_or('0')
+            .to_ascii_uppercase(),
+    );
     rendered
 }

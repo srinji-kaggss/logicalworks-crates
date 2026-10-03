@@ -58,7 +58,10 @@ fn reference_render(bytes: &[u8; 16]) -> String {
             .take(index)
             .map(|&(_, bytes)| bytes)
             .sum::<usize>();
-        for byte in bytes.get(start..start.saturating_add(byte_width)).unwrap_or(&[]) {
+        for byte in bytes
+            .get(start..start.saturating_add(byte_width))
+            .unwrap_or(&[])
+        {
             let high = u32::from(byte >> 4);
             let low = u32::from(byte & 0x0f);
             rendered.push(char::from_digit(high, 16).unwrap_or('?'));
@@ -109,9 +112,7 @@ fn reference_version(bytes: &[u8; 16]) -> Option<u8> {
 fn reference_parse(text: &str) -> Result<[u8; 16], Reference> {
     let bytes = text.as_bytes();
     if bytes.len() != CANONICAL_LEN {
-        return Err(Reference::WrongLength {
-            len: bytes.len(),
-        });
+        return Err(Reference::WrongLength { len: bytes.len() });
     }
     let starts = reference_group_starts();
     let mut raw = [0u8; 16];
@@ -199,7 +200,11 @@ fn id_trace(seed: u64) -> u64 {
         let raw = <[u8; 16]>::try_from(bytes.as_slice()).unwrap_or([0u8; 16]);
         let rendered = reference_render(&raw);
 
-        assert_eq!(rendered.len(), CANONICAL_LEN, "seed {seed}: the canonical form is 36 characters");
+        assert_eq!(
+            rendered.len(),
+            CANONICAL_LEN,
+            "seed {seed}: the canonical form is 36 characters"
+        );
         let parsed = Uuid::parse(&rendered);
         assert_eq!(
             parsed.as_ref().map(Uuid::as_bytes),
@@ -629,7 +634,9 @@ fn a_multi_byte_character_in_a_group_is_refused_at_its_own_offset()
             // corruption must land: a separator position is a different refusal
             // with a different coordinate.
             let hex_start = GROUP_STARTS[group_index];
-            let hex_width = GROUPS[group_index].0.saturating_sub(usize::from(group_index > 0));
+            let hex_width = GROUPS[group_index]
+                .0
+                .saturating_sub(usize::from(group_index > 0));
             let within = below(&mut state, hex_width.saturating_sub(1));
             let position = hex_start.saturating_add(within);
             let alien_index = below(&mut state, multibyte.len());

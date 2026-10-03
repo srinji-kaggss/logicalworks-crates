@@ -151,7 +151,10 @@ fn a_seeded_value_round_trips_through_json_text() -> Result<(), json::Error> {
             let value = draw_shape(&mut state);
             let text = json::to_string(&value)?;
             let restored: Shape = json::from_str(&text)?;
-            assert_eq!(restored, value, "seed {seed}: JSON must round-trip the value");
+            assert_eq!(
+                restored, value,
+                "seed {seed}: JSON must round-trip the value"
+            );
             assert!(
                 !text.contains('\n'),
                 "seed {seed}: compact JSON has no newlines"
@@ -172,7 +175,10 @@ fn a_seeded_value_round_trips_through_ron_text() -> Result<(), ron::Error> {
             let value = draw_shape(&mut state);
             let text = ron::to_string(&value)?;
             let restored: Shape = ron::from_str(&text)?;
-            assert_eq!(restored, value, "seed {seed}: RON must round-trip the value");
+            assert_eq!(
+                restored, value,
+                "seed {seed}: RON must round-trip the value"
+            );
         }
     }
     Ok(())
@@ -184,13 +190,7 @@ fn a_seeded_value_round_trips_through_ron_text() -> Result<(), ron::Error> {
 /// Every borrowing door in both codecs runs this, so the assertion exists once: the
 /// doors differ only in their decoder, and a check written twice would be
 /// two checks that could drift apart.
-fn assert_field_borrows(
-    seed: u64,
-    buffer: &[u8],
-    decoded: &Borrowed<'_>,
-    value: &str,
-    what: &str,
-) {
+fn assert_field_borrows(seed: u64, buffer: &[u8], decoded: &Borrowed<'_>, value: &str, what: &str) {
     assert_eq!(
         decoded.value, value,
         "seed {seed}: the {what} field keeps its value"
@@ -266,8 +266,8 @@ fn sweep_borrowed_field(
 /// The INV-CODEC-1 borrowing property for JSON through the text door: an
 /// unescaped string field, decoded into a borrowed `&str`, points *into* the
 /// supplied text rather than owning a copy of it.
-fn an_unescaped_json_field_borrows_from_the_supplied_text()
--> Result<(), Box<dyn std::error::Error>> {
+fn an_unescaped_json_field_borrows_from_the_supplied_text() -> Result<(), Box<dyn std::error::Error>>
+{
     for seed in SWEEP_SEEDS {
         sweep_borrowed_field(seed, false, Door::Text, "JSON text")?;
     }
@@ -291,15 +291,14 @@ fn an_unescaped_json_field_borrows_from_the_supplied_slice()
 /// RON's check is the same assertion as JSON's with a different decoder, so it
 /// runs the same sweep rather than a second copy of the check: four doors and
 /// one assertion, or four assertions that could drift.
-fn an_unescaped_ron_field_borrows_from_the_supplied_input()
--> Result<(), Box<dyn std::error::Error>> {
+fn an_unescaped_ron_field_borrows_from_the_supplied_input() -> Result<(), Box<dyn std::error::Error>>
+{
     for seed in SWEEP_SEEDS {
         sweep_borrowed_field(seed, true, Door::Text, "RON text")?;
         sweep_borrowed_field(seed, true, Door::Slice, "RON slice")?;
     }
     Ok(())
 }
-
 
 #[test]
 /// An **escaped** string cannot be borrowed: it needs decoded storage that the
@@ -558,7 +557,10 @@ fn the_empty_containers_are_values_in_both_codecs() -> Result<(), Box<dyn std::e
     };
 
     let json_text = json::to_string(&value)?;
-    assert!(json_text.contains(r#""items":[]"#), "an empty array is rendered");
+    assert!(
+        json_text.contains(r#""items":[]"#),
+        "an empty array is rendered"
+    );
     assert_eq!(
         json::from_str::<Shape>(&json_text)?,
         value,
@@ -579,8 +581,7 @@ fn the_empty_containers_are_values_in_both_codecs() -> Result<(), Box<dyn std::e
 /// escaped every multi-byte scalar into `\u` sequences would still produce the
 /// right *value*, so this family checks the value across a corpus of real
 /// multi-byte text rather than only ASCII.
-fn multi_byte_text_round_trips_through_both_codecs()
--> Result<(), Box<dyn std::error::Error>> {
+fn multi_byte_text_round_trips_through_both_codecs() -> Result<(), Box<dyn std::error::Error>> {
     let samples = ["héllo", "こんにちは", "☃☃☃", "ünïcødé", "aé☃"];
     for sample in samples {
         let value = Shape {
@@ -611,7 +612,10 @@ fn a_shape_with_empty_collections_still_round_trips() -> Result<(), Box<dyn std:
             let mut value = draw_shape(&mut state);
             value.items.clear();
             let json_back: Shape = json::from_str(&json::to_string(&value)?)?;
-            assert_eq!(json_back, value, "seed {seed}: the emptied shape round-trips");
+            assert_eq!(
+                json_back, value,
+                "seed {seed}: the emptied shape round-trips"
+            );
         }
     }
     Ok(())
@@ -639,10 +643,7 @@ fn two_seeds_draw_two_different_values() {
     let mut second = SWEEP_SEEDS[1];
     let left = draw_shape(&mut first);
     let right = draw_shape(&mut second);
-    assert_ne!(
-        left, right,
-        "the two sweep seeds drew the same value"
-    );
+    assert_ne!(left, right, "the two sweep seeds drew the same value");
     let mut trace = initial_trace();
     fold(&mut trace, u64::try_from(left.items.len()).unwrap_or(0));
     fold_bytes(&mut trace, left.name.as_bytes());

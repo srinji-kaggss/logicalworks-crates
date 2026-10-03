@@ -20,8 +20,8 @@ mod seeded_bytes;
 mod seeded_sweep;
 
 use lgwks_std::leb128::{
-    DecodeError, decode_i32, decode_i64, decode_u32, decode_u64, encode_i32, encode_i64, encode_u32,
-    encode_u64,
+    DecodeError, decode_i32, decode_i64, decode_u32, decode_u64, encode_i32, encode_i64,
+    encode_u32, encode_u64,
 };
 
 use seeded_bytes::{below, fold_bytes, fold_refusal, next_byte, next_bytes};
@@ -256,7 +256,12 @@ fn leb128_trace(seed: u64) -> u64 {
                 let mut encoded = Vec::new();
                 encode_u64(u64::from(value), &mut encoded);
                 let decoded = decode_u64(&encoded);
-                agree!(seed, decoded, reference_decode_unsigned(&encoded, 64), "u64");
+                agree!(
+                    seed,
+                    decoded,
+                    reference_decode_unsigned(&encoded, 64),
+                    "u64"
+                );
                 assert_eq!(
                     decoded.unwrap_or_default().0,
                     u64::from(value),
@@ -269,7 +274,12 @@ fn leb128_trace(seed: u64) -> u64 {
                 let mut encoded = Vec::new();
                 encode_u32(value, &mut encoded);
                 let decoded = decode_u32(&encoded);
-                agree_narrow!(seed, decoded, reference_decode_unsigned(&encoded, 32), "u32");
+                agree_narrow!(
+                    seed,
+                    decoded,
+                    reference_decode_unsigned(&encoded, 32),
+                    "u32"
+                );
                 assert_eq!(
                     decoded.unwrap_or_default().0,
                     value,
@@ -321,7 +331,12 @@ fn a_seeded_unsigned_value_round_trips_at_both_widths() -> Result<(), DecodeErro
                 (wide, wide_bytes.len()),
                 "seed {seed}: a u64 must decode back to its value and consumed length"
             );
-            agree!(seed, decode_u64(&wide_bytes), reference_decode_unsigned(&wide_bytes, 64), "u64");
+            agree!(
+                seed,
+                decode_u64(&wide_bytes),
+                reference_decode_unsigned(&wide_bytes, 64),
+                "u64"
+            );
 
             let mut narrow_bytes = Vec::new();
             encode_u32(narrow, &mut narrow_bytes);
@@ -361,7 +376,12 @@ fn a_seeded_signed_value_round_trips_at_both_widths() -> Result<(), DecodeError>
                 (wide, wide_bytes.len()),
                 "seed {seed}: an i64 must decode back to its value and consumed length"
             );
-            agree!(seed, decode_i64(&wide_bytes), reference_decode_signed(&wide_bytes, 64), "i64");
+            agree!(
+                seed,
+                decode_i64(&wide_bytes),
+                reference_decode_signed(&wide_bytes, 64),
+                "i64"
+            );
 
             let mut narrow_bytes = Vec::new();
             encode_i32(narrow, &mut narrow_bytes);
@@ -426,7 +446,12 @@ fn every_boundary_value_is_encoded_minimally() -> Result<(), DecodeError> {
             "u64 {value:#x} must occupy its minimal {expected} groups, not {}",
             bytes.len()
         );
-        agree!(0, decode_u64(&bytes), reference_decode_unsigned(&bytes, 64), "u64 boundary");
+        agree!(
+            0,
+            decode_u64(&bytes),
+            reference_decode_unsigned(&bytes, 64),
+            "u64 boundary"
+        );
 
         let narrow = u32::try_from(value & 0xffff_ffff).unwrap_or(0);
         let mut narrow_bytes = Vec::new();
@@ -593,7 +618,12 @@ fn an_over_wide_run_is_refused_as_overflow_at_its_own_group() {
                 reference_decode_unsigned(&run, 32),
                 "narrow run"
             );
-            agree!(seed, decode_i64(&run), reference_decode_signed(&run, 64), "wide signed");
+            agree!(
+                seed,
+                decode_i64(&run),
+                reference_decode_signed(&run, 64),
+                "wide signed"
+            );
             agree_narrow_signed!(
                 seed,
                 decode_i32(&run),
@@ -644,7 +674,9 @@ fn every_truncation_of_an_encoding_is_refused() -> Result<(), DecodeError> {
     for seed in SWEEP_SEEDS {
         let mut state = seed;
         for _ in 0..32 {
-            let value = u64::from(next_byte(&mut state)).saturating_mul(2_654_435_761).saturating_add(u64::try_from(below(&mut state, 97)).unwrap_or(0));
+            let value = u64::from(next_byte(&mut state))
+                .saturating_mul(2_654_435_761)
+                .saturating_add(u64::try_from(below(&mut state, 97)).unwrap_or(0));
             let mut encoded = Vec::new();
             encode_u64(value, &mut encoded);
             for cut in 0..encoded.len() {
@@ -702,7 +734,11 @@ fn the_endpoints_are_exact_at_both_widths() -> Result<(), DecodeError> {
     let mut zero = Vec::new();
     encode_u64(0, &mut zero);
     assert_eq!(zero, vec![0x00], "zero is a single zero group");
-    assert_eq!(decode_u64(&zero)?, (0, 1), "zero decodes to zero in one group");
+    assert_eq!(
+        decode_u64(&zero)?,
+        (0, 1),
+        "zero decodes to zero in one group"
+    );
 
     let mut max = Vec::new();
     encode_u64(u64::MAX, &mut max);
@@ -832,7 +868,10 @@ fn the_encoder_appends_to_the_buffer_it_is_given() -> Result<(), DecodeError> {
             }),
             "seed {seed}: nothing is left over to read"
         );
-        fold(&mut initial_trace(), u64::try_from(values.len()).unwrap_or(0));
+        fold(
+            &mut initial_trace(),
+            u64::try_from(values.len()).unwrap_or(0),
+        );
     }
     Ok(())
 }
