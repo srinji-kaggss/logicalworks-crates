@@ -25,7 +25,7 @@ use crate::error::{BotError, DispatchCertainty};
 use crate::verb;
 
 #[cfg(feature = "process")]
-use crate::rt::process::{ProcessRun, ProcessRunError, ProcessSpec};
+use crate::rt::process::{Frames, ProcessRun, ProcessRunError, ProcessSpec};
 #[cfg(feature = "process")]
 use crate::rt::supervise::Supervisor;
 #[cfg(feature = "process")]
@@ -85,6 +85,11 @@ pub struct Process {
     /// One slot per child this domain may run at once, shared by every verb
     /// call on this value, so concurrent calls cannot fork past the ceiling.
     slots: Semaphore,
+    /// The reader ceiling for the framed stdout reading, when the caller asked
+    /// for one. `None` (the default) leaves [`ProcessState::stdout_frames`]
+    /// empty and reports stdout exactly as before; setting it reaches the
+    /// crate's one frame grammar through the verb path.
+    frame_stdout: Option<NonZeroUsize>,
 }
 
 /// Observe or execute a system process. Supports Observe, Execute, Query.
@@ -140,6 +145,14 @@ pub struct ProcessState {
     pub deadline_fired: bool,
     /// The terminating signal, when the process was killed by one.
     pub signal: Option<i32>,
+    /// The length-framed reading of stdout, when the domain was built with
+    /// [`Process::frame_stdout`].
+    ///
+    /// Private with an accessor because it is a reading of bytes the process
+    /// wrote: a caller reads it, never edits it in place. `None` for a domain
+    /// built without a framed reading, which is the default.
+    #[cfg(feature = "process")]
+    stdout_frames: Option<Frames>,
 }
 
 impl ProcessState {
@@ -153,6 +166,19 @@ impl ProcessState {
     #[must_use]
     pub fn stderr(&self) -> &str {
         &self.stderr
+    }
+
+    /// The child's stdout read as length-framed records, when the domain was
+    /// built with [`Process::frame_stdout`].
+    ///
+    /// `None` for a domain built without it, which is the default. The reading
+    /// is byte-exact where [`ProcessState::stdout`] is lossy, and its ending is
+    /// the one [`crate::rt::process::CapturedStream::frames`] decides for a
+    /// capture that may have cut the child's stream.
+    #[cfg(feature = "process")]
+    #[must_use]
+    pub fn stdout_frames(&self) -> Option<&Frames> {
+        self.stdout_frames.as_ref()
     }
 }
 
@@ -186,7 +212,23 @@ impl Process {
             spec,
             caps: vec![Cap::sys()],
             slots: Semaphore::new(DEFAULT_MAX_CONCURRENT.get()),
+            frame_stdout: None,
         }
+    }
+
+    /// Attach a length-framed reading of the child's stdout.
+    ///
+    /// When set, every [`ProcessState`] the verbs return carries the child's
+    /// stdout read as length-prefixed records under `ceiling` through
+    /// [`ProcessState::stdout_frames`] — the crate's one frame grammar
+    /// ([`crate::journal::frame`]) reached from the verb a caller performs work
+    /// with. The reading is byte-exact, so a binary record round-trips where
+    /// the lossy [`ProcessState::stdout`] cannot. Without it the framed reading
+    /// is absent and nothing else about the run changes.
+    #[must_use]
+    pub fn frame_stdout(mut self, ceiling: NonZeroUsize) -> Self {
+        self.frame_stdout = Some(ceiling);
+        self
     }
 
     /// Set how many children this domain runs at once.
@@ -219,7 +261,7 @@ impl Process {
         };
         let mut supervisor = Supervisor::new(1);
         match supervisor.run_process(&self.spec).await {
-            Ok(run) => Ok(ProcessState::from_run(&run)),
+            Ok(run) => Ok(ProcessState::from_run(&run, self.frame_stdout)),
             Err(ProcessRunError::Refused) => Err(BotError::DomainError {
                 domain: String::from("sys::process"),
                 certainty: DispatchCertainty::Refused,
@@ -252,7 +294,12 @@ impl Process {
 #[cfg(feature = "process")]
 impl ProcessState {
     /// Fold one supervised run into the observable state.
-    fn from_run(run: &ProcessRun) -> Self {
+    ///
+    /// `frame_stdout` is the domain's own reader ceiling: when present, the
+    /// same bytes `stdout` decodes lossily are read once through the crate's
+    /// frame grammar, so the framed reading has a production caller rather than
+    /// existing only for a test.
+    fn from_run(run: &ProcessRun, frame_stdout: Option<NonZeroUsize>) -> Self {
         let stdout = run.stdout();
         let stderr = run.stderr();
         #[cfg(unix)]
@@ -270,11 +317,37 @@ impl ProcessState {
             stderr_total_bytes: stderr.total_bytes(),
             deadline_fired: run.deadline_fired(),
             signal,
+            stdout_frames: frame_stdout.map(|ceiling| stdout.frames(ceiling.get())),
         }
     }
 }
 
-#[cfg(feature = "process")]
+impl Process {
+    /// Run one verb call, or refuse it when no supervised runner is bound.
+    ///
+    /// One body for the three verbs and both feature sets, so a refusal message
+    /// and the successful path cannot drift between them. What differs between
+    /// a build with the `process` runner and one without is a fact about this
+    /// method rather than about each verb: a build with no runner has no
+    /// supervised process to bind to, so the refusal names the verb and the
+    /// command it was asked to run.
+    async fn dispatch(&self, verb: &'static str) -> Result<ProcessState, BotError> {
+        #[cfg(feature = "process")]
+        {
+            let _ = verb;
+            self.run_once().await
+        }
+        #[cfg(not(feature = "process"))]
+        {
+            Err(BotError::DomainError {
+                domain: String::from("sys::process"),
+                certainty: DispatchCertainty::Refused,
+                cause: format!("{verb} {:?} — binding required", self.command),
+            })
+        }
+    }
+}
+
 impl verb::Observe for Process {
     type Output = ProcessState;
 
@@ -287,7 +360,7 @@ impl verb::Observe for Process {
         // A one-shot process has no persistent state to read, so the observed
         // value is the result of running it: the ECS schedule fires the chain
         // when that state moves.
-        self.run_once().await
+        self.dispatch("polling").await
     }
 
     fn domain_id(&self) -> &str {
@@ -295,7 +368,6 @@ impl verb::Observe for Process {
     }
 }
 
-#[cfg(feature = "process")]
 impl verb::Execute for Process {
     type Input = ();
     type Output = ProcessState;
@@ -306,7 +378,7 @@ impl verb::Execute for Process {
 
     async fn execute_action(&self, call: (Auth, &())) -> Result<ProcessState, BotError> {
         call.0.check(self.required_caps())?;
-        self.run_once().await
+        self.dispatch("executing").await
     }
 
     fn domain_id(&self) -> &str {
@@ -314,7 +386,6 @@ impl verb::Execute for Process {
     }
 }
 
-#[cfg(feature = "process")]
 impl verb::Query for Process {
     type Input = ();
     type Output = ProcessState;
@@ -328,75 +399,7 @@ impl verb::Query for Process {
         // The read-only probe form: it runs the same command and reports, and
         // by construction performs no write of its own beyond what the command
         // does. A command with an effect belongs in `Execute`.
-        self.run_once().await
-    }
-
-    fn domain_id(&self) -> &str {
-        "sys::process"
-    }
-}
-
-#[cfg(not(feature = "process"))]
-impl verb::Observe for Process {
-    type Output = ProcessState;
-
-    fn required_caps(&self) -> &[Cap] {
-        &self.caps
-    }
-
-    async fn poll(&self, call: (Auth, ())) -> Result<ProcessState, BotError> {
-        call.0.check(self.required_caps())?;
-        Err(BotError::DomainError {
-            domain: self.domain_id().into(),
-            certainty: DispatchCertainty::Refused,
-            cause: format!("polling {:?} — binding required", self.command),
-        })
-    }
-
-    fn domain_id(&self) -> &str {
-        "sys::process"
-    }
-}
-
-#[cfg(not(feature = "process"))]
-impl verb::Execute for Process {
-    type Input = ();
-    type Output = ProcessState;
-
-    fn required_caps(&self) -> &[Cap] {
-        &self.caps
-    }
-
-    async fn execute_action(&self, call: (Auth, &())) -> Result<ProcessState, BotError> {
-        call.0.check(self.required_caps())?;
-        Err(BotError::DomainError {
-            domain: self.domain_id().into(),
-            certainty: DispatchCertainty::Refused,
-            cause: format!("executing {:?} — binding required", self.command),
-        })
-    }
-
-    fn domain_id(&self) -> &str {
-        "sys::process"
-    }
-}
-
-#[cfg(not(feature = "process"))]
-impl verb::Query for Process {
-    type Input = ();
-    type Output = ProcessState;
-
-    fn required_caps(&self) -> &[Cap] {
-        &self.caps
-    }
-
-    async fn query(&self, call: (Auth, &())) -> Result<ProcessState, BotError> {
-        call.0.check(self.required_caps())?;
-        Err(BotError::DomainError {
-            domain: self.domain_id().into(),
-            certainty: DispatchCertainty::Refused,
-            cause: format!("querying {:?} — binding required", self.command),
-        })
+        self.dispatch("querying").await
     }
 
     fn domain_id(&self) -> &str {
