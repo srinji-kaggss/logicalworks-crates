@@ -240,14 +240,35 @@ struct DepPlan {
     optional: bool,
     /// Manifest path for a path edge.
     path: Option<String>,
-    /// Enabled features.
-    features: Vec<String>,
-    /// Whether default features are enabled.
-    uses_default_features: bool,
-    /// Target cfg scope.
-    target: Option<String>,
-    /// Local rename alias.
-    rename: Option<String>,
+    /// Which features, under which scope and alias, the declaration selects.
+    selection: Selection,
+}
+
+/// The selection half of a declaration: everything Cargo lets a manifest say
+/// about *how* an edge is enabled, as opposed to *which* edge it is.
+#[derive(Clone)]
+struct Selection {
+    /// Enabled features, in emitted order.
+    enabled: Vec<String>,
+    /// Whether default features are on.
+    defaults: bool,
+    /// Target `cfg` scope, when the declaration is target-specific.
+    scope: Option<String>,
+    /// Local `package =` alias, when the manifest renamed the edge.
+    alias: Option<String>,
+}
+
+impl Selection {
+    /// Cargo's selection when a manifest says nothing: no extra features,
+    /// defaults on, unconditional, no alias.
+    const fn cargo_default() -> Self {
+        Self {
+            enabled: Vec::new(),
+            defaults: true,
+            scope: None,
+            alias: None,
+        }
+    }
 }
 
 impl DepPlan {
@@ -260,10 +281,7 @@ impl DepPlan {
             kind: None,
             optional: false,
             path: None,
-            features: Vec::new(),
-            uses_default_features: true,
-            target: None,
-            rename: None,
+            selection: Selection::cargo_default(),
         }
     }
 }
@@ -293,10 +311,11 @@ fn dep_json(dep: &DepPlan) -> String {
     let source = json_string(dep.source.as_deref());
     let kind = json_string(dep.kind);
     let path = json_string(dep.path.as_deref());
-    let target = json_string(dep.target.as_deref());
-    let rename = json_string(dep.rename.as_deref());
+    let target = json_string(dep.selection.scope.as_deref());
+    let rename = json_string(dep.selection.alias.as_deref());
     let features = dep
-        .features
+        .selection
+        .enabled
         .iter()
         .map(|feature| format!("\"{feature}\""))
         .collect::<Vec<_>>()
@@ -310,7 +329,7 @@ fn dep_json(dep: &DepPlan) -> String {
         optional = dep.optional,
         path = path,
         features = features,
-        defaults = dep.uses_default_features,
+        defaults = dep.selection.defaults,
         target = target,
         rename = rename,
     )
@@ -397,13 +416,13 @@ fn build_member(
         Dim::Kind => dep.kind = Some(*rng.pick(&["normal", "build", "dev"])),
         Dim::Target => {
             if rng.coin() {
-                dep.target = Some("cfg(unix)".to_owned());
+                dep.selection.scope = Some("cfg(unix)".to_owned());
             }
         }
         Dim::Optional => dep.optional = rng.coin(),
-        Dim::DefaultFeatures => dep.uses_default_features = rng.coin(),
+        Dim::DefaultFeatures => dep.selection.defaults = rng.coin(),
         Dim::Features => {
-            dep.features = ["a", "b", "c"]
+            dep.selection.enabled = ["a", "b", "c"]
                 .iter()
                 .copied()
                 .filter(|_| rng.coin())
@@ -412,7 +431,7 @@ fn build_member(
         }
         Dim::Rename => {
             if rng.coin() {
-                dep.rename = Some(format!("alias{index}"));
+                dep.selection.alias = Some(format!("alias{index}"));
             }
         }
         Dim::Path => {
@@ -441,10 +460,10 @@ fn build_member(
         optional: dep.optional,
         workspace: false,
         target_repository: None,
-        features: dep.features.clone(),
-        uses_default_features: dep.uses_default_features,
-        target: dep.target.clone(),
-        rename: dep.rename.clone(),
+        features: dep.selection.enabled.clone(),
+        uses_default_features: dep.selection.defaults,
+        target: dep.selection.scope.clone(),
+        rename: dep.selection.alias.clone(),
     };
     // The generator's only path shapes are `../<member>` and
     // `../outside/<dep>`, so membership is decided by the leading component.
@@ -635,10 +654,7 @@ fn mismatch_scenario(seed: u64) -> Scenario {
         kind: None,
         optional: false,
         path: Some("../helper".to_owned()),
-        features: Vec::new(),
-        uses_default_features: true,
-        target: None,
-        rename: None,
+        selection: Selection::cargo_default(),
     };
     let records = vec![
         member_json(&first, std::slice::from_ref(&dep)),

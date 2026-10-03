@@ -55,7 +55,7 @@ fn a_chatty_client_is_truncated_at_its_ceiling_and_never_decoded() -> TestResult
         .program(fake.program())
         .capture_limit(limit(1024)?)
         .deadline(Some(Duration::from_secs(10)))
-        .env("PATH", path_for(&fake)?);
+        .env("PATH", fake.search_path()?);
 
     let outcome =
         lgwks_bot::Runtime::new()?.block_on(gh.query_lossy("repos/acme/widgets/pulls/7"))?;
@@ -97,7 +97,7 @@ fn a_response_within_the_ceiling_is_parsed() -> TestResult {
         .program(fake.program())
         .capture_limit(limit(64 * 1024)?)
         .deadline(Some(Duration::from_secs(10)))
-        .env("PATH", path_for(&fake)?);
+        .env("PATH", fake.search_path()?);
 
     let outcome =
         lgwks_bot::Runtime::new()?.block_on(gh.query_lossy("repos/acme/widgets/pulls/7"))?;
@@ -126,7 +126,7 @@ fn a_hanging_client_is_stopped_as_a_whole_group_and_reports_no_exit_code() -> Te
         .program(fake.program())
         .capture_limit(limit(64 * 1024)?)
         .deadline(Some(Duration::from_millis(400)))
-        .env("PATH", path_for(&fake)?);
+        .env("PATH", fake.search_path()?);
 
     let started = std::time::Instant::now();
     let outcome =
@@ -250,7 +250,7 @@ fn a_review_list_past_the_ceiling_is_refused_not_truncated() -> TestResult {
         .program(fake.program())
         .capture_limit(limit(4 * 1024 * 1024)?)
         .deadline(Some(Duration::from_secs(20)))
-        .env("PATH", path_for(&fake)?);
+        .env("PATH", fake.search_path()?);
 
     let refused = lgwks_bot::Runtime::new()?
         .block_on(async {
@@ -311,7 +311,7 @@ fn a_review_list_exactly_at_the_ceiling_is_read() -> TestResult {
         .program(fake.program())
         .capture_limit(limit(4 * 1024 * 1024)?)
         .deadline(Some(Duration::from_secs(20)))
-        .env("PATH", path_for(&fake)?);
+        .env("PATH", fake.search_path()?);
 
     let reviews = lgwks_bot::Runtime::new()?.block_on(async {
         gh.read_reviews(&lgwks_bot::domain::gh::PullRequest::new(
@@ -337,7 +337,7 @@ fn a_malformed_review_list_is_refused_rather_than_decoded_into_a_partial_answer(
             .program(fake.program())
             .capture_limit(limit(64 * 1024)?)
             .deadline(Some(Duration::from_secs(10)))
-            .env("PATH", path_for(&fake)?);
+            .env("PATH", fake.search_path()?);
 
         let refused = lgwks_bot::Runtime::new()?
             .block_on(async {
@@ -382,15 +382,6 @@ fn the_argument_vector_is_a_vector_and_names_the_method_and_path() -> TestResult
         "no shell metacharacter is introduced by the binding itself"
     );
     Ok(())
-}
-
-/// The `PATH` a fake is found through, with the fixture's directory in front of
-/// the ambient one.
-fn path_for(fake: &FakeGh) -> Result<std::ffi::OsString, Box<dyn std::error::Error>> {
-    let ambient = std::env::var_os("PATH").unwrap_or_default();
-    let mut entries = vec![fake.dir().to_path_buf()];
-    entries.extend(std::env::split_paths(&ambient));
-    Ok(std::env::join_paths(&entries)?)
 }
 
 /// The one extension the fixture needs so a test can read the raw outcome

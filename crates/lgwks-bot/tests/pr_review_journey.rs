@@ -77,10 +77,7 @@ fn host() -> Result<Host, Box<dyn std::error::Error>> {
 /// is a per-child delta rather than a mutation of this process's environment,
 /// which keeps the tests independent and needs no `unsafe`.
 fn gh_for(fake: &FakeGh) -> Result<Gh, Box<dyn std::error::Error>> {
-    let ambient = std::env::var_os("PATH").unwrap_or_default();
-    let mut entries = vec![fake.dir().to_path_buf()];
-    entries.extend(std::env::split_paths(&ambient));
-    let path = std::env::join_paths(&entries)?;
+    let path = fake.search_path()?;
     Ok(Gh::new(Repository::new("acme/widgets")?)
         .program(fake.program())
         .capture_limit(NonZeroUsize::new(64 * 1024).ok_or("a non-zero limit")?)

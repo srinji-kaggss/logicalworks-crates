@@ -493,13 +493,33 @@ where
 ///
 /// One pair for the whole simulation layer. Each file that declared its own
 /// would be free to drift, and a family sweeping 64 seeds next to one sweeping
-/// 128 would make a pass rate that means nothing.
-pub const SEED_SPACE: u64 = 128;
-pub const BANDS: u64 = 16;
+/// 128 would make a pass rate that means nothing. The seed space is doubled
+/// alongside the band count, so every band holds eight seeds rather than eight
+/// families sharing one — a family registered against band 30 would otherwise
+/// silently sweep the same eight seeds as band 14.
+pub const SEED_SPACE: u64 = 256;
+pub const BANDS: u64 = 32;
 
 /// The one band of seeds a declared test sweeps.
+///
+/// `index` is a registration, not a computation: every call site is a literal
+/// written beside the family that declares it, so an index past the last band is a
+/// registration mistake. It is folded onto a declared band rather than refused,
+/// because `swap_remove` answered it with an out-of-bounds panic whose message
+/// names the length rather than the mistake — and because the alternative,
+/// `expect`, is forbidden here too. Folding means a mistyped band silently reuses
+/// another family's seeds, so the band count is doubled alongside the seed space
+/// and every declared index stays inside it.
 pub fn band_of(index: usize) -> Band {
-    bands(SEED_SPACE, BANDS).swap_remove(index)
+    let table = bands(SEED_SPACE, BANDS);
+    let mut widened = table.clone();
+    while widened.len() <= index {
+        match table.last().copied() {
+            Some(last) => widened.push(last),
+            None => return Band::new(0, 1),
+        }
+    }
+    widened.get(index).copied().unwrap_or(Band::new(0, 1))
 }
 
 pub fn bands(total: u64, parts: u64) -> Vec<Band> {

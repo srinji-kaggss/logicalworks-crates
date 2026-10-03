@@ -47,6 +47,18 @@ pub fn scratch(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("lgwks-journal-{name}-{nanos}-{unique}"))
 }
 
+/// A scratch *directory* unique to one test run, created before it is returned.
+///
+/// Separate from [`scratch`] because the two uses are genuinely different: a
+/// caller that hands the path to a journal opening it itself needs no directory,
+/// and a caller that writes files into it needs one made. Naming both is cheaper
+/// than a boolean, and it keeps the `?` at the call site.
+pub fn scratch_dir(name: &str) -> std::io::Result<std::path::PathBuf> {
+    let dir = scratch(name);
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
 /// Removes a test's scratch path when the test ends, however it ends.
 pub struct TempGuard(pub std::path::PathBuf);
 

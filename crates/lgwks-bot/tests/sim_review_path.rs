@@ -339,10 +339,7 @@ fn host() -> Result<Host, Box<dyn std::error::Error>> {
 /// ceiling it can exceed and every other family needs one it cannot; a single
 /// shared value would make one of them untestable.
 fn gh_for(fake: &FakeGh, capture: usize) -> Result<Gh, Box<dyn std::error::Error>> {
-    let ambient = std::env::var_os("PATH").unwrap_or_default();
-    let mut entries = vec![fake.dir().to_path_buf()];
-    entries.extend(std::env::split_paths(&ambient));
-    let path = std::env::join_paths(&entries)?;
+    let path = fake.search_path()?;
     Ok(Gh::new(Repository::new("acme/widgets")?)
         .program(fake.program())
         .capture_limit(NonZeroUsize::new(capture).ok_or("a non-zero limit")?)
@@ -762,7 +759,7 @@ fn deadline_stop_r32() -> TestResult {
             .program(fake.program())
             .capture_limit(NonZeroUsize::new(CAPTURE).ok_or("a non-zero limit")?)
             .deadline(Some(Duration::from_millis(400)))
-            .env("PATH", path_for(&fake)?);
+            .env("PATH", fake.search_path()?);
         let started = std::time::Instant::now();
         let report = host.block_on(&job, (gh, request(7)?))?;
         let elapsed = started.elapsed();
@@ -1156,7 +1153,7 @@ fn two_tenants_on_one_pull_request_r32() -> TestResult {
         let fake = FakeGh::install("tenants", HEAD)?;
         fake.configure(Scenario::new(HEAD))?;
         let host = host()?;
-        let path = path_for(&fake)?;
+        let path = fake.search_path()?;
 
         let run_tenant = |body: &'static str| -> Result<ReviewOutcome, Box<dyn std::error::Error>> {
             // One body per identity, bound at declaration: the closure is
@@ -1265,15 +1262,6 @@ fn retention_is_bounded_by_the_declared_ceiling() -> TestResult {
         );
     }
     Ok(())
-}
-
-/// The `PATH` a fixture is found through, with its directory in front of the
-/// ambient one.
-fn path_for(fake: &FakeGh) -> Result<std::ffi::OsString, Box<dyn std::error::Error>> {
-    let ambient = std::env::var_os("PATH").unwrap_or_default();
-    let mut entries = vec![fake.dir().to_path_buf()];
-    entries.extend(std::env::split_paths(&ambient));
-    Ok(std::env::join_paths(&entries)?)
 }
 
 /// The cancellation family: a run stopped mid-flight keeps its effect knowledge.
@@ -1447,7 +1435,7 @@ fn two_repositories_on_one_host_r16() -> TestResult {
                     .program(fake.program())
                     .capture_limit(NonZeroUsize::new(CAPTURE).ok_or("a non-zero limit")?)
                     .deadline(Some(Duration::from_secs(20)))
-                    .env("PATH", path_for(fake)?);
+                    .env("PATH", fake.search_path()?);
                 let pull = PullRequest::new(Repository::new(repo)?, 7);
                 let request = ReviewRequest::new(pull, "COMMENT", BODY).with_marker(repo);
                 let report = host.block_on(&job, (gh, String::from(repo), request))?;

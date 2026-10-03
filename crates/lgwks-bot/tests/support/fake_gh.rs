@@ -94,6 +94,18 @@ impl FakeGh {
         &self.dir
     }
 
+    /// The `PATH` this fake is found through: its directory in front of the
+    /// ambient one.
+    ///
+    /// Handed to a binding as a per-child variable rather than set on this
+    /// process, which keeps tests independent and needs no `unsafe`.
+    pub fn search_path(&self) -> Result<std::ffi::OsString, std::env::JoinPathsError> {
+        let ambient = std::env::var_os("PATH").unwrap_or_default();
+        let mut entries = vec![self.dir.clone()];
+        entries.extend(std::env::split_paths(&ambient));
+        std::env::join_paths(&entries)
+    }
+
     /// The program name the adapter resolves through `PATH`.
     ///
     /// A bare `gh`, so the test exercises real `PATH` resolution rather than

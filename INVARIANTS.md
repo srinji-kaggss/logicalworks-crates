@@ -401,7 +401,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `lgwks_std::fs::capability::tests::a_non_utf8_name_is_counted_not_returned`
 
   Known limit, stated rather than left to be discovered:
-  `fs::capability::Dir::entry_names` is Linux-only. `getdents64` is the only
+  `fs::capability::Dir::entry_names` is Linux-only. The raw `getdents64` syscall is the only
   syscall that lists a descriptor, the BSDs expose no equivalent, and calling
   `readdir(3)` would need `unsafe` under `unsafe_code = forbid`. It reports
   `Unsupported` elsewhere. Every other `Dir` operation is `*at(2)` and portable.
@@ -568,6 +568,83 @@ Each of these was a shipped defect. Treat the list as the spec.
   disposition, output or located error, and every report says no external
   effect is known. · why: #87 step 1 (T01–T04, T36) · enforced by:
   `tests/task_front_door.rs` and `tests/sim_task.rs`
+- **INV-BOT-50** A durable record reaches the disk on a thread of the store's own,
+  so no executor thread ever waits inside a flush. The whole ordered step — the
+  in-memory checks, the length fence, the write, the `sync_all` and the fold into
+  the store's index — runs on one `journal::owner` thread, which is what makes the
+  fence and the write it guards un-overtakable. `RunRecords::append_async` is what
+  a step awaits, so a parked device is a wait rather than a stalled runtime; a
+  caller that walks away from an outstanding record latches the handle's poison,
+  because the bytes may be on the disk under no acknowledgment and only a reopen
+  settles that. · why: #87 step 5, the blocking-write defect #122 removed from
+  `FileJournal` and the run store inherited · enforced by:
+  `tests/resume_liveness.rs` (`a_parked_record_device_lets_the_runtime_turn`,
+  `an_abandoned_record_leaves_the_store_consistent`,
+  `a_parked_store_still_serves_its_own_records_only`,
+  `the_parked_device_probe_measures_turns`), whose watchdog is an independent OS
+  thread and whose assertion is on the unrelated task's poll count — measured at
+  1,917 turns against a parked flush, where a blocking implementation reaches
+  one
+- **INV-BOT-51** The effect journal's frames and the run store's frames are one
+  grammar, in `journal::frame`: the length prefix, the 32-byte stored head, the
+  torn-tail scan, the refusal of a frame no writer produces, and the whole
+  archive/bound/chain/lay-out step, parameterised by each store's record type,
+  archiver and head-chaining function. "What a torn tail is" therefore has one
+  answer in this crate rather than one per store, and a frame one store writes is
+  framed exactly as a frame the other writes. `journal::file`'s behaviour is
+  unchanged by the extraction. · why: #87 step 5 (duplicated estate capability)
+  · enforced by: `journal::frame::tests` (six properties, including the three
+  prefix endings and the frame round trip), `journal::file::tests` unchanged and
+  green, and the `tests/sim_journal.rs` and `tests/sim_journal_liveness.rs`
+  binaries
+- **INV-BOT-52** A durable step's cost is a stated number, not an adjective. The
+  run store's per-step cost is measured against the two things it could be: a
+  plain un-recorded step, and the effect journal's append at the same payload
+  size. Measured here: plain p50=1us, `remember` p50=17984us / p95=33189us /
+  p99=44988us, `FileJournal` p50=15977us / p95=29949us / p99=39949us — so a
+  durable step is not paying twice for one mechanism. A measurement that did not
+  run says it did not run, never a bound nobody checked. · why: #87 step 5
+  (frontier) · enforced by: `crates/lgwks-bot/examples/resume_cost.rs`, three
+  mechanisms at one payload size in one harness
+- **INV-BOT-53** The store holds every record at every concurrency tier it claims,
+  with two tenants interleaved, and the counts are read back from a reopened
+  store rather than from the handle that wrote them. Measured here: 100 runs →
+  p50=3019us p95=3977us p99=4138us in 316.11ms; 1000 → p50=3005us p95=4001us
+  p99=4136us in 3.13s; 10000 → p50=3017us p95=4144us p99=5312us in 32.74s,
+  with no record lost, none duplicated and none attributed to the wrong tenant.
+  Under contention the ordered step stays ordered: many appends through one owner
+  thread lose nothing, a repeated submission commits one frame, and a replayed
+  step is never re-recorded. · why: #87 step 5 (hyperscale) · enforced by:
+  `tests/task_resume.rs::concurrent_runs_across_tiers` and
+  `tests/sim_store_scale.rs` (`concurrent_appends_lose_nothing`,
+  `an_interrupted_step_records_exactly_once`,
+  `tenants_interleaved_stay_isolated`, `same_seed_replays`)
+- **INV-BOT-54** A durable claim is backed by a store that outlives the process, and
+  every part of it says which. A host with `run_store` installed mints a `RunId`,
+  records each `remember` step's value with an `fsync` *before* returning it, and
+  reports the run's identity and step count in `EffectKnowledge::StepRecords`; a
+  host with no store reports `EffectKnowledge::None`, no `run_id` and no ticket,
+  and its durable steps simply re-run. A resume under a run id another tenant owns
+  is a typed `Refused`, never another tenant's records. Committed records are
+  chain-verified and a broken chain is refused, not trimmed; an interrupted final
+  append is the one thing dropped, because it was never acknowledged. Each of the
+  three ceilings (per-record bytes, records per run, total bytes) is a typed
+  refusal naming the bound, and a refusal leaves the store byte-identical. A step
+  that ran but whose record did not land re-runs on resume, so the durable
+  guarantee is exactly-once for a *recorded* step and at-least-once for an
+  unrecorded one; an external effect a step performs still needs the effect
+  journal, not this. · why: #87 step 5 (host-held continuation) · enforced by:
+  `tests/task_resume.rs` (`a_killed_process_resumes_without_rerunning_finished_steps`,
+  `a_run_without_a_store_claims_no_durability`,
+  `two_tenants_resuming_one_run_id_stay_isolated`,
+  `a_torn_final_record_is_dropped_and_earlier_ones_survive`,
+  `a_store_corrupt_before_the_tail_is_refused_not_trimmed`,
+  `an_oversized_record_is_refused_naming_the_ceiling`,
+  `a_duplicate_append_of_the_same_record_is_a_no_op`) and
+  `tests/sim_task_resume.rs` (`crash_points_resume_to_the_same_output`,
+  `finished_steps_run_once`, `tenants_stay_isolated`, `same_seed_replays`),
+  which sweeps every step boundary of every seeded run twice for an identical
+  trace hash.
 - **INV-BOT-40** The committed record can be replayed without materializing it:
   `FileJournal::replay` streams frames from its own read-only descriptor,
   retaining at most one event, applies the same frame validation and event

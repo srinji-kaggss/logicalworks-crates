@@ -18,22 +18,20 @@
 use std::error::Error;
 use std::future::{Future, poll_fn};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
-use lgwks_bot::journal::{
-    DurabilityPromise, EffectEvent, EffectJournal, FileJournal, JournalPosition, StorageGate,
-};
+use lgwks_bot::journal::{DurabilityPromise, EffectEvent, EffectJournal, FileJournal};
 
 #[path = "support/journal.rs"]
+mod fixtures;
+
+#[path = "support/resume.rs"]
 mod shared;
 
-use shared::{TempGuard, key, scratch};
-
-/// How many turns the unrelated task must get before the watchdog releases the
-/// parked device. A blocking durable wait reaches at most one.
-const PROGRESS_TURNS: u64 = 64;
+use fixtures::{TempGuard, key, scratch};
+use shared::{PROGRESS_TURNS, Parked, heartbeat};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -46,78 +44,6 @@ fn ignore<T>(_: T) {}
 /// an independent thread that releases the device once the unrelated task has
 /// progressed — is the thing under test, and a second copy is a second thing to
 /// drift.
-struct Parked {
-    /// The parked journal's append fence.
-    tail: JournalPosition,
-    /// How many turns the unrelated task has taken.
-    ticks: Arc<AtomicU64>,
-    /// Set by the watchdog once it has released the device.
-    released: Arc<AtomicBool>,
-    /// The independent thread that releases the device.
-    watchdog: std::thread::JoinHandle<u64>,
-}
-
-impl Parked {
-    /// Park `journal`'s device and start the independent watchdog over it.
-    fn new(journal: &FileJournal, gate: StorageGate) -> Result<Self, std::io::Error> {
-        let ticks = Arc::new(AtomicU64::new(0));
-        let released = Arc::new(AtomicBool::new(false));
-        let watchdog = spawn_watchdog(&ticks, gate, Arc::clone(&released))?;
-        Ok(Self {
-            tail: journal.tail(),
-            ticks,
-            released,
-            watchdog,
-        })
-    }
-
-    /// Wait for the watchdog and report the turns the runtime achieved.
-    fn observed(self) -> Result<u64, Box<dyn Error>> {
-        self.watchdog
-            .join()
-            .map_err(|_| std::io::Error::other("the watchdog thread panicked").into())
-    }
-}
-
-/// The unrelated ready task, polled on the same driver as the append: it ticks
-/// and re-wakes itself so the driver keeps turning while the append is parked.
-fn heartbeat(ticks: Arc<AtomicU64>) -> impl Future<Output = ()> {
-    poll_fn(move |cx| {
-        ticks.fetch_add(1, Ordering::Relaxed);
-        cx.waker().wake_by_ref();
-        Poll::<()>::Pending
-    })
-}
-
-/// An independent thread that releases the parked device once the unrelated
-/// task has demonstrably progressed.
-///
-/// It is not the runtime and not the storage owner: nothing it does depends on
-/// the future under test being polled. It gives up at `deadline` so a tree that
-/// is genuinely wedged fails the tick assertion rather than hanging the suite,
-/// sets `released` so a later phase can observe the release without asking the
-/// journal, and reports the tick count it saw.
-fn spawn_watchdog(
-    ticks: &Arc<AtomicU64>,
-    gate: StorageGate,
-    released: Arc<AtomicBool>,
-) -> Result<std::thread::JoinHandle<u64>, std::io::Error> {
-    let ticks = Arc::clone(ticks);
-    std::thread::Builder::new()
-        .name("liveness-watchdog".to_owned())
-        .spawn(move || {
-            let deadline = Instant::now().checked_add(Duration::from_secs(10));
-            while deadline.is_none_or(|limit| Instant::now() < limit)
-                && ticks.load(Ordering::Relaxed) < PROGRESS_TURNS
-            {
-                std::thread::park_timeout(Duration::from_millis(1));
-            }
-            gate.release();
-            released.store(true, Ordering::Relaxed);
-            ticks.load(Ordering::Relaxed)
-        })
-}
-
 /// A parked device must not stop an unrelated ready task from getting turns.
 ///
 /// The append is awaited on the runtime being driven; the unrelated task is
@@ -130,11 +56,11 @@ fn a_slow_store_lets_the_runtime_and_the_release_progress() -> TestResult {
     let path = scratch("progress");
     let _guard = TempGuard(path.clone());
     let mut journal = FileJournal::open_with_stalled_storage(&path)?;
-    let parked = Parked::new(&journal, journal.storage_gate())?;
+    let parked = Parked::at(Some(journal.tail()), journal.storage_gate())?;
     let event = EffectEvent::IntentAdmitted { key: key(1)? };
 
-    let mut heartbeat = Box::pin(heartbeat(Arc::clone(&parked.ticks)));
-    let mut append = Box::pin(journal.compare_and_append_async(parked.tail, &event));
+    let mut heartbeat = Box::pin(heartbeat(Arc::clone(&parked.ticks())));
+    let mut append = Box::pin(journal.compare_and_append_async(parked.tail()?, &event));
     let ack = lgwks_bot::rt::runtime::block_on(poll_fn(|cx| {
         // The unrelated task gets a turn before the append is polled, and its
         // wake keeps the driver moving; if the append blocked here, this line
@@ -182,11 +108,11 @@ fn a_cancelled_append_leaves_the_runtime_and_the_handle_live() -> TestResult {
     let path = scratch("cancel");
     let _guard = TempGuard(path.clone());
     let mut journal = FileJournal::open_with_stalled_storage(&path)?;
-    let parked = Parked::new(&journal, journal.storage_gate())?;
+    let parked = Parked::at(Some(journal.tail()), journal.storage_gate())?;
     let event = EffectEvent::IntentAdmitted { key: key(2)? };
 
-    let mut heartbeat = Box::pin(heartbeat(Arc::clone(&parked.ticks)));
-    let mut append = Box::pin(journal.compare_and_append_async(parked.tail, &event));
+    let mut heartbeat = Box::pin(heartbeat(Arc::clone(&parked.ticks())));
+    let mut append = Box::pin(journal.compare_and_append_async(parked.tail()?, &event));
     // Poll the append exactly once so the owner has the request, letting the
     // unrelated task tick in the same round. Then abandon it: the append is
     // parked, so the drop cannot be waiting on the device.
@@ -204,7 +130,7 @@ fn a_cancelled_append_leaves_the_runtime_and_the_handle_live() -> TestResult {
     // outstanding, turning the unrelated task until the independent watchdog
     // releases the device.
     lgwks_bot::rt::runtime::block_on(poll_fn(|cx| {
-        if parked.released.load(Ordering::Relaxed) {
+        if parked.released().load(Ordering::Relaxed) {
             return Poll::Ready(());
         }
         ignore(heartbeat.as_mut().poll(cx));
