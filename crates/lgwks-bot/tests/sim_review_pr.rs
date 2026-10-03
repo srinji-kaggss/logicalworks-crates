@@ -33,7 +33,9 @@ use std::hash::{Hash, Hasher};
 /// What a simulation reports when a precondition did not hold.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-use lgwks_bot::domain::gh::{CommitId, Gh, GhError, Repository, ReviewPayload, ReviewRecord};
+use lgwks_bot::domain::gh::{
+    CommitId, Gh, GhError, Repository, ReviewComment, ReviewPayload, ReviewRecord,
+};
 use lgwks_bot::review::ReviewOutcome;
 
 /// One simulated fault, chosen by the seed.
@@ -731,6 +733,53 @@ fn pull_object_contract_r64() -> TestResult {
         assert!(
             not_github.head_sha().is_empty() && not_github.base_sha().is_empty(),
             "seed {index}: a flat answer is not GitHub's shape and pins nothing"
+        );
+    }
+    Ok(())
+}
+
+/// Inline comments are carried in the payload and read back by field.
+///
+/// A non-empty comment list travels on the wire (where a verifier compares it),
+/// and an empty one is omitted, so a payload that declares no comments is
+/// byte-for-byte what it always was.
+#[test]
+fn review_comments_are_carried_and_omitted_r16() -> TestResult {
+    for index in 0..16u64 {
+        let subject = CommitId::new(seeded_sha(index, 5))?;
+        let comments = vec![
+            ReviewComment::new(format!("src/a{index}.rs"), index.saturating_add(1), "first"),
+            ReviewComment::new(
+                format!("src/b{index}.rs"),
+                index.saturating_add(2),
+                "second",
+            ),
+        ];
+        let payload =
+            ReviewPayload::new(&subject, "COMMENT", "body", "marker")?.with_comments(comments);
+        assert_eq!(
+            payload.comments().len(),
+            2,
+            "seed {index}: both comments are carried"
+        );
+        let first = payload.comments().first().ok_or("the first comment")?;
+        assert!(
+            first.path().starts_with("src/a"),
+            "seed {index}: a comment names its path"
+        );
+        assert_eq!(first.line(), index.saturating_add(1));
+        assert_eq!(first.body(), "first");
+        let wire = lgwks_std::json::to_string(&payload)?;
+        assert!(wire.contains("\"comments\":["), "seed {index}: {wire}");
+        assert!(
+            !wire.contains("\"comments\":[]"),
+            "seed {index}: a non-empty list is sent, never an empty one"
+        );
+
+        let bare = ReviewPayload::new(&subject, "COMMENT", "body", "marker")?;
+        assert!(
+            !lgwks_std::json::to_string(&bare)?.contains("comments"),
+            "seed {index}: an empty comment list is omitted from the wire"
         );
     }
     Ok(())

@@ -99,6 +99,62 @@ task_local! {
     /// its own and restores this one on the way out. A clone is one reference
     /// count.
     static DEFINITION: Option<Arc<DefinitionIdentity>>;
+
+    /// The authority a step's `require` is checked against, if any.
+    static AUTHORITY: Option<Authority>;
+}
+
+/// The authority a run's steps are checked against: the host's grant plus the
+/// delta of any repair this run is carrying.
+///
+/// Object-safe and `Arc`-held for the same reason as [`RunRecords`] — it is
+/// installed as a `dyn` behind a task-local and consulted by borrowed methods, so
+/// a step body can ask what it may do without the host being named in its
+/// signature.
+#[derive(Clone)]
+pub(crate) struct Authority(pub(crate) Arc<dyn AuthorityCheck>);
+
+/// What a step's `require` asks of the run's authority.
+///
+/// One method, because there is one question: *is this capability covered right
+/// now*. It returns the whole shortfall rather than a `bool`, so a step that is
+/// short of three capabilities learns all three at once and the repair ticket
+/// built from the answer is written once.
+pub(crate) trait AuthorityCheck: Send + Sync {
+    /// Every capability in `required` this run's authority does not cover, in
+    /// declaration order, each named once.
+    fn uncovered(&self, required: &[crate::cap::Cap]) -> Vec<crate::cap::Shortage>;
+}
+
+impl Authority {
+    /// The shortfall for `required`, or `None` when no authority is installed —
+    /// which is a local run outside any host, where a step reaches nothing and so
+    /// needs nothing.
+    pub(crate) fn shortfall(
+        &self,
+        required: &[crate::cap::Cap],
+    ) -> Option<Vec<crate::cap::Shortage>> {
+        let short = self.0.uncovered(required);
+        (!short.is_empty()).then_some(short)
+    }
+}
+
+/// The authority installed for the current future, if any.
+pub(crate) fn authority() -> Option<Authority> {
+    AUTHORITY.try_with(Clone::clone).unwrap_or(None)
+}
+
+/// Install `authority` for the futures polled inside `body`; `None` installs the
+/// absence a run with no authority reports, through the same one composition.
+///
+/// Crate-private for the same reason as [`within`]: the host is the supported way
+/// to make a run checkable, and a caller who installed their own authority would
+/// be granting themselves the capability the step is asking about.
+pub(crate) async fn with_authority<R>(
+    authority: Option<Authority>,
+    body: impl Future<Output = R>,
+) -> R {
+    AUTHORITY.scope(authority, body).await
 }
 
 /// The durable store a run's durable steps consult.
@@ -374,6 +430,17 @@ impl StoredValue {
     pub(crate) fn new(path: String, bytes: Vec<u8>) -> Self {
         Self { path, bytes }
     }
+
+    /// The archived bytes, by value.
+    ///
+    /// The reader's door, and the counterpart to the borrow
+    /// [`StagedRecord::bytes`] takes on the writer's side. `pub(crate)` for the same
+    /// reason [`StoredValue::new`] is: the store hands these out and
+    /// [`crate::task::RunStore::lookup`] is the one place a caller may read them,
+    /// so no public field can hand a step of the wrong type a value it will decode.
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
 }
 
 /// What a durable append did.
@@ -529,6 +596,19 @@ pub(crate) fn installed() -> Option<Records> {
     RECORDS.try_with(Clone::clone).unwrap_or(None)
 }
 
+/// The definition a durable step records under.
+///
+/// The run's host-installed identity when one is installed, otherwise one derived
+/// from `scope` and `step`. One resolution point, so a refusal [`remember_at`]
+/// writes and a value [`remember`] writes cannot disagree about the definition
+/// their run is using.
+pub(crate) fn step_definition(scope: &Scope, step: &str) -> Arc<DefinitionIdentity> {
+    match installed_definition() {
+        Some(installed) => installed,
+        None => Arc::new(definition_of(scope, step)),
+    }
+}
+
 /// Run `body` once and remember its value across runs of this step.
 ///
 /// The public spelling of the durable step. `step` is the step's name and enters
@@ -566,18 +646,11 @@ where
     Fut: Future<Output = Result<T, FlowError>>,
 {
     let child = scope.enter(step)?;
-    let derived;
     // The host-installed identity, or one derived from this scope's own facts when
     // no run above declared one. Derived rather than defaulted so two runs on one
     // host cannot claim one definition, and so a hand-built scope with no host
     // above it still records something that is stable for its own run.
-    let definition = match installed_definition() {
-        Some(installed) => installed,
-        None => {
-            derived = definition_of(scope, step);
-            Arc::new(derived)
-        }
-    };
+    let definition = step_definition(scope, step);
     step_in(&child, &definition, body).await
 }
 

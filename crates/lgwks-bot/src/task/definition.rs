@@ -250,7 +250,7 @@ impl DefinitionIdentity {
     ///
     /// Domain-separated and length-framed per field, so no two distinct
     /// identities can hash the same bytes and the digest cannot be confused with
-    /// the [`StepKey`] of any step.
+    /// the [`StepKey`](crate::script::StepKey) of any step.
     #[must_use]
     pub fn digest(&self) -> Digest {
         let mut hasher = Hasher::new();

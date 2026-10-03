@@ -344,8 +344,8 @@ impl Broker {
     /// # Errors
     ///
     /// [`BrokerError::UnknownEnvironment`] when this broker already owns `id`,
-    /// and [`JournalError`](crate::journal::JournalError) when the journal cannot
-    /// be read or does not describe `id`.
+    /// and [`JournalError`] when the journal cannot be read or does not describe
+    /// `id`.
     pub fn adopt(
         &mut self,
         id: EnvironmentId,
