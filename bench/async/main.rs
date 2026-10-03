@@ -164,11 +164,25 @@ async fn facade_side(total: usize, bound: usize) -> (f64, Tally) {
 async fn facade_side_draining(total: usize, bound: usize, drain: Drain) -> (f64, Tally) {
     let counter = Arc::new(AtomicU64::new(0));
     let mut supervisor = Supervisor::new(bound);
+    // The mutant's tail: its last `bound` bodies wait on a gate that opens only
+    // after the tally is read. Without it the defect is a race the host decides —
+    // a fast runner finishes the last in-flight bodies before the one `reap`, the
+    // mutant reports every unit complete, and the gate is told it accepted an
+    // unfair side when the side was in fact fair. Holding exactly `bound` bodies
+    // fills the ceiling and no more, so the spawn loop still places every task.
+    let held = (drain == Drain::GiveUp).then(|| Arc::new(Semaphore::new(0)));
+    let tail_from = total.saturating_sub(bound);
     let started = Instant::now();
-    for _ in 0..total {
+    for index in 0..total {
         let counter = Arc::clone(&counter);
+        let hold = held.clone().filter(|_| index >= tail_from);
         supervisor
-            .spawn(move |_token| async move { body_unit(counter).await })
+            .spawn(move |_token| async move {
+                if let Some(hold) = hold {
+                    let _released = hold.acquire().await;
+                }
+                body_unit(counter).await;
+            })
             .await;
     }
     // Drain every task before cancelling anything.
@@ -215,6 +229,9 @@ async fn facade_side_draining(total: usize, bound: usize, drain: Drain) -> (f64,
         dropped_detail: stats.reports_dropped,
         work_units: counter.load(Ordering::SeqCst),
     };
+    if let Some(held) = held {
+        held.add_permits(bound);
+    }
     drop(supervisor);
     (elapsed, tally)
 }
