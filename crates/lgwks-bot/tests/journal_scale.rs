@@ -62,9 +62,15 @@ const FDS_PER_TENANT: u64 = 2;
 /// nextest's own runner, so the real run does not sit exactly on the ceiling.
 const THREAD_RESERVE: u64 = 256;
 
-/// The most parked threads the probe will ever create, so a host with no
-/// reachable ceiling cannot make the probe run forever.
-const MAX_PROBE_THREADS: usize = 65_536;
+/// The most parked threads the probe creates: what the largest tier needs
+/// (10,000 tenants x [`THREADS_PER_TENANT`]) plus [`THREAD_RESERVE`], and no more.
+///
+/// The probe used to spawn until the OS refused a thread. On Linux that limit is
+/// per *user*, so while the probe sat at exhaustion the test runner itself could
+/// not fork the next test (`Resource temporarily unavailable (os error 11)`,
+/// main CI run 37091933076). Measuring only up to the level a tier can use
+/// answers the same question without taking the host's last thread.
+const MAX_PROBE_THREADS: usize = 20_256;
 
 /// The ceiling assumed when neither `ulimit -n` nor the thread probe answers:
 /// the level round two proved, kept so the tier still runs rather than folding
