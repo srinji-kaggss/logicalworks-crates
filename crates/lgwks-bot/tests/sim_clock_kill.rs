@@ -26,7 +26,11 @@
 //! recovered step does not double-spend the budget; a torn tail (an append
 //! interrupted mid-write) is refused rather than read as a shorter step.
 
-#![cfg(unix)]
+// Unix-only, because `SIGKILL` and `Child::kill`'s signal report are both POSIX.
+// Also gated on `rt`, because the clock this file observes lives behind that
+// feature: without it there is no `Clock` to kill anything under, and a target
+// that compiled to nothing would read as a test that passed.
+#![cfg(all(unix, feature = "rt"))]
 
 mod common;
 

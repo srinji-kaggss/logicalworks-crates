@@ -705,8 +705,8 @@ fn a_real_kill_mid_append_leaves_no_duplicate_and_no_lost_receipt() -> TestResul
 
     let child = spawn_stalled_probe(
         "a_real_kill_mid_append_leaves_no_duplicate_and_no_lost_receipt",
-        &journal_path,
-        &marker,
+        journal_path,
+        marker,
     )?;
     kill_after_marker(
         child,
@@ -717,7 +717,7 @@ fn a_real_kill_mid_append_leaves_no_duplicate_and_no_lost_receipt() -> TestResul
     // The append never completed: the owner was parked, so nothing reached the
     // disk. A clean, empty journal is the only honest answer — not a torn tail
     // and not a phantom committed event.
-    let mut journal = FileJournal::open(&journal_path)?;
+    let mut journal = FileJournal::open(journal_path)?;
     assert!(
         !journal.torn_tail_repaired(),
         "an append that wrote nothing cannot leave a torn tail"
@@ -741,7 +741,7 @@ fn a_real_kill_mid_append_leaves_no_duplicate_and_no_lost_receipt() -> TestResul
         "the retry earns the same durable promise the killed append would have"
     );
     drop(journal);
-    let reopened = FileJournal::open(&journal_path)?;
+    let reopened = FileJournal::open(journal_path)?;
     assert_eq!(
         reopened.committed()?.len(),
         1,
