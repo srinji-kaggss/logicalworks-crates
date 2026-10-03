@@ -34,6 +34,11 @@
 //!   see. Two adjacent steps permuted inside the same shape keep every path and
 //!   every recorded value, so nothing there is a drift and pretending otherwise
 //!   would be refusing a sound resume.
+//! - The store's *format* version is not a definition axis at all: a `\x01` store
+//!   has no records to disagree with, so it is refused at open rather than
+//!   refused as a drift. `a_pre_version_store_is_refused_naming_both_versions`
+//!   keeps that separate on purpose — the refusal says "wrong version", not
+//!   "wrong definition", because those two send an operator to different places.
 
 // A run store needs the `script` surface to be durable at all and `ephemeral`
 // to mint the run identity its records are keyed by, so this target is gated on
@@ -316,19 +321,6 @@ fn input_digest_value(input: u32) -> lgwks_std::hash::Digest {
     hasher.finalize()
 }
 
-/// The disposition as a number, so a trace compares two runs rather than a
-/// rendered string.
-const fn disposition_code(disposition: Disposition) -> u64 {
-    match disposition {
-        Disposition::Succeeded => 0,
-        Disposition::Failed => 1,
-        Disposition::Cancelled => 2,
-        Disposition::DeadlineExceeded => 3,
-        Disposition::Refused => 4,
-        _ => 255,
-    }
-}
-
 /// second reach the control and then assert it was refused.
 fn drawn_drift(sim: &mut sim::Sim) -> DriftKind {
     let drawn = usize::try_from(sim.rng().below(4)).unwrap_or_default();
@@ -466,8 +458,10 @@ fn drift_kinds_are_refused_typed(band: sim::Band) -> TestResult {
             let observed = attempt(&dir.0, tenant, FIRST_INPUT, FIRST_CODEC, kind)?;
 
             sim.record(&format!("{tenant}:{}", kind.tag()));
-            sim.trace
-                .record_u64("disposition", disposition_code(observed.disposition));
+            sim.trace.record_u64(
+                "disposition",
+                shared::disposition_code(observed.disposition),
+            );
 
             assert_eq!(
                 observed.disposition,
@@ -728,6 +722,107 @@ fn a_refusal_leaves_the_store_byte_identical(band: sim::Band) -> TestResult {
     sim::assert_replays(band, body)
 }
 
+/// The format-version byte at the end of the header, the byte that differs
+/// between formats.
+const VERSION_BYTE: usize = 15;
+/// The version byte a pre-version store carries, and the version this build reads.
+///
+/// Spelled out rather than imported: the claim under test is that the two are
+/// *not* the same, so a check that read both from the crate would agree with a
+/// revert. The two are literals here for the same reason `CURRENT_FORMAT` is in
+/// `task_resume.rs` — the same fact, one owner each for the two questions that
+/// read it (a store handle, and a host installing over a directory).
+const PRE_VERSION: u8 = 1;
+/// The version this build writes and reads.
+const CURRENT_FORMAT: u8 = 2;
+
+/// A store in an older format is refused naming both versions, and its bytes do
+/// not move.
+///
+/// The file half of T15's "before any new effect". A record written without a
+/// definition identity cannot be shown to be this build's own work, so the only
+/// honest answer is a refusal — and the refusal has to distinguish "this is an
+/// older version of *my* format" from "this was never my format at all", because
+/// the second message is what makes an operator delete a file their system is
+/// still relying on. This family writes a real store, rewrites its version byte
+/// and reopens it, sweeping the tenant per seed so both stores are exercised, and
+/// asserts the typed `FormatVersion { found, expected }` payload *and* that the
+/// file is byte-identical afterwards.
+fn a_pre_version_store_is_refused_naming_both_versions(band: sim::Band) -> TestResult {
+    let body = |sim: &mut sim::Sim| -> TestResult {
+        for tenant in TENANTS {
+            let input = sim.rng().below(64);
+            let dir = Scratch(sim.scratch("format")?);
+            let path = store_path(&dir.0, tenant);
+
+            let host = host_for(tenant, &dir.0)?;
+            let work = drift_task()?;
+            let identity = first_identity(&host, input, FIRST_CODEC)?;
+            let first = lgwks_bot::block_on(host.run_under(
+                &identity,
+                &work,
+                Job {
+                    input,
+                    dir: dir.0.clone(),
+                },
+            ));
+            assert_eq!(
+                first.disposition(),
+                Disposition::Succeeded,
+                "{tenant}: the first attempt must succeed so there are real frames to downgrade"
+            );
+            drop(first);
+            drop(host);
+
+            // The shipped file becomes a `\x01` file: real committed frames under
+            // a pre-version header, which is exactly the artifact a deployment on
+            // the earlier format holds.
+            let mut bytes = std::fs::read(&path)?;
+            assert_eq!(
+                bytes[VERSION_BYTE], CURRENT_FORMAT,
+                "{tenant}: the store must be written at the current version before it is downgraded"
+            );
+            bytes[VERSION_BYTE] = PRE_VERSION;
+            std::fs::write(&path, &bytes)?;
+            let before = bytes.clone();
+
+            let refusal = RunStore::open(&path)
+                .err()
+                .ok_or_else(|| -> Box<dyn Error> {
+                    format!("{tenant}: a pre-version store must not open").into()
+                })?;
+            let (found, expected) =
+                shared::format_version(&refusal).ok_or_else(|| -> Box<dyn Error> {
+                    format!("{tenant}: a \\x01 store must be a version refusal, got: {refusal}")
+                        .into()
+                })?;
+            assert_eq!(
+                found, PRE_VERSION,
+                "{tenant}: the refusal must name the version found"
+            );
+            assert_eq!(
+                expected, CURRENT_FORMAT,
+                "{tenant}: the refusal must name the version this build reads"
+            );
+            assert_eq!(
+                std::fs::read(&path)?,
+                before,
+                "{tenant}: the refusal moved bytes in a store it could not read"
+            );
+
+            sim.record(tenant);
+            sim.trace.record_u64("found", u64::from(PRE_VERSION));
+            sim.trace.record_u64("expected", u64::from(CURRENT_FORMAT));
+            sim.trace.record_u64(
+                "store-bytes",
+                u64::try_from(before.len()).unwrap_or(u64::MAX),
+            );
+        }
+        Ok(())
+    };
+    sim::assert_replays(band, body)
+}
+
 /// The same seed produces the same trace, and a different seed a different one.
 ///
 /// The replay receipt, asserted directly as well as through
@@ -789,6 +884,8 @@ band_family::band_family! {
     every_axis_is_distinguishable_band_11 => every_axis_is_distinguishable, 11;
     a_refusal_leaves_the_store_byte_identical_band_12 => a_refusal_leaves_the_store_byte_identical, 12;
     a_refusal_leaves_the_store_byte_identical_band_13 => a_refusal_leaves_the_store_byte_identical, 13;
+    a_pre_version_store_is_refused_naming_both_versions_band_16 => a_pre_version_store_is_refused_naming_both_versions, 16;
+    a_pre_version_store_is_refused_naming_both_versions_band_17 => a_pre_version_store_is_refused_naming_both_versions, 17;
     same_seed_same_trace_hash_band_14 => same_seed_same_trace_hash, 14;
     same_seed_same_trace_hash_band_15 => same_seed_same_trace_hash, 15;
 }

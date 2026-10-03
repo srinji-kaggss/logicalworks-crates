@@ -92,6 +92,48 @@ pub fn boxed_body(scope: Scope, value: u32) -> BodyFuture {
     )
 }
 
+/// The two versions a run store's format refusal names, or `None` for any other
+/// refusal.
+///
+/// One reader for three test binaries that all need to tell a `\x01` store's
+/// refusal from every other one. It exists as a function rather than a pattern at
+/// each call site for two reasons. The workspace forbids
+/// `clippy::pattern_type_mismatch`, so every way of reaching a field out of a
+/// borrowed error is a lint error in one direction or the other and the pattern
+/// has to be rewritten per ownership. And a `match` on [`StoreError`] in three
+/// files is three copies of the same discrimination — which is exactly the block
+/// the commit guard refuses, and which is what makes one of them quietly accept
+/// a different arm if the enum grows.
+///
+/// The pair is `(found, expected)` rather than the error itself so a caller can
+/// assert on the two numbers without re-matching.
+#[cfg(feature = "script")]
+#[must_use]
+pub fn format_version(error: &lgwks_bot::task::StoreError) -> Option<(u8, u8)> {
+    match error {
+        &lgwks_bot::task::StoreError::FormatVersion { found, expected } => Some((found, expected)),
+        _ => None,
+    }
+}
+
+/// The disposition as a pair of numbers, for a trace that compares runs.
+///
+/// A rendered label changes when the enum gains an arm; the two numbers below do
+/// not, so a seeded scenario that recorded the label would report a trace
+/// difference for a change that never affected what the scenario decided.
+#[cfg(feature = "script")]
+#[must_use]
+pub fn disposition_code(disposition: lgwks_bot::task::Disposition) -> u64 {
+    match disposition {
+        lgwks_bot::task::Disposition::Succeeded => 0,
+        lgwks_bot::task::Disposition::Failed => 1,
+        lgwks_bot::task::Disposition::Cancelled => 2,
+        lgwks_bot::task::Disposition::DeadlineExceeded => 3,
+        lgwks_bot::task::Disposition::Refused => 4,
+        _ => 255,
+    }
+}
+
 /// A unique scratch directory, removed when the guard ends.
 pub struct Scratch {
     /// The directory itself.

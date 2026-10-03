@@ -71,9 +71,11 @@ pub const MAX_STORE_BYTES: u64 = 64 * 1024 * 1024;
 /// than scanned: reading a foreign file as records is how a caller is handed a
 /// value nobody wrote. The last byte of the header is the format's version, so a
 /// future change is a refusal rather than a misreading. `\x01` was the record
-/// without a [`DefinitionIdentity`] and is not migrated — see the `definition`
-/// module for why reading one as the unversioned identity would be the worse
-/// answer.
+/// without a [`DefinitionIdentity`]; a file in that format still *is* a run
+/// store, so it is refused as [`StoreError::FormatVersion`] naming both versions
+/// rather than as `NotAStore`, which would claim the bytes were never this
+/// store's. See [`check_format_version`] for the rule and the `definition` module
+/// for why reading one as the unversioned identity would be the worse answer.
 const STORE_MAGIC: &[u8; 16] = b"lgwks-runstore\x00\x00";
 
 /// The header as this crate writes it: the constant prefix and the version.
@@ -86,6 +88,49 @@ const STORE_HEADER: [u8; 16] = {
     header[15] = STORE_FORMAT;
     header
 };
+
+/// The index of the version byte in [`STORE_HEADER`].
+///
+/// Spelled as a name because the writer, the reader and the refusal all have to
+/// agree on *which* byte carries the version, and a literal `15` in three places
+/// is three chances for one of them to mean a different byte. It is the last
+/// byte, which is what leaves the first [`STORE_MAGIC`] free of version bytes.
+const VERSION_BYTE: usize = STORE_MAGIC.len() - 1;
+
+/// Refuse a header whose format this build does not read.
+///
+/// Two refusals, and the order is the argument: a header whose *first* bytes are
+/// not this store's magic was never a run store ([`StoreError::NotAStore`]),
+/// while a header whose first bytes match and whose version byte does not is a
+/// run store this build cannot read ([`StoreError::FormatVersion`], naming both
+/// versions). Reporting the second as the first would tell an operator their
+/// data was never theirs, when in fact it was written by an earlier version of
+/// this very crate — which is the one conclusion that must never be drawn from a
+/// refusal, because it is what makes someone delete the file.
+///
+/// [`STORE_MAGIC`] is constant across versions and the version byte is not, so
+/// "the first bytes match" is exactly "this is some version of this format",
+/// and the one comparison below is what keeps those two facts from collapsing
+/// into one check.
+///
+/// # Errors
+///
+/// [`StoreError::NotAStore`] when the magic does not match, and
+/// [`StoreError::FormatVersion`] naming the found and expected versions when it
+/// does.
+fn check_format_version(header: [u8; STORE_HEADER.len()]) -> Result<(), StoreError> {
+    if header[..VERSION_BYTE] != STORE_MAGIC[..VERSION_BYTE] {
+        return Err(StoreError::NotAStore);
+    }
+    let found = header[VERSION_BYTE];
+    if found == STORE_FORMAT {
+        return Ok(());
+    }
+    Err(StoreError::FormatVersion {
+        found,
+        expected: STORE_FORMAT,
+    })
+}
 
 /// The chain digest a store starts from: 32 zero bytes, hashed through the same
 /// framing as any record so the first head is a real chain step and not a
@@ -137,6 +182,30 @@ pub enum StoreError {
     },
     /// The file exists but is not a run store, or its header is short.
     NotAStore,
+    /// The file *is* a run store, in a format this build does not read.
+    ///
+    /// Distinct from [`NotAStore`][Self::NotAStore] because the two say opposite
+    /// things about what is on the disk: one says these bytes were never this
+    /// store's, the other says they were, and were written by a version of this
+    /// crate whose records mean something this build cannot reconstruct. A
+    /// pre-version store holds records with no
+    /// [`DefinitionIdentity`](super::DefinitionIdentity) in them, and the only
+    /// ways to read those are to invent an identity they never carried — which
+    /// makes every pre-version resume look exactly compatible — or to discard
+    /// evidence a running system is relying on. So the store is refused with both
+    /// versions named, and the caller is told which this build wants rather than
+    /// being handed a corrupt-store error that says nothing about either.
+    ///
+    /// This is a breaking change for every existing run store, and it is
+    /// deliberately not softened into one: the format has never shipped a version
+    /// that could lose a record, so there is nothing to convert, and a deployment
+    /// that needs its records keeps its own copy and re-runs.
+    FormatVersion {
+        /// The version byte the file declares.
+        found: u8,
+        /// The version this build reads.
+        expected: u8,
+    },
     /// A committed frame does not follow from the records before it. Those
     /// bytes are acknowledged evidence and are refused, never trimmed.
     Corrupt {
@@ -227,6 +296,12 @@ impl fmt::Display for StoreError {
             Self::NotAStore => {
                 formatter.write_str("this file is not a run store; refusing to read it as records")
             }
+            Self::FormatVersion { found, expected } => write!(
+                formatter,
+                "this is a run store in format version {found}, and this build reads version \
+                 {expected}; refusing to read records whose definition identity this version \
+                 cannot reconstruct"
+            ),
             Self::Corrupt { at } => write!(
                 formatter,
                 "run store frame {at} does not follow from the records before it; \
@@ -268,6 +343,7 @@ impl std::error::Error for StoreError {
             Self::Encoding { ref cause } => Some(cause),
             Self::Limit { .. }
             | Self::NotAStore
+            | Self::FormatVersion { .. }
             | Self::Corrupt { .. }
             | Self::ForeignTenant { .. }
             | Self::UnknownRun { .. }
@@ -1112,9 +1188,18 @@ fn replay(file: &mut File) -> Result<Index, StoreError> {
     file.seek(SeekFrom::Start(0)).map_err(StoreError::storage)?;
 
     let mut header = [0u8; STORE_HEADER.len()];
-    if !read_full(file, &mut header)? || header != STORE_HEADER {
+    if !read_full(file, &mut header)? {
         return Err(StoreError::NotAStore);
     }
+    // The two refusals are separated, and the version one is checked first,
+    // because they are different facts and only one of them is a version the
+    // writer could have meant. Every version of this format shares the whole
+    // magic *except* its last byte, which is that format's version — so a file
+    // whose first fifteen bytes match is this store's, at some version, and a
+    // file whose first fifteen do not match was never a run store at all. That
+    // is the whole reason `STORE_MAGIC` is 15 bytes of constant plus a version
+    // byte rather than one 16-byte constant.
+    check_format_version(header)?;
     let mut index = Index {
         runs: HashMap::new(),
         committed: u64::try_from(STORE_HEADER.len()).unwrap_or(u64::MAX),

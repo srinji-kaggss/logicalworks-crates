@@ -8,6 +8,27 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### lgwks_bot Breaking
+
+- `task::StoreError`: a new `FormatVersion { found, expected }` variant, and the
+  run store's file format version moves from `\x01` to `\x02` (T15). **Migration:**
+  opening a `\x01` run store is refused with `StoreError::FormatVersion { found:
+  1, expected: 2 }`, which names both versions, instead of the generic
+  `StoreError::NotAStore` it previously produced. The refusal is typed rather
+  than generic on purpose: `NotAStore` asserts the bytes were never this store's,
+  and a `\x01` store was written by an earlier version of this very crate, so
+  that message would tell an operator their own data was never theirs — the one
+  conclusion a refusal must never produce, because it is what makes someone
+  delete a file a system still relies on. There is no migration, deliberately:
+  the two available readings are to invent a `DefinitionIdentity` those records
+  never carried, which would make every pre-version resume look exactly
+  compatible, or to discard acknowledged evidence. The format has never shipped a
+  version that could lose a record, so there is nothing to convert. A deployment
+  that needs its records keeps its own copy and re-runs. A file whose magic does
+  not match is still `NotAStore`, and the two refusals are asserted apart by
+  `tests/task_resume.rs::a_pre_version_store_is_refused_naming_both_versions` and
+  `::a_foreign_file_is_still_refused_as_not_a_store`.
+
 ### lgwks_bot Added
 
 - `task::DefinitionIdentity` and `task::Drift`: a recorded step value is only
@@ -15,10 +36,11 @@ explicitly under that crate.
   carries the task name, a declared definition revision, the input digest, a
   declared durable-value schema id and the count of durable steps (T15).
   **Migration:** the run store's file format version moves from `\x01` to
-  `\x02` and a `\x01` store is refused at open with `StoreError::NotAStore`
-  rather than migrated — reading one as the unversioned identity would make
-  every pre-version resume look compatible rather than unprovable. A deployment
-  that needs its records keeps its own copy and re-runs.
+  `\x02` and a `\x01` store is refused at open as a `FormatVersion` naming both
+  versions rather than migrated — reading one as the unversioned identity would
+  make every pre-version resume look compatible rather than unprovable. See the
+  **lgwks_bot Breaking** section above for the migration note and the refusal's
+  shape.
 - `Host::run_under`, `Host::resume_under`, `Host::definition` and
   `HostBuilder::durable_codec`: the doors that carry a declared definition
   identity. `resume_under` returns a `Disposition::Refused` report carrying
