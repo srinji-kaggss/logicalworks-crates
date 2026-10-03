@@ -56,6 +56,12 @@ explicitly under that crate.
   another worker's journal would mint warrants for a generation that worker had
   been replaced past — internally consistent and jointly wrong. The new refusals
   are `BrokerError::{Journal, ForeignEnvironment, NothingToAdopt}`.
+- `script::FlowError::Store`: a typed arm carrying the run store's own
+  `StoreError`. A store that cannot read its own records now reaches the caller
+  as itself rather than as a `Failed` reason string, so a device refusal is
+  distinguishable from a definition drift by the variant alone (INV-BOT-7,
+  INV-BOT-81). `FlowError` is `#[non_exhaustive]`, so this is an additive minor
+  change.
 
 ### lgwks_bot Fixed
 
@@ -66,6 +72,24 @@ explicitly under that crate.
   recorded. The unit tests around `DefinitionIdentity` did not catch this — they
   tested the identity type, not the check's placement — and
   `tests/sim_replay_drift.rs` did, which is why the row now has a seeded sweep.
+- A run store read failure is an error, never a disagreement (INV-BOT-7,
+  INV-BOT-81). The step's compatibility check returned `false` on a store that
+  could not read its own index, and that `false` was rendered as "recorded under
+  a different definition" — a specific, actionable claim about a definition made
+  by a device that established nothing. `Records::agrees` now returns the store's
+  own typed error unchanged, the durable step refuses as `FlowError::Store`
+  carrying the store's `StoreError`, and the host's admission pre-flight refuses
+  every non-drift store error the same way instead of admitting the run and
+  letting the step discover it. Asserted by `tests/store_read_failure.rs` and the
+  `an_unreadable_store_is_refused_as_itself` family of
+  `tests/sim_replay_drift.rs`.
+- The drift refusal now carries the exact typed `Drift` (R2): `FlowError::Incompatible`
+  names for each axis the two revisions, input digests, durable-step counts or
+  schema ids that disagreed, so a caller learns which axis moved and against what
+  rather than having to parse a rendered sentence. Asserted by the
+  `every_axis_is_refused_with_its_exact_drift` family of
+  `tests/sim_replay_drift.rs`, which destructures the `Drift` for all four axes
+  on a real `Host::resume_under` over a reopened file store.
 
 ### lgwks_std Breaking
 

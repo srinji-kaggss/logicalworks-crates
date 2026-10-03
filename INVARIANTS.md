@@ -204,19 +204,54 @@ Each of these was a shipped defect. Treat the list as the spec.
   recorded one, which is why a compatible resume finds its own records. The
   check is the *declared* identity against the *recorded* one; an earlier
   revision compared a run's records against themselves and every drift passed.
-  A refusal leaves the store byte-identical. "Order" here is the count of
-  declared durable steps, the only form of order a step key cannot see: two
-  adjacent steps permuted inside the same shape keep every path and every
-  recorded value, so nothing there is a drift. The store's format version is
-  `\x02` and a `\x01` record is refused at open rather than migrated, because
-  inventing that migration would make every pre-version resume look compatible
-  rather than unprovable. · why: T15 · enforced by:
+  A refusal leaves the store byte-identical, and it is typed down to the axis's
+  own values: `FlowError::Incompatible` carries the exact `Drift`, naming for
+  each axis the two revisions, digests, step counts or schema ids that
+  disagreed, so a caller learns not merely which axis moved but against what.
+  A store that cannot read its own records is refused as itself and never as a
+  disagreement: its read answers `Err`, the step's compatibility check
+  propagates the store's own typed error rather than a `false`, and the host's
+  admission pre-flight refuses every non-drift store error as `FlowError::Store`
+  carrying the store's `StoreError` — so a device fault reaches the caller as a
+  device fault and never as a claim that the definition changed (INV-BOT-7).
+  "Order" here is the count of declared durable steps, the only form of order a
+  step key cannot see: two adjacent steps permuted inside the same shape keep
+  every path and every recorded value, so nothing there is a drift. The store's
+  format version is `\x02` and a `\x01` record is refused at open as
+  `StoreError::FormatVersion { found, expected }` naming both versions rather
+  than migrated, because inventing that migration would make every pre-version
+  resume look compatible rather than unprovable. · why: T15 · enforced by:
   `tests/sim_replay_drift.rs` (`drift_kinds_are_refused_typed_band_00..03`,
   `compatible_resume_replays_without_a_new_request_band_04..07`,
-  `tenants_drift_independently_band_08..10`,
-  `every_axis_is_distinguishable_band_11`,
+  `tenants_drift_independently_band_08..10`, `every_axis_is_distinguishable`,
+  `every_axis_is_refused_with_its_exact_drift_band_20..21`,
   `a_refusal_leaves_the_store_byte_identical_band_12..13`,
-  `same_seed_same_trace_hash_band_14..15`)
+  `an_unreadable_store_is_refused_as_itself_band_18..19`,
+  `same_seed_same_trace_hash_band_14..15`), `tests/store_read_failure.rs`
+  (`an_unreadable_store_is_refused_as_itself_and_not_as_a_drift`,
+  `the_fault_is_one_shot_and_the_step_after_it_replays`,
+  `a_compatible_resume_still_replays_after_no_fault`), and `tests/task_resume.rs`
+  (`a_pre_version_store_is_refused_naming_both_versions`,
+  `a_foreign_file_is_still_refused_as_not_a_store`)
+
+- **INV-BOT-81** The durable run store's refusals reach the caller as
+  themselves. A store that cannot read its own records answers `Err`, never a
+  `false` that a caller would report as "these records were written under a
+  different definition", and never a rendered `Failed` string. `Records::agrees`
+  returns `Result<(), FlowError>` and propagates the store's error unchanged, so
+  the step's compatibility check cannot turn a read failure into a drift; a
+  resumed step that cannot be read is refused as `FlowError::Store` wrapping the
+  store's own `StoreError`, and the host's admission pre-flight refuses every
+  non-drift store error the same way. The store's own `From<StoreError>` keeps a
+  genuine drift as the flow's typed `FlowError::Incompatible` carrying its
+  `Drift` axis, so the one fault an operator must see is never indistinguishable
+  from a device that failed to answer. · why: INV-BOT-7, T15 (R1) · enforced by:
+  `tests/store_read_failure.rs`
+  (`an_unreadable_store_is_refused_as_itself_and_not_as_a_drift`,
+  `the_fault_is_one_shot_and_the_step_after_it_replays`,
+  `a_compatible_resume_still_replays_after_no_fault`) and
+  `tests/sim_replay_drift.rs`
+  (`an_unreadable_store_is_refused_as_itself_band_18..19`)
 
 - **INV-BOT-56** An owner epoch is a fact on the disk, not a constant each
   process chooses for itself. `Broker::register` starts an environment at
