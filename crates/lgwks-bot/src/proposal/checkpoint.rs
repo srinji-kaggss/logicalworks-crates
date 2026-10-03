@@ -275,12 +275,9 @@ impl Checkpoint {
         if self.completed(step) {
             return Ok(());
         }
-        push_bounded(
-            &mut self.steps,
-            step,
-            MAX_CHECKPOINT_STEPS,
-            "completed steps",
-        )
+        check_push(&self.steps, MAX_CHECKPOINT_STEPS, "completed steps")?;
+        self.steps.push(step.to_owned());
+        Ok(())
     }
 
     /// Record what the user said.
@@ -291,7 +288,7 @@ impl Checkpoint {
     /// [`MAX_CHECKPOINT_NOTES`] corrections.
     pub fn correct(&mut self, kind: CorrectionKind, text: &str) -> Result<(), CheckpointError> {
         self.corrections.push(Correction::new(kind, text));
-        check_len(&self.corrections, MAX_CHECKPOINT_NOTES, "user corrections")
+        check_push(&self.corrections, MAX_CHECKPOINT_NOTES, "user corrections")
     }
 
     /// Record what is known about one effect.
@@ -316,10 +313,22 @@ impl Checkpoint {
             .iter_mut()
             .find(|held| held.reference() == reference)
         {
-            Some(held) => *held = note,
-            None => self.effects.push(note),
+            // A *replacement* is never a growth, so it is never refused: the
+            // ceiling bounds how many distinct references the checkpoint carries,
+            // and reconciling one of them is exactly what it is for.
+            Some(held) => {
+                *held = note;
+                Ok(())
+            }
+            // The charge comes before the append, so a refused effect note
+            // leaves the checkpoint exactly as it was rather than one longer
+            // than the caller was told.
+            None => {
+                check_push(&self.effects, MAX_CHECKPOINT_NOTES, "effect notes")?;
+                self.effects.push(note);
+                Ok(())
+            }
         }
-        check_len(&self.effects, MAX_CHECKPOINT_NOTES, "effect notes")
     }
 
     /// Record an evidence reference a completion claim may rest on.
@@ -332,32 +341,28 @@ impl Checkpoint {
         if self.evidence.iter().any(|held| held == reference) {
             return Ok(());
         }
-        push_bounded(
-            &mut self.evidence,
-            reference,
+        check_push(
+            &self.evidence,
             MAX_CHECKPOINT_EVIDENCE,
             "evidence references",
-        )
+        )?;
+        self.evidence.push(reference.to_owned());
+        Ok(())
     }
 }
 
-/// Push `value` onto `list`, or refuse it against `ceiling`.
-fn push_bounded(
-    list: &mut Vec<String>,
-    value: &str,
-    ceiling: usize,
-    what: &'static str,
-) -> Result<(), CheckpointError> {
-    list.push(value.to_owned());
-    check_len(list, ceiling, what)
-}
-
-/// Refuse a list past its ceiling, naming it.
-fn check_len<T>(list: &[T], ceiling: usize, what: &'static str) -> Result<(), CheckpointError> {
-    if list.len() > ceiling {
+/// Charge one append against `ceiling`, before the caller performs it.
+///
+/// Generic over the element so one rule covers all four lists. It reads the list
+/// through a slice and mutates nothing, because the *caller* performs the append:
+/// a rule that ran after the append would report a bound the list had already
+/// broken, which is the defect this shape exists to rule out.
+fn check_push<T>(list: &[T], ceiling: usize, what: &'static str) -> Result<(), CheckpointError> {
+    let would_hold = list.len().saturating_add(1);
+    if would_hold > ceiling {
         return Err(CheckpointError::Limit {
             what,
-            got: u64::try_from(list.len()).unwrap_or(u64::MAX),
+            got: u64::try_from(would_hold).unwrap_or(u64::MAX),
             limit: u64::try_from(ceiling).unwrap_or(u64::MAX),
         });
     }
@@ -418,6 +423,18 @@ impl From<CheckpointError> for super::Refusal {
                 at: 0,
             },
         }
+    }
+}
+
+impl From<CheckpointError> for crate::script::FlowError {
+    /// A checkpoint refusal inside a task body.
+    ///
+    /// Permanent, because both arms are: a ceiling that was reached will still
+    /// be reached, and an archive that will not decode will not decode on a
+    /// retry. The text carries which, so the step's own location names the fact
+    /// rather than the caller having to match on the variant.
+    fn from(error: CheckpointError) -> Self {
+        Self::failed(error)
     }
 }
 

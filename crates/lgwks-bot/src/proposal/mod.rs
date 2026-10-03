@@ -148,7 +148,10 @@ use std::fmt;
 
 use lgwks_std::hash::{Digest, Hasher};
 
-pub use artifact::{ArtifactError, ArtifactKey, ArtifactStore, MAX_ARTIFACT_BYTES};
+pub use artifact::{
+    ArtifactError, ArtifactKey, ArtifactStore, MAX_ARTIFACT_BYTES, MAX_ARTIFACTS_PER_TENANT,
+    WriteOutcome,
+};
 pub use checkpoint::{
     Checkpoint, CheckpointError, Correction, CorrectionKind, EffectNote, EffectNoteKind,
     MAX_CHECKPOINT_EVIDENCE, MAX_CHECKPOINT_NOTES, MAX_CHECKPOINT_STEPS,
