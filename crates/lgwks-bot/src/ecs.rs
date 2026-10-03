@@ -1536,10 +1536,28 @@ struct Committed {
 }
 
 /// What one chain's committed observation is waiting for.
+///
+/// Three states rather than one boolean, because "was replaced before it was
+/// acted on" and "has never been observed at all" both read as `false` in the
+/// two-state form, and conflating them reports the *first* observation of every
+/// chain as a pass-over. That is not cosmetic: it would make a fresh bot claim
+/// it had skipped a state it had never seen.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum SlotState {
+    /// Nothing has been committed for this chain yet.
+    #[default]
+    Nothing,
+    /// A value is committed and a generation has run over it.
+    Admitted,
+    /// A value is committed and no generation has run over it.
+    Unacted,
+}
+
+/// What one chain's committed observation is waiting for.
 #[derive(Debug, Clone, Copy, Default)]
 struct SlotAdmission {
-    /// Whether a generation has been opened over the value in the slot.
-    admitted: bool,
+    /// Where the chain's committed value stands.
+    state: SlotState,
     /// The revision the value in the slot was committed under.
     revision: u64,
 }
@@ -1548,7 +1566,7 @@ impl Committed {
     /// Note that `chain` committed a value under `revision`, not yet admitted.
     fn commit(&mut self, chain: usize, revision: u64) {
         if let Some(slot) = self.slots.get_mut(chain) {
-            slot.admitted = false;
+            slot.state = SlotState::Unacted;
             slot.revision = revision;
         }
     }
@@ -1560,7 +1578,7 @@ impl Committed {
     /// replacing it later is not a supersession.
     fn admit(&mut self, chain: usize) {
         if let Some(slot) = self.slots.get_mut(chain) {
-            slot.admitted = true;
+            slot.state = SlotState::Admitted;
         }
     }
 
@@ -3354,9 +3372,24 @@ fn admitted_identity(world: &mut World, chain: usize, value: Option<&Erased>) ->
 /// once. Once a transition is bound to it, the transition is what speaks for
 /// it, and the slot being empty is not a loss — it is the record that the value
 /// is out on loan, which [`observe_fold`] reads back through the binding.
+///
+/// The take is also what admits the value: a generation is being opened over
+/// exactly this payload, so a later commit that overtakes it is superseding work
+/// that is already owed and being done, not work that is still unclaimed. Marking
+/// it here rather than on the handover is what makes a value that a *held*
+/// generation is holding count as acted-on — the handover happens only once the
+/// transition is finally dropped, which for an entry awaiting evidence is never
+/// on the tick the pass-over occurs.
 fn take_observed(world: &mut World, chain: usize) -> Option<Erased> {
-    let mut observed = world.non_send_mut::<Observed>();
-    observed.0.get_mut(chain).and_then(Option::take)
+    let taken = world
+        .non_send_mut::<Observed>()
+        .0
+        .get_mut(chain)
+        .and_then(Option::take);
+    if taken.is_some() {
+        world.non_send_mut::<Committed>().admit(chain);
+    }
+    taken
 }
 
 /// Whether the newest observation for `chain` should be admitted over the
@@ -3651,6 +3684,11 @@ fn observe_fold(world: &mut World) {
     // bump above. A value superseded by this tick carries the revision it was
     // committed at, which is what a caller needs to line the pass-over up with
     // the generation that did or did not run on it.
+    //
+    // Only `Unacted` is a pass-over. `Nothing` is a first observation, which
+    // replaced nothing; `Admitted` is a value a generation already ran on, which
+    // also replaced nothing that was still owed. Reading either of those as a
+    // pass-over would make a healthy bot claim it had skipped a state.
     for index in changed
         .iter()
         .copied()
@@ -3658,7 +3696,7 @@ fn observe_fold(world: &mut World) {
         .filter_map(|(index, moved)| moved.then_some(index))
     {
         let previous = world.non_send::<Committed>().slot(index);
-        if !previous.admitted {
+        if previous.state == SlotState::Unacted {
             superseded.push(SupersededObservation {
                 chain: index,
                 revision: previous.revision,
@@ -3666,6 +3704,15 @@ fn observe_fold(world: &mut World) {
         }
         let revision = revision_of(world, index);
         world.non_send_mut::<Committed>().commit(index, revision);
+        // The mark is spent by the read it forced, and only by it. This is the
+        // point at which a forced poll has provably committed a value, so the
+        // baseline this tick holds is one the source produced rather than one the
+        // source disowned. A tick that never reaches here — parked, or stopped on
+        // a rendezvous miss — leaves the mark standing, which is the correct
+        // outcome for a refresh that did not land.
+        if let Some(slot) = world.non_send_mut::<Invalidated>().reasons.get_mut(index) {
+            *slot = None;
+        }
     }
     world.resource_mut::<TickReport>().superseded = superseded;
     world.non_send_mut::<Moved>().0 = changed;
@@ -3816,23 +3863,14 @@ fn fire_plan(world: &mut World) {
             .non_send_mut::<Ledger>()
             .put(index, if retained { Some(transition) } else { None });
         if let Some(returned) = returned {
-            let handed_back = {
-                let mut observed = world.non_send_mut::<Observed>();
-                observed
-                    .0
-                    .get_mut(index)
-                    .filter(|slot| slot.is_none())
-                    .map(|slot| *slot = Some(returned))
-                    .is_some()
-            };
-            // The generation that ran on this value has finished, so the value is
-            // now *acted on*: replacing it later loses nothing and is not a
-            // supersession. Marked on the handover rather than where the
-            // generation is opened, because the handover is what makes the value
-            // standing in the slot again — and a value still out on loan is
-            // exactly the one a supersession can overtake.
-            if handed_back {
-                world.non_send_mut::<Committed>().admit(index);
+            // Handed back only when the slot is empty, because a slot the
+            // observation phase filled this tick holds a newer value than the
+            // one being returned. Nothing to mark here: the value was admitted
+            // when its generation took it out of the slot, and a value standing
+            // in the slot again is *still* admitted — it has been acted on.
+            let mut observed = world.non_send_mut::<Observed>();
+            if let Some(slot) = observed.0.get_mut(index).filter(|slot| slot.is_none()) {
+                *slot = Some(returned);
             }
         }
     }
