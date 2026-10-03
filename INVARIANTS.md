@@ -984,6 +984,107 @@ Each of these was a shipped defect. Treat the list as the spec.
   `finished_steps_run_once`, `tenants_stay_isolated`, `same_seed_replays`),
   which sweeps every step boundary of every seeded run twice for an identical
   trace hash.
+- **INV-BOT-130** Concurrent durable appends share one `fsync`, and nothing about
+  the acknowledgement moved to make that safe. An ordered step on
+  `journal::owner` is two phases: the *stage* phase runs every queued request's
+  in-memory checks, the length fence, the framing and the `write_all`, in
+  submission order, and the *settle* phase performs **one** `sync_all` for the whole
+  batch and only then publishes each answer and folds each record into the store's
+  index. So no append is acknowledged before the `sync_all` covering its bytes has
+  returned `Ok`; a batch whose write or sync fails acknowledges **none** of its
+  members, hands each the typed failure, and latches the poison once for all of
+  them (INV-BOT-15/50) rather than per record; a waiter that drops mid-batch still
+  poisons the handle; and the layout order, the length fence and the hash chain
+  hold across batch boundaries because the stage phase is per record and strictly
+  ordered (INV-BOT-51). The readable half of a record's fold waits for the flush —
+  the chain head and committed length do not, because the next member of the same
+  batch must chain over them and a head that lagged a write would fork the chain.
+  A reopen therefore replays exactly the file's complete frames — every
+  acknowledged record, plus any unacknowledged batch whose bytes the device did
+  take (at-least-once, INV-BOT-54) — and never a torn or invented one. That is why
+  the failed-batch test reads its answer back from `RunStore::open` rather than
+  from the handle, whose index folded nothing.
+  Bounded on both axes and declared as constants: `MAX_BATCH_RECORDS` (64 records)
+  and `MAX_BATCH_BYTES` (256 KiB) cap one flush, and two bounded rings cap the
+  requests — `DEFAULT_QUEUE_DEPTH` (64) for what the owner drains and
+  `MAX_WAITING_SUBMITTERS` (64) for submitters parked waiting for room. A full
+  first ring makes a caller **wait** (backpressure, never growth); only a caller
+  that has outrun both rings is refused, with `SubmitError::QueueFull`. There is
+  **no linger**: the owner drains whatever is queued at the moment it wakes and
+  syncs once, so a lone append stages one record and pays exactly one `sync_all`
+  with no timer to wait out — measured at 16 fsyncs for 16 sequential records
+  (1.00 per record), which is the property that distinguishes grouping from
+  batching-with-delay. Wired: `RunRecords::append_async`, the door `remember` takes
+  from `Host::run`, is the only write path for a step record, and
+  `RunStore::flush_counts` reports the mechanism's own flush and staged-record
+  counters so the ratio below is measured rather than inferred.
+  Measured here, release build, one payload size, same harness (`resume_cost`),
+  BEFORE = merge base `3d3ec7e8` built in a separate target directory:
+  at concurrency 1 the two are identical at 1.00 fsync/record; at concurrency 16,
+  256 appends took **2.913s (88/s)** before at 256 fsyncs, and **0.184s (1,394/s)**
+  after at **25 fsyncs** — a 15.9x throughput gain at 0.09 fsync/record, with
+  per-append p50/p95/p99 falling from 149,839/396,700/590,351us to
+  7,987/47,991/48,101us. The ceiling the before path could not reach at all: at
+  concurrency 256 it **refused outright** with `QueueFull`, and after the change it
+  serves 128 concurrent submitters (the two ring ceilings) and refuses the 129th —
+  reproduced exactly at c=128 succeed / c=130 refuse. Peak RSS 14,139,392 bytes
+  before and 13,287,424 bytes after at c=16, i.e. unchanged within noise.
+  · why: #152 §group commit · enforced by:
+  `crates/lgwks-bot/src/journal/owner.rs::tests::a_failed_batch_flush_acknowledges_nobody_and_folds_nothing`,
+  which refuses the covering flush of a three-member batch on the shipped store
+  and observes every member refused, no member folded into the handle's index, one
+  poison latched, every later submit refused, and a reopen that replays exactly the
+  file's complete frames; `tests/sim_group_commit.rs`
+  (`acknowledged_equals_replayed`, `submission_order_is_layout_order`,
+  `every_flushed_batch_acknowledges_every_member` — the control: no seeded
+  simulation can reach the `#[cfg(test)]` flush switch, so a sim proves only that
+  a store whose batches all flushed acknowledges every member —
+  `no_record_is_acknowledged_before_its_covering_sync`,
+  `a_torn_tail_at_a_batch_boundary_drops_only_the_incomplete_record`,
+  `two_tenants_on_one_store_stay_isolated`,
+  `saturation_reaches_every_tier_and_records_the_ceiling`,
+  `the_batch_bounds_are_declared_and_never_silent`, `same_seed_replays`),
+  `tests/resume_liveness.rs::a_grouped_batch_still_lets_the_runtime_turn`,
+  `tests/durable_crash_group_commit.rs`
+  (`a_real_kill_mid_batch_holds_exactly_the_acknowledged_prefix`,
+  `a_killed_run_with_no_acknowledgment_leaves_no_record`), and
+  `crates/lgwks-bot/examples/resume_cost.rs`
+- **INV-BOT-131** A batch's evidence is read from a **reopened** store, never from
+  the handle that acknowledged the records. Group commit's whole risk is an answer
+  that outruns its bytes, and that risk is invisible from the writer's side: the
+  handle's index is the thing that would be wrong. So every count in the group
+  commit family is answered by `RunStore::open` over the same file, and the
+  saturation tiers record the requested level, the level reached and the store's
+  own ceiling together, so no reader is told a concurrency number nobody ran
+  (INV-BOT-16's rule). Measured here: 100 → 100 reached in 100 fsyncs, 1,000 →
+  1,000 in 1,000 fsyncs, 10,000 → 10,000 in 10,000 fsyncs, against
+  `MAX_RECORDS_PER_RUN` of 65,536. Those fsync counts are *equal to* the record
+  counts, and that is the point rather than a disappointment: a sequential store has
+  no company to batch with, so paying one flush per record is correct and is the
+  control against which the concurrent tier's 0.09 is a measurement.
+  · why: #152 §group commit · enforced by: `tests/sim_group_commit.rs`
+  (`acknowledged_equals_replayed`, `saturation_reaches_every_tier_and_records_the_ceiling`),
+  `crates/lgwks-bot/src/journal/owner.rs::tests::a_failed_batch_flush_acknowledges_nobody_and_folds_nothing`
+  (the failed batch's durable reality is read from a reopen of the file, not the
+  handle that refused it), and
+  `tests/durable_crash_group_commit.rs::a_real_kill_mid_batch_holds_exactly_the_acknowledged_prefix`
+- **INV-BOT-132** One storage owner serves every durable store with one ordered
+  step whose answer has three shapes: `Settled` (nothing was written, the answer is
+  ready), `Unsynced` (bytes are on the file and the answer and fold are owed the
+  batch's one flush), and `Committed` (the step wrote and flushed its own bytes
+  inside the ordered step, so it owes the batch nothing). A step whose *later*
+  member must decide against its fold — the run ledger's charge, which applies a
+  repair ticket once and moves an epoch — answers `Committed`, so its fold cannot
+  be deferred to a batch settle the way a step record's can. Both stores therefore
+  run on the same owner thread, the same bounded rings and the same poison latch,
+  and `StorageOwner::enqueue_awaiting` returns the concrete `Send` future the
+  host's own path needs, unboxed, without weakening the erased `BoxFuture` a task
+  body awaits. · why: #152 §group commit merged with the repair ledger (#87
+  T13/T23/T24) · enforced by: the ledger's own families (`tests/repair.rs`,
+  `tests/sim_repair.rs`), which charge through the owner's unboxed awaiting future
+  and answer `Committed`, and
+  `crates/lgwks-bot/src/journal/owner.rs::tests::a_failed_batch_flush_acknowledges_nobody_and_folds_nothing`,
+  which drives the `Settled`/`Unsynced` failure path on the same owner
 - **INV-BOT-100** A request key is an identity, not a lock, and `Host::submit`
   makes the three outcomes distinct. The run identity is derived, not minted:
   it is a domain-separated hash of the host's tenant and the key, so the same

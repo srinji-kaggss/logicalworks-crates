@@ -62,7 +62,7 @@ fn report(label: &str, summary: &measure::Summary) {
 type StepFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<u32, FlowError>>>>;
 
 /// The task type the two run-store measurements share.
-type OneStep = lgwks_bot::task::Task<fn(Scope, u32) -> StepFuture>;
+type OneStep = lgwks_bot::task::Task<fn(Scope, (u32, u32)) -> StepFuture>;
 
 /// A task whose whole body is one `remember` call.
 fn one_step_task() -> Result<OneStep, FlowError> {
@@ -70,10 +70,18 @@ fn one_step_task() -> Result<OneStep, FlowError> {
 }
 
 /// The one-step body behind its nameable return type.
-fn boxed_body(scope: Scope, value: u32) -> StepFuture {
-    Box::pin(
-        async move { remember(&scope, "v", || async move { Ok::<_, FlowError>(value) }).await },
-    )
+///
+/// The input is a pair rather than a scalar because the concurrent sweep files
+/// each lane's appends under distinct steps: one lane's first append must not be a
+/// repeat of its own second, or the store would answer it from the index and never
+/// reach the device at all.
+fn boxed_body(scope: Scope, value: (u32, u32)) -> StepFuture {
+    Box::pin(async move {
+        remember(&scope, "v", || async move {
+            Ok::<_, FlowError>(value.0.saturating_add(value.1))
+        })
+        .await
+    })
 }
 
 /// The effect key every journal append uses, one per measurement step.
@@ -101,6 +109,113 @@ fn key(index: u32) -> Result<EffectKey, Box<dyn std::error::Error>> {
 /// read from the journal rather than recomputed here.
 fn tail_of(journal: &FileJournal) -> JournalPosition {
     journal.tail()
+}
+
+/// The concurrency tiers the sweep drives.
+const TIERS: [u32; 4] = [1, 16, 256, 1_024];
+
+/// How many appends each lane of a concurrent tier performs.
+const LANE_APPENDS: u32 = 16;
+
+/// `fsyncs / records` as hundredths, or an explicit marker when nothing was staged.
+///
+/// Integer arithmetic only, so the number a report carries is exactly the number a
+/// reader can compare against another run's rather than one that lost a digit to
+/// floating point on the way out.
+fn per_record(flushes: u64, records: u64) -> String {
+    if records == 0 {
+        return String::from("none-staged");
+    }
+    let hundredths = u128::from(flushes)
+        .saturating_mul(100)
+        .checked_div(u128::from(records))
+        .unwrap_or(u128::MAX);
+    u64::try_from(hundredths).map_or_else(
+        |_| String::from("over-100/100"),
+        |whole| format!("{whole}/100"),
+    )
+}
+
+/// Report one tier's cost at `concurrency` lanes of [`LANE_APPENDS`] appends.
+///
+/// Each lane is its own OS thread driving its own runtime, because that is what
+/// makes the appends *concurrent* from the storage owner's point of view: the owner
+/// sees them arrive together or not at all, and how many share one flush is the
+/// measurement.
+///
+/// # Errors
+///
+/// Whatever the host, a lane or the filesystem reports. A lane's refusal is an error
+/// rather than a dropped sample, because a tier that silently lost appends would
+/// report a throughput nobody achieved.
+fn report_concurrent(
+    scratch: &std::path::Path,
+    concurrency: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let tier_dir = scratch.join(format!("tier-{concurrency}"));
+    std::fs::create_dir_all(&tier_dir)?;
+    let host = Host::builder("bench")?.run_store(&tier_dir)?.build()?;
+    let store = host
+        .run_store()
+        .ok_or("a host built with a store installed keeps one")?
+        .clone();
+    let samples: std::sync::Arc<std::sync::Mutex<Vec<u128>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let started = Instant::now();
+    let mut lanes = Vec::with_capacity(usize::try_from(concurrency).unwrap_or(0));
+    for lane in 0..concurrency {
+        let host = host.clone();
+        let samples = std::sync::Arc::clone(&samples);
+        lanes.push(
+            std::thread::Builder::new()
+                .name(format!("cost-{lane}"))
+                .spawn(move || -> Result<(), String> {
+                    let mut local = Vec::with_capacity(usize::try_from(LANE_APPENDS).unwrap_or(0));
+                    let work = one_step_task().map_err(|cause| cause.to_string())?;
+                    for index in 0..LANE_APPENDS {
+                        let at = Instant::now();
+                        let result =
+                            lgwks_bot::rt::runtime::block_on(host.run(&work, (lane, index)));
+                        local.push(at.elapsed().as_micros());
+                        if !result.disposition().is_success() {
+                            return Err(format!(
+                                "lane {lane} append {index}: {:?}",
+                                result.error()
+                            ));
+                        }
+                    }
+                    samples
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .extend(local);
+                    Ok(())
+                })?,
+        );
+    }
+    for lane in lanes {
+        lane.join()
+            .map_err(|_| "a benchmark lane panicked".to_owned())??;
+    }
+    let elapsed = started.elapsed();
+    let acknowledged = LANE_APPENDS.saturating_mul(concurrency);
+    let (flushes, staged) = store.flush_counts();
+    let mut sorted = samples
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    let summary = Summary::of(&mut sorted);
+    report(&format!("tier c={concurrency} n={acknowledged}"), &summary);
+    let mut out = std::io::stdout().lock();
+    let _written = writeln!(
+        out,
+        "tier c={concurrency}: elapsed={elapsed:?} fsyncs={flushes} records={staged} \
+         fsyncs_per_record={}",
+        per_record(flushes, staged)
+    );
+    drop(host);
+    drop(std::fs::remove_dir_all(&tier_dir));
+    Ok(())
 }
 
 /// Report the per-step cost of each mechanism over the same payload size.
@@ -142,15 +257,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stored = Vec::with_capacity(STEPS);
     for index in 0..STEPS {
         let started = Instant::now();
-        let report = lgwks_bot::block_on(
-            host.run(&one_step_task()?, u32::try_from(index).unwrap_or_default()),
-        );
+        let report = lgwks_bot::block_on(host.run(
+            &one_step_task()?,
+            (0, u32::try_from(index).unwrap_or_default()),
+        ));
         stored.push(started.elapsed().as_micros());
         if !report.disposition().is_success() {
             return Err(format!("the stored measurement step failed: {:?}", report.error()).into());
         }
     }
     report("stored (remember)", &measure::Summary::of(&mut stored));
+
+    // What that cost in flushes. One `sync_all` per record is the whole of the
+    // defect #152 group commit removed, so the count is stated beside the latency
+    // rather than left to be inferred from it.
+    let (flushes, staged) = host
+        .run_store()
+        .ok_or("a host built with a store installed keeps one")?
+        .flush_counts();
+    let _written = writeln!(
+        out,
+        "stored (remember): fsyncs={flushes} records={staged} \
+         fsyncs_per_record={}",
+        per_record(flushes, staged)
+    );
+
+    // Measurement 2b: the same body at concurrency, which is where a batch forms.
+    // Sequential runs pay one flush each — correctly, because there is nothing to
+    // batch with. The sweep below is what says whether the flush rate is the
+    // mechanism's ceiling or the device's.
+    for tier in TIERS {
+        report_concurrent(&scratch, tier)?;
+    }
 
     // Measurement 3: the estate's existing durable append, at the same payload
     // size. This is the frontier comparison: if `remember` cost more than a

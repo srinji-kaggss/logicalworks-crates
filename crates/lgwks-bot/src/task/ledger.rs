@@ -50,7 +50,7 @@ use lgwks_std::wire::{WireError, from_bytes, to_bytes};
 
 use crate::effect::RunId;
 use crate::journal::frame::{self, HEAD_BYTES, LENGTH_BYTES, Piece, Prefix};
-use crate::journal::owner::{self, StorageOwner, SubmitError};
+use crate::journal::owner::{self, Stage, StorageOwner, SubmitError};
 
 use super::store::{StoreError, StoreLimitKind};
 
@@ -513,6 +513,13 @@ fn classify(cause: SubmitError) -> CommitError {
 /// device's own error so the owner's one reply channel serves this store the way
 /// it serves the step store. A logical refusal is decided before any byte moves,
 /// so a refused charge leaves the file byte-identical.
+///
+/// The step performs its own `sync_all` and fold under the index lock before it
+/// returns, so it answers [`Stage::Committed`]: it owes the batch's flush nothing,
+/// because the one ordered step that makes "applied once" a fact about bytes is
+/// the same step that flushed it. A later member of a shared batch must decide
+/// against the fold this charge left, which is why the fold cannot be deferred to
+/// a batch settle the way a step record's can.
 #[expect(
     clippy::too_many_arguments,
     reason = "the ledger's state is the file and the index, and the charge is the tenant, \
@@ -528,13 +535,13 @@ fn charge_on_owner(
     spend: u64,
     max_attempts: u64,
     max_spend: u64,
-) -> std::io::Result<Control> {
+) -> std::io::Result<Stage<Control, Arc<Mutex<Index>>>> {
     let mut index = owner::lock(shared);
     let (entry, next) = decide_under(&index, tenant, run, ticket, spend, max_attempts, max_spend)
         .map_err(std::io::Error::other)?;
     write_entry(file, &mut index, &entry)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    Ok(next)
+    Ok(Stage::Committed(next))
 }
 
 /// The decision, over the ledger's own state: what charging `run` would leave, and

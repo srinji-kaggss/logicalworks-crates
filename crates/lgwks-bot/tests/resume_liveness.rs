@@ -26,6 +26,7 @@
 //! | Test | What it pins |
 //! |---|---|
 //! | `a_parked_record_device_lets_the_runtime_turn` | a `remember` whose flush is parked does not stop an unrelated ready task, and the record reaches the disk |
+//! | `a_grouped_batch_still_lets_the_runtime_turn` | the same liveness claim for a *batch*: several records sharing one flush park the append only once, and all of them land |
 //! | `an_abandoned_record_leaves_the_store_consistent` | dropping a `remember` mid-append leaves a store that reopens, is never duplicated, and resumes to the same output |
 //! | `a_parked_store_still_serves_its_own_records_only` | a parked device widens neither who a run is attributed to nor which records are read |
 //! | `the_parked_device_probe_measures_turns` | the tick counter is not vacuous, so the liveness assertions above cannot pass by accident |
@@ -262,6 +263,108 @@ fn the_parked_device_probe_measures_turns() -> TestResult {
     assert!(
         counted >= 2,
         "one driver turn produced {counted} polls: the probe is not counting turns"
+    );
+    Ok(())
+}
+
+/// A batch of records sharing one flush must park the runtime exactly as one record
+/// does, and must land every member of it.
+///
+/// Group commit changed *how many* records one flush covers, not where the flush
+/// runs: the whole point of the storage owner is that the wait is the caller's and
+/// the device's, and a batch is a reason to sync once rather than a reason to block
+/// an executor thread twice. This asserts that directly — several runs are driven on
+/// one driver while the device is parked, the unrelated task must keep turning, and
+/// after the release every one of the runs must be on the disk.
+///
+/// The liveness half is the load-bearing one: a batch staged on the awaiting thread
+/// would show up here as a turn count of one.
+#[test]
+fn a_grouped_batch_still_lets_the_runtime_turn() -> TestResult {
+    let scratch = Scratch::new("liveness-group")?;
+    let store = RunStore::open_with_stalled_device(scratch.store())?;
+    let parked = Parked::new(store.storage_gate())?;
+    let work = one_step_task()?;
+    let host = Host::builder("acme")?.store(store).build()?;
+    let batch = 8u32;
+
+    // Every lane's future is polled on one driver alongside the heartbeat, so the
+    // turn count is what the runtime achieved while a whole batch was outstanding.
+    let mut beat = Box::pin(heartbeat(parked.ticks()));
+    let mut runs: Vec<std::pin::Pin<Box<_>>> =
+        Vec::with_capacity(usize::try_from(batch).unwrap_or(0));
+    for index in 0..batch {
+        runs.push(Box::pin(host.run(&work, index)));
+    }
+    // Answers are collected as they land rather than in a second pass: a lane that
+    // has resolved is not polled again, which is the rule a `Host::run` future
+    // enforces — polling it after it completed is a use-after-completion, not a way
+    // to read its answer twice.
+    let mut landed: Vec<RunId> = Vec::with_capacity(usize::try_from(batch).unwrap_or(0));
+    let mut resolved: Vec<Option<lgwks_bot::task::Report<u32>>> =
+        runs.iter_mut().map(|_| None).collect();
+    runtime::block_on(poll_fn(|cx| {
+        let _unobserved = beat.as_mut().poll(cx);
+        let mut pending = false;
+        for (index, step) in runs.iter_mut().enumerate() {
+            if resolved[index].is_some() {
+                continue;
+            }
+            if let Poll::Ready(report) = step.as_mut().poll(cx) {
+                resolved[index] = Some(report);
+            } else {
+                pending = true;
+            }
+        }
+        if pending {
+            Poll::Pending
+        } else {
+            Poll::Ready(())
+        }
+    }));
+    for report in resolved.iter().flatten() {
+        landed.push(report.run_id().ok_or("a stored run must name a run id")?);
+    }
+    drop(runs);
+    assert_eq!(
+        landed.len(),
+        usize::try_from(batch).unwrap_or(usize::MAX),
+        "a batch of {batch} runs acknowledged {} of them",
+        landed.len()
+    );
+
+    let observed = parked.observed()?;
+    measure::record_measurement(&format!("group-commit turns_while_parked={observed}"))?;
+    assert!(
+        observed >= PROGRESS_TURNS,
+        "the unrelated task ticked {observed} times while a batch of {batch} records was \
+         outstanding: a batch that parked the driver's thread reaches one poll per submission"
+    );
+
+    // Every record of the batch is on the disk, read back through a fresh handle:
+    // a batch that acknowledged only some of its members would look identical from
+    // the driver's side.
+    drop(beat);
+    let store = RunStore::open(scratch.store())?;
+    let on_disk = landed
+        .iter()
+        .filter(|run| store.record_count(**run) == 1)
+        .count();
+    assert_eq!(
+        on_disk,
+        landed.len(),
+        "a released device must land every record of its batch: {on_disk} of {} are on \
+         the disk",
+        landed.len()
+    );
+    // And the batch really was a batch: fewer flushes than records is what group
+    // commit means, and a store that paid one flush per record under concurrency
+    // would not have earned the name.
+    let (flushes, staged) = store.flush_counts();
+    assert!(
+        flushes <= staged.max(1),
+        "a batch of {} records reported {flushes} flushes",
+        staged
     );
     Ok(())
 }

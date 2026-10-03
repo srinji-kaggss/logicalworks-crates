@@ -220,6 +220,22 @@ explicitly under that crate.
 
 ### Fixed
 
+- The group-commit failure test is no longer a test that does not test. The
+  seeded `tests/sim_group_commit.rs` family named for a failed batch never failed
+  one — the flush-failure switch is a `#[cfg(test)]` seam no simulation can reach —
+  so it is renamed to what it actually proves,
+  `every_flushed_batch_acknowledges_every_member`, and the all-or-nothing answer of
+  a *failed* batch is now injected and observed on the shipped store by
+  `journal::owner::tests::a_failed_batch_flush_acknowledges_nobody_and_folds_nothing`:
+  a three-member batch whose covering `sync_all` is refused answers every member
+  with the failure, folds none of them into the handle's index, latches one poison
+  against which every later submit is refused, and is read back from a reopen of
+  the file rather than from the handle (INV-BOT-130/131).
+- `journal::owner`'s ordered step grew the third answer shape `Stage::Committed`,
+  for a step that flushes its own bytes inside the step, so the run ledger's charge
+  shares the one storage owner — thread, bounded rings and poison latch — with the
+  group-committed step store, and `StorageOwner::enqueue_awaiting` returns the
+  concrete `Send` future the host's own path needs (INV-BOT-132).
 - `lgwks_bot`: `tests/sim_review_path.rs`'s saturation tiers shard each
   saturation tier across receivers of at most 100 runs, so the fixture's
   read-back stays linear. The merged receiver `cat`'d its whole
@@ -401,6 +417,33 @@ explicitly under that crate.
 
 ### lgwks_bot Added
 
+- Group commit on `journal::owner`: concurrent durable appends now share one
+  `fsync` instead of paying one each (#152). An ordered step became two phases —
+  every queued request's checks, fence, framing and `write_all` run in submission
+  order, then **one** `sync_all` covers the whole batch, and only then are the
+  answers published and the records folded. No append is acknowledged before the
+  flush covering its bytes returns `Ok`; a failed batch acknowledges *none* of its
+  members and latches the poison once for all of them, exactly as a failed single
+  append did; a dropped waiter still poisons the handle; and the layout order,
+  the length fence and the hash chain hold across batch boundaries.
+  Measured, release build, same harness and payload as the merge base built in a
+  separate target directory: at concurrency 16, 256 appends went from **2.913s
+  (88/s, 256 fsyncs)** to **0.184s (1,394/s, 25 fsyncs)** — 15.9x, at 0.09
+  fsync per record, with p50/p95/p99 falling from 149,839/396,700/590,351us to
+  7,987/47,991/48,101us. A lone append still pays exactly one `sync_all` with no
+  linger (16 fsyncs for 16 sequential records), because the owner drains what is
+  queued when it wakes rather than waiting for a batch to fill. Bounded and
+  declared: `MAX_BATCH_RECORDS` and `MAX_BATCH_BYTES` cap one flush, and a
+  caller arriving at a full request ring now *waits* in a second bounded ring
+  rather than being refused — which is why a store that previously refused outright
+  with `QueueFull` at concurrency 256 now serves 128 concurrent submitters and
+  refuses the 129th.
+- `RunStore::flush_counts`, the mechanism's own `sync_all` and staged-record
+  counters (#152). The batching factor is the one claim in this change that a
+  latency difference could only hint at, so it is measured where it happens — on
+  the owner thread — and read through the store's public surface. A caller that
+  gave up on its answer is still counted as a staged record, so the ratio cannot
+  report a better batching factor than the store achieved.
 - Two missing arms of the request-keyed submission are now covered rather than
   assumed. `DeadlineExceeded` is the request's own verdict — the same declaration
   that fixed the key also fixed the run's budget — so a request that overran its
