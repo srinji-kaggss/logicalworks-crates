@@ -393,6 +393,19 @@ pub enum TaskOutcome {
 /// therefore remains a truthful result when SIGKILL was delivered while the
 /// unreaped leader pinned the group id, but this supervisor could not prove
 /// that every member had disappeared before its bounded drain ended.
+///
+/// # What `CleanupConfirmed` does and does not claim
+///
+/// **It claims: every process that was still in the supervised group when the
+/// group was last observed is gone.** The observation is `killpg(group, 0)`, and
+/// a process that called `setsid` has left the group by construction, so it is
+/// not a member and its survival is not a counterexample to the claim.
+///
+/// It does **not** claim that no process this supervisor started is still
+/// running. That is the honest limit of a process group, and a caller that needs
+/// it needs a kernel job object or a cgroup, neither of which this module has.
+/// `tests/process_escape.rs` exercises a real `setsid` escape and states this
+/// boundary against a live process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CleanupReceipt {

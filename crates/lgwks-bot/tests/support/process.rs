@@ -185,6 +185,19 @@ pub fn pid_is_alive(pid: i32) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// Send SIGKILL to `pid` and reap whatever the platform reports.
+///
+/// The signal is sent by the `kill` utility rather than by a syscall because
+/// this crate builds with `unsafe_code` forbidden and the test targets inherit
+/// that. `status()` waits for it, so the helper leaves no unreaped child for the
+/// harness's own leak check to find.
+pub fn kill_pid(pid: i32) {
+    let _ignored = std::process::Command::new("kill")
+        .arg("-9")
+        .arg(pid.to_string())
+        .status();
+}
+
 /// Wait until `pid` is gone, up to `budget`.
 ///
 /// `None` for a pid that is still running when the budget expires, so a caller
@@ -257,39 +270,114 @@ pub fn escape_command() -> Option<EscapeCommand> {
         .copied()
 }
 
-/// One way to leave the caller's process group: a program, a flag, and the source
-/// it runs under that flag.
+/// One way to leave the caller's process group, and to record the pid only
+/// after leaving it.
+///
+/// The ordering is the whole point and is why the recording is part of each
+/// candidate's program rather than something the caller appends: a pid recorded
+/// *before* `setsid` belongs to a process that is still a member of the caller's
+/// group, and a test holding that pid would be measuring the ordinary group kill
+/// while believing it measured an escape.
 ///
 /// A flag of `-c` runs `source` as a shell command line; a flag of `-e` runs it
-/// as interpreter source. Both call `setsid` and then sleep, which is all a
-/// caller needs: the only fact asserted downstream is that the pid landed in
-/// another group.
+/// as interpreter source. Both call `setsid`, then record, then sleep.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EscapeCommand {
     /// The interpreter or utility to run.
     pub program: &'static str,
-    /// The single argument that selects the third field's meaning.
+    /// The single flag that selects the third field's meaning.
     pub flag: &'static str,
-    /// The program, or the command line, that calls `setsid` and then sleeps.
-    pub source: &'static str,
+    /// The program, or the command line, that escapes and then records `$$`.
+    ///
+    /// `{file}` is replaced with the pid path. It is a placeholder rather than a
+    /// second argument because each interpreter takes its program as one
+    /// argument: a trailing path would be `@ARGV` to perl and ignored.
+    source: &'static str,
+}
+
+impl EscapeCommand {
+    /// The shell command line that escapes the group and records its pid.
+    ///
+    /// The interpreter runs in the **background** (`&`), and that is the whole
+    /// design rather than an incidental shell feature. `setsid()` fails with
+    /// `EPERM` when its caller is already a process-group leader, and it fails
+    /// *silently* here — a perl one-liner that ignores the return value simply
+    /// carries on in the supervisor's group and is killed with it, so the test
+    /// sees an escapee that never escaped. Since the supervisor calls
+    /// `process_group(0)`, its direct child **is** a group leader, so the only
+    /// process that can successfully leave the group is a *child* of that leader.
+    /// Backgrounding makes exactly that: the leader forks, and the fork is not a
+    /// group leader, so its `setsid` succeeds.
+    ///
+    /// The leader is kept alive by the trailing `wait`, so the supervised child
+    /// does not exit immediately and hand the supervisor a terminal outcome
+    /// before the escapee has recorded anything.
+    ///
+    /// The program is passed as a single **single-quoted** shell word, the only
+    /// quoting that leaves the sources intact in both directions:
+    ///
+    /// - Double quotes would let this shell expand `$f` and `$$` before perl or
+    ///   python ever saw them, so `open(my $f, …)` arrives as `open(my , …)` and
+    ///   the candidate dies of a syntax error.
+    /// - Single quotes are therefore required, which is why every source below is
+    ///   written with double quotes and no apostrophe: a source containing `'`
+    ///   would terminate the wrapper early.
+    ///   [`sources_are_apostrophe_free`] keeps that true rather than leaving it to
+    ///   a comment.
+    pub fn script(&self, pid_file: &Path) -> String {
+        let source = self
+            .source
+            .replace("{file}", &pid_file.display().to_string());
+        format!("{} {} '{source}' & wait", self.program, self.flag)
+    }
+}
+
+/// Whether every escape source is free of the apostrophe that would break the
+/// single-quoted wrapper in [`EscapeCommand::script`].
+///
+/// A check rather than a comment, because the failure it prevents is invisible
+/// from outside: a mis-quoted source makes the candidate record nothing, and a
+/// test that waits for a pid then reports "this host cannot escape" — a claim
+/// about the host that is really about this file's quoting.
+pub fn sources_are_apostrophe_free() -> bool {
+    ESCAPE_COMMANDS
+        .iter()
+        .all(|candidate| !candidate.source.contains('\''))
 }
 
 /// Every way this suite knows to leave a process group, in preference order.
+///
+/// `setsid(1)` first because it is the utility that does exactly this and
+/// nothing else. macOS ships no `setsid(1)`, so the interpreters follow: POSIX
+/// `setsid` is in both, and each takes its program as one argument after a
+/// single flag.
+///
+/// Each source records the pid *after* `setsid` returns, so the pid a test reads
+/// back belongs to a process that has already left the group. That ordering is
+/// the difference between measuring an escape and measuring the ordinary group
+/// kill, and it is why the recording lives here rather than in the caller.
 const ESCAPE_COMMANDS: [EscapeCommand; 3] = [
     EscapeCommand {
         program: "setsid",
         flag: "sh",
-        source: "-c 'sleep 30'",
+        source: "echo $$ > {file}; sleep 30",
     },
     EscapeCommand {
         program: "perl",
         flag: "-e",
-        source: "use POSIX; setsid(); sleep 30",
+        // The flush is load-bearing, not decoration: perl's filehandles are
+        // block-buffered, so an unflushed `print` leaves the pid in a buffer
+        // until the process exits. The test reads the file while the process is
+        // alive, sees a zero-length file, and concludes the escape never
+        // recorded anything — a conclusion that is really about a missing flush.
+        source: "use POSIX; setsid(); open(my $f, \">\", \"{file}\"); print $f $$; $f->flush(); \
+                 sleep 30",
     },
     EscapeCommand {
         program: "python3",
         flag: "-c",
-        source: "import os,time; os.setsid(); time.sleep(30)",
+        source: "import os,time; os.setsid(); open(\"{file}\",\"w\").write(str(os.getpid())); \
+                 time.sleep(30)",
     },
 ];
 
