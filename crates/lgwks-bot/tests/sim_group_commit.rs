@@ -10,7 +10,7 @@
 //! |---|---|
 //! | `acknowledged_equals_replayed` | every acknowledged record is on the disk after a reopen, and no unacknowledged one is |
 //! | `submission_order_is_layout_order` | records land in the order they were submitted, across batch boundaries |
-//! | `a_failed_batch_acknowledges_nobody` | an injected device refusal poisons the handle and answers every member of its batch with the failure |
+//! | `every_flushed_batch_acknowledges_every_member` | a store whose batches all flushed acknowledges every member and a reopen replays it |
 //! | `no_record_is_acknowledged_before_its_covering_sync` | the store's own flush counter never lets a record be acknowledged without a flush carrying it |
 //! | `a_torn_tail_at_a_batch_boundary_drops_only_the_incomplete_record` | a cut at any byte offset keeps the whole frames before it |
 //! | `two_tenants_on_one_store_stay_isolated` | two tenants sharing one file each read their own records |
@@ -159,16 +159,6 @@ impl Scenario {
     fn parts(&self) -> (&Seeded, u32, u32, PathBuf) {
         (&self.fixture, self.appends, self.tag, self.path.clone())
     }
-
-    /// This scenario's fixture, moved out.
-    ///
-    /// One family needs the store in a host rather than reached through the fixture,
-    /// and a host takes the store by value — so that family needs the fixture itself,
-    /// not a borrow of it. Taken by value here so the family does not reach into the
-    /// struct's fields to get it.
-    fn into_fixture(self) -> Seeded {
-        self.fixture
-    }
 }
 
 /// One seed's fixture: a scratch directory and the shipped store opened in it.
@@ -245,18 +235,6 @@ impl Seeded {
     /// The path this seed's store lives at.
     fn scratch_path(&self) -> std::path::PathBuf {
         self.scratch.store()
-    }
-
-    /// The store, and this fixture, with the store's own handle dropped.
-    ///
-    /// One family needs the store in a host rather than reached through the
-    /// fixture, and it needs the scratch directory to outlive that host: dropping
-    /// the fixture takes the directory with it, which would delete the bytes the
-    /// row is about to reopen. So both come back together and the caller keeps the
-    /// fixture for the whole row.
-    fn into_store(self) -> (Self, RunStore) {
-        let store = self.store.clone();
-        (self, store)
     }
 
     /// Let the store's file go, so a reopen in this seed does not race a live handle,
@@ -339,41 +317,42 @@ fn submission_order_is_layout_order(band: Band) -> TestResult {
     })
 }
 
-/// An injected device refusal answers nobody and poisons the handle.
+/// A store whose batches all flushed acknowledges every member and keeps the
+/// handle unpoisoned.
 ///
-/// A batch is all-or-nothing: a failure of the covering flush means a prefix of
-/// *every* member's bytes may be on the disk, so no member is told it succeeded
-/// and the handle refuses everything after. This drives it through the real store
-/// rather than through the owner's internals, so what it observes is what a caller
-/// observes.
-fn a_failed_batch_acknowledges_nobody(band: Band) -> TestResult {
-    sweep("sim-gc-fail", 2, band, |scenario| {
-        let (_seeded, _appends, tag, path) = scenario.parts();
-        // The host takes the store by value, so this family moves the fixture out
-        // and keeps it, because the scratch directory has to outlive the reopen below.
-        let (_kept, store) = scenario.into_fixture().into_store();
-        let handle = host("sim", store)?;
-        let work = one_step_task()?;
-        let first = lgwks_bot::rt::runtime::block_on(handle.run(&work, 1u32));
-        assert!(
-            first.disposition().is_success(),
-            "seed {tag}: the first append must land before the failure: {:?}",
-            first.error()
+/// The control half of the failed-batch contract, and the honest name for what a
+/// seeded run can observe. The failure itself is a `#[cfg(test)]` seam on the
+/// storage owner that no seeded simulation can reach, so every batch a sim
+/// stages flushes; *that* the owner answers a failed batch all-or-nothing — every
+/// member refused, no fold run, one poison — is proved on the shipped store by
+/// `journal::owner::tests::a_failed_batch_flush_acknowledges_nobody_and_folds_nothing`.
+/// What this row proves is the other direction: with a device that answers, no
+/// append is refused, every member is acknowledged, and a reopen replays all of
+/// them. It drives the real store through the real front door, so what it observes
+/// is what a caller observes.
+fn every_flushed_batch_acknowledges_every_member(band: Band) -> TestResult {
+    sweep("sim-gc-flushed", 2, band, |scenario| {
+        let (seeded, appends, tag, path) = scenario.parts();
+        let round = seeded.round("sim", appends, tag)?;
+        assert_eq!(
+            round.refused, 0,
+            "seed {tag}: a store whose batches all flushed refused {} of {appends} appends",
+            round.refused
         );
-        // And the run after it, with the device still answering, must also land —
-        // which is the control: the store was never poisoned by a batch that did
-        // not fail.
-        let second = lgwks_bot::rt::runtime::block_on(handle.run(&work, 2u32));
-        assert!(
-            second.disposition().is_success(),
-            "seed {tag}: a store whose batches all flushed keeps appending: {:?}",
-            second.error()
+        assert_eq!(
+            round.acknowledged, appends,
+            "seed {tag}: every member of a flushed batch must be acknowledged"
         );
-        drop(handle);
         let reopened = RunStore::open(path)?;
-        assert!(
-            reopened.committed_bytes() > 0,
-            "seed {tag}: a store with two acknowledged records committed no bytes"
+        let replayed = round
+            .runs
+            .iter()
+            .filter(|run| reopened.record_count(**run) == 1)
+            .count();
+        assert_eq!(
+            replayed,
+            round.runs.len(),
+            "seed {tag}: a reopen must replay every acknowledged member of a flushed batch"
         );
         Ok(())
     })
@@ -654,8 +633,10 @@ band_family::band_family! {
     acknowledged_equals_replayed_band_03 => acknowledged_equals_replayed, 3;
     submission_order_is_layout_order_band_04 => submission_order_is_layout_order, 4;
     submission_order_is_layout_order_band_05 => submission_order_is_layout_order, 5;
-    a_failed_batch_acknowledges_nobody_band_06 => a_failed_batch_acknowledges_nobody, 6;
-    a_failed_batch_acknowledges_nobody_band_07 => a_failed_batch_acknowledges_nobody, 7;
+    every_flushed_batch_acknowledges_every_member_band_06
+        => every_flushed_batch_acknowledges_every_member, 6;
+    every_flushed_batch_acknowledges_every_member_band_07
+        => every_flushed_batch_acknowledges_every_member, 7;
     no_record_is_acknowledged_before_its_covering_sync_band_08
         => no_record_is_acknowledged_before_its_covering_sync, 8;
     no_record_is_acknowledged_before_its_covering_sync_band_09

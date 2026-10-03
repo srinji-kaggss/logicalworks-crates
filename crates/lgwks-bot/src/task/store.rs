@@ -444,6 +444,19 @@ impl RunStore {
         self.storage_gate().release();
     }
 
+    /// Arm a refusal of the next batch's covering `sync_all`.
+    ///
+    /// The seam the storage owner's `fail_next_flush` reaches through, so the
+    /// all-or-nothing answer of a failed group commit — every member refused, no
+    /// fold run, one poison latched, and a reopen that reads the file rather than
+    /// the handle — is proved on the shipped store rather than a copy of it. A
+    /// test-only door for the same reason `StorageOwner::fail_next_commit` is: no
+    /// filesystem refuses a flush on demand.
+    #[cfg(test)]
+    pub(crate) fn fail_next_flush(&self) {
+        self.inner.owner.fail_next_flush();
+    }
+
     /// Open a store under `dir`, named by the tenant that owns it.
     ///
     /// The form [`HostBuilder::run_store`](crate::task::HostBuilder::run_store)

@@ -324,6 +324,15 @@ struct Slot<S, A> {
     released: bool,
     /// Whether the next request should report a device refusal instead of writing.
     fail_next: bool,
+    /// Whether the next batch's covering `sync_all` should report a refusal
+    /// instead of syncing.
+    ///
+    /// Separate from [`fail_next`][Self::fail_next], which refuses one request's
+    /// ordered step before it writes anything. This one fails the *whole batch's*
+    /// flush, which is the failure that must answer every member of the batch at
+    /// once — the one fact group commit can get wrong and a per-request switch
+    /// cannot exercise.
+    fail_next_flush: bool,
     /// How many `sync_all` calls this owner has made.
     ///
     /// The observable that says whether a batch formed: one per flush, so
@@ -388,6 +397,7 @@ impl<S, A> Default for Slot<S, A> {
             closed: false,
             released: false,
             fail_next: false,
+            fail_next_flush: false,
             flushes: 0,
             staged_records: 0,
         }
@@ -601,6 +611,20 @@ where
     #[cfg(test)]
     pub(crate) fn fail_next_commit(&self) {
         lock(&self.slot).fail_next = true;
+    }
+
+    /// Make the next batch's covering `sync_all` report a refusal instead of
+    /// syncing.
+    ///
+    /// The flush failure is a different fault from [`fail_next_commit`][Self::fail_next_commit]:
+    /// that one refuses a single request's ordered step before it writes, while
+    /// this one fails the *whole batch's* one flush after every member's bytes are
+    /// already on the file. That is the failure group commit must answer
+    /// all-or-nothing, and no filesystem produces it on demand. Its only caller is
+    /// the store's test module, so it is gated with the store it serves.
+    #[cfg(all(test, feature = "script"))]
+    pub(crate) fn fail_next_flush(&self) {
+        lock(&self.slot).fail_next_flush = true;
     }
 
     /// Perform `job` on the owner thread and wait for it to finish.
@@ -897,10 +921,21 @@ fn run_batch<S, A>(
     // none of them is answered.
     let owes = batch.iter().any(|member| member.staged.owes_flush());
     let sync = if owes {
-        let outcome = file.sync_all();
-        let mut held = lock(slot);
-        held.flushes = held.flushes.saturating_add(1);
-        outcome
+        let injected = {
+            let mut held = lock(slot);
+            std::mem::take(&mut held.fail_next_flush)
+        };
+        if injected {
+            // A test refusal of the covering flush: the one failure no filesystem
+            // produces on demand, and the failure that must answer the whole batch
+            // at once. No `sync_all` runs, so no flush is counted.
+            Err(std::io::Error::other("the injected flush refusal"))
+        } else {
+            let outcome = file.sync_all();
+            let mut held = lock(slot);
+            held.flushes = held.flushes.saturating_add(1);
+            outcome
+        }
     } else {
         Ok(())
     };
@@ -1008,5 +1043,173 @@ fn await_work<S, A>(slot: &Mutex<Slot<S, A>>, gate: &Mutex<Gate>, signal: &Condv
             .wait_timeout(held, Duration::from_millis(1))
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         held = guard;
+    }
+}
+
+#[cfg(all(test, feature = "script"))]
+mod tests {
+    //! The failed covering flush, driven on the shipped store.
+    //!
+    //! `tests/sim_group_commit.rs` drives the same group commit through the front
+    //! door, but the flush-failure switch is a `#[cfg(test)]` seam and no seeded
+    //! simulation can reach it, so every batch a sim stages flushes. This is the
+    //! test that injects the failure the sim family cannot: it queues `MEMBERS`
+    //! requests into one batch, refuses that batch's one `sync_all`, and checks
+    //! what the contract promises a failed group commit does.
+
+    use std::error::Error;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use crate::effect::RunId;
+    use crate::script::run_store::RunRecords;
+    use crate::script::{Scope, Tenant};
+    use crate::task::RunStore;
+
+    /// The most members the one batch this test stages holds.
+    ///
+    /// Three is the smallest count that is more than one *and* more than two, so a
+    /// failure that answered only the first request, or paired requests, is caught
+    /// rather than mistaken for the batch-wide answer.
+    const MEMBERS: usize = 3;
+
+    /// One distinct run id per member, in fixed hex.
+    ///
+    /// Fixed rather than minted so the scenario needs no entropy, and distinct so
+    /// each record is its own to fold — a fold any member missed would be visible
+    /// as a missing run in the store's index.
+    const RUN_HEX: [&str; MEMBERS] = [
+        "01000000000000000000000000000000",
+        "02000000000000000000000000000000",
+        "03000000000000000000000000000000",
+    ];
+
+    /// One distinct payload per member, so no two records are duplicates of each
+    /// other and the duplicate path cannot fold one as another's answer.
+    const PAYLOAD: [u8; MEMBERS] = [1, 2, 3];
+
+    /// A scratch directory unique to this test process and call.
+    ///
+    /// The process id separates concurrent test processes and the counter separates
+    /// calls within one. Never the repository's own tree.
+    fn scratch_dir() -> std::path::PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let call = NEXT.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("lgwks-owner-flush-{}-{call}", std::process::id()))
+    }
+
+    /// A failed batch's flush answers every member, folds none, and leaves the file
+    /// as the only authority.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the store, the scope or the filesystem reports.
+    #[test]
+    fn a_failed_batch_flush_acknowledges_nobody_and_folds_nothing() -> Result<(), Box<dyn Error>> {
+        let dir = scratch_dir();
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("store");
+
+        // A device parked before it takes any request, so every submission below is
+        // queued when it is released and the owner drains all of them into one
+        // batch — rather than a race for how many happen to be queued together.
+        let store = RunStore::open_with_stalled_device(&path)?;
+        let tenant = "flush-tenant";
+        let key = Scope::root(Tenant::new(tenant)?).enter("step")?.key();
+
+        // One distinct record per member, built through the store's own staging
+        // door so the record is exactly what `remember` would commit.
+        let mut runs = Vec::with_capacity(MEMBERS);
+        let mut outstanding = Vec::with_capacity(MEMBERS);
+        for index in 0..MEMBERS {
+            let run = RunId::from_hex(RUN_HEX[index])?;
+            runs.push(run);
+            let record = RunRecords::stage(&store, tenant, run, key, "step", vec![PAYLOAD[index]]);
+            outstanding.push(RunRecords::append_async(&store, record));
+        }
+
+        // Poll each future once so its request reaches the owner's ring, and no
+        // further: a device that is parked cannot answer, so a request completing
+        // here would mean a release this test did not make. Polling every future
+        // before the release is what queues them into *one* batch rather than a race
+        // for how many happen to be queued together.
+        {
+            let waker = std::task::Waker::noop();
+            let mut context = std::task::Context::from_waker(waker);
+            for future in &mut outstanding {
+                if future.as_mut().poll(&mut context).is_ready() {
+                    return Err("a parked device answered a request before it was released".into());
+                }
+            }
+        }
+
+        // Refuse the batch's one covering flush, then release the parked device.
+        store.fail_next_flush();
+        store.release_device();
+
+        // (1) Every member receives the failure: none of the batch is acknowledged.
+        for (index, pending) in outstanding.into_iter().enumerate() {
+            let answered = crate::rt::runtime::block_on(pending);
+            assert!(
+                answered.is_err(),
+                "member {index} of a batch whose flush failed was acknowledged: {answered:?}"
+            );
+        }
+
+        // (2) No member's fold ran: the handle's index names none of them, so the
+        // reader cannot see a record whose bytes the device never took.
+        for (index, run) in runs.iter().enumerate() {
+            assert!(
+                !store.knows_run(*run),
+                "member {index}'s run is in the handle's index after a failed flush"
+            );
+            assert_eq!(
+                store.record_count(*run),
+                0,
+                "member {index}'s record was folded into the handle's index after a failed flush"
+            );
+        }
+
+        // (3) One poison is latched for the whole handle: every later submission is
+        // refused with the same message rather than written, and the index still
+        // holds nothing.
+        for run in runs.iter().take(2) {
+            let message = RunRecords::append(&store, tenant, *run, key, "late", vec![9])
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default();
+            assert!(
+                message.contains("previous append"),
+                "a later append must be refused as poisoned, not accepted: {message}"
+            );
+        }
+
+        // (4) A reopen reads the file, not the handle. The batch's bytes were
+        // written before the flush failed, so the complete frames are exactly what a
+        // fresh handle replays and consumes — none invented, none dropped. The
+        // handle's own index, which folded nothing, is not consulted.
+        let staged = store.committed_bytes();
+        drop(store);
+        let reopened = RunStore::open(&path)?;
+        assert_eq!(
+            reopened.committed_bytes(),
+            std::fs::metadata(&path)?.len(),
+            "a reopen must consume the whole file, so it replays exactly its durable frames"
+        );
+        assert_eq!(
+            reopened.committed_bytes(),
+            staged,
+            "the failed batch's complete frames must be the file's own bytes"
+        );
+        for (index, run) in runs.iter().enumerate() {
+            assert_eq!(
+                reopened.record_count(*run),
+                1,
+                "member {index}'s complete frame is on the file and a reopen reads it, \
+                 though the handle acknowledged none of the batch"
+            );
+        }
+        drop(reopened);
+        drop(std::fs::remove_dir_all(&dir));
+        Ok(())
     }
 }
