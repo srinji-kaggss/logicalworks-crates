@@ -50,6 +50,8 @@ use crate::journal::owner::{self, StorageGate, StorageOwner, SubmitError};
 use crate::script::run_store::{Appended, RunRecords, StagedRecord, StoredValue};
 use crate::script::{FlowError, StepKey};
 
+use super::definition::{DefinitionIdentity, Drift, STORE_FORMAT};
+
 /// The most bytes one archived step record may occupy.
 ///
 /// A step that returns more than this is refused rather than written: the value
@@ -63,13 +65,27 @@ pub const MAX_RECORDS_PER_RUN: u64 = 65_536;
 /// The most bytes one run's store file may hold.
 pub const MAX_STORE_BYTES: u64 = 64 * 1024 * 1024;
 
-/// The magic at the head of every run store's file.
+/// The constant prefix of every run store's file.
 ///
 /// A file that does not begin with it is not this format and is refused rather
 /// than scanned: reading a foreign file as records is how a caller is handed a
-/// value nobody wrote. The trailing `\x01` is this format's version, so a future
-/// change is a refusal rather than a misreading.
-const STORE_MAGIC: &[u8; 16] = b"lgwks-runstore\x00\x01";
+/// value nobody wrote. The last byte of the header is the format's version, so a
+/// future change is a refusal rather than a misreading. `\x01` was the record
+/// without a [`DefinitionIdentity`] and is not migrated — see the `definition`
+/// module for why reading one as the unversioned identity would be the worse
+/// answer.
+const STORE_MAGIC: &[u8; 16] = b"lgwks-runstore\x00\x00";
+
+/// The header as this crate writes it: the constant prefix and the version.
+///
+/// Built once so the writer and the reader cannot disagree about which byte is
+/// which, which is the only thing a hand-written `OpenOptions` chain would get
+/// wrong.
+const STORE_HEADER: [u8; 16] = {
+    let mut header = *STORE_MAGIC;
+    header[15] = STORE_FORMAT;
+    header
+};
 
 /// The chain digest a store starts from: 32 zero bytes, hashed through the same
 /// framing as any record so the first head is a real chain step and not a
@@ -157,6 +173,21 @@ pub enum StoreError {
         /// The store that could not attribute it.
         tenant: String,
     },
+    /// The run's records were written under a different definition identity, so
+    /// replaying them would answer a question this build never asked.
+    ///
+    /// Refused before any step runs and with nothing written, because the two
+    /// available answers are both worse: replaying is returning a value the
+    /// current definition never produced, and re-running is repeating effects a
+    /// previous attempt already performed. Which axis disagrees is named, so the
+    /// caller knows whether it needs a new run, a decision, a migration or an
+    /// edit.
+    Incompatible {
+        /// The run whose records disagree.
+        run: String,
+        /// Which axis, and what each side holds.
+        drift: Drift,
+    },
 }
 
 impl StoreError {
@@ -219,6 +250,12 @@ impl fmt::Display for StoreError {
                 "no records for run {run} in tenant {tenant:?}'s store; refusing to resume a \
                  run this store cannot attribute to it"
             ),
+            Self::Incompatible { ref run, ref drift } => write!(
+                formatter,
+                "run {run} was recorded under a different definition: {}; refusing to replay \
+                 it under this one",
+                drift
+            ),
         }
     }
 }
@@ -233,7 +270,8 @@ impl std::error::Error for StoreError {
             | Self::NotAStore
             | Self::Corrupt { .. }
             | Self::ForeignTenant { .. }
-            | Self::UnknownRun { .. } => None,
+            | Self::UnknownRun { .. }
+            | Self::Incompatible { .. } => None,
         }
     }
 }
@@ -301,6 +339,14 @@ struct Index {
 struct RunIndex {
     /// The tenant that minted the run, and the only one allowed to read it.
     tenant: String,
+    /// The definition every record under this run was written under.
+    ///
+    /// One per run rather than one per record because a run is one attempt to
+    /// execute one definition: a record written under a different definition
+    /// than the run's first is not a step that changed, it is a different run
+    /// that arrived under the same id, and the first record is what the rest are
+    /// compared against.
+    definition: DefinitionIdentity,
     /// Per step key hex: the step's path and its archived value.
     steps: HashMap<String, Held>,
 }
@@ -386,9 +432,9 @@ impl RunStore {
             .truncate(false)
             .open(&path)
             .map_err(StoreError::storage)?;
-        let header = u64::try_from(STORE_MAGIC.len()).unwrap_or(u64::MAX);
+        let header = u64::try_from(STORE_HEADER.len()).unwrap_or(u64::MAX);
         if !existed || file.metadata().map_err(StoreError::storage)?.len() == 0 {
-            file.write_all(STORE_MAGIC)
+            file.write_all(&STORE_HEADER)
                 .and_then(|()| file.sync_all())
                 .map_err(StoreError::storage)?;
         }
@@ -497,6 +543,50 @@ impl RunStore {
         index.runs.get(&run).map(|held| held.tenant.clone())
     }
 
+    /// The definition `run`'s records were written under.
+    ///
+    /// The answer a resume compares its own identity against, through
+    /// [`Self::check_definition`]. `None` for a run this store never wrote, which
+    /// is not a refusal to read — a process killed before its first record left
+    /// nothing to disagree with.
+    #[must_use]
+    pub fn definition_of(&self, run: RunId) -> Option<DefinitionIdentity> {
+        let index = self.index();
+        index.runs.get(&run).map(|held| held.definition.clone())
+    }
+
+    /// Refuse `identity` for `run` if the records disagree with it.
+    ///
+    /// The pre-flight a resume makes before admission: a run whose recorded
+    /// definition, input, step count or value schema is not the one being resumed
+    /// is refused with [`StoreError::Incompatible`] and nothing is written, so no
+    /// step body is polled and no record is added. Called both at the host, before
+    /// the body is ever constructed, and by every durable step before it replays a
+    /// value — the second because a host with no store is not the only door, and a
+    /// store handed a run from elsewhere must not answer from another definition's
+    /// records either.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Incompatible`] naming the axis that disagrees. A run this
+    /// store has no record for is not refused.
+    pub fn check_definition(
+        &self,
+        run: RunId,
+        identity: &DefinitionIdentity,
+    ) -> Result<(), StoreError> {
+        let Some(recorded) = self.definition_of(run) else {
+            return Ok(());
+        };
+        match identity.drift_from(&recorded) {
+            None => Ok(()),
+            Some(drift) => Err(StoreError::Incompatible {
+                run: run.id().to_hex(),
+                drift,
+            }),
+        }
+    }
+
     /// Turn a borrowed record into one that can cross onto the storage owner's
     /// thread.
     ///
@@ -510,6 +600,7 @@ impl RunStore {
                 key: record.key().as_bytes().to_vec(),
                 tenant: record.tenant().to_owned(),
                 path: record.path().to_owned(),
+                definition: StoredDefinition::of(record.definition()),
                 value: record.bytes().to_vec(),
             },
             key: record.key(),
@@ -563,10 +654,28 @@ impl RunRecords for RunStore {
         run: RunId,
         key: StepKey,
         path: &str,
+        definition: &DefinitionIdentity,
         bytes: Vec<u8>,
     ) -> Result<Appended, FlowError> {
-        let staged = self.owned(RunRecords::stage(self, tenant, run, key, path, bytes));
+        let staged = self.owned(RunRecords::stage(
+            self, tenant, run, key, path, definition, bytes,
+        ));
         self.commit(staged.record, staged.key)
+            .map_err(FlowError::from)
+    }
+
+    /// Whether the records for `run` were written under `definition`.
+    ///
+    /// The check every durable step makes before it returns a recorded value. A
+    /// run this store holds nothing for is compatible by definition: that is a
+    /// first attempt, and refusing it would make the first record unreachable.
+    fn compatibility(
+        &self,
+        run: RunId,
+        definition: &DefinitionIdentity,
+    ) -> Result<bool, FlowError> {
+        self.check_definition(run, definition)
+            .map(|()| true)
             .map_err(FlowError::from)
     }
 
@@ -760,6 +869,7 @@ fn decide_and_write(
     index.tail = head;
     index.runs.entry(stored.run).or_insert_with(|| RunIndex {
         tenant: stored.tenant.clone(),
+        definition: stored.definition.to_identity(),
         steps: HashMap::new(),
     });
     if let Some(run) = index.runs.get_mut(&stored.run) {
@@ -807,9 +917,87 @@ struct Stored {
     /// The step's path, for attribution.
     #[rkyv(attr(doc = "The step's path, for attribution."))]
     path: String,
+    /// The definition the record was written under, as its fields.
+    ///
+    /// Archived as fields rather than as one digest because a drift refusal has
+    /// to *name* the two sides: a head over the digest could detect the
+    /// disagreement but could not report which axis it was, and the fields are
+    /// what a caller reads to decide whether it needs a new run or a migration.
+    #[rkyv(attr(doc = "The definition the record was written under, as its fields."))]
+    definition: StoredDefinition,
     /// The archived value the step returned.
     #[rkyv(attr(doc = "The archived value the step returned."))]
     value: Vec<u8>,
+}
+
+/// A [`DefinitionIdentity`] in the shape a record archives.
+///
+/// Named rather than archived directly so the record's on-disk shape is stated
+/// once, in the store that writes it, and a future revision of the definition
+/// vocabulary is a new struct here rather than a change to a type every consumer
+/// of [`Drift`] is already matching.
+#[derive(
+    Debug, Clone, lgwks_std::wire::Archive, lgwks_std::wire::Serialize, lgwks_std::wire::Deserialize,
+)]
+#[rkyv(
+    attr(non_exhaustive),
+    crate = lgwks_std::wire::rkyv,
+    compare(PartialEq),
+    derive(Debug)
+)]
+struct StoredDefinition {
+    /// The task name.
+    #[rkyv(attr(doc = "The task name."))]
+    name: String,
+    /// The declared definition revision.
+    #[rkyv(attr(doc = "The declared definition revision."))]
+    revision: u64,
+    /// The input digest.
+    #[rkyv(attr(doc = "The input digest."))]
+    input: Vec<u8>,
+    /// How many durable steps the definition declares.
+    #[rkyv(attr(doc = "How many durable steps the definition declares."))]
+    steps: u64,
+    /// The declared durable-value schema id.
+    #[rkyv(attr(doc = "The declared durable-value schema id."))]
+    codec: String,
+}
+
+/// The 32 bytes a record archived, as the digest the identity carries back.
+///
+/// A fixed width rather than a slice, because a record whose input field is not
+/// 32 bytes is a corrupt frame and the checked decoder is what says so; the
+/// conversion cannot silently truncate, because `as` is forbidden in this
+/// workspace and this is the honest alternative to it.
+fn digest_from_record(bytes: &[u8]) -> Digest {
+    let mut digest = [0u8; 32];
+    let copied = bytes.len().min(digest.len());
+    digest[..copied].copy_from_slice(&bytes[..copied]);
+    Digest::from_bytes(digest)
+}
+
+impl StoredDefinition {
+    /// The record's archived form of a live identity.
+    fn of(identity: &DefinitionIdentity) -> Self {
+        Self {
+            name: identity.name().to_owned(),
+            revision: identity.revision(),
+            input: identity.input().as_bytes().to_vec(),
+            steps: u64::try_from(identity.steps()).unwrap_or(u64::MAX),
+            codec: identity.codec().to_owned(),
+        }
+    }
+
+    /// The live identity this record was written under.
+    fn to_identity(&self) -> DefinitionIdentity {
+        DefinitionIdentity::new(
+            &self.name,
+            self.revision,
+            digest_from_record(&self.input),
+            usize::try_from(self.steps).unwrap_or(usize::MAX),
+        )
+        .with_codec(&self.codec)
+    }
 }
 
 impl Stored {
@@ -817,8 +1005,11 @@ impl Stored {
     ///
     /// Framed exactly as the step key is framed, so a record's head cannot be
     /// confused with the digest of the bytes it holds: the run, the key, the
-    /// tenant and the path are each length-framed, and the value is framed last
-    /// so no two different records hash the same byte string.
+    /// tenant, the path and every definition field are length-framed, and the
+    /// value is framed last so no two different records hash the same byte
+    /// string. The definition's own bytes go in through the identity's framing
+    /// so a head over the record commits to the identity the same way the
+    /// identity's digest commits to it.
     fn head_from(&self, previous: &Digest, _archived: &[u8]) -> Digest {
         let mut hasher = Hasher::new();
         hasher.write_framed(previous.as_bytes());
@@ -826,6 +1017,11 @@ impl Stored {
         hasher.write_framed(&self.key);
         hasher.write_framed(self.tenant.as_bytes());
         hasher.write_framed(self.path.as_bytes());
+        hasher.write_framed(self.definition.name.as_bytes());
+        hasher.write_framed(&self.definition.revision.to_le_bytes());
+        hasher.write_framed(&self.definition.input);
+        hasher.write_framed(&self.definition.steps.to_le_bytes());
+        hasher.write_framed(self.definition.codec.as_bytes());
         hasher.write_framed(&self.value);
         hasher.finalize()
     }
@@ -915,13 +1111,13 @@ fn replay(file: &mut File) -> Result<Index, StoreError> {
     let total = file.metadata().map_err(StoreError::storage)?.len();
     file.seek(SeekFrom::Start(0)).map_err(StoreError::storage)?;
 
-    let mut header = [0u8; STORE_MAGIC.len()];
-    if !read_full(file, &mut header)? || header != *STORE_MAGIC {
+    let mut header = [0u8; STORE_HEADER.len()];
+    if !read_full(file, &mut header)? || header != STORE_HEADER {
         return Err(StoreError::NotAStore);
     }
     let mut index = Index {
         runs: HashMap::new(),
-        committed: u64::try_from(STORE_MAGIC.len()).unwrap_or(u64::MAX),
+        committed: u64::try_from(STORE_HEADER.len()).unwrap_or(u64::MAX),
         tail: genesis_head(),
     };
     let mut previous = genesis_head();
@@ -983,6 +1179,7 @@ fn replay(file: &mut File) -> Result<Index, StoreError> {
         }
         let run = index.runs.entry(stored.run).or_insert_with(|| RunIndex {
             tenant: stored.tenant.clone(),
+            definition: stored.definition.to_identity(),
             steps: HashMap::new(),
         });
         run.steps.insert(

@@ -91,6 +91,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
+use lgwks_std::hash::{Digest, Hasher};
+
 use crate::effect::RunId;
 use crate::rt::clock::Clock;
 use crate::rt::runtime::{Handle, Runtime};
@@ -102,9 +104,11 @@ use crate::script::{DEFAULT_TRAIL_STEPS, FlowError, MAX_IN_FLIGHT, Scope, Tenant
 
 use self::name::TaskName;
 
+mod definition;
 mod name;
 mod store;
 
+pub use definition::{DefinitionIdentity, Drift, UNVERSIONED_CODEC};
 pub use store::{
     MAX_RECORD_BYTES, MAX_RECORDS_PER_RUN, MAX_STORE_BYTES, RunStore, StoreError, StoreLimitKind,
 };
@@ -691,6 +695,13 @@ struct Installation {
     /// that behaved as though it had none would be claiming durability it does
     /// not have, which is the one thing INV-BOT-54 forbids.
     store: Option<store::RunStore>,
+    /// The declared schema id of this host's durable step values.
+    ///
+    /// What a [`DefinitionIdentity`] this host builds by hand starts from, so the
+    /// declared schema is one setting rather than one argument per call. The
+    /// default is [`UNVERSIONED_CODEC`], which says the caller declared none
+    /// rather than that the values are schema-free.
+    codec: String,
     /// The runtime [`Host::block_on`] drives on, built once on first use.
     reactor: Mutex<Option<Reactor>>,
 }
@@ -715,6 +726,128 @@ struct Reactor {
     runtime: Runtime,
 }
 
+/// What one call to [`Host::execute`] is asking for.
+///
+/// A run id and a definition identity are two different facts about a run — the
+/// first says which records to look under, the second says what they have to
+/// have been written under — and pairing them by enumerating four door
+/// combinations is what made a drift check easy to apply to one door and forget
+/// on another. One sum type carries both, and the identity a caller did not
+/// declare is derived here rather than at each door.
+#[derive(Debug, Clone)]
+enum Plan {
+    /// A new run, with or without a declared identity.
+    Fresh,
+    /// A fresh run under `DefinitionIdentity`.
+    Declared(DefinitionIdentity),
+    /// A resume of `RunId`, under whatever identity this host derives.
+    Resume(RunId),
+    /// A resume of `RunId` under `DefinitionIdentity`.
+    ResumeUnder(RunId, DefinitionIdentity),
+}
+
+impl Plan {
+    /// The run this plan adopts, or `None` for one that mints its own.
+    const fn run(&self) -> Option<RunId> {
+        match *self {
+            Self::Fresh | Self::Declared(_) => None,
+            Self::Resume(run) | Self::ResumeUnder(run, _) => Some(run),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Plan;
+    use crate::effect::RunId;
+    use crate::script::Tenant;
+    use crate::task::{Host, name::TaskName};
+
+    /// What this module's tests report.
+    ///
+    /// A `Result` rather than a panic because the workspace forbids the
+    /// panicking path everywhere, test code included: a unit test that unwound
+    /// would report a line number inside a macro rather than which of the facts
+    /// it was checking had moved.
+    type TestResult = Result<(), String>;
+
+    /// Every plan arm reports the run it adopts, and only the resume arms report one.
+    ///
+    /// The property the drift check's placement rests on: a fresh plan has no run
+    /// to be incompatible with, and both resume arms have one whether or not they
+    /// declared an identity.
+    #[test]
+    fn only_the_resume_arms_adopt_a_run() -> TestResult {
+        let host = host()?;
+        let task = TaskName::new("probe").map_err(|error| error.to_string())?;
+        let run = RunId::mint().map_err(|error| error.to_string())?;
+        let identity = host.definition_for(task.as_str(), None);
+        assert!(Plan::Fresh.run().is_none(), "a fresh plan adopts nothing");
+        assert!(
+            Plan::Declared(identity.clone()).run().is_none(),
+            "a declared fresh plan adopts nothing either"
+        );
+        assert_eq!(
+            Plan::Resume(run).run(),
+            Some(run),
+            "a resume adopts its run"
+        );
+        assert_eq!(
+            Plan::ResumeUnder(run, identity).run(),
+            Some(run),
+            "a resume under a declared identity adopts the same run"
+        );
+        Ok(())
+    }
+
+    /// The derived identity is stable for one run and different for another.
+    ///
+    /// What makes it usable as a default at all: a derived identity that moved
+    /// between two attempts at the same run would make every existing durable
+    /// step refuse its own resume, and one that was the same for every run would
+    /// make two runs claim one definition.
+    #[test]
+    fn a_derived_identity_is_stable_per_run_and_distinct_across_runs() -> TestResult {
+        let host = host()?;
+        let first = RunId::mint().map_err(|error| error.to_string())?;
+        let second = RunId::mint().map_err(|error| error.to_string())?;
+        assert_eq!(
+            host.definition_for("probe", Some(&first)).digest(),
+            host.definition_for("probe", Some(&first)).digest(),
+            "one run's derived identity must not move between two readings"
+        );
+        assert_ne!(
+            host.definition_for("probe", Some(&first)).digest(),
+            host.definition_for("probe", Some(&second)).digest(),
+            "two runs must not share a derived identity"
+        );
+        assert_ne!(
+            host.definition_for("probe", None).digest(),
+            host.definition_for("probe", Some(&first)).digest(),
+            "a run that has not adopted an id is not the run that has"
+        );
+        Ok(())
+    }
+
+    /// A host this module's tests can always build.
+    fn host() -> Result<Host, String> {
+        Host::builder("acme")
+            .map_err(|error| error.to_string())?
+            .build()
+            .map_err(|error| error.to_string())
+    }
+
+    /// The tenant name this module's tests build, named so the fixture above is
+    /// the only place it is spelled.
+    #[expect(
+        dead_code,
+        reason = "the tenant is named by the host fixture; kept for the type"
+    )]
+    fn tenant() -> Result<Tenant, String> {
+        Tenant::new("acme").map_err(|error| error.to_string())
+    }
+}
+
 impl Host {
     /// Begin building a host for `tenant`.
     ///
@@ -733,6 +866,7 @@ impl Host {
             progress: DEFAULT_TRAIL_STEPS,
             clock: Clock::wall(),
             store: None,
+            codec: UNVERSIONED_CODEC.to_owned(),
         })
     }
 
@@ -785,6 +919,89 @@ impl Host {
         self.inner.store.as_ref()
     }
 
+    /// The identity the run's records are already under, or `declared` when this
+    /// call is the run's first attempt.
+    ///
+    /// One read, and every durable step under the run gets the same answer, so a
+    /// resume cannot check its definition against one run and write its records
+    /// under another. `None` means nothing is recorded yet, which is the first
+    /// attempt's situation and not a compatibility.
+    fn identity_for(&self, run: RunId, declared: &DefinitionIdentity) -> DefinitionIdentity {
+        self.inner
+            .store
+            .as_ref()
+            .and_then(|store| store.definition_of(run))
+            .unwrap_or_else(|| declared.clone())
+    }
+
+    /// The identity a run adopts when its caller declared none.
+    ///
+    /// Derived from the three facts every run has — its tenant, its task name and
+    /// the run id it adopted — so it is stable across attempts at one run and
+    /// distinct across runs. A run that has not adopted one yet reads as fresh,
+    /// which is the same derivation with the third fact set to `fresh`, and a
+    /// caller that declares its own identity overrides this entirely.
+    fn definition_for(&self, task_name: &str, run: Option<&RunId>) -> DefinitionIdentity {
+        let mut hasher = Hasher::new();
+        hasher.write_framed(b"lgwks.bot.definition.host-default");
+        hasher.write_framed(self.inner.tenant.as_str().as_bytes());
+        hasher.write_framed(task_name.as_bytes());
+        match run {
+            Some(run) => hasher.write_framed(run.id().to_hex().as_bytes()),
+            None => hasher.write_framed(b"fresh"),
+        };
+        DefinitionIdentity::new(task_name, 0, hasher.finalize(), 1).with_codec(&self.inner.codec)
+    }
+
+    /// The definition identity every run under this host records against.
+    ///
+    /// The caller's half of what a resume has to agree with: the task is named
+    /// here because the host knows which task it is about to run, the revision and
+    /// the step count are the two facts the caller declares, and the input digest
+    /// is the identity [`crate::effect::InputIdentity`] names. The schema id is
+    /// the host's [`HostBuilder::durable_codec`], so the declared schema is one
+    /// setting rather than one argument per run.
+    ///
+    /// A `None` input digest means the caller did not declare one, which is not
+    /// the same as declaring some particular digest: an undeclared identity is
+    /// recorded as such and compares equal to another undeclared one, so two runs
+    /// that pass different inputs under it still resume — and the caller who needs
+    /// that refused declares the digest.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use lgwks_bot::effect::{Hasher, InputIdentity};
+    /// use lgwks_bot::task::Host;
+    ///
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let host = Host::builder("acme")?.build()?;
+    /// let mut hasher = Hasher::new();
+    /// 7u32.write_identity(&mut hasher);
+    /// let identity = host.definition("nightly", 3, Some(hasher.finalize()), 5);
+    /// assert_eq!(identity.revision(), 3);
+    /// assert_eq!(identity.steps(), 5);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn definition(
+        &self,
+        task_name: &str,
+        definition_revision: u64,
+        input_digest: Option<Digest>,
+        steps: usize,
+    ) -> DefinitionIdentity {
+        let input = input_digest.unwrap_or_else(|| {
+            let mut hasher = Hasher::new();
+            hasher.write_framed(b"lgwks.bot.input.undeclared");
+            hasher.write_framed(self.inner.codec.as_bytes());
+            hasher.finalize()
+        });
+        DefinitionIdentity::new(task_name, definition_revision, input, steps)
+            .with_codec(&self.inner.codec)
+    }
+
     /// Stop every run under this host, including one waiting for a permit, and
     /// refuse every run started afterwards.
     ///
@@ -822,7 +1039,30 @@ impl Host {
         F: Fn(Scope, I) -> Fut,
         Fut: Future<Output = Result<O, FlowError>>,
     {
-        self.execute(task, input, None).await
+        self.execute(task, input, Plan::Fresh).await
+    }
+
+    /// [`Host::run`] under a declared definition identity.
+    ///
+    /// The door a durable caller uses. The identity is recorded with the run's
+    /// first record, so every later [`Host::resume_under`] of that run either
+    /// agrees with it exactly or is refused before any step body is polled — which
+    /// is what stops an edited task, a changed input or a changed value schema
+    /// from replaying values the current definition never produced. A host with
+    /// no store runs the body and records nothing, so the identity is only a claim
+    /// when a store exists to check it against.
+    pub async fn run_under<I, O, F, Fut>(
+        &self,
+        definition: &DefinitionIdentity,
+        task: &Task<F>,
+        input: I,
+    ) -> Report<O>
+    where
+        F: Fn(Scope, I) -> Fut,
+        Fut: Future<Output = Result<O, FlowError>>,
+    {
+        self.execute(task, input, Plan::Declared(definition.clone()))
+            .await
     }
 
     /// [`Host::run`] under a run identity the caller already holds.
@@ -842,7 +1082,31 @@ impl Host {
         F: Fn(Scope, I) -> Fut,
         Fut: Future<Output = Result<O, FlowError>>,
     {
-        self.execute(task, input, Some(run)).await
+        self.execute(task, input, Plan::Resume(run)).await
+    }
+
+    /// [`Host::resume`] under a declared definition identity.
+    ///
+    /// The check this door exists for: a resume whose definition, input, step
+    /// count or value schema is not the one the records were written under is a
+    /// [`Disposition::Refused`] report carrying [`FlowError::Incompatible`], with
+    /// nothing admitted, no body constructed and no record written. A run this
+    /// store holds no record for is *not* refused — a process killed before its
+    /// first record left nothing to disagree with, and refusing that would make
+    /// the exactly-at-least-once step unrecoverable.
+    pub async fn resume_under<I, O, F, Fut>(
+        &self,
+        run: RunId,
+        definition: &DefinitionIdentity,
+        task: &Task<F>,
+        input: I,
+    ) -> Report<O>
+    where
+        F: Fn(Scope, I) -> Fut,
+        Fut: Future<Output = Result<O, FlowError>>,
+    {
+        self.execute(task, input, Plan::ResumeUnder(run, definition.clone()))
+            .await
     }
 
     /// Resume from a [`Ticket`].
@@ -878,7 +1142,7 @@ impl Host {
                 ),
             });
         }
-        Ok(self.execute(task, input, Some(ticket.run())).await)
+        Ok(self.execute(task, input, Plan::Resume(ticket.run())).await)
     }
 
     /// The one body of a run, shared by [`Host::run`] and [`Host::resume`].
@@ -886,18 +1150,32 @@ impl Host {
     /// Split so there is exactly one place a run mints or adopts its identity,
     /// builds its scope, installs the store and assembles its report — a second
     /// copy of any of those is a second definition of what a resume means.
-    async fn execute<I, O, F, Fut>(
-        &self,
-        task: &Task<F>,
-        input: I,
-        resume: Option<RunId>,
-    ) -> Report<O>
+    async fn execute<I, O, F, Fut>(&self, task: &Task<F>, input: I, plan: Plan) -> Report<O>
     where
         F: Fn(Scope, I) -> Fut,
         Fut: Future<Output = Result<O, FlowError>>,
     {
         let started = Instant::now();
         let task_name = task.name_owned();
+        let resume = plan.run();
+        // The definition this run records under. A run that declared none gets a
+        // per-run identity derived from the tenant, the task and the run id, which
+        // is stable across attempts at one run and therefore resumes exactly as a
+        // run under `run` already does — a declared identity is an addition, never
+        // a precondition.
+        // A resume's identity names the run it is *replacing* only for its first
+        // attempt: a caller that runs the same task on the same input twice gets
+        // two runs and two identities, which is right — they are two pieces of
+        // work. Declaring one identity for both and resuming the first would then
+        // be refused, which is the opposite of what a caller means. So the
+        // identity a run is recorded under is its own first attempt's, and a
+        // resume is measured against that.
+        let definition = match plan {
+            Plan::Declared(identity) | Plan::ResumeUnder(_, identity) => identity,
+            Plan::Fresh | Plan::Resume(_) => {
+                self.definition_for(task_name.as_str(), resume.as_ref())
+            }
+        };
 
         // A resume this store knows belongs to another tenant is refused before
         // admission, so the refusal is a `Refused` with no body and no step rather
@@ -917,6 +1195,40 @@ impl Host {
                 asked: self.inner.tenant.as_str().to_owned(),
             };
             return self.refuse(started, task_name, error.to_string());
+        }
+        // What this call's records will be written under, decided before
+        // admission. The run a call adopts is not always the run it records
+        // against — a fresh run mints one of its own below, and it is *that*
+        // run's records this call writes. So a resume reads the identity its own
+        // records already carry rather than the one its derivation would name,
+        // and the check and the write below read the same value; measuring one
+        // against a run this call never touches would refuse an unrelated run
+        // and let the real one through.
+        let recorded_definition = match resume {
+            Some(adopted) => self.identity_for(adopted, &definition),
+            None => definition,
+        };
+        // The drift check, before admission and before the body is ever
+        // constructed. Replaying a value the current definition never produced and
+        // re-running a step whose effect already landed are the two answers on
+        // either side of this, so the run is refused rather than picked between,
+        // and the refusal names the axis that disagrees so the caller knows which
+        // repair it needs. Nothing is written and no permit is taken.
+        if let (Some(run), Some(store)) = (resume, self.inner.store.as_ref())
+            && let Err(error) = store.check_definition(run, &recorded_definition)
+            && let StoreError::Incompatible { ref drift, .. } = error
+        {
+            let located = FlowError::incompatible(task_name.as_str(), drift.clone());
+            self.inner.refused.fetch_add(1, Ordering::Relaxed);
+            return self.report(Terminal {
+                started,
+                task: task_name,
+                disposition: Disposition::Refused,
+                output: None,
+                error: Some(located),
+                trail: TrailSnapshot::Empty,
+                run: Some(run),
+            });
         }
         // A resume on a host with nothing to replay from would run every step
         // again under a caller's belief that finished steps are kept. That is
@@ -1043,6 +1355,7 @@ impl Host {
         // another run's body costs the parent a pointer rather than its frame.
         let outcome = Box::pin(crate::script::run_store::within(
             self.records(run),
+            &recorded_definition,
             HELD_PERMITS.scope(charged, within(&scope, BODY_STEP, deadline, body)),
         ))
         .await;
@@ -1571,6 +1884,12 @@ pub struct HostBuilder {
     clock: Clock,
     /// The durable step-record store, when the caller installed one.
     store: Option<store::RunStore>,
+    /// The declared schema id of this host's durable step values.
+    ///
+    /// The default is [`UNVERSIONED_CODEC`], which says the caller declared none
+    /// rather than that the values are schema-free; [`HostBuilder::durable_codec`]
+    /// changes it once, for every run this host admits.
+    codec: String,
 }
 
 impl HostBuilder {
@@ -1656,6 +1975,22 @@ impl HostBuilder {
         self
     }
 
+    /// Declare the schema id this host's durable step values are written under.
+    ///
+    /// Every [`DefinitionIdentity`] this host builds carries it, so changing the
+    /// schema of a durable value is one setting here rather than an argument to
+    /// every run — and a resume whose records were written under another schema
+    /// is refused as [`Drift::Schema`] rather than decoding them as this one.
+    ///
+    /// The convention is `lgwks.bot.schema.v1.<kind>`, the same one
+    /// [`crate::effect::InputIdentity`] uses. The default is
+    /// [`UNVERSIONED_CODEC`], which says the caller declared none.
+    #[must_use = "a builder that declares nothing is the host the caller already had"]
+    pub fn durable_codec(mut self, codec: &str) -> Self {
+        codec.clone_into(&mut self.codec);
+        self
+    }
+
     /// Install the host.
     ///
     /// # Errors
@@ -1712,6 +2047,7 @@ impl HostBuilder {
                 refused: AtomicU64::new(0),
                 clock: self.clock,
                 store: self.store,
+                codec: self.codec,
                 reactor: Mutex::new(None),
             }),
         })

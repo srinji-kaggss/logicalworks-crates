@@ -28,6 +28,7 @@ use lgwks_std::wire::{Archive, Deserialize, Serialize, WireError};
 
 use crate::effect::RunId;
 use crate::rt::task_local;
+use crate::task::DefinitionIdentity;
 
 use super::{FlowError, Scope, StepKey};
 
@@ -90,6 +91,14 @@ where
 task_local! {
     /// The durable record store for the run this future belongs to, if any.
     static RECORDS: Option<Records>;
+
+    /// The definition identity the run above records its values under.
+    ///
+    /// Shared rather than borrowed for the same reason [`RECORDS`] is: the value
+    /// has to outlive the frame that installed it, because a nested run installs
+    /// its own and restores this one on the way out. A clone is one reference
+    /// count.
+    static DEFINITION: Option<Arc<DefinitionIdentity>>;
 }
 
 /// The durable store a run's durable steps consult.
@@ -128,6 +137,7 @@ pub trait RunRecords: Send + Sync {
         run: RunId,
         key: StepKey,
         path: &str,
+        definition: &DefinitionIdentity,
         bytes: Vec<u8>,
     ) -> Result<Appended, FlowError>;
 
@@ -154,15 +164,41 @@ pub trait RunRecords: Send + Sync {
         record: StagedRecord<'a>,
     ) -> crate::BoxFuture<'a, Result<Appended, FlowError>> {
         Box::pin(async move {
-            let (tenant, run, key, path) =
-                (record.tenant(), record.run(), record.key(), record.path());
-            self.append(tenant, run, key, path, record.into_bytes())
+            let (tenant, run, key, path, definition) = (
+                record.tenant(),
+                record.run(),
+                record.key(),
+                record.path(),
+                record.definition(),
+            );
+            self.append(tenant, run, key, path, definition, record.into_bytes())
         })
+    }
+
+    /// Whether this store's records for `run` were written under `definition`.
+    ///
+    /// The replay's own pre-flight, asked by every durable step before it returns
+    /// a recorded value. A store that cannot answer says `true`: it holds no
+    /// record for the run at all, which is the same situation as a first attempt
+    /// and not a disagreement. Refusing to answer is not an option — a store that
+    /// could not read its own index must not have that read as permission to
+    /// replay, so it answers `false` and the step refuses.
+    ///
+    /// # Errors
+    ///
+    /// [`FlowError`] when the store refused the question, which the caller treats
+    /// as a refusal rather than as a compatibility.
+    fn compatibility(
+        &self,
+        _run: RunId,
+        _definition: &DefinitionIdentity,
+    ) -> Result<bool, FlowError> {
+        Ok(true)
     }
 
     /// Build the record this store is being asked to commit.
     ///
-    /// One constructor for the five fields both doors take, because the awaited door
+    /// One constructor for the six fields both doors take, because the awaited door
     /// and the blocking door are otherwise two places that assemble the same thing
     /// and could disagree about what a record is.
     fn stage<'a>(
@@ -171,24 +207,25 @@ pub trait RunRecords: Send + Sync {
         run: RunId,
         key: StepKey,
         path: &'a str,
+        definition: &'a DefinitionIdentity,
         bytes: Vec<u8>,
     ) -> StagedRecord<'a> {
-        StagedRecord::of(tenant, run, key, path, bytes)
+        StagedRecord::of(tenant, run, key, path, definition, bytes)
     }
 }
 
 /// One record a store is being asked to commit, borrowed rather than assembled at
 /// each call site.
 ///
-/// The trait's two doors take the same five facts, and a store's implementation
+/// The trait's two doors take the same six facts, and a store's implementation
 /// wants them as one value; a struct the caller fills once through
 /// [`StagedRecord::of`] is what keeps those two doors from being two copies of the
 /// same parameter list.
 ///
 /// Fields private and reached through accessors, because the invariants a store
-/// checks — the tenant that owns the run, the key the record is filed under — are
-/// the store's to make, not a caller's to have bypassed by writing the field
-/// directly.
+/// checks — the tenant that owns the run, the key the record is filed under, the
+/// definition it was written under — are the store's to make, not a caller's to
+/// have bypassed by writing the field directly.
 #[derive(Debug, Clone)]
 pub struct StagedRecord<'a> {
     /// The tenant the run belongs to.
@@ -199,18 +236,28 @@ pub struct StagedRecord<'a> {
     key: StepKey,
     /// The step's path, for attribution.
     path: &'a str,
+    /// The definition the value is recorded under.
+    definition: &'a DefinitionIdentity,
     /// The archived value.
     bytes: Vec<u8>,
 }
 
 impl<'a> StagedRecord<'a> {
-    /// The five facts a record is, assembled once.
-    fn of(tenant: &'a str, run: RunId, key: StepKey, path: &'a str, bytes: Vec<u8>) -> Self {
+    /// The six facts a record is, assembled once.
+    fn of(
+        tenant: &'a str,
+        run: RunId,
+        key: StepKey,
+        path: &'a str,
+        definition: &'a DefinitionIdentity,
+        bytes: Vec<u8>,
+    ) -> Self {
         Self {
             tenant,
             run,
             key,
             path,
+            definition,
             bytes,
         }
     }
@@ -237,6 +284,16 @@ impl<'a> StagedRecord<'a> {
     #[must_use]
     pub const fn path(&self) -> &'a str {
         self.path
+    }
+
+    /// The definition the value is recorded under.
+    ///
+    /// Borrowed rather than cloned because the store copies it once, onto its own
+    /// storage thread, where the frame head is computed — the same place the
+    /// tenant and path are copied, so a store cannot record one without the other.
+    #[must_use]
+    pub const fn definition(&self) -> &'a DefinitionIdentity {
+        self.definition
     }
 
     /// The archived value, by reference.
@@ -311,6 +368,17 @@ impl Records {
         self.0.lookup(tenant, run, key)
     }
 
+    /// Whether this store's records for `run` agree with `definition`.
+    ///
+    /// The check every durable step makes before it replays a value, and the
+    /// reason a store that was handed a run from elsewhere cannot answer from
+    /// another definition's records. `Ok(true)` when the store cannot answer
+    /// either way — a run it holds no record for — which is the same answer it
+    /// gives a first attempt.
+    pub(crate) fn agrees(&self, run: RunId, definition: &DefinitionIdentity) -> bool {
+        self.0.compatibility(run, definition).unwrap_or_default()
+    }
+
     /// The durable append, refusing a conflicting record as an error.
     ///
     /// A conflict is turned into a [`FlowError`] here rather than being left as
@@ -327,13 +395,14 @@ impl Records {
         run: RunId,
         key: StepKey,
         path: &'a str,
+        definition: &'a DefinitionIdentity,
         bytes: Vec<u8>,
     ) -> crate::BoxFuture<'a, Result<(), FlowError>> {
         let conflict = std::sync::Arc::from(path);
         Box::pin(async move {
             match self
                 .0
-                .append_async(self.0.stage(tenant, run, key, path, bytes))
+                .append_async(self.0.stage(tenant, run, key, path, definition, bytes))
                 .await
             {
                 Ok(Appended::Recorded) | Ok(Appended::AlreadyRecorded) => Ok(()),
@@ -358,14 +427,34 @@ impl std::fmt::Debug for Records {
     }
 }
 
-/// Install `records` for the futures polled inside `body`; `None` installs the
-/// absence a storeless run reports, through the same one composition.
+/// Install `records` and `definition` for the futures polled inside `body`;
+/// `None` installs the absence a storeless run reports, through the same one
+/// composition.
 ///
 /// Crate-private: the host is the supported way to make a run durable (DX-10),
 /// and a caller who installed their own store would be reaching past the one
 /// path that also mints the run id the record is keyed by.
-pub(crate) async fn within<R>(records: Option<Records>, body: impl Future<Output = R>) -> R {
-    RECORDS.scope(records, body).await
+pub(crate) async fn within<R>(
+    records: Option<Records>,
+    definition: &DefinitionIdentity,
+    body: impl Future<Output = R>,
+) -> R {
+    RECORDS
+        .scope(
+            records,
+            DEFINITION.scope(Some(Arc::new(definition.clone())), body),
+        )
+        .await
+}
+
+/// The definition the current run records under, when one was installed.
+///
+/// `None` for a step outside a run, which is what a hand-built [`Scope`] with no
+/// host above it is. The caller then derives its own, so the two doors — a
+/// host-installed identity and a bare scope — cannot disagree about whether a run
+/// declared one.
+pub(crate) fn installed_definition() -> Option<Arc<DefinitionIdentity>> {
+    DEFINITION.try_with(Clone::clone).unwrap_or(None)
 }
 
 /// The store installed for the current future, if any.
@@ -410,19 +499,53 @@ where
     Fut: Future<Output = Result<T, FlowError>>,
 {
     let child = scope.enter(step)?;
-    step_in(&child, body).await
+    let derived;
+    // The host-installed identity, or one derived from this scope's own facts when
+    // no run above declared one. Derived rather than defaulted so two runs on one
+    // host cannot claim one definition, and so a hand-built scope with no host
+    // above it still records something that is stable for its own run.
+    let definition = match installed_definition() {
+        Some(installed) => installed,
+        None => {
+            derived = definition_of(scope, step);
+            Arc::new(derived)
+        }
+    };
+    step_in(&child, &definition, body).await
+}
+
+/// The definition a step records under when no host installed one.
+///
+/// The per-step fallback, and the reason it is a digest rather than a fixed
+/// constant: the run id and the step's own path are both already facts this
+/// store holds, so naming them together gives a stable identity for a flow that
+/// never declared a revision — and it is deliberately *not* stable across two
+/// different run ids, so a caller that resumes a run it does not hold cannot
+/// inherit a definition from wherever it looked.
+fn definition_of(scope: &Scope, step: &str) -> DefinitionIdentity {
+    let mut hasher = lgwks_std::hash::Hasher::new();
+    hasher.write_framed(b"lgwks.bot.definition.v1");
+    hasher.write_framed(scope.tenant().as_str().as_bytes());
+    hasher.write_framed(step.as_bytes());
+    if let Some(run) = scope.run() {
+        hasher.write_framed(run.id().to_hex().as_bytes());
+    } else {
+        hasher.write_framed(b"no-run");
+    }
+    DefinitionIdentity::new(scope.path(), u64::MAX, hasher.finalize(), 1)
 }
 
 /// [`remember`] against a scope the caller already entered.
 pub(crate) async fn step_in<T, Fut>(
     scope: &Scope,
+    definition: &DefinitionIdentity,
     body: impl FnOnce() -> Fut,
 ) -> Result<T, FlowError>
 where
     T: lgwks_std::wire::Archive + Durable,
     Fut: Future<Output = Result<T, FlowError>>,
 {
-    remember_at(scope, scope.run(), body).await
+    remember_at(scope, scope.run(), definition, body).await
 }
 
 /// [`remember`] against a scope already carrying a run, or `remember_at` for a
@@ -430,6 +553,7 @@ where
 pub(crate) async fn remember_at<T, Fut>(
     scope: &Scope,
     run: Option<RunId>,
+    definition: &DefinitionIdentity,
     body: impl FnOnce() -> Fut,
 ) -> Result<T, FlowError>
 where
@@ -442,6 +566,20 @@ where
     let Some(run) = run else {
         return body().await;
     };
+    // Before the lookup, not after it. A record found under another definition is
+    // a value this build never produced, and returning it is the failure T15
+    // names; asking first means the refusal costs a hash-map probe rather than a
+    // step body having already been trusted.
+    if !records.agrees(run, definition) {
+        return Err(FlowError::Failed {
+            at: scope.shared_path().as_ref().into(),
+            reason: format!(
+                "run {} was recorded under a different definition, so nothing this step could \
+                 replay is its own work",
+                run.id().to_hex()
+            ),
+        });
+    }
     let key = scope.key();
     let tenant = scope.tenant().as_str();
 
@@ -457,7 +595,7 @@ where
         .map_err(|error| error.located_at(scope.shared_path()))?;
     let bytes = encode(&value).map_err(|error| error.located_at(scope.shared_path()))?;
     records
-        .record(tenant, run, key, scope.path(), bytes)
+        .record(tenant, run, key, scope.path(), definition, bytes)
         .await?;
     Ok(value)
 }

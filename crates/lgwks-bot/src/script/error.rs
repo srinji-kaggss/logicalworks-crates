@@ -101,6 +101,21 @@ pub enum FlowError {
         /// The largest value accepted.
         max: u64,
     },
+    /// A resumed run's records were written under a different definition, input,
+    /// step count or value schema, so none of them is this build's own work.
+    ///
+    /// Typed rather than a `Failed` string because the caller has to choose: a
+    /// changed definition wants a new run, a changed input wants a decision, a
+    /// changed schema wants a migration. Raised before any step body is polled
+    /// and before any record is written, so a refusal costs nothing and replays
+    /// nothing — and, because it is permanent, an enclosing `retry` will not
+    /// spend attempts asking the same store the same question.
+    Incompatible {
+        /// Where the run would have resumed.
+        at: Arc<str>,
+        /// Which axis disagreed, and what each side holds.
+        drift: crate::task::Drift,
+    },
 }
 
 impl FlowError {
@@ -109,6 +124,18 @@ impl FlowError {
         Self::Failed {
             at: Arc::from(""),
             reason: reason.to_string(),
+        }
+    }
+
+    /// A refusal to resume a run under a definition its records do not match.
+    ///
+    /// Permanent by construction: the records are what they are, so repeating the
+    /// resume asks the same store the same question and gets the same answer.
+    #[must_use]
+    pub fn incompatible(at: &str, drift: crate::task::Drift) -> Self {
+        Self::Incompatible {
+            at: Arc::from(at),
+            drift,
         }
     }
 
@@ -138,7 +165,8 @@ impl FlowError {
             | Self::TooDeep { .. }
             | Self::InvalidTenant { .. }
             | Self::InvalidName { .. }
-            | Self::InvalidBound { .. } => false,
+            | Self::InvalidBound { .. }
+            | Self::Incompatible { .. } => false,
         }
     }
 
@@ -160,6 +188,7 @@ impl FlowError {
             | Self::Transient { ref at, .. }
             | Self::Bot { ref at, .. }
             | Self::TooDeep { ref at, .. } => at,
+            Self::Incompatible { ref at, .. } => at,
             Self::InvalidTenant { .. } | Self::InvalidName { .. } | Self::InvalidBound { .. } => "",
         }
     }
@@ -184,7 +213,8 @@ impl FlowError {
             | Self::Failed { ref mut at, .. }
             | Self::Transient { ref mut at, .. }
             | Self::Bot { ref mut at, .. }
-            | Self::TooDeep { ref mut at, .. } => {
+            | Self::TooDeep { ref mut at, .. }
+            | Self::Incompatible { ref mut at, .. } => {
                 if at.is_empty() {
                     *at = Arc::clone(path);
                 }
@@ -233,6 +263,10 @@ impl fmt::Display for FlowError {
             Self::InvalidBound { what, value, max } => {
                 write!(formatter, "{what}: {value} is outside 1..={max}")
             }
+            Self::Incompatible { ref at, ref drift } => write!(
+                formatter,
+                "{at}: refusing to resume under a different definition: {drift}"
+            ),
         }
     }
 }
@@ -249,6 +283,7 @@ impl std::error::Error for FlowError {
             | Self::TooDeep { .. }
             | Self::InvalidTenant { .. }
             | Self::InvalidName { .. }
+            | Self::Incompatible { .. }
             | Self::InvalidBound { .. } => None,
         }
     }
