@@ -1029,7 +1029,7 @@ impl Host {
 
     /// Repair a run blocked on unmet authority, and resume it.
     ///
-    /// The door a [`RepairTicket`](repair::RepairTicket) is answered at. It
+    /// The door a [`RepairTicket`] is answered at. It
     /// resumes the run under the run's own id, so every step recorded before the
     /// block replays without its body being polled — the prior analysis is not
     /// rerun — and only the blocked remainder runs. That is the whole of what a
@@ -2149,7 +2149,7 @@ impl HostBuilder {
     /// One file per tenant, named after it, so two tenants pointed at the same
     /// directory never share a file — the same rule the step store follows. With
     /// a ledger installed a blocked run's report carries a
-    /// [`RepairTicket`](repair::RepairTicket) and [`Host::repair`] can decide a
+    /// [`RepairTicket`] and [`Host::repair`] can decide a
     /// repair against the run's epoch, its root budget and the tickets already
     /// applied to it.
     ///

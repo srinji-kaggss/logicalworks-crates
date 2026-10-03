@@ -229,7 +229,8 @@ fn render(caps: &[Cap]) -> String {
 
 /// An intervention request: this run is blocked, and here is exactly why.
 ///
-/// A *report*, never a grant — the same rule [`NeedSet`] follows for a spec's
+/// A *report*, never a grant — the same rule [`NeedSet`](crate::spec::NeedSet)
+/// follows for a spec's
 /// unmet needs. The needs are what the run asked for and the host has not
 /// supplied; only the host, through [`Host::repair`](super::Host::repair), can
 /// turn them into authority, and only for these needs at this epoch.
