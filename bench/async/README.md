@@ -52,6 +52,54 @@ Two real asymmetries were found and fixed *in the harness*, not in the crate:
 The gate is not decoration: it refused four times during development, each time on
 a real difference between the two sides.
 
+## The §3 workload matrix — every row, with its receipt
+
+`--matrix` drives each row lgwks_bot can actually drive today and records what it
+produced. A row that fails aborts the run with the row named, because a matrix
+with one quietly-skipped row reads as coverage.
+
+```sh
+CARGO_TARGET_DIR=/tmp/lgwks-bench-async \
+  cargo run --release --manifest-path bench/async/Cargo.toml -- \
+    --matrix --json=bench/async/matrix.json
+```
+
+Recorded output, Apple M5 Pro, macOS 27.0, rustc 1.98.0:
+
+| row | shape | placed | completed | cancelled | aborted | work units |
+|---|---|---:|---:|---:|---:|---:|
+| sequential-composition | 64 bodies, bound 1, nothing overlaps | 64 | 64 | 0 | 0 | 64 |
+| high-fanout-slow-consumer | 1024 tasks, 4 KiB each, bound 32, 8-slot channel | 1024 | 1024 | 0 | 0 | 1024 |
+| cancel-at-saturation | 64 bodies fill the ceiling, cancelled while full | 64 | 0 | 64 | 0 | 64 |
+| two-tenants | 2048 tasks each, bound 32 each, run together | 4096 | 4096 | 0 | 0 | 4096 |
+| sustained-burst-reconnect | 512 sustained, 1024 burst, 128 reconnect, bound 16 | 1664 | 1664 | 0 | 0 | 1664 |
+| durable-history | 1000 records through `FileJournal` | 1000 | 1000 | 0 | 0 | 1000 |
+| durable-history | 10000 records through `FileJournal` | 10000 | 10000 | 0 | 0 | 10000 |
+| durable-history | 100000 records through `FileJournal` | 100000 | 100000 | 0 | 0 | 100000 |
+
+Three of these rows assert more than their receipt, and the receipt alone would
+not show what they check:
+
+- **`cancel-at-saturation`** fills the ceiling with bodies that end *only* when
+  cancelled, cancels while every permit is held, and then asserts that
+  `in_flight()` returned to zero, that the counts partition, that every parked
+  body reported cancellation, and that a *spent* supervisor refuses later
+  admissions. The receipt shows 64 cancelled and 0 completed; the assertions are
+  what make that a cleanup observation rather than a tally.
+- **`high-fanout-slow-consumer`** runs 1,024 producers through an 8-slot channel
+  into a deliberately slow consumer. The row fails unless the consumer received
+  exactly 1,024 payloads *and* exactly 4 MiB, so a lost or duplicated result is
+  caught rather than averaged away.
+- **`two-tenants`** runs two supervisors concurrently and fails if either tenant
+  ends with a non-zero `in_flight`, a refused spawn, or a work-unit count that
+  is not its own — a shared permit pool or a shared counter would show up there.
+
+**Rows that cannot be driven are named rather than guessed.** The issue's matrix
+also asks for fixed-model AI authoring, which needs a model credential this
+machine does not have; that row is absent from the table above rather than
+filled with a number nobody measured. `bench/async/results.json` carries the
+ladder and the scenario table; `bench/async/matrix.json` carries these receipts.
+
 ## The concurrency ladder — every tier, both sides
 
 `--tiers` measures facade and raw baseline at 100, 1,000, 10,000 and 100,000
