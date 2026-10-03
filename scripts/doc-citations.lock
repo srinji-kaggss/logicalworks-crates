@@ -19,21 +19,21 @@ crates/lgwks-bot/src/cap.rs:288	pub fn to_grant_set(&self) -> GrantSet {
 crates/lgwks-bot/src/cap.rs:365	pub(crate) fn new(mut caps: Vec<Cap>) -> Self {
 crates/lgwks-bot/src/cap.rs:414	pub fn check(&self, required: &[Cap]) -> Result<(), BotError> {
 crates/lgwks-bot/src/domain/sys.rs:43	/// rest is drained and counted, never retained.
-crates/lgwks-bot/src/ecs.rs:1313	#[derive(Resource, Debug)]
-crates/lgwks-bot/src/ecs.rs:1743	/// chain's before committing anything.
-crates/lgwks-bot/src/ecs.rs:3575	/// satisfied, so the entries behind it are unresolved through it.
-crates/lgwks-bot/src/ecs.rs:3654	/// explains every successor blocked behind it, so naming it is naming the
-crates/lgwks-bot/src/ecs.rs:3875	RetryClass::Never => EntryState::Abandoned {
-crates/lgwks-bot/src/ecs.rs:3982	{
-crates/lgwks-bot/src/ecs.rs:4034	*slot = Some(value);
-crates/lgwks-bot/src/ecs.rs:4135	fn fire_plan(world: &mut World) {
-crates/lgwks-bot/src/ecs.rs:4264	/// bindings. Empty `Vec`s are left in their place, so a tick that dies before
-crates/lgwks-bot/src/ecs.rs:4766	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:4791	// borrow of the plan would outlive the schedule that wrote it. An empty
-crates/lgwks-bot/src/ecs.rs:4879	pub fn tick(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:5540	Ok(_) => {
-crates/lgwks-bot/src/ecs.rs:5692	.ensure_outcome(*key, evidence)
-crates/lgwks-bot/src/ecs.rs:5709	}),
+crates/lgwks-bot/src/ecs.rs:1314	#[derive(Resource, Debug)]
+crates/lgwks-bot/src/ecs.rs:1763	/// chain's before committing anything.
+crates/lgwks-bot/src/ecs.rs:3893	/// satisfied, so the entries behind it are unresolved through it.
+crates/lgwks-bot/src/ecs.rs:3972	/// explains every successor blocked behind it, so naming it is naming the
+crates/lgwks-bot/src/ecs.rs:4193	RetryClass::Never => EntryState::Abandoned {
+crates/lgwks-bot/src/ecs.rs:4300	{
+crates/lgwks-bot/src/ecs.rs:4352	*slot = Some(value);
+crates/lgwks-bot/src/ecs.rs:4453	fn fire_plan(world: &mut World) {
+crates/lgwks-bot/src/ecs.rs:4582	/// bindings. Empty `Vec`s are left in their place, so a tick that dies before
+crates/lgwks-bot/src/ecs.rs:5084	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs.rs:5109	// borrow of the plan would outlive the schedule that wrote it. An empty
+crates/lgwks-bot/src/ecs.rs:5197	pub fn tick(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs.rs:5885	Ok(_) => {
+crates/lgwks-bot/src/ecs.rs:6037	.ensure_outcome(*key, evidence)
+crates/lgwks-bot/src/ecs.rs:6054	}),
 crates/lgwks-bot/src/error.rs:151	/// the calling thread until its verb futures resolve, and the thread it was
 crates/lgwks-bot/src/gate.rs:12	pub struct GrantSet {
 crates/lgwks-bot/src/gate.rs:44	pub fn grant(mut self, cap: Cap) -> Self {

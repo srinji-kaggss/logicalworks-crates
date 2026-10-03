@@ -2141,6 +2141,19 @@ fn reaper(clock: &Clock, watchdog: &WatchdogShared) {
     let fired = clock.wall_watchdog();
     let mut state = lock(&watchdog.state);
     loop {
+        // A wave that finished before this thread reached its first wait must
+        // not be waited for. `released` is set and notified by the last poll's
+        // `Drop`; a notification that lands before the reaper waits is a wakeup
+        // a condition variable does not replay, so a per-poll watchdog that was
+        // spawned *before* the poll never saw the race, while a wave-level one
+        // spawned *during* the poll does — the source that yields and answers
+        // on its very next turn resolves in less time than this thread takes to
+        // start. Checked under the same guard `wait_timeout` releases
+        // atomically, so no poll can set `released` between this check and the
+        // wait.
+        if state.released {
+            return;
+        }
         let remaining = watchdog.deadline.saturating_sub(fired.elapsed());
         if remaining.is_zero() {
             state.expired = true;
