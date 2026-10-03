@@ -314,12 +314,18 @@ impl World {
 /// number the duplicate-effect clause reads. [`Ledger::applied`] is the
 /// deduplication door, and it is a read rather than a claim: a solution that
 /// never asks gets a duplicate like any other.
-#[derive(Debug, Default)]
+///
+/// `Clone` because a task body is an `Fn`, called once per run: the closure
+/// cannot consume the ledger it closes over, so every attempt reaches the same
+/// ledger through its own clone. That is the fixture's job to be honest about —
+/// one ledger, many handles — and it is why `applies` is an `AtomicU64` under a
+/// lock rather than a counter the clone could take with it.
+#[derive(Debug, Default, Clone)]
 pub struct Ledger {
     /// How many times the effect was applied.
-    applies: AtomicU64,
+    applies: Arc<AtomicU64>,
     /// The effect names that have been applied.
-    names: Mutex<BTreeSet<String>>,
+    names: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl Ledger {
@@ -355,7 +361,9 @@ impl Ledger {
 
     /// The names lock, recovering from poisoning.
     fn lock(&self) -> MutexGuard<'_, BTreeSet<String>> {
-        self.names.lock().unwrap_or_else(PoisonError::into_inner)
+        self.names
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 }
 
