@@ -1,0 +1,72 @@
+id: hardening-registry-and-ambiguous-commit
+actor: agent-or-human-dev
+job: Declare a domain registry a spec will be materialized against, and run one
+  external effect through a store whose acknowledgment can be lost, and be
+  certain afterwards that a duplicate identifier cannot silently change which
+  constructor runs and that a lost reply cannot resend or strand the effect.
+prior_knowledge:
+  - Knows the identifier and the action they want; has not read the registry or
+    effect-handler modules.
+  - Assumes two declarations of one identifier are harmless because "the first
+    one wins", and that a transport error after a write means the write did not
+    happen. Both assumptions are wrong, and this journey is where they learn it.
+start:
+  installation: lgwks-bot built; a durable store the process can write.
+  state: a registry list that may declare one identifier twice, and an effect
+    whose outcome append can commit while its reply is lost.
+success:
+  visible_outcome: an ambiguous identifier is refused by name before anything is
+    built, and a lost reply settles the already-committed record or reports the
+    occurrence as certain — the action runs exactly once either way.
+states:
+  - name: duplicate-refused
+    expectation: validate() names the identifier, the role and both positions,
+      and every lookup refuses the ambiguous name rather than resolving it.
+  - name: committed-reply-lost
+    expectation: the record is in the store; readback finds it, the journal
+      attests it, and the tick settles without re-entering the action.
+  - name: not-committed-reply-lost
+    expectation: readback proves absence, the caller is told the effect occurred
+      but its record is missing, and the retry writes the record without
+      re-running the action.
+  - name: settled-repeat
+    expectation: repeating the same evidence through resolve_effect is the same
+      fact, not a refusal and not a second dispatch.
+invariants:
+  - An ambiguous identifier has no meaning to resolve; declaration order is not
+    dispatch order.
+  - A commit is not a receipt, and a lost reply is neither proof of failure nor
+    proof of success.
+  - An action is never re-entered to repair its own record.
+  - Recovery reconciles by readback, never by guessing.
+trust_boundaries:
+  - "The speculative registry list is untrusted; it is admitted only after
+    validate() refuses every duplicate."
+  - A store whose reply can vanish is untrusted; nothing infers outcome from the
+    absence of a reply.
+recovery_contracts:
+  - A duplicated identifier is refused with the exact pair to repair.
+  - A committed-but-unacknowledged outcome is settled from the store, never by a
+    second append that could duplicate.
+  - An uncommitted unknown leaves the ladder free so the record can land later.
+agent_contracts:
+  - DomainRegistry::source/action return None for ambiguous and absent alike;
+    validate() is what tells them apart.
+  - compare_and_append reports OutcomeUnknown only when the event may have
+    committed; a refusal that left the journal unchanged is a distinct error.
+  - resolve_effect is idempotent under repeated identical evidence.
+probes:
+  - id: ambiguous-identifier-not-first-wins
+    action: Build a registry declaring one source id twice, in both orders;
+      assert source() is None and validate() names both positions identically.
+  - id: committed-lost-reply-settles-no-resend
+    action: Inject a one-shot post-commit lost reply on the outcome append,
+      tick, and assert the store holds the Applied outcome, the action ran once,
+      and pending() is empty.
+  - id: unknown-without-commit-records-on-retry
+    action: Inject a one-shot unknown with nothing written, tick, assert
+      EffectUnrecorded with DispatchCertainty::Occurred, then tick again and
+      assert the record lands and the action still ran once.
+  - id: settled-repeat-is-idempotent
+    action: After settlement, call resolve_effect with the same evidence and
+      assert it succeeds and the next tick dispatches nothing.

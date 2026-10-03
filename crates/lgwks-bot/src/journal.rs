@@ -72,7 +72,7 @@ mod file;
 /// The file-backed journal, re-exported from the private `file` module beside
 /// the in-memory one: the trait's second shipped adapter, and the one whose
 /// promises a process kill can check.
-pub use file::{Corruption, CorruptionKind, FileJournal};
+pub use file::{Corruption, CorruptionKind, FileJournal, Replay, StorageGate};
 
 /// The domain separator hashed into the genesis position.
 ///
@@ -940,6 +940,31 @@ pub trait EffectJournal {
             required: DurabilityPromise::ProcessCrash,
             offered,
         })
+    }
+
+    /// Whether this journal can admit `rungs` more events for an attempt it is
+    /// about to hand off, decided *before* any of them is written.
+    ///
+    /// A handoff records at least three rungs — `IntentAdmitted`,
+    /// `DispatchPrepared` and the settling `OutcomeObserved` — and the last one
+    /// is written only after the effect has left the process. A journal that
+    /// admits the first two and then refuses the third leaves an attempt that
+    /// can never be settled without deleting unresolved evidence: the exact
+    /// availability loss the hard ceiling must not cause. A bounded journal
+    /// answers this by checking the whole attempt fits, so a refusal happens
+    /// before the handoff rather than after it.
+    ///
+    /// The default is permissive, so external adapters keep their current
+    /// behaviour; a bounded adapter overrides it. The check is a conservative
+    /// admission test, not a held reservation: it is made on the serialized
+    /// append path, where the count it reads cannot move between the check and
+    /// the writes it authorizes.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::CapacityExceeded`] when the attempt does not fit.
+    fn reserve_handoff_capacity(&self, _rungs: u64) -> Result<(), JournalError> {
+        Ok(())
     }
 }
 

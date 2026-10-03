@@ -227,6 +227,21 @@ explicitly under that crate.
   Concurrent verb calls on one `Process` share a bounded slot pool
   (`DEFAULT_MAX_CONCURRENT`, set with `Process::max_concurrent`), claimed
   before the fork, so a burst of calls never forks a burst of children.
+- `FileJournal::replay` returns a `Replay` that streams the committed frames
+  from its own read-only descriptor, one event at a time, so a caller that only
+  folds the record pays for the largest frame rather than the whole history.
+  It applies the same frame validation `open` does and is bounded by
+  `MAX_JOURNAL_EVENTS`; the materialized `events()` view is unchanged (#122
+  item 2).
+- `StorageGate::storage_gate` is public, so a slow-store liveness test can
+  release a parked device from its own thread rather than from the runtime
+  awaiting the append (#156).
+- `EffectJournal::reserve_handoff_capacity` reserves room for a whole external
+  handoff — intent, preparation and the settlement that lands after the effect
+  has left the process — before the first rung is written. The default is
+  permissive; `FileJournal` refuses the handoff against its event ceiling, so a
+  durable journal can never leave an attempt admitted and unable to settle
+  (#122 item 2 / #156).
 - The `compare_orchestration` example gains a `host` way — `Host::run` per item
   with the host's admission ceiling as the fan-out bound and matched semantics
   against the hand-written `JoinSet`+`Semaphore` and `join_all_bounded` ways —
@@ -239,8 +254,22 @@ explicitly under that crate.
   absent so a document written before the field existed still parses. A version
   this build does not implement is refused by `BotSpec::from_json` and by
   `Bot::from_spec`.
+- `DomainRegistry::source` and `DomainRegistry::action` return `None` for an
+  identifier declared more than once, not the first matching constructor. An
+  ambiguous identifier no longer resolves by declaration order; `validate()`
+  already refused such a registry by name at every construction path, and this
+  closes the raw lookup so a caller that skips validation cannot reach an
+  ambiguous constructor either (#122). Migration: a caller that relied on the
+  first-wins result should pick the duplicate it means, or the registry should
+  be repaired; `validate()` reports both positions.
 
 ### lgwks_bot Fixed
+
+- The `registry` module documentation said "A duplicate is not refused: lookup
+  is in declaration order and the first entry wins", which had been false since
+  `DomainRegistry::validate` landed. It now states the truth: `validate` refuses
+  a duplicated identifier and names both positions, and the raw `source`/`action`
+  lookups refuse an ambiguous identifier too (#122).
 
 - A process group whose leader is an unreaped zombie reports `EPERM` on a
   further `killpg` (macOS/BSD). That is a still-present group, not a refused
@@ -253,6 +282,21 @@ explicitly under that crate.
   after the leader dies, and the zombie leader then makes every further
   `killpg` return `EPERM` without reaching it; Linux aborts such a fork. A
   drop after the fork (T20) leaves no running member on either.
+
+- The journal-scale invariants were renumbered `INV-BOT-23..28` to
+  `INV-BOT-40..45`, because the old numbers were taken by another branch's
+  register. Only the identifiers moved; every enforced-by reference still
+  resolves. `INV-BOT-45` now states the tiered 100/1,000/10,000 sweep and its
+  requested/reached/ceiling receipt (#122 item 1).
+- `FileJournal::storage_gate`'s documentation now says what the handle is: a
+  fault-injection and liveness instrument whose held gate parks every append on
+  that journal by design, opened only through `open_with_stalled_storage`, never
+  by `open` (#122 item 2).
+- The registry-identifier invariant and the ambiguous-append invariant this
+  branch added were renumbered to `INV-BOT-46` and `INV-BOT-47`, because the
+  numbers they first carried were already taken on `main` (structural
+  inspection, and the task front door). Only the identifiers moved; both
+  invariants' `enforced by` references still resolve (#122, #118).
 
 ### lgwks_bot Breaking
 
