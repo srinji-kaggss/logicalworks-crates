@@ -1,0 +1,50 @@
+# Matched-semantics async comparison: `lgwks_bot::rt` against raw Tokio.
+#
+# This is its own Cargo workspace root, for the same reason `bench/` is: the
+# comparison needs a raw `tokio` edge the estate's four published crates must
+# never author, and `lgwks-deps check` discovers packages through Cargo's own
+# `workspace_members`, so a separate root is invisible to the gate. Adding the
+# edge to the estate would be the wrong answer — these are not the estate's
+# dependencies, they are this instrument's.
+#
+# It is also *separate from* `bench/` rather than a second binary in it, because
+# the synchronous rig there deliberately builds `lgwks_bot` with `rt` withdrawn
+# so the measured path is exactly the ECS schedule. Cargo features are
+# per-package and not per-binary, so a second binary there would have forced the
+# async surface into that build and made its headline claim — "no tokio edge is
+# compiled" — false. Two roots, two claims, neither compromising the other.
+#
+# Not part of any workspace, and not published.
+
+[workspace]
+
+[package]
+name = "lgwks-bench-async"
+description = "Matched-semantics measurement of lgwks_bot::rt against pinned raw Tokio. Not part of the workspace; not published."
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# The facade under test, with the async surface this comparison measures.
+lgwks_bot = { path = "../../crates/lgwks-bot", default-features = false, features = ["rt", "time", "sync"] }
+
+# The baseline side reaches the engine directly rather than through the facade.
+# That is the whole point of the comparison: a baseline that went through
+# `lgwks_bot::rt` would be comparing the facade with itself.
+#
+# `tokio-util` is deliberately absent. The baseline's cancellation token is built
+# on the engine's own `watch` channel — the same primitive `rt::cancel` is built
+# on — so the comparison measures the facade rather than two different
+# cancellation implementations, and no second third-party edge is introduced.
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
+
+[[bin]]
+name = "lgwks-bench-async"
+path = "main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+debug = true

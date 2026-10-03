@@ -73,6 +73,29 @@ fn host(tenant: &str, store: RunStore) -> Result<Host, Box<dyn Error>> {
     Ok(Host::builder(tenant)?.store(store).build()?)
 }
 
+/// One seed's fixture: a fresh scratch directory, the shipped store opened in
+/// it, the append task, and one host on that store.
+///
+/// Every single-host family starts from exactly these four things, so they are
+/// built once here; a family that opened them by hand would be the place a seed
+/// silently ran against another seed's store.
+struct Seeded {
+    scratch: Scratch,
+    work: AppendTask,
+    host: Host,
+}
+
+/// Open the [`Seeded`] fixture under the scratch name `name`.
+fn seeded(name: &'static str) -> Result<Seeded, Box<dyn Error>> {
+    let scratch = Scratch::new(name)?;
+    let store = RunStore::open(scratch.store())?;
+    Ok(Seeded {
+        work: append_task()?,
+        host: host("sim", store)?,
+        scratch,
+    })
+}
+
 /// How many runs a tenant performs in one contended round.
 fn tenant_runs(rng: &mut Rng) -> u32 {
     rng.between(1, MAX_APPENDS)
@@ -90,10 +113,11 @@ fn concurrent_appends_lose_nothing(band: Band) -> TestResult {
     for _ in band.seeds() {
         let appends = tenant_runs(&mut rng);
         let tag = rng.below(u32::MAX);
-        let scratch = Scratch::new("sim-contend")?;
-        let store = RunStore::open(scratch.store())?;
-        let host = host("sim", store)?;
-        let work = append_task()?;
+        let Seeded {
+            scratch,
+            work,
+            host,
+        } = seeded("sim-contend")?;
 
         let mut ids = Vec::new();
         for index in 0..appends {
@@ -132,10 +156,11 @@ fn duplicate_submissions_are_idempotent(band: Band) -> TestResult {
     for _ in band.seeds() {
         let repeats = tenant_runs(&mut rng);
         let tag = rng.below(u32::MAX);
-        let scratch = Scratch::new("sim-dupe")?;
-        let store = RunStore::open(scratch.store())?;
-        let host = host("sim", store)?;
-        let work = append_task()?;
+        let Seeded {
+            scratch,
+            work,
+            host,
+        } = seeded("sim-dupe")?;
         let run = RunId::mint()?;
 
         // The same run id and the same value, recorded over and over: every attempt
@@ -188,11 +213,12 @@ fn an_interrupted_step_records_exactly_once(band: Band) -> TestResult {
     for _ in band.seeds() {
         let attempts = tenant_runs(&mut rng);
         let tag = rng.below(u32::MAX);
-        let scratch = Scratch::new("sim-once")?;
+        let Seeded {
+            scratch,
+            work,
+            host,
+        } = seeded("sim-once")?;
         let path = scratch.store();
-        let store = RunStore::open(&path)?;
-        let work = append_task()?;
-        let host = host("sim", store)?;
         let run = RunId::mint()?;
 
         // The first attempt records. Every resume after it replays, because the
@@ -308,10 +334,11 @@ fn tenants_interleaved_stay_isolated(band: Band) -> TestResult {
 fn same_seed_replays(band: Band) -> TestResult {
     let body = |sim_run: &mut sim::Sim| -> TestResult {
         let appends = tenant_runs(sim_run.rng());
-        let scratch = Scratch::new("sim-replay")?;
-        let store = RunStore::open(scratch.store())?;
-        let host = host("sim", store)?;
-        let work = append_task()?;
+        let Seeded {
+            scratch,
+            work,
+            host,
+        } = seeded("sim-replay")?;
         for index in 0..appends {
             let report = lgwks_bot::rt::runtime::block_on(host.run(&work, index));
             sim_run
@@ -410,11 +437,12 @@ fn a_torn_tail_drops_only_the_incomplete_record(band: Band) -> TestResult {
     for _ in band.seeds() {
         let appends = rng.between(2, 8);
         let tag = rng.below(u32::MAX);
-        let scratch = Scratch::new("sim-torn")?;
+        let Seeded {
+            scratch,
+            work,
+            host,
+        } = seeded("sim-torn")?;
         let path = scratch.store();
-        let store = RunStore::open(&path)?;
-        let work = append_task()?;
-        let host = host("sim", store)?;
 
         let mut ids = Vec::new();
         for index in 0..appends {

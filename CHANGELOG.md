@@ -160,6 +160,45 @@ explicitly under that crate.
 
 ### lgwks_bot Added
 
+- More than one million task executions in flight at once on one node, measured
+  (#152 §4). `tests/task_million.rs` (opt-in, `LGWKS_MILLION=1`) admits
+  1,048,576 `Host::run` executions across sixteen tenant hosts, each saturated
+  to its own `MAX_ADMITTED_TASKS` ceiling of 65,536, waits until every one is
+  observed suspended inside its body at the same time, then releases them. The
+  subjects are admitted, executing runs holding their permits — not queued
+  requests or inert records. Measured on an Apple M5 Pro, release build, one
+  current-thread runtime: all 1,048,576 in flight after 1.74 s; peak RSS
+  6,445,662,208 bytes by `/usr/bin/time -l` (about 6.1 KiB per suspended run);
+  release-to-resume p50=2.80 s p95=3.99 s p99=4.17 s, the single thread
+  draining a million wakeups; every run returned its own doubled input, every
+  host got every permit back and none admitted past its ceiling.
+- `rt::clock`: one declared logical clock (`Clock`) and the wall-clock watchdog
+  (`WallClock`) that pausing it cannot disable. `Clock::wall` follows real time
+  and refuses a caller advance with a named reason; `Clock::virtual_at` is
+  caller-advanceable, so retry, sleep, readiness and continuation deadlines are
+  exactly drivable from a test. An advance past the declared ceiling saturates
+  rather than wrapping, and a clock already at the ceiling refuses rather than
+  reporting movement it did not make. `ClockSnapshot` is a **duration**, not an
+  instant: what survives a restart is the remaining budget, which means the same
+  thing on another host (#152).
+- `rt::time::Deadline`: a deadline that names the clock governing it, carrying
+  both the logical bound (`elapsed`, `remaining`, `is_exhausted`, driven by the
+  declared clock) and the independent wall watchdog (`watchdog`,
+  `watchdog_exceeded`, real time). Additive; no existing signature changed (#152).
+- `Supervisor::snapshot` -> `SupervisorSnapshot`: a bounded, point-in-time view
+  of live capacity, the declared ceiling, the supervisor's own counters, whether
+  admission is closed, and the next eligible action (`NextAction::Admit`,
+  `WaitForCapacity`, `Stopped`). It reads the owner's own admission and reporting
+  fields, so it is never a second ledger; terminal outcomes stay in the report
+  stream where the retention cap already governs them. The live listing is capped
+  at the in-flight ceiling and reports how many it excluded, and every field is
+  private behind an accessor. Additive (#152).
+- The declared `Clock` now **governs the real run path** (#152, `INV-BOT-30`):
+  `script::within`, the task `Host` (`HostBuilder::clock`, default wall) and the
+  Supervisor's budget and deadline checks all read time through it. A body handed
+  a caller-advanceable clock reports the same deadline refusal a real overrun
+  would, with no real wait; a scope given no clock is unchanged. Additive: every
+  existing signature still compiles and behaves as before.
 - The run store's durable write reaches the disk off the executor (#87 step 5).
   `remember` awaited `RunStore::commit` directly, so a step's `write_all` plus
   `sync_all` ran on the thread polling it and parked the whole runtime for the

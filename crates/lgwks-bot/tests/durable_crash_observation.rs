@@ -27,38 +27,7 @@
 //! a real store), #107 T21/T22 (needs a real descendant tree), #108 (needs a
 //! real frame). They are named so they cannot quietly count as done.
 
-use std::process::Child;
-use std::time::Duration;
-
-/// Owns the probe child and kills it, reaping it, however the test ends.
-///
-/// A test that returns early, or panics, between the spawn and the kill must
-/// not leave a live child behind: the guard's drop is the backstop the
-/// harness itself can forget. `take` hands the child to the kill harness,
-/// which then owns the kill and the reap, so the guard drops empty and no
-/// path kills twice.
-struct ProbeGuard(Option<Child>);
-
-impl ProbeGuard {
-    /// Hand the child to the kill harness.
-    fn take(&mut self) -> Option<Child> {
-        self.0.take()
-    }
-}
-
-impl Drop for ProbeGuard {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
-            drop(child.kill());
-            drop(child.wait());
-        }
-    }
-}
-
-use lgwks_bot::effect::{
-    ActionDigest, ActionId, AttemptId, EffectKey, EnvironmentEpoch, EnvironmentId, FlowRevision,
-    Id128, RunId,
-};
+use lgwks_bot::effect::{EffectKey, Id128};
 /// The scratch-path and cleanup-guard fixtures this file shares with the
 /// journal liveness and scale families.
 ///
@@ -68,17 +37,13 @@ use lgwks_bot::effect::{
 #[path = "support/journal.rs"]
 mod shared;
 
-use shared::{TempGuard, scratch_dir};
+use shared::{ProbeGuard, TempGuard, key_for as key, pause, scratch_dir};
 
 use lgwks_bot::journal::{
     AttemptStatus, DurabilityPromise, EffectEvent, EffectEvidence, EffectJournal, FileJournal,
     JournalError, Verification, VerificationResult,
 };
 
-const RUN: &str = "0102030405060708090a0b0c0d0e0f10";
-const ACTION: &str = "1112131415161718191a1b1c1d1e1f20";
-const ENV: &str = "2122232425262728292a2b2c2d2e2f30";
-const FLOW_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 const DIGEST_A: &str = "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeffe0e1e2e3e4e5e6e7e8e9eaebecedeeef";
 const DIGEST_B: &str = "efeeedecebeae9e8e7e6e5e4e3e2e1e0dfdedddcdbdad9d8d7d6d5d4d3d2d1d0";
 const PREDICATE: &str = "4142434445464748494a4b4c4d4e4f50";
@@ -99,19 +64,6 @@ const PROBE_MARKER: &str = "LGWKS_PROBE_MARKER";
 /// Turns this test binary into a probe child that parks mid-append, with its
 /// storage device held closed, and waits to be killed with nothing written.
 const PROBE_STALLED: &str = "LGWKS_PROBE_STALLED";
-
-/// A key for one attempt at the shared intent, under `digest`.
-fn key(attempt: &str, digest: &str) -> Result<EffectKey, Box<dyn std::error::Error>> {
-    Ok(EffectKey::new(
-        RunId::from_hex(RUN)?,
-        ActionId::from_hex(ACTION)?,
-        AttemptId::from_decimal(attempt)?,
-        FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-        ActionDigest::from_tagged("blake3_256", digest)?,
-        EnvironmentId::from_hex(ENV)?,
-        EnvironmentEpoch::from_decimal("1")?,
-    ))
-}
 
 /// Append the first `rungs` events of the standard ladder for `key`, each
 /// through `compare_and_append` at the journal's own tail.
@@ -159,26 +111,6 @@ fn tear_tail(
 }
 
 // ── The probe child ─────────────────────────────────────────────────────────
-
-/// A plain-process pause, for both branches of the harness that have no
-/// runtime: the probe child parking between its appends and its kill, and the
-/// parent polling for the child's marker.
-///
-/// The workspace's ban on `std::thread::sleep` exists because blocking an
-/// executor thread stalls every task on it. Neither branch here has an
-/// executor: this file's tests drive the journal synchronously, the child is
-/// this same binary running one sync body, and the wait — a child parked
-/// while the parent decides when it dies — is the observation's subject
-/// rather than its scaffolding.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the kill harness is a plain process with no async runtime and no reactor to \
-              stall; the parked child and the marker poll are the observation's shape, and \
-              `rt::time::sleep` cannot be awaited here"
-)]
-fn pause(millis: u64) {
-    std::thread::sleep(Duration::from_millis(millis));
-}
 
 /// Run the probe body when this process is the child.
 ///
@@ -318,37 +250,7 @@ fn kill_after_marker(
     mut guard: ProbeGuard,
     marker: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(mut child) = guard.take() else {
-        return Err("the probe child was already gone before the kill".into());
-    };
-    for _ in 0..2_000 {
-        if marker.exists() {
-            child.kill()?;
-            let status = child.wait()?;
-            // The kill, not an earlier failure, must be what ended the
-            // child: a probe that died on its own after writing the marker
-            // would make this observation a courtesy, not a kill.
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::ExitStatusExt as _;
-                assert_eq!(
-                    status.signal(),
-                    Some(9),
-                    "the probe must have been killed, not exited: {status}"
-                );
-            }
-            return Ok(());
-        }
-        if let Some(status) = child.try_wait()? {
-            return Err(
-                format!("the probe child exited on its own before the kill: {status}").into(),
-            );
-        }
-        pause(5);
-    }
-    child.kill()?;
-    child.wait()?;
-    Err("the probe child never reached its marker; the observation has no kill to test".into())
+    guard.kill_after_marker(marker, "durable_crash_observation")
 }
 
 // ── Row #106: the settlement survives the kill ──────────────────────────────

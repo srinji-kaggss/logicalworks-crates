@@ -94,13 +94,116 @@ pub fn record_measurement(line: &str) -> std::io::Result<()> {
 
 /// A fixture key for attempt `attempt`, under the shared identity.
 pub fn key(attempt: u64) -> Result<EffectKey, Box<dyn Error>> {
+    key_for(&attempt.to_string(), DIGEST_HEX)
+}
+
+/// The key for attempt `attempt` under the shared identity, binding `digest`.
+///
+/// `digest` is the attempt's content identity; a different digest is a
+/// different attempt with its own ladder, which is exactly the distinction the
+/// crash rows turn on. Every harness that journals under the shared run builds
+/// its key here, so two harnesses cannot fold different worlds under what
+/// looks like the same key.
+pub fn key_for(attempt: &str, digest: &str) -> Result<EffectKey, Box<dyn Error>> {
     Ok(EffectKey::new(
         RunId::from_hex(RUN)?,
         ActionId::from_hex(ACTION)?,
-        AttemptId::from_decimal(&attempt.to_string())?,
+        AttemptId::from_decimal(attempt)?,
         FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-        ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
+        ActionDigest::from_tagged("blake3_256", digest)?,
         EnvironmentId::from_hex(ENV)?,
         EnvironmentEpoch::from_decimal("1")?,
     ))
+}
+
+/// A plain-process pause, for the kill harnesses' two branches that have no
+/// runtime: a probe child parking until it is killed, and the parent polling
+/// for the child's marker.
+///
+/// The workspace bans `std::thread::sleep` because blocking an executor thread
+/// stalls every task on it. Neither branch here has an executor, and the wait —
+/// a child parked while the parent decides when it dies — is the observation's
+/// subject rather than its scaffolding.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the kill harness is a plain process with no async runtime and no reactor to \
+              stall; the parked child and the marker poll are the observation's shape, and \
+              `rt::time::sleep` cannot be awaited here"
+)]
+pub fn pause(millis: u64) {
+    std::thread::sleep(std::time::Duration::from_millis(millis));
+}
+
+/// Owns a probe child and kills it, reaping it, however the test ends.
+///
+/// A test that returns early, or panics, between the spawn and the kill must
+/// not leave a live child behind: the drop is the backstop the harness itself
+/// can forget. `take` hands the child to the kill harness, which then owns the
+/// kill and the reap, so the guard drops empty and no path kills twice.
+pub struct ProbeGuard(pub Option<std::process::Child>);
+
+impl ProbeGuard {
+    /// Hand the child to the kill harness.
+    pub fn take(&mut self) -> Option<std::process::Child> {
+        self.0.take()
+    }
+
+    /// Wait until `marker` exists — the child's proof that what it wrote was
+    /// acknowledged — then kill the child with a real `SIGKILL` and reap it.
+    ///
+    /// `Child::kill` sends `SIGKILL` on Unix: no cleanup, no destructors, no
+    /// flushing. Whatever the child wrote that is not on the disk is gone, and
+    /// whatever claimed to be durable had better be there. The wait is bounded,
+    /// so a child that never reaches its marker cannot leave a stray process.
+    pub fn kill_after_marker(
+        &mut self,
+        marker: &std::path::Path,
+        test_name: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let Some(mut child) = self.take() else {
+            return Err(format!("the probe child for {test_name} was gone before the kill").into());
+        };
+        for _ in 0..2_000 {
+            if marker.exists() {
+                child.kill()?;
+                let status = child.wait()?;
+                // The kill, not an earlier failure, must be what ended the
+                // child: a probe that died on its own after writing the marker
+                // would make the observation a courtesy, not a kill.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt as _;
+                    assert_eq!(
+                        status.signal(),
+                        Some(9),
+                        "the probe for {test_name} must have been killed, not exited: {status}"
+                    );
+                }
+                return Ok(());
+            }
+            if let Some(status) = child.try_wait()? {
+                return Err(format!(
+                    "the probe child for {test_name} exited on its own before the kill: {status}"
+                )
+                .into());
+            }
+            pause(5);
+        }
+        child.kill()?;
+        child.wait()?;
+        Err(format!(
+            "the probe child for {test_name} never reached its marker; the observation has no \
+             kill to test"
+        )
+        .into())
+    }
+}
+
+impl Drop for ProbeGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            drop(child.kill());
+            drop(child.wait());
+        }
+    }
 }

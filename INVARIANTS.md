@@ -106,6 +106,48 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
 
 Each of these was a shipped defect. Treat the list as the spec.
 
+- **INV-BOT-30** One declared clock governs every deadline this crate
+  evaluates, and pausing it never disables the wall-clock watchdog.
+  `rt::clock::Clock` is the authority; `rt::time::Deadline` names the clock that
+  governs a deadline rather than an opaque process-local `Instant`. A
+  caller-advanceable clock saturates at its declared ceiling and refuses a caller
+  advance when already there, so a deadline computed from a wrapped clock can
+  never fire immediately and look legitimate. What survives a restart is the
+  remaining **duration** (`ClockSnapshot`), never the instant: an `Instant` has
+  no epoch and means nothing on another host. The watchdog reads
+  `std::time::Instant` and is therefore unreachable from a paused logical clock
+  — a subprocess that stopped answering, a blocking callback that will never
+  return, and a store whose `fsync` is stuck are not waiting for time, and only
+  real elapsed time says so. Determinism claimed here is about which deadline is
+  *eligible*; poll order across workers, observed external order and cross-host
+  clock skew are not claimed. · why: #152 §1 · enforced by:
+  `tests/sim_clock.rs` (`the_same_seed_replays_the_same_clock_trace`,
+  `racing_logical_time_leaves_the_wall_watchdog_independent`,
+  `a_restart_restores_the_remaining_budget_and_not_an_instant`,
+  `a_wall_clock_refuses_a_caller_advance`,
+  `the_elapsed_ceiling_saturates_instead_of_wrapping_into_the_past`,
+  `an_over_advanced_clock_saturates_rather_than_wrapping`,
+  `distinct_seeds_give_distinct_clock_traces`).
+- **INV-BOT-31** Inspection reads the owner's own state; it is never a second
+  ledger. `Supervisor::snapshot` is built from the same admission and reporting
+  fields the permits and `Stats` are built from, so what it reports and what the
+  supervisor admits are one fact read twice: a snapshot that says a free permit
+  is followed by a spawn that starts. The live listing is capped at the
+  in-flight ceiling and reports how many it excluded; terminal outcomes stay in
+  the report stream, where the retention cap already governs them, so no outcome
+  exists in two places. Every snapshot field is private behind an accessor: a
+  read must not hand the caller the right to edit what they believe they
+  observed. A caller that never drains loses detail, never memory, and the
+  dropped counter says so. · why: #152 §2 · enforced by:
+  `tests/inspect_contract.rs` (`the_snapshot_and_the_admission_decision_agree`,
+  `the_live_listing_is_bounded_by_the_ceiling_and_says_it_truncated`,
+  `cancellation_closes_admission_and_the_terminal_record_stays_readable`,
+  `an_undrained_supervisor_reports_dropped_detail_without_growing`,
+  `repeated_snapshots_do_not_accumulate`,
+  `reading_a_snapshot_has_no_side_effect_on_admission`,
+  `a_fresh_snapshot_admits_at_the_declared_ceiling`,
+  `a_bounded_repeating_task_reports_exhaustion_not_a_hang`).
+
 - **INV-BOT-1** Journal before acknowledge: a live settlement is journaled before it is
   acknowledged. · why: cef8059b (#112)
 - **INV-BOT-2** A settlement binds to the generation it names; a transition binds to

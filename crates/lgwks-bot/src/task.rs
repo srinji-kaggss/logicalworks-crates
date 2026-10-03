@@ -92,6 +92,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::effect::RunId;
+use crate::rt::clock::Clock;
 use crate::rt::runtime::{Handle, Runtime};
 use crate::rt::sync::{CancellationToken, OwnedSemaphorePermit, Semaphore};
 use crate::rt::task_local;
@@ -678,6 +679,11 @@ struct Installation {
     admitted: AtomicU64,
     /// Every run refused at admission.
     refused: AtomicU64,
+    /// The clock every run's deadline is measured on.
+    ///
+    /// Read by the admission wait and handed to each run's root scope, so one
+    /// timeline governs the whole host rather than each step choosing its own.
+    clock: Clock,
     /// The durable step-record store, when one was installed.
     ///
     /// `None` is the honest local mode: no record survives the process, so no
@@ -725,6 +731,7 @@ impl Host {
             max_concurrent: default_max_concurrent(),
             deadline: default_deadline(),
             progress: DEFAULT_TRAIL_STEPS,
+            clock: Clock::wall(),
             store: None,
         })
     }
@@ -742,6 +749,17 @@ impl Host {
     #[must_use]
     pub fn limits(&self) -> &HostLimits {
         &self.inner.limits
+    }
+
+    /// The clock every run's deadline is measured on.
+    ///
+    /// Read by the admission wait and by each run's root scope, so a caller can
+    /// ask which timeline governs a refusal instead of assuming real time. The
+    /// borrow cannot move it; a caller that holds the [`Clock`] it built the host
+    /// with advances it directly.
+    #[must_use]
+    pub fn clock(&self) -> &Clock {
+        &self.inner.clock
     }
 
     /// This host's live admission counters.
@@ -962,10 +980,15 @@ impl Host {
         let _admission = self.charge(permit);
 
         let trail = Trail::new(self.inner.limits.progress_capacity());
-        let root = Scope::with_token_trail_and_run(
+        // The host's clock, not a fresh one: a run's admission wait and its
+        // body's `within` budget are two readings of the same timeline, and
+        // minting a second clock here would make a run that is admitted late
+        // look to its own body as if it had started on time.
+        let root = Scope::rooted(
             self.inner.tenant.clone(),
             self.inner.token.child_token(),
             Arc::clone(&trail),
+            self.inner.clock.clone(),
             run,
         );
         let scope = match root.enter(task_name.as_str()) {
@@ -1188,6 +1211,10 @@ impl Host {
                 at: Arc::from(task.as_str()),
             }));
         }
+        // The wait for a permit is bounded in real time, charged to the run's
+        // deadline. It is a wait on other runs releasing capacity — a real
+        // event no logical clock can hurry — so the host's declared clock
+        // governs the body's `within`, not this queue.
         let deadline = self.inner.limits.default_deadline();
         let remaining = deadline.saturating_sub(started.elapsed());
         let waiting = self
@@ -1540,6 +1567,8 @@ pub struct HostBuilder {
     deadline: Duration,
     /// The step trail's capacity.
     progress: usize,
+    /// The clock every run's deadline is measured on.
+    clock: Clock,
     /// The durable step-record store, when the caller installed one.
     store: Option<store::RunStore>,
 }
@@ -1561,6 +1590,24 @@ impl HostBuilder {
     /// The default is 30 seconds; the ceiling is [`MAX_TASK_DEADLINE`].
     pub fn default_deadline(mut self, deadline: Duration) -> Self {
         self.deadline = deadline;
+        self
+    }
+
+    /// Measure every run's deadline on `clock`.
+    ///
+    /// The clock is shared by every run this host admits and by every step
+    /// scope under it, so one advance from a test reaches the whole host. It
+    /// is the host's declared timeline: [`Host::run`] reads it for the run's
+    /// admission wait, and the [`within`] around the body reads it for the body
+    /// itself.
+    ///
+    /// The default is a wall clock, so a host in production never has to drive
+    /// anything. A caller-advanceable clock instead makes the run's whole
+    /// deadline schedule — admission *and* body — exact and free to exhaust:
+    /// advancing past [`HostBuilder::default_deadline`] produces the same
+    /// `FlowError::TimedOut` a real overrun produces, with no real wait.
+    pub fn clock(mut self, clock: Clock) -> Self {
+        self.clock = clock;
         self
     }
 
@@ -1663,6 +1710,7 @@ impl HostBuilder {
                 peak_in_flight: HighWater::default(),
                 admitted: AtomicU64::new(0),
                 refused: AtomicU64::new(0),
+                clock: self.clock,
                 store: self.store,
                 reactor: Mutex::new(None),
             }),

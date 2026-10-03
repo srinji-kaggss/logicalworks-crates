@@ -14,9 +14,6 @@
 //! is outside its reach, and writers on other hosts need a lease, not a lock.
 //! Both limits are stated on [`JournalError::Locked`] rather than hidden.
 
-use std::process::Child;
-use std::time::Duration;
-
 /// The scratch-path and cleanup-guard fixtures this file shares with the
 /// journal liveness, scale and crash-observation families.
 ///
@@ -26,21 +23,12 @@ use std::time::Duration;
 #[path = "support/journal.rs"]
 mod shared;
 
-use shared::{TempGuard, scratch};
+use shared::{DIGEST_HEX, ProbeGuard, TempGuard, key_for, pause, scratch};
 
-use lgwks_bot::effect::{
-    ActionDigest, ActionId, AttemptId, EffectKey, EnvironmentEpoch, EnvironmentId, FlowRevision,
-    RunId,
-};
+use lgwks_bot::effect::EffectKey;
 use lgwks_bot::journal::{
     DurabilityPromise, EffectEvent, EffectJournal, FileJournal, JournalError,
 };
-
-const RUN: &str = "0102030405060708090a0b0c0d0e0f10";
-const ACTION: &str = "1112131415161718191a1b1c1d1e1f20";
-const ENV: &str = "2122232425262728292a2b2c2d2e2f30";
-const FLOW_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-const DIGEST_HEX: &str = "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeffe0e1e2e3e4e5e6e7e8e9eaebecedeeef";
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -50,48 +38,9 @@ const PROBE_ENV: &str = "LGWKS_FENCE_PROBE";
 const PROBE_JOURNAL: &str = "LGWKS_FENCE_JOURNAL";
 const PROBE_MARKER: &str = "LGWKS_FENCE_MARKER";
 
-/// Owns the probe child and kills it, reaping it, however the test ends.
-struct ProbeGuard(Option<Child>);
-
-impl ProbeGuard {
-    /// Hand the child to the kill harness, so no path kills twice.
-    fn take(&mut self) -> Option<Child> {
-        self.0.take()
-    }
-}
-
-impl Drop for ProbeGuard {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
-            drop(child.kill());
-            drop(child.wait());
-        }
-    }
-}
-
+/// The fence harness's key for attempt `attempt`, under the shared digest.
 fn key(attempt: &str) -> Result<EffectKey, Box<dyn std::error::Error>> {
-    Ok(EffectKey::new(
-        RunId::from_hex(RUN)?,
-        ActionId::from_hex(ACTION)?,
-        AttemptId::from_decimal(attempt)?,
-        FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-        ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
-        EnvironmentId::from_hex(ENV)?,
-        EnvironmentEpoch::from_decimal("1")?,
-    ))
-}
-
-/// The kill harness is a plain process with no async runtime and no reactor
-/// to stall; the parked child and the marker poll are the observation's
-/// shape, and `rt::time::sleep` cannot be awaited here.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the probe child parks while the parent decides when it dies, and the parent \
-              polls for the child's marker; neither side runs an executor that a blocked \
-              thread would starve"
-)]
-fn pause(millis: u64) {
-    std::thread::sleep(Duration::from_millis(millis));
+    key_for(attempt, DIGEST_HEX)
 }
 
 /// Run the probe body when this process is the child.

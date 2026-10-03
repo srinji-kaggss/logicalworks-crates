@@ -5,7 +5,9 @@ use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::rt::clock::{Clock, TimeSource};
 use crate::rt::time;
+use crate::rt::time::Deadline;
 
 use super::{FlowError, MAX_ATTEMPTS, MAX_BACKOFF, MAX_IN_FLIGHT, Scope, StepKey};
 
@@ -54,6 +56,23 @@ pub fn attempts(count: u32) -> Result<NonZeroU32, FlowError> {
 /// Either way the body is dropped, which is how a Rust future is stopped: an
 /// expired step does not keep running in the background.
 ///
+/// # The two bounds, and which clock reads which
+///
+/// `limit` is checked against **the scope's declared [`Clock`]**, not against a
+/// local wall timer, so a scope built on a caller-advanceable clock reports the
+/// same [`FlowError::TimedOut`](crate::script::FlowError::TimedOut) when the clock is advanced past `limit`
+/// that a real overrun reports — with no real wait. A scope built by
+/// [`Scope::root`](crate::script::Scope::root) carries a wall clock, so the
+/// default behaviour is exactly what it always was.
+///
+/// The body is raced against the scope's stop **and** against the wall watchdog
+/// on `limit`. The watchdog is what bounds a body that has stopped making
+/// progress rather than one that is waiting: a virtual clock cannot observe a
+/// blocking callback that will never return, and a deadline that only a virtual
+/// clock could satisfy would hang forever on it. The watchdog is real elapsed
+/// time from this call, so it is unaffected by whatever a test does to the
+/// logical clock — which is the contract the two are kept separate to express.
+///
 /// # Errors
 ///
 /// The body's own error, `TimedOut`, or `Cancelled`.
@@ -66,19 +85,144 @@ pub async fn within<T, Fut>(
 where
     Fut: Future<Output = Result<T, FlowError>>,
 {
-    match scope
-        .token()
-        .run_until_cancelled(time::timeout(limit, body))
-        .await
-    {
-        Some(Ok(result)) => result,
-        Some(Err(_elapsed)) => Err(FlowError::TimedOut {
-            at: scope.join(step),
-            after: limit,
-        }),
-        None => Err(FlowError::Cancelled {
-            at: scope.join(step),
-        }),
+    within_on(scope.clock(), scope, step, limit, body).await
+}
+
+/// [`within`] with the logical bound measured on an explicitly named `clock`.
+///
+/// The same two bounds and the same two errors; the difference is only whose
+/// clock reads the logical one. [`within`] reads the scope's, so this is for the
+/// caller whose step is bounded by a *shorter* clock than the flow's — an
+/// admission budget that is tighter than the run's, say — and for tests that
+/// want to say which clock governs rather than imply it.
+pub async fn within_on<T, Fut>(
+    clock: &Clock,
+    scope: &Scope,
+    step: &str,
+    limit: Duration,
+    body: Fut,
+) -> Result<T, FlowError>
+where
+    Fut: Future<Output = Result<T, FlowError>>,
+{
+    let deadline = Deadline::after(clock, limit);
+    // The location every refusal from this step carries, computed once: both
+    // arms below refuse here, and joining it per refusal would allocate the same
+    // string twice on the path that fails.
+    let at = scope.join(step);
+    let timed_out = || FlowError::TimedOut {
+        at: Arc::clone(&at),
+        after: limit,
+    };
+    // The logical bound is not left to the engine's timer, which a
+    // caller-advanceable clock cannot move. It is settled before the first poll
+    // and re-checked on every wake, which is what lets an advance past `limit`
+    // refuse the step with no real wait and produce the same error a real
+    // overrun produces.
+    if deadline.is_exhausted() {
+        return Err(timed_out());
+    }
+    // The two refusal arms and the body are boxed. A `select!` builds one future
+    // per branch and holds them all for the body's whole life, so an unboxed
+    // engine timer makes *every* `within` frame as large as the engine's timer
+    // state. That is paid once per nesting level, and on a deeply nested tree the
+    // frames alone exhaust the caller's stack. Boxing moves the arms to the heap
+    // and keeps one poll frame per level, which is what the deep-nest regression
+    // measures.
+    //
+    // A wall clock's bound is the engine timer itself, so `settle_logical_bound`
+    // awaits its body directly and arms no re-read timer: only a
+    // caller-advanceable clock, whose movement no timer can see, pays for the
+    // logical poll.
+    let logical = Box::pin(settle_logical_bound(
+        &deadline,
+        clock.source() == TimeSource::Wall,
+        Arc::clone(&at),
+        limit,
+        body,
+    ));
+    let watchdog = Box::pin(time::sleep(limit));
+    let stopped = Box::pin(scope.token().cancelled());
+    lgwks_deps::tokio::select! {
+        biased;
+        // Read the logical bound before the engine's timer, so an advance that
+        // has already spent the budget wins even if the timer arm is also ready.
+        finished = logical => finished,
+        // The engine's timer is the real-time watchdog for either clock: a
+        // virtual clock nobody advances still cannot hold a stuck body past
+        // `limit` of real time.
+        () = watchdog => Err(timed_out()),
+        // A stop, from the scope or anything it descends from.
+        () = stopped => Err(FlowError::Cancelled { at: Arc::clone(&at) }),
+    }
+}
+
+/// Settle once the deadline's logical clock has reached its budget, or once the
+/// body's own outcome arrives.
+///
+/// Not a timer: the engine's timer cannot be moved by a caller-advanceable
+/// clock, so waiting for one is how a three-day logical outage would cost three
+/// real days. This future completes the moment the logical bound is met — which
+/// is immediate when the bound is already spent — and otherwise waits for
+/// `body`.
+///
+/// The poll interval bounds only how *late* an advance is noticed, never
+/// whether it is: the loop re-reads the clock, so the refusal happens whenever
+/// the advance lands. The body is polled every interval too, so a body that
+/// completes during a poll gap is not delayed behind the next tick.
+async fn settle_logical_bound<T, Fut>(
+    deadline: &Deadline<'_>,
+    wall: bool,
+    at: Arc<str>,
+    limit: Duration,
+    body: Fut,
+) -> Result<T, FlowError>
+where
+    Fut: Future<Output = Result<T, FlowError>>,
+{
+    /// How often a caller-advanceable clock is re-read while a body runs.
+    ///
+    /// The bound on how promptly an advance is noticed, nothing else. Small
+    /// enough that a test's expiry assertion does not sleep noticeably; large
+    /// enough that a saturated run does not spend its time polling.
+    const LOGICAL_POLL: Duration = Duration::from_millis(1);
+    // A wall clock is governed by the caller's engine timer, which already
+    // races this future: re-reading it here would only arm a second timer per
+    // step for the same answer.
+    if wall {
+        return body.await;
+    }
+    let mut body = std::pin::pin!(body);
+    // Every refusal this future raises reports `at`, the step path its caller
+    // computed from the same `Scope`. Passing it down is what keeps one error
+    // variant from being constructed two different ways, which is how a
+    // timeout's location and a cancellation's location drift apart.
+    let refused = || FlowError::TimedOut {
+        at: Arc::clone(&at),
+        after: limit,
+    };
+    loop {
+        if deadline.is_exhausted() {
+            return Err(refused());
+        }
+        lgwks_deps::tokio::select! {
+            biased;
+            () = time::sleep(LOGICAL_POLL) => {}
+            finished = &mut body => {
+                // The bound is re-read *after* the body returns, which is what
+                // makes a logical overrun mean the same thing as a real one. On
+                // a wall clock the timer arm wins that race, because a body that
+                // outran its budget is already past it when it finishes; here a
+                // body may return an instant after the clock moved, and without
+                // this check that body would be reported as having finished in
+                // time. The check is the same fact read one instant later, so
+                // the two timelines cannot disagree about an overrun.
+                if deadline.is_exhausted() {
+                    return Err(refused());
+                }
+                return finished;
+            }
+        }
     }
 }
 

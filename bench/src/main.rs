@@ -34,11 +34,9 @@
 
 mod stats;
 
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::fmt::Write as _;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use lgwks_bot::{Auth, Bot, BotError, Cap, Evaluate, Execute, GrantSet, Observe};
@@ -60,52 +58,13 @@ use lgwks_bot::{Auth, Bot, BotError, Cap, Evaluate, Execute, GrantSet, Observe};
 // The two are therefore run separately: `--alloc-report` counts, the timing
 // scenarios do not, and no ratio in `results.json` is taken from a counting run.
 
-static ALLOCS: AtomicU64 = AtomicU64::new(0);
-static BYTES: AtomicU64 = AtomicU64::new(0);
-static COUNTING: AtomicU64 = AtomicU64::new(0);
-
-struct Counting;
-
-impl Counting {
-    /// Whether the counters are live. Reads are relaxed: the flag is only ever
-    /// flipped between measurement phases, never inside one.
-    fn on() -> bool {
-        COUNTING.load(Ordering::Relaxed) == 1
-    }
-}
-
-// SAFETY: every method forwards to `System` unchanged, so the allocator
-// contract (`alloc`/`dealloc`/`realloc` paired on the same `Layout`) is the
-// system allocator's. The only addition is a counter increment on either side,
-// which allocates nothing and touches no memory the caller owns.
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if Self::on() {
-            ALLOCS.fetch_add(1, Ordering::Relaxed);
-            BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
-        }
-        // SAFETY: `layout` is forwarded verbatim from the caller.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: `ptr`/`layout` are forwarded verbatim from the caller, which
-        // obtained them from this allocator's `alloc`/`realloc`.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if Self::on() {
-            ALLOCS.fetch_add(1, Ordering::Relaxed);
-            BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
-        }
-        // SAFETY: `ptr`/`layout`/`new_size` are forwarded verbatim.
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-}
-
-#[global_allocator]
-static ALLOCATOR: Counting = Counting;
+/// The allocation counter, shared with `bench/async` by path inclusion.
+///
+/// It lives in its own file because a second copy of an instrument that
+/// produces published numbers is a second instrument, and a reader comparing the
+/// two rigs would be comparing two different measurements under one name.
+#[path = "alloc_count.rs"]
+mod alloc_count;
 
 // ── The workload ─────────────────────────────────────────────────────────────
 
@@ -581,27 +540,25 @@ fn alloc_report() -> Result<String, Box<dyn std::error::Error>> {
         }
 
         let ticks = 512u64;
-        ALLOCS.store(0, Ordering::Relaxed);
-        BYTES.store(0, Ordering::Relaxed);
-        COUNTING.store(1, Ordering::Relaxed);
+        alloc_count::reset();
+        alloc_count::start();
         for tick in warm..warm.saturating_add(ticks) {
             clock.set(tick);
             let _ = bot.tick()?;
         }
-        COUNTING.store(0, Ordering::Relaxed);
-        let bot_allocs = ALLOCS.load(Ordering::Relaxed);
-        let bot_bytes = BYTES.load(Ordering::Relaxed);
+        alloc_count::stop();
+        let (bot_allocs, bot_bytes) = alloc_count::snapshot();
 
-        ALLOCS.store(0, Ordering::Relaxed);
-        COUNTING.store(1, Ordering::Relaxed);
+        alloc_count::reset();
+        alloc_count::start();
         for tick in warm..warm.saturating_add(ticks) {
             let _ = chains
                 .iter_mut()
                 .map(|c| c.tick(tick, &evals_base_cell))
                 .sum::<u64>();
         }
-        COUNTING.store(0, Ordering::Relaxed);
-        let base_allocs = ALLOCS.load(Ordering::Relaxed);
+        alloc_count::stop();
+        let (base_allocs, _) = alloc_count::snapshot();
 
         let per_tick = bot_allocs as f64 / ticks as f64;
         writeln!(
@@ -635,11 +592,12 @@ fn alloc_report() -> Result<String, Box<dyn std::error::Error>> {
     )?;
     for tick in 64..124u64 {
         clock.set(tick);
-        ALLOCS.store(0, Ordering::Relaxed);
-        COUNTING.store(1, Ordering::Relaxed);
+        alloc_count::reset();
+        alloc_count::start();
         let _ = bot.tick()?;
-        COUNTING.store(0, Ordering::Relaxed);
-        write!(out, "{}:{} ", tick, ALLOCS.load(Ordering::Relaxed))?;
+        alloc_count::stop();
+        let (tick_allocs, _) = alloc_count::snapshot();
+        write!(out, "{tick}:{tick_allocs} ")?;
     }
     writeln!(out, "\n")?;
     Ok(out)
