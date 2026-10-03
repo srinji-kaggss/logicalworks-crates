@@ -8,10 +8,6 @@
     feature = "process"
 ))]
 
-use std::fs;
-use std::path::Path;
-use std::process::{Command, Output};
-
 use lgwks_bot::Runtime;
 use lgwks_bot::rt::process::ProcessSpec;
 use lgwks_bot::rt::supervise::{Supervisor, TaskOutcome};
@@ -19,76 +15,12 @@ use lgwks_bot::rt::time::{Instant, sleep};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-// Shared with the storefront consumer probes: one definition of where a
-// nested build puts its artifacts. A probe used to build into its own scratch
-// directory, compiling `lgwks_bot` and every dependency cold: two probes,
-// ~41 s each, the longest tests in the suite.
-#[path = "../../lgwks-deps/tests/support/target_dir.rs"]
-mod target_dir;
+// The compile-probe harness, shared with `t02_compile_surface`: one definition
+// of where a nested build puts its artifacts, so the two targets cannot drift.
+#[path = "support/compile.rs"]
+mod compile;
 
-use target_dir::{workspace_root, workspace_target_dir};
-
-/// Type-checks a one-file consumer of `lgwks_bot` and returns cargo's output.
-///
-/// The probe starts from the workspace lockfile, so it resolves the versions
-/// the workspace build compiled rather than whatever the local registry cache
-/// holds newest. Scratch is named by wall-clock nanos plus a sequence, not a
-/// process or thread id (both are reused) and not `lgwks_std::random` (behind
-/// features this test is built without).
-fn compile_probe(
-    name: &str,
-    dependency: &str,
-    main: &str,
-) -> Result<Output, Box<dyn std::error::Error>> {
-    static DIR_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_nanos())
-        .unwrap_or(0);
-    let seq = DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!("{name}-{nanos}-{seq}"));
-    fs::create_dir_all(root.join("src"))?;
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    fs::copy(
-        workspace_root()?.join("Cargo.lock"),
-        root.join("Cargo.lock"),
-    )?;
-    fs::write(
-        root.join("Cargo.toml"),
-        format!(
-            "[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\nlgwks_bot = {{ path = \"{}\"{dependency} }}\n",
-            manifest_dir.display()
-        ),
-    )?;
-    fs::write(root.join("src/main.rs"), main)?;
-    let output = Command::new(env!("CARGO"))
-        .args(["check", "--offline", "--manifest-path"])
-        .arg(root.join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", workspace_target_dir()?)
-        .output();
-    fs::remove_dir_all(&root)?;
-    Ok(output?)
-}
-
-/// The probe was refused by the compiler for the reason named, not by cargo
-/// for some other one. A bare `!status.success()` also passed when the probe
-/// never reached rustc at all: an offline resolution failure, a lock error, a
-/// missing toolchain.
-fn assert_refused_for(output: &Output, code: &str, symbol: &str) {
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        !output.status.success(),
-        "the probe unexpectedly compiled:\n{text}"
-    );
-    assert!(
-        text.contains(&format!("error[{code}]")) && text.contains(symbol),
-        "the probe failed, but not with {code} naming `{symbol}`:\n{text}"
-    );
-}
+use compile::{assert_refused_for, compile_probe};
 
 #[test]
 fn public_process_description_rejects_direct_execution() -> TestResult {
