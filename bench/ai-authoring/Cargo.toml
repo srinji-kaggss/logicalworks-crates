@@ -1,0 +1,16 @@
+# The AI-authoring benchmark's own Cargo workspace root.
+#
+# It is a *separate* root from both the estate workspace and `bench/`, for the
+# same load-bearing reason those are: `lgwks-deps check .` discovers packages
+# through Cargo's own `workspace_members`, so a separate root is invisible to
+# the estate's dependency contract. Nothing here belongs in the shipped graph —
+# the instrument and the crate template it generates are this rig's, not the
+# estate's.
+#
+# `template/` is a member so a lockfile can be generated for the exact
+# dependency graph a trial crate will use (the `script` feature pulls
+# `lgwks_macros`, whose `syn`/`quote` edges must be in the lock). The runner
+# substitutes `__NAME__` and copies the lock into each trial directory.
+[workspace]
+members = ["support", "template"]
+resolver = "2"

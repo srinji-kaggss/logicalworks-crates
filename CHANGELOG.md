@@ -174,6 +174,47 @@ explicitly under that crate.
   INV-BOT-81, INV-BOT-82).
 - `FlowError::InvalidRequestKey`: the typed refusal a malformed `RequestKey`
   names, alongside the tenant and task-name refusals.
+- `script::Readiness<T>`, a typed, generation-bound readiness fact and the wait
+  that consumes it (#87 T18 / LC-09). A `Ready<T>` carries the `Generation` its
+  instance was admitted under, so the four ways a readiness can say "no" are four
+  different facts rather than one boolean: a signal from an older instance is
+  `StaleGeneration`, one from a generation this readiness never issued is
+  `UnknownGeneration`, a second release at a settled generation is `AlreadyReady`
+  (the first release survives it — it is not a second release), and a duplicate
+  failure is `AlreadyFailed`. `ReadinessError::released` is false for every arm,
+  and `is_permanent` separates the one retryable refusal from the rest, so an
+  enclosing `retry` cannot loop on a stale instance.
+- `Readiness::fail` reaches a dependant that has **already been released**: it
+  cancels the token of every dependant the release handed out, so a dependant
+  still running learns the service is gone rather than talking to a dead
+  process, and `failed_at` distinguishes that from a failure before anyone was
+  released (which owes nobody a cancellation). `Readiness::shutdown` is the
+  separate fact — a teardown is a stop, not a failure, and the waiting side sees
+  `FlowError::Cancelled` so a routine restart does not read as an outage.
+- `Generation`: a monotone, saturating counter with `FIRST`, `next` and `at`. Not
+  a timestamp, because cross-host clock skew is unmeasured (INV-BOT-30), and not a
+  random token, because a token can answer "the same or not" but never "older",
+  which is exactly the question a restarted instance's surviving handle asks. A
+  restart is a **new** readiness at a **new** generation, and that is what makes
+  the old instance's handle unable to release anybody.
+- `Readiness::wait(scope, limit)`: one admission, one `watch` subscription and one
+  `select!`. No sleep and no poll loop, charged to the step's own budget through
+  the existing `within` so it is bounded and stopped by the scope's stop, and an
+  already-released readiness resolves without spending its budget — the property
+  a guessed sleep cannot have. A readiness admits at most `MAX_DEPENDANTS`
+  dependants, charged *before* a slot is taken, so a refused admission leaves
+  capacity exactly as it was.
+- `Supervisor::run_process_observed`, a stdout-line observer for a supervised
+  child, and the `rt::supervise::LineObserver` alias that names it. The observer
+  is called from inside the same pipe read that retains the child's output, on the
+  bytes that read just observed, so an observation and a capture cannot disagree
+  about what the child wrote; it fires before the capture ceiling is consulted
+  and whether or not the bytes are retained, and never arms a timer. A long-lived
+  service's readiness therefore comes from what the child printed — a `sh -c`
+  child that prints a readiness line gates on its own output, with no timer
+  anywhere in the path. `Supervisor::run_process` is that call with `None` and
+  is now one method on every target, the Unix and non-Unix bodies differing
+  behind it.
 - More than one million task executions in flight at once on one node, measured
   (#152 §4). `tests/task_million.rs` (opt-in, `LGWKS_MILLION=1`) admits
   1,048,576 `Host::run` executions across sixteen tenant hosts, each saturated

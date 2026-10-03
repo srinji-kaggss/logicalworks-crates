@@ -66,10 +66,10 @@ crates/lgwks-bot/src/rt/supervise.rs:834	/// long enough on one worker and far t
 crates/lgwks-bot/src/rt/supervise.rs:887	pub fn new(max_in_flight: usize) -> Self {
 crates/lgwks-bot/src/rt/supervise.rs:1235	/// # Why the description is borrowed
 crates/lgwks-bot/src/rt/supervise.rs:1297	let end =
-crates/lgwks-bot/src/rt/supervise.rs:2599	if let Some(text) = payload.downcast_ref::<String>() {
-crates/lgwks-bot/src/rt/supervise.rs:2612	if kept.len() < text.len() {
-crates/lgwks-bot/src/rt/supervise.rs:2635	/// private interval of iterations the loop yields to the executor, so a
-crates/lgwks-bot/src/rt/supervise.rs:2660	/// [`repeat`], so a caller that never asks for a clock observes the behaviour it
+crates/lgwks-bot/src/rt/supervise.rs:2801	if let Some(text) = payload.downcast_ref::<String>() {
+crates/lgwks-bot/src/rt/supervise.rs:2814	if kept.len() < text.len() {
+crates/lgwks-bot/src/rt/supervise.rs:2837	/// private interval of iterations the loop yields to the executor, so a
+crates/lgwks-bot/src/rt/supervise.rs:2862	/// [`repeat`], so a caller that never asks for a clock observes the behaviour it
 crates/lgwks-bot/src/rt/task.rs:170	where
 crates/lgwks-bot/src/semantic.rs:13	//! This tier is consulted only when the lexicon returns [`Resolution::Absent`] —
 crates/lgwks-bot/src/semantic.rs:117	pub trait Embedder {
