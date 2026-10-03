@@ -53,6 +53,12 @@ net = ["io", "lgwks_deps/tokio-net"]
 process = ["io", "sync", "time", "lgwks_std/process", "lgwks_deps/tokio-process", "lgwks_deps/process-group-probe"]
 fs = ["io", "lgwks_deps/tokio-fs"]
 signal = ["rt", "lgwks_deps/tokio-signal"]
+# `inspect`: typed in-process structural code inspection (R8). Host-only, like
+# `process`/`fs`/`net`: it pulls the native tree-sitter grammars through
+# `lgwks_ast`, which cannot build for the WASI boundary target. Not on by
+# default for that reason; `full` turns it on so the gate exercises it rather
+# than letting it rot as an unbuilt candidate.
+inspect = ["dep:lgwks_ast"]
 # Minting a run identity needs an entropy source, and the estate has exactly
 # one: `lgwks_std::random`, whose `random` feature is `getrandom` under
 # `lgwks_std`'s ownership. This crate authors no edge of its own — it turns on a
@@ -86,6 +92,7 @@ full = [
     "signal",
     "ephemeral",
     "script",
+    "inspect",
 ]
 
 [dependencies]
@@ -111,6 +118,11 @@ lgwks_std = { workspace = true, features = ["json", "ron", "http", "hash", "wire
 lgwks_deps = { workspace = true, default-features = false, features = ["bevy-ecs"] }
 # The `script!` proc macro. First-party, host-only, optional behind `script`.
 lgwks_macros = { workspace = true, optional = true }
+# The multi-language AST parser, behind `inspect`. `lgwks_bot` is the consumer
+# INV-DEP-1 names for it; the finished parser itself is not grown. Its default
+# grammar set includes the two the shipped structural rule set speaks (Rust and
+# Python), so the edge needs no feature override.
+lgwks_ast = { workspace = true, optional = true }
 
 [lints]
 workspace = true
@@ -138,3 +150,13 @@ required-features = ["script", "ephemeral"]
 name = "script_tenants"
 path = "examples/script_tenants.rs"
 required-features = ["script"]
+
+[[example]]
+name = "inspect_scale"
+path = "examples/inspect_scale.rs"
+required-features = ["inspect", "script"]
+
+[[example]]
+name = "measure_overhead"
+path = "examples/measure_overhead.rs"
+required-features = ["script", "rt", "time", "sync", "process"]

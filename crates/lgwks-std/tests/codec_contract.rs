@@ -1,6 +1,9 @@
 //! Public-consumer regression checks for codec coordinate contracts.
 #![forbid(unsafe_code)]
 
+#[path = "support/consumer_probe.rs"]
+mod consumer_probe;
+
 #[cfg(all(feature = "hash", feature = "random"))]
 use lgwks_std::hash::Digest;
 #[cfg(all(feature = "hash", feature = "random"))]
@@ -77,39 +80,11 @@ fn consumer_preserves_uuid_digest_and_minimal_leb_profiles()
 #[test]
 fn consumer_counts_no_allocation_on_fixed_size_codec_paths()
 -> Result<(), Box<dyn std::error::Error>> {
-    let directory = tempfile::tempdir()?;
-    std::fs::create_dir(directory.path().join("src"))?;
     let manifest = format!(
         "[package]\nname = \"alloc_probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nlgwks_std = {{ path = {:?}, default-features = false, features = [\"hash\", \"random\"] }}\n",
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
     );
-    let manifest_path = directory.path().join("Cargo.toml");
-    std::fs::write(&manifest_path, manifest)?;
-    std::fs::write(directory.path().join("src/main.rs"), ALLOCATION_PROBE)?;
-    let cargo = |args: &[&str]| {
-        std::process::Command::new(env!("CARGO"))
-            .args(args)
-            .arg("--manifest-path")
-            .arg(&manifest_path)
-            .env(
-                "CARGO_TARGET_DIR",
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
-            )
-            .output()
-    };
-    let lock = cargo(&["generate-lockfile", "--offline"])?;
-    assert!(
-        lock.status.success(),
-        "probe lock generation failed: {}",
-        String::from_utf8_lossy(&lock.stderr)
-    );
-    let run = cargo(&["run", "--locked", "--offline", "--quiet"])?;
-    let stdout = String::from_utf8_lossy(&run.stdout);
-    assert!(
-        run.status.success(),
-        "allocation probe failed: {stdout}{}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    let stdout = crate::consumer_probe::build_and_run(&manifest, ALLOCATION_PROBE)?;
     for expected in [
         "uuid-parse 0",
         "uuid-display 0",

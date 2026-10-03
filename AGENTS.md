@@ -63,8 +63,15 @@ with no authored edge.
 
 Do **not** add `tokio`, `futures`, `async-trait`, `pollster`, `syn`,
 `proc-macro2`, `regex`, `uuid`, `chrono`, `walkdir`, `glob`, `base64`, `hex`,
-`percent-encoding`, `serde_json`, `ureq`, `reqwest`, or `ast-grep-*` directly.
-Each maps to a workspace path; see `docs/dependency-doctrine.md`. Async and
+`percent-encoding`, `serde_json`, `ureq`, `reqwest`, or `ast-grep-*` as a *new*
+edge. Read that as a ban on additions, not as a description of the tree: the
+list is not a statement about which crates the workspace currently compiles
+against. `lgwks_std` and `lgwks_ast` already author several of these names
+directly — `regex`, `serde_json`, `ureq` and `ast-grep-*` among them — under
+the grandfather clause above. A name on this list therefore maps to a workspace
+path *when a facade supplies it*; where no facade does, the approved direct edge
+is legal and removing it would be the defect. See `docs/dependency-doctrine.md`
+for which is which. Async and
 runners are exposed by `lgwks_bot`; its tokio engine is selected through the
 `lgwks_deps` storefront, which owns the workspace's one `tokio` edge. The gate
 refuses a second `tokio` consumer.

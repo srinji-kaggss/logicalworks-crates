@@ -32,8 +32,8 @@ use lgwks_bot::effect::{
     RunId,
 };
 use lgwks_bot::journal::{
-    DurabilityPromise, DurableAck, EffectEvent, EffectJournal, EventKind, JournalEntry,
-    JournalError, JournalPosition, MemoryJournal,
+    DurabilityPromise, DurableAck, EffectEvent, EffectEvidence, EffectJournal, EventKind,
+    JournalEntry, JournalError, JournalPosition, MemoryJournal,
 };
 use lgwks_bot::spec::{Bot, EffectIdentity, EffectScope};
 use lgwks_bot::{Auth, BotError, Cap, EffectLifetime, Execute, GrantSet, Observe};
@@ -46,6 +46,30 @@ use lgwks_bot::{Auth, BotError, Cap, EffectLifetime, Execute, GrantSet, Observe}
 pub const VALUE: u32 = 1;
 
 // ── The store a test can read from inside an effect ────────────────────────
+
+/// The store-forwarding half of an `EffectJournal` adapter.
+///
+/// Every adapter here is a [`MemoryJournal`] behind a policy, and each forwards
+/// the same read and identity methods to the shared store. This macro is that
+/// half, written once: a second copy is how one adapter's forwarding drifts from
+/// another's, and the ladder these tests exercise must be the shipped one, not a
+/// reimplementation. The type must have a `store: Rc<RefCell<MemoryJournal>>`
+/// field; it supplies its own `durability` and `compare_and_append`.
+macro_rules! store_forwarding {
+    ($ty:ty) => {
+        fn tail(&self) -> JournalPosition {
+            self.store.borrow().tail()
+        }
+
+        fn committed(&self) -> Result<Vec<EffectEvent>, JournalError> {
+            EffectJournal::committed(&*self.store.borrow())
+        }
+
+        fn committed_entries(&self) -> Result<Vec<JournalEntry>, JournalError> {
+            Ok(self.store.borrow().committed().to_vec())
+        }
+    };
+}
 
 /// A journal that shares its store with the test.
 ///
@@ -68,17 +92,7 @@ impl EffectJournal for ProbeJournal {
         self.store.borrow().durability()
     }
 
-    fn tail(&self) -> JournalPosition {
-        self.store.borrow().tail()
-    }
-
-    fn committed(&self) -> Result<Vec<EffectEvent>, JournalError> {
-        EffectJournal::committed(&*self.store.borrow())
-    }
-
-    fn committed_entries(&self) -> Result<Vec<JournalEntry>, JournalError> {
-        Ok(self.store.borrow().committed().to_vec())
-    }
+    store_forwarding!(ProbeJournal);
 
     fn compare_and_append(
         &mut self,
@@ -88,6 +102,94 @@ impl EffectJournal for ProbeJournal {
         self.store
             .borrow_mut()
             .compare_and_append(expected_tail, event)
+    }
+}
+
+/// A store-sharing adapter whose next outcome append may lose its reply.
+///
+/// Graded [`DurabilityPromise::ProcessCrash`] so an external handoff is
+/// admitted, the two one-shot faults cover both halves of the
+/// [`JournalError::OutcomeUnknown`] contract: `ambiguous_once` commits the event
+/// and then drops the acknowledgment, and `unknown_once` reports an unknown
+/// outcome without writing anything. [`EffectJournal::confirm_outcome`] attests
+/// only an outcome actually present in the store, which is the shape a
+/// file-backed adapter has.
+pub struct LostReplyJournal {
+    /// The store, shared with the test and with any action the test arms.
+    pub store: Rc<RefCell<MemoryJournal>>,
+    /// One-shot: commit the next outcome append and lose its reply.
+    pub ambiguous_once: Rc<Cell<bool>>,
+    /// One-shot: the next outcome append reports an unknown outcome, unwritten.
+    pub unknown_once: Rc<Cell<bool>>,
+}
+
+impl LostReplyJournal {
+    /// A fresh adapter: an empty store and both faults disarmed.
+    pub fn new() -> Self {
+        Self {
+            store: Rc::new(RefCell::new(MemoryJournal::new())),
+            ambiguous_once: Rc::new(Cell::new(false)),
+            unknown_once: Rc::new(Cell::new(false)),
+        }
+    }
+}
+
+impl Default for LostReplyJournal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EffectJournal for LostReplyJournal {
+    fn durability(&self) -> DurabilityPromise {
+        DurabilityPromise::ProcessCrash
+    }
+
+    store_forwarding!(LostReplyJournal);
+
+    fn compare_and_append(
+        &mut self,
+        expected_tail: JournalPosition,
+        event: &EffectEvent,
+    ) -> Result<DurableAck, JournalError> {
+        let is_outcome = matches!(event, EffectEvent::OutcomeObserved { .. });
+        // Half two: nothing is written, the reply is still reported lost, so
+        // readback proves absence and the caller may safely re-append.
+        if is_outcome && self.unknown_once.take() {
+            return Err(JournalError::OutcomeUnknown {
+                cause: std::io::Error::other("injected unknown outcome, nothing written"),
+            });
+        }
+        let acknowledgment = self
+            .store
+            .borrow_mut()
+            .compare_and_append(expected_tail, event)?;
+        // Half one: the event is in the store, the reply is gone. `Storage`
+        // would claim the journal is unchanged, which the committed event
+        // contradicts, so the conforming report is `OutcomeUnknown`.
+        if is_outcome && self.ambiguous_once.take() {
+            return Err(JournalError::OutcomeUnknown {
+                cause: std::io::Error::other("injected post-commit lost reply"),
+            });
+        }
+        Ok(acknowledgment)
+    }
+
+    fn confirm_outcome(
+        &mut self,
+        key: EffectKey,
+        evidence: EffectEvidence,
+        position: JournalPosition,
+        required: DurabilityPromise,
+    ) -> Result<DurableAck, JournalError> {
+        let held = self.store.borrow().committed().iter().any(|entry| {
+            matches!(*entry.event(), EffectEvent::OutcomeObserved { key: held, evidence: held_evidence }
+                    if held == key && held_evidence == evidence)
+        });
+        if !held {
+            return Err(JournalError::ReceiptUnavailable { required });
+        }
+        Ok(DurableAck::new(position, self.durability()))
     }
 }
 

@@ -27,11 +27,32 @@
 //!
 //! # Uniqueness
 //!
-//! Identifiers are expected to be unique within a list. A duplicate is not
-//! refused: lookup is in declaration order and the first entry wins. The check
-//! that would make this a compile error is a `const` assertion, and it is not
-//! written because `clippy::panic` is forbidden workspace-wide, which leaves no
-//! way to fail a `const` evaluation from this module.
+//! Identifiers are expected to be unique within a role, and the boundary
+//! between "refused" and "first wins" is exactly this:
+//!
+//! - **Construction is validated.** [`DomainRegistry::validate`] refuses a
+//!   registry that declares one identifier twice in the same role, naming both
+//!   positions, and every build path — [`DomainRegistry::build_source`],
+//!   [`DomainRegistry::build_action`] and the `domains!` macro — goes through
+//!   it, so no registry with a duplicate can be constructed. Letting the first
+//!   declaration win would make dispatch depend on declaration order.
+//! - **The lookup accessors refuse ambiguity too.** [`DomainRegistry::source`]
+//!   and [`DomainRegistry::action`] return `None` for an identifier declared
+//!   more than once in their list, exactly as they do for an absent one; neither
+//!   ever resolves to "whichever constructor was declared first", so a caller
+//!   that skips [`DomainRegistry::validate`] still cannot reach an ambiguous
+//!   constructor. They are the accessors, not an alternative construction path.
+//!
+//! The two roles are checked independently: one identifier appearing once as a
+//! source and once as an action is one domain with two roles, not a duplicate.
+//!
+//! Exercised by `tests/registry.rs`:
+//! `a_duplicate_source_identifier_is_refused_with_both_positions`,
+//! `a_duplicate_action_identifier_is_refused_the_same_way`,
+//! `validate_names_the_first_duplicate_pair_and_passes_clean_lists` and
+//! `an_ambiguous_identifier_is_not_resolved_by_declaration_order`; the
+//! downstream consequence by `tests/spec_materialize.rs`'s
+//! `a_duplicate_registry_is_refused_naming_the_identifier`.
 
 use std::any::Any;
 
@@ -436,12 +457,21 @@ impl DomainRegistry {
     }
 
     /// The constructor registered for a source identifier, if any.
+    ///
+    /// `None` when the identifier is unknown *or* declared twice in the source
+    /// list. An ambiguous identifier is deliberately not resolved to the first
+    /// declaration: doing so would make which constructor a spec reaches depend
+    /// on declaration order. [`Self::validate`] distinguishes an ambiguity from
+    /// an absence by name.
     #[must_use]
     pub fn source(&self, domain_id: &str) -> Option<SourceCtor> {
         find(self.sources, domain_id)
     }
 
     /// The constructor registered for an action identifier, if any.
+    ///
+    /// `None` when the identifier is unknown *or* declared twice in the action
+    /// list, for the reason [`Self::source`] gives.
     #[must_use]
     pub fn action(&self, domain_id: &str) -> Option<ActionCtor> {
         find(self.actions, domain_id)
@@ -533,15 +563,25 @@ impl std::fmt::Debug for DomainRegistry {
 
 /// Find an identifier in a declaration list, in declaration order.
 ///
+/// `None` when the identifier is absent *or* declared more than once. The
+/// second case is the point: an ambiguous identifier must not resolve to
+/// whichever constructor the author happened to list first, because that makes
+/// dispatch depend on declaration order (issue #122). [`DomainRegistry::validate`]
+/// names the duplicate pair before any build, and refusing it here means a
+/// caller that reaches for `source`/`action` directly still cannot construct
+/// from an ambiguous list.
+///
 /// Linear because the list is a handful of entries and is read at most once per
 /// spec, not per tick. A map would be a second structure to keep in step with
 /// the first for no gain at this size.
 fn find<T: Copy>(entries: &[(&'static str, T)], domain_id: &str) -> Option<T> {
-    let mut found = None;
+    let mut found: Option<T> = None;
     for &(registered, ctor) in entries {
         if registered == domain_id {
+            if found.is_some() {
+                return None;
+            }
             found = Some(ctor);
-            break;
         }
     }
     found

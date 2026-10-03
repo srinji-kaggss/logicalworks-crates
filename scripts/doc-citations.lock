@@ -9,6 +9,8 @@
 Cargo.toml:124	print_stderr = "forbid"
 Cargo.toml:125	print_stdout = "forbid"
 crates/lgwks-ast/src/lib.rs:54	//! point for anything else is a caller-registered parser. [`CustomLang`] is
+crates/lgwks-ast/src/lib.rs:2359	assert_eq!(
+crates/lgwks-ast/src/lib.rs:2362	"the fixture table must cover every grammar the manifest declares"
 crates/lgwks-bot/src/cap.rs:15	//! before acting. This stops confused-deputy calls and accidental ungated
 crates/lgwks-bot/src/cap.rs:53	pub const NET: &str = "bot.net";
 crates/lgwks-bot/src/cap.rs:64	pub fn new(name: impl Into<Cow<'static, str>>) -> Self {
@@ -17,21 +19,21 @@ crates/lgwks-bot/src/cap.rs:288	pub fn to_grant_set(&self) -> GrantSet {
 crates/lgwks-bot/src/cap.rs:365	pub(crate) fn new(mut caps: Vec<Cap>) -> Self {
 crates/lgwks-bot/src/cap.rs:414	pub fn check(&self, required: &[Cap]) -> Result<(), BotError> {
 crates/lgwks-bot/src/domain/sys.rs:43	/// rest is drained and counted, never retained.
-crates/lgwks-bot/src/ecs.rs:1269	struct TickError(Option<BotError>);
-crates/lgwks-bot/src/ecs.rs:1441	const MAX_IN_FLIGHT_POLLS: usize = 32;
-crates/lgwks-bot/src/ecs.rs:3213	RetryClass::Never => EntryState::Abandoned {
-crates/lgwks-bot/src/ecs.rs:3258	let mut first_error = None;
-crates/lgwks-bot/src/ecs.rs:3336	.is_some_and(|value| {
-crates/lgwks-bot/src/ecs.rs:3403	fn fire_plan(world: &mut World) {
-crates/lgwks-bot/src/ecs.rs:3623	match entry.condition.check_any(value) {
-crates/lgwks-bot/src/ecs.rs:3675	.initialize(world)
-crates/lgwks-bot/src/ecs.rs:3905	pub fn name(&self) -> &str {
-crates/lgwks-bot/src/ecs.rs:4020	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:4123	pub fn tick(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:4227	async fn run_steps(
-crates/lgwks-bot/src/ecs.rs:4976	pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
-crates/lgwks-bot/src/ecs.rs:5128	for chain in &chains {
-crates/lgwks-bot/src/ecs.rs:5145	world.insert_resource(Grants(grants.clone()));
+crates/lgwks-bot/src/ecs.rs:1312	struct TickError(Option<BotError>);
+crates/lgwks-bot/src/ecs.rs:1484	const MAX_IN_FLIGHT_POLLS: usize = 32;
+crates/lgwks-bot/src/ecs.rs:3256	RetryClass::Never => EntryState::Abandoned {
+crates/lgwks-bot/src/ecs.rs:3301	let mut first_error = None;
+crates/lgwks-bot/src/ecs.rs:3379	.is_some_and(|value| {
+crates/lgwks-bot/src/ecs.rs:3446	fn fire_plan(world: &mut World) {
+crates/lgwks-bot/src/ecs.rs:3666	match entry.condition.check_any(value) {
+crates/lgwks-bot/src/ecs.rs:3718	.initialize(world)
+crates/lgwks-bot/src/ecs.rs:3948	pub fn name(&self) -> &str {
+crates/lgwks-bot/src/ecs.rs:4063	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs.rs:4166	pub fn tick(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs.rs:4270	async fn run_steps(
+crates/lgwks-bot/src/ecs.rs:5019	pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
+crates/lgwks-bot/src/ecs.rs:5171	for chain in &chains {
+crates/lgwks-bot/src/ecs.rs:5188	world.insert_resource(Grants(grants.clone()));
 crates/lgwks-bot/src/error.rs:151	/// handed may be the one that owns the runtime's driver. Parked, that
 crates/lgwks-bot/src/gate.rs:12	pub struct GrantSet {
 crates/lgwks-bot/src/gate.rs:44	pub fn grant(mut self, cap: Cap) -> Self {
