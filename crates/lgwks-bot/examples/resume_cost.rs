@@ -204,7 +204,7 @@ fn report_concurrent(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone();
-    let summary = Summary::of(&mut sorted);
+    let summary = measure::Summary::of(&mut sorted);
     report(&format!("tier c={concurrency} n={acknowledged}"), &summary);
     let mut out = std::io::stdout().lock();
     let _written = writeln!(
