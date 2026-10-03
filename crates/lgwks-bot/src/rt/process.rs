@@ -342,11 +342,23 @@ impl CapturedStream {
     /// # What a truncated capture means for the ending
     ///
     /// A [`CapturedStream`] that reports [`CapturedStream::truncated`] holds a
-    /// **prefix the capture cut**, so its bytes are not the child's whole output
-    /// no matter how they happen to end. A pass over them therefore never reports
-    /// [`FrameRead::EndOfStream`] and never reports a child truncation as though
-    /// it were one: the ending is [`FrameRead::CeilingReached`] carrying the
-    /// capture's own retained capacity, and [`Frames::is_complete`] is `false`.
+    /// **prefix the capture cut**, so the pass cannot end in
+    /// [`FrameRead::EndOfStream`] and cannot report a child truncation as though
+    /// it were one. It overrides exactly the three endings that are *about where
+    /// the bytes stop* — [`FrameRead::EndOfStream`],
+    /// [`FrameRead::TruncatedPrefix`] and [`FrameRead::TruncatedPayload`] — with
+    /// [`FrameRead::CeilingReached`] carrying the capture's own retained
+    /// capacity, and [`Frames::is_complete`] is `false` for each of them.
+    ///
+    /// The two it does **not** override are the two the cut could not have
+    /// decided. A [`FrameRead::MalformedPrefix`] was reached from a whole prefix
+    /// the capture did retain — a declared `0`, or a length past the reader's
+    /// ceiling — so it is rot in the child's output and stands. A
+    /// [`FrameRead::CeilingReached`] the *reader* reached stopped the pass before
+    /// the cut mattered, so it names the reader's ceiling and stands too. A
+    /// capture's cut is a fact about this pass's bounds; it is not a reason to
+    /// discard what those bounds already decided.
+    ///
     /// Otherwise the endings are the reader's own — the clean end, or the
     /// truncation a child actually performed on its own last record.
     ///
@@ -354,7 +366,14 @@ impl CapturedStream {
     #[must_use]
     pub fn frames(&self, ceiling: usize) -> Frames {
         let mut pass = Frames::of_slice(self.bytes.as_slice(), ceiling);
-        if self.truncated {
+        if self.truncated
+            && matches!(
+                pass.ended,
+                FrameRead::EndOfStream
+                    | FrameRead::TruncatedPrefix { .. }
+                    | FrameRead::TruncatedPayload { .. }
+            )
+        {
             pass.ended = FrameRead::CeilingReached {
                 ceiling: self.retained_capacity(),
             };
@@ -562,7 +581,11 @@ pub enum FrameRead {
     /// A [`CapturedStream::frames`] reading of a *truncated* capture also ends
     /// here, carrying the capture's retained capacity rather than the caller's
     /// ceiling: the bytes read are a prefix the capture cut, so nothing about
-    /// them can decide whether the child's stream ended.
+    /// them can decide whether the child's stream ended. That override covers the
+    /// clean end and the two truncations only — an ending the pass already
+    /// reached from a whole prefix, or from the caller's own ceiling, names what
+    /// decided it and is not replaced. See
+    /// [`CapturedStream::frames`](crate::rt::process::CapturedStream::frames).
     ///
     /// The one reading not about the bytes at all, and the reason a bounded
     /// reader is honest about having stopped early rather than claiming the
@@ -799,13 +822,24 @@ impl Frames {
                 retained_bytes,
             },
             // A slice's reads cannot fail, so the arm is unreachable by
-            // construction rather than by assumption. An empty complete reading
-            // keeps the claim harmless if it were ever reached: no record
-            // decoded, and nothing is claimed beyond that.
-            Err(_) => Self {
-                records: Vec::new(),
-                ended: FrameRead::EndOfStream,
-                retained_bytes: 0,
+            // construction rather than by assumption. If it were ever reached the
+            // pass would have stopped *without a reading* — not at a clean end,
+            // which claims every record was decoded, and not by dropping what was
+            // already whole. So it fails closed: whatever the pass had read is
+            // kept, and the ending is the bound it charged against, with
+            // `is_complete()` false. The empty `EndOfStream` this arm used to
+            // return was the fail-open direction, reporting a pass that stopped
+            // early as one that read the stream to the end.
+            Err(Failed {
+                records,
+                retained_bytes,
+                ..
+            }) => Self {
+                records,
+                ended: FrameRead::CeilingReached {
+                    ceiling: retained_bytes,
+                },
+                retained_bytes,
             },
         }
     }
