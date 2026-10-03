@@ -687,6 +687,45 @@ Each of these was a shipped defect. Treat the list as the spec.
   `finished_steps_run_once`, `tenants_stay_isolated`, `same_seed_replays`),
   which sweeps every step boundary of every seeded run twice for an identical
   trace hash.
+- **INV-BOT-81** A request key is an identity, not a lock, and `Host::submit`
+  makes the three outcomes distinct. The run identity is derived, not minted:
+  it is a domain-separated hash of the host's tenant and the key, so the same
+  request on another process or day derives the same run and its receipt is
+  findable without a second table. The input's canonical `InputDigest` (the
+  `InputIdentity` schema id framed with its identity bytes) is recorded under
+  `@request` before any step runs; the terminal outcome is recorded under
+  `@terminal` after. A repeat with the same key and digest reattaches to the
+  recorded terminal and never re-enters the body; a repeat with the same key
+  and a different digest is a typed `RequestError::Conflict` naming both
+  digests and writes nothing; distinct keys derive distinct runs and are never
+  collapsed; one key under two tenants derives two runs over a shared store
+  file. A host with no store refuses with `RequestError::NoStore` rather than
+  downgrading to a plain run. · why: #87 step 7 (T30) · enforced by:
+  `tests/request_key.rs`
+  (`a_duplicate_identical_request_reattaches_without_rerunning`,
+  `a_reattach_survives_a_reopened_store`,
+  `same_key_with_a_different_payload_is_a_typed_conflict`,
+  `distinct_request_keys_are_distinct_runs`,
+  `two_tenants_never_share_a_request_run`,
+  `a_submission_without_a_store_is_refused`,
+  `a_recorded_request_answers_over_a_changed_body`) and
+  `tests/sim_request_key.rs` (`collisions_across_two_tenants`, `same_seed_replays`,
+  `concurrent_submissions_across_tiers`).
+- **INV-BOT-82** A durable submission's receipt outlives the client that
+  submitted it, and the in-flight state is reported as two separate facts. If a
+  waiter is dropped while the body is in flight, the `@request` receipt and any
+  completed step records are already on the disk and no `@terminal` record is;
+  a later client that submits the same key and input receives
+  `Submission::InFlight` — not a fabricated success and not a re-run of the
+  parked body — which names the run to settle (`InFlight::run`) and how many
+  records survived (`InFlight::records`). The host remains the cleanup owner:
+  the run store is the host's, so settling the un-recorded step is a `resume`
+  of that run, never the client's to hold. The crate deliberately does not drive
+  a dropped non-`Send` body in the background; what survives is the durable
+  record, which is what a resume needs. · why: #87 step 7 (T17) · enforced by:
+  `tests/request_key.rs`
+  (`a_dropped_client_leaves_the_request_in_flight_for_a_later_client`) and
+  `tests/sim_request_key.rs` (`drop_and_reattach`).
 - **INV-BOT-40** The committed record can be replayed without materializing it:
   `FileJournal::replay` streams frames from its own read-only descriptor,
   retaining at most one event, applies the same frame validation and event

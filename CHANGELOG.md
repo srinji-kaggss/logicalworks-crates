@@ -160,6 +160,20 @@ explicitly under that crate.
 
 ### lgwks_bot Added
 
+- `Host::submit`: a request-keyed durable submission. A caller supplies a
+  `RequestKey`; the host derives the run identity from the tenant and the key,
+  records the input's canonical `InputDigest` under a reserved `@request` record
+  before any step runs, and records the terminal outcome under `@terminal`
+  after. `Submission::Executed` is a first run, `Submission::Reattached` returns
+  the recorded report without re-entering the body, `Submission::InFlight`
+  reports a request whose waiter was dropped mid-effect (the run to settle and
+  the records that survived, kept apart), and a different input under one key is
+  a typed `RequestError::Conflict` naming both digests. A host with no store
+  refuses with `RequestError::NoStore`. Supported by `RequestKey`, `InputDigest`,
+  `Submission`, `InFlight`, `RequestConflict` and `RequestError` (T30, T17;
+  INV-BOT-81, INV-BOT-82).
+- `FlowError::InvalidRequestKey`: the typed refusal a malformed `RequestKey`
+  names, alongside the tenant and task-name refusals.
 - More than one million task executions in flight at once on one node, measured
   (#152 §4). `tests/task_million.rs` (opt-in, `LGWKS_MILLION=1`) admits
   1,048,576 `Host::run` executions across sixteen tenant hosts, each saturated
