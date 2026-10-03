@@ -160,6 +160,46 @@ explicitly under that crate.
 
 ### lgwks_bot Added
 
+- `domain::gh` is a real adapter (#151): the GitHub CLI runs as one supervised
+  child through `Supervisor::run_process`, with bounded capture, a deadline and
+  process-group cleanup, instead of the typed `binding required` refusal the
+  domain returned before. `Gh::snapshot`, `Gh::read_reviews` and `Gh::publish`
+  each admit a validated `ProcessSpec`; arguments are a vector, so no shell is
+  involved. `Repository`, `CommitId` and `ReviewPayload::new` refuse what
+  GitHub would reject rather than sending it. A publication payload is staged as
+  a private file (`create_new`, mode 0600) and removed on every exit path; the
+  name comes from `lgwks_std::random` under `ephemeral`, and a build without
+  that feature refuses to publish rather than reuse a name the OS recycles.
+  Without the `process` feature every call refuses with `GhError::NoRunner`
+  rather than reporting an empty answer a caller could mistake for "GitHub has
+  no reviews". `GhQuery` and `PrSnapshotSource` expose the same binding through
+  `Query` and `Observe`; both require `bot.sys` and `bot.net`.
+- `review`, the canonical PR-review task (#87 step 6, #151): `review_pr` pins a
+  subject, runs a caller-supplied analysis, checks freshness, publishes once at
+  the reviewed commit, and verifies through a separate read-back.
+  `ReviewOutcome` is five states a caller can act on without reading a message —
+  `Published { verified }`, `Unknown`, `TargetMoved { reviewed, current }`,
+  `Refused`. A lost response is reconciled by one read, never a second create;
+  only a `Refused` certainty proves nothing was written, because a non-zero
+  exit cannot distinguish "never arrived" from "applied and the answer was
+  lost". Verification compares subject, body and state and deliberately ignores
+  the application marker, which locates a candidate and is not proof. The body
+  manages no pid, no reap loop and no retry over publication.
+  `cargo run -p lgwks_bot --features process --example review_pr -- <repo> <pr>
+  <EVENT> <body>` runs the whole path; `LGWKS_REVIEW_PUBLISH=0` is a
+  draft-only profile.
+- `domain::gh::MAX_REVIEWS_PER_PULL` and `GhError::ReviewCeiling` (#151):
+  `--paginate` follows GitHub's review pages until the client is done, so the
+  review list used to grow with a pull request's history rather than with any
+  bound of this crate's own. A review read now refuses a list longer than the
+  declared ceiling — a *typed refusal*, not a shortened list. The distinction
+  matters because a truncated list that decoded cleanly is indistinguishable
+  from the whole history, and a verification built on it would report "no
+  matching review" for a review that exists on a page nobody read. Exactly the
+  ceiling is accepted; one more is refused, naming the endpoint, the count and
+  the ceiling. This is a bound, not a truncation: a build without the
+  `process` feature still refuses every call with `NoRunner` rather than
+  reporting an empty snapshot, an empty review list, or review id `0`.
 - `inspect`, typed in-process structural code inspection (#150, R8; feature
   `inspect`): `inspect(&InspectRequest)` parses the subject's bytes with
   `lgwks_ast` and walks the tree against the versioned `RuleSet::STRUCTURAL_V1`

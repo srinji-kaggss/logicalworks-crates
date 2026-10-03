@@ -645,6 +645,51 @@ Each of these was a shipped defect. Treat the list as the spec.
   `two_tenants_stay_isolated`, `a_dropped_run_releases_everything`,
   `names_inputs_and_limits`) and `examples/compare_orchestration.rs`
 
+- **INV-BOT-80** A GitHub publication is reported only from an independent
+  read-back, never from a client's exit code. `ReviewOutcome::Published` is
+  produced only when a review at the reviewed commit, with the intended body and
+  state, was observed on a separate call; the create's own success is transport
+  evidence and is never one. A publish step that failed for any reason other
+  than a `Refused` certainty — a non-zero exit, a dropped connection, a
+  deadline — leaves the effect unobserved and is reconciled by exactly one read,
+  because an exit code cannot distinguish "never arrived" from "applied and the
+  answer was lost". A reconciliation that cannot establish the outcome stays
+  `Unknown` and issues no second create. A head that changed between the pinned
+  read and the publication is `TargetMoved`, naming both commits, and publishes
+  nothing; the review subject is never silently re-pointed at the new head.
+  Verification compares subject, body and state and ignores the application
+  marker. A staged payload carries a name no two concurrent publications share,
+  taken from `lgwks_std::random` under `ephemeral`; a build without that feature
+  refuses to publish rather than reuse a name the OS recycles. A review read is
+  bounded by the declared `domain::gh::MAX_REVIEWS_PER_PULL` rather than by
+  `--paginate`'s patience: a list longer than the ceiling is refused whole with
+  `GhError::ReviewCeiling`, because a prefix that decoded cleanly is
+  indistinguishable from the whole history and would report "no matching
+  review" for a review on a page nobody read. A build without the `process`
+  feature refuses every call with `GhError::NoRunner` and returns no snapshot,
+  review list or review id at all. · why: #151, #87 step 6 (PR-06, PR-07,
+  PR-09) · enforced by:
+  `tests/pr_review_journey.rs` (`a_lost_response_is_reconciled_by_reading_back_and_never_reposted`,
+  `a_loss_that_cannot_be_reconciled_stays_unknown_and_still_does_not_repost`,
+  `a_moved_head_is_a_typed_refusal_and_publishes_nothing`,
+  `a_review_is_published_at_the_pinned_head_and_verified_by_a_separate_read`,
+  `a_non_zero_exit_is_not_a_published_review`,
+  `a_client_that_never_starts_is_a_definite_non_effect_and_is_not_reconciled`,
+  `two_identities_on_one_repository_stay_isolated`) and
+  `tests/sim_review_pr.rs` (`subject_r64`, `publication_r64`, `identity_r64`,
+  `same_seed_same_trace_hash`, `every_outcome_is_reachable_in_the_family`),
+  `tests/sim_review_path.rs` (`verified_and_not_observed_r32`,
+  `gh_exit_failures_r32`, `deadline_stop_r32`,
+  `head_moved_between_snapshot_and_publish_r32`,
+  `malformed_and_oversized_answers_r32`,
+  `a_publication_the_ceiling_cannot_verify_stays_unknown`,
+  `same_seed_same_trace_hash_r32`, `saturation_r32`,
+  `two_tenants_on_one_pull_request_r32`, `cancellation_under_faults_r16`,
+  `duplicate_submission_r16`, `two_repositories_on_one_host_r16`) and
+  `tests/gh_binding.rs` (`a_review_list_past_the_ceiling_is_refused_not_truncated`,
+  `a_review_list_exactly_at_the_ceiling_is_read`,
+  `a_malformed_review_list_is_refused_rather_than_decoded_into_a_partial_answer`)
+
 ## Open questions for the Director
 
 - For INV-BOT-1..10: which crash/recovery test exercises each one? The ones without a
