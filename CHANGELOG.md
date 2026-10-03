@@ -174,6 +174,74 @@ explicitly under that crate.
   INV-BOT-100, INV-BOT-101).
 - `FlowError::InvalidRequestKey`: the typed refusal a malformed `RequestKey`
   names, alongside the tenant and task-name refusals.
+- `proposal` (feature `script`): the boundary where untrusted model output
+  becomes work. Issue #87's rule is that an AI proposal is an **untrusted task
+  input**, and that validation, provenance, no-progress detection, bounded repair,
+  tenant-scoped artifacts and serialized writes belong in the host/adapter
+  contract rather than in a prompt — so this module reads bytes and refuses them
+  rather than prompting a model. It is **not** a fifth verb: an admitted `Plan` is
+  a list of names to perform through the existing verbs, the operations a proposal
+  may name are exactly the ones the host registered in a `Surface`, and the crate
+  calls no network model at all. `StubModel` is a deterministic double from a seed
+  to output bytes, because the guarantee here is about *admission* and admission is
+  identical whoever produced the bytes (#87 T26–T29, T35).
+  - `Decoder`: a hand-written bounded line grammar with a byte ceiling, a
+    per-field ceiling and a field-count ceiling. `install`, `credential` and `host`
+    are *recognised* so their refusals name what was asked for — a decoder that had
+    never heard of them would report `Malformed` and an attempt to widen authority
+    would read as a broken document. An unknown field is refused rather than
+    ignored, and a refused payload returns no plan beside its refusal.
+  - `Refusal`: a typed arm per refusal, with `SandboxEscape` as its own arm so an
+    escape stays observable, and `is_privilege_attempt` for the five arms that are
+    attempts rather than syntax. Every outcome carries `Provenance` — the source
+    (model, tool output or document), the tenant and the digest of the exact bytes.
+  - `Completion`: admitted only with the evidence it names present.
+    `Coverage::from_claim` maps *every* payload claim onto `Partial`, so a plan
+    cannot be talked into full coverage, and `Coverage::Complete` has no
+    constructor reachable from a decoder.
+  - `RepairLedger` and `PlanBudget`: one unchanged fingerprint past its ceiling is
+    a typed `Intervention`, and recording new evidence moves no repetition count,
+    so it cannot erase what a failure already cost.
+  - `Checkpoint`: `Durable`, so a context reset recovers completed steps, user
+    corrections *with their kind*, `Unknown`-classed effects and evidence
+    references through the run store.
+  - `ArtifactStore`: keyed by `(tenant, digest)`, so identical bytes from two
+    tenants are two artifacts; writes to one key serialized and idempotent by
+    content, reads lock-free of the writer, every bound a typed refusal that
+    leaves the store unchanged.
+- `script::admit` (feature `script`): the one step a task body uses to admit model
+  or tool output, and the fix for the defect a reviewer found on the `proposal`
+  module above — it shipped with **no production caller**, so every property
+  INV-BOT-90..94 state held for a boundary nothing invoked. The estate rule is
+  "wired or it does not exist", so the capability lands called from the run path
+  in the same change rather than deleted (#87 T26–T29).
+  - It is a `script` block rather than a helper because a task body can only act on
+    a `FlowError`: it enters its step, so a refusal reads `admit/plan` like every
+    other located failure; it charges one **run-scoped** `Gate` — decoder, surface,
+    `PlanBudget`, `RepairLedger` — so the fourth identical refusal across four
+    separate `Host::run`s is a finite typed `Intervention` rather than four
+    refusals a caller has to correlate; and it records each refusal through the
+    run store under `<step>/refusal` *before* returning the error, so a run resumed
+    on a fresh host reads back what the first run refused rather than re-deriving
+    that nothing was refused.
+  - `FlowError` gains two arms, `Refused { at, refusal, provenance }` and
+    `Intervention { at, intervention }`. Both are typed and both carry the
+    `Provenance` of the refused bytes, so no refusal reaching a `Report` is a
+    string a caller must parse or an unattributable failure. Both are non-retryable:
+    a payload refused for its content is refused however often it is re-read, and
+    another attempt is exactly the repair an intervention refused.
+  - `Gate` is shared by clone and its lock is held across the charge, the decode
+    and the ledger update and **never across an `.await`**, so a fan-out can hand
+    one gate to every body without the budget becoming per-body.
+  - It admits a `Plan` of operation *names* and performs nothing. Not a fifth verb,
+    and not an untyped plan interpreter: performing a plan's operations is still
+    the caller's job through the existing verbs, and `EffectKnowledge` continues
+    to report that a run performed no external effect.
+- `task::RunStore::lookup`: the reader's door onto a durable step's value — the
+  archived bytes committed for a step key under a run, or `None`. Without it, the
+  only way to see what a previous instance recorded was to re-run the step that
+  wrote it, which is why a resumed run could not read back a refusal. `Err` is a
+  read failure (a run another tenant owns), never a miss (INV-BOT-7).
 - `script::Readiness<T>`, a typed, generation-bound readiness fact and the wait
   that consumes it (#87 T18 / LC-09). A `Ready<T>` carries the `Generation` its
   instance was admitted under, so the four ways a readiness can say "no" are four

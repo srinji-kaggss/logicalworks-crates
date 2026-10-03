@@ -285,6 +285,17 @@ impl StoredValue {
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+
+    /// The archived bytes, by value.
+    ///
+    /// The reader's door, and the counterpart to the borrow
+    /// [`StagedRecord::bytes`] takes on the writer's side. `pub(crate)` for the same
+    /// reason [`StoredValue::new`] is: the store hands these out and
+    /// [`crate::task::RunStore::lookup`] is the one place a caller may read them,
+    /// so no public field can hand a step of the wrong type a value it will decode.
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
 }
 
 /// What a durable append did.
