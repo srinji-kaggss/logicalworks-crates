@@ -121,6 +121,15 @@ pub const PROGRESS_TURNS: u64 = 64;
 
 /// A parked device with the instruments a liveness test needs.
 pub struct Parked {
+    /// Where the parked append must be attempted, when the caller is parking a
+    /// position-fenced write rather than a record append.
+    ///
+    /// A journal's liveness test needs the fence it is about to contend on; a
+    /// record store's does not, because its append takes no caller-supplied
+    /// position. One type serves both rather than two that differ by a field,
+    /// because the part that is under test is identical: an independent thread
+    /// releasing a parked device while an unrelated task keeps turning.
+    tail: Option<lgwks_bot::journal::JournalPosition>,
     /// How many turns the unrelated task has taken.
     ticks: Arc<AtomicU64>,
     /// Set by the watchdog once it has released the device.
@@ -141,14 +150,43 @@ impl Parked {
     ///
     /// Whatever the OS reports when the watchdog thread cannot start.
     pub fn new(gate: StorageGate) -> Result<Self, std::io::Error> {
+        Self::at(None, gate)
+    }
+
+    /// Park a position-fenced write at `tail` as well, for a journal whose
+    /// append is refused unless it continues from the right fence.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the OS reports when the watchdog thread cannot start.
+    pub fn at(
+        tail: Option<lgwks_bot::journal::JournalPosition>,
+        gate: StorageGate,
+    ) -> Result<Self, std::io::Error> {
         let ticks = Arc::new(AtomicU64::new(0));
         let released = Arc::new(AtomicBool::new(false));
         let watchdog = spawn_watchdog(&ticks, gate, Arc::clone(&released))?;
         Ok(Self {
+            tail,
             ticks,
             released,
             watchdog,
         })
+    }
+
+    /// The fence a parked append must continue from.
+    ///
+    /// # Errors
+    ///
+    /// `None` if this `Parked` was opened with [`Self::new`] rather than
+    /// [`Self::at`]: a caller asking for a fence it never supplied cannot be
+    /// served a value, and a store whose append takes no position has none to
+    /// hand back. `Result` rather than a panic because the two kinds of caller
+    /// differ by construction and the test must not be the thing that decides
+    /// which one it is.
+    pub fn tail(&self) -> Result<lgwks_bot::journal::JournalPosition, String> {
+        self.tail
+            .ok_or_else(|| "this Parked was opened without a fence; use Parked::at".to_owned())
     }
 
     /// The counter the unrelated task turns.
