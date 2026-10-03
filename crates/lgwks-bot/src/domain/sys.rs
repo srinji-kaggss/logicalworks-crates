@@ -221,7 +221,7 @@ impl Process {
     /// When set, every [`ProcessState`] the verbs return carries the child's
     /// stdout read as length-prefixed records under `ceiling` through
     /// [`ProcessState::stdout_frames`] — the crate's one frame grammar
-    /// ([`crate::journal::frame`]) reached from the verb a caller performs work
+    /// (`journal::frame`, crate-private) reached from the verb a caller performs work
     /// with. The reading is byte-exact, so a binary record round-trips where
     /// the lossy [`ProcessState::stdout`] cannot. Without it the framed reading
     /// is absent and nothing else about the run changes.

@@ -172,7 +172,9 @@ fn run_child_branch() -> TestResult {
     // The marker is written before the run is driven, so the parent's "did it
     // start" is established by this process rather than inferred from a poll that
     // may never have been reached.
-    std::fs::write(&marker, std::process::id().to_string())?;
+    // Its presence is the whole signal: the parent waits for the file, never
+    // reads an identity out of it.
+    std::fs::write(&marker, "started")?;
 
     // This call never returns: the body never reaches an await point, so the
     // runtime never regains its thread. Reaching the end of it would mean the

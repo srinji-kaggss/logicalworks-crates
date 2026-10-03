@@ -285,7 +285,8 @@ pub fn escape_command() -> Option<EscapeCommand> {
 pub struct EscapeCommand {
     /// The interpreter or utility to run.
     pub program: &'static str,
-    /// The single flag that selects the third field's meaning.
+    /// The argument text that selects the third field's meaning: one flag for
+    /// an interpreter, or a shell and its flag for a utility that runs one.
     pub flag: &'static str,
     /// The program, or the command line, that escapes and then records `$$`.
     ///
@@ -359,7 +360,11 @@ pub fn sources_are_apostrophe_free() -> bool {
 const ESCAPE_COMMANDS: [EscapeCommand; 3] = [
     EscapeCommand {
         program: "setsid",
-        flag: "sh",
+        // `setsid(1)` runs a program with its arguments, so the "flag" here is
+        // the shell plus its `-c`: without `-c`, `sh` reads the source as a
+        // *script file name* and records nothing. macOS has no `setsid(1)` and
+        // falls through to perl, so only a Linux host exercises this entry.
+        flag: "sh -c",
         source: "echo $$ > {file}; sleep 30",
     },
     EscapeCommand {

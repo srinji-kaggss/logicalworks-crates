@@ -537,7 +537,7 @@ pub enum FrameRead {
     /// that separates this from [`Self::EndOfStream`]: these bytes were part-way
     /// through being written, and nothing ever named them.
     TruncatedPrefix {
-        /// The prefix bytes that arrived, fewer than [`LENGTH_BYTES`].
+        /// The prefix bytes that arrived, fewer than the four a length prefix holds.
         partial: Vec<u8>,
     },
     /// The stream ended part-way through a payload a whole prefix had already
@@ -779,7 +779,7 @@ impl Frames {
     /// Read `stream` to its end, its first refusal, or `ceiling` payload bytes.
     ///
     /// The one constructor that can refuse, so a pass over a real reader runs to
-    /// one of its three endings or reports the device's refusal; [`Self::of_slice`]
+    /// one of its three endings or reports the device's refusal; `of_slice`
     /// is the same pass over bytes already in hand and cannot refuse.
     ///
     /// # Errors
