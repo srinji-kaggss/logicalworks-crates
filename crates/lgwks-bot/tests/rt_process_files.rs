@@ -15,6 +15,7 @@
 ))]
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use lgwks_bot::Runtime;
 use lgwks_bot::rt::process::ProcessSpec;
@@ -27,7 +28,14 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(name: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let dir = std::env::temp_dir().join(format!("lgwks-rt-files-{name}-{}", std::process::id()));
+        // Nanos plus a counter, never a process id: the OS reuses pids, and a
+        // reused id would make two runs share one directory.
+        static SCRATCH: AtomicU64 = AtomicU64::new(0);
+        let unique = SCRATCH.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("lgwks-rt-files-{name}-{nanos}-{unique}"));
         std::fs::create_dir_all(&dir)?;
         Ok(Self(dir))
     }
@@ -35,7 +43,7 @@ impl Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
+        drop(std::fs::remove_dir_all(&self.0));
     }
 }
 
@@ -60,7 +68,11 @@ fn stdout_and_stderr_land_in_their_files() -> TestResult {
     })?;
 
     assert_eq!(run.exit_code(), Some(0));
-    assert_eq!(std::fs::read_to_string(&out)?, "result", "truncated, then written");
+    assert_eq!(
+        std::fs::read_to_string(&out)?,
+        "result",
+        "truncated, then written"
+    );
     assert_eq!(std::fs::read_to_string(&err)?, "problem");
     assert!(
         run.stdout().bytes().is_empty(),
@@ -83,7 +95,10 @@ fn a_later_policy_replaces_the_file() -> TestResult {
     })?;
 
     assert_eq!(run.stdout().bytes(), b"captured");
-    assert!(!out.exists(), "the file redirect was replaced, so the file was never opened");
+    assert!(
+        !out.exists(),
+        "the file redirect was replaced, so the file was never opened"
+    );
     Ok(())
 }
 
@@ -99,7 +114,10 @@ fn an_unopenable_path_refuses_the_start_and_runs_nothing() -> TestResult {
         supervisor.run_process(&spec).await
     });
 
-    assert!(outcome.is_err(), "the start is refused, not run with output lost");
+    assert!(
+        outcome.is_err(),
+        "the start is refused, not run with output lost"
+    );
     assert!(!ran.exists(), "no child ran");
     Ok(())
 }

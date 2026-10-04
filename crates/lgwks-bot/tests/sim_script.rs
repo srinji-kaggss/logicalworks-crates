@@ -565,7 +565,6 @@ fn fan_machine_sized(band: Band) -> TestResult {
     })
 }
 
-
 /// The error a `FanOut` body returns in these families: a type of the test's
 /// own, so the family can tell it came back unchanged.
 #[derive(Debug, PartialEq)]
@@ -590,7 +589,9 @@ fn run_fan_out(
         let live = probe.enter();
         Turns(item.turns).await;
         if item.fails {
-            return Err(Refused(item.value));
+            let refusal: Result<u64, Refused> = Err(Refused(item.value));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "fan_out body: returning an error to the caller");
+            return refusal;
         }
         live.finish();
         Ok(item.value.wrapping_mul(2))
@@ -619,7 +620,10 @@ fn fan_out_typed_error(band: Band) -> TestResult {
         let values: Vec<u64> = list.iter().map(|item| item.value).collect();
         let probe = Probe::default();
         let Err(FanOutError::Item { index, error }) = run_fan_out(&probe, list, limit) else {
-            return Err("a failing item must come back as FanOutError::Item".into());
+            let refusal: TestResult =
+                Err("a failing item must come back as FanOutError::Item".into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "sweep: returning an error to the caller");
+            return refusal;
         };
 
         assert!(
@@ -656,7 +660,10 @@ fn fan_out_bounded_ordered(band: Band) -> TestResult {
         let probe = Probe::default();
         let output = run_fan_out(&probe, list, limit)?;
 
-        assert_eq!(output, expected, "FanOut returns item i's value at position i");
+        assert_eq!(
+            output, expected,
+            "FanOut returns item i's value at position i"
+        );
         assert!(
             probe.peak.get() <= limit,
             "in-flight {} exceeded the bound {limit}",
@@ -700,7 +707,11 @@ fn fan_out_deadline(band: Band) -> TestResult {
             Err(FanOutError::TimedOut { after }) => {
                 assert_eq!(after, deadline, "the declared deadline is reported");
             }
-            other => return Err(format!("expected TimedOut, got {other:?}").into()),
+            other => {
+                let refusal: TestResult = Err(format!("expected TimedOut, got {other:?}").into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "sweep: returning an error to the caller");
+                return refusal;
+            }
         }
         probe.assert_settled();
         assert_eq!(
@@ -708,7 +719,10 @@ fn fan_out_deadline(band: Band) -> TestResult {
             limit.min(usize::try_from(count)?),
             "no body past the bound ever started"
         );
-        sim.record(&format!("n={count} limit={limit} started={}", probe.started.get()));
+        sim.record(&format!(
+            "n={count} limit={limit} started={}",
+            probe.started.get()
+        ));
         Ok(())
     })
 }
@@ -747,7 +761,10 @@ fn fan_out_refusals_and_drop(band: Band) -> TestResult {
             probe.started.get(),
             "every body the dropped future owned was dropped with it"
         );
-        sim.record(&format!("n={count} limit={limit} started={}", probe.started.get()));
+        sim.record(&format!(
+            "n={count} limit={limit} started={}",
+            probe.started.get()
+        ));
         Ok(())
     })
 }

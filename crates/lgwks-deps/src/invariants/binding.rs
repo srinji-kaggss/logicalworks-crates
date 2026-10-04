@@ -102,6 +102,14 @@ fn git(root: &Path, args: &[&str]) -> Result<Output, EvidenceGap> {
     })
 }
 
+/// Refuse with `gap`, leaving a trace of why: a caller that sees only the value
+/// cannot tell which of the audit's checks produced it.
+fn refuse(gap: EvidenceGap) -> Result<(), EvidenceGap> {
+    let refusal = Err(gap);
+    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "bind: returning an error to the caller");
+    refusal
+}
+
 /// A Git exit code that is neither success nor the command's one defined "no".
 fn unverifiable(output: &Output) -> EvidenceGap {
     EvidenceGap::Unverifiable {
@@ -124,15 +132,15 @@ pub(super) fn bind(
     let resolved = git(root, &["rev-parse", "--verify", "--quiet", &named])?;
     let commit = match resolved.status.code() {
         Some(0) => String::from_utf8_lossy(&resolved.stdout).trim().to_owned(),
-        Some(1) => return Err(EvidenceGap::UnknownRevision),
-        _ => return Err(unverifiable(&resolved)),
+        Some(1) => return refuse(EvidenceGap::UnknownRevision),
+        _ => return refuse(unverifiable(&resolved)),
     };
 
     let ancestry = git(root, &["merge-base", "--is-ancestor", &commit, "HEAD"])?;
     match ancestry.status.code() {
         Some(0) => {}
-        Some(1) => return Err(EvidenceGap::NotInHistory),
-        _ => return Err(unverifiable(&ancestry)),
+        Some(1) => return refuse(EvidenceGap::NotInHistory),
+        _ => return refuse(unverifiable(&ancestry)),
     }
 
     let Some(enforcer) = enforcer else {
@@ -149,11 +157,14 @@ pub(super) fn bind(
             // invisible to `git diff`.
             let existed = git(root, &["cat-file", "-e", &format!("{commit}:{path}")])?;
             if !existed.status.success() {
-                return Err(changed());
+                return refuse(changed());
             }
             vec![spec]
         }
-        _ => LINT_DECLARATIONS.iter().map(|spec| (*spec).to_owned()).collect(),
+        _ => LINT_DECLARATIONS
+            .iter()
+            .map(|spec| (*spec).to_owned())
+            .collect(),
     };
     let mut arguments = vec!["diff", "--quiet", commit.as_str(), "--"];
     arguments.extend(pathspecs.iter().map(String::as_str));

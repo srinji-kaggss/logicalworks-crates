@@ -77,6 +77,7 @@
 //! [`StepKey`]: crate::script::StepKey
 //! [`Architecture`]: crate::script::Architecture
 //! [`Readiness`]: crate::script::Readiness
+//! [`FanOut`]: crate::script::FanOut
 
 mod admit;
 mod control;

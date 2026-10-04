@@ -315,7 +315,10 @@ fn a_tenant_without_the_grant_is_refused_while_the_other_is_served() -> TestResu
     }
     let per_tenant = THREADS_PER_TENANT * ROUNDS;
     assert_eq!(served_rounds, per_tenant, "every granted round was served");
-    assert_eq!(refused_rounds, per_tenant, "every ungranted round was refused");
+    assert_eq!(
+        refused_rounds, per_tenant,
+        "every ungranted round was refused"
+    );
     Ok(())
 }
 

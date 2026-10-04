@@ -201,5 +201,6 @@ impl<I: IntoIterator> FanOut<I> {
 /// Take the lock. A poisoned cell still holds a consistent value, because the
 /// only writes are `get_or_insert` and `take`, which cannot be left half done.
 fn lock<E>(cell: &Mutex<Option<(usize, E)>>) -> MutexGuard<'_, Option<(usize, E)>> {
-    cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    cell.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

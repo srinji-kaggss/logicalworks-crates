@@ -2106,7 +2106,10 @@ mod tests {
         Ok(())
     }
 
-    fn verdict(version: u64, result: VerificationResult) -> Result<Verification, Box<dyn std::error::Error>> {
+    fn verdict(
+        version: u64,
+        result: VerificationResult,
+    ) -> Result<Verification, Box<dyn std::error::Error>> {
         Ok(Verification::new(
             Id128::from_hex(PREDICATE)?,
             version,
@@ -2148,7 +2151,9 @@ mod tests {
         let recovered = journal.recover();
         assert_eq!(recovered.status(key), Some(AttemptStatus::Verified));
         assert_eq!(
-            recovered.verification(key).map(|found| found.predicate_version()),
+            recovered
+                .verification(key)
+                .map(|found| found.predicate_version()),
             Some(3),
             "the status is qualified by the version it was decided at"
         );
@@ -2161,11 +2166,27 @@ mod tests {
             trail,
             vec![
                 (None, AttemptStatus::Prepared, 0),
-                (Some(AttemptStatus::Prepared), AttemptStatus::OutcomeUnknown, 1),
-                (Some(AttemptStatus::OutcomeUnknown), AttemptStatus::Applied, 2),
+                (
+                    Some(AttemptStatus::Prepared),
+                    AttemptStatus::OutcomeUnknown,
+                    1
+                ),
+                (
+                    Some(AttemptStatus::OutcomeUnknown),
+                    AttemptStatus::Applied,
+                    2
+                ),
                 (Some(AttemptStatus::Applied), AttemptStatus::Verified, 3),
-                (Some(AttemptStatus::Verified), AttemptStatus::VerificationFailed, 4),
-                (Some(AttemptStatus::VerificationFailed), AttemptStatus::Verified, 5),
+                (
+                    Some(AttemptStatus::Verified),
+                    AttemptStatus::VerificationFailed,
+                    4
+                ),
+                (
+                    Some(AttemptStatus::VerificationFailed),
+                    AttemptStatus::Verified,
+                    5
+                ),
             ],
             "what changed, what it superseded, and where in the journal"
         );

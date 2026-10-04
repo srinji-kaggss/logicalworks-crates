@@ -23,7 +23,7 @@ Development index. Every link below resolves against `main` as it stood when thi
 - [Authority in lgwks_bot](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-bot/authority.md) — Admission, the `Auth` snapshot, and the no-sandbox boundary.
 - [What a failed tick means](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-bot/failures.md) — Poll failure, partial action failure, and unknown effect.
 - [Bounded background work](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-bot/background-work.md) — Bounded fan-out, supervision, and the cancellation limits.
-- [Migrating to 1.0.0](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-bot/migrating-to-1-0.md) — What spawn, JoinHandle, Child and Command became, and the traps the compiler cannot show.
+- [Migrating to `lgwks_bot` 1.0.0](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-bot/migrating-to-1-0.md) — What 1.0.0 removed, what replaces it, and the traps the compiler cannot show.
 - [Guidance sessions](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-bot/sessions.md) — Unreleased: validated guidance flows and the session runner.
 - [Resolution and degraded verdicts](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-bot/resolution.md) — Unreleased: lexical and semantic resolution, and degraded verdicts.
 - [The registry: what a spec's identifiers resolve to](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-bot/domains.md) — Unreleased: the domain registry, and what a spec's identifiers resolve to.

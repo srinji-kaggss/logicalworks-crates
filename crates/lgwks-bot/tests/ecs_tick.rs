@@ -1597,7 +1597,11 @@ fn a_moved_source_runs_exactly_once_after_a_sibling_recovers() -> TestResult {
         bot.tick().is_err(),
         "the first tick reports the sibling's refusal"
     );
-    assert_eq!(bot.tick()?, 2, "both sources fire once the sibling recovers");
+    assert_eq!(
+        bot.tick()?,
+        2,
+        "both sources fire once the sibling recovers"
+    );
     assert_eq!(*seen.borrow(), vec![17, 23]);
 
     // The subsequent change: the source moves while the sibling refuses again.
@@ -1787,7 +1791,10 @@ fn a_skipped_entry_does_not_block_its_successor() -> TestResult {
         .observe(Dial {
             value: Rc::new(Cell::new(1)),
         })
-        .on(|_observed: &u32| false, Noted(Rc::new(RefCell::new(Vec::new()))))
+        .on(
+            |_observed: &u32| false,
+            Noted(Rc::new(RefCell::new(Vec::new()))),
+        )
         .on(|_observed: &u32| true, Noted(Rc::clone(&log)))
         .with_effects(test_effects()?)
         .build(&GrantSet::empty())?;

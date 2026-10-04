@@ -33,5 +33,6 @@ pub async fn solve(ids: Vec<u32>, fetch: Fetcher, deadline: Duration) -> Result<
         .try_fold(0_u64, |sum, value| async move { Ok(sum + value) });
     timeout(deadline, work)
         .await
-        .map_err(|_| SolveError::Deadline)?
+        .ok()
+        .ok_or(SolveError::Deadline)?
 }

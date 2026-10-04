@@ -2267,11 +2267,12 @@ mod tests {
                 .env_remove("GIT_INDEX_FILE")
                 .output()?;
             if !output.status.success() {
-                return Err(format!(
-                    "git {args:?}: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                )
-                .into());
+                let refusal: Result<String, Box<dyn std::error::Error>> =
+                    Err(
+                        format!("git {args:?}: {}", String::from_utf8_lossy(&output.stderr)).into(),
+                    );
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "git: returning an error to the caller");
+                return refusal;
             }
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
         }
@@ -2283,10 +2284,15 @@ mod tests {
         }
 
         fn new(name: &str) -> Result<Self, Box<dyn std::error::Error>> {
-            let root = std::env::temp_dir().join(format!(
-                "lgwks-deps-binding-{name}-{}",
-                std::process::id()
-            ));
+            // Nanos plus a counter, never a process id: the OS reuses pids, and a
+            // reused id would make two runs share one repository.
+            static SCRATCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let unique = SCRATCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos();
+            let root =
+                std::env::temp_dir().join(format!("lgwks-deps-binding-{name}-{nanos}-{unique}"));
             std::fs::create_dir_all(root.join("tests"))?;
             let scratch = Self { root };
             scratch.git(&["init", "--quiet", "--initial-branch=main"])?;
@@ -2379,13 +2385,19 @@ mod tests {
         )?;
         let uncommitted = scratch.audit(&observed)?;
         assert!(
-            matches!(only_gap(&uncommitted), Some(EvidenceGap::EnforcerChanged { .. })),
+            matches!(
+                only_gap(&uncommitted),
+                Some(EvidenceGap::EnforcerChanged { .. })
+            ),
             "an uncommitted edit counts: {:?}",
             uncommitted.refusals()
         );
         scratch.commit("edit committed")?;
         let committed = scratch.audit(&observed)?;
-        assert!(matches!(only_gap(&committed), Some(EvidenceGap::EnforcerChanged { .. })));
+        assert!(matches!(
+            only_gap(&committed),
+            Some(EvidenceGap::EnforcerChanged { .. })
+        ));
         Ok(())
     }
 

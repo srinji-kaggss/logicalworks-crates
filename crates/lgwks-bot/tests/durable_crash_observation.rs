@@ -673,7 +673,9 @@ fn a_verdict_is_revised_by_a_later_verification_after_a_reopen() -> TestResult {
         "the later verdict is the recovered one"
     );
     assert_eq!(
-        recovered.verification(this_key).map(|found| found.predicate_version()),
+        recovered
+            .verification(this_key)
+            .map(|found| found.predicate_version()),
         Some(2),
         "and it says which predicate version decided it"
     );
@@ -683,7 +685,10 @@ fn a_verdict_is_revised_by_a_later_verification_after_a_reopen() -> TestResult {
         .ok_or("a recovered attempt has a history")?;
     assert_eq!(
         (last.from(), last.to()),
-        (Some(AttemptStatus::Verified), AttemptStatus::VerificationFailed),
+        (
+            Some(AttemptStatus::Verified),
+            AttemptStatus::VerificationFailed
+        ),
         "the history names what the verdict superseded"
     );
     assert_eq!(recovered.uncertain().len(), 0);

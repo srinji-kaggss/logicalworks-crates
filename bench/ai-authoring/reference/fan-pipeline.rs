@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use ai_task_support::{Published, Stage, StageName};
+use ai_task_support::{Published, Stage, StageError, StageName};
 use lgwks_bot::rt::time;
 use lgwks_bot::script::{FanOut, FanOutError};
 
@@ -17,13 +17,21 @@ pub enum PipelineError {
     Cancelled,
 }
 
+/// The stage a failed run names. `StageError` has one shape; matching it keeps the
+/// error read rather than discarded.
+fn failed_stage(error: StageError) -> StageName {
+    match error {
+        StageError::Stage { name } => name,
+    }
+}
+
 pub async fn solve(stage: Stage, deadline: Duration) -> Result<Published, PipelineError> {
     let pipeline = async {
         FanOut::new([StageName::FetchA, StageName::FetchB])
             .at_most(2)
             .run(|name| {
                 let stage = stage.clone();
-                async move { stage.run(name).await.map_err(|_| name) }
+                async move { stage.run(name).await.map_err(failed_stage) }
             })
             .await
             .map_err(|error| match error {
@@ -33,11 +41,11 @@ pub async fn solve(stage: Stage, deadline: Duration) -> Result<Published, Pipeli
         stage
             .run(StageName::Combine)
             .await
-            .map_err(|_| PipelineError::Stage { name: StageName::Combine })?;
+            .map_err(|error| PipelineError::Stage { name: failed_stage(error) })?;
         let artifact = stage
             .run(StageName::Publish)
             .await
-            .map_err(|_| PipelineError::Stage { name: StageName::Publish })?;
+            .map_err(|error| PipelineError::Stage { name: failed_stage(error) })?;
         Ok(Published::from(artifact))
     };
     match time::timeout(deadline, pipeline).await {

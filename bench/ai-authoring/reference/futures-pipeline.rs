@@ -35,5 +35,6 @@ pub async fn solve(stage: Stage, deadline: Duration) -> Result<Published, Pipeli
     };
     timeout(deadline, work)
         .await
-        .map_err(|_| PipelineError::Deadline)?
+        .ok()
+        .ok_or(PipelineError::Deadline)?
 }

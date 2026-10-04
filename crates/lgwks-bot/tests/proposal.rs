@@ -724,7 +724,12 @@ fn concurrent_writers_of_one_key_commit_exactly_once_per_tenant() -> TestResult 
                 let tenant = if index % 2 == 0 { TENANT } else { OTHER_TENANT };
                 scope.spawn(move || {
                     barrier.wait();
-                    (tenant, store.write(tenant, bytes).map_err(|error| error.to_string()))
+                    (
+                        tenant,
+                        store
+                            .write(tenant, bytes)
+                            .map_err(|error| error.to_string()),
+                    )
                 })
             })
             .collect::<Vec<_>>();

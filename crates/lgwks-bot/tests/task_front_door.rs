@@ -929,9 +929,7 @@ fn an_overflowing_trail_still_reports_the_terminal_failure() -> TestResult {
         "an overflowing trail does not hide the failure"
     );
     assert!(report.output().is_none(), "a failed run has no output");
-    let error = report
-        .error()
-        .ok_or("a failed run must carry its error")?;
+    let error = report.error().ok_or("a failed run must carry its error")?;
     assert!(
         error.at().ends_with(&format!("page#{FAILING}")),
         "the error is located at the failing item, not at the end of the trail: {}",
