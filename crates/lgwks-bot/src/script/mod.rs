@@ -20,6 +20,7 @@
 //! | Block | Primitive | What it rules out |
 //! |---|---|---|
 //! | `each x in xs, at most N at once:` | [`each`] | unbounded fan-out; lost results; orphaned siblings after a failure |
+//! | `FanOut::new(xs).at_most(N).within(d).run(body)` | [`FanOut`] | the same, with no scope to open and your own error type back, with the failing item's position |
 //! | `within 2s:` | [`within`] | a wait with no deadline; a wait that ignores cancellation |
 //! | `retry up to 3 times, waiting 100ms:` | [`retry`] | retry storms; retrying a permanent failure; a new identity per attempt |
 //! | `together:` | `try_join!` | sequential awaits that should overlap; a failed branch that keeps running |
@@ -81,6 +82,7 @@ mod admit;
 mod control;
 mod each;
 mod error;
+mod fan_out;
 mod map;
 mod policy;
 mod ready;
@@ -103,6 +105,7 @@ pub use admit::{
 pub use control::{at_most, attempts, retry, within, within_on};
 pub use each::each;
 pub use error::{FlowError, OptionExt, ResultExt};
+pub use fan_out::{FanOut, FanOutError};
 pub use map::{Architecture, FlowShape, StepKind, StepShape};
 pub use ready::{
     FailAfterReady, Generation, MAX_DEPENDANTS, MAX_NAME_BYTES, Readiness, ReadinessError, Ready,
