@@ -429,7 +429,7 @@ impl ReviewComment {
         self.line
     }
 
-    /// The comment body.
+    /// The text a reviewer wrote, as GitHub returned it, with no trimming or marker stripping applied.
     #[must_use]
     pub fn body(&self) -> &str {
         &self.body
@@ -469,7 +469,7 @@ impl ChangedFile {
         &self.filename
     }
 
-    /// The change status.
+    /// GitHub's own status word for this file in the diff, such as added, modified, removed or renamed, passed through verbatim.
     #[must_use]
     pub fn status(&self) -> &str {
         &self.status
@@ -523,7 +523,7 @@ impl PullDiff {
         self.number
     }
 
-    /// The changed files.
+    /// Every file the pull request touches, in the order GitHub listed them, each with its status and line counts.
     #[must_use]
     pub fn files(&self) -> &[ChangedFile] {
         &self.files
@@ -692,7 +692,7 @@ pub struct PullRequest {
 }
 
 impl PullRequest {
-    /// The repository this names.
+    /// Which repository, as owner and name, the pull request number below belongs to.
     #[must_use]
     pub const fn repository(&self) -> &Repository {
         &self.repository
@@ -757,7 +757,7 @@ impl ReviewPayload {
         &self.commit_id
     }
 
-    /// The review event.
+    /// GitHub's review verdict word that will be submitted with the payload: COMMENT, APPROVE or REQUEST_CHANGES.
     #[must_use]
     pub fn event(&self) -> &str {
         &self.event
@@ -785,7 +785,7 @@ impl ReviewPayload {
         }
     }
 
-    /// The application marker.
+    /// The hidden trailer text that a read-back searches for, so a later run can locate this review again.
     #[must_use]
     pub fn marker(&self) -> &str {
         &self.marker

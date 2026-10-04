@@ -433,7 +433,6 @@ impl Response {
     ///     }
     /// }
     /// ```
-    #[must_use]
     pub fn header_values(&self) -> impl ExactSizeIterator<Item = (&str, &[u8])> {
         self.header_bytes
             .iter()

@@ -601,10 +601,10 @@ pub(crate) fn derive_run(tenant: &str, key: &RequestKey) -> Result<RunId, Reques
 /// digest is, which cannot happen for a record this crate wrote and is refused
 /// rather than truncated.
 pub(crate) fn digest_of_record(bytes: &[u8]) -> Result<InputDigest, RequestError> {
-    let raw: [u8; 32] = bytes.try_into().map_err(|_| {
-        RequestError::Record(FlowError::failed(
-            "the request receipt is not a 32-byte input digest",
-        ))
+    let raw: [u8; 32] = bytes.try_into().map_err(|error| {
+        RequestError::Record(FlowError::failed(format!(
+            "the request receipt is not a 32-byte input digest: {error}"
+        )))
     })?;
     Ok(InputDigest::from_bytes(raw))
 }

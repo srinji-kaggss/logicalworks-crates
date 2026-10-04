@@ -328,6 +328,104 @@ fn resolve_ambiguous_tail(
     Ok(ScanStop::Torn(offset))
 }
 
+/// A whole, decodable frame read from a journal file.
+struct Whole {
+    /// The event the payload decoded to.
+    event: EffectEvent,
+    /// The chain head the frame recorded for itself.
+    head: [u8; HEAD_BYTES],
+    /// The payload length the frame declared.
+    payload_len: usize,
+}
+
+/// Why a frame read halted the scan, before the offset it halted at is known.
+#[derive(Clone, Copy)]
+enum Halt {
+    /// A clean end of file.
+    Complete,
+    /// An interrupted length prefix or head.
+    Torn,
+    /// A payload that ran past the end of the file, declaring this length.
+    Ambiguous(usize),
+}
+
+impl Halt {
+    /// The stop this halt is once the offset of the frame being read is known.
+    const fn at(self, offset: u64) -> ScanStop {
+        match self {
+            Self::Complete => ScanStop::Complete(offset),
+            Self::Torn => ScanStop::Torn(offset),
+            Self::Ambiguous(declared_len) => ScanStop::AmbiguousTail {
+                offset,
+                declared_len,
+            },
+        }
+    }
+}
+
+/// Read the frame at ordinal `index`, with `held` entries already read.
+///
+/// A complete prefix naming a frame this journal never writes is not a torn
+/// append: a write leaves only a prefix of its bytes, so the length a writer
+/// did complete is the length it intended, and that is always a frame this
+/// journal writes. It is refused, never trimmed, because the bytes after it may
+/// be acknowledged. A declared payload that runs past the end of the file is
+/// left to `resolve_ambiguous_tail`, which decides on the frame's own stored
+/// head and never by trusting the prefix.
+fn next_frame(
+    reader: &mut impl Read,
+    held: usize,
+    max_events: usize,
+    index: u64,
+) -> Result<Result<Whole, Halt>, JournalError> {
+    let mut prefix = [0u8; LENGTH_BYTES];
+    match super::frame::read_prefix(reader, &mut prefix).map_err(JournalError::Storage)? {
+        Prefix::Eof => return Ok(Err(Halt::Complete)),
+        Prefix::Torn => return Ok(Err(Halt::Torn)),
+        Prefix::Full => {
+            let requested = u64::try_from(held).unwrap_or(u64::MAX).saturating_add(1);
+            if requested > u64::try_from(max_events).unwrap_or(u64::MAX) {
+                let refusal = Err(JournalError::CapacityExceeded {
+                    resource: JournalLimitKind::Events,
+                    limit: u64::try_from(max_events).unwrap_or(u64::MAX),
+                    requested,
+                });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "next_frame: the file holds more events than the ceiling");
+                return refusal;
+            }
+        }
+    }
+    let payload_len = super::frame::declared_length(&prefix);
+    if !super::frame::is_possible_length(payload_len, MAX_FRAME_BYTES) {
+        let refusal = Err(JournalError::Corrupt(Box::new(Corruption::new(
+            index,
+            CorruptionKind::Framed,
+        ))));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), payload_len, "next_frame: the declared length is one this journal never writes");
+        return refusal;
+    }
+    let mut payload = vec![0u8; payload_len];
+    if let FramePiece::Interrupted = read_exact_classified(reader, &mut payload)? {
+        return Ok(Err(Halt::Ambiguous(payload_len)));
+    }
+    let mut head = [0u8; HEAD_BYTES];
+    if let FramePiece::Interrupted = read_exact_classified(reader, &mut head)? {
+        return Ok(Err(Halt::Torn));
+    }
+    let event = from_bytes::<EffectEvent, WireError>(&payload).map_err(|error| {
+        lgwks_std::trace::debug!(?error, index, "next_frame: the payload did not decode");
+        JournalError::Corrupt(Box::new(Corruption::new(
+            index,
+            CorruptionKind::Undecodable,
+        )))
+    })?;
+    Ok(Ok(Whole {
+        event,
+        head,
+        payload_len,
+    }))
+}
+
 /// Read frames from `reader`, stopping at the first torn frame.
 ///
 /// Returns the decoded entries, or the corruption that refuses the file.
@@ -343,64 +441,14 @@ fn scan(
     let mut offset = 0u64;
     let mut index = 0u64;
     loop {
-        let mut prefix = [0u8; LENGTH_BYTES];
-        match super::frame::read_prefix(reader, &mut prefix).map_err(JournalError::Storage)? {
-            Prefix::Eof => return Ok((entries, ScanStop::Complete(offset))),
-            Prefix::Torn => return Ok((entries, ScanStop::Torn(offset))),
-            Prefix::Full => {
-                let requested = u64::try_from(entries.len())
-                    .unwrap_or(u64::MAX)
-                    .saturating_add(1);
-                if requested > u64::try_from(max_events).unwrap_or(u64::MAX) {
-                    let refusal = Err(JournalError::CapacityExceeded {
-                        resource: JournalLimitKind::Events,
-                        limit: u64::try_from(max_events).unwrap_or(u64::MAX),
-                        requested,
-                    });
-                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "scan: returning an error to the caller");
-                    return refusal;
-                }
-            }
-        }
-        let payload_len = super::frame::declared_length(&prefix);
-        if !super::frame::is_possible_length(payload_len, MAX_FRAME_BYTES) {
-            // A complete prefix that names an impossible frame is not a torn
-            // append: a write leaves only a prefix of its bytes, so the
-            // length a writer did complete is the length it intended, and
-            // that is always a frame this journal writes. Refuse, never
-            // trim: the bytes after this point may be acknowledged.
-            let refusal = Err(JournalError::Corrupt(Box::new(Corruption::new(
-                index,
-                CorruptionKind::Framed,
-            ))));
-            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "scan: returning an error to the caller");
-            return refusal;
-        }
-        let mut payload = vec![0u8; payload_len];
-        if let FramePiece::Interrupted = read_exact_classified(reader, &mut payload)? {
-            // The declared payload ran past the end of the file. Whether that
-            // is an interrupted append or a lying length is decided in
-            // `resolve_ambiguous_tail`, on the frame's own stored head — not
-            // here, and never by trusting the prefix.
-            return Ok((
-                entries,
-                ScanStop::AmbiguousTail {
-                    offset,
-                    declared_len: payload_len,
-                },
-            ));
-        }
-        let mut head = [0u8; HEAD_BYTES];
-        if let FramePiece::Interrupted = read_exact_classified(reader, &mut head)? {
-            return Ok((entries, ScanStop::Torn(offset)));
-        }
-
-        let event: EffectEvent = from_bytes::<EffectEvent, WireError>(&payload).map_err(|_| {
-            JournalError::Corrupt(Box::new(Corruption::new(
-                index,
-                CorruptionKind::Undecodable,
-            )))
-        })?;
+        let Whole {
+            event,
+            head,
+            payload_len,
+        } = match next_frame(reader, entries.len(), max_events, index)? {
+            Ok(whole) => whole,
+            Err(halt) => return Ok((entries, halt.at(offset))),
+        };
         let head_digest = chain(position, &event)?;
         let recomputed = JournalPosition {
             sequence: position.sequence().saturating_add(1),
@@ -1483,14 +1531,21 @@ pub(super) mod tests {
     }
 
     fn key() -> Result<crate::effect::EffectKey, Box<dyn std::error::Error>> {
+        let run = RunId::from_hex(RUN)?;
+        let action = ActionId::from_hex(ACTION)?;
+        let attempt = AttemptId::from_decimal("1")?;
+        let flow = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
+        let digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
+        let environment = EnvironmentId::from_hex(ENV)?;
+        let epoch = EnvironmentEpoch::from_decimal("1")?;
         Ok(crate::effect::EffectKey::new(
-            RunId::from_hex(RUN)?,
-            ActionId::from_hex(ACTION)?,
-            AttemptId::from_decimal("1")?,
-            FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-            ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
-            EnvironmentId::from_hex(ENV)?,
-            EnvironmentEpoch::from_decimal("1")?,
+            run,
+            action,
+            attempt,
+            flow,
+            digest,
+            environment,
+            epoch,
         ))
     }
 
@@ -1603,27 +1658,41 @@ pub(super) mod tests {
     /// A key for attempt `n`, so a frame count can be built without
     /// tripping the ladder's one-climb-per-key rule.
     fn attempt_key(n: u64) -> Result<crate::effect::EffectKey, Box<dyn std::error::Error>> {
+        let run = RunId::from_hex(RUN)?;
+        let action = ActionId::from_hex(ACTION)?;
+        let attempt = AttemptId::from_decimal(&n.to_string())?;
+        let flow = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
+        let digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
+        let environment = EnvironmentId::from_hex(ENV)?;
+        let epoch = EnvironmentEpoch::from_decimal("1")?;
         Ok(crate::effect::EffectKey::new(
-            RunId::from_hex(RUN)?,
-            ActionId::from_hex(ACTION)?,
-            AttemptId::from_decimal(&n.to_string())?,
-            FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-            ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
-            EnvironmentId::from_hex(ENV)?,
-            EnvironmentEpoch::from_decimal("1")?,
+            run,
+            action,
+            attempt,
+            flow,
+            digest,
+            environment,
+            epoch,
         ))
     }
 
     /// A second key, so a batch can fail on its own rung.
     fn key2() -> Result<crate::effect::EffectKey, Box<dyn std::error::Error>> {
+        let run = RunId::from_hex(RUN)?;
+        let action = ActionId::from_hex(ACTION)?;
+        let attempt = AttemptId::from_decimal("7")?;
+        let flow = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
+        let digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
+        let environment = EnvironmentId::from_hex(ENV)?;
+        let epoch = EnvironmentEpoch::from_decimal("1")?;
         Ok(crate::effect::EffectKey::new(
-            RunId::from_hex(RUN)?,
-            ActionId::from_hex(ACTION)?,
-            AttemptId::from_decimal("7")?,
-            FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-            ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
-            EnvironmentId::from_hex(ENV)?,
-            EnvironmentEpoch::from_decimal("1")?,
+            run,
+            action,
+            attempt,
+            flow,
+            digest,
+            environment,
+            epoch,
         ))
     }
 

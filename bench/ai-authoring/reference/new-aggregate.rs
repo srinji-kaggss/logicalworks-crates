@@ -18,8 +18,14 @@ pub enum SolveError {
     Cancelled,
 }
 
+/// The caller's cancellation, naming why the tenant could not be opened.
+fn cancelled(cause: impl std::fmt::Debug) -> SolveError {
+    ai_task_support::diagnostic(format_args!("the aggregate tenant was refused: {cause:?}"));
+    SolveError::Cancelled
+}
+
 pub async fn solve(ids: Vec<u32>, fetch: Fetcher, deadline: Duration) -> Result<u64, SolveError> {
-    let tenant = Tenant::new("aggregate").map_err(|_| SolveError::Cancelled)?;
+    let tenant = Tenant::new("aggregate").map_err(cancelled)?;
     let outer_scope = Scope::root(tenant);
     let bound = NonZeroUsize::new(4).ok_or(SolveError::Cancelled)?;
     let failed: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));

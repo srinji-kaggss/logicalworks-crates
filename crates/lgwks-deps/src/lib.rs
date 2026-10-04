@@ -1414,7 +1414,7 @@ pub struct Verdict {
 }
 
 impl Verdict {
-    /// The parsed register.
+    /// The approved-dependency register this verdict was judged against, as parsed from `contract/APPROVED.toml`.
     #[must_use]
     pub fn register(&self) -> &Contract {
         &self.register

@@ -18,8 +18,14 @@ pub enum PipelineError {
     Cancelled,
 }
 
+/// The caller's cancellation, naming why the tenant could not be opened.
+fn cancelled(cause: impl std::fmt::Debug) -> PipelineError {
+    ai_task_support::diagnostic(format_args!("the pipeline tenant was refused: {cause:?}"));
+    PipelineError::Cancelled
+}
+
 pub async fn solve(stage: Stage, deadline: Duration) -> Result<Published, PipelineError> {
-    let tenant = Tenant::new("pipeline").map_err(|_| PipelineError::Cancelled)?;
+    let tenant = Tenant::new("pipeline").map_err(cancelled)?;
     let outer_scope = Scope::root(tenant);
     let bound = NonZeroUsize::new(2).ok_or(PipelineError::Cancelled)?;
     let failed: Arc<Mutex<Option<StageName>>> = Arc::new(Mutex::new(None));
@@ -58,11 +64,11 @@ pub async fn solve(stage: Stage, deadline: Duration) -> Result<Published, Pipeli
         stage_for_await
             .run(StageName::Combine)
             .await
-            .map_err(|_| FlowError::failed("combine"))?;
+            .map_err(|error| FlowError::failed(format!("combine: {error}")))?;
         let published = stage_for_await
             .run(StageName::Publish)
             .await
-            .map_err(|_| FlowError::failed("publish"))?;
+            .map_err(|error| FlowError::failed(format!("publish: {error}")))?;
         Ok(Published::from(published))
     })
     .await;

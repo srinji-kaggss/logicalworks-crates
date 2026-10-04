@@ -48,6 +48,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use lgwks_bot::effect::RunId;
 use lgwks_bot::script::{FlowError, Scope, remember};
 use lgwks_bot::task::{Disposition, Host, RunStore, Task, task};
 
@@ -166,75 +167,145 @@ fn host(tenant: &str, dir: &Path) -> Result<Host, Box<dyn Error>> {
     Ok(Host::builder(tenant)?.run_store(dir)?.build()?)
 }
 
+/// Crash a fresh run at one boundary, then resume that run to the uninterrupted output.
+fn crash_then_resume(
+    store_dir: &Path,
+    crash_at: usize,
+    steps: usize,
+    expected: &Outcome,
+) -> TestResult {
+    let crashed_host = host("sim", store_dir)?;
+    let report = lgwks_bot::block_on(crashed_host.run(&work_task()?, (crash_at, steps)));
+    assert_eq!(
+        report.disposition(),
+        Disposition::Cancelled,
+        "a run stopped at a step boundary reports Cancelled"
+    );
+    assert!(
+        report.output().is_none(),
+        "a stopped run has no output to hand back"
+    );
+    let crashed_run = report.run_id().ok_or("a stored run must name a run id")?;
+    let recorded = crashed_host
+        .run_store()
+        .ok_or("a stored host keeps a store")?
+        .record_count(crashed_run);
+    assert_eq!(
+        recorded, crash_at,
+        "crash at {crash_at} records exactly the steps before it"
+    );
+
+    // Resume that same run with no crash: the interrupted step runs once,
+    // and the full output comes back.
+    let resumed = lgwks_bot::block_on(host("sim", store_dir)?.resume(
+        crashed_run,
+        &work_task()?,
+        (steps, steps),
+    ));
+    assert_eq!(
+        resumed.output(),
+        Some(expected),
+        "the resumed run must equal the uninterrupted output, got {:?} err {:?}",
+        resumed.output(),
+        resumed.error()
+    );
+    assert_eq!(
+        resumed.disposition(),
+        Disposition::Succeeded,
+        "the resume must succeed"
+    );
+    Ok(())
+}
+
+/// One seed of the crash sweep: a full run, then a crash and resume at every boundary.
+fn crash_seed(rng: &mut Rng) -> TestResult {
+    let steps = usize::try_from(rng.between(2, MAX_STEPS)).unwrap_or(2);
+    let scratch = Scratch::new("sim-crash")?;
+    let store_dir = scratch.path().join("store");
+    let expected = uninterrupted(steps);
+
+    // One full run establishes the records a resume would find.
+    let seeded = lgwks_bot::block_on(host("sim", &store_dir)?.run(&work_task()?, (steps, steps)));
+    let run = seeded.run_id().ok_or("a stored run must name a run id")?;
+    assert_eq!(
+        seeded.output(),
+        Some(&expected),
+        "the uninterrupted run must reach its output"
+    );
+
+    // A fresh run under every crash boundary in turn. The steps before the
+    // boundary commit and the step at the boundary does not, so the resume
+    // starts exactly where the first attempt stopped. Each crashed run has a
+    // fresh run id (its own store record set), and its own resume reaches the
+    // uninterrupted output.
+    for crash_at in 0..steps {
+        crash_then_resume(&store_dir, crash_at, steps, &expected)?;
+    }
+    // And the seeded run, never crashed, still resumes to the same output.
+    let _ = run;
+    Ok(())
+}
+
 /// Every crash point at every step boundary resumes to the uninterrupted output.
 fn crash_points_resume_to_the_same_output(band: Band) -> TestResult {
     let mut rng = Rng::new(band.first);
     for _ in band.seeds() {
-        let steps = usize::try_from(rng.between(2, MAX_STEPS)).unwrap_or(2);
-        let scratch = Scratch::new("sim-crash")?;
-        let store_dir = scratch.path().join("store");
-        let expected = uninterrupted(steps);
-
-        // One full run establishes the records a resume would find.
-        let seeded =
-            lgwks_bot::block_on(host("sim", &store_dir)?.run(&work_task()?, (steps, steps)));
-        let run = seeded.run_id().ok_or("a stored run must name a run id")?;
-        assert_eq!(
-            seeded.output(),
-            Some(&expected),
-            "the uninterrupted run must reach its output"
-        );
-
-        // A fresh run under every crash boundary in turn. The steps before the
-        // boundary commit and the step at the boundary does not, so the resume
-        // starts exactly where the first attempt stopped. Each crashed run has a
-        // fresh run id (its own store record set), and its own resume reaches the
-        // uninterrupted output.
-        for crash_at in 0..steps {
-            let crashed_host = host("sim", &store_dir)?;
-            let report = lgwks_bot::block_on(crashed_host.run(&work_task()?, (crash_at, steps)));
-            assert_eq!(
-                report.disposition(),
-                Disposition::Cancelled,
-                "a run stopped at a step boundary reports Cancelled"
-            );
-            assert!(
-                report.output().is_none(),
-                "a stopped run has no output to hand back"
-            );
-            let crashed_run = report.run_id().ok_or("a stored run must name a run id")?;
-            let recorded = crashed_host
-                .run_store()
-                .ok_or("a stored host keeps a store")?
-                .record_count(crashed_run);
-            assert_eq!(
-                recorded, crash_at,
-                "crash at {crash_at} records exactly the steps before it"
-            );
-
-            // Resume that same run with no crash: the interrupted step runs once,
-            // and the full output comes back.
-            let resumed = lgwks_bot::block_on(host("sim", &store_dir)?.resume(
-                crashed_run,
-                &work_task()?,
-                (steps, steps),
-            ));
-            assert_eq!(
-                resumed.output(),
-                Some(&expected),
-                "the resumed run must equal the uninterrupted output, got {:?} err {:?}",
-                resumed.output(),
-                resumed.error()
-            );
-            assert_eq!(
-                resumed.disposition(),
-                Disposition::Succeeded,
-                "the resume must succeed"
-            );
-        }
-        // And the seeded run, never crashed, still resumes to the same output.
-        let _ = run;
+        crash_seed(&mut rng)?;
     }
+    Ok(())
+}
+
+/// One seed of the run-once check: crash at a drawn boundary, resume, and count each step.
+fn once_per_seed(rng: &mut Rng) -> TestResult {
+    let steps = usize::try_from(rng.between(2, MAX_STEPS)).unwrap_or(2);
+    let crash_at =
+        usize::try_from(rng.below(u32::try_from(steps).unwrap_or(1))).unwrap_or_default();
+    let scratch = Scratch::new("sim-once")?;
+    let store_dir = scratch.path().join("store");
+    let host = host("sim", &store_dir)?;
+
+    // The first attempt dies at the boundary; the resume completes it. The
+    // interrupted step must run exactly once more, and no committed step a
+    // second time.
+    let stopped = lgwks_bot::block_on(host.run(&work_task()?, (crash_at, steps)));
+    assert_eq!(
+        stopped.disposition(),
+        Disposition::Cancelled,
+        "seed {}: a run stopped at a boundary reports Cancelled",
+        rng.below(u32::MAX)
+    );
+    let run = stopped.run_id().ok_or("a stored run must name a run id")?;
+    let recorded = host
+        .run_store()
+        .ok_or("a stored host keeps a store")?
+        .record_count(run);
+    assert_eq!(
+        recorded,
+        crash_at,
+        "seed {}: exactly the steps before the boundary are on the disk",
+        rng.below(u32::MAX)
+    );
+
+    let resumed = lgwks_bot::block_on(host.resume(run, &work_task()?, (steps, steps)));
+    let outcome = resumed.output().ok_or("the resume must succeed")?;
+    assert_eq!(
+        resumed.disposition(),
+        Disposition::Succeeded,
+        "the resume must succeed"
+    );
+    assert_eq!(
+        outcome.ran,
+        (0..steps)
+            .map(|index| u32::try_from(index).unwrap_or_default())
+            .collect::<Vec<_>>(),
+        "seed {}: each step contributes exactly once over the whole life of the run",
+        rng.below(u32::MAX)
+    );
+    assert_eq!(
+        outcome.total,
+        uninterrupted(steps).total,
+        "the resumed total must equal the uninterrupted one"
+    );
     Ok(())
 }
 
@@ -242,56 +313,92 @@ fn crash_points_resume_to_the_same_output(band: Band) -> TestResult {
 fn finished_steps_run_once(band: Band) -> TestResult {
     let mut rng = Rng::new(band.first);
     for _ in band.seeds() {
-        let steps = usize::try_from(rng.between(2, MAX_STEPS)).unwrap_or(2);
-        let crash_at =
-            usize::try_from(rng.below(u32::try_from(steps).unwrap_or(1))).unwrap_or_default();
-        let scratch = Scratch::new("sim-once")?;
-        let store_dir = scratch.path().join("store");
-        let host = host("sim", &store_dir)?;
+        once_per_seed(&mut rng)?;
+    }
+    Ok(())
+}
 
-        // The first attempt dies at the boundary; the resume completes it. The
-        // interrupted step must run exactly once more, and no committed step a
-        // second time.
-        let stopped = lgwks_bot::block_on(host.run(&work_task()?, (crash_at, steps)));
+/// Offer one tenant's run id to another tenant's handle on the shared file, and check who may resume it.
+fn offer_run(
+    rng: &mut Rng,
+    shared_path: &Path,
+    steps: usize,
+    owner_name: &str,
+    run: RunId,
+    other: &(String, RunId),
+) -> TestResult {
+    let (ref asker_name, _) = *other;
+    let asker = Host::builder(asker_name)?
+        .store(RunStore::open(shared_path)?)
+        .build()?;
+    if asker_name == owner_name {
         assert_eq!(
-            stopped.disposition(),
-            Disposition::Cancelled,
-            "seed {}: a run stopped at a boundary reports Cancelled",
-            rng.below(u32::MAX)
+            asker
+                .run_store()
+                .ok_or("a stored host keeps a store")?
+                .tenant_of(run)
+                .as_deref(),
+            Some(asker_name.as_str()),
+            "the owner must attribute its own run to itself"
         );
-        let run = stopped.run_id().ok_or("a stored run must name a run id")?;
-        let recorded = host
-            .run_store()
-            .ok_or("a stored host keeps a store")?
-            .record_count(run);
         assert_eq!(
-            recorded,
-            crash_at,
-            "seed {}: exactly the steps before the boundary are on the disk",
-            rng.below(u32::MAX)
-        );
-
-        let resumed = lgwks_bot::block_on(host.resume(run, &work_task()?, (steps, steps)));
-        let outcome = resumed.output().ok_or("the resume must succeed")?;
-        assert_eq!(
-            resumed.disposition(),
+            lgwks_bot::block_on(asker.resume(run, &work_task()?, (steps, steps))).disposition(),
             Disposition::Succeeded,
-            "the resume must succeed"
+            "the owner must be able to resume its own run"
         );
+    } else {
+        let foreign = lgwks_bot::block_on(asker.resume(run, &work_task()?, (steps, steps)));
         assert_eq!(
-            outcome.ran,
-            (0..steps)
-                .map(|index| u32::try_from(index).unwrap_or_default())
-                .collect::<Vec<_>>(),
-            "seed {}: each step contributes exactly once over the whole life of the run",
+            foreign.disposition(),
+            Disposition::Refused,
+            "seed {}: {asker_name} must be refused {owner_name}'s run",
             rng.below(u32::MAX)
         );
         assert_eq!(
-            outcome.total,
-            uninterrupted(steps).total,
-            "the resumed total must equal the uninterrupted one"
+            asker
+                .run_store()
+                .ok_or("a store keeps a handle")?
+                .record_count(run),
+            steps,
+            "seed {}: a refused resume leaves {owner_name}'s records exactly as they \
+             were — it neither reads them nor adds to them",
+            rng.below(u32::MAX)
         );
     }
+    Ok(())
+}
+
+/// One tenant installs a handle on the shared file, runs, and records its run id.
+fn tenant_runs_alone(
+    rng: &mut Rng,
+    shared_path: &Path,
+    steps: usize,
+    expected: &Outcome,
+    index: usize,
+    runs: &mut Vec<(String, RunId)>,
+) -> TestResult {
+    let name = format!("tenant-{index}");
+    let owned = Host::builder(&name)?
+        .store(RunStore::open(shared_path)?)
+        .build()?;
+    let report = lgwks_bot::block_on(owned.run(&work_task()?, (steps, steps)));
+    assert_eq!(
+        report.output(),
+        Some(expected),
+        "seed {}: tenant {name} must reach its own output",
+        rng.below(u32::MAX)
+    );
+    let run = report.run_id().ok_or("a stored run must name a run id")?;
+    assert_eq!(
+        owned
+            .run_store()
+            .ok_or("a stored host keeps a store")?
+            .record_count(run),
+        steps,
+        "seed {}: tenant {name} records every step",
+        rng.below(u32::MAX)
+    );
+    runs.push((name, run));
     Ok(())
 }
 
@@ -313,28 +420,7 @@ fn tenants_stay_isolated(band: Band) -> TestResult {
         // Every tenant installs a handle on the *same* file.
         let mut runs = Vec::new();
         for index in 0..tenants {
-            let name = format!("tenant-{index}");
-            let owned = Host::builder(&name)?
-                .store(RunStore::open(&shared_path)?)
-                .build()?;
-            let report = lgwks_bot::block_on(owned.run(&work_task()?, (steps, steps)));
-            assert_eq!(
-                report.output(),
-                Some(&expected),
-                "seed {}: tenant {name} must reach its own output",
-                rng.below(u32::MAX)
-            );
-            let run = report.run_id().ok_or("a stored run must name a run id")?;
-            assert_eq!(
-                owned
-                    .run_store()
-                    .ok_or("a stored host keeps a store")?
-                    .record_count(run),
-                steps,
-                "seed {}: tenant {name} records every step",
-                rng.below(u32::MAX)
-            );
-            runs.push((name, run));
+            tenant_runs_alone(&mut rng, &shared_path, steps, &expected, index, &mut runs)?;
         }
 
         // Every tenant's run id is offered to every tenant's handle on that one
@@ -343,46 +429,7 @@ fn tenants_stay_isolated(band: Band) -> TestResult {
         for entry in &runs {
             let (ref owner_name, run) = *entry;
             for other in &runs {
-                let (ref asker_name, _) = *other;
-                let asker = Host::builder(asker_name)?
-                    .store(RunStore::open(&shared_path)?)
-                    .build()?;
-                if asker_name == owner_name {
-                    assert_eq!(
-                        asker
-                            .run_store()
-                            .ok_or("a stored host keeps a store")?
-                            .tenant_of(run)
-                            .as_deref(),
-                        Some(asker_name.as_str()),
-                        "the owner must attribute its own run to itself"
-                    );
-                    assert_eq!(
-                        lgwks_bot::block_on(asker.resume(run, &work_task()?, (steps, steps)))
-                            .disposition(),
-                        Disposition::Succeeded,
-                        "the owner must be able to resume its own run"
-                    );
-                } else {
-                    let foreign =
-                        lgwks_bot::block_on(asker.resume(run, &work_task()?, (steps, steps)));
-                    assert_eq!(
-                        foreign.disposition(),
-                        Disposition::Refused,
-                        "seed {}: {asker_name} must be refused {owner_name}'s run",
-                        rng.below(u32::MAX)
-                    );
-                    assert_eq!(
-                        asker
-                            .run_store()
-                            .ok_or("a store keeps a handle")?
-                            .record_count(run),
-                        steps,
-                        "seed {}: a refused resume leaves {owner_name}'s records exactly as they \
-                         were — it neither reads them nor adds to them",
-                        rng.below(u32::MAX)
-                    );
-                }
+                offer_run(&mut rng, &shared_path, steps, owner_name, run, other)?;
             }
         }
     }

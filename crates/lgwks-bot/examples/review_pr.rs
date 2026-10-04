@@ -186,67 +186,58 @@ fn analyse(
     ))
 }
 
-/// Print one outcome, naming the fact that produced it.
-fn report_outcome(
-    out: &mut impl Write,
-    outcome: &ReviewOutcome,
-) -> Result<(), Box<dyn std::error::Error>> {
+/// The lines that name one outcome and the fact that produced it.
+fn outcome_lines(outcome: &ReviewOutcome) -> Vec<String> {
     match *outcome {
         ReviewOutcome::Published {
             review_id,
             ref commit_id,
             verified,
-        } => {
-            writeln!(
-                out,
-                "published review {review_id} at {commit_id} (verified: {verified})"
-            )?;
-            writeln!(
-                out,
-                "  the review was read back from GitHub before this was reported"
-            )?;
-        }
+        } => vec![
+            format!("published review {review_id} at {commit_id} (verified: {verified})"),
+            String::from("  the review was read back from GitHub before this was reported"),
+        ],
         ReviewOutcome::Unknown {
             ref commit_id,
             ref reason,
-        } => {
-            writeln!(
-                out,
-                "unknown: an effect at {commit_id} may or may not have landed"
-            )?;
-            writeln!(out, "  {reason}")?;
-            writeln!(
-                out,
-                "  no second review was created; reconcile before doing anything else"
-            )?;
-        }
+        } => vec![
+            format!("unknown: an effect at {commit_id} may or may not have landed"),
+            format!("  {reason}"),
+            String::from("  no second review was created; reconcile before doing anything else"),
+        ],
         ReviewOutcome::TargetMoved {
             ref reviewed,
             ref current,
-        } => {
-            writeln!(
-                out,
-                "refused: the head moved while this review was being prepared"
-            )?;
-            writeln!(out, "  reviewed: {reviewed}")?;
-            writeln!(out, "  current:  {current}")?;
-            writeln!(
-                out,
-                "  nothing was published; re-analysing at the new head is a separate decision"
-            )?;
-        }
-        ReviewOutcome::Refused { ref reason } => {
-            writeln!(out, "refused: {reason}")?;
-            writeln!(out, "  no external effect is claimed")?;
-        }
+        } => vec![
+            String::from("refused: the head moved while this review was being prepared"),
+            format!("  reviewed: {reviewed}"),
+            format!("  current:  {current}"),
+            String::from(
+                "  nothing was published; re-analysing at the new head is a separate decision",
+            ),
+        ],
+        ReviewOutcome::Refused { ref reason } => vec![
+            format!("refused: {reason}"),
+            String::from("  no external effect is claimed"),
+        ],
         // A new state the journey does not model yet. Named rather than
         // collapsed into a refusal, because "something else happened" and
         // "nothing happened" are the two answers a caller most needs to tell
         // apart.
-        ref other => {
-            writeln!(out, "unmodelled outcome: {other:?}")?;
-            writeln!(out, "  no claim is made about whether an effect happened")?;
-        }
+        ref other => vec![
+            format!("unmodelled outcome: {other:?}"),
+            String::from("  no claim is made about whether an effect happened"),
+        ],
+    }
+}
+
+/// Print one outcome, naming the fact that produced it.
+fn report_outcome(
+    out: &mut impl Write,
+    outcome: &ReviewOutcome,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for line in outcome_lines(outcome) {
+        writeln!(out, "{line}")?;
     }
     Ok(())
 }

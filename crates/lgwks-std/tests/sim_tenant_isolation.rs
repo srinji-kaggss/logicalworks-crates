@@ -28,6 +28,7 @@ use lgwks_std::retry::RetryPolicy;
 use lgwks_std::similarity::{
     CheckedEvidence, CheckedSimilarity, EditDistance, EvidenceError, EvidenceVerdict,
 };
+use std::io::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -195,7 +196,7 @@ fn answer(tenant: &TenantPolicy, scratch: &mut GlobScratch) -> TenantAnswer {
     let verdict: &EvidenceVerdict = &tenant
         .evidence
         .verdict(SHARED_INPUT, SHARED_INPUT)
-        .unwrap_or_else(|_| unreachable_verdict());
+        .unwrap_or_else(|refusal| unreachable_verdict(&refusal));
     TenantAnswer {
         matched: tenant.pattern.is_match_with(SHARED_INPUT, scratch),
         score_bits: verdict.score().map_or(0, f64::to_bits),
@@ -211,7 +212,8 @@ fn answer(tenant: &TenantPolicy, scratch: &mut GlobScratch) -> TenantAnswer {
 /// Reached only if the shared input is over budget, which the sixteen-character
 /// budget of every tenant means it never is; the answer would otherwise be a
 /// refusal, which every tenant produces identically and would not discriminate.
-fn unreachable_verdict() -> ! {
+fn unreachable_verdict(refusal: &dyn std::fmt::Debug) -> ! {
+    lgwks_std::trace::error!(?refusal, "the shared input was refused by a tenant budget");
     std::process::abort()
 }
 

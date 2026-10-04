@@ -141,7 +141,7 @@ fn append_tenant(
     }
     let held = journal.events().count();
     sink.lock()
-        .map_err(|_| "the latency sink was poisoned".to_owned())?
+        .map_err(|error| format!("the latency sink was poisoned: {error}"))?
         .push(elapsed);
     Ok(held)
 }
@@ -412,9 +412,9 @@ fn run_tier(requested: usize, ceiling: usize) -> Result<TierReport, Box<dyn Erro
     }
 
     for handle in handles {
-        let count = handle
-            .join()
-            .map_err(|_| std::io::Error::other("a tenant thread panicked"))??;
+        let count = handle.join().map_err(|panic| {
+            std::io::Error::other(format!("a tenant thread panicked: {panic:?}"))
+        })??;
         assert_eq!(
             count, EVENTS_PER_TENANT,
             "a tenant journal held another tenant's events"
@@ -423,7 +423,7 @@ fn run_tier(requested: usize, ceiling: usize) -> Result<TierReport, Box<dyn Erro
 
     let mut samples = latencies
         .lock()
-        .map_err(|_| std::io::Error::other("the latency sink was poisoned"))?
+        .map_err(|error| std::io::Error::other(format!("the latency sink was poisoned: {error}")))?
         .clone();
     samples.sort_unstable();
     let p50 = percentile(&samples, 50);

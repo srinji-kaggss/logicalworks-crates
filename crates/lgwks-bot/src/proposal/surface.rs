@@ -34,7 +34,7 @@ pub struct Operation {
 }
 
 impl Operation {
-    /// The name a proposal names this operation by.
+    /// The registry key a proposal uses to ask for this operation, unique within one surface.
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
@@ -112,7 +112,7 @@ impl Surface {
         self.held.contains(cap)
     }
 
-    /// The registered names, in name order.
+    /// Every operation key in the surface, sorted, so a listing printed twice reads identically.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.operations.keys().map(String::as_str)
     }

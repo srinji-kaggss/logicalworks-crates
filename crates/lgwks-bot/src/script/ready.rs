@@ -157,7 +157,7 @@ impl Generation {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         Self(
             COUNTER
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
                     Some(value.saturating_add(1))
                 })
                 .unwrap_or(u64::MAX),
@@ -470,7 +470,7 @@ pub struct Ready<T> {
 }
 
 impl<T> Ready<T> {
-    /// The generation that was released.
+    /// The generation this release was published for, so a dependant can tell which instance of the service its evidence came from.
     #[must_use]
     pub const fn generation(&self) -> Generation {
         self.generation
@@ -1167,12 +1167,12 @@ impl<T: Clone> Readiness<T> {
         // `MAX_DEPENDANTS` is 65 536, and a caller that asked for more than a
         // `u64` of dependants is asking for a number, not a bound.
         let cap_as_count = u64::try_from(cap).unwrap_or(u64::MAX);
-        let charged =
-            self.inner
-                .admitted
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-                    (count < cap_as_count).then_some(count.saturating_add(1))
-                });
+        let charged = self
+            .inner
+            .admitted
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                (count < cap_as_count).then_some(count.saturating_add(1))
+            });
         if charged.is_err() {
             let refusal = Err(ReadinessError::DependantsFull {
                 what: Arc::clone(&self.inner.what),

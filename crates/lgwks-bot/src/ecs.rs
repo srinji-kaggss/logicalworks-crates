@@ -4875,7 +4875,10 @@ impl EcsBot {
     ///     fn from_target(target: &str) -> Result<Source, BotError> {
     ///         match target.parse::<u16>() {
     ///             Ok(count) => Ok(Source::new(Self(count))),
-    ///             Err(_) => Err(BotError::IncompleteSpec { field: "target" }),
+    ///             Err(error) => Err(BotError::IncompleteSpec {
+    ///                 field: "target",
+    ///                 cause: error.to_string(),
+    ///             }),
     ///         }
     ///     }
     /// }

@@ -234,14 +234,20 @@ pub const ENV: &str = "2122232425262728292a2b2c2d2e2f30";
 /// trace hash exists to catch — and the takeover family in particular needs two
 /// keys that differ in the generation and in nothing else.
 fn key_as(action: ActionId, epoch: u64, n: u64) -> Result<EffectKey, Box<dyn Error>> {
+    let run = RunId::from_hex(RUN)?;
+    let attempt = AttemptId::from_decimal(&n.to_string())?;
+    let flow = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
+    let digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
+    let environment = EnvironmentId::from_hex(ENV)?;
+    let epoch = EnvironmentEpoch::from_decimal(&epoch.to_string())?;
     Ok(EffectKey::new(
-        RunId::from_hex(RUN)?,
+        run,
         action,
-        AttemptId::from_decimal(&n.to_string())?,
-        FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-        ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
-        EnvironmentId::from_hex(ENV)?,
-        EnvironmentEpoch::from_decimal(&epoch.to_string())?,
+        attempt,
+        flow,
+        digest,
+        environment,
+        epoch,
     ))
 }
 

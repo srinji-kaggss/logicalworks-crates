@@ -89,7 +89,7 @@ pub struct StubModel {
 }
 
 impl StubModel {
-    /// The model for `seed`.
+    /// Build the reference model a seed selects from its fixed table, so one seed always yields the same model.
     #[must_use]
     pub fn from_seed(seed: u64) -> Self {
         let mut state = seed ^ 0x9109_2d4d_5eed_0f11;

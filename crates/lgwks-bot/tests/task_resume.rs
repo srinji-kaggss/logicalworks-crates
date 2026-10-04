@@ -280,6 +280,42 @@ const CHILD_STORE: &str = "LGWKS_RESUME_STORE";
 const CHILD_RUN: &str = "LGWKS_RESUME_RUN";
 const CHILD_TEST: &str = "child_process_runs_the_task_and_parks";
 
+/// The child's three-step body: two recorded steps, the published run id, then a
+/// third step that parks until the parent kills the process.
+async fn three_steps(scope: Scope, dir: PathBuf, run_file: Arc<Path>) -> Result<u32, FlowError> {
+    // Alpha's and beta's markers are written *after* their `remember`
+    // returns, not inside their bodies. The parent waits on them and then
+    // kills, so a marker written inside the body would be the parent's
+    // evidence that the body started, which is not the same claim: the
+    // kill could land between the marker and the append, and the resume
+    // would then re-run a step whose record the test had already said was
+    // durable. Publishing after the await makes these markers mean what
+    // the parent needs them to mean — the record is on the disk.
+    remember(&scope, "alpha", || async { Ok::<_, FlowError>(2u32) }).await?;
+    record_run(&dir, "alpha")?;
+    // The run id is published only after `alpha`'s record was acknowledged,
+    // so the parent's wait for it is a wait for durable evidence.
+    let run = scope
+        .run()
+        .ok_or_else(|| FlowError::failed("a stored run must carry a run id"))?;
+    std::fs::write(&*run_file, run.id().to_hex()).map_err(FlowError::failed)?;
+    remember(&scope, "beta", || async { Ok::<_, FlowError>(3u32) }).await?;
+    record_run(&dir, "beta")?;
+    // Park here: this step's body starts, its record never lands, and the
+    // parent kills the process while it is outstanding. Its marker is
+    // inside the body and deliberately proves nothing about durability:
+    // that is what distinguishes it from the two steps above.
+    remember(&scope, "gamma", || async {
+        record_run(&dir, "gamma")?;
+        for _ in 0..600 {
+            pause(100);
+        }
+        Err::<u32, _>(FlowError::failed("the child was never killed"))
+    })
+    .await?;
+    Ok::<_, FlowError>(10u32)
+}
+
 /// The child body: record two steps, publish the run id, then park in the third.
 ///
 /// The parking loop is bounded, so a parent that never kills leaves a loud
@@ -290,43 +326,11 @@ fn child_body() -> TestResult {
     let run_file = PathBuf::from(std::env::var(CHILD_RUN)?);
 
     let host = Host::builder("acme")?.run_store(&store)?.build()?;
-    let run_file = Arc::new(run_file);
+    let run_file: Arc<Path> = Arc::from(run_file);
     let run_file_in = Arc::clone(&run_file);
     let body = task("three", move |scope: Scope, dir: PathBuf| {
         let run_file = Arc::clone(&run_file_in);
-        async move {
-            // Alpha's and beta's markers are written *after* their `remember`
-            // returns, not inside their bodies. The parent waits on them and then
-            // kills, so a marker written inside the body would be the parent's
-            // evidence that the body started, which is not the same claim: the
-            // kill could land between the marker and the append, and the resume
-            // would then re-run a step whose record the test had already said was
-            // durable. Publishing after the await makes these markers mean what
-            // the parent needs them to mean — the record is on the disk.
-            remember(&scope, "alpha", || async { Ok::<_, FlowError>(2u32) }).await?;
-            record_run(&dir, "alpha")?;
-            // The run id is published only after `alpha`'s record was acknowledged,
-            // so the parent's wait for it is a wait for durable evidence.
-            let run = scope
-                .run()
-                .ok_or_else(|| FlowError::failed("a stored run must carry a run id"))?;
-            std::fs::write(run_file.as_path(), run.id().to_hex()).map_err(FlowError::failed)?;
-            remember(&scope, "beta", || async { Ok::<_, FlowError>(3u32) }).await?;
-            record_run(&dir, "beta")?;
-            // Park here: this step's body starts, its record never lands, and the
-            // parent kills the process while it is outstanding. Its marker is
-            // inside the body and deliberately proves nothing about durability:
-            // that is what distinguishes it from the two steps above.
-            remember(&scope, "gamma", || async {
-                record_run(&dir, "gamma")?;
-                for _ in 0..600 {
-                    pause(100);
-                }
-                Err::<u32, _>(FlowError::failed("the child was never killed"))
-            })
-            .await?;
-            Ok::<_, FlowError>(10u32)
-        }
+        three_steps(scope, dir, run_file)
     })?;
 
     let report = lgwks_bot::block_on(host.run(&body, work));

@@ -254,6 +254,49 @@ where
 }
 /// The grammar's own tests: the round trip, the three prefix endings, the piece
 /// ending, and the two questions about a length.
+/// The bytes of one whole frame: the payload and the head that follows it.
+pub(crate) struct Raw {
+    /// The payload bytes, which the chain head is computed over.
+    pub(crate) payload: Vec<u8>,
+    /// The chain head the frame recorded for itself.
+    pub(crate) head: [u8; HEAD_BYTES],
+}
+
+/// Read the next whole frame, or `None` where the file stops holding one.
+///
+/// A partial length prefix, or a payload or head cut short, is an append that
+/// never finished: it was never anyone's answer, so the scan stops and the
+/// caller trims. A complete prefix naming a length the writer never produces
+/// cannot be an interrupted append, and is `corrupt`.
+pub(crate) fn read_raw<E>(
+    reader: &mut impl Read,
+    max_frame_bytes: usize,
+    storage: fn(std::io::Error) -> E,
+    corrupt: impl FnOnce() -> E,
+) -> Result<Option<Raw>, E> {
+    let mut prefix = [0u8; LENGTH_BYTES];
+    let declared = match read_prefix(reader, &mut prefix).map_err(storage)? {
+        Prefix::Eof | Prefix::Torn => return Ok(None),
+        Prefix::Full => declared_length(&prefix),
+    };
+    if !is_possible_length(declared, max_frame_bytes) {
+        lgwks_std::trace::debug!(
+            declared,
+            "read_raw: the declared length is one the writer never produces"
+        );
+        return Err(corrupt());
+    }
+    let mut payload = vec![0u8; declared];
+    if let Piece::Interrupted = read_piece(reader, &mut payload).map_err(storage)? {
+        return Ok(None);
+    }
+    let mut head = [0u8; HEAD_BYTES];
+    if let Piece::Interrupted = read_piece(reader, &mut head).map_err(storage)? {
+        return Ok(None);
+    }
+    Ok(Some(Raw { payload, head }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

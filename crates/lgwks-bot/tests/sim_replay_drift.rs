@@ -547,6 +547,75 @@ fn drift_kinds_are_refused_typed(band: sim::Band) -> TestResult {
     sim::assert_replays(band, body)
 }
 
+/// One tenant of the compatible-resume sweep.
+fn compatible_tenant(sim: &mut sim::Sim, tenant: &str) -> TestResult {
+    let input = sim.rng().below(64);
+    let dir = Scratch(sim.scratch("compatible")?);
+    let host = host_for(tenant, &dir.0)?;
+    let work = drift_task()?;
+    let identity = first_identity(&host, input, FIRST_CODEC)?;
+    let expected = input.saturating_add(input.saturating_add(1));
+    let job = Job {
+        input,
+        dir: dir.0.clone(),
+    };
+
+    let first = lgwks_bot::block_on(host.run_under(&identity, &work, job.clone()));
+    assert_eq!(
+        first.disposition(),
+        Disposition::Succeeded,
+        "{tenant}: the first attempt must succeed"
+    );
+    assert_eq!(
+        first.output(),
+        Some(&expected),
+        "{tenant}: the first attempt's own output"
+    );
+    let run = first.run_id().ok_or("a stored run must name its run id")?;
+    assert_eq!(
+        (ran(&dir.0, "alpha")?, ran(&dir.0, "beta")?),
+        (1, 1),
+        "{tenant}: each durable step ran exactly once"
+    );
+    drop(first);
+    drop(host);
+
+    let reopened = host_for(tenant, &dir.0)?;
+    let before = constructions();
+    let replayed = lgwks_bot::block_on(reopened.resume_under(run, &identity, &work, job));
+
+    assert_eq!(
+        replayed.disposition(),
+        Disposition::Succeeded,
+        "{tenant}: a compatible resume must succeed"
+    );
+    assert_eq!(
+        replayed.output(),
+        Some(&expected),
+        "{tenant}: the resumed output is the recorded one, not a re-run's"
+    );
+    assert_eq!(
+        constructions().saturating_sub(before),
+        0,
+        "{tenant}: a compatible resume constructed a step body, so a durable step was re-requested"
+    );
+    assert_eq!(
+        (ran(&dir.0, "alpha")?, ran(&dir.0, "beta")?),
+        (1, 1),
+        "{tenant}: a compatible resume re-ran a durable step"
+    );
+    assert_eq!(
+        RunStore::open(store_path(&dir.0, tenant))?.record_count(run),
+        STEPS,
+        "{tenant}: a compatible resume added a record"
+    );
+
+    sim.record(tenant);
+    sim.trace.record_u64("input", u64::from(input));
+    sim.trace.record_u64("output", u64::from(expected));
+    Ok(())
+}
+
 /// A compatible resume replays every recorded step and runs no body.
 ///
 /// The second half of T15: replayed model results incur no new request. The
@@ -557,70 +626,7 @@ fn drift_kinds_are_refused_typed(band: sim::Band) -> TestResult {
 fn compatible_resume_replays_without_a_new_request(band: sim::Band) -> TestResult {
     let body = |sim: &mut sim::Sim| -> TestResult {
         for tenant in TENANTS {
-            let input = sim.rng().below(64);
-            let dir = Scratch(sim.scratch("compatible")?);
-            let host = host_for(tenant, &dir.0)?;
-            let work = drift_task()?;
-            let identity = first_identity(&host, input, FIRST_CODEC)?;
-            let expected = input.saturating_add(input.saturating_add(1));
-            let job = Job {
-                input,
-                dir: dir.0.clone(),
-            };
-
-            let first = lgwks_bot::block_on(host.run_under(&identity, &work, job.clone()));
-            assert_eq!(
-                first.disposition(),
-                Disposition::Succeeded,
-                "{tenant}: the first attempt must succeed"
-            );
-            assert_eq!(
-                first.output(),
-                Some(&expected),
-                "{tenant}: the first attempt's own output"
-            );
-            let run = first.run_id().ok_or("a stored run must name its run id")?;
-            assert_eq!(
-                (ran(&dir.0, "alpha")?, ran(&dir.0, "beta")?),
-                (1, 1),
-                "{tenant}: each durable step ran exactly once"
-            );
-            drop(first);
-            drop(host);
-
-            let reopened = host_for(tenant, &dir.0)?;
-            let before = constructions();
-            let replayed = lgwks_bot::block_on(reopened.resume_under(run, &identity, &work, job));
-
-            assert_eq!(
-                replayed.disposition(),
-                Disposition::Succeeded,
-                "{tenant}: a compatible resume must succeed"
-            );
-            assert_eq!(
-                replayed.output(),
-                Some(&expected),
-                "{tenant}: the resumed output is the recorded one, not a re-run's"
-            );
-            assert_eq!(
-                constructions().saturating_sub(before),
-                0,
-                "{tenant}: a compatible resume constructed a step body, so a durable step was re-requested"
-            );
-            assert_eq!(
-                (ran(&dir.0, "alpha")?, ran(&dir.0, "beta")?),
-                (1, 1),
-                "{tenant}: a compatible resume re-ran a durable step"
-            );
-            assert_eq!(
-                RunStore::open(store_path(&dir.0, tenant))?.record_count(run),
-                STEPS,
-                "{tenant}: a compatible resume added a record"
-            );
-
-            sim.record(tenant);
-            sim.trace.record_u64("input", u64::from(input));
-            sim.trace.record_u64("output", u64::from(expected));
+            compatible_tenant(sim, tenant)?;
         }
         Ok(())
     };
@@ -707,6 +713,50 @@ fn every_axis_is_distinguishable(band: sim::Band) -> TestResult {
     sim::assert_replays(band, body)
 }
 
+/// One tenant of the exact-replay sweep.
+fn exact_tenant(sim: &mut sim::Sim, tenant: &str) -> TestResult {
+    let dir = Scratch(sim.scratch("exact")?);
+    let host = host_for(tenant, &dir.0)?;
+    let work = drift_task()?;
+    let first = first_identity(&host, FIRST_INPUT, FIRST_CODEC)?;
+    let recorded_input = first.input();
+    let job = Job {
+        input: FIRST_INPUT,
+        dir: dir.0.clone(),
+    };
+    let initial = lgwks_bot::block_on(host.run_under(&first, &work, job.clone()));
+    assert_eq!(
+        initial.disposition(),
+        Disposition::Succeeded,
+        "{tenant}: the first attempt must succeed before it can be drifted"
+    );
+    let run = initial
+        .run_id()
+        .ok_or("a stored run must name its run id")?;
+    drop(initial);
+    drop(host);
+
+    let reopened = host_for(tenant, &dir.0)?;
+    for kind in DriftKind::DRIFTED {
+        let drifted = kind.declare(&first);
+        let resumed = lgwks_bot::block_on(reopened.resume_under(run, &drifted, &work, job.clone()));
+        let error = resumed.error().ok_or_else(|| -> Box<dyn Error> {
+            format!("{tenant}/{}: a drifted resume must be refused", kind.tag()).into()
+        })?;
+        let drift = drift_of(error).ok_or_else(|| -> Box<dyn Error> {
+            format!(
+                "{tenant}/{}: the refusal must be FlowError::Incompatible",
+                kind.tag()
+            )
+            .into()
+        })?;
+        sim.record(&format!("{tenant}:{}", kind.tag()));
+        sim.trace.record_u64("axis", axis_id(drift.kind()));
+        assert_exact_drift(tenant, kind, drift, recorded_input)?;
+    }
+    Ok(())
+}
+
 /// Each axis is refused with its exact typed `Drift`, payloads included.
 ///
 /// The typed half of T15 and R2. [`drift_axis`] checks *which* axis a refusal
@@ -724,50 +774,63 @@ fn every_axis_is_distinguishable(band: sim::Band) -> TestResult {
 fn every_axis_is_refused_with_its_exact_drift(band: sim::Band) -> TestResult {
     let body = |sim: &mut sim::Sim| -> TestResult {
         for tenant in TENANTS {
-            let dir = Scratch(sim.scratch("exact")?);
-            let host = host_for(tenant, &dir.0)?;
-            let work = drift_task()?;
-            let first = first_identity(&host, FIRST_INPUT, FIRST_CODEC)?;
-            let recorded_input = first.input();
-            let job = Job {
-                input: FIRST_INPUT,
-                dir: dir.0.clone(),
-            };
-            let initial = lgwks_bot::block_on(host.run_under(&first, &work, job.clone()));
-            assert_eq!(
-                initial.disposition(),
-                Disposition::Succeeded,
-                "{tenant}: the first attempt must succeed before it can be drifted"
-            );
-            let run = initial
-                .run_id()
-                .ok_or("a stored run must name its run id")?;
-            drop(initial);
-            drop(host);
-
-            let reopened = host_for(tenant, &dir.0)?;
-            for kind in DriftKind::DRIFTED {
-                let drifted = kind.declare(&first);
-                let resumed =
-                    lgwks_bot::block_on(reopened.resume_under(run, &drifted, &work, job.clone()));
-                let error = resumed.error().ok_or_else(|| -> Box<dyn Error> {
-                    format!("{tenant}/{}: a drifted resume must be refused", kind.tag()).into()
-                })?;
-                let drift = drift_of(error).ok_or_else(|| -> Box<dyn Error> {
-                    format!(
-                        "{tenant}/{}: the refusal must be FlowError::Incompatible",
-                        kind.tag()
-                    )
-                    .into()
-                })?;
-                sim.record(&format!("{tenant}:{}", kind.tag()));
-                sim.trace.record_u64("axis", axis_id(drift.kind()));
-                assert_exact_drift(tenant, kind, drift, recorded_input)?;
-            }
+            exact_tenant(sim, tenant)?;
         }
         Ok(())
     };
     sim::assert_replays(band, body)
+}
+
+/// One tenant of the drifted-resume sweep.
+fn drifted_tenant(sim: &mut sim::Sim, tenant: &str) -> TestResult {
+    let kind = drawn_drift(sim);
+    let dir = Scratch(sim.scratch("bytes")?);
+    let path = store_path(&dir.0, tenant);
+
+    let host = host_for(tenant, &dir.0)?;
+    let work = drift_task()?;
+    let first = first_identity(&host, FIRST_INPUT, FIRST_CODEC)?;
+    let drifted = kind.declare(&first);
+    let job = Job {
+        input: FIRST_INPUT,
+        dir: dir.0.clone(),
+    };
+    let initial = lgwks_bot::block_on(host.run_under(&first, &work, job.clone()));
+    let run = initial
+        .run_id()
+        .ok_or("a stored run must name its run id")?;
+    drop(initial);
+    drop(host);
+
+    let before = std::fs::read(&path)?;
+    let reopened = host_for(tenant, &dir.0)?;
+    let refused = lgwks_bot::block_on(reopened.resume_under(run, &drifted, &work, job));
+
+    assert_eq!(
+        refused.disposition(),
+        Disposition::Refused,
+        "{tenant}/{}: a drifted resume must be refused",
+        kind.tag()
+    );
+    assert_eq!(
+        refused.error().and_then(drift_axis),
+        kind.expects(),
+        "{tenant}/{}: the refusal must name this axis",
+        kind.tag()
+    );
+    assert_eq!(
+        std::fs::read(&path)?,
+        before,
+        "{tenant}/{}: the refusal moved bytes in the store",
+        kind.tag()
+    );
+
+    sim.record(&format!("{tenant}:{}", kind.tag()));
+    sim.trace.record_u64(
+        "store-bytes",
+        u64::try_from(before.len()).unwrap_or(u64::MAX),
+    );
+    Ok(())
 }
 
 /// A refused resume leaves the store byte-identical.
@@ -779,53 +842,7 @@ fn every_axis_is_refused_with_its_exact_drift(band: sim::Band) -> TestResult {
 fn a_refusal_leaves_the_store_byte_identical(band: sim::Band) -> TestResult {
     let body = |sim: &mut sim::Sim| -> TestResult {
         for tenant in TENANTS {
-            let kind = drawn_drift(sim);
-            let dir = Scratch(sim.scratch("bytes")?);
-            let path = store_path(&dir.0, tenant);
-
-            let host = host_for(tenant, &dir.0)?;
-            let work = drift_task()?;
-            let first = first_identity(&host, FIRST_INPUT, FIRST_CODEC)?;
-            let drifted = kind.declare(&first);
-            let job = Job {
-                input: FIRST_INPUT,
-                dir: dir.0.clone(),
-            };
-            let initial = lgwks_bot::block_on(host.run_under(&first, &work, job.clone()));
-            let run = initial
-                .run_id()
-                .ok_or("a stored run must name its run id")?;
-            drop(initial);
-            drop(host);
-
-            let before = std::fs::read(&path)?;
-            let reopened = host_for(tenant, &dir.0)?;
-            let refused = lgwks_bot::block_on(reopened.resume_under(run, &drifted, &work, job));
-
-            assert_eq!(
-                refused.disposition(),
-                Disposition::Refused,
-                "{tenant}/{}: a drifted resume must be refused",
-                kind.tag()
-            );
-            assert_eq!(
-                refused.error().and_then(drift_axis),
-                kind.expects(),
-                "{tenant}/{}: the refusal must name this axis",
-                kind.tag()
-            );
-            assert_eq!(
-                std::fs::read(&path)?,
-                before,
-                "{tenant}/{}: the refusal moved bytes in the store",
-                kind.tag()
-            );
-
-            sim.record(&format!("{tenant}:{}", kind.tag()));
-            sim.trace.record_u64(
-                "store-bytes",
-                u64::try_from(before.len()).unwrap_or(u64::MAX),
-            );
+            drifted_tenant(sim, tenant)?;
         }
         Ok(())
     };
@@ -846,6 +863,75 @@ const PRE_VERSION: u8 = 1;
 /// The version this build writes and reads.
 const CURRENT_FORMAT: u8 = 2;
 
+/// One tenant of the refused-resume sweep.
+fn refused_tenant(sim: &mut sim::Sim, tenant: &str) -> TestResult {
+    let input = sim.rng().below(64);
+    let dir = Scratch(sim.scratch("format")?);
+    let path = store_path(&dir.0, tenant);
+
+    let host = host_for(tenant, &dir.0)?;
+    let work = drift_task()?;
+    let identity = first_identity(&host, input, FIRST_CODEC)?;
+    let first = lgwks_bot::block_on(host.run_under(
+        &identity,
+        &work,
+        Job {
+            input,
+            dir: dir.0.clone(),
+        },
+    ));
+    assert_eq!(
+        first.disposition(),
+        Disposition::Succeeded,
+        "{tenant}: the first attempt must succeed so there are real frames to downgrade"
+    );
+    drop(first);
+    drop(host);
+
+    // The shipped file becomes a `\x01` file: real committed frames under
+    // a pre-version header, which is exactly the artifact a deployment on
+    // the earlier format holds.
+    let mut bytes = std::fs::read(&path)?;
+    assert_eq!(
+        bytes[VERSION_BYTE], CURRENT_FORMAT,
+        "{tenant}: the store must be written at the current version before it is downgraded"
+    );
+    bytes[VERSION_BYTE] = PRE_VERSION;
+    std::fs::write(&path, &bytes)?;
+    let before = bytes.clone();
+
+    let refusal = RunStore::open(&path)
+        .err()
+        .ok_or_else(|| -> Box<dyn Error> {
+            format!("{tenant}: a pre-version store must not open").into()
+        })?;
+    let (found, expected) = shared::format_version(&refusal).ok_or_else(|| -> Box<dyn Error> {
+        format!("{tenant}: a \\x01 store must be a version refusal, got: {refusal}").into()
+    })?;
+    assert_eq!(
+        found, PRE_VERSION,
+        "{tenant}: the refusal must name the version found"
+    );
+    assert_eq!(
+        expected, CURRENT_FORMAT,
+        "{tenant}: the refusal must name the version this build reads"
+    );
+    assert_eq!(
+        std::fs::read(&path)?,
+        before,
+        "{tenant}: the refusal moved bytes in a store it could not read"
+    );
+
+    sim.record(tenant);
+    sim.trace.record_u64("found", u64::from(PRE_VERSION));
+    sim.trace.record_u64("expected", u64::from(CURRENT_FORMAT));
+    sim.trace.record_u64(
+        "store-bytes",
+        u64::try_from(before.len()).unwrap_or(u64::MAX),
+    );
+    Ok(())
+}
+
 /// A store in an older format is refused naming both versions, and its bytes do
 /// not move.
 ///
@@ -861,76 +947,98 @@ const CURRENT_FORMAT: u8 = 2;
 fn a_pre_version_store_is_refused_naming_both_versions(band: sim::Band) -> TestResult {
     let body = |sim: &mut sim::Sim| -> TestResult {
         for tenant in TENANTS {
-            let input = sim.rng().below(64);
-            let dir = Scratch(sim.scratch("format")?);
-            let path = store_path(&dir.0, tenant);
-
-            let host = host_for(tenant, &dir.0)?;
-            let work = drift_task()?;
-            let identity = first_identity(&host, input, FIRST_CODEC)?;
-            let first = lgwks_bot::block_on(host.run_under(
-                &identity,
-                &work,
-                Job {
-                    input,
-                    dir: dir.0.clone(),
-                },
-            ));
-            assert_eq!(
-                first.disposition(),
-                Disposition::Succeeded,
-                "{tenant}: the first attempt must succeed so there are real frames to downgrade"
-            );
-            drop(first);
-            drop(host);
-
-            // The shipped file becomes a `\x01` file: real committed frames under
-            // a pre-version header, which is exactly the artifact a deployment on
-            // the earlier format holds.
-            let mut bytes = std::fs::read(&path)?;
-            assert_eq!(
-                bytes[VERSION_BYTE], CURRENT_FORMAT,
-                "{tenant}: the store must be written at the current version before it is downgraded"
-            );
-            bytes[VERSION_BYTE] = PRE_VERSION;
-            std::fs::write(&path, &bytes)?;
-            let before = bytes.clone();
-
-            let refusal = RunStore::open(&path)
-                .err()
-                .ok_or_else(|| -> Box<dyn Error> {
-                    format!("{tenant}: a pre-version store must not open").into()
-                })?;
-            let (found, expected) =
-                shared::format_version(&refusal).ok_or_else(|| -> Box<dyn Error> {
-                    format!("{tenant}: a \\x01 store must be a version refusal, got: {refusal}")
-                        .into()
-                })?;
-            assert_eq!(
-                found, PRE_VERSION,
-                "{tenant}: the refusal must name the version found"
-            );
-            assert_eq!(
-                expected, CURRENT_FORMAT,
-                "{tenant}: the refusal must name the version this build reads"
-            );
-            assert_eq!(
-                std::fs::read(&path)?,
-                before,
-                "{tenant}: the refusal moved bytes in a store it could not read"
-            );
-
-            sim.record(tenant);
-            sim.trace.record_u64("found", u64::from(PRE_VERSION));
-            sim.trace.record_u64("expected", u64::from(CURRENT_FORMAT));
-            sim.trace.record_u64(
-                "store-bytes",
-                u64::try_from(before.len()).unwrap_or(u64::MAX),
-            );
+            refused_tenant(sim, tenant)?;
         }
         Ok(())
     };
     sim::assert_replays(band, body)
+}
+
+/// One tenant of the same-seed replay sweep.
+fn replay_tenant(sim: &mut sim::Sim, tenant: &str) -> TestResult {
+    let input = sim.rng().below(64);
+    // Drawn before anything else, so the trace's first fact is the one that
+    // selects the scenario rather than a value derived later.
+    let armed = sim.rng().chance(500);
+    let dir = Scratch(sim.scratch("read-failure")?);
+
+    let host = host_for(tenant, &dir.0)?;
+    let work = drift_task()?;
+    let identity = first_identity(&host, input, FIRST_CODEC)?;
+    let job = Job {
+        input,
+        dir: dir.0.clone(),
+    };
+    let first = lgwks_bot::block_on(host.run_under(&identity, &work, job.clone()));
+    assert_eq!(
+        first.disposition(),
+        Disposition::Succeeded,
+        "{tenant}: the first attempt must succeed before a read can fail"
+    );
+    let run = first.run_id().ok_or("a stored run must name its run id")?;
+    drop(first);
+    drop(host);
+
+    // A fresh handle over a fresh replay of the file, so the resume below is
+    // a restart rather than a map the first attempt left warm.
+    let reopened = host_for(tenant, &dir.0)?;
+    if armed {
+        reopened
+            .run_store()
+            .ok_or("a stored host keeps a store")?
+            .fail_next_index_read();
+    }
+
+    let before = constructions();
+    let refused = lgwks_bot::block_on(reopened.resume_under(run, &identity, &work, job));
+
+    if armed {
+        let error = refused.error().ok_or_else(|| -> Box<dyn Error> {
+            format!("{tenant}: a store that cannot be read must not succeed").into()
+        })?;
+        assert!(
+            !matches!(error, FlowError::Incompatible { .. }),
+            "{tenant}: a read failure must not be reported as a definition drift, got: \
+             {error}"
+        );
+        // The typed half of INV-BOT-7: the refusal is the store's own,
+        // reached by its variant and its wrapped kind, not by reading the
+        // rendered text. A rendering that merely mentioned a device would
+        // satisfy a `contains` while the payload was another arm.
+        let refusal = shared::store_refusal(error).ok_or_else(|| -> Box<dyn Error> {
+            format!("{tenant}: a read failure must reach the caller as FlowError::Store").into()
+        })?;
+        assert!(
+            matches!(refusal, StoreError::Storage { .. }),
+            "{tenant}: the wrapped refusal must be the device's own storage error, got: \
+             {refusal:?}"
+        );
+        assert_eq!(
+            constructions().saturating_sub(before),
+            0,
+            "{tenant}: a refused step constructed its body, so the fault did not stop it"
+        );
+    } else {
+        assert_eq!(
+            refused.disposition(),
+            Disposition::Succeeded,
+            "{tenant}: the control arm must replay, got: {:?}",
+            refused.error()
+        );
+        assert_eq!(
+            constructions().saturating_sub(before),
+            0,
+            "{tenant}: the control arm re-ran a durable step"
+        );
+    }
+
+    sim.record(tenant);
+    sim.trace.record_u64("armed", u64::from(armed));
+    sim.trace.record_u64(
+        "disposition",
+        shared::disposition_code(refused.disposition()),
+    );
+    Ok(())
 }
 
 /// A store that cannot be read is refused as itself, never as a drift.
@@ -951,89 +1059,7 @@ fn a_pre_version_store_is_refused_naming_both_versions(band: sim::Band) -> TestR
 fn an_unreadable_store_is_refused_as_itself(band: sim::Band) -> TestResult {
     let body = |sim: &mut sim::Sim| -> TestResult {
         for tenant in TENANTS {
-            let input = sim.rng().below(64);
-            // Drawn before anything else, so the trace's first fact is the one that
-            // selects the scenario rather than a value derived later.
-            let armed = sim.rng().chance(500);
-            let dir = Scratch(sim.scratch("read-failure")?);
-
-            let host = host_for(tenant, &dir.0)?;
-            let work = drift_task()?;
-            let identity = first_identity(&host, input, FIRST_CODEC)?;
-            let job = Job {
-                input,
-                dir: dir.0.clone(),
-            };
-            let first = lgwks_bot::block_on(host.run_under(&identity, &work, job.clone()));
-            assert_eq!(
-                first.disposition(),
-                Disposition::Succeeded,
-                "{tenant}: the first attempt must succeed before a read can fail"
-            );
-            let run = first.run_id().ok_or("a stored run must name its run id")?;
-            drop(first);
-            drop(host);
-
-            // A fresh handle over a fresh replay of the file, so the resume below is
-            // a restart rather than a map the first attempt left warm.
-            let reopened = host_for(tenant, &dir.0)?;
-            if armed {
-                reopened
-                    .run_store()
-                    .ok_or("a stored host keeps a store")?
-                    .fail_next_index_read();
-            }
-
-            let before = constructions();
-            let refused = lgwks_bot::block_on(reopened.resume_under(run, &identity, &work, job));
-
-            if armed {
-                let error = refused.error().ok_or_else(|| -> Box<dyn Error> {
-                    format!("{tenant}: a store that cannot be read must not succeed").into()
-                })?;
-                assert!(
-                    !matches!(error, FlowError::Incompatible { .. }),
-                    "{tenant}: a read failure must not be reported as a definition drift, got: \
-                     {error}"
-                );
-                // The typed half of INV-BOT-7: the refusal is the store's own,
-                // reached by its variant and its wrapped kind, not by reading the
-                // rendered text. A rendering that merely mentioned a device would
-                // satisfy a `contains` while the payload was another arm.
-                let refusal = shared::store_refusal(error).ok_or_else(|| -> Box<dyn Error> {
-                    format!("{tenant}: a read failure must reach the caller as FlowError::Store")
-                        .into()
-                })?;
-                assert!(
-                    matches!(refusal, StoreError::Storage { .. }),
-                    "{tenant}: the wrapped refusal must be the device's own storage error, got: \
-                     {refusal:?}"
-                );
-                assert_eq!(
-                    constructions().saturating_sub(before),
-                    0,
-                    "{tenant}: a refused step constructed its body, so the fault did not stop it"
-                );
-            } else {
-                assert_eq!(
-                    refused.disposition(),
-                    Disposition::Succeeded,
-                    "{tenant}: the control arm must replay, got: {:?}",
-                    refused.error()
-                );
-                assert_eq!(
-                    constructions().saturating_sub(before),
-                    0,
-                    "{tenant}: the control arm re-ran a durable step"
-                );
-            }
-
-            sim.record(tenant);
-            sim.trace.record_u64("armed", u64::from(armed));
-            sim.trace.record_u64(
-                "disposition",
-                shared::disposition_code(refused.disposition()),
-            );
+            replay_tenant(sim, tenant)?;
         }
         Ok(())
     };

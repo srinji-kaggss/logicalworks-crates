@@ -123,9 +123,9 @@ fn probe_body() -> TestResult {
             .ok_or("the probe child was started without a marker path")?,
     );
     let runs: u32 = std::env::var(PROBE_RUNS)
-        .map_err(|_| "the probe child was started without a run count")?
+        .map_err(|error| format!("the probe child was started without a run count: {error}"))?
         .parse()
-        .map_err(|_| "the probe child's run count was not a number")?;
+        .map_err(|error| format!("the probe child's run count was not a number: {error}"))?;
 
     let host = Host::builder("probe")?.run_store(&store)?.build()?;
     if let Some(hold) = std::env::var_os(PROBE_HOLD_MS) {

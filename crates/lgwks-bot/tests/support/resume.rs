@@ -313,7 +313,7 @@ impl Parked {
     pub fn observed(self) -> Result<u64, String> {
         self.watchdog
             .join()
-            .map_err(|_| "the watchdog thread panicked".to_owned())
+            .map_err(|panic| format!("the watchdog thread panicked: {panic:?}"))
     }
 }
 

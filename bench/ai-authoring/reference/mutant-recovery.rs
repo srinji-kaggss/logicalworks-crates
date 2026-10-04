@@ -47,6 +47,9 @@ pub async fn recover(
     // gives it a fresh one per attempt, which is a store no earlier attempt ever
     // wrote to — so the resume has nothing to replay.
     let private = store_dir.join(format!("attempt-{attempt}"));
-    std::fs::create_dir_all(&private).map_err(|_| RecoveryError::NoStore)?;
+    std::fs::create_dir_all(&private).map_err(|error| {
+        ai_task_support::diagnostic(format_args!("could not create {private:?}: {error}"));
+        RecoveryError::NoStore
+    })?;
     reference::recover(world, private, deadline).await
 }

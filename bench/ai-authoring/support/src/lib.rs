@@ -51,6 +51,15 @@ fn planned_delay(seed: u64, key: u64) -> Duration {
 
 // ── Fetcher ──────────────────────────────────────────────────────────────────
 
+/// Report one refusal the rig cannot return to its caller.
+///
+/// The solutions and the oracle answer in their own error types, which carry no
+/// cause; the cause goes to the estate's trace stream instead, where a reader of
+/// the run can still find it.
+pub fn diagnostic(line: fmt::Arguments<'_>) {
+    lgwks_std::trace::warn!("{line}");
+}
+
 /// Why a fetch did not return a value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FetchError {
@@ -59,6 +68,16 @@ pub enum FetchError {
         /// The id that failed.
         id: u32,
     },
+}
+
+impl FetchError {
+    /// The id whose fetch failed.
+    #[must_use]
+    pub const fn id(self) -> u32 {
+        match self {
+            Self::Failed { id } => id,
+        }
+    }
 }
 
 impl fmt::Display for FetchError {
@@ -132,7 +151,10 @@ struct FetchLiveGuard {
 impl FetchLiveGuard {
     /// Enter the live set and update the high-water mark.
     fn enter(counters: Arc<FetchCounters>) -> Self {
-        let live = counters.live.fetch_add(1, Ordering::AcqRel).saturating_add(1);
+        let live = counters
+            .live
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1);
         counters.max_live.fetch_max(live, Ordering::AcqRel);
         Self { counters }
     }
@@ -230,10 +252,11 @@ impl Fetcher {
         if self.failures.contains(&id) {
             self.counters.failure_seen.store(true, Ordering::Release);
             self.counters.failed.fetch_add(1, Ordering::AcqRel);
-            return Err(FetchError::Failed { id });
+            Err(FetchError::Failed { id })
+        } else {
+            self.counters.completed.fetch_add(1, Ordering::AcqRel);
+            Ok(u64::from(id).saturating_mul(3))
         }
-        self.counters.completed.fetch_add(1, Ordering::AcqRel);
-        Ok(u64::from(id).saturating_mul(3))
     }
 }
 
@@ -351,7 +374,7 @@ impl Artifact {
         Self(value)
     }
 
-    /// The artifact's value.
+    /// Read back the number this artifact carries, which is the unit's own result, unchanged by publishing.
     #[must_use]
     pub const fn value(&self) -> u64 {
         self.0
@@ -369,7 +392,7 @@ impl Published {
         Self(value)
     }
 
-    /// The published value.
+    /// Read back the number that was published for this run, exactly as the publisher received it.
     #[must_use]
     pub const fn value(&self) -> u64 {
         self.0
@@ -534,27 +557,28 @@ impl Stage {
             .unwrap_or_else(|| planned_delay(self.seed, name.plan_key()));
         lgwks_bot::rt::time::sleep(delay).await;
         if self.failures.contains(&name) {
-            return Err(StageError::Stage { name });
-        }
-        match name {
-            StageName::FetchA => {
-                *self.state.lock_a() = Some(11);
-                Ok(Artifact::new(11))
-            }
-            StageName::FetchB => {
-                *self.state.lock_b() = Some(22);
-                Ok(Artifact::new(22))
-            }
-            StageName::Combine => {
-                let a = (*self.state.lock_a()).unwrap_or(0);
-                let b = (*self.state.lock_b()).unwrap_or(0);
-                let combined = a.saturating_add(b);
-                *self.state.lock_combined() = Some(combined);
-                Ok(Artifact::new(combined))
-            }
-            StageName::Publish => {
-                let combined = (*self.state.lock_combined()).unwrap_or(0);
-                Ok(Artifact::new(combined.saturating_mul(2)))
+            Err(StageError::Stage { name })
+        } else {
+            match name {
+                StageName::FetchA => {
+                    *self.state.lock_a() = Some(11);
+                    Ok(Artifact::new(11))
+                }
+                StageName::FetchB => {
+                    *self.state.lock_b() = Some(22);
+                    Ok(Artifact::new(22))
+                }
+                StageName::Combine => {
+                    let a = (*self.state.lock_a()).unwrap_or(0);
+                    let b = (*self.state.lock_b()).unwrap_or(0);
+                    let combined = a.saturating_add(b);
+                    *self.state.lock_combined() = Some(combined);
+                    Ok(Artifact::new(combined))
+                }
+                StageName::Publish => {
+                    let combined = (*self.state.lock_combined()).unwrap_or(0);
+                    Ok(Artifact::new(combined.saturating_mul(2)))
+                }
             }
         }
     }

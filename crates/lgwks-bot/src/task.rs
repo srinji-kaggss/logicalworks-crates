@@ -734,7 +734,7 @@ impl Ticket {
         &self.tenant
     }
 
-    /// The task that was running.
+    /// The identity of the task whose run this outcome describes, as the caller submitted it.
     #[must_use]
     pub fn task(&self) -> &str {
         self.task.as_str()
@@ -768,6 +768,27 @@ impl fmt::Display for Ticket {
             write!(formatter, " at {at}")?;
         }
         Ok(())
+    }
+}
+
+/// The receipt a claim just lost to, read back from the store.
+///
+/// A claim that reports another submitter's record already on the disk and a
+/// lookup that then finds nothing contradict each other, so that is an
+/// [`RequestError::IdCollision`] rather than a missing value.
+fn recorded_receipt(
+    records: &Records,
+    tenant: &str,
+    run: RunId,
+    binding_key: crate::script::StepKey,
+) -> Result<StoredValue, RequestError> {
+    match records.lookup(tenant, run, binding_key)? {
+        Some(held) => Ok(held),
+        None => {
+            let refusal = Err(RequestError::IdCollision);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "recorded_receipt: the claim reported a record the lookup cannot find");
+            refusal
+        }
     }
 }
 
@@ -1571,7 +1592,7 @@ impl Host {
         }
 
         // No receipt yet: the claim decides which submitter may run the body.
-        match records
+        let claimed = records
             .claim(
                 tenant,
                 run,
@@ -1580,13 +1601,11 @@ impl Host {
                 &definition,
                 digest.as_bytes().to_vec(),
             )
-            .await?
-        {
+            .await?;
+        match claimed {
             Appended::Recorded => {}
             Appended::AlreadyRecorded => {
-                let held = records
-                    .lookup(tenant, run, binding_key)?
-                    .ok_or(RequestError::IdCollision)?;
+                let held = recorded_receipt(&records, tenant, run, binding_key)?;
                 let existing = Existing {
                     store,
                     records: &records,
@@ -1599,9 +1618,7 @@ impl Host {
                 return self.observe_existing(existing, task);
             }
             Appended::Conflicting => {
-                let held = records
-                    .lookup(tenant, run, binding_key)?
-                    .ok_or(RequestError::IdCollision)?;
+                let held = recorded_receipt(&records, tenant, run, binding_key)?;
                 let existing = digest_of_record(held.bytes())?;
                 let refusal = Err(RequestError::Conflict(RequestConflict::new(
                     key.clone(),
@@ -2260,14 +2277,15 @@ impl Host {
         // reading: this run holds nothing it inherited, so it is charged for
         // everything it does itself. `Vec::new()` rather than a discard of the
         // not-entered error, which carries no permit information at all.
-        let held = match HELD_PERMITS.try_with(Clone::clone) {
-            Ok(held) => held,
-            // Outside a scope there is no held set, and an empty one is the
-            // correct reading: this run holds nothing it inherited, so it is
-            // charged for everything it does itself. The error is not-entered,
-            // which carries no permit to lose.
-            Err(_not_entered) => Vec::new(),
-        };
+        let held = HELD_PERMITS
+            .try_with(Clone::clone)
+            .unwrap_or_else(|not_entered| {
+                lgwks_std::trace::debug!(
+                    ?not_entered,
+                    "submit: no enclosing scope holds a permit set"
+                );
+                Vec::new()
+            });
         let charged = if held.contains(&self.inner.identity) {
             held
         } else {
@@ -2750,7 +2768,7 @@ impl HighWater {
         // exists to refuse — or `drop` on a `Copy` value, which does nothing.
         let _previous = self
             .0
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |peak| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |peak| {
                 (live > peak).then_some(live)
             });
     }
@@ -2827,7 +2845,7 @@ impl LiveRuns {
         // discarded with `let _ =`, the shape `let_underscore_must_use` refuses.
         let _previous = self
             .0
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
                 live.checked_sub(1)
             });
     }

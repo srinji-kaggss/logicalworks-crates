@@ -918,6 +918,7 @@ impl Frames {
 /// The records and payload bytes are carried out with the refusal rather than
 /// dropped, because "the reader failed" and "nothing had been read yet" are
 /// different facts and a caller retrying wants to know which it is.
+#[derive(Debug)]
 struct Failed {
     /// The device's refusal.
     source: io::Error,

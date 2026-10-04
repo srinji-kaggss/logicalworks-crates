@@ -186,7 +186,7 @@ fn trace_on_small_stack(seed: u64) -> TestResult {
     let handle = started?;
     let trace = handle
         .join()
-        .map_err(|_payload| "the deep-cancel journey panicked")?;
+        .map_err(|payload| format!("the deep-cancel journey panicked: {payload:?}"))?;
     let path = std::env::var(TRACE_ENV)?;
     std::fs::write(path, trace)?;
     Ok(())

@@ -27,10 +27,7 @@ pub async fn solve(ids: Vec<u32>, fetch: Fetcher, deadline: Duration) -> Result<
     let results = join_all_bounded(usize::MAX, futures).await;
     let mut sum: u64 = 0;
     for result in results {
-        match result {
-            Ok(value) => sum = sum.saturating_add(value),
-            Err(FetchError::Failed { id }) => return Err(SolveError::Fetch { id }),
-        }
+        sum = sum.saturating_add(result.map_err(|error| SolveError::Fetch { id: error.id() })?);
     }
     Ok(sum)
 }

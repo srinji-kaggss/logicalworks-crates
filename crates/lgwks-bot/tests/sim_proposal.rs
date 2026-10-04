@@ -457,7 +457,7 @@ fn concurrent_readers_and_conflicting_writers(band: Band) -> TestResult {
         let mut stored = 0_usize;
         let mut already = 0_usize;
         for outcome in outcomes {
-            match outcome.map_err(|_| "a writer thread panicked")?? {
+            match outcome.map_err(|panic| format!("a writer thread panicked: {panic:?}"))?? {
                 WriteOutcome::Stored { .. } => stored = stored.saturating_add(1),
                 WriteOutcome::AlreadyPresent { .. } => already = already.saturating_add(1),
                 other => {
@@ -496,7 +496,7 @@ fn concurrent_readers_and_conflicting_writers(band: Band) -> TestResult {
         // What must never happen is a read yielding *some* of the content, and
         // that is what the byte-for-byte check below rules out.
         for seen in seen {
-            let seen = seen.map_err(|_| "a reader thread panicked")?;
+            let seen = seen.map_err(|panic| format!("a reader thread panicked: {panic:?}"))?;
             assert!(
                 seen <= reads_each,
                 "a reader cannot see the artifact more often than it read it: {seen} of \
@@ -880,6 +880,43 @@ fn host_for(tenant: &str, rng: &mut Rng) -> Result<Host, Box<dyn Error>> {
     Ok(Host::builder(tenant)?.max_concurrent_tasks(limit).build()?)
 }
 
+/// One tenant's refusal of the shared payload, with the step path it was located at.
+fn refusal_for_tenant(
+    sim: &mut sim::Sim,
+    name: &str,
+    work: &support::AdmittingTask,
+    payload: &[u8],
+    seen: &mut Vec<String>,
+) -> TestResult {
+    let surface = Surface::builder(name)?
+        .operation(support::READ, &[Cap::fs()])?
+        .holding(&[Cap::fs()])
+        .build();
+    let gate = gate_for(&surface, limits_for(sim.rng()))?;
+    let host = host_for(name, sim.rng())?;
+    let report = support::drive(host.run(work, (gate, payload.to_vec())));
+    let error = report
+        .error()
+        .ok_or("an injection is refused, so the run fails")?;
+    let provenance =
+        lgwks_bot::script::provenance_of(error).ok_or("a refusal carries its provenance")?;
+    assert_eq!(
+        provenance.tenant(),
+        name,
+        "tenant {name}: the refusal is attributed to the run that produced it, never to \
+         a neighbour"
+    );
+    assert_eq!(
+        provenance.digest_hex(),
+        lgwks_std::hash::blake3(payload).to_hex(),
+        "tenant {name}: the digest is over the shared bytes alone — a digest is a \
+         function of content, which is exactly why the tenant is a separate field of \
+         the provenance and not folded into the hash"
+    );
+    seen.push(error.at().to_owned());
+    Ok(())
+}
+
 /// Two tenants sharing one host shape admit on separate gates, get distinct step
 /// keys, and neither run's refusal is attributable to the other.
 ///
@@ -906,32 +943,7 @@ fn two_tenants_admitting_on_one_host_stay_isolated(band: Band) -> TestResult {
 
         let mut seen = Vec::new();
         for name in [tenant, stranger] {
-            let surface = Surface::builder(name)?
-                .operation(support::READ, &[Cap::fs()])?
-                .holding(&[Cap::fs()])
-                .build();
-            let gate = gate_for(&surface, limits_for(sim.rng()))?;
-            let host = host_for(name, sim.rng())?;
-            let report = support::drive(host.run(&work, (gate, payload.clone())));
-            let error = report
-                .error()
-                .ok_or("an injection is refused, so the run fails")?;
-            let provenance = lgwks_bot::script::provenance_of(error)
-                .ok_or("a refusal carries its provenance")?;
-            assert_eq!(
-                provenance.tenant(),
-                name,
-                "tenant {name}: the refusal is attributed to the run that produced it, never to \
-                 a neighbour"
-            );
-            assert_eq!(
-                provenance.digest_hex(),
-                lgwks_std::hash::blake3(&payload).to_hex(),
-                "tenant {name}: the digest is over the shared bytes alone — a digest is a \
-                 function of content, which is exactly why the tenant is a separate field of \
-                 the provenance and not folded into the hash"
-            );
-            seen.push(error.at().to_owned());
+            refusal_for_tenant(sim, name, &work, &payload, &mut seen)?;
         }
 
         // Distinct hosts, distinct runs: the step path is the same string for both

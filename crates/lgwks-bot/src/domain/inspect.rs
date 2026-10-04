@@ -119,20 +119,20 @@ impl InspectionJob {
         self
     }
 
-    /// Replace the budgets.
+    /// Return the job with all six resource ceilings replaced by `budgets`; every other field is kept.
     #[must_use]
     pub fn with_budgets(mut self, budgets: Budgets) -> Self {
         self.budgets = budgets;
         self
     }
 
-    /// The artifact identity.
+    /// The caller's identity for the artifact being inspected, a path or label that the inspection result names back.
     #[must_use]
     pub fn artifact(&self) -> &str {
         &self.artifact
     }
 
-    /// The subject's bytes.
+    /// The subject text the rules run over, held as the caller supplied it.
     #[must_use]
     pub fn subject(&self) -> &str {
         &self.subject
@@ -235,7 +235,10 @@ impl Subject {
     /// that reads the working directory's empty name.
     pub fn from_target(target: &str) -> Result<crate::Source, BotError> {
         if target.is_empty() {
-            let refusal = Err(BotError::IncompleteSpec { field: "target" });
+            let refusal = Err(BotError::IncompleteSpec {
+                field: "target",
+                cause: String::from("the spec names no artifact path"),
+            });
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "from_target: returning an error to the caller");
             return refusal;
         }

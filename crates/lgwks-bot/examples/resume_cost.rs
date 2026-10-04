@@ -93,14 +93,22 @@ fn key(index: u32) -> Result<EffectKey, Box<dyn std::error::Error>> {
     // Every id here is one-based: `AttemptId` and `EnvironmentEpoch` are non-zero
     // counters by construction, and an attempt of zero is not an attempt.
     let at = u64::from(index).saturating_add(1);
+    let run = RunId::from_hex(&format!("{at:032x}"))?;
+    let action = ActionId::from_hex(&format!("{:032x}", at.saturating_add(1)))?;
+    let attempt = AttemptId::from_decimal(&at.to_string())?;
+    let flow = FlowRevision::from_tagged("blake3_256", &format!("{at:064x}"))?;
+    let digest =
+        ActionDigest::from_tagged("blake3_256", &format!("{:064x}", at.saturating_add(2)))?;
+    let environment = EnvironmentId::from_hex(&format!("{:032x}", at.saturating_add(3)))?;
+    let epoch = EnvironmentEpoch::from_decimal(&at.to_string())?;
     Ok(EffectKey::new(
-        RunId::from_hex(&format!("{at:032x}"))?,
-        ActionId::from_hex(&format!("{:032x}", at.saturating_add(1)))?,
-        AttemptId::from_decimal(&at.to_string())?,
-        FlowRevision::from_tagged("blake3_256", &format!("{at:064x}"))?,
-        ActionDigest::from_tagged("blake3_256", &format!("{:064x}", at.saturating_add(2)))?,
-        EnvironmentId::from_hex(&format!("{:032x}", at.saturating_add(3)))?,
-        EnvironmentEpoch::from_decimal(&at.to_string())?,
+        run,
+        action,
+        attempt,
+        flow,
+        digest,
+        environment,
+        epoch,
     ))
 }
 
@@ -195,7 +203,7 @@ fn report_concurrent(
     }
     for lane in lanes {
         lane.join()
-            .map_err(|_| "a benchmark lane panicked".to_owned())??;
+            .map_err(|panic| format!("a benchmark lane panicked: {panic:?}"))??;
     }
     let elapsed = started.elapsed();
     let acknowledged = LANE_APPENDS.saturating_mul(concurrency);

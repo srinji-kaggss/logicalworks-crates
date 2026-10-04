@@ -423,7 +423,7 @@ mod tokio_util_cancel {
         }
     }
 
-    /// A new token.
+    /// Mint a fresh cancellation token, unrelated to any other, so one benchmark lane's cancel never reaches another lane.
     #[must_use]
     pub fn token() -> Token {
         Token::new()
@@ -1246,6 +1246,46 @@ async fn row_sustained_burst_reconnect() -> Result<Receipt, String> {
     Ok(receipt)
 }
 
+/// The key of the `attempt`th record of the durable-history row.
+///
+/// One attempt per record: the journal enforces the ladder in order for a
+/// *given* attempt, so reusing an attempt id would make the second record's
+/// `IntentAdmitted` an out-of-order append rather than history. A fresh attempt
+/// id per record is what makes this a history of distinct facts.
+fn history_key(attempt: usize) -> Result<lgwks_bot::effect::EffectKey, String> {
+    use lgwks_bot::effect::{
+        ActionDigest, ActionId, AttemptId, EffectKey, EnvironmentEpoch, EnvironmentId,
+        FlowRevision, RunId,
+    };
+
+    const RUN: &str = "0102030405060708090a0b0c0d0e0f10";
+    const ACTION: &str = "1112131415161718191a1b1c1d1e1f20";
+    const ENV: &str = "2122232425262728292a2b2c2d2e2f30";
+    const FLOW: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    const DIGEST: &str = "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeffe0e1e2e3e4e5e6e7e8e9eaebecedeeef";
+
+    let run = RunId::from_hex(RUN).map_err(|error| format!("run id: {error}"))?;
+    let action = ActionId::from_hex(ACTION).map_err(|error| format!("action id: {error}"))?;
+    let attempt = AttemptId::from_decimal(&format!("{attempt}"))
+        .map_err(|error| format!("attempt id: {error}"))?;
+    let flow = FlowRevision::from_tagged("blake3_256", FLOW)
+        .map_err(|error| format!("flow revision: {error}"))?;
+    let digest = ActionDigest::from_tagged("blake3_256", DIGEST)
+        .map_err(|error| format!("action digest: {error}"))?;
+    let environment =
+        EnvironmentId::from_hex(ENV).map_err(|error| format!("environment: {error}"))?;
+    let epoch = EnvironmentEpoch::from_decimal("1").map_err(|error| format!("epoch: {error}"))?;
+    Ok(EffectKey::new(
+        run,
+        action,
+        attempt,
+        flow,
+        digest,
+        environment,
+        epoch,
+    ))
+}
+
 /// Row: durable history at 1k, 10k and 100k records through the real journal.
 ///
 /// The durability row, and the only one here that writes to disk. Each tier is
@@ -1257,17 +1297,7 @@ fn row_durable_history(
     records: usize,
     shape: &'static str,
 ) -> Result<Receipt, String> {
-    use lgwks_bot::effect::{
-        ActionDigest, ActionId, AttemptId, EffectKey, EnvironmentEpoch, EnvironmentId,
-        FlowRevision, RunId,
-    };
     use lgwks_bot::journal::{EffectEvent, EffectJournal, FileJournal};
-
-    const RUN: &str = "0102030405060708090a0b0c0d0e0f10";
-    const ACTION: &str = "1112131415161718191a1b1c1d1e1f20";
-    const ENV: &str = "2122232425262728292a2b2c2d2e2f30";
-    const FLOW: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-    const DIGEST: &str = "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeffe0e1e2e3e4e5e6e7e8e9eaebecedeeef";
 
     std::fs::create_dir_all(dir).map_err(|error| format!("scratch dir: {error}"))?;
     let path = dir.join(format!("journal-{records}.log"));
@@ -1284,19 +1314,8 @@ fn row_durable_history(
             // second record's `IntentAdmitted` an out-of-order append rather
             // than history. A fresh attempt id per record is what makes this a
             // history of `records` distinct facts.
-            let attempt = appended.saturating_add(offset) + 1;
-            let key = EffectKey::new(
-                RunId::from_hex(RUN).map_err(|error| format!("run id: {error}"))?,
-                ActionId::from_hex(ACTION).map_err(|error| format!("action id: {error}"))?,
-                AttemptId::from_decimal(&format!("{attempt}"))
-                    .map_err(|error| format!("attempt id: {error}"))?,
-                FlowRevision::from_tagged("blake3_256", FLOW)
-                    .map_err(|error| format!("flow revision: {error}"))?,
-                ActionDigest::from_tagged("blake3_256", DIGEST)
-                    .map_err(|error| format!("action digest: {error}"))?,
-                EnvironmentId::from_hex(ENV).map_err(|error| format!("environment: {error}"))?,
-                EnvironmentEpoch::from_decimal("1").map_err(|error| format!("epoch: {error}"))?,
-            );
+            let attempt = appended.saturating_add(offset).saturating_add(1);
+            let key = history_key(attempt)?;
             events.push(EffectEvent::IntentAdmitted { key });
         }
         journal
@@ -1452,7 +1471,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut matrix = false;
     for arg in std::env::args().skip(1) {
         if let Some(value) = arg.strip_prefix("--rounds=") {
-            rounds = value.parse().map_err(|_| "rounds must be a number")?;
+            rounds = value
+                .parse()
+                .map_err(|error| format!("rounds must be a number: {error}"))?;
         } else if let Some(value) = arg.strip_prefix("--json=") {
             json = Some(value.to_string());
         } else if arg == "--alloc-report" {

@@ -85,7 +85,7 @@ impl Policy {
         // Relaxed: the balance is a counter, not a guard for other memory.
         let _previous = self
             .retries
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
                 Some(held.saturating_add(RETRY_RATIO_MILLI))
             });
     }
@@ -94,7 +94,7 @@ impl Policy {
     /// systemic and repeating it would only add load.
     pub(super) fn take_retry(&self) -> bool {
         self.retries
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
                 held.checked_sub(MILLI)
             })
             .is_ok()

@@ -135,12 +135,17 @@ fn rewrite(field: u32, held: EffectKey) -> Result<EffectKey, Box<dyn Error>> {
     let mut digest = held.digest();
     let mut environment = held.environment();
     let mut epoch = held.epoch();
+    let other_run = RunId::from_hex(OTHER_RUN)?;
+    let other_action = ActionId::from_hex(OTHER_ACTION)?;
+    let other_digest = ActionDigest::from_tagged("blake3_256", OTHER_DIGEST)?;
+    let other_flow = FlowRevision::from_tagged("blake3_256", OTHER_FLOW)?;
+    let other_environment = EnvironmentId::from_hex(OTHER_ENVIRONMENT)?;
     match field {
-        0 => run = RunId::from_hex(OTHER_RUN)?,
-        1 => action = ActionId::from_hex(OTHER_ACTION)?,
-        2 => digest = ActionDigest::from_tagged("blake3_256", OTHER_DIGEST)?,
-        3 => flow = FlowRevision::from_tagged("blake3_256", OTHER_FLOW)?,
-        4 => environment = EnvironmentId::from_hex(OTHER_ENVIRONMENT)?,
+        0 => run = other_run,
+        1 => action = other_action,
+        2 => digest = other_digest,
+        3 => flow = other_flow,
+        4 => environment = other_environment,
         5 => {
             epoch = epoch
                 .checked_next()

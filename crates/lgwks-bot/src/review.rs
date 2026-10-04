@@ -167,7 +167,7 @@ impl ReviewRequest {
         &self.comments
     }
 
-    /// The reconciliation marker.
+    /// The hidden trailer a published review carries, which a later run reads to recognise its own earlier review.
     #[must_use]
     pub fn marker(&self) -> &str {
         &self.marker

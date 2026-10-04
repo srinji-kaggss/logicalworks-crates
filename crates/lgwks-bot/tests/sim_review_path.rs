@@ -2037,65 +2037,71 @@ fn same_seed_same_trace_hash_subject(band: sim::Band) -> TestResult {
     Ok(())
 }
 
+/// One seed of the two-identity sweep: each identity publishes and verifies only its own review.
+fn identities_seed(index: u64) -> TestResult {
+    let fake = FakeGh::install("subject-tenants", HEAD)?;
+    fake.configure(Scenario::new(HEAD))?;
+    let host = host()?;
+    let path = fake.search_path()?;
+
+    let run_tenant = |body: &'static str| -> Result<ReviewOutcome, Box<dyn std::error::Error>> {
+        let job = task(
+            "review-pr",
+            move |scope: Scope, (gh, request): (Gh, ReviewRequest)| async move {
+                lgwks_bot::review::review_pr(scope, gh, request, move |_s, _scope| {
+                    Ok(String::from(body))
+                })
+                .await
+            },
+        )?;
+        let gh = Gh::new(Repository::new("acme/widgets")?)
+            .program(fake.program())
+            .capture_limit(NonZeroUsize::new(CAPTURE).ok_or("a non-zero limit")?)
+            .deadline(Some(Duration::from_secs(20)))
+            .env("PATH", &path);
+        let request = ReviewRequest::new(pull(7)?, "COMMENT", body).with_marker(body);
+        let report = host.block_on(&job, (gh, request))?;
+        report
+            .output()
+            .cloned()
+            .ok_or_else(|| "each identity must produce an outcome".into())
+    };
+
+    let first = run_tenant("first identity")?;
+    let second = run_tenant("second identity")?;
+    assert!(
+        first.is_published() && second.is_published(),
+        "seed {index}: both identities publish independently: {first:?} {second:?}"
+    );
+    assert_ne!(
+        first.review_id(),
+        second.review_id(),
+        "seed {index}: two identities must verify two distinct reviews: {first:?} {second:?}"
+    );
+    let payloads = fake.received()?;
+    assert_eq!(
+        payloads
+            .iter()
+            .filter(|payload| payload.contains("first identity"))
+            .count(),
+        1,
+        "seed {index}: exactly one payload carries the first identity's body"
+    );
+    assert_eq!(
+        payloads
+            .iter()
+            .filter(|payload| payload.contains("second identity"))
+            .count(),
+        1,
+        "seed {index}: exactly one payload carries the second identity's body"
+    );
+    Ok(())
+}
+
 /// Two identities on one pull request each verify only their own review.
 fn two_identities_subject(band: sim::Band) -> TestResult {
     for index in band.seeds() {
-        let fake = FakeGh::install("subject-tenants", HEAD)?;
-        fake.configure(Scenario::new(HEAD))?;
-        let host = host()?;
-        let path = fake.search_path()?;
-
-        let run_tenant = |body: &'static str| -> Result<ReviewOutcome, Box<dyn std::error::Error>> {
-            let job = task(
-                "review-pr",
-                move |scope: Scope, (gh, request): (Gh, ReviewRequest)| async move {
-                    lgwks_bot::review::review_pr(scope, gh, request, move |_s, _scope| {
-                        Ok(String::from(body))
-                    })
-                    .await
-                },
-            )?;
-            let gh = Gh::new(Repository::new("acme/widgets")?)
-                .program(fake.program())
-                .capture_limit(NonZeroUsize::new(CAPTURE).ok_or("a non-zero limit")?)
-                .deadline(Some(Duration::from_secs(20)))
-                .env("PATH", &path);
-            let request = ReviewRequest::new(pull(7)?, "COMMENT", body).with_marker(body);
-            let report = host.block_on(&job, (gh, request))?;
-            report
-                .output()
-                .cloned()
-                .ok_or_else(|| "each identity must produce an outcome".into())
-        };
-
-        let first = run_tenant("first identity")?;
-        let second = run_tenant("second identity")?;
-        assert!(
-            first.is_published() && second.is_published(),
-            "seed {index}: both identities publish independently: {first:?} {second:?}"
-        );
-        assert_ne!(
-            first.review_id(),
-            second.review_id(),
-            "seed {index}: two identities must verify two distinct reviews: {first:?} {second:?}"
-        );
-        let payloads = fake.received()?;
-        assert_eq!(
-            payloads
-                .iter()
-                .filter(|payload| payload.contains("first identity"))
-                .count(),
-            1,
-            "seed {index}: exactly one payload carries the first identity's body"
-        );
-        assert_eq!(
-            payloads
-                .iter()
-                .filter(|payload| payload.contains("second identity"))
-                .count(),
-            1,
-            "seed {index}: exactly one payload carries the second identity's body"
-        );
+        identities_seed(index)?;
     }
     Ok(())
 }

@@ -120,22 +120,32 @@ fn codec_trace(seed: u64) -> u64 {
     for _ in 0..24 {
         let value = draw_shape(&mut state);
 
-        let json_text = json::to_string(&value).unwrap_or_default();
-        let json_back: Shape = json::from_str(&json_text).unwrap_or_else(|_| value.clone());
+        let json_text = json::to_string(&value).map_err(|error| error.to_string());
+        let json_back = json_text
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(|text| json::from_str::<Shape>(text).map_err(|error| error.to_string()));
         assert_eq!(
-            json_back, value,
+            json_back,
+            Ok(value.clone()),
             "seed {seed}: a value must round-trip through JSON text"
         );
 
-        let ron_text = ron::to_string(&value).unwrap_or_default();
-        let ron_back: Shape = ron::from_str(&ron_text).unwrap_or_else(|_| value.clone());
+        let ron_text = ron::to_string(&value).map_err(|error| error.to_string());
+        let ron_back = ron_text
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(|text| ron::from_str::<Shape>(text).map_err(|error| error.to_string()));
         assert_eq!(
-            ron_back, value,
+            ron_back,
+            Ok(value.clone()),
             "seed {seed}: a value must round-trip through RON text"
         );
 
-        fold_bytes(&mut trace, json_text.as_bytes());
-        fold_bytes(&mut trace, ron_text.as_bytes());
+        if let Some((json_text, ron_text)) = json_text.as_ref().ok().zip(ron_text.as_ref().ok()) {
+            fold_bytes(&mut trace, json_text.as_bytes());
+            fold_bytes(&mut trace, ron_text.as_bytes());
+        }
         fold_usize(&mut trace, value.items.len());
     }
     trace
@@ -221,6 +231,44 @@ enum Door {
     Slice,
 }
 
+/// Decodes `document` through the text door of the codec `ron_style` names and
+/// checks the borrowed field points into it.
+fn check_text_door(
+    seed: u64,
+    ron_style: bool,
+    document: &str,
+    value: &str,
+    what: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if ron_style {
+        let decoded: Borrowed<'_> = ron::from_str(document)?;
+        assert_field_borrows(seed, document.as_bytes(), &decoded, value, what);
+    } else {
+        let decoded: Borrowed<'_> = json::from_str(document)?;
+        assert_field_borrows(seed, document.as_bytes(), &decoded, value, what);
+    }
+    Ok(())
+}
+
+/// Decodes `bytes` through the slice door of the codec `ron_style` names and
+/// checks the borrowed field points into it.
+fn check_slice_door(
+    seed: u64,
+    ron_style: bool,
+    bytes: Vec<u8>,
+    value: &str,
+    what: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if ron_style {
+        let decoded: Borrowed<'_> = ron::from_slice(&bytes)?;
+        assert_field_borrows(seed, &bytes, &decoded, value, what);
+    } else {
+        let decoded: Borrowed<'_> = json::from_slice(&bytes)?;
+        assert_field_borrows(seed, &bytes, &decoded, value, what);
+    }
+    Ok(())
+}
+
 /// Sweeps the borrowed-field property through one door, drawing a seeded value
 /// and checking that the decoded field points into the document it came from
 /// rather than owning a copy of the same text.
@@ -238,25 +286,9 @@ fn sweep_borrowed_field(
         let value_len = below(&mut state, 16);
         let value = next_text(&mut state, value_len);
         let document = borrowed_document(&value, ron_style);
-        match (ron_style, door) {
-            (true, Door::Text) => {
-                let decoded: Borrowed<'_> = ron::from_str(&document)?;
-                assert_field_borrows(seed, document.as_bytes(), &decoded, &value, what);
-            }
-            (false, Door::Text) => {
-                let decoded: Borrowed<'_> = json::from_str(&document)?;
-                assert_field_borrows(seed, document.as_bytes(), &decoded, &value, what);
-            }
-            (true, Door::Slice) => {
-                let bytes = document.into_bytes();
-                let decoded: Borrowed<'_> = ron::from_slice(&bytes)?;
-                assert_field_borrows(seed, &bytes, &decoded, &value, what);
-            }
-            (false, Door::Slice) => {
-                let bytes = document.into_bytes();
-                let decoded: Borrowed<'_> = json::from_slice(&bytes)?;
-                assert_field_borrows(seed, &bytes, &decoded, &value, what);
-            }
+        match door {
+            Door::Text => check_text_door(seed, ron_style, &document, &value, what)?,
+            Door::Slice => check_slice_door(seed, ron_style, document.into_bytes(), &value, what)?,
         }
     }
     Ok(())

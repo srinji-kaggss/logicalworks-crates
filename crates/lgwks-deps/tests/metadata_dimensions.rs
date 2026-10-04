@@ -143,19 +143,25 @@ fn the_retained_metadata_matches_a_fresh_locked_run() -> TestResult {
 fn copy_fixture(source: &Path, destination: &Path) -> Result<(), Box<dyn Error>> {
     std::fs::create_dir_all(destination)?;
     for entry in std::fs::read_dir(source)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if name.to_string_lossy() == "target" {
-            continue;
-        }
-        let to = destination.join(&name);
-        if entry.file_type()?.is_dir() {
-            copy_fixture(&entry.path(), &to)?;
-        } else {
-            std::fs::copy(entry.path(), &to)?;
-        }
+        copy_entry(&entry?, destination)?;
     }
     Ok(())
+}
+
+/// Copies one directory entry into `destination`, recursing into a directory and
+/// leaving cargo's `target/` behind.
+fn copy_entry(entry: &std::fs::DirEntry, destination: &Path) -> Result<(), Box<dyn Error>> {
+    let name = entry.file_name();
+    if name.to_string_lossy() == "target" {
+        return Ok(());
+    }
+    let to = destination.join(&name);
+    if entry.file_type()?.is_dir() {
+        copy_fixture(&entry.path(), &to)
+    } else {
+        std::fs::copy(entry.path(), &to)?;
+        Ok(())
+    }
 }
 
 /// A distinguishable scratch name: wall-clock nanos plus a monotone sequence.

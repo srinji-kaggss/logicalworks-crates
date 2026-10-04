@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use ai_task_support::{Artifact, Published, Stage, StageName};
+use ai_task_support::{Artifact, Published, Stage, StageError, StageName};
 use lgwks_bot::rt::task::join_all_bounded;
 use lgwks_bot::rt::time;
 
@@ -21,7 +21,9 @@ async fn run_stage(stage: Stage, name: StageName) -> Result<Artifact, PipelineEr
     stage
         .run(name)
         .await
-        .map_err(|_| PipelineError::Stage { name })
+        .map_err(|error| match error {
+            StageError::Stage { name } => PipelineError::Stage { name },
+        })
 }
 
 pub async fn solve(stage: Stage, deadline: Duration) -> Result<Published, PipelineError> {
@@ -36,9 +38,7 @@ pub async fn solve(stage: Stage, deadline: Duration) -> Result<Published, Pipeli
             .collect();
         let fetched = join_all_bounded(2, futures).await;
         for result in fetched {
-            if let Err(error) = result {
-                return Err(error);
-            }
+            result?;
         }
         let _combined = run_stage(stage.clone(), StageName::Combine).await?;
         let published = run_stage(stage, StageName::Publish).await?;

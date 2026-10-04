@@ -46,7 +46,7 @@ use lgwks_std::hash::{Digest, Hasher};
 use lgwks_std::wire::{WireError, from_bytes, to_bytes};
 
 use crate::effect::RunId;
-use crate::journal::frame::{self, HEAD_BYTES, LENGTH_BYTES, Piece, Prefix};
+use crate::journal::frame::{self, HEAD_BYTES};
 use crate::journal::owner::{self, Stage, StorageGate, StorageOwner, SubmitError};
 use crate::script::run_store::{Appended, RunRecords, StagedRecord, StoredValue};
 use crate::script::{FlowError, StepKey};
@@ -1416,6 +1416,44 @@ fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> Result<bool, StoreError>
     Ok(true)
 }
 
+/// One complete, decoded frame read from the store.
+struct Framed {
+    /// The record the frame's payload decoded to.
+    stored: Stored,
+    /// The payload bytes, which the chain head is computed over.
+    payload: Vec<u8>,
+    /// The chain head the frame recorded for itself.
+    head: [u8; HEAD_BYTES],
+    /// The payload length the frame declared.
+    declared: usize,
+}
+
+/// Read the frame at ordinal `at`, or `None` where the file stops holding a
+/// whole frame.
+///
+/// A partial length prefix, or a payload or head cut short, is an append that
+/// never finished: it was never anyone's answer, so the scan stops and the
+/// caller trims to `committed`. A complete prefix naming a frame this store
+/// never writes (a write leaves a prefix of a length it did finish computing,
+/// and that length was always legal) or a payload that does not decode cannot
+/// be an interrupted append and is refused.
+fn next_frame(file: &mut File, at: u64) -> Result<Option<Framed>, StoreError> {
+    let corrupt = || StoreError::Corrupt { at };
+    let Some(raw) = frame::read_raw(file, MAX_RECORD_BYTES, StoreError::storage, corrupt)? else {
+        return Ok(None);
+    };
+    let stored = from_bytes::<Stored, WireError>(&raw.payload).map_err(|error| {
+        lgwks_std::trace::debug!(?error, at, "next_frame: the payload did not decode");
+        StoreError::Corrupt { at }
+    })?;
+    Ok(Some(Framed {
+        stored,
+        declared: raw.payload.len(),
+        payload: raw.payload,
+        head: raw.head,
+    }))
+}
+
 /// Read every committed frame, returning the index it implies.
 ///
 /// The scan is bounded by the file's own length: every iteration consumes at
@@ -1448,38 +1486,13 @@ fn replay(file: &mut File) -> Result<Index, StoreError> {
     };
     let mut previous = genesis_head();
     let mut at = 0u64;
-    loop {
-        let mut prefix = [0u8; LENGTH_BYTES];
-        let declared = match frame::read_prefix(file, &mut prefix).map_err(StoreError::storage)? {
-            Prefix::Eof => break,
-            // A partial length prefix is an append that never finished: it was
-            // never anyone's answer, so the scan stops here and the caller trims
-            // to `committed`.
-            Prefix::Torn => break,
-            Prefix::Full => frame::declared_length(&prefix),
-        };
-        if !frame::is_possible_length(declared, MAX_RECORD_BYTES) {
-            // A complete prefix naming a frame this store never writes cannot be
-            // an interrupted append: a write leaves a prefix of a length it did
-            // finish computing, and that length was always legal. Refuse.
-            let refusal = Err(StoreError::Corrupt { at });
-            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "replay: returning an error to the caller");
-            return refusal;
-        }
-        let mut payload = vec![0u8; declared];
-        if let Piece::Interrupted =
-            frame::read_piece(file, &mut payload).map_err(StoreError::storage)?
-        {
-            break;
-        }
-        let mut head = [0u8; HEAD_BYTES];
-        if let Piece::Interrupted =
-            frame::read_piece(file, &mut head).map_err(StoreError::storage)?
-        {
-            break;
-        }
-        let stored: Stored =
-            from_bytes::<Stored, WireError>(&payload).map_err(|_| StoreError::Corrupt { at })?;
+    while let Some(Framed {
+        stored,
+        payload,
+        head,
+        declared,
+    }) = next_frame(file, at)?
+    {
         if stored.head_from(&previous, &payload) != Digest::from_bytes(head) {
             let refusal = Err(StoreError::Corrupt { at });
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "replay: returning an error to the caller");
@@ -1540,5 +1553,5 @@ fn hex_of(bytes: &[u8]) -> String {
     // Every byte pushed above is an ASCII digit, so this is well-formed UTF-8
     // and the conversion cannot fail; `String::from_utf8` reports the invariant
     // rather than trusting it.
-    String::from_utf8(hex).unwrap_or_default()
+    hex.into_iter().map(char::from).collect()
 }

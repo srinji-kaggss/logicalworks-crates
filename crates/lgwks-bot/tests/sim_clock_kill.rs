@@ -109,8 +109,8 @@ fn admit(journal: &mut FileJournal, key: EffectKey) -> Result<(), Box<dyn std::e
 /// count, and the claim under test is about what survives, not about which
 /// variant carries it.
 fn child_body() -> TestResult {
-    let journal_path = journal_path();
-    let marker = marker_path();
+    let journal_path = journal_path()?;
+    let marker = marker_path()?;
     let snapshot_path = journal_path.with_extension("elapsed");
 
     let mut journal = FileJournal::open(&journal_path)?;
@@ -164,13 +164,17 @@ fn spawn_probe(
 
 /// The journal every probe child appends to, ordered by the parent through the
 /// environment.
-fn journal_path() -> PathBuf {
-    PathBuf::from(std::env::var_os(PROBE_JOURNAL).unwrap_or_default())
+fn journal_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = std::env::var_os(PROBE_JOURNAL)
+        .ok_or("the probe child was started without a journal path")?;
+    Ok(PathBuf::from(path))
 }
 
 /// The marker every probe child writes once its appends were acknowledged.
-fn marker_path() -> PathBuf {
-    PathBuf::from(std::env::var_os(PROBE_MARKER).unwrap_or_default())
+fn marker_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = std::env::var_os(PROBE_MARKER)
+        .ok_or("the probe child was started without a marker path")?;
+    Ok(PathBuf::from(path))
 }
 
 /// Wait for the marker, then `SIGKILL` the child and reap it.
@@ -214,7 +218,7 @@ fn read_child_elapsed(journal_path: &Path) -> Result<Duration, Box<dyn std::erro
 /// exists to prevent.
 fn nanos_of(elapsed: Duration) -> Result<u64, Box<dyn std::error::Error>> {
     u64::try_from(elapsed.as_nanos())
-        .map_err(|_| format!("{elapsed:?} is longer than the record can hold").into())
+        .map_err(|error| format!("{elapsed:?} is longer than the record can hold: {error}").into())
 }
 
 /// A scratch directory whose journal and marker paths are already chosen.

@@ -684,6 +684,76 @@ impl<'a> InvariantReport<'a> {
     }
 }
 
+/// Reports a check whose dependency register audited, beside its invariant audit.
+fn report_audited_check(
+    root: &Path,
+    mode: PolicyMode,
+    verdict: &Verdict,
+    invariant: InvariantReport<'_>,
+    json_output: bool,
+    out: &mut impl io::Write,
+    err: &mut impl io::Write,
+) -> io::Result<ExitCode> {
+    let register = verdict.register();
+    let refusals = verdict.refusals();
+    if json_output {
+        print_check_json(
+            &CheckOutcome {
+                root: Some(root),
+                mode,
+                audit: Ok(verdict),
+            },
+            Some(invariant.json()),
+            out,
+        )?;
+        return Ok(invariant.check_exit_code(refusals));
+    }
+    if refusals.is_empty() && invariant.audit.refusals().is_empty() {
+        writeln!(
+            out,
+            "OK  {} — {} semantic approvals; {} invariants resolve ({} resolved, {} attested by a recorded run)",
+            root.display(),
+            register.entry_count(),
+            invariant.audit.registered(),
+            invariant.audit.resolved(),
+            invariant.audit.attested()
+        )?;
+        write_receipt(
+            &CheckOutcome {
+                root: Some(root),
+                mode,
+                audit: Ok(verdict),
+            },
+            out,
+        )?;
+        writeln!(out, "SCOPE  {INVARIANT_SCOPE}")?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    writeln!(
+        err,
+        "REFUSED  {} — {} dependency-edge violations, {} invariant violations\n",
+        root.display(),
+        refusals.len(),
+        invariant.audit.refusals().len()
+    )?;
+    write_dependency_refusals(refusals, err)?;
+    write_invariant_refusals(invariant.audit, err)?;
+    write_receipt(
+        &CheckOutcome {
+            root: Some(root),
+            mode,
+            audit: Ok(verdict),
+        },
+        err,
+    )?;
+    writeln!(err, "SCOPE  {INVARIANT_SCOPE}")?;
+    writeln!(
+        err,
+        "\nBoth registers are reviewed contracts; repair each named refusal before delivery."
+    )?;
+    Ok(invariant.check_exit_code(refusals))
+}
+
 /// Reports one check verdict after both registers have been audited.
 fn report_check_with_invariants(
     root: &Path,
@@ -695,66 +765,7 @@ fn report_check_with_invariants(
     err: &mut impl io::Write,
 ) -> io::Result<ExitCode> {
     match audit {
-        Ok(verdict) => {
-            let register = verdict.register();
-            let refusals = verdict.refusals();
-            if json_output {
-                print_check_json(
-                    &CheckOutcome {
-                        root: Some(root),
-                        mode,
-                        audit: Ok(verdict),
-                    },
-                    Some(invariant.json()),
-                    out,
-                )?;
-                return Ok(invariant.check_exit_code(refusals));
-            }
-            if refusals.is_empty() && invariant.audit.refusals().is_empty() {
-                writeln!(
-                    out,
-                    "OK  {} — {} semantic approvals; {} invariants resolve ({} resolved, {} attested by a recorded run)",
-                    root.display(),
-                    register.entry_count(),
-                    invariant.audit.registered(),
-                    invariant.audit.resolved(),
-                    invariant.audit.attested()
-                )?;
-                write_receipt(
-                    &CheckOutcome {
-                        root: Some(root),
-                        mode,
-                        audit: Ok(verdict),
-                    },
-                    out,
-                )?;
-                writeln!(out, "SCOPE  {INVARIANT_SCOPE}")?;
-                return Ok(ExitCode::SUCCESS);
-            }
-            writeln!(
-                err,
-                "REFUSED  {} — {} dependency-edge violations, {} invariant violations\n",
-                root.display(),
-                refusals.len(),
-                invariant.audit.refusals().len()
-            )?;
-            write_dependency_refusals(refusals, err)?;
-            write_invariant_refusals(invariant.audit, err)?;
-            write_receipt(
-                &CheckOutcome {
-                    root: Some(root),
-                    mode,
-                    audit: Ok(verdict),
-                },
-                err,
-            )?;
-            writeln!(err, "SCOPE  {INVARIANT_SCOPE}")?;
-            writeln!(
-                err,
-                "\nBoth registers are reviewed contracts; repair each named refusal before delivery."
-            )?;
-            Ok(invariant.check_exit_code(refusals))
-        }
+        Ok(verdict) => report_audited_check(root, mode, verdict, invariant, json_output, out, err),
         Err(dependency_error) => report_check_with_dependency_error(
             root,
             mode,
@@ -819,39 +830,53 @@ fn report_check_with_invariant_error(
         audit: None,
         error: Some(invariant_error),
     };
+    if machine_output {
+        print_check_json(&outcome, Some(broken_invariant), stdout)?;
+        return Ok(ExitCode::from(2));
+    }
     match audit {
-        Ok(verdict) => {
-            if machine_output {
-                print_check_json(&outcome, Some(broken_invariant), stdout)?;
-                return Ok(ExitCode::from(2));
-            }
-            writeln!(
-                stderr,
-                "REFUSED  {} — {} dependency-edge violations, invariant register error\n",
-                root.display(),
-                verdict.refusals().len()
-            )?;
-            write_dependency_refusals(verdict.refusals(), stderr)?;
-            write_register_detail(stderr, "invariant", invariant_error)?;
-            write_receipt(&outcome, stderr)?;
-            Ok(ExitCode::from(2))
-        }
+        Ok(verdict) => write_invariant_register_error(root, verdict, invariant_error, stderr)?,
         Err(dependency_error) => {
-            if machine_output {
-                print_check_json(&outcome, Some(broken_invariant), stdout)?;
-                return Ok(ExitCode::from(2));
-            }
-            writeln!(
-                stderr,
-                "REFUSED  {} — both registers could not be audited",
-                root.display()
-            )?;
-            write_register_detail(stderr, "dependency", dependency_error)?;
-            write_register_detail(stderr, "invariant", invariant_error)?;
-            write_receipt(&outcome, stderr)?;
-            Ok(ExitCode::from(2))
+            write_both_registers_unaudited(root, dependency_error, invariant_error, stderr)?;
         }
     }
+    write_receipt(&outcome, stderr)?;
+    Ok(ExitCode::from(2))
+}
+
+/// Writes the human refusal for a tree whose dependency register audited and
+/// whose invariant register did not, naming every dependency refusal it found.
+fn write_invariant_register_error(
+    root: &Path,
+    verdict: &Verdict,
+    invariant_error: &str,
+    stderr: &mut impl io::Write,
+) -> io::Result<()> {
+    writeln!(
+        stderr,
+        "REFUSED  {} — {} dependency-edge violations, invariant register error\n",
+        root.display(),
+        verdict.refusals().len()
+    )?;
+    write_dependency_refusals(verdict.refusals(), stderr)?;
+    write_register_detail(stderr, "invariant", invariant_error)
+}
+
+/// Writes the human refusal for a tree on which neither register could be
+/// audited, naming why each one could not.
+fn write_both_registers_unaudited(
+    root: &Path,
+    dependency_error: &str,
+    invariant_error: &str,
+    stderr: &mut impl io::Write,
+) -> io::Result<()> {
+    writeln!(
+        stderr,
+        "REFUSED  {} — both registers could not be audited",
+        root.display()
+    )?;
+    write_register_detail(stderr, "dependency", dependency_error)?;
+    write_register_detail(stderr, "invariant", invariant_error)
 }
 
 /// Writes the receipt that binds the verdict to what it was reached against.
@@ -958,15 +983,23 @@ fn report_check(
     let named = outcome.root.unwrap_or(Path::new("."));
     if verdict.refusals().is_empty() {
         report_ok(named, verdict.register().entry_count(), out)?;
-        write_receipt(outcome, out)?;
-        writeln!(out, "SCOPE  {INVARIANT_SCOPE}")?;
-        Ok(ExitCode::SUCCESS)
+        finish_verdict(outcome, out, ExitCode::SUCCESS)
     } else {
         let code = report_refusals(named, verdict.register(), verdict.refusals(), err)?;
-        write_receipt(outcome, err)?;
-        writeln!(err, "SCOPE  {INVARIANT_SCOPE}")?;
-        Ok(code)
+        finish_verdict(outcome, err, code)
     }
+}
+
+/// Closes a human verdict with its receipt and the scope the verdict covers,
+/// then hands back the exit code the verdict earned.
+fn finish_verdict(
+    outcome: &CheckOutcome<'_>,
+    writer: &mut impl io::Write,
+    code: ExitCode,
+) -> io::Result<ExitCode> {
+    write_receipt(outcome, writer)?;
+    writeln!(writer, "SCOPE  {INVARIANT_SCOPE}")?;
+    Ok(code)
 }
 
 /// Writes the verdict as one JSON object on `out`.
@@ -1906,6 +1939,33 @@ fn handle_vendor(
     run_vendor_check(&start, out, err)
 }
 
+/// Writes the refusal for a lock file the vendor tree does not cover: how many
+/// locked packages are missing, each one by name and version, and the repair.
+fn write_missing_packages(
+    root: &Path,
+    tree: &Path,
+    report: &lgwks_deps::vendor::Report,
+    err: &mut impl io::Write,
+) -> io::Result<()> {
+    writeln!(
+        err,
+        "REFUSED  {} — {} of {} locked packages missing from {}\n",
+        root.display(),
+        report.missing.len(),
+        // Both operands are counts of entries in one lock file, so the
+        // sum is bounded by its package count and cannot overflow.
+        report.covered.saturating_add(report.missing.len()),
+        tree.display()
+    )?;
+    for missing in &report.missing {
+        writeln!(err, "  {} {}", missing.name, missing.version)?;
+    }
+    writeln!(
+        err,
+        "\nRe-run the vendor sync for this repo, then re-check."
+    )
+}
+
 /// Proves every locked package resolves to the shared vendor tree.
 ///
 /// Exit 0 when the tree covers the lock file and 2 when any locked package is
@@ -1935,23 +1995,7 @@ fn run_vendor_check(
             Ok(ExitCode::SUCCESS)
         }
         Ok(report) => {
-            writeln!(
-                err,
-                "REFUSED  {} — {} of {} locked packages missing from {}\n",
-                root.display(),
-                report.missing.len(),
-                // Both operands are counts of entries in one lock file, so the
-                // sum is bounded by its package count and cannot overflow.
-                report.covered.saturating_add(report.missing.len()),
-                tree.display()
-            )?;
-            for missing in &report.missing {
-                writeln!(err, "  {} {}", missing.name, missing.version)?;
-            }
-            writeln!(
-                err,
-                "\nRe-run the vendor sync for this repo, then re-check."
-            )?;
+            write_missing_packages(&root, &tree, &report, err)?;
             Ok(ExitCode::from(2))
         }
         Err(error) => refuse(&error.to_string(), err),

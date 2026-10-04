@@ -195,7 +195,7 @@ pub struct Wanted {
 }
 
 impl Wanted {
-    /// The operation this value is for.
+    /// The name of the operation this proposal asks to run, as it must appear in the surface's registry.
     #[must_use]
     pub fn operation(&self) -> &str {
         &self.operation

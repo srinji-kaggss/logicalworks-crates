@@ -34,7 +34,7 @@ use seeded_sweep::{
 /// the whole signed range rather than only its lower half.
 fn next_signed_byte(state: &mut u64) -> i8 {
     let raw = next_byte(state);
-    i8::try_from(raw).unwrap_or_else(|_| i8::try_from(raw.wrapping_sub(128)).unwrap_or(0))
+    i8::from_ne_bytes([raw])
 }
 
 /// Why the reference coder refused one run of bytes.
