@@ -28,7 +28,6 @@ use lgwks_std::retry::RetryPolicy;
 use lgwks_std::similarity::{
     CheckedEvidence, CheckedSimilarity, EditDistance, EvidenceError, EvidenceVerdict,
 };
-use std::io::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
