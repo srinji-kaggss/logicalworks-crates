@@ -107,6 +107,12 @@ jobs:
     # Measured on sim_scale alone: 104 s on disk, 21.6 s on a RAM volume.
     env:
       TMPDIR: /dev/shm
+      # The Clippy job is where lints run, with `-D warnings`, over the same
+      # workspace. `.cargo/config.toml` also routes every workspace compile
+      # through clippy-driver so a plain local build enforces them; repeating the
+      # lint pass in each test shard only adds to the compile that gates the run.
+      # Empty is "no wrapper" to cargo, and the compiled code is identical.
+      RUSTC_WORKSPACE_WRAPPER: ""
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -175,6 +181,12 @@ jobs:
         shard: [1, 2, 3, 4]
     env:
       TMPDIR: /dev/shm
+      # The Clippy job is where lints run, with `-D warnings`, over the same
+      # workspace. `.cargo/config.toml` also routes every workspace compile
+      # through clippy-driver so a plain local build enforces them; repeating the
+      # lint pass in each test shard only adds to the compile that gates the run.
+      # Empty is "no wrapper" to cargo, and the compiled code is identical.
+      RUSTC_WORKSPACE_WRAPPER: ""
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -203,6 +215,12 @@ jobs:
     timeout-minutes: 15
     env:
       TMPDIR: /dev/shm
+      # The Clippy job is where lints run, with `-D warnings`, over the same
+      # workspace. `.cargo/config.toml` also routes every workspace compile
+      # through clippy-driver so a plain local build enforces them; repeating the
+      # lint pass in each test shard only adds to the compile that gates the run.
+      # Empty is "no wrapper" to cargo, and the compiled code is identical.
+      RUSTC_WORKSPACE_WRAPPER: ""
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
