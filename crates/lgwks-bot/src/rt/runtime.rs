@@ -13,6 +13,12 @@ use std::time::Duration;
 /// Maximum number of native worker threads accepted by [`Builder`].
 pub const MAX_WORKER_THREADS: usize = 1024;
 
+/// The largest worker stack [`Builder::thread_stack_size`] accepts: 256 MiB.
+///
+/// Stacks are reserved address space per worker, so the ceiling is a multiple of
+/// worker count's bound, not a limit on how deep any one call may recurse.
+pub const MAX_THREAD_STACK_SIZE: usize = 256 * 1024 * 1024;
+
 /// Configures and builds an owned [`Runtime`].
 ///
 /// Native targets use Tokio's multi-thread scheduler. WASM targets use the
@@ -34,6 +40,9 @@ pub struct Builder {
     /// Ceiling on the blocking pool used by the `fs` driver, or `None` for the
     /// engine's default. `NonZeroUsize` because the engine refuses zero.
     max_blocking_threads: Option<NonZeroUsize>,
+    /// Stack size in bytes for native workers, or `None` for the engine's default
+    /// of 2 MiB. Ignored on WASM.
+    thread_stack_size: Option<NonZeroUsize>,
 }
 
 impl Builder {
@@ -80,6 +89,21 @@ impl Builder {
         self
     }
 
+    /// Give each native worker thread a stack of `bytes`, or pass `None` for the
+    /// engine's default of 2 MiB. Has no effect on WASM.
+    ///
+    /// A future's own state lives in the task, but every synchronous call a poll
+    /// makes uses the worker's stack, and a chain of bounded but deep calls can
+    /// exceed the default; the process then aborts with a stack overflow rather
+    /// than returning an error. Sizes above [`MAX_THREAD_STACK_SIZE`] are refused
+    /// when the runtime is built, as [`Builder::worker_threads`] counts above its
+    /// ceiling are, so the knob cannot reserve unbounded address space per worker.
+    #[must_use]
+    pub fn thread_stack_size(mut self, bytes: Option<NonZeroUsize>) -> Self {
+        self.thread_stack_size = bytes;
+        self
+    }
+
     /// Build the runtime.
     ///
     /// This allocates native worker threads immediately; a failure is the OS
@@ -118,6 +142,18 @@ impl Builder {
         builder.thread_name(self.thread_name.as_deref().unwrap_or("lgwks-bot"));
         if let Some(max_blocking) = self.max_blocking_threads {
             builder.max_blocking_threads(max_blocking.get());
+        }
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(bytes) = self.thread_stack_size {
+            if bytes.get() > MAX_THREAD_STACK_SIZE {
+                let refusal = Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "lgwks_bot: thread_stack_size exceeds MAX_THREAD_STACK_SIZE",
+                ));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build: returning an error to the caller");
+                return refusal;
+            }
+            builder.thread_stack_size(bytes.get());
         }
         builder.enable_all();
         builder.build().map(|inner| Runtime { inner })

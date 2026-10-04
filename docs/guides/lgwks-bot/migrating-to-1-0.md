@@ -99,14 +99,17 @@ running the tests.
    output, because that tool writes its result to stdout. See the open gaps
    below.
 
-## Open gaps this migration found
+## Gaps this migration found, and what closed them
 
-These are real limits of the 1.0 surface, not misunderstandings:
+Both were real limits of the 1.0.0 surface, not misunderstandings. They are
+closed in the release after 1.0.0:
 
-- `ProcessSpec` streams take `Inherit`, `Null` or `Capture(n)` only. A stream
-  cannot be attached to a file. Until a file policy exists, redirect inside the
-  command (`/bin/sh -c '<tool> > <path>'`) and quote the path.
-- `rt::runtime::Builder` exposes worker threads, a thread name and a blocking
-  ceiling, and nothing for worker stack size. A bounded future chain deeper than
-  the engine's 2 MiB default worker stack aborts the process with a stack
-  overflow, and there is no sanctioned knob.
+- **A stream cannot be attached to a file.** `ProcessSpec::stdout_to_file(path)`
+  and `stderr_to_file(path)` create or truncate the file when the child starts. A
+  path that cannot be opened refuses the start as an `io::Error`, and no child
+  runs. On 1.0.0, redirect inside the command (`/bin/sh -c '<tool> > <path>'`) and
+  quote the path.
+- **No worker stack size.** `rt::runtime::Builder::thread_stack_size(Some(bytes))`
+  sets it, up to `MAX_THREAD_STACK_SIZE` (256 MiB), and refuses more at build. On
+  1.0.0 a bounded call chain deeper than the engine's 2 MiB default aborts the
+  process with a stack overflow, and `RUST_MIN_STACK` is the only lever.
