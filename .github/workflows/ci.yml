@@ -94,6 +94,13 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Two shards of one nextest run: `--partition count:N/2` splits the suite by
+    # test, so the shards cover it exactly once between them. The suite was 269 s
+    # of a 308 s job; halved, the job is as long as one shard plus its build.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     # The simulation suites write a real file journal and `sync_all` it. On the
     # runner's disk those syncs queue behind each other; on tmpfs they cost
     # nothing and the syscalls, the code and every assertion are unchanged.
@@ -116,12 +123,19 @@ jobs:
       - name: Install nextest
         uses: taiki-e/install-action@nextest
       - name: Run all workspace tests
-        run: cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)'
+        env:
+          PARTITION: count:${{ matrix.shard }}/2
+        run: cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)' ${PARTITION:+--partition $PARTITION}
+      # The three checks below are not part of the partitioned suite; they run
+      # once, on the first shard, rather than once per shard.
       - name: Deterministic simulation evidence
+        if: matrix.shard == 1
         run: python3 scripts/ci_local.py --lane simulation-evidence
       - name: Doc tests
+        if: matrix.shard == 1
         run: cargo test --workspace --doc --locked
       - name: Debug doctor end-to-end journey
+        if: matrix.shard == 1
         run: python3 scripts/ci_local.py --lane debug-e2e
 
   tests_nodefault:
@@ -153,6 +167,12 @@ jobs:
     name: Tests (lgwks-bot full)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Four shards of one nextest run (542 s of a 571 s job), covering the suite
+    # exactly once between them.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     env:
       TMPDIR: /dev/shm
     steps:
@@ -170,7 +190,9 @@ jobs:
       - name: Install nextest
         uses: taiki-e/install-action@nextest
       - name: Run lgwks-bot async runner tests
-        run: cargo nextest run -p lgwks_bot --all-targets --locked --features full
+        env:
+          PARTITION: count:${{ matrix.shard }}/4
+        run: cargo nextest run -p lgwks_bot --all-targets --locked --features full ${PARTITION:+--partition $PARTITION}
 
   bench_fairness:
     # Its own job: it builds a separate workspace root in release, and run after
