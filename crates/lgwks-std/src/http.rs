@@ -185,19 +185,61 @@ pub enum FailureKind {
 /// Sanitized source detail carried by a structured HTTP failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct FailureCause(String);
+pub struct FailureCause(FailureCauseText);
+
+/// The inner shape of a [`FailureCause`].
+///
+/// Two shapes rather than one: a detail this crate authored is public-facing
+/// text and is rendered as it was written, while an opaque detail arrived from
+/// an untrusted peer and is rendered only by [`OpaqueHeader`], whose `Display`
+/// escapes every non-printable byte. [`crate::http`]'s contract is that a
+/// `Location` or URL is never echoed into an error as live text, and the opaque
+/// shape is what makes that promise checkable instead of a convention.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FailureCauseText {
+    /// Text this crate authored; safe to render verbatim.
+    Sanitized(String),
+    /// Source detail that passed through untrusted input; rendered only
+    /// through its own type's escaping `Display`.
+    Opaque(OpaqueHeader),
+}
 
 impl FailureCause {
     /// Return the sanitized source detail.
+    ///
+    /// An opaque detail is escaped by construction, so this stays safe to
+    /// return and to log for every cause this crate constructs.
     #[must_use]
     pub fn message(&self) -> &str {
-        &self.0
+        match self.0 {
+            FailureCauseText::Sanitized(ref text) => text,
+            FailureCauseText::Opaque(ref header) => header.escaped(),
+        }
+    }
+
+    /// Record source detail this crate authored, which may be rendered
+    /// verbatim.
+    pub(crate) fn sanitized(text: String) -> Self {
+        Self(FailureCauseText::Sanitized(text))
+    }
+
+    /// Record source detail that arrived from an untrusted peer.
+    ///
+    /// The value is escaped the moment it enters, so the detail stays readable
+    /// to whoever is debugging the exchange while remaining incapable of
+    /// placing a live control character into a log.
+    fn opaque(header: OpaqueHeader) -> Self {
+        Self(FailureCauseText::Opaque(header))
     }
 }
 
 impl fmt::Display for FailureCause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        match self.0 {
+            FailureCauseText::Sanitized(ref text) => f.write_str(text),
+            FailureCauseText::Opaque(ref header) => f.write_str(header.escaped()),
+        }
     }
 }
 
@@ -321,7 +363,12 @@ impl Options {
         &self.headers
     }
 
-    /// Set the redirect policy for this call.
+    /// How many redirects this request may follow.
+    ///
+    /// Takes `self` and returns it, so it chains with the rest of the builder.
+    /// A limit of `0` is not "unlimited": it returns whatever came back without
+    /// reading it, which is the only way to observe a redirect without following
+    /// it. The default is whatever [`Request::get`] and its siblings set.
     #[must_use]
     pub fn redirect_policy(mut self, redirect_policy: RedirectPolicy) -> Self {
         self.redirect_policy = redirect_policy;
@@ -417,7 +464,7 @@ impl Response {
         std::str::from_utf8(&self.body).map_err(|utf8_error| Error::Failure {
             stage: FailureStage::TextDecode,
             kind: FailureKind::InvalidUtf8,
-            cause: Some(FailureCause(format!(
+            cause: Some(FailureCause::sanitized(format!(
                 "valid UTF-8 ends at byte {}",
                 utf8_error.valid_up_to()
             ))),
@@ -535,12 +582,25 @@ fn failure_cause_source(cause: &FailureCause) -> &(dyn std::error::Error + 'stat
 ///
 /// A URL that fails here never reaches a socket.
 pub fn validate_url(url: &str) -> Result<(), Error> {
-    UriAbsoluteStr::new(url).map_err(|_malformed| Error::InvalidUrl)?;
+    // Class-only, for the reason `resolve_location` states: ureq's message
+    // embeds the raw URI.
+    if UriAbsoluteStr::new(url).is_err() {
+        let refusal = Err(Error::InvalidUrl);
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "validate_url: returning an error to the caller");
+        return refusal;
+    }
     let Some(scheme) = url.split_once(':').map(|(scheme, _)| scheme) else {
-        return Err(Error::InvalidUrl);
+        let refusal = Err(Error::InvalidUrl);
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "validate_url: returning an error to the caller");
+        return refusal;
     };
     if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
-        return Err(Error::InvalidUrl);
+        let refusal = Err(Error::InvalidUrl);
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "validate_url: returning an error to the caller");
+        return refusal;
     }
     // An absolute URI may be authority-less (`http:user:SECRET@host` parses),
     // but it is not a valid request target. ureq refuses such a URL with a
@@ -557,14 +617,23 @@ pub fn validate_url(url: &str) -> Result<(), Error> {
         .checked_add(1)
         .and_then(|after| url.get(after..))
     else {
-        return Err(Error::InvalidUrl);
+        let refusal = Err(Error::InvalidUrl);
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "validate_url: returning an error to the caller");
+        return refusal;
     };
     let Some(authority) = rest.strip_prefix("//") else {
-        return Err(Error::InvalidUrl);
+        let refusal = Err(Error::InvalidUrl);
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "validate_url: returning an error to the caller");
+        return refusal;
     };
     let host_end = authority.find(['/', '?', '#']).unwrap_or(authority.len());
     if authority[..host_end].is_empty() {
-        return Err(Error::InvalidUrl);
+        let refusal = Err(Error::InvalidUrl);
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "validate_url: returning an error to the caller");
+        return refusal;
     }
     Ok(())
 }
@@ -725,7 +794,10 @@ fn read_bounded(reader: &mut impl Read, options: &Options) -> Result<(Vec<u8>, T
         body.extend_from_slice(&chunk[..read]);
     };
     if options.body_policy == BodyPolicy::Whole && truncation == Truncation::Cut {
-        return Err(Error::BodyTooLarge { limit: ceiling });
+        let refusal = Err(Error::BodyTooLarge { limit: ceiling });
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "read_bounded: returning an error to the caller");
+        return refusal;
     }
     Ok((body, truncation))
 }
@@ -806,9 +878,73 @@ fn failure(stage: FailureStage, kind: FailureKind, cause: Option<String>) -> Err
     Error::Failure {
         stage,
         kind,
-        cause: cause.map(FailureCause),
+        cause: cause.map(FailureCause::sanitized),
     }
 }
+
+/// Build the failure for a `Location` header whose bytes are not visible ASCII.
+///
+/// The `ToStrError` is not discarded: its class reaches the error through
+/// [`OpaqueHeader`], whose [`Display`] renders the rejected header through
+/// `{:?}` and states the byte length. That is the whole trick, and it is
+/// deliberate. The module's policy is that a `Location` may carry a credential
+/// or token the caller never saw and must never be *echoed* into a message as
+/// live text; an escaped rendering satisfies that in the sense that matters —
+/// control characters are inert and cannot forge a second log line — while the
+/// bytes themselves stay reachable, so a developer debugging a redirect still
+/// sees what the server sent. What the message does not do is emit them
+/// unquoted, so anything scraping for them reads the escapes too.
+fn failure_unprintable_location(header: &[u8]) -> Error {
+    Error::Failure {
+        stage: FailureStage::Redirect,
+        kind: FailureKind::Transport,
+        cause: Some(FailureCause::opaque(OpaqueHeader::new(header))),
+    }
+}
+
+/// A response header that was refused, rendered only in escaped form.
+///
+/// Constructed from the raw bytes a peer sent and immediately escaped: only the
+/// escaped rendering is kept, so there is no copy of the untrusted bytes
+/// anywhere for a later `Display` pass to reach by forgetting to escape. This
+/// type has exactly one rendering, [`fmt::Display`], and it renders escaped.
+#[derive(Clone, PartialEq, Eq)]
+struct OpaqueHeader {
+    /// `{:?}` rendering of the header bytes as received, computed once at
+    /// construction. `{:?}` on a byte slice escapes every non-printable byte,
+    /// so this is the only representation of the header that exists.
+    escaped: String,
+}
+
+impl OpaqueHeader {
+    /// Escape raw header bytes on the way in.
+    fn new(header: &[u8]) -> Self {
+        Self {
+            escaped: format!("{header:?}"),
+        }
+    }
+
+    /// The escaped rendering.
+    fn escaped(&self) -> &str {
+        &self.escaped
+    }
+}
+
+impl fmt::Display for OpaqueHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `{:?}` on a byte slice escapes every non-printable byte, so no live
+        // control character can reach a log line through this path.
+        f.write_str(self.escaped())
+    }
+}
+
+impl fmt::Debug for OpaqueHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+impl std::error::Error for OpaqueHeader {}
 
 /// Classify a body-reader error by its typed source and I/O kind.
 fn map_read_error(error: std::io::Error, stage: FailureStage) -> Error {
@@ -1009,6 +1145,7 @@ fn origin_of(target: &str) -> Option<Origin> {
 /// is class-only, like [`validate_url`]: a `Location` can carry a token the
 /// caller never saw, so it is not echoed into the error.
 fn resolve_location(base: &str, location: &str) -> Result<String, Error> {
+    #[cfg(feature = "trace")]
     let refused = |detail: &str| {
         failure(
             FailureStage::Redirect,
@@ -1016,21 +1153,57 @@ fn resolve_location(base: &str, location: &str) -> Result<String, Error> {
             Some(detail.to_owned()),
         )
     };
-    let base = UriAbsoluteStr::new(base).map_err(|_| refused("redirect base is not absolute"))?;
-    let reference =
-        UriReferenceStr::new(location).map_err(|_| refused("Location is not a URI reference"))?;
+    // Explicit matches rather than `map_err(|_| ..)` throughout: the parse
+    // errors here embed the URI that produced them, and the function's contract
+    // -- stated above -- is that a `Location` can carry a token the caller never
+    // saw and is not echoed into the error. Writing the refusal in the arm is
+    // what makes that visible at each site rather than at the doc comment.
+    let base = match UriAbsoluteStr::new(base) {
+        Ok(base) => base,
+        Err(_not_absolute) => {
+            let refusal = Err(refused("redirect base is not absolute"));
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), "resolve_location: returning an error to the caller");
+            return refusal;
+        }
+    };
+    let reference = match UriReferenceStr::new(location) {
+        Ok(reference) => reference,
+        Err(_not_a_reference) => {
+            let refusal = Err(refused("Location is not a URI reference"));
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), "resolve_location: returning an error to the caller");
+            return refusal;
+        }
+    };
     let resolved = reference.resolve_against(base);
-    resolved
-        .ensure_rfc3986_normalizable()
-        .map_err(|_| refused("Location does not resolve to one unambiguous target"))?;
-    let resolved = resolved
-        .try_to_dedicated_string()
-        .map_err(|_| failure(FailureStage::Redirect, FailureKind::Resource, None))?;
+    if resolved.ensure_rfc3986_normalizable().is_err() {
+        let refusal = Err(refused(
+            "Location does not resolve to one unambiguous target",
+        ));
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "resolve_location: returning an error to the caller");
+        return refusal;
+    }
+    let resolved = match resolved.try_to_dedicated_string() {
+        Ok(resolved) => resolved,
+        Err(_not_representable) => {
+            let refusal = Err(failure(FailureStage::Redirect, FailureKind::Resource, None));
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), "resolve_location: returning an error to the caller");
+            return refusal;
+        }
+    };
     let target = resolved
         .as_str()
         .split_once('#')
         .map_or(resolved.as_str(), |(target, _fragment)| target);
-    validate_url(target).map_err(|_| refused("Location leaves absolute http(s)"))?;
+    if validate_url(target).is_err() {
+        let refusal = Err(refused("Location leaves absolute http(s)"));
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "resolve_location: returning an error to the caller");
+        return refusal;
+    }
     Ok(target.to_owned())
 }
 
@@ -1052,13 +1225,14 @@ fn redirect_location(response: &ureq::http::Response<ureq::Body>) -> Result<Opti
     else {
         return Ok(None);
     };
-    location.to_str().map(Some).map_err(|_| {
-        failure(
-            FailureStage::Redirect,
-            FailureKind::Transport,
-            Some("Location is not visible ASCII".to_owned()),
-        )
-    })
+    // The `to_str` failure is translated, never discarded: the header's bytes
+    // reach the error through `OpaqueHeader`, whose only rendering is an escaped
+    // one. Nothing here can put live untrusted bytes into a message, so the
+    // module's no-echo policy holds — see `failure_unprintable_location`.
+    match location.to_str() {
+        Ok(text) => Ok(Some(text)),
+        Err(_not_visible_ascii) => Err(failure_unprintable_location(location.as_bytes())),
+    }
 }
 
 /// The method the next hop uses, or a refusal when following would resend a
@@ -1140,7 +1314,13 @@ fn exchange(url: &str, method: Method<'_>, options: &Options) -> Result<Response
             Some(at) => match at.checked_duration_since(std::time::Instant::now()) {
                 Some(left) if !left.is_zero() => Some(left),
                 _ => {
-                    return Err(failure(FailureStage::Deadline, FailureKind::Timeout, None));
+                    {
+                        let refusal =
+                            Err(failure(FailureStage::Deadline, FailureKind::Timeout, None));
+                        #[cfg(feature = "trace")]
+                        crate::trace::debug!(error = ?refusal.as_ref().err(), "exchange: returning an error to the caller");
+                        return refusal;
+                    };
                 }
             },
             None => None,
@@ -1159,22 +1339,72 @@ fn exchange(url: &str, method: Method<'_>, options: &Options) -> Result<Response
         if limit == 0 {
             return response_of(response, options, chain);
         }
-        let Some(location) = redirect_location(&response)? else {
-            return response_of(response, options, chain);
-        };
-        if hops >= limit {
-            return Err(failure(
-                FailureStage::Redirect,
-                FailureKind::RedirectLimit,
-                None,
-            ));
+        match next_hop(&target, &response, limit, hops, method)? {
+            Hop::Final => return response_of(response, options, chain),
+            Hop::Follow {
+                next,
+                method: next_method,
+                hops: climbed,
+            } => {
+                method = next_method;
+                hops = climbed;
+                chain.push(sanitized_target(&next));
+                target = next;
+            }
         }
-        let next = resolve_location(&target, location)?;
-        method = next_method(response.status(), method)?;
-        hops = hops.saturating_add(1);
-        chain.push(sanitized_target(&next));
-        target = next;
     }
+}
+
+/// What one response means for the redirect walk.
+enum Hop<'body> {
+    /// The walk stops and the response just seen is the answer.
+    Final,
+    /// The walk continues to `next` with `method`.
+    Follow {
+        /// The absolute URL this hop targets.
+        next: String,
+        /// The method this hop carries, which a 303 rewrites to `GET`.
+        method: Method<'body>,
+        /// How many redirects the walk has now taken, for the limit check.
+        hops: u32,
+    },
+}
+
+/// Decides whether a response ends the redirect walk or continues it.
+///
+/// A helper rather than the loop's second half inline: as one block the walk
+/// carried four propagation operators across the location parse, the limit
+/// check, the location resolve and the method rewrite, so a reader following
+/// the redirect rules had to hold the whole tail of the loop in view to see
+/// which of them could refuse.
+fn next_hop<'body>(
+    current: &str,
+    response: &ureq::http::Response<ureq::Body>,
+    limit: u32,
+    hops: u32,
+    method: Method<'body>,
+) -> Result<Hop<'body>, Error> {
+    #[cfg(feature = "trace")]
+    let Some(location) = redirect_location(response)? else {
+        return Ok(Hop::Final);
+    };
+    if hops >= limit {
+        let refusal = Err(failure(
+            FailureStage::Redirect,
+            FailureKind::RedirectLimit,
+            None,
+        ));
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "next_hop: returning an error to the caller");
+        return refusal;
+    }
+    let next = resolve_location(current, location)?;
+    let method = next_method(response.status(), method)?;
+    Ok(Hop::Follow {
+        next,
+        method,
+        hops: hops.saturating_add(1),
+    })
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -1263,50 +1493,65 @@ mod tests {
         let handle = thread::spawn(move || -> std::io::Result<()> {
             for (status, body) in replies {
                 let (mut stream, _) = listener.accept()?;
-                let mut request = vec![0u8; 4096];
-                let mut head = Vec::new();
-                loop {
-                    let n = stream.read(&mut request)?;
-                    head.extend_from_slice(&request[..n]);
-                    if head.windows(4).any(|w| w == b"\r\n\r\n") {
-                        break;
-                    }
-                }
-                let header_end = head
-                    .windows(4)
-                    .position(|w| w == b"\r\n\r\n")
-                    // `position` reports the delimiter's first byte, so the
-                    // header end is four past it; in a 4096-byte buffer that
-                    // cannot approach `usize::MAX`.
-                    .map(|position| position.saturating_add(4))
-                    .unwrap_or(head.len());
-                let text = String::from_utf8_lossy(&head[..header_end]);
-                let content_length = text
-                    .lines()
-                    .filter_map(|line| line.split_once(':'))
-                    .find(|entry| entry.0.eq_ignore_ascii_case("content-length"))
-                    .and_then(|(_, value)| value.trim().parse::<usize>().ok())
-                    .unwrap_or(0);
-                // `header_end` is either the delimiter's end or the whole
-                // buffer, so it never exceeds `head.len()`.
-                let mut received = head.len().saturating_sub(header_end);
-                while received < content_length {
-                    let n = stream.read(&mut request)?;
-                    head.extend_from_slice(&request[..n]);
-                    received = received.saturating_add(n);
-                }
-                let full = String::from_utf8_lossy(&head);
-                let echoed = full.contains(ECHO);
-                let payload = if echoed { ECHO.to_owned() } else { body };
-                let reply = format!(
-                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
-                    payload.len()
-                );
-                stream.write_all(reply.as_bytes())?;
+                serve_one(&mut stream, status, body)?;
             }
             Ok(())
         });
         Ok((port, handle))
+    }
+
+    /// Reads one request off `stream` and writes the canned reply.
+    ///
+    /// A helper rather than the accept loop's body: as one block the loop carried
+    /// five fallible operations across the header read, the body read and the
+    /// reply write, and the header/body split is the part a reader of this fixture
+    /// actually needs to understand. It is now named, and the reply decision -- an
+    /// `ECHO` marker in the request wins over the canned body -- is one `if`.
+    #[cfg(test)]
+    fn serve_one(
+        stream: &mut std::net::TcpStream,
+        status: &'static str,
+        body: String,
+    ) -> std::io::Result<()> {
+        let mut request = vec![0u8; 4096];
+        let mut head = Vec::new();
+        loop {
+            let n = stream.read(&mut request)?;
+            head.extend_from_slice(&request[..n]);
+            if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let header_end = head
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            // `position` reports the delimiter's first byte, so the header end is
+            // four past it; in a 4096-byte buffer that cannot approach `usize::MAX`.
+            .map(|position| position.saturating_add(4))
+            .unwrap_or(head.len());
+        let text = String::from_utf8_lossy(&head[..header_end]);
+        let content_length = text
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|entry| entry.0.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        // `header_end` is either the delimiter's end or the whole buffer, so it
+        // never exceeds `head.len()`.
+        let mut received = head.len().saturating_sub(header_end);
+        while received < content_length {
+            let n = stream.read(&mut request)?;
+            head.extend_from_slice(&request[..n]);
+            received = received.saturating_add(n);
+        }
+        let full = String::from_utf8_lossy(&head);
+        let echoed = full.contains(ECHO);
+        let payload = if echoed { ECHO.to_owned() } else { body };
+        let reply = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+            payload.len()
+        );
+        stream.write_all(reply.as_bytes())
     }
 
     /// Joins the canned server, surfacing its refusal or a panic inside it.

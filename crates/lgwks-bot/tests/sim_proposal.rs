@@ -461,9 +461,10 @@ fn concurrent_readers_and_conflicting_writers(band: Band) -> TestResult {
                 WriteOutcome::Stored { .. } => stored = stored.saturating_add(1),
                 WriteOutcome::AlreadyPresent { .. } => already = already.saturating_add(1),
                 other => {
-                    return Err(
-                        format!("a writer reported an unexpected outcome: {other:?}").into(),
-                    );
+                    let refusal =
+                        Err(format!("a writer reported an unexpected outcome: {other:?}").into());
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "concurrent_readers_and_conflicting_writers: returning an error to the caller");
+                    return refusal;
                 }
             }
         }

@@ -43,7 +43,7 @@
 #             CI ignores the field: every CI job is its own machine.
 
 [toolchain]
-rust = "1.98.0"
+rust = "1.99.0"
 
 # ── shared: one command, both surfaces ──────────────────────────────────────
 
@@ -224,6 +224,15 @@ required = true
 fast = true
 command = "cargo clippy --workspace --all-targets --locked -- -D warnings"
 ci_step = "Clippy all workspace targets"
+
+[[lane]]
+id = "scan"
+group = "quality"
+surfaces = "local ci"
+required = true
+fast = true
+command = "cargo run --locked --release -p lgwks_deps --bin lgwks-deps -- scan"
+ci_step = "Scan reports zero findings"
 
 [[lane]]
 id = "docs-all-features"

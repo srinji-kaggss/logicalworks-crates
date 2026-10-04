@@ -1289,6 +1289,47 @@ fn next_allowed_of(last: Option<EventKind>) -> Option<EventKind> {
     last.map_or(Some(EventKind::IntentAdmitted), EventKind::next)
 }
 
+/// Refuse an append whose tail is stale or whose kind does not follow what is
+/// already committed for its key.
+///
+/// The two checks every adapter's append makes before it touches storage, once:
+/// the memory journal and the file journal used to spell them out separately,
+/// which is how two stores could come to disagree about what an out-of-order
+/// append is. `last` is the last kind committed for the event's key.
+///
+/// # Errors
+///
+/// [`JournalError::TailMismatch`] when `expected_tail` is not `actual`, and
+/// [`JournalError::OutOfOrder`] when the event's kind is not the next one the
+/// ladder allows for its key.
+fn check_append_order(
+    expected_tail: JournalPosition,
+    actual: JournalPosition,
+    event: &EffectEvent,
+    last: Option<EventKind>,
+) -> Result<(), JournalError> {
+    if expected_tail != actual {
+        let refusal = Err(JournalError::TailMismatch {
+            expected: expected_tail,
+            actual,
+        });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "check_append_order: the caller's view of the tail is stale");
+        return refusal;
+    }
+    let attempted = event.kind();
+    let expected = next_allowed_of(last);
+    if expected != Some(attempted) {
+        let refusal = Err(JournalError::OutOfOrder {
+            key: Box::new(event.key()),
+            expected,
+            attempted,
+        });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "check_append_order: the event does not follow the ladder");
+        return refusal;
+    }
+    Ok(())
+}
+
 /// Recompute the chain over `entries` and report the first disagreement.
 ///
 /// # Errors
@@ -1301,15 +1342,21 @@ pub fn verify_chain(entries: &[JournalEntry]) -> Result<JournalPosition, ChainBr
         let sequence = position.sequence().saturating_add(1);
         let head = match chain(position, entry.event()) {
             Ok(head) => head,
-            Err(_) => return Err(ChainBreak::Unencodable { at: sequence }),
+            Err(_) => {
+                let refusal = Err(ChainBreak::Unencodable { at: sequence });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "verify_chain: returning an error to the caller");
+                return refusal;
+            }
         };
         let recomputed = JournalPosition { sequence, head };
         if recomputed != entry.position() {
-            return Err(ChainBreak::Disagreement {
+            let refusal = Err(ChainBreak::Disagreement {
                 at: sequence,
                 recorded: entry.position(),
                 recomputed,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "verify_chain: returning an error to the caller");
+            return refusal;
         }
         position = recomputed;
     }
@@ -1447,31 +1494,19 @@ impl EffectJournal for MemoryJournal {
         event: &EffectEvent,
     ) -> Result<DurableAck, JournalError> {
         let actual = self.tail();
-        if expected_tail != actual {
-            return Err(JournalError::TailMismatch {
-                expected: expected_tail,
-                actual,
-            });
-        }
         let key = event.key();
-        let attempted = event.kind();
-        let expected = next_allowed_of(self.ladder.get(&key).copied());
-        if expected != Some(attempted) {
-            return Err(JournalError::OutOfOrder {
-                key: Box::new(key),
-                expected,
-                attempted,
-            });
-        }
+        check_append_order(expected_tail, actual, event, self.ladder.get(&key).copied())?;
         let requested_events = u64::try_from(self.committed.len())
             .unwrap_or(u64::MAX)
             .saturating_add(1);
         if requested_events > u64::try_from(MAX_JOURNAL_EVENTS).unwrap_or(u64::MAX) {
-            return Err(JournalError::CapacityExceeded {
+            let refusal = Err(JournalError::CapacityExceeded {
                 resource: JournalLimitKind::Events,
                 limit: u64::try_from(MAX_JOURNAL_EVENTS).unwrap_or(u64::MAX),
                 requested: requested_events,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "compare_and_append: returning an error to the caller");
+            return refusal;
         }
         let payload_len = u64::try_from(event.to_bytes().map_err(JournalError::Encoding)?.len())
             .unwrap_or(u64::MAX);
@@ -1480,11 +1515,13 @@ impl EffectJournal for MemoryJournal {
             .saturating_add(payload_len)
             .saturating_add(36);
         if requested_bytes > MAX_JOURNAL_BYTES {
-            return Err(JournalError::CapacityExceeded {
+            let refusal = Err(JournalError::CapacityExceeded {
                 resource: JournalLimitKind::Bytes,
                 limit: MAX_JOURNAL_BYTES,
                 requested: requested_bytes,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "compare_and_append: returning an error to the caller");
+            return refusal;
         }
         let sequence = actual
             .sequence()
@@ -1496,7 +1533,7 @@ impl EffectJournal for MemoryJournal {
         };
         self.committed.push(JournalEntry::new(position, *event));
         self.committed_bytes = requested_bytes;
-        self.ladder.insert(key, attempted);
+        self.ladder.insert(key, event.kind());
         if let EffectEvent::OutcomeObserved { evidence, .. } = *event {
             self.outcomes.insert(key, (position, evidence));
         }
@@ -1541,14 +1578,21 @@ mod tests {
         attempt: &str,
         epoch: &str,
     ) -> Result<EffectKey, Box<dyn std::error::Error>> {
+        let key_run = RunId::from_hex(RUN)?;
+        let key_action = ActionId::from_hex(action)?;
+        let key_attempt = AttemptId::from_decimal(attempt)?;
+        let key_flow_revision = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
+        let key_digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
+        let key_environment = EnvironmentId::from_hex(ENV)?;
+        let key_epoch = EnvironmentEpoch::from_decimal(epoch)?;
         Ok(EffectKey::new(
-            RunId::from_hex(RUN)?,
-            ActionId::from_hex(action)?,
-            AttemptId::from_decimal(attempt)?,
-            FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-            ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
-            EnvironmentId::from_hex(ENV)?,
-            EnvironmentEpoch::from_decimal(epoch)?,
+            key_run,
+            key_action,
+            key_attempt,
+            key_flow_revision,
+            key_digest,
+            key_environment,
+            key_epoch,
         ))
     }
 

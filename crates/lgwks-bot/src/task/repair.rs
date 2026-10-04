@@ -380,11 +380,15 @@ impl RepairTicket {
     pub(crate) fn check_grant(&self, grant: &GrantSet) -> Result<(), RepairError> {
         let missing = self.missing_from(grant);
         if !missing.is_empty() {
-            return Err(RepairError::NotAuthorized { missing });
+            let refusal = Err(RepairError::NotAuthorized { missing });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "check_grant: returning an error to the caller");
+            return refusal;
         }
         let beyond = self.beyond(grant);
         if !beyond.is_empty() {
-            return Err(RepairError::OverWide { beyond });
+            let refusal = Err(RepairError::OverWide { beyond });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "check_grant: returning an error to the caller");
+            return refusal;
         }
         Ok(())
     }

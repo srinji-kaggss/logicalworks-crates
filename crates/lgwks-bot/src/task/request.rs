@@ -581,7 +581,11 @@ pub(crate) fn derive_run(tenant: &str, key: &RequestKey) -> Result<RunId, Reques
     let mut raw = [0u8; 16];
     match digest.as_bytes().get(..raw.len()) {
         Some(head) => raw.copy_from_slice(head),
-        None => return Err(RequestError::IdCollision),
+        None => {
+            let refusal = Err(RequestError::IdCollision);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "derive_run: returning an error to the caller");
+            return refusal;
+        }
     }
     match NonZeroU128::new(u128::from_be_bytes(raw)) {
         Some(value) => Ok(RunId::new(Id128::from_nonzero(value))),

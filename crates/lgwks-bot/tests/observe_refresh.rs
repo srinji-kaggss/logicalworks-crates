@@ -117,13 +117,14 @@ impl Observe for Declarable {
         call.0.check(Observe::required_caps(self))?;
         self.polls.set(self.polls.get().saturating_add(1));
         if self.refusing.get() {
-            return Err(BotError::DomainError {
+            Err(BotError::DomainError {
                 domain: self.domain.to_owned(),
                 certainty: DispatchCertainty::NotDelivered,
                 cause: "the source refused to read".to_owned(),
-            });
+            })
+        } else {
+            Ok(self.value.get())
         }
-        Ok(self.value.get())
     }
 
     fn cache_state(&self) -> Option<RefreshReason> {

@@ -173,9 +173,11 @@ impl SurfaceBuilder {
     /// escaping.
     pub fn operation(mut self, name: &str, requires: &[Cap]) -> Result<Self, SurfaceError> {
         if !is_operation_name(name) {
-            return Err(SurfaceError::InvalidOperation {
+            let refusal = Err(SurfaceError::InvalidOperation {
                 name: name.to_owned(),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "operation: returning an error to the caller");
+            return refusal;
         }
         self.operations.insert(
             name.to_owned(),

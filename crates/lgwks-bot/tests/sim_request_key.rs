@@ -149,7 +149,9 @@ fn collision_scenario(sim_run: &mut sim::Sim) -> TestResult {
                     );
                 }
                 other => {
-                    return Err(format!("expected a conflict, got {other:?}").into());
+                    let refusal = Err(format!("expected a conflict, got {other:?}").into());
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "collision_scenario: returning an error to the caller");
+                    return refusal;
                 }
             }
         }
@@ -188,7 +190,11 @@ fn drop_scenario(sim_run: &mut sim::Sim) -> TestResult {
                 .trace
                 .record_u64("records", u64::try_from(in_flight.records()).unwrap_or(0));
         }
-        other => return Err(format!("expected an in-flight report, got {other:?}").into()),
+        other => {
+            let refusal = Err(format!("expected an in-flight report, got {other:?}").into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "drop_scenario: returning an error to the caller");
+            return refusal;
+        }
     }
     Ok(())
 }
@@ -376,12 +382,14 @@ fn stop_scenario(sim_run: &mut sim::Sim) -> TestResult {
         let seen = lgwks_bot::block_on(reopened.submit(&key, &released, payload))?;
         let seen_disposition = match seen {
             Submission::Reattached(report) => {
-                return Err(format!(
+                let refusal = Err(format!(
                     "a request stopped at {point:?} reattached to {:?}; a host stop is not the \
-                     request's outcome",
+                 request's outcome",
                     report.disposition()
                 )
                 .into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "stop_scenario: returning an error to the caller");
+                return refusal;
             }
             Submission::InFlight(ref in_flight) => {
                 sim_run
@@ -394,10 +402,12 @@ fn stop_scenario(sim_run: &mut sim::Sim) -> TestResult {
             // prompt here, and a request whose settlement this family has not
             // been taught to read is not silently treated as unsettled.
             other => {
-                return Err(format!(
+                let refusal = Err(format!(
                     "a request this family does not know how to read came back as {other:?}"
                 )
                 .into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "stop_scenario: returning an error to the caller");
+                return refusal;
             }
         };
         sim_run.trace.record(&format!("after-stop {seen:?}"));
@@ -419,11 +429,13 @@ fn stop_scenario(sim_run: &mut sim::Sim) -> TestResult {
         let reattached = match repeat {
             Submission::Reattached(report) => report.disposition(),
             other => {
-                return Err(format!(
+                let refusal = Err(format!(
                     "a request driven to a verdict must record exactly one terminal; a later \
-                     submission saw {other:?}"
+                 submission saw {other:?}"
                 )
                 .into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "stop_scenario: returning an error to the caller");
+                return refusal;
             }
         };
         assert_eq!(
@@ -559,11 +571,13 @@ fn deadline_scenario(sim_run: &mut sim::Sim) -> TestResult {
         let recorded = match seen {
             Submission::Reattached(report) => report.disposition(),
             other => {
-                return Err(format!(
+                let refusal = Err(format!(
                     "a request that overran its budget reported {other:?} on a repeat; the \
-                     deadline is the request's own verdict and must be recorded"
+                 deadline is the request's own verdict and must be recorded"
                 )
                 .into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "deadline_scenario: returning an error to the caller");
+                return refusal;
             }
         };
         assert_eq!(
@@ -682,11 +696,13 @@ fn settle_refusal_scenario(sim_run: &mut sim::Sim) -> TestResult {
         )? {
             Submission::InFlight(in_flight) => in_flight.run(),
             other => {
-                return Err(format!(
+                let refusal = Err(format!(
                     "seed {}: a dropped waiter must leave the request in flight; got {other:?}",
                     sim_run.seed
                 )
                 .into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "settle_refusal_scenario: returning an error to the caller");
+                return refusal;
             }
         };
 
@@ -721,12 +737,14 @@ fn settle_refusal_scenario(sim_run: &mut sim::Sim) -> TestResult {
         match after {
             Submission::InFlight(_) => {}
             other => {
-                return Err(format!(
+                let refusal = Err(format!(
                     "seed {}: a request whose verdict the store refused must stay unsettled, not \
-                     reattach to {other:?}",
+                 reattach to {other:?}",
                     sim_run.seed
                 )
                 .into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "settle_refusal_scenario: returning an error to the caller");
+                return refusal;
             }
         }
         refused = refused.saturating_add(1);

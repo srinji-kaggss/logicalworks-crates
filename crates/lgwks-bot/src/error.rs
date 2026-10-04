@@ -34,6 +34,10 @@
 //! the message.
 
 use std::fmt;
+// `write!` and `write_str` into a `String` need `fmt::Write` in scope;
+// `Display`'s own `Formatter` already implements it, so this names the same
+// sink trait rather than introducing another.
+use std::fmt::Write as FmtWrite;
 use std::time::Duration;
 
 use super::broker::DispatchError;
@@ -67,9 +71,28 @@ pub enum BotError {
     },
     /// The bot spec is incomplete: a required field is missing (currently the
     /// name; an empty chain list is allowed).
+    ///
+    /// `cause` is the detail the producing site refused with. It is required
+    /// rather than optional because the field name alone does not say *why* the
+    /// value was missing: a threshold that does not parse and a chain list that
+    /// is absent are both "missing target", and only the cause tells a caller
+    /// which one it is looking at. Rendered through [`Escaped`] because it
+    /// originates in the spec document.
     IncompleteSpec {
         /// What is missing.
         field: &'static str,
+        /// Why the field is missing, in the producing site's own words.
+        ///
+        /// Required rather than optional because the two ways this is reached
+        /// are different defects with different repairs: a field that was absent
+        /// from a document, and a field whose translation failed. It is untrusted
+        /// -- it names something from the spec document -- so it renders through
+        /// the escaping wrapper.
+        ///
+        /// A site with no underlying error states its own reason rather than
+        /// leaving this empty; there is no "unknown" here, because a caller
+        /// holding this is being told what to repair.
+        cause: String,
     },
     /// The spec names a domain this binary does not run.
     ///
@@ -143,6 +166,17 @@ pub enum BotError {
     UnknownCondition {
         /// The condition identifier the spec spelled.
         condition: String,
+        /// The parse failure the registry recorded for the identifier's
+        /// argument, rendered as the `FromStr` error's own text.
+        ///
+        /// It is required because the identifier alone cannot distinguish the
+        /// two ways this is reached: an identifier outside the vocabulary, and
+        /// an identifier in it whose threshold argument does not parse. A
+        /// caller repairing a spec needs to know which. Held as a `String` and
+        /// rendered through [`Escaped`], exactly as [`BotError::MalformedSpec`]
+        /// holds its cause, so a payload that reaches it cannot forge a log
+        /// line.
+        argument_parse: String,
     },
     /// The synchronous adapter, [`Bot::tick`](crate::Bot::tick), was called on a
     /// thread an async runtime is already driving.
@@ -508,6 +542,12 @@ pub enum BotError {
         variable: String,
         /// The answer that failed conversion.
         value: String,
+        /// Why the conversion refused.
+        ///
+        /// Carried rather than dropped: "cannot be assigned to variable x" and
+        /// "it is not a decimal integer" are different facts, and a caller that
+        /// only sees the first has to guess which of the four reasons it was.
+        reason: String,
     },
     /// A session has already reached a terminal outcome.
     SessionTerminated,
@@ -912,46 +952,65 @@ impl From<Deficit> for BotError {
 /// rather than with an escaping pass of its own.
 pub(crate) struct Escaped<'a>(pub(crate) &'a str);
 
+/// Writes one glyph's escaped form.
+///
+/// A helper rather than a fourth match arm inline: the loop body was four
+/// fallible writes in one statement, so reading the escaping rules also meant
+/// reading four propagation operators to see that each arm writes one thing.
+fn write_escaped(formatter: &mut fmt::Formatter<'_>, glyph: char) -> fmt::Result {
+    match glyph {
+        '\n' => formatter.write_str("\\n"),
+        '\r' => formatter.write_str("\\r"),
+        '\t' => formatter.write_str("\\t"),
+        control if control.is_control() => write!(formatter, "\\u{{{:x}}}", u32::from(control)),
+        plain => {
+            let mut buffer = [0_u8; 4];
+            formatter.write_str(plain.encode_utf8(&mut buffer))
+        }
+    }
+}
+
 impl fmt::Display for Escaped<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for glyph in self.0.chars() {
-            match glyph {
-                '\n' => f.write_str("\\n")?,
-                '\r' => f.write_str("\\r")?,
-                '\t' => f.write_str("\\t")?,
-                control if control.is_control() => {
-                    write!(f, "\\u{{{:x}}}", u32::from(control))?;
-                }
-                plain => {
-                    let mut buffer = [0_u8; 4];
-                    f.write_str(plain.encode_utf8(&mut buffer))?;
-                }
-            }
+            write_escaped(f, glyph)?;
         }
         Ok(())
     }
 }
 
-/// Render one terminal outcome inside a diagnostic.
+/// Renders a node whose declared terminal contradicts its kind's own outcome.
 ///
-/// The two payload-bearing variants carry untrusted text — a handoff target and
-/// a refusal reason can both come from the document — so both go through
-/// `Debug`, which is Rust's own escaping formatter and therefore refuses to
-/// emit a live control character. `Escaped` is not reusable here for the same
-/// reason the `Debug` sites above do not use it: the wrapper would have to be
-/// re-applied around each field separately, and one forgotten wrapper is a
-/// forged log line.
-fn write_terminal(formatter: &mut fmt::Formatter<'_>, terminal: &Terminal) -> fmt::Result {
-    // No wildcard arm: `Terminal` is `#[non_exhaustive]` for *downstream*
-    // consumers, and inside this crate the compiler knows the full set, so a
-    // new variant is a compile error here — which is the prompt wanted, since
-    // a diagnostic that cannot name an outcome should not be written by
-    // accident.
+/// Rendered into a buffer and written once: inline, the arm was five fallible
+/// writes in one statement, so reading the sentence also meant reading five
+/// propagation operators, and a writer that failed part-way through had already
+/// emitted a truncated sentence.
+fn write_conflicting_declaration(
+    formatter: &mut fmt::Formatter<'_>,
+    node: &str,
+    intrinsic: &Terminal,
+    declared: &Terminal,
+) -> fmt::Result {
+    let mut rendered = String::new();
+    write!(rendered, "terminal declaration on node {} ", Escaped(node))?;
+    rendered.write_str("contradicts the outcome its kind carries: ")?;
+    write_terminal_to(&mut rendered, intrinsic)?;
+    rendered.write_str(" declared as ")?;
+    write_terminal_to(&mut rendered, declared)?;
+    formatter.write_str(&rendered)
+}
+
+/// Renders one terminal outcome into any `fmt::Write` sink.
+///
+/// `write_terminal` is the `Formatter`-typed form used by the `Display` arms;
+/// this is the same rendering against a buffer, so a caller composing a
+/// sentence cannot reimplement the escaping and get it subtly wrong.
+fn write_terminal_to<W: fmt::Write>(sink: &mut W, terminal: &Terminal) -> fmt::Result {
     match *terminal {
-        Terminal::Completed => formatter.write_str("completed"),
-        Terminal::Referred { ref target } => write!(formatter, "referred to {target:?}"),
-        Terminal::HandedOff { ref target } => write!(formatter, "handed off to {target:?}"),
-        Terminal::Refused { ref reason } => write!(formatter, "refused because {reason:?}"),
+        Terminal::Completed => sink.write_str("completed"),
+        Terminal::Referred { ref target } => write!(sink, "referred to {target:?}"),
+        Terminal::HandedOff { ref target } => write!(sink, "handed off to {target:?}"),
+        Terminal::Refused { ref reason } => write!(sink, "refused because {reason:?}"),
     }
 }
 
@@ -967,8 +1026,16 @@ impl fmt::Display for BotError {
             Self::CapabilityDenied { ref deficit } => {
                 write!(f, "capability denied: {deficit}")
             }
-            Self::IncompleteSpec { field } => {
-                write!(f, "incomplete bot spec: missing {field}")
+            // One `write!`, so there is a single fallible step and no partially
+            // rendered sentence if the formatter refuses part-way. `cause` is
+            // escaped for the same reason `field`'s neighbours are: it names
+            // something from the spec document.
+            Self::IncompleteSpec { field, ref cause } => {
+                write!(
+                    f,
+                    "incomplete bot spec: missing {field}: {}",
+                    Escaped(cause)
+                )
             }
             Self::UnregisteredDomain { ref domain } => {
                 write!(f, "unregistered domain: {}", Escaped(domain))
@@ -994,10 +1061,18 @@ impl fmt::Display for BotError {
                 "bot spec declares version {found}, but this build materializes version \
                  {supported} only"
             ),
-            Self::UnknownCondition { ref condition } => write!(
+            Self::UnknownCondition {
+                ref condition,
+                ref argument_parse,
+            } => write!(
                 f,
-                "unknown condition {}: not in the supported wire vocabulary",
-                Escaped(condition)
+                // `argument_parse` distinguishes an identifier this build does
+                // not know from one whose threshold argument does not parse --
+                // two different repairs -- so it is rendered rather than dropped.
+                "unknown condition {}: not in the supported wire vocabulary, or its threshold \
+                 argument did not parse ({})",
+                Escaped(condition),
+                Escaped(argument_parse)
             ),
             Self::TickInsideRuntime => f.write_str(
                 "tick: the synchronous adapter cannot park a thread an async runtime is driving; \
@@ -1132,13 +1207,7 @@ impl fmt::Display for BotError {
                 ref node,
                 ref intrinsic,
                 ref declared,
-            } => {
-                write!(f, "terminal declaration on node {} ", Escaped(node))?;
-                f.write_str("contradicts the outcome its kind carries: ")?;
-                write_terminal(f, intrinsic)?;
-                f.write_str(" declared as ")?;
-                write_terminal(f, declared)
-            }
+            } => write_conflicting_declaration(f, node, intrinsic, declared),
             Self::UtteranceTooLarge { bytes, limit } => write!(
                 f,
                 "answer utterance of {bytes} bytes exceeds the {limit}-byte utterance limit"
@@ -1209,10 +1278,16 @@ impl fmt::Display for BotError {
             Self::InvalidVariableValue {
                 ref variable,
                 ref value,
+                ref reason,
             } => write!(
                 f,
-                "value {value:?} cannot be assigned to variable {}",
-                Escaped(variable)
+                // `reason` is untrusted like the other two: it is the decoder's
+                // own rendering, and a caller may reach it through an answer that
+                // reached the declaration. Escaped for the same reason `value`
+                // renders through `Debug` and `variable` through `Escaped`.
+                "value {value:?} cannot be assigned to variable {}: {}",
+                Escaped(variable),
+                Escaped(reason)
             ),
             Self::SessionTerminated => f.write_str("session has already terminated"),
             Self::SessionNotAwaitingAnswer => f.write_str("session is not awaiting an answer"),
@@ -1526,6 +1601,20 @@ mod tests {
             BotError::MalformedSpec {
                 cause: payload.clone(),
             },
+            // Both spec-refusal variants grew an untrusted payload since this
+            // list was written, so each gets its own row here: `IncompleteSpec`
+            // names the missing field and records why it was missing, and
+            // `UnknownCondition` names the identifier and records how its
+            // argument refused to parse. Neither may render a live control
+            // character.
+            BotError::IncompleteSpec {
+                field: "target",
+                cause: payload.clone(),
+            },
+            BotError::UnknownCondition {
+                condition: payload.clone(),
+                argument_parse: payload.clone(),
+            },
             BotError::DomainError {
                 domain: payload.clone(),
                 certainty: DispatchCertainty::Refused,
@@ -1601,6 +1690,7 @@ mod tests {
             BotError::InvalidVariableValue {
                 variable: payload.clone(),
                 value: payload.clone(),
+                reason: payload.clone(),
             },
             BotError::ResolverReturnedInvalidOption { node: payload },
         ]

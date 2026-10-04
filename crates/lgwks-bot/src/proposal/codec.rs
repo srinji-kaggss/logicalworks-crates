@@ -352,10 +352,12 @@ impl Decoder {
     /// Charge the payload against the byte ceiling before decoding it.
     fn check_size(&self, payload: &[u8]) -> Result<(), Refusal> {
         if payload.len() > self.limits.max_bytes {
-            return Err(Refusal::Oversized {
+            let refusal = Err(Refusal::Oversized {
                 got: payload.len(),
                 limit: self.limits.max_bytes,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "check_size: returning an error to the caller");
+            return refusal;
         }
         Ok(())
     }
@@ -376,7 +378,9 @@ impl Decoder {
         provenance: Provenance,
     ) -> Result<Plan, Refusal> {
         if declared.is_empty() {
-            return Err(Refusal::Empty);
+            let refusal = Err(Refusal::Empty);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "plan: returning an error to the caller");
+            return refusal;
         }
         for path in declared.paths() {
             refuse_traversal(path)?;
@@ -421,10 +425,14 @@ impl Decoder {
 /// it refused is not observable.
 fn refuse_traversal(path: &str) -> Result<(), Refusal> {
     if path.starts_with('/') || path.starts_with('\\') || path.contains(':') {
-        return Err(Refusal::escape("path", path));
+        let refusal = Err(Refusal::escape("path", path));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "refuse_traversal: returning an error to the caller");
+        return refusal;
     }
     if path.split('/').any(|segment| segment == "..") {
-        return Err(Refusal::escape("path", path));
+        let refusal = Err(Refusal::escape("path", path));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "refuse_traversal: returning an error to the caller");
+        return refusal;
     }
     Ok(())
 }
@@ -470,11 +478,13 @@ impl<'a> Reader<'a> {
             }
             fields = fields.saturating_add(1);
             if fields > self.limits.max_fields {
-                return Err(Refusal::Limit {
+                let refusal = Err(Refusal::Limit {
                     what: "the number of fields in a plan",
                     got: u64::from(fields),
                     limit: u64::from(self.limits.max_fields),
                 });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "document: returning an error to the caller");
+                return refusal;
             }
             self.field(&mut declared, line, start)?;
         }
@@ -494,11 +504,13 @@ impl<'a> Reader<'a> {
             if taken > self.line_ceiling() {
                 // A line this long cannot be within the value ceiling whatever it
                 // says, so it is refused before the value is sliced out of it.
-                return Err(Refusal::Limit {
+                let refusal = Err(Refusal::Limit {
                     what: "the length of a line in a plan",
                     got: u64::try_from(taken).unwrap_or(u64::MAX),
                     limit: u64::try_from(self.line_ceiling()).unwrap_or(u64::MAX),
                 });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "line: returning an error to the caller");
+                return refusal;
             }
         }
         // No terminator: the document ended without a final newline. That is
@@ -519,10 +531,12 @@ impl<'a> Reader<'a> {
     /// Charge and store one field's value.
     fn field(&mut self, declared: &mut Declared, line: &[u8], start: usize) -> Result<(), Refusal> {
         let Some(split) = line.iter().position(|byte| *byte == b'=') else {
-            return Err(Refusal::Malformed {
+            let refusal = Err(Refusal::Malformed {
                 cause: "a line with no `=` separator",
                 at: start,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "field: returning an error to the caller");
+            return refusal;
         };
         let raw_name = &line[..split];
         let raw_value = &line[split.saturating_add(1)..];
@@ -552,7 +566,9 @@ impl<'a> Reader<'a> {
         at: usize,
     ) -> Result<(), Refusal> {
         if len > limit {
-            return Err(Refusal::Malformed { cause: what, at });
+            let refusal = Err(Refusal::Malformed { cause: what, at });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "check_len: returning an error to the caller");
+            return refusal;
         }
         Ok(())
     }
@@ -573,17 +589,27 @@ impl<'a> Reader<'a> {
             // Named so the refusal is about the capability rather than the
             // grammar: the payload asked for a tool, and this decoder is what
             // says no.
-            "install" => return Err(Refusal::install_tool(&value)),
-            "credential" => return Err(Refusal::credential_read(&value)),
+            "install" => {
+                let refusal = Err(Refusal::install_tool(&value));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "store: returning an error to the caller");
+                return refusal;
+            }
+            "credential" => {
+                let refusal = Err(Refusal::credential_read(&value));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "store: returning an error to the caller");
+                return refusal;
+            }
             // The one field whose legality depends on the surface rather than on
             // the grammar: `host` naming this run's own tenant is the same
             // tenant, and naming any other is leaving the run's boundary.
             "host" => return self.refuse_foreign_host(&value, start),
             _ => {
-                return Err(Refusal::Malformed {
+                let refusal = Err(Refusal::Malformed {
                     cause: "a field this decoder does not recognise",
                     at: start,
                 });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "store: returning an error to the caller");
+                return refusal;
             }
         }
         Ok(())
@@ -592,10 +618,12 @@ impl<'a> Reader<'a> {
     /// Refuse a `host` field that does not name this run's own tenant.
     fn refuse_foreign_host(&self, value: &str, at: usize) -> Result<(), Refusal> {
         let Some(surface) = self.surface else {
-            return Err(Refusal::Malformed {
+            let refusal = Err(Refusal::Malformed {
                 cause: "a `host` field outside a run surface",
                 at,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "refuse_foreign_host: returning an error to the caller");
+            return refusal;
         };
         if value == surface.tenant() {
             Ok(())

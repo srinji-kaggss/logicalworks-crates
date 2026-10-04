@@ -554,7 +554,9 @@ pub async fn review_pr(
             // is the reconciliation read below — which observes GitHub rather
             // than trusting an exit code. It is a read, never a second create.
             if !may_have_landed(&error) {
-                return Err(error);
+                let refusal = Err(error);
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "review_pr: returning an error to the caller");
+                return refusal;
             }
             None
         }

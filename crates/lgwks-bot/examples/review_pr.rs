@@ -58,12 +58,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let (Some(repo), Some(number), Some(event)) = (args.next(), args.next(), args.next()) else {
         writeln!(std::io::stderr(), "{USAGE}")?;
-        return Err(USAGE.into());
+        let refusal = Err(USAGE.into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
+        return refusal;
     };
     let body = args.collect::<Vec<_>>().join(" ");
     if body.is_empty() {
         writeln!(std::io::stderr(), "{USAGE}")?;
-        return Err("the review body is empty".into());
+        let refusal = Err("the review body is empty".into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
+        return refusal;
     }
 
     // The capability the adapter requires is named once, here, so a reader can

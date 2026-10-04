@@ -135,7 +135,9 @@ fn append_tenant(
         .map_err(|error| error.to_string())?;
     let elapsed = start.elapsed().as_micros();
     if acks.len() != EVENTS_PER_TENANT {
-        return Err("the batch did not acknowledge every rung".to_owned());
+        let refusal = Err("the batch did not acknowledge every rung".to_owned());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "append_tenant: returning an error to the caller");
+        return refusal;
     }
     let held = journal.events().count();
     sink.lock()
@@ -398,11 +400,13 @@ fn run_tier(requested: usize, ceiling: usize) -> Result<TierReport, Box<dyn Erro
                 paths.push(path);
             }
             Err(error) => {
-                return Err(format!(
+                let refusal = Err(format!(
                     "the host refused a tenant thread at {tenant} of {target} with a \
-                     measured ceiling of {ceiling}: {error}"
+                 measured ceiling of {ceiling}: {error}"
                 )
                 .into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "run_tier: returning an error to the caller");
+                return refusal;
             }
         }
     }

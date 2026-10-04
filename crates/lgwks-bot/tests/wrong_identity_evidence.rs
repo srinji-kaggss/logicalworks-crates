@@ -387,11 +387,21 @@ fn held_under(store: Rc<RefCell<MemoryJournal>>) -> Result<Held, Box<dyn Error>>
         .build(&GrantSet::empty())?;
     match bot.tick() {
         Ok(fired) => {
-            return Err(format!("an indeterminate effect was reported as {fired} fired").into());
+            {
+                let refusal =
+                    Err(format!("an indeterminate effect was reported as {fired} fired").into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "held_under: returning an error to the caller");
+                return refusal;
+            };
         }
         Err(error) => {
             if !matches!(error, BotError::EffectIndeterminate { .. }) {
-                return Err(format!("expected the action's own error, got {error:?}").into());
+                {
+                    let refusal =
+                        Err(format!("expected the action's own error, got {error:?}").into());
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "held_under: returning an error to the caller");
+                    return refusal;
+                };
             }
         }
     }
@@ -549,12 +559,14 @@ fn assert_refusal_for(wrong: WrongField, outcome: &Result<(), BotError>) -> Test
         // Anything else is a failure of the row, reported through the caller's
         // own `Result` rather than through a panic, which this workspace forbids.
         (wrong, actual) => {
-            return Err(format!(
+            let refusal = Err(format!(
                 "{}: the refusal was {actual:?}, not the one this field must \
-                 produce",
+             produce",
                 wrong.tag()
             )
             .into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "assert_refusal_for: returning an error to the caller");
+            return refusal;
         }
     }
     Ok(())

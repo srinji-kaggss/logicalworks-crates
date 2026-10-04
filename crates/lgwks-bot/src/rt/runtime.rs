@@ -88,10 +88,12 @@ impl Builder {
     pub fn build(self) -> io::Result<Runtime> {
         #[cfg(target_family = "wasm")]
         if self.worker_threads.is_some() {
-            return Err(io::Error::new(
+            let refusal = Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "lgwks_bot: worker_threads is unsupported on WASM",
             ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build: returning an error to the caller");
+            return refusal;
         }
 
         #[cfg(not(target_family = "wasm"))]
@@ -103,10 +105,12 @@ impl Builder {
         #[cfg(not(target_family = "wasm"))]
         if let Some(workers) = workers {
             if self.worker_threads.is_some() && workers.get() > MAX_WORKER_THREADS {
-                return Err(io::Error::new(
+                let refusal = Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "lgwks_bot: worker_threads exceeds MAX_WORKER_THREADS",
                 ));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build: returning an error to the caller");
+                return refusal;
             }
             builder.worker_threads(workers.get().min(MAX_WORKER_THREADS));
         }

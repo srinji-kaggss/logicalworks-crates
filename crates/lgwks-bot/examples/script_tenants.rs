@@ -68,7 +68,9 @@ impl Site {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if page.is_multiple_of(97) && state.failed_once.insert(page) {
             state.transient = state.transient.saturating_add(1);
-            return Err(FlowError::transient("the site was busy"));
+            let refusal = Err(FlowError::transient("the site was busy"));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "fetch: returning an error to the caller");
+            return refusal;
         }
         if !state.served.insert(key) {
             state.duplicates = state.duplicates.saturating_add(1);
@@ -121,7 +123,7 @@ async fn crawl_by_hand(site: Arc<Site>, tenant: &str, pages: Vec<u32>) -> Result
                 match timeout(Duration::from_secs(1), site.fetch(key, page)).await {
                     Ok(Ok(size)) => return Ok(size),
                     Ok(Err(error)) if error.is_retryable() => last = Some(error),
-                    Ok(Err(error)) => return Err(error),
+                    Ok(Err(error)) => { let refusal = Err(error); lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "crawl_by_hand: returning an error to the caller"); return refusal; },
                     Err(_elapsed) => last = Some(FlowError::transient("timed out")),
                 }
                 sleep(Duration::from_millis(5)).await;
@@ -167,13 +169,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
              {duplicates} duplicates, total {total} (expected {expected})"
         )?;
         if total != expected || fetched != u64::from(PAGES) {
-            return Err(format!("{name}: the crawl did not fetch every page exactly once").into());
+            {
+                let refusal =
+                    Err(format!("{name}: the crawl did not fetch every page exactly once").into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
+                return refusal;
+            };
         }
     }
     let shared = acme_site.keys().intersection(&globex_site.keys()).count();
     writeln!(out, " shared: {shared} keys shared across tenants")?;
     if shared != 0 {
-        return Err("tenants shared a key".into());
+        let refusal = Err("tenants shared a key".into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
+        return refusal;
     }
 
     // The same two crawls, written by hand on the bounded fan-out primitive.

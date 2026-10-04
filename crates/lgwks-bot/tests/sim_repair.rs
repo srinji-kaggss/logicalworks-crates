@@ -303,11 +303,13 @@ fn block_with(host: &Host, reach: usize) -> Result<Case, Box<dyn Error>> {
     let report =
         lgwks_bot::block_on(host.run(&declared, input_needing(Arc::clone(&polls), 7, needs)));
     if report.disposition() != Disposition::Blocked {
-        return Err(format!(
+        let refusal = Err(format!(
             "the run must block before any decision: {:?}",
             report.error()
         )
         .into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "block_with: returning an error to the caller");
+        return refusal;
     }
     let ticket = report
         .repair()
@@ -383,11 +385,13 @@ fn decide(
                 (0, 0) => "at-zero",
                 (1, 1) => "at-one",
                 (epoch, applied) => {
-                    return Err(format!(
+                    let refusal = Err(format!(
                         "a run that has had one ticket applied is at epoch 1 with one \
-                         applied; got epoch {epoch} with {applied}"
+                     applied; got epoch {epoch} with {applied}"
                     )
                     .into());
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "decide: returning an error to the caller");
+                    return refusal;
                 }
             });
         }
@@ -397,11 +401,13 @@ fn decide(
         Ok(report) => Ok(match report.disposition() {
             Disposition::Succeeded => "succeeded",
             other => {
-                return Err(format!(
+                let refusal = Err(format!(
                     "an authorized repair must succeed, got {other}: {:?}",
                     report.error()
                 )
                 .into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "decide: returning an error to the caller");
+                return refusal;
             }
         }),
         Err(_) => Ok(expected),
@@ -752,9 +758,10 @@ fn tenants_keep_their_own_tickets_and_budgets(band: Band) -> TestResult {
                 );
             }
             other => {
-                return Err(
-                    format!("another tenant's ticket must be refused, got {other:?}").into(),
-                );
+                let refusal =
+                    Err(format!("another tenant's ticket must be refused, got {other:?}").into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "tenants_keep_their_own_tickets_and_budgets: returning an error to the caller");
+                return refusal;
             }
         }
         // The run ids are *not* in the trace: they are minted from the estate's
@@ -905,10 +912,12 @@ fn saturation_applies_each_ticket_once(band: Band) -> TestResult {
             )) {
                 Err(RepairError::AlreadyApplied) | Err(RepairError::StaleEpoch { .. }) => {}
                 other => {
-                    return Err(format!(
+                    let refusal = Err(format!(
                         "tier {tier}: redelivery {index} must be refused, got {other:?}"
                     )
                     .into());
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "saturation_applies_each_ticket_once: returning an error to the caller");
+                    return refusal;
                 }
             }
         }

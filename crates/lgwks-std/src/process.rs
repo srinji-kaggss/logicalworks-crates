@@ -23,7 +23,10 @@ pub fn kill_process_group(pgid: i32) -> io::Result<()> {
     // Reject before touching rustix: 0 names the CALLER's group (SIGKILL
     // would hit us) and negatives panic inside Pid::from_raw in debug.
     if pgid <= 0 {
-        return Err(invalid_pgid());
+        let refusal = Err(invalid_pgid());
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "kill_process_group: returning an error to the caller");
+        return refusal;
     }
     let pid = pid_from_raw(pgid)?;
     rustix::process::kill_process_group(pid, rustix::process::Signal::KILL).map_err(errno_to_io)
@@ -54,10 +57,16 @@ pub fn kill_process_group(pgid: i32) -> io::Result<()> {
 #[cfg(all(unix, feature = "process"))]
 pub fn child_has_exited_without_reaping(pid: i32) -> io::Result<bool> {
     if pid <= 0 {
-        return Err(invalid_pid());
+        let refusal = Err(invalid_pid());
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "child_has_exited_without_reaping: returning an error to the caller");
+        return refusal;
     }
     let Some(target) = rustix::process::Pid::from_raw(pid) else {
-        return Err(invalid_pid());
+        let refusal = Err(invalid_pid());
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "child_has_exited_without_reaping: returning an error to the caller");
+        return refusal;
     };
     let observed = rustix::process::waitid(
         rustix::process::WaitId::Pid(target),

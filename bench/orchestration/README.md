@@ -17,10 +17,14 @@ python3 bench/orchestration/run.py --render results.json   # the tables below
 ```
 
 The runner builds every way into a temporary directory, which it removes at
-the end. It runs each (way, scenario) cell five times, one process at a time,
-reads peak RSS from `/usr/bin/time -l`, and prints a line per cell followed by
-the verdicts. Needs `cargo`, `go`, `node`/`npm` and `uv`. Third-party code is
-pinned by lockfile or hash:
+the end. That is its own scratch space and is not the `lgwks_bot` journal:
+`../README.md` describes the journal `lgwks-bench` now writes to
+`$TMPDIR/lgwks-bench-journal-<pid>/` and does *not* remove, because a journal
+is a record rather than a build product. Nothing in this directory dispatches a
+`lgwks_bot` effect, so it needs no such directory. It runs each (way, scenario)
+cell five times, one process at a time, reads peak RSS from `/usr/bin/time -l`,
+and prints a line per cell followed by the verdicts. Needs `cargo`, `go`,
+`node`/`npm` and `uv`. Third-party code is pinned by lockfile or hash:
 
 - `go/go.sum` for errgroup.
 - `node/package-lock.json` for Effect.
@@ -70,7 +74,7 @@ so any location in the reported error must come from the orchestration.
 
 ## Results
 
-Measured 2026-09-30 on an Apple M5 Pro (15 cores), macOS 27.0: rustc 1.98.0,
+Measured 2026-09-30 on an Apple M5 Pro (15 cores), macOS 27.0: rustc 1.99.0,
 Go 1.27.1, Node 24.14.1 with Effect 3.22.2, Python 3.14.7 with Trio 0.34.0, on
 an idle host: the run started after three readings 20 s apart below a
 one-minute load of 4, and its load was 3.3 at the start and 3.1 at the end

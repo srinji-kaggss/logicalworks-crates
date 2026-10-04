@@ -306,6 +306,33 @@ fn chain_verifies(band: Band) -> TestResult {
 /// their own journals, each ending with exactly its own events and exactly its
 /// own tail. An aggregate "all tenants fine" would hide one tenant's loss, so
 /// every tenant is read back on its own.
+/// Opens one tenant's journal, writes its ladder, and reports what it committed.
+fn write_tenant_ladder(
+    sim: &sim::Sim,
+    dir: &std::path::Path,
+    tenant: u32,
+) -> Result<(u64, u64), Box<dyn Error>> {
+    let mut journal = FileJournal::open(sim.journal_path(dir, tenant))?;
+    journal.compare_and_append_all(&ladder(u64::from(tenant).saturating_add(1))?)?;
+    Ok((
+        u64::try_from(journal.events().count())?,
+        journal.tail().sequence(),
+    ))
+}
+
+/// Opens one tenant's journal read-only and reports what survived the reopen.
+fn read_tenant_journal(
+    sim: &sim::Sim,
+    dir: &std::path::Path,
+    tenant: u32,
+) -> Result<(u64, u64), Box<dyn Error>> {
+    let reopened = FileJournal::open(sim.journal_path(dir, tenant))?;
+    Ok((
+        u64::try_from(reopened.events().count())?,
+        reopened.tail().sequence(),
+    ))
+}
+
 fn tenant_isolation(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
         let dir = sim.scratch("tenants")?;
@@ -313,25 +340,23 @@ fn tenant_isolation(band: Band) -> TestResult {
         let mut expected: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
         let mut tails: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
 
+        // One helper per tenant per pass: each pass opens every tenant's journal
+        // and reads two numbers back, and the write pass additionally builds a
+        // ladder, so the two loops carried five fallible operations between them
+        // and a reader could not see that the second pass only reads.
         for tenant in 0..tenants {
-            let mut journal = FileJournal::open(sim.journal_path(&dir, tenant))?;
-            journal.compare_and_append_all(&ladder(u64::from(tenant).saturating_add(1))?)?;
-            expected.insert(tenant, u64::try_from(journal.events().count())?);
-            tails.insert(tenant, journal.tail().sequence());
+            let (events, tail) = write_tenant_ladder(sim, &dir, tenant)?;
+            expected.insert(tenant, events);
+            tails.insert(tenant, tail);
         }
 
         for tenant in 0..tenants {
-            let reopened = FileJournal::open(sim.journal_path(&dir, tenant))?;
+            let (events, tail) = read_tenant_journal(sim, &dir, tenant)?;
             assert_eq!(
-                u64::try_from(reopened.events().count())?,
-                expected[&tenant],
+                events, expected[&tenant],
                 "tenant {tenant} changed across a reopen"
             );
-            assert_eq!(
-                reopened.tail().sequence(),
-                tails[&tenant],
-                "tenant {tenant}'s tail moved"
-            );
+            assert_eq!(tail, tails[&tenant], "tenant {tenant}'s tail moved");
         }
         sim.record("tenants-isolated");
         sim.trace

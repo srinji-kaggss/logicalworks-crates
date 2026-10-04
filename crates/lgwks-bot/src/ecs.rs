@@ -243,6 +243,19 @@ const ACTION_DIGEST_DOMAIN: &[u8] = b"lgwks.bot.action-digest.v2";
 /// and the two streams are different identities by construction (issue #118).
 const OUTPUT_IDENTITY_DOMAIN: &[u8] = b"lgwks.bot.input-identity.v2";
 
+/// The refusal for a journal that already holds a *different* outcome for `key`
+/// than the one being settled.
+///
+/// One constructor for both places that compare a recorded outcome with the
+/// evidence in hand, so they cannot name different orderings for one conflict.
+fn changed_outcome(key: EffectKey) -> JournalError {
+    JournalError::OutOfOrder {
+        key: Box::new(key),
+        expected: Some(EventKind::Verified),
+        attempted: EventKind::OutcomeObserved,
+    }
+}
+
 /// Hash a sequence of byte fields into the estate's content-identity digest.
 ///
 /// Each field is length-prefixed with its `u64` little-endian width before the
@@ -739,10 +752,12 @@ impl Effects {
         let intent_ack = self.append_async(&intent).await?;
         self.note_journal_attempt(key.action(), key.attempt());
         if !intent_ack.promise().meets(required) {
-            return Err(DispatchError::Journal(JournalError::PromiseUnmet {
+            let refusal = Err(DispatchError::Journal(JournalError::PromiseUnmet {
                 required,
                 offered: intent_ack.promise(),
             }));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "prepare: returning an error to the caller");
+            return refusal;
         }
         self.accept_position(&intent, intent_ack.position())?;
         let expected_tail = self.tail;
@@ -760,10 +775,12 @@ impl Effects {
             // would be just as unverified and could turn an ambiguous durable
             // state into a false no-handoff claim. Recovery must hold it as
             // unknown until an operator establishes the outcome.
-            return Err(DispatchError::Journal(JournalError::PromiseUnmet {
+            let refusal = Err(DispatchError::Journal(JournalError::PromiseUnmet {
                 required,
                 offered: ack.promise(),
             }));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "prepare: returning an error to the caller");
+            return refusal;
         }
         self.accept_position(&EffectEvent::DispatchPrepared { key }, ack.position())?;
         self.requirements.push((key, required));
@@ -839,10 +856,12 @@ impl Effects {
         self.event_position(event, position)?;
         let actual = self.scope.journal().tail();
         if actual != position {
-            return Err(JournalError::TailMismatch {
+            let refusal = Err(JournalError::TailMismatch {
                 expected: position,
                 actual,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "accept_position: returning an error to the caller");
+            return refusal;
         }
         self.tail = position;
         Ok(())
@@ -970,18 +989,18 @@ impl Effects {
     ) -> Result<JournalPosition, JournalError> {
         let event = EffectEvent::OutcomeObserved { key, evidence };
         let Some((position, recorded)) = self.scope.journal().outcome_at(key)? else {
-            return Err(JournalError::OutOfOrder {
+            let refusal = Err(JournalError::OutOfOrder {
                 key: Box::new(key),
                 expected: Some(EventKind::OutcomeObserved),
                 attempted: EventKind::OutcomeObserved,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "outcome_position: returning an error to the caller");
+            return refusal;
         };
         if recorded != evidence {
-            return Err(JournalError::OutOfOrder {
-                key: Box::new(key),
-                expected: Some(EventKind::Verified),
-                attempted: EventKind::OutcomeObserved,
-            });
+            let refusal = Err(changed_outcome(key));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "outcome_position: the journal holds a different outcome");
+            return refusal;
         }
         self.event_position(&event, position)?;
         Ok(position)
@@ -998,18 +1017,22 @@ impl Effects {
         position: JournalPosition,
     ) -> Result<(), JournalError> {
         let Some(entry) = self.scope.journal().committed_entry(position)? else {
-            return Err(JournalError::OutOfOrder {
+            let refusal = Err(JournalError::OutOfOrder {
                 key: Box::new(expected.key()),
                 expected: Some(expected.kind()),
                 attempted: expected.kind(),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "event_position: returning an error to the caller");
+            return refusal;
         };
         if entry.event() != expected {
-            return Err(JournalError::EntryMismatch {
+            let refusal = Err(JournalError::EntryMismatch {
                 position,
                 expected: Box::new(*expected),
                 actual: Box::new(*entry.event()),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "event_position: returning an error to the caller");
+            return refusal;
         }
         Ok(())
     }
@@ -1050,23 +1073,44 @@ impl Effects {
     ) -> Result<(), JournalError> {
         let position = self.outcome_position(key, evidence)?;
         if acknowledgment.position() != position {
-            return Err(JournalError::ReceiptMismatch {
+            let refusal = Err(JournalError::ReceiptMismatch {
                 expected: position,
                 actual: acknowledgment.position(),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "confirm_outcome: returning an error to the caller");
+            return refusal;
         }
         if acknowledgment.promise().meets(required) {
             return Ok(());
         }
+        self.obtain_receipt(key, evidence, position, required)
+    }
+
+    /// Ask the journal for its own receipt for the outcome at `position` and
+    /// require it to name that position at the grade `required`.
+    ///
+    /// The one receipt check both [`Self::confirm_outcome`] (a weak append whose
+    /// acknowledgment fell short) and [`Self::confirm_recorded_outcome`] (recovery
+    /// of an outcome whose acknowledgment is gone) end in, so the two cannot
+    /// disagree about what a receipt must prove.
+    fn obtain_receipt(
+        &mut self,
+        key: EffectKey,
+        evidence: EffectEvidence,
+        position: JournalPosition,
+        required: DurabilityPromise,
+    ) -> Result<(), JournalError> {
         let receipt = self
             .scope
             .journal_mut()
             .confirm_outcome(key, evidence, position, required)?;
         if receipt.position() != position {
-            return Err(JournalError::ReceiptMismatch {
+            let refusal = Err(JournalError::ReceiptMismatch {
                 expected: position,
                 actual: receipt.position(),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "obtain_receipt: the receipt names another position");
+            return refusal;
         }
         if receipt.promise().meets(required) {
             Ok(())
@@ -1106,24 +1150,7 @@ impl Effects {
             return Ok(());
         }
         let position = self.outcome_position(key, evidence)?;
-        let receipt = self
-            .scope
-            .journal_mut()
-            .confirm_outcome(key, evidence, position, required)?;
-        if receipt.position() != position {
-            return Err(JournalError::ReceiptMismatch {
-                expected: position,
-                actual: receipt.position(),
-            });
-        }
-        if receipt.promise().meets(required) {
-            Ok(())
-        } else {
-            Err(JournalError::PromiseUnmet {
-                required,
-                offered: receipt.promise(),
-            })
-        }
+        self.obtain_receipt(key, evidence, position, required)
     }
 
     /// Settle an outcome the journal already holds.
@@ -1149,7 +1176,9 @@ impl Effects {
     ) -> Result<(), JournalError> {
         let offered = self.scope.journal().durability();
         if !offered.meets(required) {
-            return Err(JournalError::ReceiptUnavailable { required });
+            let refusal = Err(JournalError::ReceiptUnavailable { required });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "settle_committed_outcome: returning an error to the caller");
+            return refusal;
         }
         if offered != DurabilityPromise::Ephemeral {
             self.confirm_recorded_outcome(key, evidence)?;
@@ -1188,11 +1217,9 @@ impl Effects {
             .unwrap_or_else(|| self.scope.journal().durability());
         if let Some(recorded) = self.outcome_for(&key)? {
             if recorded != evidence {
-                return Err(JournalError::OutOfOrder {
-                    key: Box::new(key),
-                    expected: Some(EventKind::Verified),
-                    attempted: EventKind::OutcomeObserved,
-                });
+                let refusal = Err(changed_outcome(key));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "ensure_outcome: the journal holds a different outcome");
+                return refusal;
             }
             // The record is already in the journal. The only open question is
             // the receipt: the original append's acknowledgment is not in hand
@@ -1201,15 +1228,7 @@ impl Effects {
             return self.settle_committed_outcome(key, evidence, required);
         }
         match self.append(&EffectEvent::OutcomeObserved { key, evidence }) {
-            Ok(acknowledgment) => {
-                self.confirm_outcome(key, evidence, required, acknowledgment)?;
-                self.accept_position(
-                    &EffectEvent::OutcomeObserved { key, evidence },
-                    self.outcome_position(key, evidence)?,
-                )?;
-                self.fold_outcome(key, evidence);
-                Ok(())
-            }
+            Ok(acknowledgment) => self.record_new_outcome(key, evidence, required, acknowledgment),
             Err(JournalError::OutOfOrder { expected, .. })
                 if expected == Some(EventKind::Verified) || expected.is_none() =>
             {
@@ -1260,6 +1279,29 @@ impl Effects {
                 Err(cause)
             }
         }
+    }
+}
+
+impl Effects {
+    /// Records a freshly appended outcome and folds it into the in-memory view.
+    ///
+    /// A helper rather than three statements in the arm: confirming the outcome,
+    /// accepting its position and folding it are one transition, and a reader of
+    /// `ensure_outcome` had to know that all three happen before the outcome
+    /// counts. The other two arms settle the same outcome by a different route,
+    /// so the three are now one named step with one exit.
+    fn record_new_outcome(
+        &mut self,
+        key: EffectKey,
+        evidence: EffectEvidence,
+        required: DurabilityPromise,
+        acknowledgment: DurableAck,
+    ) -> Result<(), JournalError> {
+        self.confirm_outcome(key, evidence, required, acknowledgment)?;
+        let position = self.outcome_position(key, evidence)?;
+        self.accept_position(&EffectEvent::OutcomeObserved { key, evidence }, position)?;
+        self.fold_outcome(key, evidence);
+        Ok(())
     }
 }
 
@@ -3420,7 +3462,9 @@ impl Ledger {
         // one is the blind resend, and the guard is here rather than at the top
         // of the walk so it cannot be bypassed by a second caller.
         if self.effects.blocks(action) {
-            return Err(BotError::EffectUnsettled { action });
+            let refusal = Err(BotError::EffectUnsettled { action });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "begin_attempt: returning an error to the caller");
+            return refusal;
         }
         let transition = self
             .transitions
@@ -3435,7 +3479,9 @@ impl Ledger {
             *state,
             EntryState::NotStarted | EntryState::DefinitelyFailed { .. }
         ) {
-            return Err(no_such_work());
+            let refusal = Err(no_such_work());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "begin_attempt: returning an error to the caller");
+            return refusal;
         }
         let record = transition
             .attempts
@@ -4909,18 +4955,23 @@ impl EcsBot {
         // document's.
         registry.validate().map_err(Admission::Refused)?;
         if spec.version != BotSpec::CURRENT_VERSION {
-            return Err(Admission::Refused(BotError::UnsupportedSpecVersion {
+            let refusal = Err(Admission::Refused(BotError::UnsupportedSpecVersion {
                 found: spec.version,
                 supported: BotSpec::CURRENT_VERSION,
             }));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "from_spec: returning an error to the caller");
+            return refusal;
         }
         // A materialized bot with nothing to observe is almost always a
         // truncated document rather than an intentional one; the builder
         // tolerates it, the materializer does not.
         if spec.chains.is_empty() {
-            return Err(Admission::Refused(BotError::IncompleteSpec {
+            let refusal = Err(Admission::Refused(BotError::IncompleteSpec {
                 field: "chains",
+                cause: String::from("the document declares no observation chains at all"),
             }));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "from_spec: returning an error to the caller");
+            return refusal;
         }
 
         // One pass over every chain, collecting *every* need rather than
@@ -4937,7 +4988,9 @@ impl EcsBot {
             }
         }
         if !needs.is_empty() {
-            return Err(Admission::Needs(NeedSet::new(needs)));
+            let refusal = Err(Admission::Needs(NeedSet::new(needs)));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "from_spec: returning an error to the caller");
+            return refusal;
         }
 
         // The same `assemble` a native bot reaches, through the same builder.
@@ -5135,7 +5188,9 @@ impl EcsBot {
         }
 
         if let Some(error) = self.world.resource_mut::<TickError>().0.take() {
-            return Err(error);
+            let refusal = Err(error);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "tick_async: returning an error to the caller");
+            return refusal;
         }
 
         // A tick that reported no failure is not necessarily a tick with nothing
@@ -5197,7 +5252,9 @@ impl EcsBot {
     pub fn tick(&mut self) -> Result<usize, BotError> {
         #[cfg(feature = "rt")]
         if lgwks_deps::tokio::runtime::Handle::try_current().is_ok() {
-            return Err(BotError::TickInsideRuntime);
+            let refusal = Err(BotError::TickInsideRuntime);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "tick: returning an error to the caller");
+            return refusal;
         }
         lgwks_std::task::block_on(self.tick_async())
     }
@@ -6538,7 +6595,12 @@ impl EcsBot {
         poll_deadline: Duration,
     ) -> Result<Self, BotError> {
         if name.is_empty() {
-            return Err(BotError::IncompleteSpec { field: "name" });
+            let refusal = Err(BotError::IncompleteSpec {
+                field: "name",
+                cause: String::from("the bot was given an empty name"),
+            });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "assemble: returning an error to the caller");
+            return refusal;
         }
         // Refused before anything is built or polled, and for the same reason the
         // name is: a budget of zero cancels every poll before its first poll, so
@@ -6546,21 +6608,32 @@ impl EcsBot {
         // as stalled. A refusal here names the number and the repair rather than
         // producing a bot whose every tick is a cancellation.
         if poll_deadline.is_zero() {
-            return Err(BotError::PollDeadlineUnbounded {
+            let refusal = Err(BotError::PollDeadlineUnbounded {
                 deadline: poll_deadline,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "assemble: returning an error to the caller");
+            return refusal;
         }
         if poll_deadline > MAX_POLL_DEADLINE {
-            return Err(BotError::PollDeadlineExceeded {
+            let refusal = Err(BotError::PollDeadlineExceeded {
                 deadline: poll_deadline,
                 ceiling: MAX_POLL_DEADLINE,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "assemble: returning an error to the caller");
+            return refusal;
         }
         // Refused before the capability gate, because a bot that cannot record
         // a dispatch is not a bot that is missing a capability — it is one that
         // was never given a dispatch path, and the repair is different.
         let Some(effects) = effects else {
-            return Err(BotError::IncompleteSpec { field: "effects" });
+            let refusal = Err(BotError::IncompleteSpec {
+                field: "effects",
+                cause: String::from(
+                    "no effect scope was supplied, so a dispatch could not be recorded",
+                ),
+            });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "assemble: returning an error to the caller");
+            return refusal;
         };
         // What recovery found, folded in before the world exists. A key naming
         // an action this bot does not declare is a foreign journal — the
@@ -6575,17 +6648,27 @@ impl EcsBot {
                 cause: DispatchError::Journal(cause),
             })?;
         let tail = effects.journal().tail();
-        let recovered_events =
-            u64::try_from(committed.len()).map_err(|_| BotError::EffectRefused {
-                cause: DispatchError::Journal(JournalError::Exhausted),
-            })?;
+        // A committed count that cannot be a sequence number means the journal
+        // holds more events than the sequence can name, which is exhaustion.
+        let recovered_events = match u64::try_from(committed.len()) {
+            Ok(count) => count,
+            Err(_too_many_events) => {
+                let refusal = Err(BotError::EffectRefused {
+                    cause: DispatchError::Journal(JournalError::Exhausted),
+                });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "assemble: returning an error to the caller");
+                return refusal;
+            }
+        };
         if recovered_events != tail.sequence() {
-            return Err(BotError::EffectRefused {
+            let refusal = Err(BotError::EffectRefused {
                 cause: DispatchError::Journal(JournalError::SnapshotStale {
                     recovered_events,
                     committed_events: tail.sequence(),
                 }),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "assemble: returning an error to the caller");
+            return refusal;
         }
         let recovered = recover(committed.iter());
         // The same admission gate `Bot::build` applies: a bot requiring a
@@ -6614,7 +6697,9 @@ impl EcsBot {
             }
         }
         if let Some(deficit) = Deficit::from_shortages(shortages) {
-            return Err(BotError::CapabilityDenied { deficit });
+            let refusal = Err(BotError::CapabilityDenied { deficit });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "assemble: returning an error to the caller");
+            return refusal;
         }
 
         let mut world = World::new();
@@ -6678,9 +6763,11 @@ impl EcsBot {
         for attempt in recovered.attempts() {
             let key = attempt.key();
             let Some(id) = ledger.locate(key.action()) else {
-                return Err(BotError::ActionNotDeclared {
+                let refusal = Err(BotError::ActionNotDeclared {
                     action: key.action(),
                 });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "assemble: returning an error to the caller");
+                return refusal;
             };
             // The journal's key must name this run, this flow, and this
             // environment. A journal that holds keys from any of the others is
@@ -6693,9 +6780,11 @@ impl EcsBot {
                 || key.flow() != identity.flow()
                 || key.environment() != identity.environment()
             {
-                return Err(BotError::ActionNotDeclared {
+                let refusal = Err(BotError::ActionNotDeclared {
                     action: key.action(),
                 });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "assemble: returning an error to the caller");
+                return refusal;
             }
             let _ = id;
             ledger
@@ -6997,11 +7086,13 @@ mod tests {
             let left = self.remaining.get();
             self.remaining.set(left.saturating_sub(1));
             if left == 0 {
-                return Err(BotError::DomainError {
+                let refusal = Err(BotError::DomainError {
                     domain: "test::exhausting".into(),
                     certainty: DispatchCertainty::NotDelivered,
                     cause: "script exhausted".into(),
                 });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "poll: returning an error to the caller");
+                return refusal;
             }
             Ok(200)
         }
@@ -7047,11 +7138,13 @@ mod tests {
             call.0.check(&self.caps)?;
             self.polls.set(self.polls.get().saturating_add(1));
             if self.fail.get() {
-                return Err(BotError::DomainError {
+                let refusal = Err(BotError::DomainError {
                     domain: "test::switched".into(),
                     certainty: DispatchCertainty::NotDelivered,
                     cause: "switch is off".into(),
                 });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "poll: returning an error to the caller");
+                return refusal;
             }
             Ok(self.value.get())
         }
@@ -7562,9 +7655,11 @@ mod tests {
                 EffectEvent::Verified { .. } => false,
             };
             if refuse {
-                return Err(JournalError::Storage(io::Error::other(
+                let refusal = Err(JournalError::Storage(io::Error::other(
                     "injected append refusal",
                 )));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "compare_and_append: returning an error to the caller");
+                return refusal;
             }
             let ack = self
                 .inner
@@ -7576,9 +7671,11 @@ mod tests {
                 // Conforming ambiguity: the event is in the store and the
                 // reply is lost. `Storage` would claim the journal is
                 // unchanged, which the committed event below contradicts.
-                return Err(JournalError::OutcomeUnknown {
+                let refusal = Err(JournalError::OutcomeUnknown {
                     cause: io::Error::other("injected post-commit lost reply"),
                 });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "compare_and_append: returning an error to the caller");
+                return refusal;
             }
             Ok(ack)
         }
@@ -7785,18 +7882,22 @@ mod tests {
             event: &EffectEvent,
         ) -> Result<DurableAck, JournalError> {
             if matches!(event, EffectEvent::OutcomeObserved { .. }) && self.unknown_once.take() {
-                return Err(JournalError::OutcomeUnknown {
+                let refusal = Err(JournalError::OutcomeUnknown {
                     cause: io::Error::other("injected unknown outcome, nothing written"),
                 });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "compare_and_append: returning an error to the caller");
+                return refusal;
             }
             let ack = self
                 .inner
                 .borrow_mut()
                 .compare_and_append(expected_tail, event)?;
             if matches!(event, EffectEvent::OutcomeObserved { .. }) && self.ambiguous_once.take() {
-                return Err(JournalError::OutcomeUnknown {
+                let refusal = Err(JournalError::OutcomeUnknown {
                     cause: io::Error::other("injected lost reply"),
                 });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "compare_and_append: returning an error to the caller");
+                return refusal;
             }
             Ok(ack)
         }
@@ -7813,7 +7914,9 @@ mod tests {
                         if held == key && held_evidence == evidence),
             );
             if !held {
-                return Err(JournalError::ReceiptUnavailable { required });
+                let refusal = Err(JournalError::ReceiptUnavailable { required });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "confirm_outcome: returning an error to the caller");
+                return refusal;
             }
             Ok(DurableAck::new(position, self.durability()))
         }

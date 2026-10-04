@@ -206,19 +206,32 @@ impl ProcessSpec {
         self.cwd.as_deref()
     }
 
-    /// The stdin policy, for inspection only.
+    /// How the child's standard input was wired at spawn.
+    ///
+    /// The policy is what was *requested*; it does not report what the child
+    /// then read, which nothing here can know. `Capture` carries the retained
+    /// byte ceiling, so this also answers how much input this child could have
+    /// had captured rather than piped.
     #[must_use]
     pub const fn stdin_policy(&self) -> StdioPolicy {
         self.stdin
     }
 
-    /// The stdout policy, for inspection only.
+    /// How the child's standard output was wired at spawn.
+    ///
+    /// `Capture` means [`Self::stdout`] holds what the child wrote, up to the
+    /// ceiling this value names; `Inherit` and `Null` mean the supervisor never
+    /// saw it and [`Self::stdout`] is empty rather than absent.
     #[must_use]
     pub const fn stdout_policy(&self) -> StdioPolicy {
         self.stdout
     }
 
-    /// The stderr policy, for inspection only.
+    /// How the child's standard error was wired at spawn.
+    ///
+    /// The same three choices as [`Self::stdout_policy`], kept separate because
+    /// a supervisor commonly captures diagnostics while letting ordinary output
+    /// through, and a caller asking "did I get its stderr" reads this.
     #[must_use]
     pub const fn stderr_policy(&self) -> StdioPolicy {
         self.stderr
@@ -431,7 +444,12 @@ impl ProcessRun {
         self.status
     }
 
-    /// The exit code, when the child exited normally.
+    /// The code the child passed to `exit`, or `None` if it did not exit.
+    ///
+    /// `None` covers both a child still running and one killed by a signal, and
+    /// the two are told apart by [`Self::signal`] on Unix or by
+    /// [`Self::deadline_fired`]. A code of `0` is a normal successful exit and
+    /// is not the same answer as `None`.
     #[must_use]
     pub fn exit_code(&self) -> Option<i32> {
         self.status.and_then(|status| status.code())
@@ -458,13 +476,23 @@ impl ProcessRun {
         self.deadline_fired
     }
 
-    /// The captured stdout.
+    /// What the child wrote to standard output, up to the capture ceiling.
+    ///
+    /// Empty unless [`Self::stdout_policy`] was `Capture`. The retained bytes
+    /// are the *head* of the stream, so [`CapturedStream::truncated`] is how a
+    /// caller knows the tail is missing; [`CapturedStream::total_bytes`] says
+    /// how much there would have been.
     #[must_use]
     pub const fn stdout(&self) -> &CapturedStream {
         &self.stdout
     }
 
-    /// The captured stderr.
+    /// What the child wrote to standard error, up to the capture ceiling.
+    ///
+    /// The same shape as [`Self::stdout`], and empty unless
+    /// [`Self::stderr_policy`] was `Capture`. A child that died before writing
+    /// leaves an empty capture rather than none, so emptiness is never evidence
+    /// that the policy was not `Capture`.
     #[must_use]
     pub const fn stderr(&self) -> &CapturedStream {
         &self.stderr
@@ -918,11 +946,13 @@ fn read_pass<R: std::io::Read>(
             // A whole record: keep reading.
             Ok(None) => {}
             Err(source) => {
-                return Err(Failed {
+                let refusal = Err(Failed {
                     source,
                     records,
                     retained_bytes: retained,
                 });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "read_pass: returning an error to the caller");
+                return refusal;
             }
         }
     };

@@ -371,10 +371,13 @@ mod tests {
     impl std::io::Write for FailAfter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
             if self.remaining == 0 {
-                return Err(std::io::Error::new(
+                let refusal = Err(std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,
                     "controlled writer failure",
                 ));
+                #[cfg(feature = "trace")]
+                crate::trace::debug!(error = ?refusal.as_ref().err(), "write: returning an error to the caller");
+                return refusal;
             }
             let accepted = bytes.len().min(self.remaining);
             self.accepted.extend_from_slice(&bytes[..accepted]);

@@ -279,18 +279,24 @@ impl OpenFlags {
     /// on every supported platform.
     pub fn validate(&self) -> io::Result<()> {
         if self.truncate && !self.write {
-            return Err(io::Error::new(
+            let refusal = Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "truncate requires write access: a read-only O_TRUNC empties the \
-                 file on macOS and the BSDs, and Linux merely refuses it",
+             file on macOS and the BSDs, and Linux merely refuses it",
             ));
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), "validate: returning an error to the caller");
+            return refusal;
         }
         if !self.read && !self.write {
-            return Err(io::Error::new(
+            let refusal = Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "open needs read, write, or both; neither asks for a descriptor \
-                 that can do nothing",
+             that can do nothing",
             ));
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), "validate: returning an error to the caller");
+            return refusal;
         }
         if self.create && self.symlinks == SymlinkPolicy::FollowFinal {
             // `create` is `O_CREAT` without `O_EXCL`, and `FollowFinal` is
@@ -300,12 +306,15 @@ impl OpenFlags {
             // whatever the link points at, wherever that is. `create_new` is
             // the safe spelling: it always pairs `O_CREAT` with `O_EXCL` and
             // `O_NOFOLLOW`, so an existing or linked name is an error.
-            return Err(io::Error::new(
+            let refusal = Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "create cannot follow a final symlink: O_CREAT without O_EXCL \
-                 writes through the link, and creates a dangling link's target. \
-                 Use Dir::create_new, which pairs O_EXCL with O_NOFOLLOW",
+             writes through the link, and creates a dangling link's target. \
+             Use Dir::create_new, which pairs O_EXCL with O_NOFOLLOW",
             ));
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), "validate: returning an error to the caller");
+            return refusal;
         }
         Ok(())
     }
@@ -707,17 +716,57 @@ mod unsupported {
 #[cfg(unix)]
 fn single_component(name: &str) -> io::Result<std::ffi::CString> {
     if name.is_empty() || name == "." || name == ".." || name.contains('/') {
-        return Err(io::Error::new(
+        let refusal = Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("{name:?} is not a single path component"),
         ));
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "single_component: returning an error to the caller");
+        return refusal;
     }
-    std::ffi::CString::new(name).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "path component contains an interior NUL",
-        )
+    std::ffi::CString::new(name).map_err(|cause| {
+        // The offset is read off the cause before the cause is moved into the
+        // error: `CString::new` already located the NUL, and restating a second
+        // copy of that number could only disagree with it.
+        let at = cause.nul_position();
+        io::Error::new(io::ErrorKind::InvalidInput, InteriorNul { cause, at })
     })
+}
+
+/// Why a path component could not become a `CString`.
+///
+/// A named type rather than a `String`: the [`std::ffi::NulError`] travels
+/// inside it and is what makes the refusal observable, while the rendered text
+/// stays the module's own phrase and never quotes the rejected name.
+#[cfg(unix)]
+#[derive(Debug)]
+struct InteriorNul {
+    /// The interior-NUL failure `CString::new` reported, kept as the cause so
+    /// `Error::source` reaches it rather than losing it at the translation.
+    cause: std::ffi::NulError,
+    /// Offset of the NUL byte within the rejected component.
+    at: usize,
+}
+
+#[cfg(unix)]
+impl std::fmt::Display for InteriorNul {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Deliberately no `{:?}` of the rejected name: this path is reached
+        // with caller-supplied text, and a name carrying CR/LF would forge a
+        // second line in whatever log interpolates the `io::Error`.
+        write!(
+            formatter,
+            "path component contains an interior NUL at offset {}",
+            self.at
+        )
+    }
+}
+
+#[cfg(unix)]
+impl std::error::Error for InteriorNul {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.cause)
+    }
 }
 
 /// Map a raw `st_mode` word to the kind this crate reports.

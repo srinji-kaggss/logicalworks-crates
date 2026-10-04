@@ -831,20 +831,24 @@ impl BotSpec {
     /// escaped, because an unknown field name is attacker-chosen.
     pub fn from_json(source: &str) -> Result<Self, BotError> {
         if source.len() > MAX_SPEC_BYTES {
-            return Err(BotError::SpecTooLarge {
+            let refusal = Err(BotError::SpecTooLarge {
                 bytes: source.len(),
                 limit: MAX_SPEC_BYTES,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "from_json: returning an error to the caller");
+            return refusal;
         }
         let spec: Self =
             crate::json::from_str(source).map_err(|error| BotError::MalformedSpec {
                 cause: error.to_string().escape_debug().to_string(),
             })?;
         if spec.version != Self::CURRENT_VERSION {
-            return Err(BotError::UnsupportedSpecVersion {
+            let refusal = Err(BotError::UnsupportedSpecVersion {
                 found: spec.version,
                 supported: Self::CURRENT_VERSION,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "from_json: returning an error to the caller");
+            return refusal;
         }
         Ok(spec)
     }
@@ -1458,7 +1462,10 @@ mod tests {
                 Bot::builder("")
                     .with_effects(test_effects()?)
                     .build(&GrantSet::empty()),
-                Err(BotError::IncompleteSpec { field: "name" })
+                Err(BotError::IncompleteSpec {
+                    field: "name",
+                    cause: _,
+                })
             ),
             "the no-chains entry point must reject an empty name"
         );
@@ -1469,7 +1476,10 @@ mod tests {
                     .observe(NeedsNet(vec![]))
                     .with_effects(test_effects()?)
                     .build(&GrantSet::empty()),
-                Err(BotError::IncompleteSpec { field: "name" })
+                Err(BotError::IncompleteSpec {
+                    field: "name",
+                    cause: _,
+                })
             ),
             "the with-chains entry point must reject the same empty name"
         );

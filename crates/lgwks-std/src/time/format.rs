@@ -53,11 +53,18 @@ fn digit_byte(value: u32) -> u8 {
 ///
 /// Returns an error when the instant is outside the signed Unix-seconds range.
 pub fn unix_parts(at: SystemTime) -> Result<(i64, u32), UnixTimeError> {
+    #[cfg(feature = "trace")]
     match at.duration_since(UNIX_EPOCH) {
         Ok(duration) => {
-            let seconds = i64::try_from(duration.as_secs()).map_err(|_| {
+            // The narrowing is checked rather than assumed: a whole-second
+            // count past `i64::MAX` is the only way this can fail, and the
+            // `TryFromIntError` it produces travels on inside the variant so
+            // the count that did not fit is still reachable after the
+            // translation.
+            let seconds = i64::try_from(duration.as_secs()).map_err(|cause| {
                 UnixTimeError::SystemTimeOutsideI64Range {
                     before_epoch: false,
+                    cause,
                 }
             })?;
             Ok((seconds, duration.subsec_nanos()))
@@ -69,15 +76,43 @@ pub fn unix_parts(at: SystemTime) -> Result<(i64, u32), UnixTimeError> {
             {
                 return Ok((i64::MIN, 0));
             }
-            let whole = i64::try_from(duration.as_secs())
-                .map_err(|_| UnixTimeError::SystemTimeOutsideI64Range { before_epoch: true })?;
+            // One whole-second count does not fit `i64`, and the guard above
+            // answers exactly it. The `Err` arm therefore does carry the
+            // seconds count that overflowed, so it is attached to the refusal
+            // rather than dropped on the way through.
+            let whole = match i64::try_from(duration.as_secs()) {
+                Ok(whole) => whole,
+                Err(cause) => {
+                    let refusal = Err(UnixTimeError::SystemTimeOutsideI64Range {
+                        before_epoch: true,
+                        cause,
+                    });
+                    #[cfg(feature = "trace")]
+                    crate::trace::debug!(error = ?refusal.as_ref().err(), "unix_parts: returning an error to the caller");
+                    return refusal;
+                }
+            };
             let nanos = duration.subsec_nanos();
             let seconds = if nanos == 0 {
                 whole.checked_neg()
             } else {
                 whole.checked_neg().and_then(|value| value.checked_sub(1))
-            }
-            .ok_or(UnixTimeError::SystemTimeOutsideI64Range { before_epoch: true })?;
+            };
+            let seconds = match seconds {
+                Some(seconds) => seconds,
+                None => {
+                    // Only negation can refuse here, and it refuses for exactly
+                    // one magnitude: `i64::MIN`. Naming it in its own variant is
+                    // what keeps the fact observable — fabricating a conversion
+                    // failure here would attach a cause that never happened.
+                    let refusal = Err(UnixTimeError::NegationOverflow {
+                        magnitude: whole.unsigned_abs(),
+                    });
+                    #[cfg(feature = "trace")]
+                    crate::trace::debug!(error = ?refusal.as_ref().err(), "unix_parts: returning an error to the caller");
+                    return refusal;
+                }
+            };
             Ok((
                 seconds,
                 if nanos == 0 {
@@ -97,10 +132,14 @@ pub fn unix_parts(at: SystemTime) -> Result<(i64, u32), UnixTimeError> {
 #[must_use]
 pub fn unix_parts_lossy(at: SystemTime) -> (i64, u32) {
     unix_parts(at).unwrap_or_else(|error| match error {
-        UnixTimeError::SystemTimeOutsideI64Range { before_epoch: true } => (i64::MIN, 0),
+        UnixTimeError::SystemTimeOutsideI64Range {
+            before_epoch: true, ..
+        } => (i64::MIN, 0),
         UnixTimeError::SystemTimeOutsideI64Range {
             before_epoch: false,
+            ..
         }
+        | UnixTimeError::NegationOverflow { .. }
         | UnixTimeError::SecondsOverflow { .. }
         | UnixTimeError::SystemTimeOutOfRange { .. } => (i64::MAX, 0),
     })
@@ -261,7 +300,10 @@ pub fn to_rfc3339(at: SystemTime) -> Result<String, FormatError> {
     // non-zero constant, so `div_euclid` cannot trap.
     let (year, month, day) = civil_from_days(secs.div_euclid(SECONDS_PER_DAY));
     if !(0..=9999).contains(&year) {
-        return Err(FormatError::YearOutsideRfc3339 { year });
+        let refusal = Err(FormatError::YearOutsideRfc3339 { year });
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "to_rfc3339: returning an error to the caller");
+        return refusal;
     }
     // The remainder is in `0..SECONDS_PER_DAY`, so the narrowing to `u32` is
     // exact.

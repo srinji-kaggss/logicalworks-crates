@@ -380,17 +380,24 @@ fn kill_when(
     reached: impl Fn() -> Result<bool, Box<dyn Error>>,
 ) -> Result<(), Box<dyn Error>> {
     let Some(mut child) = guard.take() else {
-        return Err(format!("the probe child for {test_name} was gone before the kill").into());
+        {
+            let refusal =
+                Err(format!("the probe child for {test_name} was gone before the kill").into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "kill_when: returning an error to the caller");
+            return refusal;
+        };
     };
     for _ in 0..2_000 {
         if reached()? {
             return sigkill(&mut child, test_name);
         }
         if let Some(status) = child.try_wait()? {
-            return Err(format!(
+            let refusal = Err(format!(
                 "the probe child for {test_name} exited on its own before its moment: {status}"
             )
             .into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "kill_when: returning an error to the caller");
+            return refusal;
         }
         pause(1);
     }

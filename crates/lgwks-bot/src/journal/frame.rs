@@ -125,7 +125,11 @@ pub(crate) fn read_prefix(
             Ok(0) => break,
             Ok(read) => filled = filled.saturating_add(read),
             Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error),
+            Err(error) => {
+                let refusal = Err(error);
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "read_prefix: returning an error to the caller");
+                return refusal;
+            }
         }
     }
     Ok(match filled {
@@ -232,7 +236,14 @@ where
 {
     let payload = archive(record)?;
     let Some(payload_len) = writable_length(payload.len(), max_frame_bytes) else {
-        return Err(refuse(payload.len()));
+        {
+            lgwks_std::trace::debug!(
+                payload_len = payload.len(),
+                max_frame_bytes,
+                "frame_record: the archived record exceeds the frame ceiling"
+            );
+            return Err(refuse(payload.len()));
+        };
     };
     // The head is chained from the record and the archived bytes together, and the
     // bytes are handed to the closure rather than re-encoded inside it: a store that

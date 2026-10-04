@@ -168,6 +168,7 @@ enum CheckRequest {
 /// because the operator's next action is to look at that token, and every one
 /// of them used to be silently tolerated — which is how an option's value
 /// became the audited repository.
+#[derive(Debug)]
 enum CheckArgError {
     /// An option that takes a value was the last argument.
     MissingValue {
@@ -252,31 +253,41 @@ fn parse_check_args(args: &[String]) -> Result<CheckRequest, CheckArgError> {
             "--json" => json = true,
             "--contract" => {
                 if contract.is_some() {
-                    return Err(CheckArgError::DuplicateOverride { flag: "--contract" });
+                    let refusal = Err(CheckArgError::DuplicateOverride { flag: "--contract" });
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "parse_check_args: returning an error to the caller");
+                    return refusal;
                 }
                 let Some(value) = cursor.next() else {
-                    return Err(CheckArgError::MissingValue { flag: "--contract" });
+                    let refusal = Err(CheckArgError::MissingValue { flag: "--contract" });
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "parse_check_args: returning an error to the caller");
+                    return refusal;
                 };
                 if value.starts_with("--") {
-                    return Err(CheckArgError::ValueLooksLikeOption {
+                    let refusal = Err(CheckArgError::ValueLooksLikeOption {
                         flag: "--contract",
                         value: value.clone(),
                     });
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "parse_check_args: returning an error to the caller");
+                    return refusal;
                 }
                 contract = Some(PathBuf::from(value));
             }
             flag if flag.starts_with("--") => {
-                return Err(CheckArgError::UnknownFlag {
+                let refusal = Err(CheckArgError::UnknownFlag {
                     flag: flag.to_owned(),
                 });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "parse_check_args: returning an error to the caller");
+                return refusal;
             }
             // A single `-` token is a path, not an option: the only short flag
             // this command defines is `-h`, which is matched above.
             path => {
                 if target.is_some() {
-                    return Err(CheckArgError::SurplusTarget {
+                    let refusal = Err(CheckArgError::SurplusTarget {
                         value: path.to_owned(),
                     });
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "parse_check_args: returning an error to the caller");
+                    return refusal;
                 }
                 target = Some(PathBuf::from(path));
             }
@@ -497,9 +508,11 @@ fn audit_invariant_root(
 
 /// Prints every refusal and returns the verdict's exit code.
 ///
-/// Exit 0 when `[policy] enforce = false`: the register has stood enforcement
-/// down deliberately, so the refusals are reported as adoption guidance and the
-/// build still passes. Exit 2 otherwise.
+/// Always exit 2 when there is at least one refusal. Adoption mode no longer
+/// returns success from this path: an `enforce = false` register on a tree that
+/// carries refusals is itself refused, so arriving here with a non-empty list
+/// means the gate found something, and the note explains which posture it was
+/// read under.
 fn report_refusals(
     root: &Path,
     register: &Contract,
@@ -524,12 +537,12 @@ fn report_refusals(
     if !register.enforce {
         writeln!(
             err,
-            "\nNOTE  [policy] enforce = false, so builds still pass. This is adoption-only."
+            "\nNOTE  [policy] enforce = false does not make these pass. Adoption mode \
+             is a reviewable posture over a *clean* tree; a stand-down over a violating \
+             tree is refused above, so fix the named edges or set enforce = true."
         )?;
-        Ok(ExitCode::SUCCESS)
-    } else {
-        Ok(ExitCode::from(2))
     }
+    Ok(ExitCode::from(2))
 }
 
 /// Prints the admitted-edge summary and returns success.
@@ -655,10 +668,15 @@ impl<'a> InvariantReport<'a> {
     }
 
     /// Computes the combined check exit code for this invariant report.
-    fn check_exit_code(self, register: &Contract, refusals: &[Refusal]) -> ExitCode {
-        let dependencies_pass = refusals.is_empty() || !register.enforce;
-        let invariants_pass = self.audit.refusals().is_empty() || !self.register.enforce;
-        if dependencies_pass && invariants_pass {
+    ///
+    /// Both halves are pure functions of the refusal count. `enforce = false`
+    /// no longer reaches this verdict: `audit_direct` refuses a stand-down
+    /// outright when the tree carries violations, so an adoption-mode register
+    /// on a violating tree arrives here with a non-empty list and exits 2
+    /// exactly as `enforce = true` would. No token remains whose flip changes
+    /// the verdict.
+    fn check_exit_code(self, refusals: &[Refusal]) -> ExitCode {
+        if refusals.is_empty() && self.audit.refusals().is_empty() {
             ExitCode::SUCCESS
         } else {
             ExitCode::from(2)
@@ -690,7 +708,7 @@ fn report_check_with_invariants(
                     Some(invariant.json()),
                     out,
                 )?;
-                return Ok(invariant.check_exit_code(register, refusals));
+                return Ok(invariant.check_exit_code(refusals));
             }
             if refusals.is_empty() && invariant.audit.refusals().is_empty() {
                 writeln!(
@@ -735,7 +753,7 @@ fn report_check_with_invariants(
                 err,
                 "\nBoth registers are reviewed contracts; repair each named refusal before delivery."
             )?;
-            Ok(invariant.check_exit_code(register, refusals))
+            Ok(invariant.check_exit_code(refusals))
         }
         Err(dependency_error) => report_check_with_dependency_error(
             root,
@@ -899,7 +917,7 @@ fn write_register_detail(err: &mut impl io::Write, register: &str, detail: &str)
 /// One function rather than a branch at each call site: the human and machine
 /// renderings differ in bytes and must not differ in *verdict*, and the only way
 /// to guarantee that is for a single place to compute it. Both modes exit 0 for
-/// an admitted tree, 0 for refusals under `enforce = false`, and 2 otherwise.
+/// an admitted tree and 2 for any refusal, including a stand-down of refusals.
 fn report_check(
     outcome: &CheckOutcome<'_>,
     json_output: bool,
@@ -911,23 +929,22 @@ fn report_check(
         // A gate that could not reach a verdict is a refusal, and exits 2.
         // This arm is first because the code below would otherwise *pass*: with
         // no register, `enforce` defaults to true and `refusals` is empty, so
-        // `refusals.is_empty() || !enforced` is satisfied and the gate would
+        // `refusals.is_empty()` is satisfied and the gate would
         // report success for a tree it never read. That is the one failure this
         // crate's fail-closed rule exists to prevent, and it was reachable only
         // through `--json`.
         if outcome.audit.is_err() {
             return Ok(ExitCode::from(2));
         }
-        // `enforce = false` is adoption-only: refusals are reported and the
-        // build still passes, exactly as in the human path. The two modes must
-        // not disagree about what an exit code means.
-        let enforced = outcome
-            .audit
-            .is_ok_and(|verdict| verdict.register().enforce);
+        // The verdict is the refusal count alone. `enforce = false` is no
+        // longer consulted: an adoption-mode register on a violating tree is
+        // itself refused by `audit_direct`, so it arrives here with a non-empty
+        // `refusals` and exits 2 -- identical to the human path, which is the
+        // property `--json` must never lose.
         let admitted = outcome
             .audit
             .is_ok_and(|verdict| verdict.refusals().is_empty());
-        return Ok(if admitted || !enforced {
+        return Ok(if admitted {
             ExitCode::SUCCESS
         } else {
             ExitCode::from(2)
@@ -1263,13 +1280,17 @@ fn parse_debug_args(args: &[String]) -> Result<DebugArgs, String> {
         match argument.as_str() {
             "--json" => json = true,
             flag if flag.starts_with("--") => {
-                return Err(format!("unknown option for `debug`: {flag}"));
+                let refusal = Err(format!("unknown option for `debug`: {flag}"));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "parse_debug_args: returning an error to the caller");
+                return refusal;
             }
             value => {
                 if target.is_some() {
-                    return Err(format!(
+                    let refusal = Err(format!(
                         "`debug` inspects one repository, and {value:?} is a second path"
                     ));
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "parse_debug_args: returning an error to the caller");
+                    return refusal;
                 }
                 target = Some(PathBuf::from(value));
             }

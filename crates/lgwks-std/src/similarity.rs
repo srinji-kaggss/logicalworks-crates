@@ -479,10 +479,13 @@ fn bounded_jaccard_score<T: PartialEq>(
 ) -> Result<f64, EvidenceError> {
     let observed = left.len().max(right.len());
     if observed > maximum_length {
-        return Err(EvidenceError::CollectionTooLong {
+        let refusal = Err(EvidenceError::CollectionTooLong {
             maximum: maximum_length,
             observed,
         });
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "bounded_jaccard_score: returning an error to the caller");
+        return refusal;
     }
     Ok(jaccard_unit(left, right))
 }
@@ -786,10 +789,13 @@ impl Cosine {
     /// Calculates the cosine similarity, or reports why it is undefined.
     pub fn try_score(&self, left: &[f32], right: &[f32]) -> Result<f64, CosineError> {
         if left.len() != right.len() {
-            return Err(CosineError::DimensionMismatch {
+            let refusal = Err(CosineError::DimensionMismatch {
                 left: left.len(),
                 right: right.len(),
             });
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), "try_score: returning an error to the caller");
+            return refusal;
         }
         let mut dot = 0.0_f64;
         let mut left_squared = 0.0_f64;
@@ -801,7 +807,10 @@ impl Cosine {
             // as what it is rather than surfacing later as a `NaN` magnitude
             // that a caller could mistake for an all-zero vector.
             if !left_value.is_finite() || !right_value.is_finite() {
-                return Err(CosineError::NonFinite);
+                let refusal = Err(CosineError::NonFinite);
+                #[cfg(feature = "trace")]
+                crate::trace::debug!(error = ?refusal.as_ref().err(), "try_score: returning an error to the caller");
+                return refusal;
             }
             dot += left_value * right_value;
             left_squared += left_value * left_value;
@@ -814,11 +823,17 @@ impl Cosine {
         // accumulator would otherwise fall through `magnitudes <= 0.0` — `NaN`
         // compares false against everything — and return as a score.
         if !dot.is_finite() || !left_squared.is_finite() || !right_squared.is_finite() {
-            return Err(CosineError::NonFinite);
+            let refusal = Err(CosineError::NonFinite);
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), "try_score: returning an error to the caller");
+            return refusal;
         }
         let magnitudes = left_squared.sqrt() * right_squared.sqrt();
         if magnitudes <= 0.0 {
-            return Err(CosineError::ZeroMagnitude);
+            let refusal = Err(CosineError::ZeroMagnitude);
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), "try_score: returning an error to the caller");
+            return refusal;
         }
         Ok((dot / magnitudes).clamp(-1.0, 1.0))
     }
@@ -915,30 +930,64 @@ pub struct Weighted<Value: ?Sized> {
     threshold: f64,
 }
 
+/// Refuses a weighted scorer built from nothing.
+///
+/// Shared by both constructors so the empty case has one refusal and one place
+/// it is reported from.
+fn require_present(count: usize) -> Result<(), WeightedError> {
+    if count == 0 {
+        let refusal = Err(WeightedError::Empty);
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "weighted scorer: there are no components");
+        return refusal;
+    }
+    Ok(())
+}
+
+/// Refuses an acceptance threshold or weight set outside the declared policy:
+/// the threshold must lie in `[0, 1]`, each weight must be finite and
+/// non-negative, and the weights may not sum past one.
+///
+/// Shared by both constructors, so the plain and the checked scorer cannot come
+/// to disagree about which policies are legal. The threshold is judged before
+/// the weights, as both constructors always did.
+fn validate_policy(
+    threshold: f64,
+    weights: impl Iterator<Item = f64>,
+) -> Result<(), WeightedError> {
+    if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+        let refusal = Err(WeightedError::InvalidThreshold);
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), threshold, "weighted scorer: the threshold is outside [0, 1]");
+        return refusal;
+    }
+    let mut total = 0.0;
+    for (index, weight) in weights.enumerate() {
+        if !weight.is_finite() || weight < 0.0 {
+            let refusal = Err(WeightedError::InvalidWeight { index });
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), index, weight, "weighted scorer: the weight is not finite and non-negative");
+            return refusal;
+        }
+        total += weight;
+    }
+    if total > 1.0 {
+        let refusal = Err(WeightedError::WeightSumExceedsOne);
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), total, "weighted scorer: the weights sum past one");
+        return refusal;
+    }
+    Ok(())
+}
+
 impl<Value: ?Sized> Weighted<Value> {
     /// Creates a weighted scorer and its acceptance threshold.
     pub fn new(
         components: Vec<(f64, Box<dyn Similarity<Value = Value>>)>,
         threshold: f64,
     ) -> Result<Self, WeightedError> {
-        if components.is_empty() {
-            return Err(WeightedError::Empty);
-        }
-        if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
-            return Err(WeightedError::InvalidThreshold);
-        }
-
-        let mut total = 0.0;
-        for (index, component) in components.iter().enumerate() {
-            let weight = component.0;
-            if !weight.is_finite() || weight < 0.0 {
-                return Err(WeightedError::InvalidWeight { index });
-            }
-            total += weight;
-        }
-        if total > 1.0 {
-            return Err(WeightedError::WeightSumExceedsOne);
-        }
+        require_present(components.len())?;
+        validate_policy(threshold, components.iter().map(|component| component.0))?;
 
         Ok(Self {
             components,
@@ -1154,28 +1203,17 @@ impl<Value: ?Sized + Sync> CheckedEvidence<Value> {
         weights: Vec<f64>,
         threshold: f64,
     ) -> Result<Self, WeightedError> {
-        if scorers.is_empty() {
-            return Err(WeightedError::Empty);
-        }
+        require_present(scorers.len())?;
         if scorers.len() != weights.len() {
-            return Err(WeightedError::WeightCountMismatch {
+            let refusal = Err(WeightedError::WeightCountMismatch {
                 scorers: scorers.len(),
                 weights: weights.len(),
             });
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), scorers = scorers.len(), weights = weights.len(), "checked weighted scorer: every scorer needs exactly one weight");
+            return refusal;
         }
-        if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
-            return Err(WeightedError::InvalidThreshold);
-        }
-        let mut total = 0.0;
-        for (index, weight) in weights.iter().enumerate() {
-            if !weight.is_finite() || *weight < 0.0 {
-                return Err(WeightedError::InvalidWeight { index });
-            }
-            total += weight;
-        }
-        if total > 1.0 {
-            return Err(WeightedError::WeightSumExceedsOne);
-        }
+        validate_policy(threshold, weights.iter().copied())?;
         Ok(Self {
             scorers,
             weights,
@@ -1214,9 +1252,12 @@ impl<Value: ?Sized + Sync> CheckedEvidence<Value> {
     pub fn verdict(&self, left: &Value, right: &Value) -> Result<EvidenceVerdict, EvidenceError> {
         let total_weight = self.total_weight();
         if total_weight <= 0.0 {
-            return Err(EvidenceError::InsufficientEvidence {
+            let refusal = Err(EvidenceError::InsufficientEvidence {
                 total_weight: total_weight.to_bits(),
             });
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), "verdict: returning an error to the caller");
+            return refusal;
         }
 
         let mut outcomes = Vec::with_capacity(self.scorers.len());
@@ -1341,7 +1382,10 @@ fn normalize_text(input: &str, maximum: usize) -> Result<Vec<char>, EditDistance
     for _ in input.chars() {
         observed = observed.saturating_add(1);
         if observed > maximum {
-            return Err(EditDistanceError::InputTooLong { maximum, observed });
+            let refusal = Err(EditDistanceError::InputTooLong { maximum, observed });
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), "normalize_text: returning an error to the caller");
+            return refusal;
         }
     }
 
@@ -1364,10 +1408,13 @@ fn normalize_text(input: &str, maximum: usize) -> Result<Vec<char>, EditDistance
     }
 
     if normalized.len() > maximum {
-        return Err(EditDistanceError::InputTooLong {
+        let refusal = Err(EditDistanceError::InputTooLong {
             maximum,
             observed: normalized.len(),
         });
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "normalize_text: returning an error to the caller");
+        return refusal;
     }
     Ok(normalized)
 }

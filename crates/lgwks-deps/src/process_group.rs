@@ -15,10 +15,12 @@ pub fn exists(pgid: i32) -> io::Result<bool> {
     use nix::unistd::Pid;
 
     if pgid <= 0 {
-        return Err(io::Error::new(
+        let refusal = Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "process group id must be positive",
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "exists: returning an error to the caller");
+        return refusal;
     }
     let pid = Pid::from_raw(pgid);
 

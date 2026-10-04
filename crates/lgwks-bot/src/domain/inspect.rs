@@ -235,7 +235,9 @@ impl Subject {
     /// that reads the working directory's empty name.
     pub fn from_target(target: &str) -> Result<crate::Source, BotError> {
         if target.is_empty() {
-            return Err(BotError::IncompleteSpec { field: "target" });
+            let refusal = Err(BotError::IncompleteSpec { field: "target" });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "from_target: returning an error to the caller");
+            return refusal;
         }
         Ok(crate::Source::new(Self::at(target)))
     }
@@ -288,11 +290,13 @@ fn read_subject(path: &str, limit: usize) -> Result<String, BotError> {
     let metadata = std::fs::metadata(path).map_err(|error| io_error(path, error))?;
     let length = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
     if length > limit {
-        return Err(BotError::DomainError {
+        let refusal = Err(BotError::DomainError {
             domain: DOMAIN.into(),
             certainty: DispatchCertainty::Refused,
             cause: format!("{path} is {length} bytes; the inspection source budget is {limit}"),
         });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "read_subject: returning an error to the caller");
+        return refusal;
     }
     std::fs::read_to_string(path).map_err(|error| io_error(path, error))
 }

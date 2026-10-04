@@ -120,7 +120,9 @@ where
     // refuse the step with no real wait and produce the same error a real
     // overrun produces.
     if deadline.is_exhausted() {
-        return Err(timed_out());
+        let refusal = Err(timed_out());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "within_on: returning an error to the caller");
+        return refusal;
     }
     // The two refusal arms and the body are boxed. A `select!` builds one future
     // per branch and holds them all for the body's whole life, so an unboxed
@@ -203,7 +205,9 @@ where
     };
     loop {
         if deadline.is_exhausted() {
-            return Err(refused());
+            let refusal = Err(refused());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "settle_logical_bound: returning an error to the caller");
+            return refusal;
         }
         lgwks_deps::tokio::select! {
             biased;
@@ -274,21 +278,27 @@ where
             Err(error) => error.located(&here),
         };
         if !error.is_retryable() {
-            return Err(error);
+            let refusal = Err(error);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "retry: returning an error to the caller");
+            return refusal;
         }
         if attempt >= attempts.get() {
-            return Err(FlowError::Exhausted {
+            let refusal = Err(FlowError::Exhausted {
                 at: Arc::clone(here.shared_path()),
                 attempts: attempt,
                 last: Box::new(error),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "retry: returning an error to the caller");
+            return refusal;
         }
         if !here.policy().take_retry() {
-            return Err(FlowError::Throttled {
+            let refusal = Err(FlowError::Throttled {
                 at: Arc::clone(here.shared_path()),
                 attempts: attempt,
                 last: Box::new(error),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "retry: returning an error to the caller");
+            return refusal;
         }
         // The key is hashed here, only once a retry is due: most steps never
         // retry, and those should not pay for a digest they do not use.
@@ -300,9 +310,11 @@ where
                 .await
                 .is_none()
         {
-            return Err(FlowError::Cancelled {
+            let refusal = Err(FlowError::Cancelled {
                 at: Arc::clone(here.shared_path()),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "retry: returning an error to the caller");
+            return refusal;
         }
         attempt = attempt.saturating_add(1);
     }

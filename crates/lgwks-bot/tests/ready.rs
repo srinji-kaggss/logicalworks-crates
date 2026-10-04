@@ -1200,9 +1200,11 @@ mod real_process {
         let (run, released) = lgwks_bot::join!(supervise, waiter);
         let run = run?;
         if let Err(error) = released.as_ref() {
-            return Err(format!(
+            let refusal = Err(format!(
                 "the dependant must have been released before the child died: {error}"
             ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "serve_and_depend: returning an error to the caller");
+            return refusal;
         }
         assert!(
             parked.load(Ordering::SeqCst),

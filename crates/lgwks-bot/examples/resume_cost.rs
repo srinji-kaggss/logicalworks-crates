@@ -179,10 +179,10 @@ fn report_concurrent(
                             lgwks_bot::rt::runtime::block_on(host.run(&work, (lane, index)));
                         local.push(at.elapsed().as_micros());
                         if !result.disposition().is_success() {
-                            return Err(format!(
+                            { let refusal = Err(format!(
                                 "lane {lane} append {index}: {:?}",
                                 result.error()
-                            ));
+                            )); lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "report_concurrent: returning an error to the caller"); return refusal; };
                         }
                     }
                     samples
@@ -245,7 +245,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }));
         plain.push(started.elapsed().as_micros());
         if outcome.is_err() {
-            return Err("the unstored measurement step failed".into());
+            let refusal = Err("the unstored measurement step failed".into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
+            return refusal;
         }
     }
     report("plain  (no store)", &measure::Summary::of(&mut plain));
@@ -263,7 +265,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ));
         stored.push(started.elapsed().as_micros());
         if !report.disposition().is_success() {
-            return Err(format!("the stored measurement step failed: {:?}", report.error()).into());
+            {
+                let refusal =
+                    Err(format!("the stored measurement step failed: {:?}", report.error()).into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
+                return refusal;
+            };
         }
     }
     report("stored (remember)", &measure::Summary::of(&mut stored));
@@ -304,7 +311,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let appended = journal.compare_and_append(tail_of(&journal), &event);
         journalled.push(started.elapsed().as_micros());
         if appended.is_err() {
-            return Err(format!("journal append {index} failed: {:?}", appended.err()).into());
+            {
+                let refusal =
+                    Err(format!("journal append {index} failed: {:?}", appended.err()).into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
+                return refusal;
+            };
         }
     }
     report(

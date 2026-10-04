@@ -72,7 +72,10 @@ impl Digest {
     /// heap allocation.
     pub fn from_hex(text: &str) -> Result<Self, DigestParseError> {
         if text.len() != 64 {
-            return Err(DigestParseError::WrongLength { len: text.len() });
+            let refusal = Err(DigestParseError::WrongLength { len: text.len() });
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), "from_hex: returning an error to the caller");
+            return refusal;
         }
         let mut raw = [0; 32];
         crate::hex::decode_into(text, &mut raw).map_err(DigestParseError::Hex)?;

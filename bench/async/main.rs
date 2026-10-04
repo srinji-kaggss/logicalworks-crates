@@ -74,7 +74,6 @@ use lgwks_bot::rt::supervise::Supervisor;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-
 // ── Allocation counting ─────────────────────────────────────────────────────
 
 // The allocation counter, shared with `bench/` by path inclusion.
@@ -333,40 +332,52 @@ fn bare_floor(total: usize) -> (f64, u64) {
 /// reader needs to know whether the run measured anything.
 fn fair(left: &Tally, right: &Tally) -> Result<(), String> {
     if left.placed != right.placed {
-        return Err(format!(
+        let refusal = Err(format!(
             "placed: facade {} vs baseline {}",
             left.placed, right.placed
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "fair: returning an error to the caller");
+        return refusal;
     }
     if left.completed != right.completed {
-        return Err(format!(
+        let refusal = Err(format!(
             "completed: facade {} vs baseline {}",
             left.completed, right.completed
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "fair: returning an error to the caller");
+        return refusal;
     }
     if left.cancelled != right.cancelled {
-        return Err(format!(
+        let refusal = Err(format!(
             "cancelled: facade {} vs baseline {}",
             left.cancelled, right.cancelled
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "fair: returning an error to the caller");
+        return refusal;
     }
     if left.aborted != right.aborted {
-        return Err(format!(
+        let refusal = Err(format!(
             "aborted: facade {} vs baseline {}",
             left.aborted, right.aborted
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "fair: returning an error to the caller");
+        return refusal;
     }
     if left.refused != right.refused {
-        return Err(format!(
+        let refusal = Err(format!(
             "refused: facade {} vs baseline {}",
             left.refused, right.refused
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "fair: returning an error to the caller");
+        return refusal;
     }
     if left.work_units != right.work_units {
-        return Err(format!(
+        let refusal = Err(format!(
             "work units: facade {} vs baseline {}",
             left.work_units, right.work_units
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "fair: returning an error to the caller");
+        return refusal;
     }
     Ok(())
 }
@@ -452,7 +463,9 @@ async fn measure(
     let (warm_facade, _) = facade_side(total, bound).await;
     let (warm_base, _) = baseline_side(total, bound).await;
     if warm_facade == 0.0 || warm_base == 0.0 {
-        return Err(format!("{name}: a warm-up round measured zero time"));
+        let refusal = Err(format!("{name}: a warm-up round measured zero time"));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "measure: returning an error to the caller");
+        return refusal;
     }
 
     // Paired within each round: facade then baseline, so drift that affects the
@@ -465,10 +478,12 @@ async fn measure(
         if round == 0 {
             tally = facade_tally;
         } else if tally != facade_tally {
-            return Err(format!(
+            let refusal = Err(format!(
                 "{name} round {round}: the facade's own tally changed between rounds \
-                 ({tally:?} then {facade_tally:?}), so the rounds are not the same work"
+             ({tally:?} then {facade_tally:?}), so the rounds are not the same work"
             ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "measure: returning an error to the caller");
+            return refusal;
         }
         facade.push(facade_time);
         baseline.push(base_time);
@@ -537,13 +552,15 @@ fn mutant_check(runtime: &Runtime) -> Result<(), Box<dyn std::error::Error>> {
 
     match fair(&mutant, &honest) {
         Ok(()) => {
-            return Err(format!(
+            let refusal = Err(format!(
                 "the fairness gate ACCEPTED a side that placed {} tasks but performed {} \
-                 work units against an honest {} / {} — a gate that passes an unfair \
-                 comparison is not a gate (mutant took {:.6}s)",
+             work units against an honest {} / {} — a gate that passes an unfair \
+             comparison is not a gate (mutant took {:.6}s)",
                 mutant.placed, mutant.work_units, honest.work_units, honest.placed, mutant_time
             )
             .into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "mutant_check: returning an error to the caller");
+            return refusal;
         }
         Err(reason) => {
             println!("refused, as required: {reason}");
@@ -552,21 +569,31 @@ fn mutant_check(runtime: &Runtime) -> Result<(), Box<dyn std::error::Error>> {
                 || reason.contains("cancelled")
                 || reason.contains("aborted");
             if !discriminates {
-                return Err(format!(
+                let refusal = Err(format!(
                     "the gate refused the mutant for {reason:?}, which is not a work-count \
-                     reason: a gate that refused for an unrelated cause would pass this check \
-                     without ever checking work"
+                 reason: a gate that refused for an unrelated cause would pass this check \
+                 without ever checking work"
                 )
                 .into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "mutant_check: returning an error to the caller");
+                return refusal;
             }
             println!("the refusal names a work-count field, so the gate discriminates on work");
             println!(
                 "\nmutant tally:  placed {} completed {} cancelled {} aborted {} work_units {}",
-                mutant.placed, mutant.completed, mutant.cancelled, mutant.aborted, mutant.work_units
+                mutant.placed,
+                mutant.completed,
+                mutant.cancelled,
+                mutant.aborted,
+                mutant.work_units
             );
             println!(
                 "honest tally:  placed {} completed {} cancelled {} aborted {} work_units {}",
-                honest.placed, honest.completed, honest.cancelled, honest.aborted, honest.work_units
+                honest.placed,
+                honest.completed,
+                honest.cancelled,
+                honest.aborted,
+                honest.work_units
             );
         }
     }
@@ -700,8 +727,13 @@ fn tier_ladder(runtime: &Runtime, json: Option<&str>) -> Result<(), Box<dyn std:
         ];
         println!(
             "{:>9} {:>11.6} {:>11.6} {:>11.6} {:>11.6} {:>11.6} {:>11.6}",
-            row.tasks, percentiles[0], percentiles[1], percentiles[2], percentiles[3],
-            percentiles[4], percentiles[5]
+            row.tasks,
+            percentiles[0],
+            percentiles[1],
+            percentiles[2],
+            percentiles[3],
+            percentiles[4],
+            percentiles[5]
         );
         if !json_rows.is_empty() {
             json_rows.push('\n');
@@ -801,10 +833,7 @@ impl Receipt {
 /// A short sleep rather than a spin: a spin would burn a core and change the
 /// timings the same process reports, and a row that measures while it waits is a
 /// row measuring its own harness.
-async fn drain_to(
-    supervisor: &mut Supervisor,
-    total: usize,
-) -> lgwks_bot::rt::supervise::Stats {
+async fn drain_to(supervisor: &mut Supervisor, total: usize) -> lgwks_bot::rt::supervise::Stats {
     let target = u64::try_from(total).unwrap_or(u64::MAX);
     while supervisor.stats().completed < target {
         if supervisor.reap() == 0 {
@@ -868,10 +897,12 @@ async fn row_sequential_composition() -> Result<Receipt, String> {
         counter.load(Ordering::SeqCst),
     );
     if receipt.work_units != u64::try_from(BODIES).unwrap_or(u64::MAX) {
-        return Err(format!(
+        let refusal = Err(format!(
             "sequential composition ran {} work units, not {BODIES}",
             receipt.work_units
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "row_sequential_composition: returning an error to the caller");
+        return refusal;
     }
     Ok(receipt)
 }
@@ -934,16 +965,26 @@ async fn row_high_fanout_slow_consumer() -> Result<Receipt, String> {
     );
     let expected = u64::try_from(TASKS).unwrap_or(u64::MAX);
     if seen != expected {
-        return Err(format!(
+        let refusal = Err(format!(
             "the slow consumer received {seen} results, not {expected}: fan-out lost or \
-             duplicated work under backpressure"
+         duplicated work under backpressure"
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "row_high_fanout_slow_consumer: returning an error to the caller");
+        return refusal;
     }
-    if bytes != usize::try_from(expected).unwrap_or(usize::MAX).saturating_mul(4_096) {
-        return Err(format!(
+    if bytes
+        != usize::try_from(expected)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(4_096)
+    {
+        let refusal = Err(format!(
             "the consumer buffered {bytes} bytes, not {}: the payload was corrupted in flight",
-            usize::try_from(expected).unwrap_or(usize::MAX).saturating_mul(4_096)
+            usize::try_from(expected)
+                .unwrap_or(usize::MAX)
+                .saturating_mul(4_096)
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "row_high_fanout_slow_consumer: returning an error to the caller");
+        return refusal;
     }
     Ok(receipt)
 }
@@ -994,11 +1035,13 @@ async fn row_cancel_at_saturation() -> Result<Receipt, String> {
     // Every permit is now held by a body parked on its own token. The ceiling is
     // saturated by construction, not by timing.
     if entered.load(Ordering::SeqCst) != u64::try_from(BOUND).unwrap_or(u64::MAX) {
-        return Err(format!(
+        let refusal = Err(format!(
             "only {} of {BOUND} bodies entered before the cancel: the row did not reach \
-             saturation, so a leaked task could not have been detected",
+         saturation, so a leaked task could not have been detected",
             entered.load(Ordering::SeqCst)
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "row_cancel_at_saturation: returning an error to the caller");
+        return refusal;
     }
     supervisor.cancel();
 
@@ -1011,50 +1054,58 @@ async fn row_cancel_at_saturation() -> Result<Receipt, String> {
         counter.load(Ordering::SeqCst),
     );
     if stats.in_flight() != 0 {
-        return Err(format!(
+        let refusal = Err(format!(
             "after cancelling a saturated run, {} tasks were still in flight: cleanup leaked",
             stats.in_flight()
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "row_cancel_at_saturation: returning an error to the caller");
+        return refusal;
     }
     let accounted = stats
         .succeeded
         .saturating_add(stats.cancelled)
         .saturating_add(stats.aborted);
     if accounted != stats.spawned {
-        return Err(format!(
+        let refusal = Err(format!(
             "{accounted} of {} placed tasks were accounted for; a cancelled task was lost",
             stats.spawned
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "row_cancel_at_saturation: returning an error to the caller");
+        return refusal;
     }
     if stats.cancelled == 0 {
-        return Err(format!(
+        let refusal = Err(format!(
             "a run cancelled while saturated reported {} cancellations: the cancel did \
-             not reach the parked bodies",
+         not reach the parked bodies",
             stats.cancelled
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "row_cancel_at_saturation: returning an error to the caller");
+        return refusal;
     }
     if receipt.work_units != accounted {
-        return Err(format!(
+        let refusal = Err(format!(
             "{} bodies recorded work for {accounted} terminal tasks: the accounting and \
-             the bodies disagree about how much ran",
+         the bodies disagree about how much ran",
             receipt.work_units
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "row_cancel_at_saturation: returning an error to the caller");
+        return refusal;
     }
 
     // A spent supervisor refuses later work rather than accepting it. This is
     // asserted, not assumed: a supervisor that kept admitting after its token is
     // cancelled would place work that can never be cancelled again.
     let before = supervisor.stats().spawned;
-    supervisor
-        .spawn(|_token| async {})
-        .await;
+    supervisor.spawn(|_token| async {}).await;
     let after = supervisor.stats().spawned;
     if after != before {
-        return Err(format!(
+        let refusal = Err(format!(
             "a cancelled supervisor admitted {} more task(s): a spent supervisor must refuse, \
-             not keep accepting",
+         not keep accepting",
             after.saturating_sub(before)
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "row_cancel_at_saturation: returning an error to the caller");
+        return refusal;
     }
     Ok(receipt)
 }
@@ -1099,33 +1150,35 @@ async fn row_two_tenants() -> Result<Receipt, String> {
         ("globex", &globex_stats, globex_work),
     ] {
         if stats.in_flight() != 0 {
-            return Err(format!(
+            let refusal = Err(format!(
                 "{who} left {} tasks in flight after draining: its permits were not its own",
                 stats.in_flight()
             ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "row_two_tenants: returning an error to the caller");
+            return refusal;
         }
         if work != target {
-            return Err(format!(
+            let refusal = Err(format!(
                 "{who} performed {work} work units, not {target}: a shared counter was read"
             ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "row_two_tenants: returning an error to the caller");
+            return refusal;
         }
         if stats.refused != 0 {
-            return Err(format!(
+            let refusal = Err(format!(
                 "{who} refused {} spawns: its ceiling was contended by the other tenant",
                 stats.refused
             ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "row_two_tenants: returning an error to the caller");
+            return refusal;
         }
     }
     Ok(Receipt {
         row: "two-tenants",
         shape: "2048 tasks each, bound 32 each, run together",
         placed: acme_stats.spawned.saturating_add(globex_stats.spawned),
-        completed: acme_stats
-            .succeeded
-            .saturating_add(globex_stats.succeeded),
-        cancelled: acme_stats
-            .cancelled
-            .saturating_add(globex_stats.cancelled),
+        completed: acme_stats.succeeded.saturating_add(globex_stats.succeeded),
+        cancelled: acme_stats.cancelled.saturating_add(globex_stats.cancelled),
         aborted: acme_stats.aborted.saturating_add(globex_stats.aborted),
         work_units: acme_work.saturating_add(globex_work),
     })
@@ -1174,17 +1227,21 @@ async fn row_sustained_burst_reconnect() -> Result<Receipt, String> {
         counter.load(Ordering::SeqCst),
     );
     if stats.refused != 0 {
-        return Err(format!(
+        let refusal = Err(format!(
             "the burst saw {} refusals: a supervisor that refuses under load is not one \
-             that waits for a permit",
+         that waits for a permit",
             stats.refused
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "place: returning an error to the caller");
+        return refusal;
     }
     if receipt.work_units != u64::try_from(total).unwrap_or(u64::MAX) {
-        return Err(format!(
+        let refusal = Err(format!(
             "the three phases performed {} work units, not {total}",
             receipt.work_units
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "place: returning an error to the caller");
+        return refusal;
     }
     Ok(receipt)
 }
@@ -1238,8 +1295,7 @@ fn row_durable_history(
                 ActionDigest::from_tagged("blake3_256", DIGEST)
                     .map_err(|error| format!("action digest: {error}"))?,
                 EnvironmentId::from_hex(ENV).map_err(|error| format!("environment: {error}"))?,
-                EnvironmentEpoch::from_decimal("1")
-                    .map_err(|error| format!("epoch: {error}"))?,
+                EnvironmentEpoch::from_decimal("1").map_err(|error| format!("epoch: {error}"))?,
             );
             events.push(EffectEvent::IntentAdmitted { key });
         }
@@ -1258,10 +1314,12 @@ fn row_durable_history(
         .map_err(|error| format!("read back: {error}"))?
         .len();
     if recovered != records {
-        return Err(format!(
+        let refusal = Err(format!(
             "{records} records were appended and {recovered} came back: the tier lost or \
-             duplicated history"
+         duplicated history"
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "row_durable_history: returning an error to the caller");
+        return refusal;
     }
     let recovered_attempts = reopened.recover().len();
     Ok(Receipt {
@@ -1292,29 +1350,30 @@ fn workload_matrix(
 
     let mut receipts = Vec::new();
     let mut failures = Vec::new();
-    let mut run = |name: &str, outcome: Result<Receipt, String>| {
-        match outcome {
-            Ok(receipt) => {
-                println!(
-                    "  {:<28} placed {:>6}  completed {:>6}  cancelled {:>4}  aborted {:>4}  \
+    let mut run = |name: &str, outcome: Result<Receipt, String>| match outcome {
+        Ok(receipt) => {
+            println!(
+                "  {:<28} placed {:>6}  completed {:>6}  cancelled {:>4}  aborted {:>4}  \
                      work {:>6}",
-                    receipt.row,
-                    receipt.placed,
-                    receipt.completed,
-                    receipt.cancelled,
-                    receipt.aborted,
-                    receipt.work_units
-                );
-                receipts.push(receipt);
-            }
-            Err(reason) => {
-                println!("  {name:<28} FAILED: {reason}");
-                failures.push(format!("{name}: {reason}"));
-            }
+                receipt.row,
+                receipt.placed,
+                receipt.completed,
+                receipt.cancelled,
+                receipt.aborted,
+                receipt.work_units
+            );
+            receipts.push(receipt);
+        }
+        Err(reason) => {
+            println!("  {name:<28} FAILED: {reason}");
+            failures.push(format!("{name}: {reason}"));
         }
     };
 
-    run("sequential-composition", runtime.block_on(row_sequential_composition()));
+    run(
+        "sequential-composition",
+        runtime.block_on(row_sequential_composition()),
+    );
     run(
         "high-fanout-slow-consumer",
         runtime.block_on(row_high_fanout_slow_consumer()),
@@ -1335,7 +1394,10 @@ fn workload_matrix(
         (10_000, "10000 records through FileJournal"),
         (100_000, "100000 records through FileJournal"),
     ] {
-        run("durable-history", row_durable_history(&dir.join("durable"), records, shape));
+        run(
+            "durable-history",
+            row_durable_history(&dir.join("durable"), records, shape),
+        );
     }
 
     println!();
@@ -1365,21 +1427,26 @@ fn workload_matrix(
         println!("wrote {path}");
     }
     if !failures.is_empty() {
-        return Err(format!(
+        let refusal = Err(format!(
             "{} workload-matrix row(s) failed: {}",
             failures.len(),
             failures.join("; ")
         )
         .into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "workload_matrix: returning an error to the caller");
+        return refusal;
     }
-    println!("{} rows, every receipt above was produced by running the row", receipts.len());
+    println!(
+        "{} rows, every receipt above was produced by running the row",
+        receipts.len()
+    );
     Ok(())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rounds: usize = 15;
     let mut json: Option<String> = None;
-let mut alloc_report = false;
+    let mut alloc_report = false;
     let mut mutant = false;
     let mut tiers = false;
     let mut matrix = false;
@@ -1424,9 +1491,7 @@ let mut alloc_report = false;
     }
 
     println!("lgwks_bot async matched-semantics comparison (facade vs raw tokio)");
-    println!(
-        "Every round is paired and gated on identical work; a mismatch aborts the run.\n"
-    );
+    println!("Every round is paired and gated on identical work; a mismatch aborts the run.\n");
 
     let scenarios: [(&str, usize, usize); 4] = [
         ("quiet-async-bot", 256, 8),
@@ -1513,10 +1578,12 @@ let mut alloc_report = false;
             "{:<16} {:>7} {:>7} {:>11.6} {:>11.6} {:>11.6} {:>11.6} {:>8.2}x",
             result.name, result.total, result.bound, f50, f99, b50, b99, ratio
         );
-        let parity = if distinguishes { "distinguishes" } else { "spans parity" };
-        println!(
-            "                 95% CI on the paired ratio: [{lo:.2}, {hi:.2}] ({parity})"
-        );
+        let parity = if distinguishes {
+            "distinguishes"
+        } else {
+            "spans parity"
+        };
+        println!("                 95% CI on the paired ratio: [{lo:.2}, {hi:.2}] ({parity})");
         if !json_rows.is_empty() {
             json_rows.push('\n');
         }
@@ -1552,7 +1619,10 @@ let mut alloc_report = false;
         // trailing comma is a syntax error and a missing one is a syntax error
         // too, and a results file that only parses for some row counts is a
         // record nobody can rely on.
-        let rows: Vec<&str> = json_rows.split('\n').filter(|row| !row.is_empty()).collect();
+        let rows: Vec<&str> = json_rows
+            .split('\n')
+            .filter(|row| !row.is_empty())
+            .collect();
         let joined = rows.join(",\n");
         let body = format!(
             "{{\n\"tool\":\"lgwks-bench-async\",\n\"rounds\":{rounds},\n\

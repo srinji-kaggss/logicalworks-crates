@@ -255,6 +255,25 @@ fn run_doubled(probe: &Probe, list: Vec<Item>, limit: usize) -> Result<Vec<u64>,
     drive(doubled(&scope, probe, &stop, list, limit))
 }
 
+/// The failure a run was required to produce, or why it produced none.
+///
+/// One reading of "this run must fail" for the fan families, so a run that
+/// unexpectedly succeeded is reported in the same words wherever it is asserted.
+fn failure_of<T>(
+    outcome: Result<T, FlowError>,
+    because: &str,
+) -> Result<FlowError, Box<dyn std::error::Error>> {
+    match outcome {
+        Err(error) => Ok(error),
+        Ok(_) => Err(because.into()),
+    }
+}
+
+/// The refusal for an outcome no branch of an assertion accounts for.
+fn unexpected(outcome: &dyn std::fmt::Display) -> Result<(), Box<dyn std::error::Error>> {
+    Err(format!("unexpected outcome: {outcome}").into())
+}
+
 /// A root scope for a tenant name.
 fn tenant_scope(name: &str, token: CancellationToken) -> Result<Scope, FlowError> {
     Ok(Scope::with_token(Tenant::new(name)?, token))
@@ -312,9 +331,10 @@ fn fan_fail_fast(band: Band) -> TestResult {
         let (list, failing) = items_with_one(sim, 120, |item| item.fails = true)?;
         let limit = seeded_limit(sim, 16)?;
         let probe = Probe::default();
-        let Err(error) = run_doubled(&probe, list, limit) else {
-            return Err("a failing item must fail the flow".into());
-        };
+        let error = failure_of(
+            run_doubled(&probe, list, limit),
+            "a failing item must fail the flow",
+        )?;
         assert!(
             matches!(error, FlowError::Failed { .. }),
             "the item's own failure is returned, not a cancellation: {error}"
@@ -388,7 +408,7 @@ fn retry_one_key(band: Band) -> TestResult {
                 );
                 assert_eq!(attempts, 1, "a permanent failure is never repeated");
             }
-            Err(other) => return Err(format!("unexpected outcome: {other}").into()),
+            Err(other) => unexpected(&other)?,
         }
         sim.record(&format!(
             "budget={budget} failures={failures} permanent={permanent} attempts={attempts}"
@@ -449,9 +469,10 @@ fn stop_reaches_every_body(band: Band) -> TestResult {
         let (list, stopping) = items_with_one(sim, 120, |item| item.stops = true)?;
         let limit = seeded_limit(sim, 16)?;
         let probe = Probe::default();
-        let Err(error) = run_doubled(&probe, list, limit) else {
-            return Err("a stopped flow must not report success".into());
-        };
+        let error = failure_of(
+            run_doubled(&probe, list, limit),
+            "a stopped flow must not report success",
+        )?;
         assert!(
             error.is_cancelled(),
             "a stop is reported as a stop: {error}"
@@ -487,9 +508,7 @@ fn retry_budget_holds(band: Band) -> TestResult {
             assert!(outcome.is_ok(), "no items, no failure");
             return Ok(());
         }
-        let Err(error) = outcome else {
-            return Err("an upstream that always fails must fail the flow".into());
-        };
+        let error = failure_of(outcome, "an upstream that always fails must fail the flow")?;
         assert!(
             matches!(
                 error,

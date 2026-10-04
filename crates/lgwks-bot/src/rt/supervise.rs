@@ -558,7 +558,9 @@ impl ShutdownReport {
     pub fn into_outcomes(self) -> Result<Vec<TaskOutcome>, Self> {
         #[cfg(all(unix, feature = "process"))]
         if self.pending_cleanup_count() > 0 {
-            return Err(self);
+            let refusal = Err(self);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "into_outcomes: returning an error to the caller");
+            return refusal;
         }
         Ok(self.outcomes)
     }
@@ -1167,9 +1169,13 @@ impl Supervisor {
             // `claim_now` counted the refusal; which world refused is the one
             // fact the counter cannot carry, so it is read here for the type.
             if self.token.is_cancelled() {
-                return Err(TrySpawnRefusal::Cancelled);
+                let refusal = Err(TrySpawnRefusal::Cancelled);
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "try_spawn: returning an error to the caller");
+                return refusal;
             }
-            return Err(TrySpawnRefusal::AtCapacity);
+            let refusal = Err(TrySpawnRefusal::AtCapacity);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "try_spawn: returning an error to the caller");
+            return refusal;
         };
         let token = self.child_token();
         let future = body(token.clone());
@@ -1284,11 +1290,15 @@ impl Supervisor {
             // cancellation alike; name which world refused, so a cancelled
             // supervisor's caller does not read this as a platform failure.
             if self.token.is_cancelled() {
-                return Err(io::Error::other(SupervisorCancelled));
+                let refusal = Err(io::Error::other(SupervisorCancelled));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "spawn_process: returning an error to the caller");
+                return refusal;
             }
-            return Err(io::Error::other(
+            let refusal = Err(io::Error::other(
                 "lgwks_bot: the supervisor's in-flight semaphore was closed",
             ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "spawn_process: returning an error to the caller");
+            return refusal;
         };
         // The recheck at the owned admission point, before the command is
         // built: a cancelled supervisor never forks, so the first instruction
@@ -1296,7 +1306,9 @@ impl Supervisor {
         // refusal is counted.
         if self.token.is_cancelled() {
             self.refused = self.refused.saturating_add(1);
-            return Err(io::Error::other(SupervisorCancelled));
+            let refusal = Err(io::Error::other(SupervisorCancelled));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "spawn_process: returning an error to the caller");
+            return refusal;
         }
         let (token, deadline, out_limit, err_limit) = self.prepare_process(spec);
         let clock = self.clock.clone();
@@ -1381,19 +1393,27 @@ impl Supervisor {
         on_line: Option<LineObserver<'_>>,
     ) -> Result<ProcessRun, ProcessRunError> {
         let Some(permit) = self.claim().await else {
-            return Err(ProcessRunError::Refused);
+            let refusal = Err(ProcessRunError::Refused);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "run_process_observed: returning an error to the caller");
+            return refusal;
         };
         // The same owned admission point `spawn_process` rechecks: a cancelled
         // supervisor never forks, so the first instruction does not run.
         if self.token.is_cancelled() {
             self.refused = self.refused.saturating_add(1);
-            return Err(ProcessRunError::Refused);
+            let refusal = Err(ProcessRunError::Refused);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "run_process_observed: returning an error to the caller");
+            return refusal;
         }
         let (token, deadline, out_limit, err_limit) = self.prepare_process(spec);
         let clock = self.clock.clone();
         let child = match start(spec) {
             Ok(child) => child,
-            Err(source) => return Err(ProcessRunError::NotStarted { source }),
+            Err(source) => {
+                let refusal = Err(ProcessRunError::NotStarted { source });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "run_process_observed: returning an error to the caller");
+                return refusal;
+            }
         };
         let task = self.allocate_task_id();
         let group = ProcessGroup::of(&child, task, permit, Arc::clone(&self.cleanup_owners));
@@ -1427,12 +1447,14 @@ impl Supervisor {
             }
         };
         if !settled {
-            return Err(ProcessRunError::AfterStart {
+            let refusal = Err(ProcessRunError::AfterStart {
                 source: io::Error::new(
                     io::ErrorKind::Interrupted,
                     "the supervisor was cancelled while the process ran",
                 ),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "run_process_observed: returning an error to the caller");
+            return refusal;
         }
         // A status is the command's *own* exit. A deadline kill reaps the group
         // and the engine then reports the signal, but that is the supervisor's

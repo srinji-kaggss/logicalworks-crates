@@ -331,7 +331,12 @@ fn child_body() -> TestResult {
 
     let report = lgwks_bot::block_on(host.run(&body, work));
     if report.disposition() != Disposition::Succeeded {
-        return Err(format!("the child run did not succeed: {:?}", report.error()).into());
+        {
+            let refusal =
+                Err(format!("the child run did not succeed: {:?}", report.error()).into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "child_body: returning an error to the caller");
+            return refusal;
+        };
     }
     Ok(())
 }
@@ -369,7 +374,9 @@ fn wait_for_run(path: &Path, within: Duration) -> Result<RunId, Box<dyn Error>> 
             }
         }
         if std::time::Instant::now() >= deadline {
-            return Err("the child never published its run id".into());
+            let refusal = Err("the child never published its run id".into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "wait_for_run: returning an error to the caller");
+            return refusal;
         }
         pause(20);
     }
@@ -391,10 +398,16 @@ fn wait_for_marker(path: &Path, within: Duration) -> TestResult {
             Ok(text) if !text.trim().is_empty() => return Ok(()),
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                let refusal = Err(error.into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "wait_for_marker: returning an error to the caller");
+                return refusal;
+            }
         }
         if std::time::Instant::now() >= deadline {
-            return Err(format!("the child never wrote {}", path.display()).into());
+            let refusal = Err(format!("the child never wrote {}", path.display()).into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "wait_for_marker: returning an error to the caller");
+            return refusal;
         }
         pause(20);
     }
@@ -966,7 +979,9 @@ fn measure_tier(runs: usize) -> TestResult {
     for host in &hosts {
         let warm = runtime::block_on(host.run(&work, 0u32));
         if !warm.disposition().is_success() {
-            return Err(format!("a warm-up run failed: {:?}", warm.error()).into());
+            let refusal = Err(format!("a warm-up run failed: {:?}", warm.error()).into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "measure_tier: returning an error to the caller");
+            return refusal;
         }
     }
 
@@ -984,7 +999,9 @@ fn measure_tier(runs: usize) -> TestResult {
         let report = runtime::block_on(host.run(&work, u32::try_from(index).unwrap_or_default()));
         samples.push(at.elapsed().as_micros());
         if !report.disposition().is_success() {
-            return Err(format!("run {index} failed: {:?}", report.error()).into());
+            let refusal = Err(format!("run {index} failed: {:?}", report.error()).into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "measure_tier: returning an error to the caller");
+            return refusal;
         }
         let id = report.run_id().ok_or("a stored run must name a run id")?;
         run_ids.push((id, which));

@@ -38,7 +38,9 @@ pub(crate) fn check(tokens: &[TokenTree]) -> Result<()> {
         let back = |distance: usize| index.checked_sub(distance).and_then(|at| tokens.get(at));
         let next = index.checked_add(1).and_then(|at| tokens.get(at));
         if let Some(message) = refusal(token, back(1), back(3), next) {
-            return Err(Error::new(token.span(), message));
+            let refusal = Err(Error::new(token.span(), message));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "check: returning an error to the caller");
+            return refusal;
         }
         if let TokenTree::Group(ref group) = *token {
             let inner: Vec<TokenTree> = group.stream().into_iter().collect();

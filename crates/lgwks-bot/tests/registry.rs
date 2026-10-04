@@ -20,7 +20,12 @@ impl Repository {
     /// prove the target arrived is a constructor that acts on it.
     fn from_target(target: &str) -> Result<Source, BotError> {
         if target.is_empty() {
-            return Err(BotError::IncompleteSpec { field: "target" });
+            let refusal = Err(BotError::IncompleteSpec {
+                field: "target",
+                cause: String::from("the spec names no target"),
+            });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "from_target: returning an error to the caller");
+            return refusal;
         }
         Ok(Source::new(Self))
     }
@@ -50,7 +55,12 @@ impl SlackNotify {
     /// Build one from the `target` its spec names.
     fn from_target(target: &str) -> Result<Action, BotError> {
         if target.is_empty() {
-            return Err(BotError::IncompleteSpec { field: "target" });
+            let refusal = Err(BotError::IncompleteSpec {
+                field: "target",
+                cause: String::from("the spec names no target"),
+            });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "from_target: returning an error to the caller");
+            return refusal;
         }
         Ok(Action::new(Self))
     }
@@ -132,7 +142,7 @@ fn building_a_source_reaches_the_domain() -> Result<(), Box<dyn std::error::Erro
     // source is erased.
     let refused = TEST_DOMAINS.build_source("github::repository", "");
     assert!(
-        matches!(refused, Err(BotError::IncompleteSpec { field }) if field == "target"),
+        matches!(refused, Err(BotError::IncompleteSpec { field, .. }) if field == "target"),
         "the constructor's own refusal did not surface: {refused:?}"
     );
     Ok(())
@@ -145,7 +155,7 @@ fn the_target_reaches_the_constructor() -> Result<(), Box<dyn std::error::Error>
     // too. Reaching the constructor is what this asserts.
     let refused = TEST_DOMAINS.build_action("notify::slack", "");
     assert!(
-        matches!(refused, Err(BotError::IncompleteSpec { field }) if field == "target"),
+        matches!(refused, Err(BotError::IncompleteSpec { field, .. }) if field == "target"),
         "the constructor's own refusal did not surface: {refused:?}"
     );
     assert!(

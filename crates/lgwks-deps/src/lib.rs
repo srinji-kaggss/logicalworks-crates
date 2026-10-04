@@ -25,6 +25,15 @@
 //! register itself: a reviewable diff carrying a human's name, never an
 //! environment variable a build can set for itself.
 //!
+//! Adoption mode is a posture, not an off switch. It is supported over a tree
+//! this gate admits, and a clean tree still passes under it. It cannot stand a
+//! violating tree down: `enforce = false` over refusals adds a named
+//! [`Refusal::AdoptionModeRefusals`] reporting how many violations the posture
+//! stood down, so `check` exits non-zero identically under `enforce = true` and
+//! `enforce = false`. The verdict is a function of the refusals alone, which is
+//! what makes the reviewable one-token diff that adoption mode depends on
+//! incapable of changing a build's result (#204).
+//!
 //! ## No name-based exemption
 //!
 //! There is no package whose name alone escapes the audit. An edge is exempt
@@ -333,6 +342,77 @@ pub enum Refusal {
         /// Capability the approval claims to supply.
         capability: String,
     },
+    /// A frozen surface's external edge was re-tiered out of the register's own
+    /// approved tier, which is how `lgwks_ast` is refused the growth
+    /// INV-DEP-1 forbids.
+    ///
+    /// `invariants.rs` reads INV-DEP-1 as *the finished, standalone `lgwks_ast`*:
+    /// it is a closed surface whose register entries must keep saying `boundary`.
+    /// A growth attempt that promotes the new edge to `vendor` — or demotes it
+    /// out of the register entirely, which this crate separately refuses as
+    /// [`Refusal::UnregisteredEdge`] — is how the freeze is expressed. No name
+    /// is hardcoded and no exemption is invented: the freeze covers exactly the
+    /// edges a register says a surface owns, and it covers no more.
+    FrozenSurfaceTier {
+        /// Frozen surface package that owns the edge.
+        consumer: String,
+        /// External package name whose approval was re-tiered.
+        krate: String,
+        /// Tier the approval now claims.
+        tier: String,
+    },
+    /// The licence the package's own manifest declares is not the licence the
+    /// register approved, or is not one this repository accepts.
+    ///
+    /// Two refusals share one variant because they are the same question asked
+    /// in two directions — *is the approved licence still true, and is it one we
+    /// accept?* — and a reader who got one answer deserves the same report
+    /// shape for the other. `approved` is what the register recorded and
+    /// `declared` is what `cargo metadata` reports: when they differ, upstream
+    /// changed the licence without a re-approval; when they agree and still
+    /// name something outside [`accepted_licenses`], the approval itself is out
+    /// of policy. `"<none>"` stands for a manifest that declares no `license`
+    /// key at all, so an absence reads as an absence and not as a permission.
+    LicenseNotAccepted {
+        /// Package whose declared licence was refused.
+        krate: String,
+        /// Licence expression the register approved.
+        approved: String,
+        /// Licence expression the package's manifest declares.
+        declared: String,
+        /// Licence identifiers outside this repository's accepted set, in the
+        /// order they appear in `declared`.
+        rejected: Vec<String>,
+    },
+    /// An approval claims the `vendor` tier while its edge still resolves to
+    /// the source class a registry edge has.
+    ///
+    /// `vendor` is rung 7 of the ladder — "audited upstream source checked into
+    /// the workspace, not a registry edge" (`docs/dependency-doctrine.md` §1).
+    /// This is the reader that tier never had. It does not ask whether the tier
+    /// is the right *label* for a dependency, which is a review decision this
+    /// gate has no evidence to make; it asks the one question the tier can
+    /// decide on its own from data the gate already has, which is whether the
+    /// tier contradicts the source class the edge actually resolves from.
+    VendorTierConflict {
+        /// Package whose approval claims the vendor tier.
+        krate: String,
+        /// Source class the authored edge actually resolves from.
+        source: String,
+    },
+    /// `[policy] enforce = false` was used to turn a tree that *actually
+    /// carries refusals* into a passing build.
+    ///
+    /// Adoption mode is a reviewable posture, not an off switch: it may report
+    /// refusals as guidance, but it cannot make them non-fatal. This refusal is
+    /// added on top of the edge refusals it counted, so the verdict is the same
+    /// under `enforce = true` and `enforce = false` and the boolean cannot be
+    /// inverted without the build changing. The count is carried so the report
+    /// says how many violations the posture tried to stand down.
+    AdoptionModeRefusals {
+        /// Number of dependency-edge refusals the posture stood down.
+        refusals: usize,
+    },
 }
 
 impl fmt::Display for Refusal {
@@ -443,12 +523,57 @@ impl fmt::Display for Refusal {
                 formatter,
                 "unused approval for {krate} capability {capability} owned by {owner}"
             ),
+            Self::FrozenSurfaceTier {
+                ref consumer,
+                ref krate,
+                ref tier,
+            } => write!(
+                formatter,
+                "{consumer} is a frozen surface and its {krate} edge is tiered {tier}; \
+                 a frozen surface's edges stay boundary, and the surface's approved set \
+                 is closed"
+            ),
+            Self::LicenseNotAccepted {
+                ref krate,
+                ref approved,
+                ref declared,
+                ref rejected,
+            } => {
+                let refused = rejected.join(", ");
+                write!(
+                    formatter,
+                    "{krate} declares licence {declared}, which the register's \
+                     approved {approved} does not admit ({refused}); re-approve the \
+                     licence or remove the edge"
+                )
+            }
+            Self::VendorTierConflict {
+                ref krate,
+                ref source,
+            } => write!(
+                formatter,
+                "{krate} is approved at the vendor tier but its edge resolves from \
+                 {source}; vendor means audited source checked into this workspace, \
+                 not a registry edge"
+            ),
+            Self::AdoptionModeRefusals { refusals } => write!(
+                formatter,
+                "[policy] enforce = false stood down {refusals} dependency-edge \
+                 violations; adoption mode reports refusals, it does not make them \
+                 pass — register the edges or re-enable enforcement"
+            ),
         }
     }
 }
 
 impl Refusal {
     /// The crate this refusal is about.
+    ///
+    /// An adoption-mode refusal is not about any one crate: it is about the
+    /// register's own `[policy]` block standing down a count of edge
+    /// violations, so it carries no crate name and answers `"<policy>"`. A
+    /// caller that wants to distinguish the two shapes matches on the variant
+    /// rather than on this label.
     #[must_use]
     pub fn krate(&self) -> &str {
         match *self {
@@ -463,8 +588,24 @@ impl Refusal {
             | Self::DefaultFeaturesDrift { ref krate, .. }
             | Self::OptionalityDrift { ref krate, .. }
             | Self::TargetDrift { ref krate, .. }
-            | Self::UnusedApproval { ref krate, .. } => krate,
+            | Self::UnusedApproval { ref krate, .. }
+            | Self::FrozenSurfaceTier { ref krate, .. }
+            | Self::LicenseNotAccepted { ref krate, .. }
+            | Self::VendorTierConflict { ref krate, .. } => krate,
+            Self::AdoptionModeRefusals { .. } => "<policy>",
         }
+    }
+
+    /// Whether this refusal names the register's enforcement policy rather
+    /// than a dependency edge.
+    ///
+    /// Kept beside [`Refusal::krate`] because the two must not drift: every
+    /// variant that returns the `"<policy>"` label has to answer `true` here,
+    /// or a consumer filtering by scope would find a crate-shaped refusal
+    /// carrying a policy-shaped name.
+    #[must_use]
+    pub const fn is_policy(&self) -> bool {
+        matches!(*self, Self::AdoptionModeRefusals { .. })
     }
 }
 
@@ -497,7 +638,13 @@ pub enum GateError {
     Contract(contract::ContractError),
     /// The optional invariant register could not be read or parsed.
     Invariant(invariants::InvariantError),
-    /// The lock file could not be read.
+    /// `Cargo.lock` does not parse.
+    ///
+    /// Its own variant rather than `Unreadable`: the file read fine, and
+    /// "unreadable" would send an operator looking at permissions or encoding
+    /// when the actual defect is a `[[package]]` block naming no package. The
+    /// gate audits a dependency graph, so a lock whose contents cannot be read
+    /// is a graph whose contents cannot be audited.
     Lock(lock::LockError),
     /// Cargo's authored direct dependency graph could not be obtained.
     Metadata(metadata::MetadataError),
@@ -726,9 +873,301 @@ fn edge_matches(entry: &contract::Entry, edge: &DirectEdge) -> bool {
         && target_matches(entry, edge)
 }
 
+/// Surfaces whose external edges are frozen: the finished, standalone crates
+/// INV-DEP-1 closes.
+///
+/// This is *not* a list of surfaces to audit — that question is answered
+/// generically, from Cargo's own `workspace_members`, so a newly declared
+/// member is audited from its first commit and nothing has to be listed here to
+/// be classified. It is only the subset whose approved edge set may not grow.
+/// The registry of what is frozen is the register: a crate is frozen once some
+/// `[[approved]]` entry names it as `owner`, and freezing therefore cannot be
+/// smuggled past this gate by editing this array.
+const FROZEN_SURFACES: [&str; 1] = ["lgwks_ast"];
+
+/// The tier an approval for a frozen surface must keep claiming.
+const FROZEN_TIER: contract::Tier = contract::Tier::Boundary;
+
+// ── Licence audit (#208) ────────────────────────────────────────────────────
+
+/// What a manifest with no `license` key is reported as.
+///
+/// A distinct spelling, not an empty string, so the refusal says *absent* rather
+/// than rendering a gap in the middle of a sentence that otherwise reads like a
+/// permission.
+const NO_LICENSE: &str = "<none>";
+
+/// The SPDX identifiers this repository admits an external dependency under.
+///
+/// Provenance, because this table is not a preference: it is the closed set
+/// spanned by what the repository already does.
+///
+/// - Every entry is a licence one of the 32 approved packages already declares
+///   under `cargo metadata`. Widening the set would be a decision the register
+///   has not made; narrowing it would refuse a tree the maintainers shipped.
+/// - `Apache-2.0` and `MIT` are the licences four of the five workspace crates
+///   declare (`crates/*/Cargo.toml`), and `MPL-2.0` is the fifth
+///   (`crates/lgwks-bot`), so these are the licences this repository has already
+///   chosen to publish under.
+/// - `Zlib` and `BSD-3-Clause` are added for one reason: Cargo *requires* every
+///   identifier in an SPDX expression to be known, so a package offering
+///   `MIT OR Apache-2.0 OR Zlib` cannot be approved at all without it. Both are
+///   permissive, non-copyleft licences, so admitting them adds no obligation a
+///   repository publishing under Apache-2.0 has not already taken on.
+///
+/// Not accepted, and refused: `GPL-*` and `AGPL-*` (reciprocal terms that would
+/// reach this repository's own files through the link), `MPL-2.0` as an
+/// *inbound* dependency licence (file-level copyleft imposed on us by an
+/// upstream is not a decision this table makes), `Unicode-3.0` and
+/// `CDLA-Permissive-2.0` (they appear in the transitive closure, and a
+/// transitive edge is not a register entry), and `LicenseRef-*` (a reference to
+/// a licence text this repository has never read).
+///
+/// **This set is not ratified policy.** `LICENSING.md` records what this
+/// repository publishes *itself* under and `docs/dependency-doctrine.md` names
+/// licence obligations exactly once, in its preamble; neither states which
+/// licences an inbound dependency may carry. The table above is therefore the
+/// set the repository currently satisfies, adopted so the audit has something
+/// to refuse with — an explicit, documented and minimal reading rather than a
+/// silent one. Widening it (to admit `BSD-3-Clause`-only or `Unlicense`
+/// packages, for instance) is a Director decision; the honest way to record one
+/// is an edit to this constant plus the register entries it admits.
+const ACCEPTED_LICENSES: [&str; 7] = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "MIT",
+    "Zlib",
+];
+
+/// Licence identifiers this repository accepts, as a sorted, borrowable slice.
+///
+/// The accessor exists so the table above has one reader in this module and
+/// every other reader — refusals, tests, an embedder asking what it may admit —
+/// goes through the same name.
+#[must_use]
+pub fn accepted_licenses() -> &'static [&'static str] {
+    &ACCEPTED_LICENSES
+}
+
+/// The licence identifiers in `expression` that this repository does not
+/// accept, in the order they appear.
+///
+/// The expression is scanned for SPDX *identifiers*, not split on whitespace.
+/// The difference decides whether two real licences pass. `Apache-2.0 WITH
+/// LLVM-exception` is one identifier with one exception attached; splitting it
+/// yields a bare `LLVM-exception`, which is not a licence anyone can be under,
+/// so `blake3` and `rustix` were refused for carrying exactly the terms the
+/// register had approved for them. `WITH` binds to the identifier on its left
+/// and is not a conjunction, so it never separates two alternatives.
+///
+/// `AND` and `OR` are operators and are consumed as part of the scan rather
+/// than reported: refusing `OR` would refuse every compound expression ever
+/// written. The register has already refused an expression that is not valid
+/// SPDX, so what reaches here from Cargo metadata is reported whole rather than
+/// parsed into a grammar this gate would then have to keep in step with the
+/// specification.
+///
+/// An identifier that is an accepted one passes even when the expression pairs
+/// it with an exception this repository does not name, because the accepted
+/// table lists `Apache-2.0 WITH LLVM-exception` in full and matching it is what
+/// "accepted" means; a bare `Apache-2.0 WITH GPL-exception` is refused on the
+/// `GPL-exception` token, which is the case the exception arm exists to catch.
+fn rejected_license_identifiers(expression: &str) -> Vec<String> {
+    let mut rejected = Vec::new();
+    // Walk left to right, taking the longest accepted identifier that matches
+    // here. Longest-first is what lets `Apache-2.0 WITH LLVM-exception` win over
+    // the bare `Apache-2.0` that also matches at this position.
+    let tokens = expression
+        .split_ascii_whitespace()
+        .map(|token| token.trim_matches(['(', ')']))
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    let mut index = 0;
+    while index < tokens.len() {
+        let rest = tokens[index..].join(" ");
+        if let Some(accepted) = ACCEPTED_LICENSES
+            .iter()
+            .filter(|candidate| rest.starts_with(**candidate))
+            .max_by_key(|candidate| candidate.len())
+        {
+            // Consume exactly the words this identifier occupies.
+            let consumed = accepted.split_ascii_whitespace().count();
+            index = index.saturating_add(consumed);
+            continue;
+        }
+        let token = tokens[index];
+        if !matches!(token, "AND" | "OR" | "WITH") {
+            rejected.push(token.to_owned());
+        }
+        index = index.saturating_add(1);
+    }
+    rejected
+}
+
+/// Every approval whose recorded licence no longer says what the package
+/// declares, or names a licence outside [`ACCEPTED_LICENSES`].
+///
+/// One pass over the approvals, and each approval is asked about the *declared*
+/// licence of its target rather than the licence the register recorded: the
+/// question the audit exists to answer is what the code in the tree is actually
+/// under, and a register that disagrees is the drift (#208). Reporting the
+/// declared expression even when it equals the approved one is deliberate —
+/// there is no second refusal to find, and one refusal that names the licence
+/// is the whole report.
+///
+/// When two edges of the same package resolve to two different declared
+/// expressions, every one of them is refused, because a single-version
+/// dependency cannot honestly be approved under two licences and the gate has
+/// no evidence to pick one.
+fn license_refusals(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
+    register
+        .approvals()
+        .filter_map(|entry| {
+            // Distinct observed licences for this package, `None` standing for a
+            // target that declares none. Order follows the edge order, so the
+            // refusal names the same expression on every run.
+            let mut observed: Vec<Option<&str>> = Vec::new();
+            for edge in edges
+                .iter()
+                .filter(|edge| !edge.workspace && entry.admits(&edge.package))
+            {
+                if !observed.contains(&edge.license()) {
+                    observed.push(edge.license());
+                }
+            }
+            let Some(first) = observed.first().copied() else {
+                // An approval whose package Cargo does not report — an inactive
+                // optional edge with no resolved package, for instance — carries
+                // nothing to compare. `UnusedApproval` is what says so, and
+                // refusing here would make a licence report restate it.
+                return None;
+            };
+            let declared = declared_value(first).to_owned();
+            let drift = observed.iter().copied().any(|candidate| {
+                !declared_value(candidate)
+                    .trim()
+                    .eq_ignore_ascii_case(entry.license().trim())
+            });
+            let rejected = observed
+                .iter()
+                .copied()
+                .flat_map(|candidate| rejected_license_identifiers(declared_value(candidate)))
+                .collect::<Vec<_>>();
+            if !drift && rejected.is_empty() {
+                return None;
+            }
+            Some(Refusal::LicenseNotAccepted {
+                krate: entry.krate().to_owned(),
+                approved: entry.license().to_owned(),
+                declared,
+                rejected,
+            })
+        })
+        .collect()
+}
+
+/// The text a declared licence is compared and rendered as.
+fn declared_value(observed: Option<&str>) -> &str {
+    match observed {
+        Some(expression) => expression,
+        None => NO_LICENSE,
+    }
+}
+
+// ── Tier audit (#210) ───────────────────────────────────────────────────────
+
+/// The source class an approval at the [`contract::Tier::Vendor`] tier may
+/// resolve from.
+///
+/// `vendor` means audited source checked into the workspace rather than a
+/// registry edge. This repository checks third-party source into `vendor/` for
+/// *offline builds* while still resolving those crates from a registry, so
+/// "there is a vendored directory" is not evidence about an edge's source class
+/// — and `vendor.rs`'s [`crate::vendor::Report`] binds on `Cargo.lock` hashes
+/// precisely so the tree cannot stand in for a source class. What can be read
+/// from an edge is where it came from, so `registry` and `git` — the two classes
+/// Cargo resolves at build time from somewhere else — contradict the tier. See
+/// [`vendor_tier_refusals`] for why `path` is deliberately not refused.
+const VENDOR_SOURCE_CLASSES: [&str; 2] = ["registry", "git"];
+
+/// Every approval that claims the vendor tier while its edge still resolves from
+/// a source the tier rules out.
+///
+/// The one claim `vendor` makes that is checkable from the edge itself. It is
+/// deliberately *not* the claim a reader might want it to make: nothing in this
+/// repository says whether a given crate's code was audited before it was
+/// checked in — `vendor.rs` records coverage and hash equality, not a review —
+/// so requiring proof of review would mean inventing an approval artefact that
+/// does not exist, and refusing everything at the tier would make the tier
+/// unusable and thereby leave it unexercised rather than meaningful.
+///
+/// Nor does this refuse `tier = "vendor"` on a `path` edge. A vendored crate
+/// normally *is* a path dependency, and a path edge is exactly what "checked
+/// into the workspace" looks like to Cargo; the check that belongs on that
+/// shape is INV-VENDOR-SINGLE-TREE, which `vendor.rs` already enforces against
+/// the lockfile. This rule is added to cover the one hole the existing gate left
+/// open: `Tier::parse` accepted `vendor` at load and nothing downstream
+/// distinguished it, so a boundary dependency could be re-declared as audited
+/// vendored source and no refusal followed.
+fn vendor_tier_refusals(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
+    register
+        .approvals()
+        .filter(|entry| entry.tier() == VENDOR_TIER)
+        .filter_map(|entry| {
+            let source = edges
+                .iter()
+                .filter(|edge| !edge.workspace && entry.admits(&edge.package))
+                .map(|edge| edge.source.class())
+                .find(|class| VENDOR_SOURCE_CLASSES.contains(class))?;
+            Some(Refusal::VendorTierConflict {
+                krate: entry.krate().to_owned(),
+                source: (*source).to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// The tier a vendored approval must be judged against.
+///
+/// Named rather than written inline so the refusal and this reader cannot
+/// disagree about which tier is being policed.
+const VENDOR_TIER: contract::Tier = contract::Tier::Vendor;
+
+/// Every approval that re-tiers a frozen surface's own edge away from
+/// [`FROZEN_TIER`], as one refusal each.
+///
+/// The second, structural half of INV-DEP-1's *never grow `lgwks_ast`*: adding
+/// the edge at all is already refused as [`Refusal::UnregisteredEdge`], and
+/// re-approving it as `vendor` rather than `boundary` is what a growth attempt
+/// would reach for next. Both refusals name the surface, so a refusal says which
+/// surface is in violation rather than only which crate is unowned.
+fn frozen_surface_tier_refusals(register: &Contract) -> Vec<Refusal> {
+    register
+        .approvals()
+        .filter(|entry| entry.tier() != FROZEN_TIER)
+        .filter(|entry| FROZEN_SURFACES.contains(&entry.owner()))
+        .map(|entry| Refusal::FrozenSurfaceTier {
+            consumer: entry.owner().to_owned(),
+            krate: entry.krate().to_owned(),
+            tier: entry.tier().to_string(),
+        })
+        .collect()
+}
+
 /// Audits authored direct dependency edges against semantic ownership.
+///
+/// Five questions, each answered from a different evidence: is every frozen
+/// surface's edge set closed (INV-DEP-1), is every edge owned, is every
+/// approval still true (`UnusedApproval`), is every declared licence one this
+/// repository accepts and the one the register approved (#208), and does every
+/// approval's tier agree with the source its edge resolves from (#210).
 pub fn audit_direct(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
-    let mut refusals = Vec::new();
+    let mut refusals = frozen_surface_tier_refusals(register);
+    refusals.extend(vendor_tier_refusals(edges, register));
+    refusals.extend(license_refusals(edges, register));
     if let Some(expected) = register.repository.as_ref() {
         for edge in edges.iter().filter(|edge| edge.workspace) {
             if let Some(declared) = edge.target_repository.as_ref()
@@ -878,6 +1317,19 @@ pub fn audit_direct(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
                 capability: entry.capability.clone(),
             });
         }
+    }
+    // Adoption mode is a posture, not an off switch. When the register says
+    // `enforce = false` *and* the tree actually carries edge violations, one
+    // refusal names the stand-down so the build fails for the same reason it
+    // would under `enforce = true`. Without this the whole verdict reduced to
+    // that one boolean: a reviewable one-token diff was enough to make a tree
+    // the gate had just declared in violation report success. An empty audit
+    // stays empty — adoption mode on a clean tree is a legitimate posture and
+    // must not be refused.
+    if !register.enforce && !refusals.is_empty() {
+        refusals.push(Refusal::AdoptionModeRefusals {
+            refusals: refusals.len(),
+        });
     }
     refusals.sort_by_key(ToString::to_string);
     refusals
@@ -1036,7 +1488,12 @@ pub fn check_verdict(
     let contract_path = contract_path.map_or_else(|| root.join(CONTRACT_PATH), Path::to_path_buf);
     ensure_contract_file(&contract_path)?;
     let register = Contract::parse(&read(&contract_path)?).map_err(GateError::Contract)?;
-    read(&lock_path)?;
+    // Parsed, not merely read. Reading proved the file exists; parsing is what
+    // makes its contents auditable. A `[[package]]` block that names no package
+    // would otherwise shrink the graph this gate reasons about without saying
+    // so -- the failure `lock::parse` exists to refuse, reached only by the two
+    // commands that happened to call it.
+    lock::parse(&read(&lock_path)?).map_err(GateError::Lock)?;
     let edges = metadata::read(root).map_err(GateError::Metadata)?;
     Ok(edges.map(|edges| {
         let refusals = audit_direct(&edges, &register);
@@ -1115,6 +1572,7 @@ mod tests {
         "version = \"1.0\"\n",
         "owner = \"lgwks_std\"\n",
         "capability = \"json.serialization\"\n",
+        "license = \"MIT OR Apache-2.0\"\n",
         "source = \"registry\"\n",
         "allowed_consumers = \"lgwks_std\"\n",
         "allowed_kinds = \"normal\"\n",
@@ -1140,6 +1598,8 @@ mod tests {
             uses_default_features: true,
             target: None,
             rename: None,
+            license: Some("MIT OR Apache-2.0".into()),
+            license_file: None,
         }
     }
 

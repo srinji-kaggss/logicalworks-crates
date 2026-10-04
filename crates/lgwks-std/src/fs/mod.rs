@@ -464,7 +464,7 @@ fn run_walk(
 fn omit(ctx: &mut WalkContext<'_>, omission: WalkOmission) -> io::Result<()> {
     if ctx.mode == WalkMode::Strict {
         let kind = omission.error.kind();
-        return Err(io::Error::new(
+        let refusal = Err(io::Error::new(
             kind,
             WalkFailure {
                 path: omission.path,
@@ -472,6 +472,9 @@ fn omit(ctx: &mut WalkContext<'_>, omission: WalkOmission) -> io::Result<()> {
                 source: omission.error,
             },
         ));
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "omit: returning an error to the caller");
+        return refusal;
     }
     if let Some(limits) = ctx.limits
         && ctx.omissions.len() >= limits.max_omissions
@@ -730,13 +733,16 @@ fn process_entry(
 fn check_directory_path(dir: &Path, canonical_root: &Path) -> io::Result<PathBuf> {
     let canon = dir.canonicalize()?;
     if !canon.starts_with(canonical_root) {
-        return Err(io::Error::new(
+        let refusal = Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
                 "walked directory {} resolves outside the root",
                 dir.display()
             ),
         ));
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "check_directory_path: returning an error to the caller");
+        return refusal;
     }
     Ok(canon)
 }
@@ -793,7 +799,10 @@ fn walk_recursive(
                 .get_ref()
                 .is_some_and(|source| source.is::<WalkFailure>())
             {
-                return Err(error);
+                let refusal = Err(error);
+                #[cfg(feature = "trace")]
+                crate::trace::debug!(error = ?refusal.as_ref().err(), "walk_recursive: returning an error to the caller");
+                return refusal;
             }
             return omit(
                 ctx,

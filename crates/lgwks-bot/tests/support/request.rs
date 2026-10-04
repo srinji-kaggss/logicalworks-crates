@@ -210,11 +210,17 @@ where
     match stopped {
         Ok(true) => {}
         Ok(false) => {
-            return Err(
+            let refusal = Err(
                 "the body never recorded its first step, so the stop had nothing to follow".into(),
             );
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "stop_mid_run: returning an error to the caller");
+            return refusal;
         }
-        Err(_) => return Err("the thread that stopped the host panicked".into()),
+        Err(_) => {
+            let refusal = Err("the thread that stopped the host panicked".into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "stop_mid_run: returning an error to the caller");
+            return refusal;
+        }
     }
     reported.map_err(Into::into)
 }

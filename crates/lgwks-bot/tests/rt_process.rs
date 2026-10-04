@@ -54,7 +54,9 @@ async fn next_outcome(
     budget: Duration,
 ) -> Result<TaskOutcome, String> {
     let Some(deadline) = Instant::now().checked_add(budget) else {
-        return Err(String::from("the deadline overflowed the clock"));
+        let refusal = Err(String::from("the deadline overflowed the clock"));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "next_outcome: returning an error to the caller");
+        return refusal;
     };
     loop {
         supervisor.reap();
@@ -62,7 +64,9 @@ async fn next_outcome(
             return Ok(outcome);
         }
         if Instant::now() >= deadline {
-            return Err(format!("no terminal outcome within {budget:?}"));
+            let refusal = Err(format!("no terminal outcome within {budget:?}"));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "next_outcome: returning an error to the caller");
+            return refusal;
         }
         sleep(POLL_INTERVAL).await;
     }

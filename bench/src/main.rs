@@ -633,23 +633,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // evaluations catch a baseline that reaches the same results by
             // skipping the work.
             if m.effects_bot != m.effects_base {
-                return Err(format!(
+                let refusal = Err(format!(
                     "FAIRNESS CHECK FAILED for '{}': bot fired {} effects, baseline fired {}. \
-                     The two engines are not doing the same work, so no timing from this \
-                     scenario is reportable.",
+                 The two engines are not doing the same work, so no timing from this \
+                 scenario is reportable.",
                     m.name, m.effects_bot, m.effects_base
                 )
                 .into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
+                return refusal;
             }
             if m.evals_bot != m.evals_base {
-                return Err(format!(
+                let refusal = Err(format!(
                     "FAIRNESS CHECK FAILED for '{}': bot evaluated the condition {} times, \
-                     baseline {} times. The effect counts agree, so this is a baseline that \
-                     reaches the same answer with less work -- which is exactly the comparison \
-                     this gate exists to refuse.",
+                 baseline {} times. The effect counts agree, so this is a baseline that \
+                 reaches the same answer with less work -- which is exactly the comparison \
+                 this gate exists to refuse.",
                     m.name, m.evals_bot, m.evals_base
                 )
                 .into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
+                return refusal;
             }
 
             let mut ratios: Vec<f64> = m

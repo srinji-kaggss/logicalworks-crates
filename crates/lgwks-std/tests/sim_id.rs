@@ -112,7 +112,10 @@ fn reference_version(bytes: &[u8; 16]) -> Option<u8> {
 fn reference_parse(text: &str) -> Result<[u8; 16], Reference> {
     let bytes = text.as_bytes();
     if bytes.len() != CANONICAL_LEN {
-        return Err(Reference::WrongLength { len: bytes.len() });
+        let refusal = Err(Reference::WrongLength { len: bytes.len() });
+        #[cfg(feature = "trace")]
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "reference_parse: returning an error to the caller");
+        return refusal;
     }
     let starts = reference_group_starts();
     let mut raw = [0u8; 16];
@@ -127,7 +130,10 @@ fn reference_parse(text: &str) -> Result<[u8; 16], Reference> {
         let pair_start = if index > 0 {
             let hyphen_at = hex_at.saturating_sub(1);
             if bytes.get(hyphen_at) != Some(&b'-') {
-                return Err(Reference::MissingHyphen { at: hyphen_at });
+                let refusal = Err(Reference::MissingHyphen { at: hyphen_at });
+                #[cfg(feature = "trace")]
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "reference_parse: returning an error to the caller");
+                return refusal;
             }
             hex_at
         } else {
@@ -150,10 +156,13 @@ fn reference_parse(text: &str) -> Result<[u8; 16], Reference> {
                 (None, _) => high_at,
                 (_, None) => low_at,
             };
-            return Err(Reference::NotDigit {
+            let refusal = Err(Reference::NotDigit {
                 group_at: hex_at,
                 at,
             });
+            #[cfg(feature = "trace")]
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "reference_parse: returning an error to the caller");
+            return refusal;
         }
         byte_cursor = byte_cursor.saturating_add(byte_width);
     }

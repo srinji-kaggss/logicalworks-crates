@@ -33,20 +33,26 @@ pub fn build_and_run(manifest: &str, main_rs: &str) -> Result<String, Box<dyn st
     };
     let lock = cargo(&["generate-lockfile", "--offline"])?;
     if !lock.status.success() {
-        return Err(format!(
+        let refusal = Err(format!(
             "probe lock generation failed: {}",
             String::from_utf8_lossy(&lock.stderr)
         )
         .into());
+        #[cfg(feature = "trace")]
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build_and_run: returning an error to the caller");
+        return refusal;
     }
     let run = cargo(&["run", "--locked", "--offline", "--quiet"])?;
     let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
     if !run.status.success() {
-        return Err(format!(
+        let refusal = Err(format!(
             "probe failed: {stdout}{}",
             String::from_utf8_lossy(&run.stderr)
         )
         .into());
+        #[cfg(feature = "trace")]
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build_and_run: returning an error to the caller");
+        return refusal;
     }
     Ok(stdout)
 }

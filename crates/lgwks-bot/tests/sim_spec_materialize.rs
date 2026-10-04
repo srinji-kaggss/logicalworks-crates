@@ -35,7 +35,12 @@ const FLOW: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d
 
 /// The cause message the counter constructors produce for a target that is not
 /// a count, so the model can name it without re-running the constructor.
-const TARGET_CAUSE: &str = "incomplete bot spec: missing target";
+///
+/// Carries the `ParseIntError`'s own text after the field, because
+/// `IncompleteSpec` renders both: the field says which part of the spec is
+/// missing and the cause says why. Pinning the whole rendered string is what
+/// makes this test notice when one of the two stops being reported.
+const TARGET_CAUSE: &str = "incomplete bot spec: missing target: invalid digit found in string";
 
 /// How many seeds the sweep covers. Well over the thousand the contract names,
 /// so no band of the space goes untested.
@@ -53,10 +58,19 @@ struct SimCounter {
 
 /// Parse a target as a count, or refuse it — the malformed-input case a
 /// constructor reports through admission.
+///
+/// The `ParseIntError` is recorded rather than dropped: `target` is untrusted
+/// text, and the parse error's own message ("invalid digit found in string",
+/// "cannot parse integer from empty string") is the part that says whether the
+/// value was empty or merely non-numeric. `BotError::IncompleteSpec` renders it
+/// through `Escaped`, so the untrusted text it quotes cannot forge a log line.
 fn parse_sim_count(target: &str) -> Result<u16, BotError> {
     target
         .parse::<u16>()
-        .map_err(|_| BotError::IncompleteSpec { field: "target" })
+        .map_err(|not_a_count| BotError::IncompleteSpec {
+            field: "target",
+            cause: not_a_count.to_string(),
+        })
 }
 
 impl SimCounter {
@@ -356,14 +370,21 @@ fn one_seed(sim: &mut Sim) -> Result<(), Box<dyn Error>> {
             );
         }
         Err(Admission::Refused(cause)) => {
-            return Err(format!(
+            let refusal = Err(format!(
                 "seed {}: a well-formed spec was refused structurally: {cause}",
                 sim.seed
             )
             .into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "one_seed: returning an error to the caller");
+            return refusal;
         }
         Err(_) => {
-            return Err(format!("seed {}: unexpected admission variant", sim.seed).into());
+            {
+                let refusal =
+                    Err(format!("seed {}: unexpected admission variant", sim.seed).into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "one_seed: returning an error to the caller");
+                return refusal;
+            };
         }
     }
     sim.record(&described);

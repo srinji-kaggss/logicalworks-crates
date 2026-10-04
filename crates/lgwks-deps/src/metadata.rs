@@ -182,6 +182,20 @@ pub struct DirectEdge {
     /// identity and the name the register approves. A rename is a local
     /// spelling and never a second identity.
     pub(crate) rename: Option<String>,
+    /// SPDX expression the target's manifest declares, verbatim.
+    ///
+    /// `None` when Cargo reports no `license` key. The audit reads this to
+    /// refuse an approval whose recorded licence no longer says what the
+    /// manifest says (#208); a package that declares none is not read as
+    /// permissive, because the value's absence is exactly the fact.
+    pub license: Option<String>,
+    /// Path the target's manifest names as its licence file, when it declares
+    /// one instead of, or as well as, an SPDX expression.
+    ///
+    /// Retained beside [`Self::license`] so an audit refusal can name the file
+    /// whose text governs when the expression alone does not say who the
+    /// licensor is.
+    pub license_file: Option<String>,
 }
 
 impl DirectEdge {
@@ -189,6 +203,21 @@ impl DirectEdge {
     #[must_use]
     pub fn consumer(&self) -> &str {
         &self.consumer
+    }
+
+    /// SPDX expression this package's own manifest declares, verbatim.
+    ///
+    /// `None` when the manifest declares none, which is a fact the licence
+    /// audit refuses rather than a licence it resolves.
+    #[must_use]
+    pub fn license(&self) -> Option<&str> {
+        self.license.as_deref()
+    }
+
+    /// Licence file this package's own manifest names, when it names one.
+    #[must_use]
+    pub fn license_file(&self) -> Option<&str> {
+        self.license_file.as_deref()
     }
 
     /// Cargo package name, independent of a local dependency rename.
@@ -327,30 +356,13 @@ impl fmt::Display for MetadataError {
                 ref process,
                 ref captures,
                 ref obligation,
-            } => {
-                if let Some(cause) = cause.as_deref() {
-                    write!(f, "{cause}; ")?;
-                }
-                write!(f, "cleanup unconfirmed")?;
-                let report = &obligation.report;
-                if let Some(ref error) = *process {
-                    let step = report.step.map_or("stop", CleanupStep::verb);
-                    match report.pid {
-                        Some(pid) => write!(f, "; could not {step} cargo (pid {pid}): {error}")?,
-                        None => write!(f, "; could not {step} cargo: {error}")?,
-                    }
-                }
-                let mut paths = report.capture_paths.iter();
-                for error in captures.iter() {
-                    match paths.next() {
-                        Some(path) => {
-                            write!(f, "; could not remove {}: {error}", path.display())?;
-                        }
-                        None => write!(f, "; could not remove a capture file: {error}")?,
-                    }
-                }
-                Ok(())
-            }
+            } => write_cleanup_unconfirmed(
+                f,
+                cause.as_deref(),
+                process.as_ref(),
+                captures,
+                obligation,
+            ),
             #[cfg(not(target_family = "wasm"))]
             Self::Entropy(ref error) => write!(
                 f,
@@ -358,6 +370,47 @@ impl fmt::Display for MetadataError {
             ),
         }
     }
+}
+
+/// Renders what could not be cleaned up after a refused capture.
+///
+/// A helper rather than the arm inline: as one block the arm carried six
+/// propagation operators across the cause prefix, the process failure, the pid
+/// arms and the capture paths, so an operator reading why cleanup was
+/// unconfirmed had to hold six partial sentences at once -- and a writer that
+/// failed part-way had already emitted the truncated prefix. Rendering into a
+/// buffer and writing once means the sentence is either whole or absent.
+fn write_cleanup_unconfirmed(
+    formatter: &mut fmt::Formatter<'_>,
+    cause: Option<&MetadataError>,
+    process: Option<&std::io::Error>,
+    captures: &[std::io::Error],
+    obligation: &CleanupObligation,
+) -> fmt::Result {
+    let mut rendered = String::new();
+    if let Some(cause) = cause {
+        let prefix = format!("{cause}; ");
+        rendered.push_str(&prefix);
+    }
+    rendered.push_str("cleanup unconfirmed");
+    let report = &obligation.report;
+    if let Some(error) = process {
+        let step = report.step.map_or("stop", CleanupStep::verb);
+        let sentence = match report.pid {
+            Some(pid) => format!("; could not {step} cargo (pid {pid}): {error}"),
+            None => format!("; could not {step} cargo: {error}"),
+        };
+        rendered.push_str(&sentence);
+    }
+    let mut paths = report.capture_paths.iter();
+    for error in captures {
+        let sentence = match paths.next() {
+            Some(path) => format!("; could not remove {}: {error}", path.display()),
+            None => format!("; could not remove a capture file: {error}"),
+        };
+        rendered.push_str(&sentence);
+    }
+    formatter.write_str(&rendered)
 }
 
 impl std::error::Error for MetadataError {
@@ -425,6 +478,15 @@ struct CargoPackage {
     /// so a scope can be resolved to a real module file rather than to a
     /// directory guessed from the package name.
     manifest_path: Option<String>,
+    /// SPDX expression the manifest's `[package] license` declares.
+    ///
+    /// The register records one of these per approval (#208). Cargo reports the
+    /// string verbatim, including a compound `OR` expression and its ordering,
+    /// so the audit compares expressions rather than trying to resolve them: a
+    /// licence this gate cannot parse is refused, not guessed at.
+    license: Option<String>,
+    /// Path the manifest's `[package] license-file` names, when it names one.
+    license_file: Option<String>,
     /// The dependency declarations this package authored, including optional
     /// edges that are inactive in the current feature selection, which is the
     /// reason metadata rather than the lockfile is the source of truth here.
@@ -558,11 +620,21 @@ fn lexical_join(base: &Path, relative: &str) -> Option<PathBuf> {
 /// manifest directory and normalized lexically — no filesystem access, so a
 /// hostile tree cannot change the answer between classification and audit.
 /// Anything unresolvable fails closed to external.
+///
+/// The declared licence travels with the edge (#208). It is read from the
+/// package record rather than the dependency declaration because Cargo
+/// publishes a package's `license` on the *resolved* package: a path
+/// dependency that lives outside the resolved graph, a feature-gated edge, and
+/// an ordinary registry edge all resolve to the same record. A name two
+/// packages share therefore cannot borrow another package's licence by
+/// renaming, and an approval is compared against the licence of the package
+/// Cargo actually resolved.
 fn direct_edges(metadata: CargoMetadata) -> Result<Vec<DirectEdge>, MetadataError> {
     let workspace = validated_workspace(&metadata)?;
     let member_packages = workspace.packages;
     let member_dirs = workspace.member_dirs;
     let declaring_dirs = workspace.declaring_dirs;
+    let licence_targets = license_targets(&metadata.packages);
     let mut edges = Vec::new();
     for package in member_packages {
         let declaring = declaring_dirs.get(package.id.as_str());
@@ -580,11 +652,20 @@ fn direct_edges(metadata: CargoMetadata) -> Result<Vec<DirectEdge>, MetadataErro
             if let Some((member_name, _)) = member
                 && dependency.name != member_name
             {
-                return Err(MetadataError::Schema(format!(
+                let refusal = Err(MetadataError::Schema(format!(
                     "dependency {:?} resolves to workspace package {:?}",
                     dependency.name, member_name
                 )));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "direct_edges: returning an error to the caller");
+                return refusal;
             }
+            let declared = licence_targets
+                .get(dependency.name.as_str())
+                .copied()
+                .unwrap_or(DeclaredLicense {
+                    license: None,
+                    license_file: None,
+                });
             edges.push(DirectEdge {
                 consumer: package.name.clone(),
                 package: dependency.name.clone(),
@@ -600,6 +681,8 @@ fn direct_edges(metadata: CargoMetadata) -> Result<Vec<DirectEdge>, MetadataErro
                 uses_default_features: dependency.uses_default_features,
                 target: dependency.target.clone(),
                 rename: dependency.rename.clone(),
+                license: declared.license.map(str::to_owned),
+                license_file: declared.license_file.map(str::to_owned),
             });
         }
     }
@@ -628,6 +711,40 @@ fn direct_edges(metadata: CargoMetadata) -> Result<Vec<DirectEdge>, MetadataErro
     Ok(edges)
 }
 
+/// The licence a package's own manifest declares.
+#[derive(Clone, Copy)]
+struct DeclaredLicense<'a> {
+    /// SPDX expression Cargo reported, when the manifest has a `license` key.
+    license: Option<&'a str>,
+    /// Path Cargo reported for `license-file`, when the manifest has one.
+    license_file: Option<&'a str>,
+}
+
+/// Indexes declared licences by package name.
+///
+/// A name is bound to one licence, or to none: Cargo's own resolution can
+/// produce two versions of the same package name, and taking whichever record
+/// sorted last would make an edge's licence depend on enumeration order. The
+/// registry is keyed by name because that is the identity the register
+/// approves, and a name two *different* packages share is already refused as a
+/// schema error by [`direct_edges`]'s membership check for workspace targets.
+/// A name that no resolved package carries is absent here, and
+/// [`DirectEdge::license`] answers `None` — an absence, not a licence.
+fn license_targets(
+    packages: &[CargoPackage],
+) -> std::collections::BTreeMap<&str, DeclaredLicense<'_>> {
+    let mut targets = std::collections::BTreeMap::new();
+    for package in packages {
+        targets
+            .entry(package.name.as_str())
+            .or_insert_with(|| DeclaredLicense {
+                license: package.license.as_deref(),
+                license_file: package.license_file.as_deref(),
+            });
+    }
+    targets
+}
+
 /// Validated view shared by edge extraction and workspace inventory.
 struct ValidatedWorkspace<'a> {
     /// Workspace packages resolved uniquely from the member-id list.
@@ -643,28 +760,36 @@ fn validated_workspace(metadata: &CargoMetadata) -> Result<ValidatedWorkspace<'_
     let mut package_ids = std::collections::BTreeSet::new();
     for package in &metadata.packages {
         if package.id.trim().is_empty() || package.name.trim().is_empty() {
-            return Err(MetadataError::Schema(
+            let refusal = Err(MetadataError::Schema(
                 "Cargo package identity contains a blank id or name".to_owned(),
             ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validated_workspace: returning an error to the caller");
+            return refusal;
         }
         if !package_ids.insert(package.id.as_str()) {
-            return Err(MetadataError::Schema(format!(
+            let refusal = Err(MetadataError::Schema(format!(
                 "duplicate Cargo package id {:?}",
                 package.id
             )));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validated_workspace: returning an error to the caller");
+            return refusal;
         }
     }
     let mut member_ids = std::collections::BTreeSet::new();
     for id in &metadata.workspace_members {
         if !member_ids.insert(id.as_str()) {
-            return Err(MetadataError::Schema(format!(
+            let refusal = Err(MetadataError::Schema(format!(
                 "duplicate Cargo workspace member id {id:?}"
             )));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validated_workspace: returning an error to the caller");
+            return refusal;
         }
         if !package_ids.contains(id.as_str()) {
-            return Err(MetadataError::Schema(format!(
+            let refusal = Err(MetadataError::Schema(format!(
                 "workspace member id {id:?} has no package record"
             )));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validated_workspace: returning an error to the caller");
+            return refusal;
         }
     }
     let packages: Vec<&CargoPackage> = metadata
@@ -698,10 +823,12 @@ fn validated_workspace(metadata: &CargoMetadata) -> Result<ValidatedWorkspace<'_
             )
             .is_some()
         {
-            return Err(MetadataError::Schema(format!(
+            let refusal = Err(MetadataError::Schema(format!(
                 "multiple workspace packages claim manifest directory {:?}",
                 dir
             )));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validated_workspace: returning an error to the caller");
+            return refusal;
         }
         declaring_dirs.insert(package.id.as_str(), dir);
     }
@@ -773,7 +900,9 @@ struct CaptureFiles {
 fn remove_capture(path: &Path) -> std::io::Result<()> {
     #[cfg(test)]
     if let Some(error) = tests::take_fault(tests::FaultPoint::Unlink) {
-        return Err(error);
+        let refusal = Err(error);
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "remove_capture: returning an error to the caller");
+        return refusal;
     }
     std::fs::remove_file(path)
 }
@@ -784,7 +913,9 @@ fn observe_child(
 ) -> std::io::Result<Option<std::process::ExitStatus>> {
     #[cfg(test)]
     if let Some(error) = tests::take_fault(tests::FaultPoint::WaitObservation) {
-        return Err(error);
+        let refusal = Err(error);
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "observe_child: returning an error to the caller");
+        return refusal;
     }
     child.try_wait()
 }
@@ -793,7 +924,9 @@ fn observe_child(
 fn terminate_child(child: &mut std::process::Child) -> std::io::Result<()> {
     #[cfg(test)]
     if let Some(error) = tests::take_fault(tests::FaultPoint::Kill) {
-        return Err(error);
+        let refusal = Err(error);
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "terminate_child: returning an error to the caller");
+        return refusal;
     }
     child.kill()
 }
@@ -802,7 +935,9 @@ fn terminate_child(child: &mut std::process::Child) -> std::io::Result<()> {
 fn reap_child(child: &mut std::process::Child) -> std::io::Result<std::process::ExitStatus> {
     #[cfg(test)]
     if let Some(error) = tests::take_fault(tests::FaultPoint::Reap) {
-        return Err(error);
+        let refusal = Err(error);
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "reap_child: returning an error to the caller");
+        return refusal;
     }
     child.wait()
 }
@@ -935,8 +1070,16 @@ impl CleanupObligation {
                 Ok(()) => {}
                 Err(kill_error) => match child.try_wait() {
                     Ok(Some(_)) => self.child = None,
-                    Ok(None) => return Err(kill_error),
-                    Err(observation_error) => return Err(observation_error),
+                    Ok(None) => {
+                        let refusal = Err(kill_error);
+                        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "retry_cleanup: returning an error to the caller");
+                        return refusal;
+                    }
+                    Err(observation_error) => {
+                        let refusal = Err(observation_error);
+                        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "retry_cleanup: returning an error to the caller");
+                        return refusal;
+                    }
                 },
             }
             if let Some(child) = self.child.as_mut() {
@@ -947,7 +1090,9 @@ impl CleanupObligation {
             }
         }
         if let Some(error) = self.captures.cleanup().into_iter().next() {
-            return Err(error);
+            let refusal = Err(error);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "retry_cleanup: returning an error to the caller");
+            return refusal;
         }
         Ok(self.captures.paths.is_empty())
     }
@@ -1035,7 +1180,9 @@ fn run_bounded(
                 tests::FaultPoint::CaptureStderr
             };
             if let Some(error) = tests::take_fault(fault) {
-                return Err(MetadataError::Spawn(error));
+                let refusal = Err(MetadataError::Spawn(error));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "capture: returning an error to the caller");
+                return refusal;
             }
         }
         // Bounded: each attempt draws a fresh distinguisher, so exhaustion
@@ -1052,7 +1199,11 @@ fn run_bounded(
             {
                 Ok(file) => return Ok((path, file)),
                 Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(MetadataError::Spawn(error)),
+                Err(error) => {
+                    let refusal = Err(MetadataError::Spawn(error));
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "capture: returning an error to the caller");
+                    return refusal;
+                }
             }
         }
         Err(MetadataError::Spawn(std::io::Error::from(
@@ -1103,7 +1254,9 @@ fn run_bounded(
                 tests::FaultPoint::ReadStderr
             };
             if let Some(error) = tests::take_fault(fault) {
-                return Err(MetadataError::Spawn(error));
+                let refusal = Err(MetadataError::Spawn(error));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "read_capped: returning an error to the caller");
+                return refusal;
             }
         }
         let limit = u64::try_from(stream_cap).unwrap_or(u64::MAX);
@@ -1145,12 +1298,20 @@ fn run_bounded(
     let mut captures = CaptureFiles::new();
     let (stdout_path, stdout_file) = match capture("stdout") {
         Ok(capture) => capture,
-        Err(error) => return Err(cleanup_error(Some(error), None, None, &mut captures)),
+        Err(error) => {
+            let refusal = Err(cleanup_error(Some(error), None, None, &mut captures));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "cleanup_error: returning an error to the caller");
+            return refusal;
+        }
     };
     captures.own(stdout_path.clone());
     let (stderr_path, stderr_file) = match capture("stderr") {
         Ok(capture) => capture,
-        Err(error) => return Err(cleanup_error(Some(error), None, None, &mut captures)),
+        Err(error) => {
+            let refusal = Err(cleanup_error(Some(error), None, None, &mut captures));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "cleanup_error: returning an error to the caller");
+            return refusal;
+        }
     };
     captures.own(stderr_path.clone());
     #[cfg(test)]
@@ -1169,12 +1330,14 @@ fn run_bounded(
     let mut child = match spawned {
         Ok(child) => child,
         Err(error) => {
-            return Err(cleanup_error(
+            let refusal = Err(cleanup_error(
                 Some(MetadataError::Spawn(error)),
                 None,
                 None,
                 &mut captures,
             ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "cleanup_error: returning an error to the caller");
+            return refusal;
         }
     };
     let deadline = std::time::Instant::now()
@@ -1255,22 +1418,32 @@ fn run_bounded(
         Ok(status) => match reap_child(&mut child) {
             Ok(_) => status,
             Err(error) => {
-                return Err(cleanup_error(
+                let refusal = Err(cleanup_error(
                     None,
                     Some((CleanupStep::Reap, error)),
                     Some(child),
                     &mut captures,
                 ));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "cleanup_error: returning an error to the caller");
+                return refusal;
             }
         },
     };
     let (stdout, stdout_overflow) = match read_capped(&stdout_path, stream_cap, "stdout") {
         Ok(output) => output,
-        Err(error) => return Err(cleanup_error(Some(error), None, None, &mut captures)),
+        Err(error) => {
+            let refusal = Err(cleanup_error(Some(error), None, None, &mut captures));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "cleanup_error: returning an error to the caller");
+            return refusal;
+        }
     };
     let (stderr, stderr_overflow) = match read_capped(&stderr_path, stream_cap, "stderr") {
         Ok(output) => output,
-        Err(error) => return Err(cleanup_error(Some(error), None, None, &mut captures)),
+        Err(error) => {
+            let refusal = Err(cleanup_error(Some(error), None, None, &mut captures));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "cleanup_error: returning an error to the caller");
+            return refusal;
+        }
     };
     let overflow = if stdout_overflow {
         Some(MetadataError::OutputTooLarge {
@@ -1286,7 +1459,9 @@ fn run_bounded(
         None
     };
     if let Some(cause) = overflow {
-        return Err(cleanup_error(Some(cause), None, None, &mut captures));
+        let refusal = Err(cleanup_error(Some(cause), None, None, &mut captures));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "cleanup_error: returning an error to the caller");
+        return refusal;
     }
     // Both streams are read in full and the child is reaped, so the output is
     // complete. A capture that cannot be removed now is reported beside it,
@@ -1337,7 +1512,9 @@ fn read_metadata(root: &Path) -> Result<Collected<CargoMetadata>, MetadataError>
     if !output.status.success() {
         let refusal =
             MetadataError::Cargo(String::from_utf8_lossy(&output.stderr).trim().to_owned());
-        return Err(collected.refuse(refusal));
+        let refusal = Err(collected.refuse(refusal));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "read_metadata: returning an error to the caller");
+        return refusal;
     }
     collected.try_map(|stdout| lgwks_std::json::from_slice(&stdout).map_err(MetadataError::Json))
 }
@@ -1441,7 +1618,58 @@ fn manifest_path(root: &Path) -> Result<std::path::PathBuf, MetadataError> {
 /// Runs locked Cargo metadata and returns every direct workspace edge, with
 /// any capture cleanup that could not be confirmed after a complete read.
 pub fn read(root: &Path) -> Result<Collected<Vec<DirectEdge>>, MetadataError> {
-    read_metadata(root)?.try_map(direct_edges)
+    read_metadata(root)?.try_map(|metadata| {
+        let mut edges = direct_edges(metadata)?;
+        // A second read, this time with dependencies, because the first cannot
+        // see them. `--no-deps` is what makes an inactive optional edge
+        // visible, and it is also what hides every third-party package: the
+        // licence audit needs exactly the packages the edge audit does not
+        // care about. A failed second read leaves the licences absent, and the
+        // audit reports that as a refusal naming the crate -- an edge whose
+        // terms are unknown must not read as an edge whose terms are absent.
+        if let Some(resolved) = read_resolved_packages(root) {
+            let declared = license_targets(&resolved);
+            for edge in &mut edges {
+                if let Some(licence) = declared.get(edge.package.as_str()).copied() {
+                    edge.license = licence.license.map(str::to_owned);
+                    edge.license_file = licence.license_file.map(str::to_owned);
+                }
+            }
+        }
+        Ok(edges)
+    })
+}
+
+/// Packages Cargo resolved, dependencies included, or `None` when that read
+/// could not be completed.
+///
+/// Failing here is not itself a refusal. The edge audit has already decided
+/// what it was going to decide from the first read, and the licence audit says
+/// in its own words which crate it could not price. Swallowing the cause keeps
+/// one unreadable query from denying the graph that was read successfully --
+/// and the licences stay absent, which the audit reports rather than hides.
+fn read_resolved_packages(root: &Path) -> Option<Vec<CargoPackage>> {
+    let manifest = manifest_path(root).ok()?;
+    let output = run_bounded(
+        "cargo",
+        &[
+            OsString::from("metadata"),
+            OsString::from("--locked"),
+            OsString::from("--format-version"),
+            OsString::from("1"),
+            OsString::from("--manifest-path"),
+            manifest.into_os_string(),
+        ],
+        root,
+        METADATA_TIMEOUT,
+        METADATA_STREAM_CAP,
+    )
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let metadata: CargoMetadata = lgwks_std::json::from_slice(&output.stdout).ok()?;
+    Some(metadata.packages)
 }
 
 /// One workspace member, with the directory holding its manifest.

@@ -115,5 +115,8 @@ pub fn reset() {
 /// `(allocations, bytes)` counted so far.
 #[must_use]
 pub fn snapshot() -> (u64, u64) {
-    (ALLOCS.load(Ordering::Relaxed), BYTES.load(Ordering::Relaxed))
+    (
+        ALLOCS.load(Ordering::Relaxed),
+        BYTES.load(Ordering::Relaxed),
+    )
 }

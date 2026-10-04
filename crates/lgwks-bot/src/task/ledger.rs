@@ -569,19 +569,23 @@ fn decide_under(
     // the same reason: charging another tenant's run under this one's name is how
     // a shared ledger becomes a cross-tenant write.
     if next.tenant != tenant {
-        return Err(LeaseRefusal::ForeignTenant {
+        let refusal = Err(LeaseRefusal::ForeignTenant {
             owner: next.tenant,
             asked: tenant.to_owned(),
         });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "decide_under: returning an error to the caller");
+        return refusal;
     }
 
     let next_attempts = next.attempts.saturating_add(1);
     let next_spend = next.spend.saturating_add(spend);
     if next_attempts > max_attempts || next_spend > max_spend {
-        return Err(LeaseRefusal::BudgetSpent {
+        let refusal = Err(LeaseRefusal::BudgetSpent {
             attempts: next_attempts,
             max_attempts,
         });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "decide_under: returning an error to the caller");
+        return refusal;
     }
 
     let mut applied = None;
@@ -592,16 +596,20 @@ fn decide_under(
         // ticket is refused by the same check, so "stale" names the disagreement
         // rather than the direction.
         if stamp.epoch != next.epoch {
-            return Err(LeaseRefusal::StaleEpoch {
+            let refusal = Err(LeaseRefusal::StaleEpoch {
                 current: next.epoch,
                 offered: stamp.epoch,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "decide_under: returning an error to the caller");
+            return refusal;
         }
         // The same ticket delivered twice is one repair applied once. The identity
         // is checked against the applied set on this run, so a different ticket
         // for the same run is unaffected.
         if next.applied.contains(&stamp.identity) {
-            return Err(LeaseRefusal::AlreadyApplied);
+            let refusal = Err(LeaseRefusal::AlreadyApplied);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "decide_under: returning an error to the caller");
+            return refusal;
         }
         // Applying a valid repair advances the epoch, which is what makes the
         // *next* delivery of this same ticket stale as well as duplicate: two
@@ -642,7 +650,9 @@ fn write_entry(file: &mut File, index: &mut Index, entry: &Entry) -> Result<(), 
     // length on the disk.
     let on_disk = file.metadata().map_err(StoreError::storage)?.len();
     if on_disk != index.committed {
-        return Err(StoreError::Corrupt { at: 0 });
+        let refusal = Err(StoreError::Corrupt { at: 0 });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "write_entry: returning an error to the caller");
+        return refusal;
     }
     file.write_all(&framed).map_err(StoreError::storage)?;
     file.sync_all().map_err(StoreError::storage)?;
@@ -708,7 +718,9 @@ fn replay(file: &mut File) -> Result<Index, StoreError> {
     file.seek(SeekFrom::Start(0)).map_err(StoreError::storage)?;
     let mut header = [0u8; LEDGER_MAGIC.len()];
     if !read_full(file, &mut header)? || header != *LEDGER_MAGIC {
-        return Err(StoreError::NotAStore);
+        let refusal = Err(StoreError::NotAStore);
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "replay: returning an error to the caller");
+        return refusal;
     }
     let mut index = Index {
         runs: HashMap::new(),
@@ -730,7 +742,9 @@ fn replay(file: &mut File) -> Result<Index, StoreError> {
         if !frame::is_possible_length(declared, MAX_LEDGER_RECORD_BYTES) {
             // A complete prefix naming a frame this ledger never writes cannot be
             // an interrupted append. Refuse.
-            return Err(StoreError::Corrupt { at });
+            let refusal = Err(StoreError::Corrupt { at });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "replay: returning an error to the caller");
+            return refusal;
         }
         let mut payload = vec![0u8; declared];
         if let Piece::Interrupted =
@@ -747,7 +761,9 @@ fn replay(file: &mut File) -> Result<Index, StoreError> {
         let entry: Entry =
             from_bytes::<Entry, WireError>(&payload).map_err(|_| StoreError::Corrupt { at })?;
         if entry.head_from(&previous) != Digest::from_bytes(head) {
-            return Err(StoreError::Corrupt { at });
+            let refusal = Err(StoreError::Corrupt { at });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "replay: returning an error to the caller");
+            return refusal;
         }
         let frame_len = frame::framed_len(declared);
         if index
@@ -762,11 +778,13 @@ fn replay(file: &mut File) -> Result<Index, StoreError> {
         previous = index.tail;
         at = at.saturating_add(1);
         if at > MAX_LEDGER_RECORDS_PER_RUN {
-            return Err(StoreError::Limit {
+            let refusal = Err(StoreError::Limit {
                 kind: StoreLimitKind::Records,
                 requested: at,
                 limit: MAX_LEDGER_RECORDS_PER_RUN,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "replay: returning an error to the caller");
+            return refusal;
         }
         fold(&mut index, &entry);
     }
@@ -781,7 +799,11 @@ fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> Result<bool, StoreError>
             Ok(0) => return Ok(false),
             Ok(read) => filled = filled.saturating_add(read),
             Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(cause) => return Err(StoreError::storage(cause)),
+            Err(cause) => {
+                let refusal = Err(StoreError::storage(cause));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "read_full: returning an error to the caller");
+                return refusal;
+            }
         }
     }
     Ok(true)

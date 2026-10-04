@@ -1033,7 +1033,9 @@ fn stalled_probe_body() -> TestResult {
     // set rather than only where `rt` is compiled in.
     let mut cx = Context::from_waker(Waker::noop());
     if append.as_mut().poll(&mut cx).is_ready() {
-        return Err("the stalled append completed before the kill".into());
+        let refusal = Err("the stalled append completed before the kill".into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "stalled_probe_body: returning an error to the caller");
+        return refusal;
     }
     std::fs::write(&marker, b"in-flight")?;
 

@@ -152,7 +152,12 @@ fn old_worker_body() -> TestResult {
         .committed_entry(prepared.position())?
         .ok_or("the acknowledged preparation must be readable at its own position")?;
     if receipt.event().kind() != EventKind::DispatchPrepared {
-        return Err("the receipt names a position that does not hold the preparation".into());
+        {
+            let refusal =
+                Err("the receipt names a position that does not hold the preparation".into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "old_worker_body: returning an error to the caller");
+            return refusal;
+        };
     }
 
     std::fs::write(&orders.parked, b"parked")?;
@@ -166,7 +171,12 @@ fn old_worker_body() -> TestResult {
         pause(100);
     }
     if !orders.release.exists() {
-        return Err("the old worker parked for its whole bound and was never released".into());
+        {
+            let refusal =
+                Err("the old worker parked for its whole bound and was never released".into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "old_worker_body: returning an error to the caller");
+            return refusal;
+        };
     }
 
     // Everything below happens *after* the takeover, and this is the row: the old
@@ -609,7 +619,11 @@ fn loop_reopen(path: &std::path::Path) -> Result<FileJournal, Box<dyn std::error
         match FileJournal::open(path) {
             Ok(journal) => return Ok(journal),
             Err(JournalError::Locked { .. }) => pause(25),
-            Err(other) => return Err(format!("reopen after the kill failed: {other}").into()),
+            Err(other) => {
+                let refusal = Err(format!("reopen after the kill failed: {other}").into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "loop_reopen: returning an error to the caller");
+                return refusal;
+            }
         }
     }
     Err("the writer fence never came back after its holder was killed".into())

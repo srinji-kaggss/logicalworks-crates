@@ -145,10 +145,14 @@ fn tenant_isolation_same_key(band: Band) -> TestResult {
         match FileJournal::open(&first) {
             Err(JournalError::Locked { .. }) => {}
             Err(other) => {
-                return Err(format!("expected a lock refusal, got {other}").into());
+                let refusal = Err(format!("expected a lock refusal, got {other}").into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "tenant_isolation_same_key: returning an error to the caller");
+                return refusal;
             }
             Ok(_) => {
-                return Err("a second tenant opened an already-owned journal".into());
+                let refusal = Err("a second tenant opened an already-owned journal".into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "tenant_isolation_same_key: returning an error to the caller");
+                return refusal;
             }
         }
 

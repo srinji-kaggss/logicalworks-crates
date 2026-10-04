@@ -126,7 +126,7 @@ impl Default for PatternConfig {
 }
 
 /// Typed refusal from a bounded matching or replacement operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PatternRunError {
     /// Input exceeded its configured byte ceiling.
@@ -144,7 +144,12 @@ pub enum PatternRunError {
         attempted: usize,
     },
     /// The allocator refused an output reservation.
-    AllocationFailed,
+    AllocationFailed {
+        /// The reservation failure the allocator reported, kept so the capacity
+        /// request that was refused stays attached to the error instead of
+        /// being dropped at the translation boundary.
+        cause: std::collections::TryReserveError,
+    },
     /// The engine violated its group-zero capture invariant.
     MissingWholeMatch,
 }
@@ -159,14 +164,23 @@ impl core::fmt::Display for PatternRunError {
                 f,
                 "replacement would produce {attempted} bytes; limit is {limit}"
             ),
-            Self::AllocationFailed => f.write_str("replacement output allocation failed"),
+            Self::AllocationFailed { ref cause } => {
+                write!(f, "replacement output allocation failed: {cause}")
+            }
             Self::MissingWholeMatch => {
                 f.write_str("regex engine returned captures without group zero")
             }
         }
     }
 }
-impl std::error::Error for PatternRunError {}
+impl std::error::Error for PatternRunError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match *self {
+            Self::AllocationFailed { ref cause } => Some(cause),
+            _ => None,
+        }
+    }
+}
 
 impl core::fmt::Display for PatternError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -295,7 +309,7 @@ impl Regex {
     /// The returned [`BoundedRegex`] enforces those limits on every operation.
     pub fn with_config(pattern: &str, config: PatternConfig) -> Result<BoundedRegex, PatternError> {
         if pattern.len() > config.pattern_limit {
-            return Err(PatternError {
+            let refusal = Err(PatternError {
                 pattern: pattern.chars().take(64).collect(),
                 message: format!(
                     "pattern is {} bytes; limit is {}",
@@ -307,6 +321,9 @@ impl Regex {
                     actual: pattern.len(),
                 },
             });
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), "with_config: returning an error to the caller");
+            return refusal;
         }
         let mut builder = regex::RegexBuilder::new(pattern);
         builder
@@ -360,10 +377,13 @@ impl BoundedRegex {
     /// Reject input before handing it to the regex engine.
     fn check_input(&self, text: &str) -> Result<(), PatternRunError> {
         if text.len() > self.config.input_limit {
-            return Err(PatternRunError::InputTooLarge {
+            let refusal = Err(PatternRunError::InputTooLarge {
                 limit: self.config.input_limit,
                 actual: text.len(),
             });
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), "check_input: returning an error to the caller");
+            return refusal;
         }
         Ok(())
     }
@@ -450,10 +470,13 @@ impl BoundedRegex {
         let mut captures = self.engine.captures_iter(text);
         let Some(first) = captures.next() else {
             if text.len() > self.config.output_limit {
-                return Err(PatternRunError::OutputTooLarge {
+                let refusal = Err(PatternRunError::OutputTooLarge {
                     limit: self.config.output_limit,
                     attempted: text.len(),
                 });
+                #[cfg(feature = "trace")]
+                crate::trace::debug!(error = ?refusal.as_ref().err(), "replace_matches: returning an error to the caller");
+                return refusal;
             }
             return Ok(Cow::Borrowed(text));
         };
@@ -525,10 +548,13 @@ impl BoundedString {
             None => usize::MAX,
         };
         if attempted > self.limit {
-            return Err(PatternRunError::OutputTooLarge {
+            let refusal = Err(PatternRunError::OutputTooLarge {
                 limit: self.limit,
                 attempted,
             });
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), "push_str: returning an error to the caller");
+            return refusal;
         }
         if self.value.capacity() < attempted {
             let target = self
@@ -538,7 +564,7 @@ impl BoundedString {
                 .clamp(attempted, self.limit);
             self.value
                 .try_reserve_exact(target.saturating_sub(self.value.len()))
-                .map_err(|_| PatternRunError::AllocationFailed)?;
+                .map_err(|cause| PatternRunError::AllocationFailed { cause })?;
         }
         self.value.push_str(value);
         Ok(())
@@ -555,28 +581,66 @@ fn expand_replacement(
     let mut cursor = 0;
     let mut literal_start = 0;
     while cursor < bytes.len() {
-        if bytes[cursor] != b'$' {
-            cursor = cursor.saturating_add(1);
-            continue;
+        match next_expansion(captures, replacement, output, cursor, &mut literal_start)? {
+            ExpansionStep::Skipped => {
+                cursor = cursor.saturating_add(1);
+            }
+            ExpansionStep::Done => {
+                output.push_str(&replacement[literal_start..])?;
+                return Ok(());
+            }
+            ExpansionStep::Consumed { next } => {
+                cursor = next;
+            }
         }
-        let reference_start = cursor.saturating_add(1);
-        if reference_start < bytes.len() && bytes[reference_start] == b'$' {
-            output.push_str(&replacement[literal_start..cursor])?;
-            output.push_str("$")?;
-            cursor = cursor.saturating_add(2);
-            literal_start = cursor;
-            continue;
-        }
-        let (reference_end, name_start, braced) = if reference_start < bytes.len()
-            && bytes[reference_start] == b'{'
-        {
+    }
+    output.push_str(&replacement[literal_start..])
+}
+
+/// What one pass over the replacement string found at `cursor`.
+enum ExpansionStep {
+    /// A byte that is not part of a reference; the caller advances past it.
+    Skipped,
+    /// A `$$` escape or a reference that consumed to the end.
+    Consumed {
+        /// The offset the walk resumes at, just past what was expanded.
+        next: usize,
+    },
+    /// The reference ran past the end, so the loop stops here.
+    Done,
+}
+
+/// Expands one `$$` escape or `$name` reference starting at `cursor`.
+///
+/// A helper rather than the loop body inline: as one block the loop carried five
+/// propagation operators across the `$$` case, the braced case and the bare
+/// case, so the bound `BoundedString` could reject in three different places
+/// and a reader had to hold all three at once to check the bound.
+fn next_expansion(
+    captures: &regex::Captures<'_>,
+    replacement: &str,
+    output: &mut BoundedString,
+    mut cursor: usize,
+    literal_start: &mut usize,
+) -> Result<ExpansionStep, PatternRunError> {
+    let bytes = replacement.as_bytes();
+    if bytes[cursor] != b'$' {
+        return Ok(ExpansionStep::Skipped);
+    }
+    let reference_start = cursor.saturating_add(1);
+    if reference_start < bytes.len() && bytes[reference_start] == b'$' {
+        output.push_str(&replacement[*literal_start..cursor])?;
+        output.push_str("$")?;
+        cursor = cursor.saturating_add(2);
+        *literal_start = cursor;
+        return Ok(ExpansionStep::Consumed { next: cursor });
+    }
+    let (reference_end, name_start, braced) =
+        if reference_start < bytes.len() && bytes[reference_start] == b'{' {
             let name_start = reference_start.saturating_add(1);
             match bytes[name_start..].iter().position(|byte| *byte == b'}') {
                 Some(offset) => (name_start.saturating_add(offset), name_start, true),
-                None => {
-                    cursor = cursor.saturating_add(1);
-                    continue;
-                }
+                None => return Ok(ExpansionStep::Skipped),
             }
         } else {
             let mut end = reference_start;
@@ -584,31 +648,32 @@ fn expand_replacement(
                 end = end.saturating_add(1);
             }
             if end == reference_start {
-                cursor = cursor.saturating_add(1);
-                continue;
+                return Ok(ExpansionStep::Skipped);
             }
             (end, reference_start, false)
         };
-        output.push_str(&replacement[literal_start..cursor])?;
-        let name = &replacement[name_start..reference_end];
-        // The engine's own rule, so `${+1}` is group 1 here exactly as it is in
-        // `regex::Captures::expand`: whatever `usize::from_str` accepts is a
-        // group number, and anything else is a group name.
-        let matched = match name.parse::<usize>() {
-            Ok(index) => captures.get(index),
-            Err(_) => captures.name(name),
-        };
-        if let Some(matched) = matched {
-            output.push_str(matched.as_str())?;
-        }
-        cursor = if braced {
-            reference_end.saturating_add(1)
-        } else {
-            reference_end
-        };
-        literal_start = cursor;
+    output.push_str(&replacement[*literal_start..cursor])?;
+    let name = &replacement[name_start..reference_end];
+    // The engine's own rule, so `${+1}` is group 1 here exactly as it is in
+    // `regex::Captures::expand`: whatever `usize::from_str` accepts is a
+    // group number, and anything else is a group name.
+    let matched = match name.parse::<usize>() {
+        Ok(index) => captures.get(index),
+        Err(_) => captures.name(name),
+    };
+    if let Some(matched) = matched {
+        output.push_str(matched.as_str())?;
     }
-    output.push_str(&replacement[literal_start..])
+    let next = if braced {
+        reference_end.saturating_add(1)
+    } else {
+        reference_end
+    };
+    *literal_start = next;
+    if next >= bytes.len() {
+        return Ok(ExpansionStep::Done);
+    }
+    Ok(ExpansionStep::Consumed { next })
 }
 
 /// A single match result.

@@ -317,10 +317,12 @@ impl Scope {
     fn descend(&self, path: Arc<str>, stop: Stop) -> Result<Self, FlowError> {
         self.checkpoint()?;
         if self.inner.depth >= MAX_DEPTH {
-            return Err(FlowError::TooDeep {
+            let refusal = Err(FlowError::TooDeep {
                 at: Arc::clone(&self.inner.path),
                 limit: MAX_DEPTH,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "descend: returning an error to the caller");
+            return refusal;
         }
         // Recorded where the step is entered, not where it finishes: a run that
         // dies halfway through a fan-out has still entered those items, and a
@@ -429,9 +431,11 @@ impl Scope {
     /// [`FlowError::Cancelled`](crate::script::FlowError::Cancelled) at this scope's path.
     pub fn checkpoint(&self) -> Result<(), FlowError> {
         if self.is_cancelled() {
-            return Err(FlowError::Cancelled {
+            let refusal = Err(FlowError::Cancelled {
                 at: Arc::clone(&self.inner.path),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "checkpoint: returning an error to the caller");
+            return refusal;
         }
         Ok(())
     }

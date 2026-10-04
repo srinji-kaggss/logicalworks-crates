@@ -253,11 +253,13 @@ impl Process {
     /// and never `Refused`.
     async fn run_once(&self) -> Result<ProcessState, BotError> {
         let Ok(_slot) = self.slots.acquire().await else {
-            return Err(BotError::DomainError {
+            let refusal = Err(BotError::DomainError {
                 domain: String::from("sys::process"),
                 certainty: DispatchCertainty::Refused,
                 cause: String::from("the process slots were closed before the process started"),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "run_once: returning an error to the caller");
+            return refusal;
         };
         let mut supervisor = Supervisor::new(1);
         match supervisor.run_process(&self.spec).await {

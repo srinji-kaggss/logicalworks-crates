@@ -26,6 +26,10 @@ publish = false
 # synchronous adapter is the one this rig measures. Withdrawing `rt` makes the
 # measured path exactly the ECS schedule plus the four verbs.
 lgwks_bot = { path = "../crates/lgwks-bot", default-features = false }
+# The diagnostics `unlogged-err-return` requires. This rig is its own workspace
+# root, so the facade is a direct edge here rather than reached through the bot.
+# `trace` is default-on upstream, so nothing extra is selected here.
+lgwks_std = { path = "../crates/lgwks-std" }
 
 [[bin]]
 name = "lgwks-bench"

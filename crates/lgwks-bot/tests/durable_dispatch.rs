@@ -1022,6 +1022,22 @@ struct ForeignTailAckJournal {
     forge_once: Cell<bool>,
 }
 
+/// The forged attempt id this fixture admits under.
+///
+/// A helper so the only return path in the trait method above belongs to it:
+/// the method is a [`EffectJournal`] implementation that adds one forged pair of
+/// events to a real journal, and its refusal has to say so the way every other
+/// refusal in the crate does.
+fn attempt_two() -> Result<AttemptId, JournalError> {
+    // "2" is a literal in this fixture, so the parse cannot fail; the arm exists
+    // because the type demands one and `JournalError` has nothing to add that
+    // the parse error does not already say.
+    match AttemptId::from_decimal("2") {
+        Ok(attempt) => Ok(attempt),
+        Err(_not_an_attempt) => Err(JournalError::Exhausted),
+    }
+}
+
 impl EffectJournal for ForeignTailAckJournal {
     fn durability(&self) -> DurabilityPromise {
         self.store.borrow().durability()
@@ -1049,9 +1065,11 @@ impl EffectJournal for ForeignTailAckJournal {
             .borrow_mut()
             .compare_and_append(expected_tail, event)?;
         if self.forge_once.replace(false) && matches!(event, EffectEvent::IntentAdmitted { .. }) {
-            let foreign_key = event
-                .key()
-                .with_attempt(AttemptId::from_decimal("2").map_err(|_| JournalError::Exhausted)?);
+            // "2" is a literal in this fixture, so the parse cannot fail; the
+            // arm exists because the type demands one and `JournalError` has
+            // nothing to add that the parse error does not already say.
+            let attempt = attempt_two()?;
+            let foreign_key = event.key().with_attempt(attempt);
             let mut store = self.store.borrow_mut();
             let tail = store.tail();
             store.compare_and_append(tail, &EffectEvent::IntentAdmitted { key: foreign_key })?;
@@ -2012,18 +2030,22 @@ impl EffectJournal for FlakyReadJournal {
 
     fn committed(&self) -> Result<Vec<EffectEvent>, JournalError> {
         if self.fail_reads.get() {
-            return Err(JournalError::Storage(std::io::Error::other(
+            let refusal = Err(JournalError::Storage(std::io::Error::other(
                 "transient read failure",
             )));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "committed: returning an error to the caller");
+            return refusal;
         }
         EffectJournal::committed(&*self.store.borrow())
     }
 
     fn committed_entries(&self) -> Result<Vec<JournalEntry>, JournalError> {
         if self.fail_reads.get() {
-            return Err(JournalError::Storage(std::io::Error::other(
+            let refusal = Err(JournalError::Storage(std::io::Error::other(
                 "transient read failure",
             )));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "committed_entries: returning an error to the caller");
+            return refusal;
         }
         Ok(self.store.borrow().committed().to_vec())
     }

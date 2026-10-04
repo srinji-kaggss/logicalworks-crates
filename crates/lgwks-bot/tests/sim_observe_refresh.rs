@@ -352,6 +352,18 @@ struct Armed {
     tenant: u32,
 }
 
+/// The refusal a seeded source answers with while its flag is set.
+///
+/// One construction for the sources that refuse on a seed, so two families
+/// cannot name a different domain for the same refusal.
+fn seeded_refusal(tenant: impl std::fmt::Display, chain: impl std::fmt::Display) -> BotError {
+    BotError::DomainError {
+        domain: format!("sim::t{tenant}-c{chain}"),
+        certainty: DispatchCertainty::NotDelivered,
+        cause: "the seeded source refused".to_owned(),
+    }
+}
+
 impl Observe for Armed {
     type Output = u32;
 
@@ -363,13 +375,10 @@ impl Observe for Armed {
         call.0.check(Observe::required_caps(self))?;
         self.polls.set(self.polls.get().saturating_add(1));
         if self.refusing.get() {
-            return Err(BotError::DomainError {
-                domain: format!("sim::t{}-c{}", self.tenant, self.chain),
-                certainty: DispatchCertainty::NotDelivered,
-                cause: "the seeded source refused".to_owned(),
-            });
+            Err(seeded_refusal(self.tenant, self.chain))
+        } else {
+            Ok(self.value.get())
         }
-        Ok(self.value.get())
     }
 
     fn cache_state(&self) -> Option<RefreshReason> {
@@ -437,12 +446,13 @@ impl Execute for Logs {
         call.0.check(Execute::required_caps(self))?;
         self.ran.borrow_mut().push((self.chain, *call.1));
         if self.holds.get() {
-            return Err(BotError::EffectIndeterminate {
+            Err(BotError::EffectIndeterminate {
                 domain: "sim::logs".to_owned(),
                 cause: "the seeded hold".to_owned(),
-            });
+            })
+        } else {
+            Ok(())
         }
-        Ok(())
     }
 
     fn domain_id(&self) -> &str {
@@ -1852,22 +1862,10 @@ struct Scripted {
     tenant: u32,
 }
 
-impl Observe for Scripted {
-    type Output = u32;
-
-    fn required_caps(&self) -> &[Cap] {
-        &[]
-    }
-
-    async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
-        call.0.check(Observe::required_caps(self))?;
-        if self.refusing.get() {
-            return Err(BotError::DomainError {
-                domain: format!("sim::t{}-c{}", self.tenant, self.chain),
-                certainty: DispatchCertainty::NotDelivered,
-                cause: "the seeded source refused".to_owned(),
-            });
-        }
+impl Scripted {
+    /// The poll a source that is not refusing makes: wedged without resolving,
+    /// pending for its paced polls, then ready with its value.
+    async fn read(&self) -> Result<u32, BotError> {
         if self.pace.get() == WEDGED_PACE {
             // Parks without ever resolving, which is the shape the per-poll
             // deadline exists to bound. A yield is a *different* shape and is
@@ -1888,6 +1886,23 @@ impl Observe for Scripted {
             }
         })
         .await
+    }
+}
+
+impl Observe for Scripted {
+    type Output = u32;
+
+    fn required_caps(&self) -> &[Cap] {
+        &[]
+    }
+
+    async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+        call.0.check(Observe::required_caps(self))?;
+        if self.refusing.get() {
+            Err(seeded_refusal(self.tenant, self.chain))
+        } else {
+            self.read().await
+        }
     }
 
     fn cache_state(&self) -> Option<RefreshReason> {

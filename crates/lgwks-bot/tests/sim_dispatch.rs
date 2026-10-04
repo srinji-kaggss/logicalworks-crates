@@ -244,11 +244,13 @@ fn restart_holds(band: Band) -> TestResult {
         match second.tick() {
             Err(BotError::PendingTransition { .. }) => {}
             other => {
-                return Err(format!(
+                let refusal = Err(format!(
                     "the first tick of a restart must hold the recovered attempt and say \
-                     so; it returned {other:?}"
+                 so; it returned {other:?}"
                 )
                 .into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "restart_holds: returning an error to the caller");
+                return refusal;
             }
         }
         assert_eq!(

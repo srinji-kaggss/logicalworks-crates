@@ -112,7 +112,9 @@ impl Outcome {
 /// `SIGKILL` mid-body leaves.
 fn step_body(index: u32, crash_at: usize) -> Result<u32, FlowError> {
     if usize::try_from(index).unwrap_or(usize::MAX) == crash_at {
-        return Err(FlowError::Cancelled { at: Arc::from("") });
+        let refusal = Err(FlowError::Cancelled { at: Arc::from("") });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "step_body: returning an error to the caller");
+        return refusal;
     }
     Ok(index)
 }

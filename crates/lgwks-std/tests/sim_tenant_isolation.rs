@@ -153,10 +153,13 @@ impl CheckedSimilarity for ExactMatch {
 
     fn try_score(&self, left: &Self::Value, right: &Self::Value) -> Result<f64, EvidenceError> {
         if left.len() > self.maximum || right.len() > self.maximum {
-            return Err(EvidenceError::InputTooLong {
+            let refusal = Err(EvidenceError::InputTooLong {
                 maximum: self.maximum,
                 observed: left.len().max(right.len()),
             });
+            #[cfg(feature = "trace")]
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "try_score: returning an error to the caller");
+            return refusal;
         }
         Ok(if left == right { 1.0 } else { 0.0 })
     }

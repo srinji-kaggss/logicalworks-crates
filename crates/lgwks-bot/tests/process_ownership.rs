@@ -85,7 +85,9 @@ async fn outcome(supervisor: &mut Supervisor) -> Result<TaskOutcome, std::io::Er
             return Ok(outcome);
         }
         if Instant::now() >= deadline {
-            return Err(std::io::Error::other("process outcome did not arrive"));
+            let refusal = Err(std::io::Error::other("process outcome did not arrive"));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "outcome: returning an error to the caller");
+            return refusal;
         }
         sleep(Duration::from_millis(5)).await;
     }

@@ -23,6 +23,10 @@ use std::fmt;
 /// Where an approved crate sits in the ladder. Only two tiers are admissible:
 /// ELIMINATE and CONSOLIDATE crates do not get entries, they get an
 /// `lgwks_std` module, and an entry claiming either tier is a category error.
+///
+/// Public so a surface freeze can be expressed in the register's own vocabulary
+/// rather than as a second list of crate names maintained beside it; see
+/// [`crate::audit_direct`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Tier {
@@ -74,6 +78,13 @@ pub struct Entry {
     pub(crate) owner: String,
     /// Stable semantic capability supplied by the dependency.
     pub(crate) capability: String,
+    /// SPDX expression the approval was granted under, verbatim as Cargo
+    /// reports it for the package.
+    ///
+    /// Required rather than optional: an approval that does not say which
+    /// licence was reviewed cannot be re-checked when the licence changes
+    /// upstream, which is the drift this field exists to catch (#208).
+    pub(crate) license: String,
     /// Admitted Cargo source class: `registry`, `git`, or `path`.
     pub(crate) source: String,
     /// Admitted origin identity for the source class: a complete Cargo
@@ -124,6 +135,47 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// The ladder tier this approval sits in.
+    ///
+    /// Public for the same reason [`crate::Tier`] is: the gate reads a tier off
+    /// an entry to decide whether a surface may be frozen, and an audit that had
+    /// to reach into `pub(crate)` fields could not be written at all.
+    #[must_use]
+    pub fn tier(&self) -> Tier {
+        self.tier
+    }
+
+    /// Workspace crate that is responsible for this capability.
+    ///
+    /// Public because the surface freeze in [`crate::audit_direct`] decides who
+    /// a re-tiered approval belongs to by owner, and a decision a caller cannot
+    /// reach is a decision it cannot make.
+    #[must_use]
+    pub fn owner(&self) -> &str {
+        &self.owner
+    }
+
+    /// Package name as `Cargo.lock` spells it.
+    ///
+    /// The companion of [`Entry::owner`] for the same reason: a refusal that
+    /// reports a violated freeze has to say which edge it is about.
+    #[must_use]
+    pub fn krate(&self) -> &str {
+        &self.krate
+    }
+
+    /// SPDX expression this approval was granted under.
+    ///
+    /// Public because the licence audit is a decision about a *comparison*: it
+    /// asks whether this string still says what the package's own manifest
+    /// says. A caller holding only an opaque `Entry` could report that some
+    /// approval drifted without being able to say which expression was
+    /// expected.
+    #[must_use]
+    pub fn license(&self) -> &str {
+        &self.license
+    }
+
     /// Whether this approval admits the observed Cargo package name `name`.
     ///
     /// Byte-exact against the Cargo-authored identity, plus any explicitly
@@ -139,9 +191,14 @@ impl Entry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Contract {
-    /// When false, refusals are reported as warnings instead of failing the
-    /// build. Adoption-only: flipping it is a reviewable diff in the register
-    /// itself, never an environment variable a process can set for itself.
+    /// When false, the register declares itself to be in adoption mode.
+    ///
+    /// This is a reviewable posture, not an off switch: flipping it is a diff in
+    /// the register itself, never an environment variable a process can set for
+    /// itself. It does **not** make refusals non-fatal. `audit_direct` refuses a
+    /// stand-down outright when the tree carries violations, so the recorded
+    /// value reports which posture the register was read under while the verdict
+    /// stays a function of the refusals (#204).
     pub enforce: bool,
     /// Canonical repository URL whose workspace members are local authority.
     pub repository: Option<String>,
@@ -563,12 +620,13 @@ impl Error for ContractError {}
 /// them. The order is observable: `validate_required_fields` reports the first
 /// absent key, so a register missing several is told about the earliest one and
 /// the message is stable across runs.
-const REQUIRED: [&str; 12] = [
+const REQUIRED: [&str; 13] = [
     "crate",
     "tier",
     "version",
     "owner",
     "capability",
+    "license",
     "source",
     "allowed_consumers",
     "allowed_kinds",
@@ -726,7 +784,9 @@ fn handle_section_header(
         // the earlier one set; refusing is what keeps the register's effective
         // enforcement flag the one a reviewer read.
         if *policy_declared {
-            return Err(ContractError::DuplicatePolicySection { line: line_no });
+            let refusal = Err(ContractError::DuplicatePolicySection { line: line_no });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "handle_section_header: returning an error to the caller");
+            return refusal;
         }
         *policy_declared = true;
         *section = Section::Policy;
@@ -817,29 +877,39 @@ fn decode_string(value: &str, key: &str, line: usize) -> Result<String, Contract
         reason,
     };
     let Some(body) = value.strip_prefix('"') else {
-        return Err(invalid("expected a double-quoted basic string"));
+        let refusal = Err(invalid("expected a double-quoted basic string"));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "decode_string: returning an error to the caller");
+        return refusal;
     };
     let mut decoded = String::with_capacity(body.len());
     let mut chars = body.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '"' {
             if chars.peek().is_some() {
-                return Err(invalid("trailing tokens after the closing quote"));
+                let refusal = Err(invalid("trailing tokens after the closing quote"));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "decode_string: returning an error to the caller");
+                return refusal;
             }
             if decoded.chars().any(char::is_control) {
-                return Err(invalid("decoded control characters are not supported"));
+                let refusal = Err(invalid("decoded control characters are not supported"));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "decode_string: returning an error to the caller");
+                return refusal;
             }
             return Ok(decoded);
         }
         if ch.is_control() {
-            return Err(invalid("control characters are not supported"));
+            let refusal = Err(invalid("control characters are not supported"));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "decode_string: returning an error to the caller");
+            return refusal;
         }
         if ch != '\\' {
             decoded.push(ch);
             continue;
         }
         let Some(escaped) = chars.next() else {
-            return Err(invalid("incomplete escape sequence"));
+            let refusal = Err(invalid("incomplete escape sequence"));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "decode_string: returning an error to the caller");
+            return refusal;
         };
         match escaped {
             'b' => decoded.push('\u{0008}'),
@@ -854,10 +924,14 @@ fn decode_string(value: &str, key: &str, line: usize) -> Result<String, Contract
                 let mut scalar = 0_u32;
                 for _ in 0..digits {
                     let Some(digit) = chars.next() else {
-                        return Err(invalid("incomplete Unicode escape"));
+                        let refusal = Err(invalid("incomplete Unicode escape"));
+                        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "decode_string: returning an error to the caller");
+                        return refusal;
                     };
                     let Some(hex) = digit.to_digit(16) else {
-                        return Err(invalid("invalid hexadecimal Unicode escape"));
+                        let refusal = Err(invalid("invalid hexadecimal Unicode escape"));
+                        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "decode_string: returning an error to the caller");
+                        return refusal;
                     };
                     scalar = scalar
                         .checked_mul(16)
@@ -865,11 +939,17 @@ fn decode_string(value: &str, key: &str, line: usize) -> Result<String, Contract
                         .ok_or_else(|| invalid("Unicode escape is outside the scalar range"))?;
                 }
                 let Some(decoded_char) = char::from_u32(scalar) else {
-                    return Err(invalid("Unicode escape is not a scalar value"));
+                    let refusal = Err(invalid("Unicode escape is not a scalar value"));
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "decode_string: returning an error to the caller");
+                    return refusal;
                 };
                 decoded.push(decoded_char);
             }
-            _ => return Err(invalid("unsupported escape sequence")),
+            _ => {
+                let refusal = Err(invalid("unsupported escape sequence"));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "decode_string: returning an error to the caller");
+                return refusal;
+            }
         }
     }
     Err(invalid("missing closing quote"))
@@ -890,16 +970,20 @@ fn apply_policy_pair(
     schema: &mut u32,
 ) -> Result<(), ContractError> {
     if !POLICY_KEYS.contains(&key) {
-        return Err(ContractError::UnknownKey {
+        let refusal = Err(ContractError::UnknownKey {
             line: line_no,
             key: key.to_owned(),
         });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "apply_policy_pair: returning an error to the caller");
+        return refusal;
     }
     if seen_keys.iter().any(|seen| seen == key) {
-        return Err(ContractError::DuplicatePolicyKey {
+        let refusal = Err(ContractError::DuplicatePolicyKey {
             line: line_no,
             key: key.to_owned(),
         });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "apply_policy_pair: returning an error to the caller");
+        return refusal;
     }
     match key {
         "enforce" => {
@@ -942,7 +1026,7 @@ fn apply_entry_pair(
             key: key.to_owned(),
         })?;
     if let Some(previous) = draft.fields.iter().find(|field| field.key == *known) {
-        return Err(ContractError::DuplicateEntryKey {
+        let refusal = Err(ContractError::DuplicateEntryKey {
             key: key.to_owned(),
             entry_header: draft.entry_header.clone(),
             entry_index: draft.index,
@@ -950,6 +1034,8 @@ fn apply_entry_pair(
             first_line: previous.line,
             duplicate_line: line_no,
         });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "apply_entry_pair: returning an error to the caller");
+        return refusal;
     }
     let decoded = decode_string(value, key, line_no)?;
     draft.fields.push(RawField {
@@ -1138,11 +1224,13 @@ fn check_aliases(entries: &[Entry]) -> Result<(), ContractError> {
         for alias in &entry.aliases {
             match owners.get(alias.as_str()) {
                 Some(owner) if *owner != entry.krate => {
-                    return Err(ContractError::AliasCollision {
+                    let refusal = Err(ContractError::AliasCollision {
                         alias: alias.clone(),
                         owner: (*owner).to_owned(),
                         line: entry.line,
                     });
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "check_aliases: returning an error to the caller");
+                    return refusal;
                 }
                 Some(_) => {}
                 None => {
@@ -1223,6 +1311,15 @@ impl Contract {
     /// deterministic and diffable.
     pub fn approvals_for<'a>(&'a self, krate: &'a str) -> impl Iterator<Item = &'a Entry> {
         self.entries.iter().filter(move |entry| entry.admits(krate))
+    }
+
+    /// Every approval in the register, in the order it was written.
+    ///
+    /// The register-wide counterpart of [`Contract::approvals_for`], for a check
+    /// that is about the register's whole posture rather than one package's
+    /// edges: the surface freeze reads every entry once.
+    pub fn approvals(&self) -> impl Iterator<Item = &Entry> {
+        self.entries.iter()
     }
 }
 
@@ -1324,6 +1421,65 @@ fn is_identifier(value: &str) -> bool {
         .next()
         .is_some_and(|first| first.is_ascii_alphanumeric())
         && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+}
+
+/// Tests whether `value` is a legible SPDX licence expression.
+///
+/// Deliberately structural rather than semantic. The gate does not ship an
+/// SPDX parser, and inventing one would make the accepted-licence set a
+/// judgement call in code; what it *can* check without a table is the shape a
+/// licence field must have before it is worth comparing byte-for-byte against
+/// what Cargo reports (#208):
+///
+/// - at least one identifier;
+/// - `AND` / `OR` / `WITH` in upper case only, and never leading or trailing;
+/// - no empty operand, so `OR MIT`, `MIT OR` and `MIT  OR` are all refused;
+/// - parenthesised groups kept together, so `(MIT OR Apache-2.0) AND
+///   Unicode-3.0` parses the way a reader parses it;
+/// - identifiers made of letters, digits, `.`, `-` and `_`, which covers every
+///   SPDX identifier and licence-reference suffix this repository can meet.
+///
+/// Whether the identifiers are *accepted* is a separate question, answered by
+/// [`crate::accepted_licenses`] in the audit rather than here: an expression can
+/// be perfectly legible and still name a licence this repository does not take.
+fn is_spdx_expression(value: &str) -> bool {
+    let mut operands = 0_usize;
+    let mut depth = 0_usize;
+    let mut previous_operand = false;
+    for token in value.split_ascii_whitespace() {
+        if token == "(" {
+            if previous_operand {
+                return false;
+            }
+            depth = depth.saturating_add(1);
+        } else if token == ")" {
+            if !previous_operand || depth == 0 {
+                return false;
+            }
+            depth = depth.saturating_sub(1);
+            previous_operand = false;
+        } else if matches!(token, "AND" | "OR" | "WITH") {
+            if !previous_operand {
+                return false;
+            }
+            previous_operand = false;
+        } else {
+            if previous_operand {
+                return false;
+            }
+            let identifier = token.trim_matches(['(', ')']);
+            if identifier.is_empty()
+                || !identifier
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
+            {
+                return false;
+            }
+            previous_operand = true;
+            operands = operands.saturating_add(1);
+        }
+    }
+    operands > 0 && depth == 0 && previous_operand
 }
 
 /// Whether an authored `origin` names a supported origin identity.
@@ -1450,6 +1606,7 @@ fn build(draft: &RawEntry) -> Result<Entry, ContractError> {
     let version = draft.require("version", &krate)?.to_owned();
     let owner = draft.require("owner", &krate)?.to_owned();
     let capability = draft.require("capability", &krate)?.to_owned();
+    let license = draft.require("license", &krate)?.to_owned();
     let source = draft.require("source", &krate)?.to_owned();
     let origin = draft.get("origin").map(str::to_owned);
     let features = optional_feature_list(draft, "features", &krate)?;
@@ -1475,6 +1632,14 @@ fn build(draft: &RawEntry) -> Result<Entry, ContractError> {
         &owner,
         is_identifier(&owner),
         "expected a workspace package identifier using ASCII letters, digits, hyphens or underscores",
+    )?;
+    validate_closed_value(
+        draft,
+        &krate,
+        "license",
+        &license,
+        is_spdx_expression(&license),
+        "expected an SPDX licence expression, for example `MIT OR Apache-2.0`",
     )?;
     validate_closed_value(
         draft,
@@ -1555,6 +1720,7 @@ fn build(draft: &RawEntry) -> Result<Entry, ContractError> {
         version,
         owner,
         capability,
+        license,
         source,
         origin,
         features,
@@ -1729,6 +1895,7 @@ mod tests {
                 "version = \"1.0\"\n",
                 "owner = \"lgwks_std\"\n",
                 "capability = \"json.serialization\"\n",
+                "license = \"MIT OR Apache-2.0\"\n",
                 "source = \"registry\"\n",
                 "allowed_consumers = \"lgwks_std\"\n",
                 "allowed_kinds = \"normal\"\n",
@@ -1751,6 +1918,7 @@ mod tests {
                 output.push_str(
                     "owner = \"lgwks_std\"\n\
                      capability = \"json.serialization\"\n\
+                     license = \"MIT OR Apache-2.0\"\n\
                      source = \"registry\"\n\
                      allowed_consumers = \"lgwks_std\"\n\
                      allowed_kinds = \"normal\"\n",
@@ -1770,6 +1938,7 @@ mod tests {
         assert_eq!(parsed.version, "1.0");
         assert_eq!(parsed.owner, "lgwks_std");
         assert_eq!(parsed.capability, "json.serialization");
+        assert_eq!(parsed.license, "MIT OR Apache-2.0");
         assert_eq!(parsed.allowed_consumers, ["lgwks_std"]);
         assert!(parsed.reason.ends_with('.'));
         assert_eq!(parsed.approved_by, "reviewer");
@@ -1790,6 +1959,7 @@ mod tests {
                 "\"json.serialization\"",
                 "\"other.capability\"",
             ),
+            ("license", "\"MIT OR Apache-2.0\"", "\"MIT\""),
             ("source", "\"registry\"", "\"git\""),
             ("allowed_consumers", "\"lgwks_std\"", "\"lgwks_deps\""),
             ("allowed_kinds", "\"normal\"", "\"dev\""),
@@ -1923,7 +2093,7 @@ mod tests {
                 matches!(
                     Contract::parse(&input),
                     Err(ContractError::InvalidString {
-                        line: 11,
+                        line: 12,
                         ref key,
                         ..
                     }) if key == "approved_by"
@@ -2003,6 +2173,18 @@ mod tests {
         Ok(())
     }
 
+    /// One final comma on a list field is a delimiter, not an empty element.
+    ///
+    /// Both list fields of an entry carry the same rule, so the assertion is
+    /// written once and told what the single surviving element should be.
+    fn assert_single_trailing_comma_parsed(actual: &[String], expected: &str) {
+        assert_eq!(
+            actual,
+            [expected],
+            "one final comma remains a delimiter rather than an empty element"
+        );
+    }
+
     #[test]
     fn a_single_legacy_trailing_list_comma_remains_supported() -> TestResult {
         let input = entry("")
@@ -2012,16 +2194,8 @@ mod tests {
             )
             .replace("allowed_kinds = \"normal\"", "allowed_kinds = \"normal,\"");
         let parsed = Contract::parse(&input)?;
-        assert_eq!(
-            parsed.entries[0].allowed_consumers,
-            ["lgwks_std"],
-            "one final comma remains a delimiter rather than an empty consumer"
-        );
-        assert_eq!(
-            parsed.entries[0].allowed_kinds,
-            ["normal"],
-            "one final comma remains a delimiter rather than an empty kind"
-        );
+        assert_single_trailing_comma_parsed(&parsed.entries[0].allowed_consumers, "lgwks_std");
+        assert_single_trailing_comma_parsed(&parsed.entries[0].allowed_kinds, "normal");
         Ok(())
     }
 
@@ -2127,7 +2301,7 @@ mod tests {
         assert_eq!(
             Contract::parse(&input),
             Err(ContractError::UnknownKey {
-                line: 14,
+                line: 15,
                 key: "typo".into()
             })
         );
@@ -2255,7 +2429,7 @@ mod tests {
             Contract::parse(&input),
             Err(ContractError::DuplicateEntry {
                 krate: "serde".into(),
-                line: 15
+                line: 16
             })
         );
     }
@@ -2439,6 +2613,84 @@ mod tests {
         ));
         assert_eq!(Contract::parse("[policy]\nenforce = true\n")?.schema(), 1);
         assert_eq!(Contract::parse("[policy]\nschema = 2\n")?.schema(), 2);
+        Ok(())
+    }
+
+    /// Issue #208: `license` is a required field, and the register parser
+    /// refuses an expression it cannot read before the audit ever compares it
+    /// with Cargo. The accepted-*licence* question is the audit's; this is only
+    /// about the shape of the string.
+    #[test]
+    fn an_absent_license_field_is_refused() {
+        let without = entry("").replace("license = \"MIT OR Apache-2.0\"\n", "");
+        assert_eq!(
+            Contract::parse(&without),
+            Err(ContractError::MissingField {
+                krate: "serde".into(),
+                field: "license",
+            })
+        );
+    }
+
+    /// Every spelling a human writes that is not an SPDX expression is refused
+    /// at the field, so a licence field cannot be a free-text note that silently
+    /// never matches what Cargo reports.
+    #[test]
+    fn an_unreadable_license_expression_is_refused_at_its_field() {
+        for value in [
+            "MIT OR",
+            "OR MIT",
+            "MIT AND",
+            "MIT OR OR Apache-2.0",
+            "MIT OR  Apache-2.0",
+            "(MIT OR Apache-2.0",
+            "MIT OR Apache-2.0)",
+            "(MIT)(Apache-2.0)",
+            "MIT or Apache-2.0",
+            "MIT/Apache-2.0",
+            "see LICENSE for terms",
+            "\"MIT\"",
+        ] {
+            let input = entry("").replace(
+                "license = \"MIT OR Apache-2.0\"",
+                &format!("license = \"{value}\""),
+            );
+            assert!(
+                matches!(
+                    Contract::parse(&input),
+                    Err(ContractError::InvalidField {
+                        field: "license",
+                        line: 7,
+                        value: ref got,
+                        ..
+                    }) if got == value
+                ),
+                "{value:?} is not an SPDX expression and must be refused, not recorded"
+            );
+        }
+    }
+
+    /// The positive half of the same grammar: every expression this repository
+    /// actually approves today, plus the parenthesised and `WITH` forms a
+    /// vendored licence statement can carry.
+    #[test]
+    fn a_readable_spdx_expression_is_kept_verbatim() -> TestResult {
+        for value in [
+            "MIT",
+            "Apache-2.0",
+            "MIT OR Apache-2.0",
+            "CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception",
+            "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+            "(MIT OR Apache-2.0) AND Unicode-3.0",
+            "LicenseRef-Proprietary",
+        ] {
+            let input = entry("").replace(
+                "license = \"MIT OR Apache-2.0\"",
+                &format!("license = \"{value}\""),
+            );
+            let parsed = Contract::parse(&input)?;
+            assert_eq!(parsed.entries[0].license(), value);
+        }
         Ok(())
     }
 }

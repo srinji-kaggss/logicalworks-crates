@@ -386,7 +386,14 @@ impl Sim {
         self.clock.now() >= self.faults.crash_at
     }
 
-    /// Record a fact.
+    /// Append a fact to this run's replay trace.
+    ///
+    /// [`assert_replays`] runs every seed in the band twice and compares the two
+    /// sweeps, so a fact recorded here is part of what determinism is asserted
+    /// over. Recording a fact the run's behaviour does not actually depend on
+    /// would make that assertion weaker, not stronger: it would pass on a run
+    /// that took a different path and merely happened to end saying the same
+    /// thing.
     pub fn record(&mut self, fact: &str) {
         self.trace.record(fact);
     }
@@ -476,7 +483,12 @@ where
     for seed in band.seeds() {
         let mut sim = Sim::new(seed);
         if let Err(err) = body(&mut sim) {
-            return Err(format!("seed {seed} did not satisfy the scenario: {err}").into());
+            {
+                let refusal =
+                    Err(format!("seed {seed} did not satisfy the scenario: {err}").into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "sweep: returning an error to the caller");
+                return refusal;
+            };
         }
         hashes.push(sim.hash());
     }

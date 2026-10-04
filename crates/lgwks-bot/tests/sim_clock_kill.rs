@@ -191,7 +191,12 @@ fn read_child_elapsed(journal_path: &Path) -> Result<Duration, Box<dyn std::erro
     let path = journal_path.with_extension("elapsed");
     let bytes = std::fs::read(&path)?;
     if bytes.len() != std::mem::size_of::<u64>() {
-        return Err(format!("the child's elapsed record is {} bytes, not 8", bytes.len()).into());
+        {
+            let refusal =
+                Err(format!("the child's elapsed record is {} bytes, not 8", bytes.len()).into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "read_child_elapsed: returning an error to the caller");
+            return refusal;
+        };
     }
     let mut raw = [0_u8; 8];
     raw.copy_from_slice(&bytes);

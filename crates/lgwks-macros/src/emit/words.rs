@@ -110,7 +110,9 @@ pub(super) fn expect_words<'line>(
     });
     let rest = line.tokens.get(words.len()..).unwrap_or_default();
     if !matches || rest.is_empty() {
-        return Err(Error::new(line.span, format!("this line reads {form}")));
+        let refusal = Err(Error::new(line.span, format!("this line reads {form}")));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "expect_words: returning an error to the caller");
+        return refusal;
     }
     Ok(rest)
 }
@@ -130,12 +132,14 @@ pub(super) fn refuse_typed_concurrency(tokens: &[TokenTree]) -> Result<()> {
             .collect::<String>()
             != "1"
     {
-        return Err(Error::new(
+        let refusal = Err(Error::new(
             literal.span(),
             "a typed concurrency number is right on one machine and wrong on the next: drop \
-             `at most` and the runtime sizes the fan-out to the host, or name where the limit \
-             comes from, `at most (upstream.limit) at once`",
+         `at most` and the runtime sizes the fan-out to the host, or name where the limit \
+         comes from, `at most (upstream.limit) at once`",
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "refuse_typed_concurrency: returning an error to the caller");
+        return refusal;
     }
     Ok(())
 }
@@ -154,20 +158,36 @@ pub(super) fn bound(
             .chars()
             .filter(char::is_ascii_digit)
             .collect();
-        let value: u64 = digits
-            .parse()
-            .map_err(|_| Error::new(literal.span(), format!("`{clause}` takes a whole number")))?;
+        // An explicit match rather than `map_err(|_| ..)`: the parse error is
+        // `ParseIntError`, whose text is "invalid digit found in string", and the
+        // message the author needs names the clause instead. Stating the refusal
+        // in the arm keeps that decision on the line that makes it.
+        let value: u64 = match digits.parse() {
+            Ok(value) => value,
+            Err(_not_a_whole_number) => {
+                let refusal = Err(Error::new(
+                    literal.span(),
+                    format!("`{clause}` takes a whole number"),
+                ));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "bound: returning an error to the caller");
+                return refusal;
+            }
+        };
         if value == 0 || value > max {
-            return Err(Error::new(
+            let refusal = Err(Error::new(
                 literal.span(),
                 format!("`{clause} {value}` is outside 1..={max}"),
             ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "bound: returning an error to the caller");
+            return refusal;
         }
         let literal = Literal::u64_unsuffixed(value);
         return Ok(literal.into_token_stream());
     }
     if tokens.is_empty() {
-        return Err(Error::new(line.span, format!("`{clause}` needs a number")));
+        let refusal = Err(Error::new(line.span, format!("`{clause}` needs a number")));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "bound: returning an error to the caller");
+        return refusal;
     }
     if let [ref only] = *tokens
         && let Some(inner) = group(only).filter(|_| is_parens(only))
@@ -195,22 +215,35 @@ pub(super) fn duration(tokens: &[TokenTree], line: &Line) -> Result<TokenStream>
                 written.find(|character: char| !(character.is_ascii_digit() || character == '.'));
             let (number, unit) = written.split_at(split.unwrap_or(written.len()));
             let Some(&(_, scale)) = UNITS.iter().find(|&&(name, _)| name == unit) else {
-                return Err(Error::new(
+                let refusal = Err(Error::new(
                     literal.span(),
                     "a duration is a number with a unit: `250ms`, `2s`, `5m`, `1h`",
                 ));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "duration: returning an error to the caller");
+                return refusal;
             };
             let nanos = scaled(number, scale).ok_or_else(|| {
                 Error::new(literal.span(), "this duration is too large or not a number")
             })?;
             if nanos == 0 {
-                return Err(Error::new(
+                let refusal = Err(Error::new(
                     literal.span(),
                     "a zero duration is no deadline; give a positive one",
                 ));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "duration: returning an error to the caller");
+                return refusal;
             }
-            let nanos = u64::try_from(nanos)
-                .map_err(|_| Error::new(literal.span(), "this duration is too large"))?;
+            // As above: the conversion error is "out of range integral type
+            // conversion attempted", and the span plus the size is what the
+            // author needs.
+            let nanos = match u64::try_from(nanos) {
+                Ok(nanos) => nanos,
+                Err(_too_large) => {
+                    let refusal = Err(Error::new(literal.span(), "this duration is too large"));
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "duration: returning an error to the caller");
+                    return refusal;
+                }
+            };
             let literal = Literal::u64_unsuffixed(nanos);
             Ok(quote!(::core::time::Duration::from_nanos(#literal)))
         }
@@ -236,11 +269,32 @@ pub(super) fn scaled(number: &str, scale: u128) -> Option<u128> {
     let mut total = whole.checked_mul(scale)?;
     let mut place = scale;
     for digit in fraction.chars() {
-        place = place.checked_div(10)?;
-        let value = u128::from(digit.to_digit(10)?);
-        total = total.checked_add(value.checked_mul(place)?)?;
+        let step = fraction_step(total, place, digit)?;
+        total = step.total;
+        place = step.place;
     }
     Some(total)
+}
+
+/// One decimal digit's contribution to a scaled number.
+struct FractionStep {
+    /// The running total with this digit folded in.
+    total: u128,
+    /// The place value the next digit would carry.
+    place: u128,
+}
+
+/// Folds one fraction digit into `total` at `place`.
+///
+/// A helper rather than the loop body inline: as one block the loop carried
+/// three propagation operators across the place division, the digit decode and
+/// the product, so "why does an over-long fraction refuse" meant reading all
+/// three to find the overflow check.
+fn fraction_step(total: u128, place: u128, digit: char) -> Option<FractionStep> {
+    let place = place.checked_div(10)?;
+    let value = u128::from(digit.to_digit(10)?);
+    let total = total.checked_add(value.checked_mul(place)?)?;
+    Some(FractionStep { total, place })
 }
 
 /// A `StepShape::new(..)` constant for the architecture map.

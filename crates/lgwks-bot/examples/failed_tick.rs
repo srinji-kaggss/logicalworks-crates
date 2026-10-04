@@ -102,7 +102,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // recoverable path, and this is one — a tick that returns `Ok` here is the
     // assertion failing, which is what the arm reports.
     let error = match bot.tick() {
-        Ok(fired) => return Err(format!("the second action was reported as {fired} fired").into()),
+        Ok(fired) => {
+            let refusal = Err(format!("the second action was reported as {fired} fired").into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
+            return refusal;
+        }
         Err(error) => error,
     };
     assert!(

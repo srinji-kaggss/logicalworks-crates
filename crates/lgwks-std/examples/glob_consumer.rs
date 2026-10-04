@@ -20,7 +20,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         || malformed_kind != Some(PatternErrorKind::UnclosedClass)
         || !legacy_match
     {
-        return Err("glob public journey produced an unexpected result".into());
+        let refusal = Err("glob public journey produced an unexpected result".into());
+        #[cfg(feature = "trace")]
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
+        return refusal;
     }
 
     let mut output = std::io::stdout().lock();

@@ -195,12 +195,20 @@ impl Ctx {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         match self.spec.scenario {
-            Scenario::Storm => return Err(FlowError::transient("the upstream is down")),
+            Scenario::Storm => {
+                let refusal = Err(FlowError::transient("the upstream is down"));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "attempt: returning an error to the caller");
+                return refusal;
+            }
             Scenario::FailFast if item == 500 => {
-                return Err(FlowError::failed("malformed record"));
+                let refusal = Err(FlowError::failed("malformed record"));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "attempt: returning an error to the caller");
+                return refusal;
             }
             Scenario::Throughput if item.is_multiple_of(97) && served.1.insert(key.clone()) => {
-                return Err(FlowError::transient("the site was busy"));
+                let refusal = Err(FlowError::transient("the site was busy"));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "attempt: returning an error to the caller");
+                return refusal;
             }
             _ => {}
         }
@@ -239,6 +247,11 @@ async fn by_hand(ctx: Arc<Ctx>, tenant: Arc<str>, item: u32) -> Result<u64, Flow
             Err(_elapsed) => FlowError::transient("timed out"),
         };
         if !error.is_retryable() || attempt >= ctx.spec.attempts {
+            lgwks_std::trace::debug!(
+                ?error,
+                attempt,
+                "by_hand: the attempt budget is spent or the error is final"
+            );
             return Err(error);
         }
         attempt = attempt.saturating_add(1);
@@ -277,7 +290,15 @@ async fn by_joinset(ctx: Arc<Ctx>, tenant: Arc<str>, items: Vec<u32>) -> Result<
         let permit = Arc::clone(&permits)
             .acquire_owned()
             .await
-            .map_err(|_closed| FlowError::failed("semaphore closed"))?;
+            // The `AcquireError` is read rather than dropped, and it is read
+            // as what it is: a `Semaphore`'s acquire fails only when the semaphore
+            // has been closed, so this message says exactly that rather than
+            // guessing at a classification the type does not carry.
+            .map_err(|closed| {
+                FlowError::failed(format!(
+                    "semaphore closed before a permit was granted: {closed}"
+                ))
+            })?;
         let (ctx, tenant) = (Arc::clone(&ctx), Arc::clone(&tenant));
         set.spawn(async move {
             let _permit = permit;
@@ -321,6 +342,11 @@ async fn host_item(host: Host, ctx: Arc<Ctx>, scope: Scope, item: u32) -> Result
             Err(error) => {
                 if !error.is_retryable() || attempt >= ctx.spec.attempts {
                     host.cancel();
+                    lgwks_std::trace::debug!(
+                        ?error,
+                        attempt,
+                        "host_item: the attempt budget is spent or the error is final"
+                    );
                     return Err(error);
                 }
                 attempt = attempt.saturating_add(1);
@@ -430,7 +456,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "cancel" => Scenario::Cancel,
         "storm" => Scenario::Storm,
         "deadline" => Scenario::Deadline,
-        other => return Err(format!("unknown scenario {other:?}").into()),
+        other => {
+            let refusal = Err(format!("unknown scenario {other:?}").into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
+            return refusal;
+        }
     };
     let ctx = Arc::new(Ctx {
         spec: Spec::of(scenario),

@@ -185,20 +185,34 @@ impl Id128 {
     /// [`IdError::WrongLength`], [`IdError::NotHex`] or [`IdError::Zero`].
     pub fn from_hex(text: &str) -> Result<Self, IdError> {
         if text.len() != 32 {
-            return Err(IdError::WrongLength { len: text.len() });
+            let refusal = Err(IdError::WrongLength { len: text.len() });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "from_hex: returning an error to the caller");
+            return refusal;
         }
         if let Some(at) = text
             .bytes()
             .position(|byte| !matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
         {
-            return Err(IdError::NotHex { at });
+            let refusal = Err(IdError::NotHex { at });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "from_hex: returning an error to the caller");
+            return refusal;
         }
         // Unreachable in practice: the two checks above leave exactly 32 hex
         // characters, which is exactly 128 bits, so the value always fits a
         // `u128`. The arm exists because `from_str_radix` has an error channel
         // and this crate has no `unwrap` to spend on a proof it cannot state to
         // the compiler.
-        let raw = u128::from_str_radix(text, 16).map_err(|_| IdError::WrongLength { len: 32 })?;
+        // The length is checked above, so the only way this fails is a
+        // non-hexadecimal character. `ParseIntError` would say "invalid digit
+        // found in string", which names neither the field nor the width.
+        let raw = match u128::from_str_radix(text, 16) {
+            Ok(raw) => raw,
+            Err(_not_hex) => {
+                let refusal = Err(IdError::WrongLength { len: 32 });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "from_hex: returning an error to the caller");
+                return refusal;
+            }
+        };
         match NonZeroU128::new(raw) {
             Some(value) => Ok(Self(value)),
             None => Err(IdError::Zero),
@@ -787,7 +801,11 @@ impl EffectKey {
         }
     }
 
-    /// The run.
+    /// Which run every key built from this identity belongs to.
+    ///
+    /// Generated and persisted before the first admission, so two runs of the
+    /// same flow against the same environment are distinguishable. It is the
+    /// half of the identity that survives a restart unchanged.
     #[must_use]
     pub const fn run(self) -> RunId {
         self.run
@@ -817,13 +835,20 @@ impl EffectKey {
         self.digest
     }
 
-    /// The environment.
+    /// Which environment every key built from this identity acts on.
+    ///
+    /// Names the process or container the host created -- not a pid, and not a
+    /// display name, either of which a restart reuses for a different thing.
     #[must_use]
     pub const fn environment(self) -> EnvironmentId {
         self.environment
     }
 
-    /// The environment's fencing generation.
+    /// Which generation of that environment this dispatch is fenced against.
+    ///
+    /// A recycled environment carries a higher epoch, so a dispatch in flight
+    /// when the old one died is refused rather than applied to whatever now
+    /// occupies the same identity.
     #[must_use]
     pub const fn epoch(self) -> EnvironmentEpoch {
         self.epoch
@@ -990,19 +1015,30 @@ impl EffectIdentity {
         })
     }
 
-    /// The run.
+    /// Which run every key built from this identity belongs to.
+    ///
+    /// Generated and persisted before the first admission, so two runs of the
+    /// same flow against the same environment are distinguishable. It is the
+    /// half of the identity that survives a restart unchanged.
     #[must_use]
     pub const fn run(self) -> RunId {
         self.run
     }
 
-    /// The environment.
+    /// Which environment every key built from this identity acts on.
+    ///
+    /// Names the process or container the host created -- not a pid, and not a
+    /// display name, either of which a restart reuses for a different thing.
     #[must_use]
     pub const fn environment(self) -> EnvironmentId {
         self.environment
     }
 
-    /// The flow revision.
+    /// The digest of the flow document this identity was admitted under.
+    ///
+    /// Editing the document changes this, so a key minted against a revised flow
+    /// cannot be mistaken for one against the document that was validated. An
+    /// ephemeral run has no document and carries a constant instead.
     #[must_use]
     pub const fn flow(self) -> FlowRevision {
         self.flow
@@ -1088,14 +1124,21 @@ mod tests {
     }
 
     fn key(attempt: u64, epoch: u64) -> Result<EffectKey, EffectKeyError> {
+        let key_run = RunId::from_hex(RUN)?;
+        let key_action = ActionId::from_hex(ACTION)?;
+        let key_attempt = AttemptId::new(nonzero(attempt)?);
+        let key_flow_revision = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
+        let key_digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
+        let key_environment = EnvironmentId::from_hex(ENV)?;
+        let key_epoch = EnvironmentEpoch::new(nonzero(epoch)?);
         Ok(EffectKey::new(
-            RunId::from_hex(RUN)?,
-            ActionId::from_hex(ACTION)?,
-            AttemptId::new(nonzero(attempt)?),
-            FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-            ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
-            EnvironmentId::from_hex(ENV)?,
-            EnvironmentEpoch::new(nonzero(epoch)?),
+            key_run,
+            key_action,
+            key_attempt,
+            key_flow_revision,
+            key_digest,
+            key_environment,
+            key_epoch,
         ))
     }
 

@@ -372,11 +372,13 @@ fn attempt(
     let before = constructions();
     let initial = lgwks_bot::block_on(host.run_under(&first, &work, job.clone()));
     if initial.disposition() != Disposition::Succeeded {
-        return Err(format!(
+        let refusal = Err(format!(
             "the first attempt must succeed for the row to mean anything: {:?}",
             initial.error()
         )
         .into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "attempt: returning an error to the caller");
+        return refusal;
     }
     assert_eq!(
         constructions().saturating_sub(before),
@@ -480,11 +482,13 @@ fn assert_exact_drift(
             "{tenant}: the schema axis must name both schema ids"
         ),
         (kind, other) => {
-            return Err(format!(
+            let refusal = Err(format!(
                 "{tenant}/{}: refused with the wrong typed drift: {other:?}",
                 kind.tag()
             )
             .into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "assert_exact_drift: returning an error to the caller");
+            return refusal;
         }
     }
     Ok(())

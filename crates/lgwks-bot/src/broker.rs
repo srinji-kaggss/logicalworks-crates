@@ -285,7 +285,9 @@ impl Broker {
     /// [`BrokerError::AlreadyRegistered`] when this broker already owns `id`.
     pub fn register(&mut self, id: EnvironmentId) -> Result<EnvironmentEpoch, BrokerError> {
         if self.environments.contains_key(&id) {
-            return Err(BrokerError::AlreadyRegistered { id });
+            let refusal = Err(BrokerError::AlreadyRegistered { id });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "register: returning an error to the caller");
+            return refusal;
         }
         // The first generation is one, not zero: the counter is a `NonZeroU64`
         // precisely so that a zeroed or truncated field cannot be read as a
@@ -313,7 +315,9 @@ impl Broker {
             .get_mut(&id)
             .ok_or(BrokerError::UnknownEnvironment { id })?;
         if !environment.open {
-            return Err(BrokerError::Closed { id });
+            let refusal = Err(BrokerError::Closed { id });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "replace: returning an error to the caller");
+            return refusal;
         }
         let next = environment
             .epoch
@@ -352,16 +356,20 @@ impl Broker {
         journal: &dyn crate::journal::EffectJournal,
     ) -> Result<EnvironmentEpoch, BrokerError> {
         if self.environments.contains_key(&id) {
-            return Err(BrokerError::AlreadyRegistered { id });
+            let refusal = Err(BrokerError::AlreadyRegistered { id });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "adopt: returning an error to the caller");
+            return refusal;
         }
         let mut highest = None;
         for event in journal.committed().map_err(BrokerError::Journal)? {
             let key = event.key();
             if key.environment() != id {
-                return Err(BrokerError::ForeignEnvironment {
+                let refusal = Err(BrokerError::ForeignEnvironment {
                     asked: id,
                     named: key.environment(),
                 });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "adopt: returning an error to the caller");
+                return refusal;
             }
             highest = Some(match highest {
                 None => key.epoch(),
@@ -370,7 +378,9 @@ impl Broker {
             });
         }
         let Some(highest) = highest else {
-            return Err(BrokerError::NothingToAdopt { id });
+            let refusal = Err(BrokerError::NothingToAdopt { id });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "adopt: returning an error to the caller");
+            return refusal;
         };
         let next = highest
             .checked_next()
@@ -433,22 +443,28 @@ impl Broker {
             .get(&id)
             .ok_or(BrokerError::UnknownEnvironment { id })?;
         if !environment.open {
-            return Err(BrokerError::Closed { id });
+            let refusal = Err(BrokerError::Closed { id });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "check_generation: returning an error to the caller");
+            return refusal;
         }
         let current = environment.epoch;
         if presented.get() > current.get() {
-            return Err(BrokerError::NeverIssued {
+            let refusal = Err(BrokerError::NeverIssued {
                 environment: id,
                 presented,
                 current,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "check_generation: returning an error to the caller");
+            return refusal;
         }
         if presented != current {
-            return Err(BrokerError::Superseded {
+            let refusal = Err(BrokerError::Superseded {
                 environment: id,
                 presented,
                 current,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "check_generation: returning an error to the caller");
+            return refusal;
         }
         Ok(current)
     }
@@ -618,14 +634,21 @@ mod tests {
     /// A key for the shared run and action, on the named environment and
     /// generation.
     fn key_on(env: &str, epoch: &str) -> Result<EffectKey, Box<dyn std::error::Error>> {
+        let key_run = RunId::from_hex(RUN)?;
+        let key_action = ActionId::from_hex(ACTION)?;
+        let key_attempt = AttemptId::from_decimal("1")?;
+        let key_flow_revision = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
+        let key_digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
+        let key_environment = EnvironmentId::from_hex(env)?;
+        let key_epoch = EnvironmentEpoch::from_decimal(epoch)?;
         Ok(EffectKey::new(
-            RunId::from_hex(RUN)?,
-            ActionId::from_hex(ACTION)?,
-            AttemptId::from_decimal("1")?,
-            FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-            ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
-            EnvironmentId::from_hex(env)?,
-            EnvironmentEpoch::from_decimal(epoch)?,
+            key_run,
+            key_action,
+            key_attempt,
+            key_flow_revision,
+            key_digest,
+            key_environment,
+            key_epoch,
         ))
     }
 

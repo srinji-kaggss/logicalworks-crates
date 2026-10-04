@@ -158,7 +158,10 @@ fn parse_minute(bytes: &[u8]) -> Result<u32, ParseError> {
 fn parse_second(bytes: &[u8]) -> Result<u32, ParseError> {
     let sec_val = parse_digit_field(bytes, 17, 2, Field::Second)?;
     if sec_val == 60 {
-        return Err(ParseError::UnsupportedLeapSecond { at: 17 });
+        let refusal = Err(ParseError::UnsupportedLeapSecond { at: 17 });
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "parse_second: returning an error to the caller");
+        return refusal;
     }
     check_range(Field::Second, sec_val, 0, 59, 17)?;
     Ok(sec_val)
@@ -264,34 +267,42 @@ fn parse_numeric_offset(
             .ok_or(ParseError::MissingOffset { at: cursor })?;
         Err(ParseError::Malformed { at: end, byte })
     } else {
-        let offset_hour = parse_digit_field(bytes, cursor.saturating_add(1), 2, Field::OffsetHour)?;
-        expect_byte(bytes, cursor.saturating_add(3), b':')?;
-        let offset_minute =
-            parse_digit_field(bytes, cursor.saturating_add(4), 2, Field::OffsetMinute)?;
-        check_range(
-            Field::OffsetHour,
-            offset_hour,
-            0,
-            23,
-            cursor.saturating_add(1),
-        )?;
-        check_range(
-            Field::OffsetMinute,
-            offset_minute,
-            0,
-            59,
-            cursor.saturating_add(4),
-        )?;
-        // The checked fields are at most 23 hours and 59 minutes.
-        let magnitude = i64::from(offset_hour)
-            .saturating_mul(60)
-            .saturating_add(i64::from(offset_minute));
+        let magnitude = offset_magnitude(bytes, cursor)?;
         if sign_negative {
             Ok(magnitude.saturating_neg())
         } else {
             Ok(magnitude)
         }
     }
+}
+
+/// The absolute value of the `HH:MM` offset at `cursor`, in minutes.
+///
+/// A helper rather than a fourth statement in the caller: inline, this branch
+/// carried four propagation operators in one block, so reading what the offset
+/// parser checks meant reading four error paths to see it checks four fields.
+fn offset_magnitude(bytes: &[u8], cursor: usize) -> Result<i64, ParseError> {
+    let offset_hour = parse_digit_field(bytes, cursor.saturating_add(1), 2, Field::OffsetHour)?;
+    expect_byte(bytes, cursor.saturating_add(3), b':')?;
+    let offset_minute = parse_digit_field(bytes, cursor.saturating_add(4), 2, Field::OffsetMinute)?;
+    check_range(
+        Field::OffsetHour,
+        offset_hour,
+        0,
+        23,
+        cursor.saturating_add(1),
+    )?;
+    check_range(
+        Field::OffsetMinute,
+        offset_minute,
+        0,
+        59,
+        cursor.saturating_add(4),
+    )?;
+    // The checked fields are at most 23 hours and 59 minutes.
+    Ok(i64::from(offset_hour)
+        .saturating_mul(60)
+        .saturating_add(i64::from(offset_minute)))
 }
 
 /// Parses timezone offset (`Z` or `±HH:MM`) into signed minutes from UTC.

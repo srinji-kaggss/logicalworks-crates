@@ -219,7 +219,12 @@ impl ProbeGuard {
         test_name: &str,
     ) -> Result<(), Box<dyn Error>> {
         let Some(mut child) = self.take() else {
-            return Err(format!("the probe child for {test_name} was gone before the kill").into());
+            {
+                let refusal =
+                    Err(format!("the probe child for {test_name} was gone before the kill").into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "kill_after_marker: returning an error to the caller");
+                return refusal;
+            };
         };
         for _ in 0..2_000 {
             if marker.exists() {
@@ -240,10 +245,12 @@ impl ProbeGuard {
                 return Ok(());
             }
             if let Some(status) = child.try_wait()? {
-                return Err(format!(
+                let refusal = Err(format!(
                     "the probe child for {test_name} exited on its own before the kill: {status}"
                 )
                 .into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "kill_after_marker: returning an error to the caller");
+                return refusal;
             }
             pause(5);
         }

@@ -278,7 +278,7 @@ capability, one stack, no surprises.
 
 ## Minimum supported Rust version
 
-Rust **1.98.0**. The MSRV moves forward only when code or dependency
+Rust **1.99.0**. The MSRV moves forward only when code or dependency
 requirements demand it.
 
 ## The other crates
