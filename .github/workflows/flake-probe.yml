@@ -19,8 +19,7 @@ jobs:
           save-if: false
       - uses: taiki-e/install-action@nextest
       - name: Build the test binary
-        run: cargo nextest run -p lgwks_bot --locked --features full --test process_escape --no-run
-      - name: Stress it under CPU load
+        run: cargo nextest run -p lgwks_bot --all-targets --locked --features full -E 'not test(saturation_r32_tier)' --no-run
+      - name: Replay shard 2 of 4 as CI runs it, repeatedly
         run: |
-          for i in $(seq 12); do (while :; do :; done) & done
-          cargo nextest run -p lgwks_bot --locked --features full --test process_escape --no-fail-fast --retries 0 --stress-count 120 2>&1 | tail -80
+          cargo nextest run -p lgwks_bot --all-targets --locked --features full -E 'not test(saturation_r32_tier)' --partition count:2/4 --no-fail-fast --retries 0 --stress-count 12 2>&1 | sed -E 's/\x1b\[[0-9;]*m//g' | grep -E "FAIL|Summary|panicked|ps for the leader|iteration" | head -80
