@@ -29,11 +29,11 @@ what is implied.
 
 | Crate | `Cargo.toml` version | Newest tag | Checked |
 |---|---|---|---|
-| `lgwks_std` | 0.10.0 | `lgwks_std-v0.9.0` | Manifest raised in the third 2026-09-30 cut (breaking); 0.9.0 is on crates.io; no 0.10.0 tag until upload |
-| `lgwks_bot` | 0.8.0 | `lgwks_bot-v0.7.0` | Manifest raised in the third 2026-09-30 cut (breaking); 0.7.0 is on crates.io and exports `script` |
-| `lgwks_ast` | 0.4.0 | `lgwks_ast-v0.3.0` | Manifest raised in the third 2026-09-30 cut (breaking); 0.3.0 is on crates.io |
-| `lgwks_deps` | 0.4.0 | `lgwks_deps-v0.3.0` | Manifest raised in the third 2026-09-30 cut (breaking); 0.3.0 is on crates.io |
-| `lgwks_macros` | 0.1.2 | `lgwks_macros-v0.1.1` | Requirement on `lgwks_deps` raised; 0.1.1 is on crates.io |
+| `lgwks_std` | 1.0.0 | `lgwks_std-v0.10.0` | Manifest raised to 1.0.0; 0.10.0 is on crates.io; no 1.0.0 tag until upload |
+| `lgwks_bot` | 1.0.0 | `lgwks_bot-v0.8.0` | Manifest raised to 1.0.0; 0.8.0 is on crates.io and exports `script` |
+| `lgwks_ast` | 1.0.0 | `lgwks_ast-v0.4.0` | Manifest raised to 1.0.0; 0.4.0 is on crates.io |
+| `lgwks_deps` | 1.0.0 | `lgwks_deps-v0.4.0` | Manifest raised to 1.0.0; 0.4.0 is on crates.io |
+| `lgwks_macros` | 1.0.0 | `lgwks_macros-v0.1.2` | Manifest raised to 1.0.0; 0.1.2 is on crates.io |
 
 Those are source tags, and a source tag is not a registry upload.
 `docs/releasing.md` keeps the two apart and warns that a release created before

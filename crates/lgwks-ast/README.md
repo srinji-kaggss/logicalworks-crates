@@ -79,7 +79,7 @@ opt-in feature, and `full` enables all 28:
 
 ```toml
 [dependencies]
-lgwks_ast = { version = "0.4.0", features = ["lang-c", "lang-cpp", "lang-scala", "lang-kotlin", "lang-tsx"] }
+lgwks_ast = { version = "1", features = ["lang-c", "lang-cpp", "lang-scala", "lang-kotlin", "lang-tsx"] }
 # or everything: features = ["full"]
 ```
 

@@ -1,7 +1,7 @@
 # Getting started with lgwks_bot
 
 One source, one condition, one effect. The program below compiles as a
-standalone `main` against `lgwks_bot = "0.4.2"` and its default features. Every
+standalone `main` against `lgwks_bot = "1"` and its default features. Every
 assertion in it was run.
 
 ## The manifest
@@ -13,7 +13,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-lgwks_bot = "0.4.2"
+lgwks_bot = "1"
 ```
 
 ## The program

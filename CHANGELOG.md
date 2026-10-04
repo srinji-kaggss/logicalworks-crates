@@ -8,6 +8,20 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### 1.0.0 — lgwks_std, lgwks_bot, lgwks_ast, lgwks_deps, lgwks_macros
+
+First stable cut: from here the public API follows semantic versioning (a
+breaking change takes a major version). No public item changes relative to
+`lgwks_std 0.10.0`, `lgwks_bot 0.8.0`, `lgwks_ast 0.4.0`, `lgwks_deps 0.4.0` and
+`lgwks_macros 0.1.2`, with these `lgwks_deps` changes since 0.4.0: new
+`metadata::read_with_members` and `Refusal::UnknownSurface` (a workspace member
+or approval owner outside the five INV-DEP-1 surfaces is refused by name, #207);
+`Refusal::VendorTierConflict` (#210) and `Refusal::LicenseNotAccepted` (#208);
+a register entry now requires a `license` key holding an SPDX expression, so a
+register written for 0.4.0 must add it; a `Cargo.lock` with a nameless package
+block or no packages is refused (#209). `vendor/` is present but not configured
+as a Cargo source.
+
 ### Benchmarks
 
 - `bench/ai-authoring`: five fixed user profiles and a third held-out task.

@@ -1,7 +1,7 @@
 [package]
 name = "lgwks_macros"
 description = "The script! orchestration language for lgwks_bot: indented, Python/AppleScript-like flows that expand to bounded, deadline-carrying, tenant-keyed async Rust and an architecture map."
-version = "0.1.2"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"
